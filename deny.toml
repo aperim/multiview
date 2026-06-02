@@ -1,0 +1,38 @@
+# cargo-deny configuration — license + advisory gating for the default build.
+# Run locally: cargo deny check    (see CONTRIBUTING.md)
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# ignore = []   # add RUSTSEC-IDs here with justification if ever needed
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# The default build must stay permissive/LGPL-clean. The `gpl-codecs` feature
+# (x264/x265) intentionally makes a build GPL — that is opt-in and NOT covered
+# by this allowlist; see docs/architecture/conventions.md §7.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

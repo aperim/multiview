@@ -1,0 +1,20 @@
+[package]
+name = "mosaic-compositor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+mosaic-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+"default" = ["wgpu"]
+"wgpu" = []
+"cuda" = []
+"metal" = []
+"vaapi" = []

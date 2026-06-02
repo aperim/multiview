@@ -1,0 +1,148 @@
+# Mosaic — Canonical Conventions (Source of Truth)
+
+This document pins the **canonical** naming, structure, and invariants for the Mosaic project.
+The deep design briefs in [`../research`](../research/) may use slightly varying names (they were
+written in parallel); **where they differ, THIS document wins**, and the Rust code is the ultimate
+source of truth. All other docs, the agent-instruction files, and the workspace must conform to this.
+
+---
+
+## 1. Project identity
+
+- **Name:** Mosaic — an efficient, hardware-accelerated, Rust live video mosaic generator.
+- **Binary / daemon:** `mosaic`
+- **Tagline:** Ingest many live sources → composite a templated mosaic on the GPU → serve robustly. Built to run great on **commodity hardware**, with **bulletproof continuous output**.
+- **Edition / toolchain:** Rust edition **2021**, pinned via `rust-toolchain.toml` (stable). MSRV documented in the README.
+- **License:** Dual **MIT OR Apache-2.0** (project code). See §7 for the FFmpeg/NDI/codec licensing model.
+- **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and macOS (Apple Silicon + Intel, native). **No Windows.**
+
+---
+
+## 2. Repository layout
+
+```
+mosaic/
+├── Cargo.toml                # workspace
+├── rust-toolchain.toml
+├── rustfmt.toml  .editorconfig  deny.toml  clippy.toml
+├── LICENSE-MIT  LICENSE-APACHE  README.md  CLAUDE.md  AGENTS.md  CONTRIBUTING.md  SECURITY.md
+├── crates/                   # all Rust crates (see §3)
+│   └── mosaic-*/ ...
+├── web/                      # the management SPA (React + TS + Vite)
+├── docs/                     # architecture, decisions (ADRs), research briefs, reference, ops
+├── examples/                 # example mosaic configs + layout templates
+├── deploy/                   # Dockerfile, compose, container assets
+├── xtask/                    # dev automation (cargo xtask ...)
+└── .github/workflows/        # CI
+```
+
+> The build also uses a transient `.mosaic-build/` working dir (git-ignored) — not part of the product.
+
+---
+
+## 3. Canonical crate map
+
+All crates are prefixed `mosaic-` and live under `crates/`. Hardware/FFI/GPU code is **behind
+off-by-default Cargo features** so the default `cargo check` builds the pure-Rust trait/type layer.
+
+| Crate | Responsibility | Notable optional features |
+|-------|----------------|---------------------------|
+| `mosaic-core` | Shared types & traits: `Frame`, `PixelFormat` (NV12 canonical), `ColorInfo` (the 4 axes), clock/`MediaTime`, layout/template model, error taxonomy, the stage traits (`Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`, `Backend`). No FFI. | — |
+| `mosaic-hal` | Hardware capability detection, backend registry, per-stage **negotiation** + **cost model/planner** (admission + degradation inputs). | `cuda`, `vaapi`, `qsv`, `videotoolbox` (probing) |
+| `mosaic-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, `AVHWFramesContext` lifecycle, hwframe transfer/map). | `ffmpeg` (links libav), `gpl-codecs` |
+| `mosaic-compositor` | The **custom GPU compositor**: scale + place + per-tile color convert (range/matrix/linearize) + linear-light blend + overlay compositing. wgpu baseline; vendor fast paths. | `wgpu` (default backend), `cuda`, `metal`, `vaapi` |
+| `mosaic-framestore` | Per-tile **last-good-frame** stores (lock-free triple-buffer) + the tile **state machine** (LIVE/STALE/RECONNECTING/NO_SIGNAL). | — |
+| `mosaic-audio` | Per-input audio decode/resample/mix/route (program bus + discrete tracks) + **EBU R128** metering. | `ffmpeg` |
+| `mosaic-overlay` | Overlay layers + text rendering + **subtitle** ingest/render (libass) and passthrough. | `libass` |
+| `mosaic-input` | Ingest sources (rtsp/hls/ts/srt/rtmp/ndi/file/test), the **input pacer**, jitter buffers, **timestamp normalization**, supervised reconnect. | `ffmpeg`, `ndi` |
+| `mosaic-output` | Output sinks/servers: RTSP server, HLS/LL-HLS packager, NDI out, RTMP/SRT push; **encode-once-mux-many** fan-out. | `ffmpeg`, `ndi` |
+| `mosaic-engine` | The **protected output core**: the fixed-cadence output clock, compositor drive, supervisor/actors, **hot-reconfiguration**, admission/degradation control loop. | — |
+| `mosaic-config` | Config & template schema (serde), validation, **config-as-code** import/export. | — |
+| `mosaic-events` | Shared realtime **event types + versioned envelope** (used by engine, control, clients). | — |
+| `mosaic-control` | The **axum** REST + WebSocket + SSE API: OpenAPI (utoipa+Scalar), auth, SQLite (sqlx), the **command-bus shell**, embedded SPA serving. | `openapi` (default), `embed-web` |
+| `mosaic-preview` | Preview **taps** (input/program/output), the preview **encoder pool**, WHEP/MJPEG/snapshot endpoints. Strictly isolated from the program path. | `webrtc` |
+| `mosaic-telemetry` | `tracing` + Prometheus metrics + health (`/livez`,`/readyz`). | — |
+| `mosaic-cli` | Binary **`mosaic`**: wires the engine + control plane; config load; run/validate subcommands. | aggregates feature flags |
+| `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint, etc.). | — |
+
+**Dependency direction:** `core` ← everything; leaf crates depend on `core` (+ `hal`, `ffmpeg`,
+`events` as needed); `engine` depends on the media crates; `control`/`preview` depend on `engine` +
+`events`; `cli` depends on all. No cycles.
+
+---
+
+## 4. Feature-flag taxonomy (canonical)
+
+Default features build a **pure-Rust, LGPL-clean, no-native-deps** check (CI green without GPUs).
+
+- **Codec backends (per stage, auto-negotiated at runtime):** `cuda` (NVDEC/NVENC), `videotoolbox`, `vaapi`, `qsv`, `software` (always on).
+- **Compositor backends:** `wgpu` (default, cross-platform), `metal`, `cuda`.
+- **Media engine:** `ffmpeg` (links libav for demux/decode/encode).
+- **Codecs licensing:** `gpl-codecs` (x264/x265 → makes the build GPL; **off by default**).
+- **NDI:** `ndi` (proprietary SDK; **off by default**, runtime-loaded; see §7).
+- **Subtitles:** `libass`.
+- **Web/API:** `openapi` (default), `embed-web` (embed the SPA), `webrtc` (WHEP preview).
+- **Umbrella presets (in `mosaic-cli`):** `nvidia` = cuda+ffmpeg+wgpu; `apple` = videotoolbox+metal+ffmpeg; `linux-vaapi` = vaapi+qsv+ffmpeg+wgpu; `full` = everything non-GPL.
+
+---
+
+## 5. Canonical technical invariants
+
+These are load-bearing; every doc and implementation must respect them (see the briefs for depth).
+
+1. **Output-clock invariant (bulletproof output):** at every tick of a single fixed-cadence internal monotonic clock, the output stage emits exactly one valid, correctly-timestamped frame (+ matching audio), **forever**, independent of any input. Inputs are *sampled*, never *pacing*. Output PTS = `f(tick)`.
+2. **Per-tile last-good-frame + state machine:** inputs write into lock-free single-slot stores; the compositor always reads the latest (or a placeholder card) and never blocks. Tiles ride LIVE→STALE→RECONNECTING→NO_SIGNAL.
+3. **Unified timing model:** per-input PTS is normalized (unwrap 33-bit wrap, genpts fallback, monotonic guard) and rebased onto one internal ns timeline; the output re-stamps all PTS/DTS from the tick counter. NTSC `1001` rates carried as exact rationals/ns — never float fps.
+4. **HLS ingest pacing:** live/VOD-as-live inputs are paced to wall-clock by PTS (a custom input pacer); `-re` is for files, not live ingest.
+5. **NV12-throughout:** frames stay NV12 (1.5 B/px); never materialize RGBA per tile. YUV→RGB happens in-shader at tile size.
+6. **Decode-at-display-resolution:** decode each source near its displayed size where the backend supports it (NVDEC `-resize` fused; VideoToolbox/VAAPI/QSV per the capability matrix); prefer a smaller source rendition/substream. Budget decode in megapixels/sec.
+7. **Encode-once-mux-many:** composite once, encode the canvas once per rendition, fan the *same* packets to all transports; separate encode only when codec/res/bitrate differ.
+8. **Color pipeline order (never reorder):** detect 4 axes (with untagged-default policy matching players, not swscale) → range-expand → YUV→RGB matrix (gamma-encoded) → linearize (EOTF) → primaries convert in linear → scale + premultiplied-alpha blend in linear → OETF → RGB→YUV + range compress → **tag the output** (primaries/TRC/matrix/range + HDR) → verify with ffprobe.
+9. **Resource-adaptive degradation:** a closed control loop (sense→estimate→plan→apply, with hysteresis) sheds load tile-by-tile in a defined cheapest-impact-first order **before** the program output is ever touched. Bounded queues drop, never grow.
+10. **Isolation:** the control plane, preview, and realtime layers are best-effort and **physically incapable of back-pressuring the engine** (watch/broadcast channels; bounded drop-oldest queues; the engine never awaits a client). A CI chaos gate enforces this.
+11. **Live-apply classification:** every management change is classified Class-1 (hot/seamless at a frame boundary) vs Class-2 (controlled reset via make-before-break parallel-output migration); the API surfaces which before applying.
+
+---
+
+## 6. API & realtime conventions
+
+- **REST base path:** `/api/v1`. Commands/CRUD only. Long-running ops return `202 Accepted` + an operation id; the result arrives on the realtime stream.
+- **Error model:** RFC 9457 `application/problem+json`.
+- **Concurrency:** per-resource version → `ETag`/`If-Match`, `412` on mismatch.
+- **Idempotency:** `Idempotency-Key` on start/stop/swap.
+- **OpenAPI:** 3.1 via **utoipa**; interactive docs (**Scalar**) at `/docs`; spec at `/api/v1/openapi.json`.
+- **Realtime:** **WebSocket** primary at `/api/v1/ws` (versioned envelope, snapshot+delta, subscriptions, resume via `seq`); **SSE** fallback at `/api/v1/events`; documented with **AsyncAPI** at `/docs/events`. High-rate audio meters are sampled/conflated (~10–30 Hz).
+- **Auth:** UI = `tower-sessions` cookie + CSRF; machine = hashed API keys (Bearer). RBAC admin/operator/viewer via `axum-login`. Per-object authorization on every resource id (BOLA is the #1 risk).
+- **Preview:** WHEP (sub-second focus) + MJPEG/JPEG (cheap grid); preview access gated by short-lived signed tokens; auto-stop with no subscribers.
+
+---
+
+## 7. Licensing model (build profiles)
+
+- **Project code:** dual **MIT OR Apache-2.0**.
+- **Default build = LGPL-clean & redistributable:** FFmpeg linked LGPL; NVENC/NVDEC via `nv-codec-headers` (MIT) need neither `--enable-gpl` nor `--enable-nonfree`; **no** libnpp/x264/x265 in the default build (compositing/scaling done in-house).
+- **`gpl-codecs` feature:** pulls x264/x265 etc. → the resulting build is **GPL**. Opt-in only.
+- **NDI:** the NDI SDK is **proprietary** (royalty-free, attribution required, redistribution restricted). It is **never vendored**; the `ndi` feature uses a runtime dynamic-load path, and the SDK/runtime is the user's responsibility. Document the EULA + attribution. NDI I/O is additionally **gated at runtime**: it stays inert until the operator explicitly confirms NDI license acceptance (`[system.ndi] accept_license`, audited), so even `ndi`-enabled builds carry no NDI obligations until a user accepts. Required trademark attribution is always preserved. See [io/ndi.md §7.5](../io/ndi.md).
+- CI uses `cargo-deny` (`deny.toml`) to gate licenses and advisories.
+
+---
+
+## 8. Frontend conventions
+
+- **Stack:** React 19 + TypeScript + Vite; **shadcn/ui** (Radix + Tailwind v4) design system; **TanStack Query** for server state; **TanStack Table** for lists.
+- **Layout editor:** **react-konva** (free-form canvas: drag/resize/rotate/z-order) + **dnd-kit** (accessible palette drag & reorderable lists).
+- **API client:** generated from the OpenAPI spec (`openapi-typescript` + `openapi-fetch`).
+- **A11y & i18n:** target **WCAG 2.2 AA** (full keyboard + focus management via Radix; status never by color alone; an accessible non-canvas editing path for the layout editor) and internationalize the UI (Lingui + ECMAScript `Intl`, RTL). Light/dark via Tailwind tokens. See [web/accessibility.md](../web/accessibility.md) and [web/internationalization.md](../web/internationalization.md).
+- **Build:** embedded into the `mosaic` binary via `rust-embed` (single deployable); dev via Vite proxy.
+
+---
+
+## 9. Naming & style
+
+- Crates: `mosaic-<area>` (kebab); the library target is `mosaic_<area>` (snake, automatic).
+- Public types: `UpperCamel`; functions/fields: `snake_case`; features: `kebab-case`.
+- Errors: per-crate `Error` enum via `thiserror`; app boundaries may use `anyhow`.
+- Async: `tokio`. Logging/tracing: `tracing`. Serialization: `serde`.
+- Docs: every public item documented; `#![warn(missing_docs)]` on library crates.
+- Formatting: `rustfmt` (config in `rustfmt.toml`); lint clean under `clippy` (`-D warnings` in CI).
+- **Inclusive language is required everywhere, always** — code, identifiers, comments, docs, commit messages, branches, config, logs, and UI copy. Prefer `allowlist`/`blocklist`, `primary`/`replica`, `main`, and gender-neutral wording. See [`CODE_OF_CONDUCT.md`](../../CODE_OF_CONDUCT.md). This may be enforced in review and CI.

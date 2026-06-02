@@ -1,0 +1,23 @@
+{
+  "name": "mosaic-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Mosaic management web app (scaffold). Full stack — shadcn/ui + Tailwind v4 + TanStack Query + react-konva/dnd-kit + generated OpenAPI client — is layered in during implementation; see ../docs/web/management-app.md.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7"
+  }
+}

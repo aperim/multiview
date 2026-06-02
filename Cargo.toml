@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/aperim/mosaic"
+authors = ["The Mosaic Authors"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Internal crates
+mosaic-core = { path = "crates/mosaic-core" }
+mosaic-hal = { path = "crates/mosaic-hal" }
+mosaic-ffmpeg = { path = "crates/mosaic-ffmpeg" }
+mosaic-compositor = { path = "crates/mosaic-compositor" }
+mosaic-framestore = { path = "crates/mosaic-framestore" }
+mosaic-audio = { path = "crates/mosaic-audio" }
+mosaic-overlay = { path = "crates/mosaic-overlay" }
+mosaic-input = { path = "crates/mosaic-input" }
+mosaic-output = { path = "crates/mosaic-output" }
+mosaic-engine = { path = "crates/mosaic-engine" }
+mosaic-config = { path = "crates/mosaic-config" }
+mosaic-events = { path = "crates/mosaic-events" }
+mosaic-control = { path = "crates/mosaic-control" }
+mosaic-preview = { path = "crates/mosaic-preview" }
+mosaic-telemetry = { path = "crates/mosaic-telemetry" }
+mosaic-cli = { path = "crates/mosaic-cli" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,38 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo — Cargo.lock IS committed (this workspace ships the `mosaic` binary)
+
+# Build working dir (transient research/build artifacts — not part of the product)
+/.mosaic-build/
+
+# Web / Node
+web/node_modules/
+web/dist/
+node_modules/
+dist/
+*.local
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Logs / runtime
+*.log
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# Per-host, uncommitted dev container override (e.g. VAAPI /dev/dri device + render GID)
+.devcontainer/devcontainer.local.json

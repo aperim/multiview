@@ -1,0 +1,24 @@
+[package]
+name = "mosaic-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+mosaic-core = { workspace = true }
+mosaic-hal = { workspace = true }
+mosaic-framestore = { workspace = true }
+mosaic-input = { workspace = true }
+mosaic-output = { workspace = true }
+mosaic-compositor = { workspace = true }
+mosaic-audio = { workspace = true }
+mosaic-overlay = { workspace = true }
+mosaic-config = { workspace = true }
+mosaic-events = { workspace = true }
+mosaic-telemetry = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
