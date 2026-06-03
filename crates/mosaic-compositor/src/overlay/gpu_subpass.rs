@@ -37,6 +37,10 @@ pub enum PrimitiveKind {
     Stroke = 2,
     /// An analytic stroked ring / annulus (a circle-band SDF) — clock bezel.
     Ring = 3,
+    /// A premultiplied-RGBA bitmap blit (DVB-sub / bitmap caption). The GPU
+    /// image-texture upload is **deferred**; the shader branch is a transparent
+    /// no-op (the CPU reference does the burn-in for the CLI bake).
+    Image = 4,
 }
 
 impl PrimitiveKind {
@@ -48,6 +52,7 @@ impl PrimitiveKind {
             Self::Rect => 1,
             Self::Stroke => 2,
             Self::Ring => 3,
+            Self::Image => 4,
         }
     }
 }
@@ -168,6 +173,22 @@ impl OverlayPrimGpu {
                     geom: [*cx, *cy, mid_radius, half],
                 }
             }
+            // GPU image-texture upload is DEFERRED: pack the dest box + the layer
+            // alpha so the shader can clip to it, but the WGSL Image branch is a
+            // transparent no-op. The CPU reference (subpass::blend_image) does the
+            // real burn-in for the CLI bake; this keeps the GPU pack total and the
+            // shader naga-valid.
+            OverlayPrimitive::Image { dest, alpha, .. } => Self {
+                kind_meta: [PrimitiveKind::Image.as_u32(), 0, 0, 0],
+                rect: [
+                    dest.x,
+                    dest.y,
+                    i32_from_u32(dest.width),
+                    i32_from_u32(dest.height),
+                ],
+                color: [0.0, 0.0, 0.0, alpha.clamp(0.0, 1.0)],
+                geom: [0.0; 4],
+            },
         }
     }
 }

@@ -175,6 +175,34 @@ pub enum OverlayPrimitive {
         /// Linear stroke color.
         color: OverlayColor,
     },
+    /// A **premultiplied-RGBA bitmap** blitted (nearest-neighbour scaled) into a
+    /// destination rectangle: a DVB-sub / bitmap caption cue burned into a tile.
+    ///
+    /// `rgba` is `src_width * src_height * 4` bytes, row-major, **already
+    /// premultiplied** (this is exactly the shape the DVB-sub decoder emits,
+    /// `mosaic_ffmpeg::caption::CueBitmap`) — so the blend builds a
+    /// [`PremulRgba`] *directly* and must **not** premultiply again. `alpha`
+    /// (`0.0..=1.0`) is a uniform fade applied channel-wise to the already-
+    /// premultiplied channels (a layer-opacity knob; `1.0` = no fade).
+    ///
+    /// The CPU reference ([`blend_image`]) is what the CLI bake uses; the GPU
+    /// image-texture upload is deferred (the WGSL has a transparent no-op branch
+    /// so `naga` still validates).
+    Image {
+        /// Destination rectangle on the canvas, integer pixels. The source is
+        /// nearest-neighbour scaled to fill it.
+        dest: OverlayRect,
+        /// Source bitmap width in pixels.
+        src_width: u32,
+        /// Source bitmap height in pixels.
+        src_height: u32,
+        /// Premultiplied-RGBA source pixels, row-major, tightly packed (no row
+        /// padding): exactly `src_width * src_height * 4` bytes.
+        rgba: Vec<u8>,
+        /// Uniform layer opacity in `0.0..=1.0`, applied channel-wise to the
+        /// already-premultiplied source. `1.0` leaves the cue unchanged.
+        alpha: f32,
+    },
     /// A stroked **ring** (annulus): an anti-aliased circle outline of a given
     /// `thickness` centred at `(cx, cy)`, used for the clock bezel / tick ring.
     /// Coverage is the closed-form distance of the pixel center to the ring's
@@ -636,7 +664,104 @@ fn blend_primitive(canvas: &mut LinearCanvasBuffer, primitive: &OverlayPrimitive
             thickness,
             color,
         } => blend_ring(canvas, *cx, *cy, *outer_radius, *thickness, *color),
+        OverlayPrimitive::Image {
+            dest,
+            src_width,
+            src_height,
+            rgba,
+            alpha,
+        } => blend_image(canvas, *dest, *src_width, *src_height, rgba, *alpha),
     }
+}
+
+/// Blend a **premultiplied-RGBA** source bitmap, nearest-neighbour scaled, into
+/// the `dest` rectangle — the bitmap-caption burn-in (DVB-sub cues).
+///
+/// The source `rgba` is **already premultiplied** (the DVB-sub decoder emits
+/// premultiplied pixels, `mosaic_ffmpeg::caption::CueBitmap`), so each sample is
+/// loaded straight into a [`PremulRgba`] and blended `over` the canvas with the
+/// shared [`over`] operator — it is **never** premultiplied again here. The
+/// uniform `alpha` (`0.0..=1.0`) scales the already-premultiplied channels,
+/// which is the correct way to fade a premultiplied layer.
+///
+/// The pass walks **only** the `dest` bounding box (like [`blend_stroke`]), so
+/// the cost is proportional to the cue footprint, never the whole canvas.
+///
+/// Color note: the cue channels are sRGB-ish premultiplied while the canvas is
+/// premultiplied-**linear**; for this Phase-2 MVP they are treated as already
+/// being in the working space and blended directly (a Phase-2.x color
+/// refinement will linearize the cue first).
+fn blend_image(
+    canvas: &mut LinearCanvasBuffer,
+    dest: OverlayRect,
+    src_width: u32,
+    src_height: u32,
+    rgba: &[u8],
+    alpha: f32,
+) {
+    if dest.width == 0 || dest.height == 0 || src_width == 0 || src_height == 0 || alpha <= 0.0 {
+        return;
+    }
+    // Guard the buffer length: a short/mismatched buffer is dropped rather than
+    // indexed past (hot-path rule: never panic on the data plane).
+    let expected = usize::try_from(src_width)
+        .ok()
+        .and_then(|w| {
+            usize::try_from(src_height)
+                .ok()
+                .map(|h| w.saturating_mul(h))
+        })
+        .and_then(|px| px.checked_mul(4));
+    if expected != Some(rgba.len()) {
+        return;
+    }
+    let fade = alpha.clamp(0.0, 1.0);
+    for row in 0..dest.height {
+        for col in 0..dest.width {
+            // Nearest-neighbour map dest (col,row) -> source (sx,sy).
+            let sx = nearest(col, dest.width, src_width);
+            let sy = nearest(row, dest.height, src_height);
+            let Some(idx) = pixel_index(src_width, sx, sy) else {
+                continue;
+            };
+            let base = idx.saturating_mul(4);
+            // One disjoint 4-byte slice (a full RGBA quad; no indexing op).
+            let Some([pr, pg, pb, pa]) = rgba.get(base..base.saturating_add(4)) else {
+                continue;
+            };
+            // The bytes are ALREADY premultiplied — load them directly into a
+            // PremulRgba (do NOT call .premultiplied()). Apply the uniform fade
+            // channel-wise (correct for a premultiplied layer).
+            let src = PremulRgba {
+                r: unit_from_u8(*pr) * fade,
+                g: unit_from_u8(*pg) * fade,
+                b: unit_from_u8(*pb) * fade,
+                a: unit_from_u8(*pa) * fade,
+            };
+            if src.a <= 0.0 {
+                continue;
+            }
+            let Some((cx, cy)) = canvas_xy(dest.x, dest.y, col, row) else {
+                continue;
+            };
+            canvas.blend_at(cx, cy, src);
+        }
+    }
+}
+
+/// Nearest-neighbour source coordinate for destination column/row `d` of
+/// `dst_len`, sampling a `src_len`-wide source: `floor((d + 0.5) * src/dst)`,
+/// clamped to `src_len - 1`. No `as` cast.
+fn nearest(d: u32, dst_len: u32, src_len: u32) -> u32 {
+    if dst_len == 0 || src_len == 0 {
+        return 0;
+    }
+    // (2*d + 1) * src_len / (2 * dst_len), all in u64 to avoid overflow.
+    let num = (u64::from(d).saturating_mul(2).saturating_add(1)).saturating_mul(u64::from(src_len));
+    let den = u64::from(dst_len).saturating_mul(2).max(1);
+    let s = num / den;
+    let max = u64::from(src_len.saturating_sub(1));
+    u32::try_from(s.min(max)).unwrap_or(src_len.saturating_sub(1))
 }
 
 /// Blend a glyph coverage bitmap tinted by `color` at `(dest_x, dest_y)`.

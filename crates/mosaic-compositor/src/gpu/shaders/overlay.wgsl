@@ -23,6 +23,12 @@ const KIND_GLYPH: u32 = 0u;
 const KIND_RECT: u32 = 1u;
 const KIND_STROKE: u32 = 2u;
 const KIND_RING: u32 = 3u;
+// A premultiplied-RGBA bitmap blit (DVB-sub / bitmap caption). The GPU
+// image-texture upload is DEFERRED: this branch is a transparent no-op so naga
+// still validates the module. The CPU reference (crate::overlay::subpass::
+// blend_image) performs the burn-in for the CLI bake. TODO(gpu-image): sample an
+// uploaded cue texture here and blend it premultiplied-over.
+const KIND_IMAGE: u32 = 4u;
 
 struct OverlayPrim {
     // x: kind. y: corner_radius (px, rects) OR half-thickness f32-bits (strokes).
@@ -133,6 +139,10 @@ fn overlay_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let radial = length(center - c);
             let d = abs(radial - mid_radius);
             coverage = clamp(band_half - d + 0.5, 0.0, 1.0);
+        } else if p.kind_meta.x == KIND_IMAGE {
+            // DEFERRED: GPU image-texture upload not yet wired. Contribute
+            // nothing (transparent no-op); the CPU reference does the burn-in.
+            coverage = 0.0;
         } else {
             // Analytic (rounded) rectangle — meters, markers, tally, chrome.
             let radius = f32(p.kind_meta.y);

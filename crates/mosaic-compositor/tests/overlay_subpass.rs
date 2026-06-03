@@ -278,6 +278,150 @@ fn batched_list_is_drawn_back_to_front() {
 }
 
 #[test]
+fn image_primitive_blits_a_premultiplied_bitmap_inside_its_dest() {
+    // A 2x2 OPAQUE-RED PREMULTIPLIED source blits red/opaque inside the dest
+    // rect and leaves everything outside it transparent. The cue RGBA is already
+    // premultiplied (so for opaque red, rgb == a == [255,0,0,255]); the blit must
+    // NOT premultiply again.
+    let mut canvas = LinearCanvasBuffer::transparent(16, 16);
+    // 2x2 opaque red premultiplied: each pixel [R=255, G=0, B=0, A=255].
+    let rgba: Vec<u8> = (0..4).flat_map(|_| [255_u8, 0, 0, 255]).collect();
+    let mut list = OverlayDrawList::new();
+    list.push(OverlayPrimitive::Image {
+        dest: OverlayRect::new(4, 5, 2, 2),
+        src_width: 2,
+        src_height: 2,
+        rgba,
+        alpha: 1.0,
+    });
+
+    blend_overlays(&mut canvas, &list);
+
+    // Inside the 2x2 dest: opaque red.
+    for y in 5..7 {
+        for x in 4..6 {
+            let p = canvas.pixel(x, y).unwrap();
+            assert_eq!(p.a, 1.0, "dest pixel ({x},{y}) is opaque");
+            assert_eq!((p.r, p.g, p.b), (1.0, 0.0, 0.0), "dest pixel ({x},{y}) red");
+        }
+    }
+    // Outside the dest: untouched.
+    assert_eq!(canvas.pixel(3, 5).unwrap().a, 0.0, "left of dest empty");
+    assert_eq!(canvas.pixel(6, 5).unwrap().a, 0.0, "right of dest empty");
+    assert_eq!(canvas.pixel(4, 7).unwrap().a, 0.0, "below dest empty");
+    // Exactly the dest area (2x2 = 4 px) is inked.
+    let inked = (0..16)
+        .flat_map(|y| (0..16).map(move |x| (x, y)))
+        .filter(|&(x, y)| canvas.pixel(x, y).unwrap().a > 0.0)
+        .count();
+    assert_eq!(inked, 4, "exactly the 2x2 dest is covered");
+}
+
+#[test]
+fn image_primitive_nearest_neighbour_upscales_to_fill_the_dest() {
+    // A 2x2 opaque-white premultiplied source scaled into a 4x4 dest must fill
+    // the whole dest (nearest-neighbour), every pixel opaque white.
+    let mut canvas = LinearCanvasBuffer::transparent(8, 8);
+    let rgba: Vec<u8> = (0..4).flat_map(|_| [255_u8, 255, 255, 255]).collect();
+    let mut list = OverlayDrawList::new();
+    list.push(OverlayPrimitive::Image {
+        dest: OverlayRect::new(1, 1, 4, 4),
+        src_width: 2,
+        src_height: 2,
+        rgba,
+        alpha: 1.0,
+    });
+
+    blend_overlays(&mut canvas, &list);
+
+    for y in 1..5 {
+        for x in 1..5 {
+            let p = canvas.pixel(x, y).unwrap();
+            assert_eq!(p.a, 1.0, "upscaled dest pixel ({x},{y}) opaque");
+            assert_eq!((p.r, p.g, p.b), (1.0, 1.0, 1.0), "upscaled pixel white");
+        }
+    }
+    let inked = (0..8)
+        .flat_map(|y| (0..8).map(move |x| (x, y)))
+        .filter(|&(x, y)| canvas.pixel(x, y).unwrap().a > 0.0)
+        .count();
+    assert_eq!(inked, 16, "the full 4x4 dest is filled by the 2x2 upscale");
+}
+
+#[test]
+fn image_primitive_half_alpha_premultiplied_src_blends_over_without_double_premultiply() {
+    // GUARD against double-premultiply: a 50%-alpha WHITE premultiplied source
+    // (premultiplied bytes [128,128,128,128]) over an opaque mid-gray (0.25)
+    // background must give the SAME `over` result a straight (1,1,1,0.5) source
+    // would: out.rgb = 0.5 + 0.25*0.5 = 0.625, out.a = 1.0. If the blit wrongly
+    // premultiplied the already-premultiplied src, rgb would collapse toward
+    // ~0.5*0.5 and the test would fail.
+    let bg = PremulRgba {
+        r: 0.25,
+        g: 0.25,
+        b: 0.25,
+        a: 1.0,
+    };
+    let mut canvas = LinearCanvasBuffer::filled(8, 8, bg);
+    // Premultiplied half-alpha white: straight white * 0.5 -> 128 in all four.
+    let rgba: Vec<u8> = vec![128, 128, 128, 128];
+    let mut list = OverlayDrawList::new();
+    list.push(OverlayPrimitive::Image {
+        dest: OverlayRect::new(2, 2, 1, 1),
+        src_width: 1,
+        src_height: 1,
+        rgba,
+        alpha: 1.0,
+    });
+
+    blend_overlays(&mut canvas, &list);
+
+    let (r, g, b, a) = straight(&canvas, 2, 2);
+    assert!((a - 1.0).abs() < 1e-6, "result opaque, got {a}");
+    for (name, v) in [("r", r), ("g", g), ("b", b)] {
+        assert!(
+            (v - 0.625).abs() < 2e-3,
+            "{name} = {v}, expected 0.625 (no double-premultiply)"
+        );
+    }
+    // A pixel outside the 1x1 dest keeps the background.
+    let (r0, _, _, a0) = straight(&canvas, 6, 6);
+    assert_eq!((r0, a0), (0.25, 1.0), "uncovered background unchanged");
+}
+
+#[test]
+fn image_primitive_alpha_scalar_fades_the_premultiplied_src() {
+    // The `alpha` field scales the already-premultiplied src channel-wise. An
+    // opaque-red premultiplied src at alpha=0.5 over an opaque gray bg behaves
+    // like a straight (1,0,0,0.5) source: out.r = 0.5 + 0.25*0.5 = 0.625,
+    // out.g = out.b = 0.0 + 0.25*0.5 = 0.125, out.a = 1.0.
+    let bg = PremulRgba {
+        r: 0.25,
+        g: 0.25,
+        b: 0.25,
+        a: 1.0,
+    };
+    let mut canvas = LinearCanvasBuffer::filled(8, 8, bg);
+    let rgba: Vec<u8> = vec![255, 0, 0, 255]; // opaque red, premultiplied
+    let mut list = OverlayDrawList::new();
+    list.push(OverlayPrimitive::Image {
+        dest: OverlayRect::new(2, 2, 1, 1),
+        src_width: 1,
+        src_height: 1,
+        rgba,
+        alpha: 0.5,
+    });
+
+    blend_overlays(&mut canvas, &list);
+
+    let (r, g, b, a) = straight(&canvas, 2, 2);
+    assert!((a - 1.0).abs() < 1e-6, "opaque, got {a}");
+    assert!((r - 0.625).abs() < 2e-3, "r = {r}, expected 0.625");
+    assert!((g - 0.125).abs() < 2e-3, "g = {g}, expected 0.125");
+    assert!((b - 0.125).abs() < 2e-3, "b = {b}, expected 0.125");
+}
+
+#[test]
 fn rounded_rect_softens_corners_but_fills_the_core() {
     // A rounded rect leaves the extreme corner pixel less than fully covered
     // while the center is solid — the closed-form coverage the GPU SDF mirrors.
