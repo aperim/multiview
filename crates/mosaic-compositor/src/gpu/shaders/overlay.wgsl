@@ -21,15 +21,21 @@
 // Primitive kinds (mirror crate::overlay::gpu_subpass::PrimitiveKind).
 const KIND_GLYPH: u32 = 0u;
 const KIND_RECT: u32 = 1u;
+const KIND_STROKE: u32 = 2u;
+const KIND_RING: u32 = 3u;
 
 struct OverlayPrim {
-    // x: kind. y: corner_radius (px, rects). z: atlas x (texels, glyphs).
-    // w: atlas y (texels, glyphs).
+    // x: kind. y: corner_radius (px, rects) OR half-thickness f32-bits (strokes).
+    // z: atlas x (texels, glyphs). w: atlas y (texels, glyphs).
     kind_meta: vec4<u32>,
     // x,y: dest top-left on canvas (px). z,w: box width,height (px).
     rect: vec4<i32>,
     // Straight LINEAR RGBA color (premultiplied in-shader by coverage).
     color: vec4<f32>,
+    // Sub-pixel analytic geometry (kind-dependent):
+    //   stroke: (x0, y0, x1, y1) segment endpoints.
+    //   ring:   (cx, cy, mid_radius, band_half).
+    geom: vec4<f32>,
 };
 
 struct OverlayUniforms {
@@ -64,6 +70,18 @@ fn rect_coverage(width: f32, height: f32, col: f32, row: f32, radius: f32) -> f3
     return clamp(radius - dist + 0.5, 0.0, 1.0);
 }
 
+// Distance from point p to the segment a–b (param clamped to [0,1]); identical
+// to crate::overlay::subpass::point_segment_distance.
+fn segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let ab = b - a;
+    let len_sq = dot(ab, ab);
+    var t = 0.0;
+    if len_sq > 1e-12 {
+        t = clamp(dot(p - a, ab) / len_sq, 0.0, 1.0);
+    }
+    return length(p - (a + t * ab));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn overlay_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cw = ov.canvas.x;
@@ -93,11 +111,28 @@ fn overlay_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         var coverage = 0.0;
+        // The pixel center in canvas coordinates, for the analytic SDFs.
+        let center = vec2<f32>(f32(coord.x) + 0.5, f32(coord.y) + 0.5);
         if p.kind_meta.x == KIND_GLYPH {
             // Sample straight coverage from the persistent atlas (R8).
             let ax = i32(p.kind_meta.z) + col;
             let ay = i32(p.kind_meta.w) + row;
             coverage = textureLoad(atlas, vec2<i32>(ax, ay), 0).r;
+        } else if p.kind_meta.x == KIND_STROKE {
+            // Thick angled segment (a capsule): coverage by distance-to-segment
+            // with a 1px linear antialias falloff (same as the CPU reference).
+            let half = bitcast<f32>(p.kind_meta.y);
+            let d = segment_distance(center, p.geom.xy, p.geom.zw);
+            coverage = clamp(half - d + 0.5, 0.0, 1.0);
+        } else if p.kind_meta.x == KIND_RING {
+            // Stroked ring (annulus): coverage by distance to the mid-radius
+            // circle, beyond the band half-width, with a 1px falloff.
+            let c = p.geom.xy;
+            let mid_radius = p.geom.z;
+            let band_half = p.geom.w;
+            let radial = length(center - c);
+            let d = abs(radial - mid_radius);
+            coverage = clamp(band_half - d + 0.5, 0.0, 1.0);
         } else {
             // Analytic (rounded) rectangle — meters, markers, tally, chrome.
             let radius = f32(p.kind_meta.y);

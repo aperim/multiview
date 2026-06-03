@@ -102,6 +102,11 @@ required-features = ["overlay"]
 name = "overlay_subpass"
 required-features = ["overlay"]
 
+# The analog clock-face primitive (ring + angled hand) tests need only `overlay`.
+[[test]]
+name = "overlay_clockface"
+required-features = ["overlay"]
+
 # The audio meters/scopes draw-data tests need only `overlay`.
 [[test]]
 name = "overlay_meters"

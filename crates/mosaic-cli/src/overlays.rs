@@ -36,14 +36,15 @@ use std::collections::HashMap;
 use mosaic_audio::meterdata::{Conflator, MeterSample};
 use mosaic_compositor::overlay::meters::{MeterBar, MeterScale};
 use mosaic_compositor::overlay::subpass::{
-    OverlayColor, OverlayDrawList, OverlayPrimitive, OverlayRect,
+    clock_face, ClockFaceStyle, HandAngles, OverlayColor, OverlayDrawList, OverlayPrimitive,
+    OverlayRect,
 };
 use mosaic_compositor::overlay::text::{FontFamily, TextEngine};
 use mosaic_compositor::Error as CompositorError;
 use mosaic_core::time::MediaTime;
 use mosaic_core::traits::SourceState;
 use mosaic_overlay::clock::{
-    ClockFace, ClockModel, RefSource, RefStatus, TimeRef, TimeZoneOffset, WallTime,
+    AnalogHands, ClockFace, ClockModel, RefSource, RefStatus, TimeRef, TimeZoneOffset, WallTime,
 };
 use mosaic_overlay::geometry::PixelRect;
 use mosaic_overlay::resolve::CanvasSize;
@@ -127,9 +128,63 @@ pub struct OverlayBaker {
     tiles: Vec<TileSpec>,
     meters: Vec<TileMeter>,
     clock: Option<ClockModel>,
+    analog_clock: Option<AnalogClockSpec>,
     subtitles: Option<CueTrack>,
     base_unix_secs: i64,
     per_tile_safe_area: bool,
+}
+
+/// An analog clock face placed on the canvas: its [`ClockModel`] (for the
+/// timezone + the hand-angle math) plus where + how big to draw the face. The
+/// face is rendered with the compositor's ring + angled-hand primitives; the
+/// model's analog hand angles drive the hands (the digital readout can be shown
+/// independently via [`OverlayBaker::with_clock`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnalogClockSpec {
+    /// The clock model (zone + analog face) whose hand angles drive the hands.
+    model: ClockModel,
+    /// Centre x of the face on the canvas, pixels.
+    cx: f32,
+    /// Centre y of the face on the canvas, pixels.
+    cy: f32,
+    /// Bezel radius of the face, pixels.
+    radius: f32,
+}
+
+impl AnalogClockSpec {
+    /// Place an analog clock of bezel `radius` (px) centred at `(cx, cy)` on the
+    /// canvas, in the given `zone`.
+    #[must_use]
+    pub fn new(zone: TimeZoneOffset, cx: f32, cy: f32, radius: f32) -> Self {
+        Self {
+            model: ClockModel::new(
+                ClockFace::analog(),
+                zone,
+                TimeRef::new(RefSource::System, RefStatus::Freerun),
+            ),
+            cx,
+            cy,
+            radius,
+        }
+    }
+
+    /// The face centre x on the canvas, pixels.
+    #[must_use]
+    pub const fn cx(self) -> f32 {
+        self.cx
+    }
+
+    /// The face centre y on the canvas, pixels.
+    #[must_use]
+    pub const fn cy(self) -> f32 {
+        self.cy
+    }
+
+    /// The bezel radius of the face, pixels.
+    #[must_use]
+    pub const fn radius(self) -> f32 {
+        self.radius
+    }
 }
 
 impl OverlayBaker {
@@ -164,6 +219,7 @@ impl OverlayBaker {
                 TimeZoneOffset::UTC,
                 TimeRef::new(RefSource::System, RefStatus::Freerun),
             )),
+            analog_clock: None,
             subtitles,
             base_unix_secs,
             per_tile_safe_area: false,
@@ -175,6 +231,24 @@ impl OverlayBaker {
     #[must_use]
     pub fn with_per_tile_safe_area(mut self, on: bool) -> Self {
         self.per_tile_safe_area = on;
+        self
+    }
+
+    /// Set (or replace) the program-wide **digital** clock label drawn top-left.
+    /// Pass `None` to suppress the digital readout (e.g. when only an analog face
+    /// is wanted). Builder-style.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Option<ClockModel>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Add an **analog** clock face (ring + angled hour/minute/second hands) at
+    /// the given placement, builder-style. Independent of the digital label — a
+    /// config may request either or both.
+    #[must_use]
+    pub fn with_analog_clock(mut self, spec: AnalogClockSpec) -> Self {
+        self.analog_clock = Some(spec);
         self
     }
 
@@ -232,9 +306,10 @@ impl OverlayBaker {
         }
 
         // Program-wide wall-clock label, top-left of the whole canvas.
+        let wall_secs = self.base_unix_secs.saturating_add(now_ns / 1_000_000_000);
+        let wall = WallTime::from_unix_seconds(wall_secs);
         if let Some(clock) = self.clock.as_ref() {
-            let secs = self.base_unix_secs.saturating_add(now_ns / 1_000_000_000);
-            if let Some(text) = clock.render_digital(WallTime::from_unix_seconds(secs)) {
+            if let Some(text) = clock.render_digital(wall) {
                 self.push_text(
                     &mut list,
                     &text,
@@ -246,6 +321,19 @@ impl OverlayBaker {
                         color: WHITE,
                     },
                 )?;
+            }
+        }
+
+        // Program-wide ANALOG clock face: a bezel ring + 12 ticks + three angled
+        // hands, driven by the model's analog hand angles for this instant. The
+        // model owns the time→angle math (the only float); this only maps those
+        // angles into the compositor's ring + stroke primitives.
+        if let Some(analog) = self.analog_clock {
+            if let Some(hands) = analog.model.render_analog(wall) {
+                let style = ClockFaceStyle::at(analog.cx, analog.cy, analog.radius);
+                for prim in clock_face(hand_angles(hands), style) {
+                    list.push(prim);
+                }
             }
         }
 
@@ -627,6 +715,17 @@ fn line(x: i32, y: i32, width: u32, height: u32, color: OverlayColor) -> Overlay
     }
 }
 
+/// Bridge the overlay model's [`AnalogHands`] (degrees clockwise from 12) into
+/// the compositor's [`HandAngles`] — the same units, just the two crates' mirror
+/// types (the compositor stays overlay-free; see [`clock_face`]).
+fn hand_angles(hands: AnalogHands) -> HandAngles {
+    HandAngles {
+        hour_deg: hands.hour_deg,
+        minute_deg: hands.minute_deg,
+        second_deg: hands.second_deg,
+    }
+}
+
 /// A coarse per-glyph advance estimate for sizing chrome (px); good enough for
 /// placement (exact measuring would re-shape the run, unnecessary here).
 fn quantize_advance(size_px: f32) -> u32 {
@@ -896,5 +995,95 @@ mod tests {
         let dyns = dynamics(&[("in_tiny", 0.0, SourceState::Live)]);
         // Must not panic; produces (at most) the clock label, no tile chrome.
         let _ = baker.draw_list(MediaTime::ZERO, &dyns).unwrap();
+    }
+
+    /// Count the ring + stroke primitives (the analog clock-face vocabulary) in a
+    /// draw list.
+    fn rings_and_strokes(list: &OverlayDrawList) -> (usize, usize) {
+        let rings = list
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, OverlayPrimitive::Ring { .. }))
+            .count();
+        let strokes = list
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, OverlayPrimitive::Stroke { .. }))
+            .count();
+        (rings, strokes)
+    }
+
+    #[test]
+    fn analog_clock_draws_a_ring_plus_hands_and_ticks() {
+        // With an analog clock configured, the baker must emit the clock-face
+        // vocabulary: a bezel ring + 12 ticks + 3 hands (the digital baseline
+        // emits NONE of these ring/stroke primitives).
+        let tiles = quad_tiles();
+        let mut plain = OverlayBaker::new(1280, 720, tiles.clone(), None, 0).unwrap();
+        let plain_list = plain.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let (plain_rings, plain_strokes) = rings_and_strokes(&plain_list);
+        assert_eq!(
+            (plain_rings, plain_strokes),
+            (0, 0),
+            "the digital baseline draws no analog face"
+        );
+
+        let mut baker = OverlayBaker::new(1280, 720, tiles, None, 0)
+            .unwrap()
+            .with_analog_clock(AnalogClockSpec::new(
+                TimeZoneOffset::UTC,
+                1160.0,
+                600.0,
+                90.0,
+            ));
+        let list = baker.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let (rings, strokes) = rings_and_strokes(&list);
+        assert_eq!(rings, 1, "the analog face draws exactly one bezel ring");
+        assert_eq!(strokes, 15, "12 hour ticks + 3 hands are stroke primitives");
+    }
+
+    #[test]
+    fn analog_clock_hands_advance_with_the_media_timeline() {
+        // The analog second hand must MOVE between ticks one second apart: its
+        // endpoint angle changes, proving the hands are driven by the timeline
+        // (not a fixed picture).
+        let tiles = quad_tiles();
+        let mut baker = OverlayBaker::new(1280, 720, tiles, None, 0)
+            .unwrap()
+            .with_analog_clock(AnalogClockSpec::new(
+                TimeZoneOffset::UTC,
+                1160.0,
+                600.0,
+                90.0,
+            ));
+
+        // The longest stroke from the centre is the second hand; track its tip.
+        let second_tip = |list: &OverlayDrawList| -> (f32, f32) {
+            list.primitives
+                .iter()
+                .filter_map(|p| match p {
+                    OverlayPrimitive::Stroke { x0, y0, x1, y1, .. } => {
+                        let dx = x1 - x0;
+                        let dy = y1 - y0;
+                        Some((dx * dx + dy * dy, (*x1, *y1)))
+                    }
+                    _ => None,
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, tip)| tip)
+                .unwrap()
+        };
+
+        let t0 = baker.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let t1 = baker
+            .draw_list(MediaTime::from_nanos(1_000_000_000), &HashMap::new())
+            .unwrap();
+        let (x0, y0) = second_tip(&t0);
+        let (x1, y1) = second_tip(&t1);
+        let moved = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+        assert!(
+            moved > 1.0,
+            "second hand tip must move between :00 and :01 (moved {moved}px)"
+        );
     }
 }

@@ -1608,6 +1608,7 @@ dependencies = [
  "mosaic-overlay",
  "mosaic-preview",
  "mosaic-telemetry",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

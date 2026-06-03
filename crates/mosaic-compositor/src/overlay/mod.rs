@@ -42,8 +42,8 @@ pub mod gpu_subpass;
 
 pub use meters::{goniometer, histogram, GonioDot, MeterBar, MeterScale};
 pub use subpass::{
-    apply_overlays_to_nv12, blend_overlays, meter_bar, LinearCanvasBuffer, OverlayColor,
-    OverlayDrawList, OverlayPrimitive, OverlayRect,
+    apply_overlays_to_nv12, blend_overlays, clock_face, meter_bar, ClockFaceStyle, HandAngles,
+    LinearCanvasBuffer, OverlayColor, OverlayDrawList, OverlayPrimitive, OverlayRect,
 };
 pub use text::{
     FontFamily, PreparedGlyph, PreparedRun, RasterizedGlyph, RasterizedRun, TextEngine,

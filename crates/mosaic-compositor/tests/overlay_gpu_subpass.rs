@@ -81,6 +81,53 @@ fn meter_bar_packs_to_an_analytic_rect_not_a_bitmap() {
 }
 
 #[test]
+fn packing_a_stroke_carries_its_endpoints_and_thickness() {
+    let prim = OverlayPrimitive::Stroke {
+        x0: 10.0,
+        y0: 20.0,
+        x1: 40.0,
+        y1: 20.0,
+        half_thickness: 2.5,
+        color: OverlayColor::opaque(1.0, 1.0, 1.0),
+    };
+    let packed = OverlayPrimGpu::pack(&prim, 0, 0);
+    assert_eq!(packed.kind_meta[0], PrimitiveKind::Stroke.as_u32());
+    // The half-thickness rides the y meta slot as f32 bits (the shader bitcasts).
+    assert_eq!(
+        f32::from_bits(packed.kind_meta[1]),
+        2.5,
+        "thickness round-trips"
+    );
+    assert_eq!(packed.geom, [10.0, 20.0, 40.0, 20.0], "endpoints preserved");
+    // The bounding box covers the segment padded by the radius (+1 AA px).
+    assert!(packed.rect[0] <= 7, "bbox left padded past x0");
+    assert!(
+        packed.rect[0] + packed.rect[2] >= 43,
+        "bbox right padded past x1"
+    );
+}
+
+#[test]
+fn packing_a_ring_carries_its_centre_and_band() {
+    let prim = OverlayPrimitive::Ring {
+        cx: 32.0,
+        cy: 32.0,
+        outer_radius: 24.0,
+        thickness: 4.0,
+        color: OverlayColor::opaque(1.0, 1.0, 1.0),
+    };
+    let packed = OverlayPrimGpu::pack(&prim, 0, 0);
+    assert_eq!(packed.kind_meta[0], PrimitiveKind::Ring.as_u32());
+    // geom = (cx, cy, mid_radius = outer - band_half, band_half = thickness/2).
+    assert_eq!(packed.geom[0], 32.0, "centre x");
+    assert_eq!(packed.geom[1], 32.0, "centre y");
+    assert_eq!(packed.geom[2], 22.0, "mid radius = 24 - 2");
+    assert_eq!(packed.geom[3], 2.0, "band half = thickness/2");
+    // The bounding box spans the whole bezel (centre ± outer radius + AA).
+    assert!(packed.rect[0] <= 7, "bbox left ≈ cx - outer");
+}
+
+#[test]
 fn pack_list_skips_glyphs_with_no_resident_atlas_slot() {
     let mut list = OverlayDrawList::new();
     // index 0: a rect (always packs); index 1: a glyph whose slot resolver says

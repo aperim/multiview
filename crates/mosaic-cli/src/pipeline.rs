@@ -273,6 +273,11 @@ pub struct RealPipeline {
     /// source id — the text drawn bottom-left of each tile.
     #[cfg(feature = "overlay")]
     tile_labels: std::collections::HashMap<String, String>,
+    /// An optional **analog** clock face requested by a `[[overlays]]` entry with
+    /// `kind = "clock"` + `face = "analog"`. `None` ⇒ only the default digital
+    /// clock label is drawn.
+    #[cfg(feature = "overlay")]
+    analog_clock: Option<crate::overlays::AnalogClockSpec>,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
@@ -407,6 +412,10 @@ impl RealPipeline {
                 (s.id.clone(), label)
             })
             .collect();
+        // Read an optional analog clock face from a `[[overlays]]` clock entry.
+        #[cfg(feature = "overlay")]
+        let analog_clock =
+            analog_clock_from_config(&config.overlays, config.canvas.width, config.canvas.height);
 
         Ok(Self {
             layout,
@@ -424,6 +433,8 @@ impl RealPipeline {
             meter_db_timelines,
             #[cfg(feature = "overlay")]
             tile_labels,
+            #[cfg(feature = "overlay")]
+            analog_clock,
         })
     }
 
@@ -677,6 +688,10 @@ impl RealPipeline {
             0,
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
+        // Wire a configured analog clock face (the digital label stays on too).
+        if let Some(spec) = self.analog_clock {
+            baker = baker.with_analog_clock(spec);
+        }
 
         let mut out_frames = Vec::with_capacity(ticks.len());
         for (i, tick) in ticks.iter().enumerate() {
@@ -1050,6 +1065,109 @@ fn u32_from_usize_audio(value: usize) -> u32 {
 }
 
 /// The codec token a config output names, if it carries one.
+/// Read an optional analog clock face from the config `[[overlays]]` list: the
+/// first entry whose `kind == "clock"` and whose `face` param is `"analog"`.
+///
+/// Placement comes from optional `x`/`y`/`radius` params (canvas pixels); a
+/// missing placement defaults the face to the bottom-right corner sized to the
+/// canvas. An optional `tz_minutes` param sets the timezone offset (default UTC).
+/// Returns `None` when no analog clock is requested (the digital label still
+/// renders). Without the `overlay` feature this is never called.
+#[cfg(feature = "overlay")]
+fn analog_clock_from_config(
+    overlays: &[mosaic_config::Overlay],
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Option<crate::overlays::AnalogClockSpec> {
+    use mosaic_overlay::clock::TimeZoneOffset;
+
+    let entry = overlays.iter().find(|o| {
+        o.kind == "clock"
+            && o.params
+                .get("face")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
+    })?;
+
+    let cw = u32_to_f32(canvas_w);
+    let ch = u32_to_f32(canvas_h);
+    // A face sized to ~22% of the shorter canvas side by default.
+    let default_radius = cw.min(ch) * 0.11;
+    // Config placement is whole-pixel / whole-minute; round each param to an i32
+    // and widen it losslessly to f32 (no `as` cast), or fall back to the default.
+    let param_f32 = |key: &str| -> Option<f32> {
+        entry
+            .params
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .map(|v| i32_to_f32(round_f64_to_i32(v)))
+    };
+    let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
+    // Default placement: bottom-right corner, inset by the radius + a margin.
+    let margin = radius * 0.25;
+    let cx = param_f32("x").unwrap_or(cw - radius - margin);
+    let cy = param_f32("y").unwrap_or(ch - radius - margin);
+    let zone = entry
+        .params
+        .get("tz_minutes")
+        .and_then(serde_json::Value::as_f64)
+        .map_or(TimeZoneOffset::UTC, |m| {
+            TimeZoneOffset::from_minutes(round_f64_to_i32(m))
+        });
+
+    Some(crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius))
+}
+
+/// Exact small-`u32` → `f32` widening (canvas sizes are well under `2^24`), no
+/// `as` cast — mirrors [`norm_to_px_f32`]'s widener.
+#[cfg(feature = "overlay")]
+fn u32_to_f32(value: u32) -> f32 {
+    let high = u16::try_from(value >> 16).unwrap_or(u16::MAX);
+    let low = u16::try_from(value & 0xFFFF).unwrap_or(u16::MAX);
+    f32::from(high) * 65_536.0 + f32::from(low)
+}
+
+/// Exact small-`i32` → `f32` widening, no `as` cast.
+#[cfg(feature = "overlay")]
+fn i32_to_f32(value: i32) -> f32 {
+    if value < 0 {
+        -u32_to_f32(value.unsigned_abs())
+    } else {
+        u32_to_f32(u32::try_from(value).unwrap_or(u32::MAX))
+    }
+}
+
+/// Round a finite `f64` config measure to the nearest `i32` (saturating to the
+/// `i32` range), no `as` cast: handle the sign, then a bounded binary search over
+/// the unsigned magnitude (mirrors [`frac_to_px`]'s `u64`-bounded search).
+#[cfg(feature = "overlay")]
+fn round_f64_to_i32(v: f64) -> i32 {
+    if !v.is_finite() {
+        return 0;
+    }
+    let r = v.round();
+    let negative = r < 0.0;
+    let magnitude = r.abs().min(f64::from(i32::MAX));
+    // Largest u32 candidate whose widening is <= the magnitude (so the rounded
+    // value maps back exactly for integral inputs within range).
+    let mut lo = 0_u32;
+    let mut hi = u32::try_from(i32::MAX).unwrap_or(u32::MAX);
+    while lo < hi {
+        let mid = lo.saturating_add((hi - lo).saturating_add(1) / 2);
+        if f64::from(mid) <= magnitude {
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+    let value = i32::try_from(lo).unwrap_or(i32::MAX);
+    if negative {
+        value.saturating_neg()
+    } else {
+        value
+    }
+}
+
 fn output_codec(output: &Output) -> Option<&str> {
     match output {
         Output::RtspServer { codec, .. }
@@ -1656,4 +1774,60 @@ fn read_plane(
         dst_row.copy_from_slice(src_row);
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "overlay"))]
+mod overlay_clock_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    /// Build a `clock` overlay carrying `params` by deserializing JSON (the
+    /// `#[non_exhaustive]` `Overlay` has no cross-crate struct literal).
+    fn clock_overlay(params: serde_json::Value) -> mosaic_config::Overlay {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".to_owned(), serde_json::json!("clk"));
+        obj.insert("kind".to_owned(), serde_json::json!("clock"));
+        obj.insert("target".to_owned(), serde_json::json!("canvas"));
+        if let serde_json::Value::Object(extra) = params {
+            for (k, v) in extra {
+                obj.insert(k, v);
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(obj)).expect("clock overlay deserializes")
+    }
+
+    #[test]
+    fn no_clock_overlay_yields_none() {
+        assert!(analog_clock_from_config(&[], 1280, 720).is_none());
+        // A digital clock overlay does NOT request the analog face.
+        let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
+        assert!(analog_clock_from_config(&[digital], 1280, 720).is_none());
+    }
+
+    #[test]
+    fn analog_face_param_requests_the_face() {
+        let analog = clock_overlay(serde_json::json!({ "face": "analog" }));
+        let spec = analog_clock_from_config(&[analog], 1280, 720)
+            .expect("an analog clock overlay yields a spec");
+        // Default placement is the bottom-right quadrant of the canvas.
+        assert!(
+            spec.cx() > 640.0 && spec.cy() > 360.0,
+            "default to bottom-right: {spec:?}"
+        );
+        assert!(spec.radius() >= 8.0, "radius is sane");
+    }
+
+    #[test]
+    fn explicit_placement_params_are_honoured() {
+        let analog = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 200, "y": 150, "radius": 64 }),
+        );
+        let spec = analog_clock_from_config(&[analog], 1280, 720).unwrap();
+        assert!((spec.cx() - 200.0).abs() < 0.5, "explicit x honoured");
+        assert!((spec.cy() - 150.0).abs() < 0.5, "explicit y honoured");
+        assert!(
+            (spec.radius() - 64.0).abs() < 0.5,
+            "explicit radius honoured"
+        );
+    }
 }

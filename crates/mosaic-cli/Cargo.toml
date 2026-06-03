@@ -56,6 +56,13 @@ ffmpeg-next = { version = "7.1", optional = true }
 # all-features=false so it never sees this opt-in dependency.
 tempfile = { version = "3", optional = true }
 
+# Used ONLY by the `overlay`-feature pipeline to read kind-specific overlay
+# params (e.g. an analog `[[overlays]]` clock's placement) out of
+# `mosaic_config::Overlay::params` (a `serde_json::Map`). Optional + gated by the
+# `overlay` feature so the default build never pulls it. `cargo deny` runs with
+# all-features=false so it never sees this opt-in dependency.
+serde_json = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
@@ -95,7 +102,7 @@ software = []
 # the baseline build stays minimal; GPU-free and LGPL-clean. Combine with
 # `ffmpeg` (`run --features ffmpeg,overlay`) to overlay the real pipeline's
 # output; it works alone with the headless software run too.
-overlay = ["mosaic-compositor/overlay"]
+overlay = ["mosaic-compositor/overlay", "dep:serde_json"]
 
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once

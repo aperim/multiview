@@ -33,6 +33,10 @@ pub enum PrimitiveKind {
     Glyph = 0,
     /// An analytic (optionally rounded) filled rectangle / line.
     Rect = 1,
+    /// An analytic thick, angled line segment (a capsule SDF) — clock hands.
+    Stroke = 2,
+    /// An analytic stroked ring / annulus (a circle-band SDF) — clock bezel.
+    Ring = 3,
 }
 
 impl PrimitiveKind {
@@ -42,6 +46,8 @@ impl PrimitiveKind {
         match self {
             Self::Glyph => 0,
             Self::Rect => 1,
+            Self::Stroke => 2,
+            Self::Ring => 3,
         }
     }
 }
@@ -53,10 +59,16 @@ impl PrimitiveKind {
 pub struct OverlayPrimGpu {
     /// `[kind, corner_radius, atlas_x, atlas_y]`.
     pub kind_meta: [u32; 4],
-    /// `[dest_x, dest_y, width, height]` in canvas pixels.
+    /// `[dest_x, dest_y, width, height]` in canvas pixels — the integer bounding
+    /// box every primitive is clipped to in the shader.
     pub rect: [i32; 4],
     /// Straight LINEAR RGBA (premultiplied in-shader by coverage).
     pub color: [f32; 4],
+    /// Sub-pixel analytic geometry, kind-dependent (`vec4` aligned):
+    /// - [`PrimitiveKind::Stroke`]: `[x0, y0, x1, y1]` segment endpoints.
+    /// - [`PrimitiveKind::Ring`]: `[cx, cy, mid_radius, band_half]`.
+    /// - others: unused (zero).
+    pub geom: [f32; 4],
 }
 
 /// Overlay sub-pass uniform block. Mirrors `OverlayUniforms` in `overlay.wgsl`.
@@ -93,6 +105,7 @@ impl OverlayPrimGpu {
                     i32_from_u32(*height),
                 ],
                 color: [color.r, color.g, color.b, color.a],
+                geom: [0.0; 4],
             },
             OverlayPrimitive::FilledRect {
                 rect,
@@ -107,6 +120,7 @@ impl OverlayPrimGpu {
                     i32_from_u32(rect.height),
                 ],
                 color: [color.r, color.g, color.b, color.a],
+                geom: [0.0; 4],
             },
             OverlayPrimitive::Line { rect, color } => Self {
                 kind_meta: [PrimitiveKind::Rect.as_u32(), 0, 0, 0],
@@ -117,9 +131,115 @@ impl OverlayPrimGpu {
                     i32_from_u32(rect.height),
                 ],
                 color: [color.r, color.g, color.b, color.a],
+                geom: [0.0; 4],
             },
+            OverlayPrimitive::Stroke {
+                x0,
+                y0,
+                x1,
+                y1,
+                half_thickness,
+                color,
+            } => {
+                let pad = half_thickness.max(0.0) + 1.0;
+                let bb = segment_bbox(*x0, *y0, *x1, *y1, pad);
+                Self {
+                    kind_meta: [PrimitiveKind::Stroke.as_u32(), bits(*half_thickness), 0, 0],
+                    rect: bb,
+                    color: [color.r, color.g, color.b, color.a],
+                    geom: [*x0, *y0, *x1, *y1],
+                }
+            }
+            OverlayPrimitive::Ring {
+                cx,
+                cy,
+                outer_radius,
+                thickness,
+                color,
+            } => {
+                let half = thickness.max(0.0) / 2.0;
+                let mid_radius = (outer_radius - half).max(0.0);
+                let pad = outer_radius.max(0.0) + 1.0;
+                let bb = segment_bbox(*cx, *cy, *cx, *cy, pad);
+                Self {
+                    kind_meta: [PrimitiveKind::Ring.as_u32(), 0, 0, 0],
+                    rect: bb,
+                    color: [color.r, color.g, color.b, color.a],
+                    geom: [*cx, *cy, mid_radius, half],
+                }
+            }
         }
     }
+}
+
+/// The reinterpret-as-`u32` bits of an `f32` (lossless transport of a sub-pixel
+/// thickness through a `u32` slot the shader bit-casts back), no `as` cast.
+fn bits(value: f32) -> u32 {
+    value.to_bits()
+}
+
+/// The integer bounding box `[x, y, w, h]` of the segment `(x0,y0)–(x1,y1)`
+/// padded by `pad` pixels, clamped to non-negative origin (the shader clips to
+/// the canvas). Used for both strokes (a real segment) and rings (a zero-length
+/// "segment" at the centre padded by the outer radius).
+fn segment_bbox(x0: f32, y0: f32, x1: f32, y1: f32, pad: f32) -> [i32; 4] {
+    let min_x = x0.min(x1) - pad;
+    let min_y = y0.min(y1) - pad;
+    let max_x = x0.max(x1) + pad;
+    let max_y = y0.max(y1) + pad;
+    let x = floor_to_i32(min_x);
+    let y = floor_to_i32(min_y);
+    let w = i32_from_u32(ceil_span(min_x, max_x));
+    let h = i32_from_u32(ceil_span(min_y, max_y));
+    [x, y, w, h]
+}
+
+/// `floor(value)` to `i32` (saturating), no `as` cast.
+fn floor_to_i32(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let f = value.floor();
+    if f < 0.0 {
+        i32_from_u32(u32_from_f32(-f)).saturating_neg()
+    } else {
+        i32_from_u32(u32_from_f32(f))
+    }
+}
+
+/// The pixel span `ceil(hi) - floor(lo)` as a `u32` (saturating), no `as` cast.
+fn ceil_span(lo: f32, hi: f32) -> u32 {
+    if !lo.is_finite() || !hi.is_finite() || hi < lo {
+        return 0;
+    }
+    let span = hi.ceil() - lo.floor();
+    u32_from_f32(span).saturating_add(1)
+}
+
+/// Round a non-negative `f32` to `u32` (saturating), no `as` cast.
+fn u32_from_f32(value: f32) -> u32 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    let target = value.round();
+    let mut lo = 0_u32;
+    let mut hi = u32::MAX;
+    while lo < hi {
+        let mid = lo.saturating_add((hi - lo).saturating_add(1) / 2);
+        if u32_to_f32(mid) <= target {
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+    lo
+}
+
+/// Exact small-`u32` → `f32`, no `as`.
+fn u32_to_f32(value: u32) -> f32 {
+    let high = u16::try_from(value >> 16).unwrap_or(u16::MAX);
+    let low = u16::try_from(value & 0xFFFF).unwrap_or(u16::MAX);
+    f32::from(high) * 65_536.0 + f32::from(low)
 }
 
 /// The compiled overlay sub-pass: the compute pipeline + its bind-group layout.
