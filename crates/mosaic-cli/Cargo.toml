@@ -41,8 +41,24 @@ tokio = { workspace = true, features = ["signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Opt-in alongside the `ffmpeg` feature, used ONLY to name `ffmpeg-next`'s safe
+# value types (`format::Pixel`, the `Video` host-frame type) when bridging
+# `mosaic-compositor`'s `Nv12Image` canvas into the `mosaic-output` sinks and
+# feeding `mosaic-ffmpeg`'s safe decoder. This crate writes NO `unsafe` and
+# performs NO FFI (it stays `unsafe_code = forbid`); all raw libav* remains owned
+# by `mosaic-ffmpeg`. Pinned to match its binding. `cargo deny` runs with
+# all-features=false so it never sees this opt-in dependency.
+ffmpeg-next = { version = "7.1", optional = true }
+
+# Used by the real `ffmpeg`-feature pipeline to stage a generated `test`-source
+# clip into a tempdir before decoding it. Optional + gated by the `ffmpeg`
+# feature so the default pure-Rust build never pulls it. `cargo deny` runs with
+# all-features=false so it never sees this opt-in dependency.
+tempfile = { version = "3", optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
 
 # Feature presets for the `mosaic` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
@@ -55,6 +71,30 @@ default = ["software"]
 
 # Software-only reference path (always available).
 software = []
+
+# Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
+# -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once
+# (LGPL `mpeg2video` by default) -> fan out to the file + HLS output sinks. Wires
+# the owning sub-crates' `ffmpeg` features and pulls `ffmpeg-next` only to name
+# its SAFE value types (no FFI in this crate). LGPL-clean: never escalates to GPL.
+ffmpeg = [
+    "dep:ffmpeg-next",
+    "dep:tempfile",
+    "mosaic-ffmpeg/ffmpeg",
+    "mosaic-input/ffmpeg",
+    "mosaic-output/ffmpeg",
+    "mosaic-audio/ffmpeg",
+]
+
+# License-escalating: forwards the GPL software encoders (libx264/libx265) so a
+# `run --features ffmpeg,gpl-codecs` may target H.264/H.265. Enabling this makes
+# the whole build GPL; it is NEVER pulled in by `ffmpeg` alone and never enters
+# the default (LGPL-clean) build. Implies `ffmpeg` (the real encode path).
+gpl-codecs = [
+    "ffmpeg",
+    "mosaic-ffmpeg/gpl-codecs",
+    "mosaic-output/gpl-codecs",
+]
 
 # NVIDIA: CUDA decode/encode + CUDA compositor fast path + FFmpeg demux/mux,
 # wgpu baseline compositor. (cuda + ffmpeg + wgpu.)

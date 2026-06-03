@@ -73,10 +73,44 @@ pub struct RunArgs {
     /// Run the pure-software engine (CPU reference compositor, built-in
     /// test-pattern sources) with no GPU or `FFmpeg` dependency. This is the
     /// software end-to-end smoke of the output-clock invariant.
+    ///
+    /// Without this flag (and built with the `ffmpeg` feature), `run` builds the
+    /// real libav* pipeline: ingest -> per-tile framestores -> the engine drive
+    /// loop -> encode the canvas once -> fan out to the configured file/HLS
+    /// outputs.
     #[arg(long)]
     pub headless: bool,
 
-    /// Stop after this many output ticks (frames). Omit to run until Ctrl-C.
+    /// Stop after this many output ticks (frames). Omit to run until Ctrl-C (or,
+    /// for a bounded run, give `--duration` instead).
     #[arg(long, value_name = "N")]
     pub ticks: Option<u64>,
+
+    /// Stop after this many seconds of output (converted to an exact whole
+    /// number of ticks at the canvas cadence). Mutually informative with
+    /// `--ticks`; if both are given, `--ticks` wins.
+    #[arg(long, value_name = "SECS")]
+    pub duration: Option<u64>,
+}
+
+impl RunArgs {
+    /// Resolve the bounded tick budget from `--ticks` / `--duration` at the
+    /// given canvas `cadence` (frames per second, exact rational).
+    ///
+    /// `--ticks` takes precedence; otherwise `--duration` seconds is converted
+    /// to an exact whole number of ticks (`secs * num / den`, rounded toward
+    /// zero). Returns [`None`] for an unbounded run (neither bound supplied).
+    #[must_use]
+    pub fn tick_budget(&self, cadence: mosaic_core::time::Rational) -> Option<u64> {
+        if let Some(ticks) = self.ticks {
+            return Some(ticks);
+        }
+        let secs = self.duration?;
+        // ticks = secs * fps = secs * num / den, exact integer arithmetic on
+        // i128 to avoid any float fps (invariant #3), clamped into u64.
+        let num = i128::from(cadence.num);
+        let den = i128::from(cadence.den).max(1);
+        let ticks = (i128::from(secs).saturating_mul(num)) / den;
+        Some(u64::try_from(ticks.max(0)).unwrap_or(u64::MAX))
+    }
 }

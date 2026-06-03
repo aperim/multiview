@@ -1,8 +1,10 @@
 //! # mosaic-cli
 //!
 //! The library half of the `mosaic` binary: the argument grammar
-//! ([`cli`]), the `validate` subcommand ([`validate`]), and the `run`
-//! subcommand's headless software engine ([`run`]).
+//! ([`cli`]), the `validate` subcommand ([`validate`]), the `run`
+//! subcommand's headless software engine ([`run`]), and — behind the
+//! off-by-default `ffmpeg` feature — the real libav\* end-to-end pipeline
+//! (`pipeline`: ingest → composite → encode-once → fan out to file/HLS sinks).
 //!
 //! The binary ([`crate`]'s `main.rs`) is a thin shell that parses
 //! [`cli::Cli`] and dispatches to these modules. Keeping the logic in a library
@@ -34,3 +36,10 @@
 pub mod cli;
 pub mod run;
 pub mod validate;
+
+/// The **real** libav\* end-to-end `mosaic run` pipeline (ingest → composite →
+/// encode-once → fan out to file/HLS sinks). Behind the off-by-default `ffmpeg`
+/// feature so the baseline build stays pure-Rust; software H.264/H.265 needs
+/// `gpl-codecs` on top.
+#[cfg(feature = "ffmpeg")]
+pub mod pipeline;
