@@ -356,6 +356,50 @@ pub fn composite_with(
     tiles: &[Tile<'_>],
     use_lut: bool,
 ) -> Result<Nv12Image> {
+    let n_threads = auto_thread_count();
+    composite_with_threads(
+        canvas_w, canvas_h, canvas, background, tiles, use_lut, n_threads,
+    )
+}
+
+/// The number of worker threads to fan the composite across: the machine's
+/// available parallelism, clamped to `[1, 64]`. Falls back to 1 when the count
+/// is unavailable (the serial path).
+fn auto_thread_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(64)
+}
+
+/// Below this many canvas pixels the thread-spawn overhead outweighs the win,
+/// so the composite runs serially (also covers tiny placeholder/test canvases).
+const PARALLEL_PIXEL_THRESHOLD: usize = 256 * 256;
+
+/// Composite as [`composite_with`], but with an explicit worker-thread count.
+///
+/// The canvas is partitioned into **even-row-aligned bands** by chroma
+/// row-pairs, so each worker owns whole UV rows of a disjoint `&mut` slice — the
+/// split is race-free by construction (no shared mutable state on the data
+/// plane) and the output is byte-identical regardless of `n_threads`, because
+/// every band runs the identical deterministic per-pixel pipeline and rebases
+/// the global row for tile addressing. `n_threads <= 1`, or a canvas below
+/// [`PARALLEL_PIXEL_THRESHOLD`] pixels, renders serially.
+///
+/// `n_threads` is clamped to `[1, 64]` and to the number of chroma row-pairs
+/// (`canvas_h / 2`) so a band is never empty.
+///
+/// # Errors
+///
+/// Same as [`composite_with`]; the first band error (in row order) is returned.
+pub fn composite_with_threads(
+    canvas_w: u32,
+    canvas_h: u32,
+    canvas: CanvasColor,
+    background: LinearRgba,
+    tiles: &[Tile<'_>],
+    use_lut: bool,
+    n_threads: usize,
+) -> Result<Nv12Image> {
     if canvas_w == 0 || canvas_h == 0 || canvas_w % 2 != 0 || canvas_h % 2 != 0 {
         return Err(Error::Geometry(format!(
             "canvas dimensions must be positive and even (got {canvas_w}x{canvas_h})"
@@ -382,19 +426,109 @@ pub fn composite_with(
     let mut y_plane = vec![0_u8; w * h];
     let mut uv_plane = vec![0_u8; w * h / 2];
 
-    composite_band(
-        &mut y_plane,
-        &mut uv_plane,
-        w,
-        0,
-        canvas_h,
-        canvas,
-        background,
-        tiles,
-        luts.as_ref(),
-    )?;
+    // Total chroma row-pairs; clamp the worker count so no band is empty.
+    let total_pairs = h / 2;
+    let workers = n_threads.clamp(1, 64).min(total_pairs.max(1));
+
+    if workers <= 1 || w.saturating_mul(h) < PARALLEL_PIXEL_THRESHOLD {
+        // Serial path: one band covering the whole canvas.
+        composite_band(
+            &mut y_plane,
+            &mut uv_plane,
+            w,
+            0,
+            canvas_h,
+            canvas,
+            background,
+            tiles,
+            luts.as_ref(),
+        )?;
+    } else {
+        composite_parallel(
+            &mut y_plane,
+            &mut uv_plane,
+            w,
+            total_pairs,
+            workers,
+            canvas,
+            background,
+            tiles,
+            luts.as_ref(),
+        )?;
+    }
 
     Nv12Image::new(canvas_w, canvas_h, y_plane, uv_plane, canvas.output_tag())
+}
+
+/// Fan the composite across `workers` scoped threads over even-row-aligned
+/// bands. `total_pairs` is `canvas_h / 2`; each band owns `pairs_per_band`
+/// chroma row-pairs (= `2 * pairs_per_band` luma rows) of a **disjoint** `&mut`
+/// slice of the Y and UV planes, so there is no shared mutable state and the
+/// borrow checker proves the split race-free. Returns the first band error in
+/// row order (deterministic).
+#[allow(clippy::too_many_arguments)]
+// reason: the band slices plus the shared composite parameters; see
+// `composite_band`. A struct would obscure the disjoint-`&mut` band ownership.
+fn composite_parallel(
+    y_plane: &mut [u8],
+    uv_plane: &mut [u8],
+    w: usize,
+    total_pairs: usize,
+    workers: usize,
+    canvas: CanvasColor,
+    background: LinearRgba,
+    tiles: &[Tile<'_>],
+    luts: Option<&LutSet>,
+) -> Result<()> {
+    // Even split of chroma row-pairs across workers (ceil), so every band is the
+    // same size except possibly the last — which is exactly what `chunks_mut`
+    // produces. The number of resulting bands may be < `workers`.
+    let pairs_per_band = total_pairs.div_ceil(workers.max(1)).max(1);
+    let y_band_len = pairs_per_band * 2 * w; // 2 luma rows per chroma pair
+    let uv_band_len = pairs_per_band * w; // 1 interleaved UV row per chroma pair
+
+    let y_bands = y_plane.chunks_mut(y_band_len);
+    let uv_bands = uv_plane.chunks_mut(uv_band_len);
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for (band_index, (band_y, band_uv)) in y_bands.zip(uv_bands).enumerate() {
+            // Global top row of this band (luma rows): band_index * band height.
+            // `pairs_per_band * 2` luma rows per band; the band's own height is
+            // derived from its (possibly shorter, final) slice length.
+            let py_start = u32::try_from(band_index * pairs_per_band * 2).unwrap_or(u32::MAX);
+            let band_h = u32::try_from(band_y.len() / w.max(1)).unwrap_or(0);
+            let handle = scope.spawn(move || {
+                composite_band(
+                    band_y, band_uv, w, py_start, band_h, canvas, background, tiles, luts,
+                )
+            });
+            handles.push(handle);
+        }
+        // Join in spawn (row) order and return the first error encountered.
+        let mut first_err: Option<Error> = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+                Err(_) => {
+                    if first_err.is_none() {
+                        first_err = Some(Error::Geometry(
+                            "composite worker thread panicked".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    })
 }
 
 /// Render the canvas rows `[py_start, py_start + band_h)` into band-local Y/UV

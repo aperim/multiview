@@ -55,8 +55,8 @@ pub mod transfer_lut;
 
 pub use error::{Error, Result};
 pub use pipeline::{
-    canvas_linear_to_output_yuv, composite, composite_with, tile_yuv_to_canvas_linear, CanvasColor,
-    Nv12Image, Tile,
+    canvas_linear_to_output_yuv, composite, composite_with, composite_with_threads,
+    tile_yuv_to_canvas_linear, CanvasColor, Nv12Image, Tile,
 };
 pub use transfer_lut::LutSet;
 
