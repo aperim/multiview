@@ -6,15 +6,68 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Workspace-internal implementation crate; never published to crates.io
+# (matches xtask). This lets cargo-deny's allow-wildcard-paths exempt the
+# intra-workspace path deps while still denying real "*" version wildcards.
+publish = false
 
 [dependencies]
 mosaic-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# wgpu GPU compositor stack — pulled in ONLY by the off-by-default `wgpu`
+# feature so the default build stays pure-Rust, GPU-free, fast, and cargo-deny
+# clean (deny.toml uses `all-features = false`). All four are permissively
+# licensed (MIT OR Apache-2.0 [+ Zlib for bytemuck]); `naga` ships in the wgpu
+# workspace and lets us STATICALLY validate the WGSL shaders without a GPU.
+#
+# `default-features = false` drops wgpu's web (`webgpu`) and Windows (`dx12`)
+# backends — both project non-goals — and we re-enable exactly the platform
+# backends Mosaic targets: `vulkan` + `gles` (Linux: NVIDIA/Intel/AMD) and
+# `metal` (macOS). Each backend crate is internally target-gated, so listing
+# all three is portable; `std` + `wgsl` are required for the native runtime and
+# the WGSL front-end.
+wgpu = { version = "29", default-features = false, features = [
+  "std",
+  "wgsl",
+  "vulkan",
+  "gles",
+  "metal",
+], optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+naga = { version = "29", features = ["wgsl-in"], optional = true }
+
+[dev-dependencies]
+proptest = "1.11.0"
+
+# GPU tests only build/run under the `wgpu` feature; the `#![cfg(feature =
+# "wgpu")]` inside also makes them compile to an empty crate when the feature
+# is off, but `required-features` keeps `cargo test` (default) from even trying.
+[[test]]
+name = "gpu_shader_validate"
+required-features = ["wgpu"]
+
+[[test]]
+name = "gpu_compositor"
+required-features = ["wgpu"]
+
 [features]
-"default" = ["wgpu"]
-"wgpu" = []
+# DEFAULT IS PURE RUST (no GPU, no native libs) — the CI-green baseline.
+#
+# The `wgpu` feature wires the portable GPU compositor (device/queue setup,
+# NV12 upload, the fixed-order WGSL pipeline). It is OFF by default in this
+# change so `cargo check --workspace` and `cargo deny check` stay green and
+# fast and pull no native graphics deps. conventions §3 lists wgpu as the
+# NOMINAL DEFAULT compositor backend, so flipping `default = ["wgpu"]` is a
+# deliberate, reviewed follow-up (it adds wgpu to the default deny graph and CI
+# build time) — recommended, but not done here.
+"default" = []
+"wgpu" = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:naga"]
 "cuda" = []
 "metal" = []
 "vaapi" = []
+
+[lints]
+workspace = true
