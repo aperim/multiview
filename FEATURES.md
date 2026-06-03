@@ -97,8 +97,8 @@ support matrix — update a row's status as it is implemented.
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
 | EBU R128 / true-peak metering | 🔵 | M4 | [media](docs/media/audio-subtitles-overlays.md) |
-| Subtitle ingest (CEA-608/708, DVB, teletext, WebVTT) | 📐 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
-| Subtitle burn-in (libass) + passthrough tracks | 📐 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
+| Subtitle ingest (CEA-608/708, DVB, teletext, WebVTT) | 🔵 | M5 | [media](docs/media/audio-subtitles-overlays.md) — native in-pipeline **WebVTT** (HLS rendition) + **DVB-sub** ingest implemented + demoed; CEA-608/708 + teletext pending (#36) |
+| Subtitle burn-in (libass) + passthrough tracks | 🔵 | M5 | [media](docs/media/audio-subtitles-overlays.md) — per-tile burn-in (text + bitmap) implemented + demoed; libass styling + passthrough pending |
 | Overlays: labels, clocks, logos, audio meters, alert cards | 🔵 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
 | Color: 4-axis detect/convert, linear-light, HDR/SDR tone-map | 🔵 | M5 | [color](docs/architecture/color.md) |
 
@@ -206,8 +206,8 @@ Standards-based broadcast-multiviewer capabilities mapped to Mosaic — see [res
 
 | Capability | Status | Relevance | Target | Standard |
 |---|---|---|---|---|
-| Content-aware fault probes: black / freeze (zone + dwell) | 📋 | core | M10 | Generic industry-standard probes |
-| Audio fault probes: silence / over-level / clip / phase / imbalance | 📋 | core | M10 | Generic; true-peak ceiling per ITU-R BS.1770 (R128 -1 dBTP / A/85 -2 dBTP) |
+| Content-aware fault probes: black / freeze (zone + dwell) | 🔵 | core | M10 | Generic industry-standard probes — black + freeze (dwell/hysteresis) probes wired into the CLI per-tile fault badges + demoed; full M10 alarm roll-up/REST/SNMP pending |
+| Audio fault probes: silence / over-level / clip / phase / imbalance | 🔵 | core | M10 | Generic; true-peak ceiling per ITU-R BS.1770 (R128 -1 dBTP / A/85 -2 dBTP) — silence/audio-loss wired into the CLI fault badge + demoed; over-level/clip/phase/imbalance designed |
 | Loudness-violation + dialnorm-mismatch alarm | 📋 | valuable | M10 | ITU-R BS.1770 vs EBU R128 / ATSC A/85; dialnorm per ATSC A/52, A/85 |
 | Caption presence-loss + validity monitoring | 📋 | valuable | M10 | CEA-608/708; DVB EN 300 743; teletext EN 300 706 / OP-47 (SMPTE RDD 8); WebVTT |
 | Format/standard-change + AFD-mismatch + colorimetry/HDR monitoring | 📋 | valuable | M10 | SMPTE ST 2016 (AFD); ITU-R BT.709/2020/2100; SMPTE ST 2086 / CTA-861 |
