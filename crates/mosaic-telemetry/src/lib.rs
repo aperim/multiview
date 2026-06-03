@@ -25,6 +25,10 @@
 //! * [`health`] — [`health::HealthState`] with readiness gates for the probes.
 //! * [`metrics`] — [`metrics::MetricsRegistry`] with counters, gauges,
 //!   histograms, and bounded-cardinality [`metrics::Labels`].
+//! * [`gpu`] — per-GPU load gauges ([`gpu::GpuGauges`]) keyed by a bounded
+//!   `{gpu, vendor}` label, the whole-system [`gpu::CpuGauge`], and the pure
+//!   std-only [`gpu::CpuSampler`] (`/proc/stat`). Unknown vendor metrics are
+//!   **not registered** (ADR-0017 §4.1 — "n/a", never a false zero).
 //! * [`tracing_init`] — [`tracing_init::SubscriberBuilder`] for an
 //!   `EnvFilter`-based subscriber.
 //! * [`syslog`] — a **pure** RFC 5424 message formatter (always compiled); the
@@ -39,6 +43,7 @@
 
 pub mod availability;
 pub mod error;
+pub mod gpu;
 pub mod health;
 pub mod metrics;
 #[cfg(feature = "snmp")]
@@ -48,6 +53,7 @@ pub mod tracing_init;
 
 pub use availability::{AvailabilityCounters, AvailabilitySnapshot};
 pub use error::{Result, TelemetryError};
+pub use gpu::{CpuGauge, CpuSampler, GpuGauges, GpuLabels, VendorExposes};
 pub use health::{GateId, HealthState, Liveness, Readiness};
 pub use metrics::{
     Counter, Gauge, Histogram, HistogramSnapshot, Labels, MetricKind, MetricsRegistry,
