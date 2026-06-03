@@ -77,6 +77,36 @@ fn run_subcommand_headless_with_ticks() {
 }
 
 #[test]
+fn run_subcommand_subtitles_flag_parses() {
+    // Default: no subtitles attached.
+    let cli = Cli::parse_from(["mosaic", "run", "examples/2x2.toml"]);
+    match cli.command {
+        Command::Run(args) => assert_eq!(
+            args.subtitles, None,
+            "subtitles must default to None when --subtitles is absent"
+        ),
+        other @ Command::Validate(_) => panic!("expected Run, got {other:?}"),
+    }
+
+    // Explicit --subtitles captures the file path.
+    let cli = Cli::parse_from([
+        "mosaic",
+        "run",
+        "examples/2x2.toml",
+        "--subtitles",
+        "captions.srt",
+    ]);
+    match cli.command {
+        Command::Run(args) => assert_eq!(
+            args.subtitles,
+            Some(PathBuf::from("captions.srt")),
+            "--subtitles FILE must be captured as the cue-track path"
+        ),
+        other @ Command::Validate(_) => panic!("expected Run, got {other:?}"),
+    }
+}
+
+#[test]
 fn missing_config_is_a_parse_error() {
     let err = Cli::try_parse_from(["mosaic", "validate"]).unwrap_err();
     // clap reports the missing required positional argument.

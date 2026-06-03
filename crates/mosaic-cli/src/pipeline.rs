@@ -7,9 +7,14 @@
 //! HLS output sinks declared in the config.
 //!
 //! ```text
-//! config ─▶ decode each source to NV12 (scaled to its cell)  ─┐
-//!                                                              ├▶ per-tile TileStore
-//!  OutputClock ─▶ EngineRuntime drive (CPU compositor) ───────┘   (sampled, never paced)
+//! each source ─▶ own decode thread ─▶ scale to its cell ─▶ publish NV12
+//!   (live or file/VOD, PTS-paced to wall-clock — invariant #4)        │
+//!                                                                     ▼
+//!                                                          per-tile TileStore
+//!                                                          (last-good, lock-free)
+//!                                                                     │  (sampled,
+//!                                                                     │   never pacing)
+//!  OutputClock ─▶ EngineRuntime drive (CPU compositor) ◀─────────────┘
 //!       │
 //!       └▶ one composited canvas per tick (out_pts = f(tick))
 //!                                                              ├▶ encode ONCE (mpeg2video
@@ -18,12 +23,31 @@
 //!                                                              └▶ fan out: FileSink + SegmentSink
 //! ```
 //!
+//! ## Ingest is streamed, never buffered (BUG-2 fix)
+//!
+//! Each declared source decodes on its **own dedicated thread** and publishes
+//! frames into its per-tile [`TileStore`](mosaic_framestore::TileStore) as they
+//! arrive — the output clock starts immediately and **samples** the stores per
+//! tick. A live stream (RTSP/HLS/SRT/RTMP/TS) never emits EOF, so the previous
+//! "decode the whole source into a `Vec` before starting the clock" approach
+//! hung forever and never honoured `--duration`/`--ticks`. Streaming makes a
+//! live input a *sampled* producer that can neither pace nor stall the output
+//! clock (invariant #1), and a bounded run (`run_for`) stops the clock after `N`
+//! ticks and tears the ingest threads down (they cannot back-pressure the
+//! engine — invariant #10).
+//!
+//! Per [invariant #4](../docs/research/streaming-gotchas.md) the ingest threads
+//! pace each frame to wall-clock **by its PTS** (a custom pacer; `-re` is never
+//! used) so a live source plays in real time and a file/VOD source plays at its
+//! natural rate rather than being slurped as fast as the disk allows.
+//!
 //! ## Invariants upheld
 //!
 //! * **#1 output-clock.** The engine's [`EngineRuntime`](mosaic_engine::EngineRuntime)
-//!   emits exactly one composited frame per tick; a source that ran out of
-//!   frames simply holds its last-good frame (or shows the slate) — it never
-//!   stalls the loop.
+//!   emits exactly one composited frame per tick; a source that has produced no
+//!   frame yet, or has run out of frames, simply holds its last-good frame (or
+//!   shows the slate) — it never stalls the loop. Ingest runs on separate
+//!   threads the engine never waits on.
 //! * **#3 timing.** PTS is re-stamped from the tick counter by the output sinks
 //!   (`out_pts = tick`); raw input PTS is never forwarded to an encoder/muxer.
 //! * **#5 NV12-throughout.** Frames stay NV12 from decode through composite; the
@@ -37,7 +61,10 @@
 //!   `gpl-codecs`. No FFI lives here — the crate stays `unsafe_code = forbid`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Pixel;
@@ -230,11 +257,25 @@ pub struct RealPipeline {
     layout: Arc<Layout>,
     /// The fixed output cadence (exact rational).
     cadence: Rational,
-    /// Per-source last-good-frame stores, keyed by source id.
+    /// An optional parsed subtitle track whose active cue is burned into the
+    /// program by the overlay baker (GAP-3). Wired from a `--subtitles` file or
+    /// a future per-source caption declaration. `None` ⇒ no subtitle overlay.
+    #[cfg(feature = "overlay")]
+    subtitles: Option<mosaic_overlay::subtitle::CueTrack>,
+    /// The real per-tick program-audio loudness timeline (dBFS), one entry per
+    /// output tick, derived off the hot path from the decoded program audio's
+    /// ballistics DSP (GAP-3). Empty ⇒ no decodable program audio (the meter
+    /// then rides its floor rather than showing a fabricated constant).
+    #[cfg(feature = "overlay")]
+    meter_db_timeline: Vec<f64>,
+    /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
+    /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
-    /// Decoded NV12 frame sequences per source (scaled to the bound cell size),
-    /// keyed by source id; the drive loop publishes the next frame per tick.
-    decoded: HashMapFrames,
+    /// Per-source streaming ingest plans: how to open + decode each source, and
+    /// the tile size its frames are scaled to. The drive starts one decode
+    /// thread per plan; the threads publish into [`Self::stores`] as frames
+    /// arrive (never buffered ahead of the clock — the BUG-2 fix).
+    ingest_plans: Vec<IngestPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -248,20 +289,45 @@ pub struct RealPipeline {
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
-type HashMapFrames = std::collections::HashMap<String, Vec<Arc<Nv12Image>>>;
+
+/// Everything one source needs to be ingested on its own decode thread: where
+/// its media lives, the store to publish into, the tile size to scale to, the
+/// canvas color tag, and whether it is a live (never-ending) source.
+struct IngestPlan {
+    /// The source id (for diagnostics / store keying).
+    id: String,
+    /// Where the media lives.
+    location: SourceLocation,
+    /// The destination tile size (even pixels) the frames are scaled to.
+    tile_w: u32,
+    /// The destination tile height.
+    tile_h: u32,
+    /// The store to publish decoded frames into (shared with the drive loop).
+    store: Arc<TileStore<Nv12Image>>,
+    /// Whether this is a live (continuous, never-EOF) source. Live sources are
+    /// reopened on EOF/error (a transient HLS/RTSP drop reconnects); a finite
+    /// file/VOD source plays once and then holds its last frame.
+    live: bool,
+    /// A generated `test` clip's tempdir, kept alive for the life of the
+    /// pipeline so the decode thread can open it.
+    _owned: Option<GeneratedClip>,
+}
 
 impl RealPipeline {
     /// Build the real pipeline from an already-validated configuration.
     ///
-    /// Solves the layout, opens + decodes every declared source into NV12 frames
-    /// scaled to the cell it binds, resolves the output encoder (LGPL by
-    /// default), and builds the runnable file/HLS sinks.
+    /// Solves the layout, resolves each declared source to a streaming
+    /// [`IngestPlan`] (it does **not** decode anything here — decoding happens on
+    /// per-source threads started by [`RealPipeline::run_for`]/`run_until`, so a
+    /// never-ending live source can never stall the build), resolves the output
+    /// encoder (LGPL by default), and builds the runnable file/HLS sinks.
     ///
     /// # Errors
     ///
-    /// Returns a [`PipelineError`] if the layout cannot be solved, a source
-    /// cannot be opened/decoded, no runnable output is declared, or the encoder
-    /// cannot be resolved.
+    /// Returns a [`PipelineError`] if the layout cannot be solved, a `test`
+    /// source's clip cannot be generated, an NDI/unsupported source kind is
+    /// declared, no runnable output is declared, or the encoder cannot be
+    /// resolved.
     pub fn build(config: &MosaicConfig) -> Result<Self, PipelineError> {
         let layout = Arc::new(config.solve_layout()?);
         let cadence = config.canvas.fps.rational();
@@ -272,19 +338,19 @@ impl RealPipeline {
         // decoded frames are scaled to tile the canvas (the reference compositor
         // places tiles 1:1 at the cell origin).
         let mut stores: HashMapStores = std::collections::HashMap::new();
-        let mut decoded: HashMapFrames = std::collections::HashMap::new();
+        let mut ingest_plans: Vec<IngestPlan> = Vec::with_capacity(config.sources.len());
 
         for source in &config.sources {
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
-            let frames = decode_source(source, tile_w, tile_h, tag)?;
             let store = Arc::new(TileStore::new(
                 source.id.clone(),
                 TileThresholds::default(),
                 NoSignalPolicy::HoldForever,
             ));
+            let plan = ingest_plan_for(source, tile_w, tile_h, Arc::clone(&store))?;
             stores.insert(source.id.clone(), store);
-            decoded.insert(source.id.clone(), frames);
+            ingest_plans.push(plan);
         }
 
         let nosignal_card =
@@ -318,17 +384,49 @@ impl RealPipeline {
             return Err(PipelineError::NoOutput("file/HLS"));
         }
 
+        // Derive the real per-tick program-audio loudness timeline off the build
+        // path (GAP-3): decode the first file-backed source's audio with
+        // mosaic-audio's ballistics DSP and snapshot the meter at each tick. A
+        // live URL or audio-free source yields an empty timeline (the meter then
+        // rides its floor — no fabricated constant). This never touches the hot
+        // path: it is computed once at build time.
+        #[cfg(feature = "overlay")]
+        let meter_db_timeline = build_meter_timeline(config, cadence);
+
         Ok(Self {
             layout,
             cadence,
             stores,
-            decoded,
+            ingest_plans,
             canvas_color,
             nosignal_card,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
             encoder,
             outputs,
+            #[cfg(feature = "overlay")]
+            subtitles: None,
+            #[cfg(feature = "overlay")]
+            meter_db_timeline,
         })
+    }
+
+    /// Attach a parsed subtitle track whose active cue is burned into the
+    /// program by the overlay baker (GAP-3). The track's cues are looked up by
+    /// each output frame's media time, so the cue burns in exactly while it is
+    /// active. Without the `overlay` feature this is a no-op identity.
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn with_subtitles(mut self, track: mosaic_overlay::subtitle::CueTrack) -> Self {
+        self.subtitles = Some(track);
+        self
+    }
+
+    /// Subtitle attachment is a no-op when the `overlay` feature is disabled
+    /// (there is no overlay baker to burn the cue into); the track is dropped.
+    #[cfg(not(feature = "overlay"))]
+    #[must_use]
+    pub fn with_subtitles(self, _track: mosaic_overlay::subtitle::CueTrack) -> Self {
+        self
     }
 
     /// The fixed output cadence (exact rational).
@@ -400,37 +498,35 @@ impl RealPipeline {
         let mut runtime = EngineRuntime::new(clock, drive, ts, pacer);
         let publisher: EnginePublisher<TickState, TickState> = EnginePublisher::new(EVENT_CAPACITY);
 
+        // Start streaming ingest BEFORE the clock loop: one decode thread per
+        // source, each publishing into its `TileStore` as frames arrive. The
+        // supervisor owns the threads + a stop flag; it never blocks the engine
+        // (the engine only ever *samples* the lock-free stores — invariant #10)
+        // and it is torn down (stop + join) when this scope ends, so a bounded
+        // run reliably stops the clock AND the ingest (invariant #1). Taking the
+        // plans by value means a second `drive` call simply ingests nothing
+        // (the stores hold their last frames / slate) rather than double-spawning.
+        let plans = std::mem::take(&mut self.ingest_plans);
+        let supervisor = IngestSupervisor::start(plans);
+
         // Collected composited canvases (Arc to avoid copies), in tick order.
         let collected: Arc<Mutex<Vec<Arc<Nv12Image>>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // The projection runs once per tick on the hot loop. It (a) advances each
-        // source store to the NEXT decoded frame (so the next tick samples a fresh
-        // frame — inputs are sampled, never pacing), and (b) snapshots the canvas
-        // into the collection. Both are cheap, panic-free, and never block the
-        // engine (the collection lock is held only for a push; invariant #10 is
-        // not at risk because this is a bounded offline collection, not a realtime
-        // consumer that could back-pressure a live engine).
-        let stores = self.stores.clone();
-        let decoded = self.decoded.clone();
+        // The projection runs once per tick on the hot loop. It snapshots the
+        // composited canvas into the collection — cheap, panic-free, and never
+        // blocks the engine (the collection lock is held only for a push;
+        // invariant #10 is not at risk because this is a bounded offline
+        // collection, not a realtime consumer that could back-pressure a live
+        // engine). Frame *advancement* is no longer done here: the ingest threads
+        // publish into the stores asynchronously, and the drive loop SAMPLES the
+        // latest-good frame per tick (inputs sampled, never pacing — invariant #1).
         let collect = Arc::clone(&collected);
         let state_of = move |frame: &CompositedFrame| -> TickState {
-            // Publish the frame this tick "consumed" plus prime the next one:
-            // advance each store to frame index `tick.index` of its sequence,
-            // holding the last frame once the sequence is exhausted (invariant
-            // #1 — output never stalls on input exhaustion).
-            let index = frame.tick.index;
-            for (id, frames) in &decoded {
-                if let Some(store) = stores.get(id) {
-                    if let Some(img) = pick_frame(frames, index) {
-                        store.publish_arc(Arc::clone(img), frame.pts());
-                    }
-                }
-            }
             if let Ok(mut sink) = collect.lock() {
                 sink.push(Arc::new(frame.canvas.clone()));
             }
             TickState {
-                tick: index,
+                tick: frame.tick.index,
                 pts: frame.pts(),
             }
         };
@@ -438,10 +534,6 @@ impl RealPipeline {
             tick: frame.tick.index,
             pts: frame.pts(),
         };
-
-        // Prime tick 0's frames into the stores BEFORE the loop so the first
-        // composite samples a real first frame rather than the slate.
-        self.prime_tick_zero();
 
         let outcome = match max_ticks {
             Some(max) => {
@@ -451,7 +543,16 @@ impl RealPipeline {
             }
             None => runtime.run(&publisher, stop, state_of, event_of).await,
         }
-        .map_err(|e| PipelineError::Engine(e.to_string()))?;
+        .map_err(|e| PipelineError::Engine(e.to_string()));
+
+        // The clock has stopped (bounded budget reached, or `stop` raised): tear
+        // ingest down deterministically (signal + join) before reading the
+        // collected frames. `drop(supervisor)` would also do this, but doing it
+        // explicitly keeps the teardown ordering legible and lets a join error
+        // surface in the log rather than being swallowed in a destructor.
+        supervisor.shutdown();
+
+        let outcome = outcome?;
 
         let frames = match collected.lock() {
             Ok(g) => g.clone(),
@@ -488,6 +589,20 @@ impl RealPipeline {
     ///
     /// Returns [`PipelineError::Engine`] if the overlay baker or sub-pass rejects
     /// the canvas (font load / unresolved color).
+    /// The program-audio loudness (dBFS) to show at output tick `i`. Reads the
+    /// real per-tick timeline derived at build time; falls back to the meter
+    /// floor ([`mosaic_audio::Ballistics::FLOOR_DB`]) when no decodable program
+    /// audio exists, so a silent / audio-free run shows an empty bar rather than
+    /// a fabricated constant.
+    #[cfg(feature = "overlay")]
+    fn meter_db_at(&self, i: usize) -> f64 {
+        self.meter_db_timeline
+            .get(i)
+            .copied()
+            .or_else(|| self.meter_db_timeline.last().copied())
+            .unwrap_or(mosaic_audio::Ballistics::FLOOR_DB)
+    }
+
     // reason: the `not(feature)` sibling consumes `frames` by value (identity
     // pass-through), so both arms share one by-value signature for the caller.
     #[cfg(feature = "overlay")]
@@ -501,7 +616,7 @@ impl RealPipeline {
         let mut baker = crate::overlays::OverlayBaker::new(
             self.layout.canvas.width,
             self.layout.canvas.height,
-            None,
+            self.subtitles.clone(),
             0,
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
@@ -509,8 +624,13 @@ impl RealPipeline {
         let mut out_frames = Vec::with_capacity(frames.len());
         for (i, frame) in frames.iter().enumerate() {
             let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
-            // A synthetic meter reading so the dB bar is alive in the output.
-            baker.observe_meter_db(-6.0);
+            // Feed the REAL per-tick program-audio loudness (GAP-3) so the dB bar
+            // tracks the decoded audio. Where no decodable program audio exists
+            // the timeline is empty and the meter rides its floor (silence) —
+            // never a fabricated constant. The conflator inside the baker thins
+            // these to ~30 Hz, so even at higher cadences the tap stays cheap and
+            // can never couple to the engine (invariant #10).
+            baker.observe_meter_db(self.meter_db_at(i));
             let list = baker
                 .draw_list(pts)
                 .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
@@ -529,18 +649,6 @@ impl RealPipeline {
         frames: Vec<Arc<Nv12Image>>,
     ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
         Ok(frames)
-    }
-
-    /// Publish each source's first decoded frame into its store at t=0 so the
-    /// engine's first composite (tick 0) samples a real frame.
-    fn prime_tick_zero(&self) {
-        for (id, frames) in &self.decoded {
-            if let Some(store) = self.stores.get(id) {
-                if let Some(img) = pick_frame(frames, 0) {
-                    store.publish_arc(Arc::clone(img), MediaTime::ZERO);
-                }
-            }
-        }
     }
 
     /// Encode the collected composited canvases once and fan them out to every
@@ -599,15 +707,90 @@ struct TickState {
     pts: MediaTime,
 }
 
-/// Pick the decoded frame for tick `index`, holding the last frame once the
-/// sequence is exhausted (so a finite clip loops to a freeze rather than the
-/// slate — input exhaustion never stalls the output, invariant #1).
-fn pick_frame(frames: &[Arc<Nv12Image>], index: u64) -> Option<&Arc<Nv12Image>> {
-    if frames.is_empty() {
-        return None;
+/// Owns the per-source streaming-ingest decode threads and a shared stop flag.
+///
+/// Each thread decodes one source and publishes frames into its [`TileStore`]
+/// (shared lock-free with the engine's drive loop). The engine only ever
+/// *samples* those stores, so a slow, fast, or never-ending ingest thread can
+/// neither pace nor stall the output clock (invariant #1) and cannot
+/// back-pressure the engine (invariant #10). [`IngestSupervisor::shutdown`]
+/// raises the stop flag and joins every thread, so a bounded run tears ingest
+/// down deterministically rather than leaking threads.
+struct IngestSupervisor {
+    stop: Arc<AtomicBool>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl IngestSupervisor {
+    /// Spawn one decode thread per plan and return the running supervisor.
+    fn start(plans: Vec<IngestPlan>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let stop = Arc::clone(&stop);
+            let id = plan.id.clone();
+            let builder = std::thread::Builder::new().name(format!("mosaic-ingest-{id}"));
+            match builder.spawn(move || ingest_loop(&plan, &stop)) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // A thread that cannot spawn is logged and skipped: its tile
+                    // simply rides NO_SIGNAL (slate) rather than failing the run
+                    // (invariant #1 — the output clock is independent of inputs).
+                    tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
+                }
+            }
+        }
+        Self { stop, handles }
     }
-    let i = usize::try_from(index).unwrap_or(usize::MAX);
-    frames.get(i).or_else(|| frames.last())
+
+    /// Signal every ingest thread to stop and join them.
+    fn shutdown(mut self) {
+        self.join_all();
+    }
+
+    /// Raise the stop flag, then join every outstanding ingest thread within a
+    /// bounded grace period.
+    ///
+    /// A thread blocked inside a libav **network** call (`ffmpeg::format::input`
+    /// opening a stalled live URL, or a `packet.read` on a wedged socket) cannot
+    /// observe the cooperative `stop` flag — libav offers no portable cancel
+    /// from a safe wrapper. Blocking forever on `join` would defeat the whole
+    /// BUG-2 fix (the bounded run would hang on teardown), so a thread that does
+    /// not finish within [`INGEST_JOIN_GRACE`] is **detached**: it only ever
+    /// *writes* a lock-free store it shares by `Arc`, owns its own libav state
+    /// (freed in `Drop`), and is reaped at process exit — it can neither corrupt
+    /// the produced output nor stall the caller. This keeps the output-clock
+    /// guarantee (invariant #1) intact end-to-end, including teardown.
+    fn join_all(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let deadline = Instant::now() + INGEST_JOIN_GRACE;
+        for handle in self.handles.drain(..) {
+            let name = handle.thread().name().unwrap_or("ingest").to_owned();
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if !handle.is_finished() {
+                tracing::warn!(
+                    thread = %name,
+                    "ingest thread wedged in a blocking libav call; detaching (reaped at exit)"
+                );
+                continue; // detach: drop the handle without joining.
+            }
+            if handle.join().is_err() {
+                tracing::error!(thread = %name, "ingest thread panicked during join");
+            }
+        }
+    }
+}
+
+impl Drop for IngestSupervisor {
+    fn drop(&mut self) {
+        // Defensive teardown if `shutdown` was not called (e.g. an early return
+        // on the encode/error path): raise the flag and join (bounded) so no
+        // thread blocks the caller. After `shutdown` the handle vec is already
+        // drained, so this is a no-op on that path.
+        self.join_all();
+    }
 }
 
 /// The pixel size of the cell that binds `source_id`, if any.
@@ -661,6 +844,96 @@ fn ticks_per_second(cadence: Rational) -> u32 {
     let den = i128::from(cadence.den).max(1);
     let rounded = (num + den / 2) / den;
     u32::try_from(rounded.max(1)).unwrap_or(u32::MAX)
+}
+
+/// Build the real per-tick program-audio loudness timeline (dBFS) off the build
+/// path (GAP-3).
+///
+/// Picks the first **file-backed** source (a `file` path or a generated `test`
+/// clip) that decodes to audio, runs its decoded 48 kHz samples through a
+/// sample-peak [`mosaic_audio::Ballistics`] meter, and snapshots the meter's
+/// reading at each output-tick boundary, producing one dBFS value per tick. The
+/// meter is the program-loudness DSP, so a silent track reads its floor and a
+/// loud track reads high — the on-screen bar reflects the real audio.
+///
+/// Returns an empty `Vec` when no source has decodable audio (live URLs are not
+/// pre-decoded here, and an audio-free clip yields nothing); the caller then
+/// rides the meter floor rather than fabricating a constant. This runs once at
+/// build time and never touches the hot path (invariant #1/#10).
+#[cfg(feature = "overlay")]
+fn build_meter_timeline(config: &MosaicConfig, cadence: Rational) -> Vec<f64> {
+    for source in &config.sources {
+        // Resolve a decodable local path, keeping any generated `test` clip's
+        // tempdir alive (`_clip`) for the whole decode.
+        let (path, _clip): (PathBuf, Option<GeneratedClip>) = match &source.kind {
+            SourceKind::File { path } => (PathBuf::from(path), None),
+            SourceKind::Test => match generate_test_clip(&source.id) {
+                Ok(clip) => (clip.0.clone(), Some(clip)),
+                Err(_) => continue,
+            },
+            // Live URLs are not pre-decoded here (they never EOF); NDI/unknown
+            // carry no file. They contribute no build-time meter timeline.
+            _ => continue,
+        };
+        match meter_timeline_for_file(&path, cadence) {
+            Ok(timeline) if !timeline.is_empty() => return timeline,
+            Ok(_) => {}
+            Err(reason) => {
+                tracing::debug!(source = %source.id, %reason, "no program-audio meter timeline");
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Decode `path`'s audio and snapshot a sample-peak meter at each output-tick
+/// boundary, yielding one dBFS reading per tick.
+#[cfg(feature = "overlay")]
+fn meter_timeline_for_file(path: &Path, cadence: Rational) -> Result<Vec<f64>, String> {
+    use mosaic_audio::decode::AudioFileDecoder;
+    use mosaic_audio::{Ballistics, ChannelLayout, MeterScale, PeakMode};
+
+    let mut decoder =
+        AudioFileDecoder::open(path, ChannelLayout::Stereo).map_err(|e| e.to_string())?;
+    let format = decoder.format();
+    let rate = format.sample_rate();
+    let channels = format.channel_count().max(1);
+    let mut meter = Ballistics::new(rate, MeterScale::SamplePeak(PeakMode::Sample));
+
+    // Samples per output tick = sample_rate * den / num (exact integer; never
+    // float fps). At least one sample per tick so a tick always advances.
+    let num = i128::from(cadence.num).max(1);
+    let den = i128::from(cadence.den).max(1);
+    let samples_per_tick = (i128::from(rate).saturating_mul(den) / num).max(1);
+
+    let mut timeline = Vec::new();
+    // Drive the meter sample-by-sample (downmix to mono by averaging the frame's
+    // channels — the meter wants a single program-loudness reading), emitting the
+    // reading each time we cross a tick boundary in input samples.
+    let mut samples_since_tick: i128 = 0;
+    while let Some(block) = decoder.next_block().map_err(|e| e.to_string())? {
+        for frame in block.interleaved().chunks_exact(channels) {
+            let sum: f32 = frame.iter().copied().sum();
+            let mono = f64::from(sum) / f64::from(u32_from_usize_audio(channels));
+            meter.push(mono);
+            samples_since_tick = samples_since_tick.saturating_add(1);
+            if samples_since_tick >= samples_per_tick {
+                timeline.push(meter.reading_db());
+                samples_since_tick = 0;
+            }
+        }
+    }
+    // Flush a final partial tick so a short clip still contributes a reading.
+    if samples_since_tick > 0 {
+        timeline.push(meter.reading_db());
+    }
+    Ok(timeline)
+}
+
+/// Saturating `usize` → `u32` for the audio-channel divisor (no `as`).
+#[cfg(feature = "overlay")]
+fn u32_from_usize_audio(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// The codec token a config output names, if it carries one.
@@ -860,35 +1133,44 @@ fn copy_plane(
     Ok(())
 }
 
-/// Decode a config [`Source`] into a sequence of NV12 frames scaled to
-/// `(tile_w, tile_h)`, tagged like the canvas.
+/// Resolve a config [`Source`] into a streaming [`IngestPlan`] (it does **not**
+/// decode anything — the plan is consumed later by an ingest thread).
 ///
-/// `test` sources are generated with the `ffmpeg` CLI (LGPL `testsrc` →
-/// `mpeg2video`); file/rtsp/hls/ts/srt/rtmp sources are opened by URL/path. All
-/// are decoded to NV12 via `mosaic-ffmpeg`'s safe `StreamVideoDecoder` and
-/// resampled to the tile size.
-fn decode_source(
+/// `test` sources are generated up-front with the `ffmpeg` CLI (LGPL `testsrc`
+/// → `mpeg2video`) into a tempdir owned by the plan; file/rtsp/hls/ts/srt/rtmp
+/// sources record their path/URL to be opened on the ingest thread.
+/// Live transports (rtsp/hls/ts/srt/rtmp) are flagged `live` so the ingest loop
+/// reconnects on EOF/error rather than ending; `test`/`file` are finite.
+///
+/// # Errors
+///
+/// Returns [`PipelineError::Ingest`] for an NDI/unsupported source kind, or if a
+/// `test` source's clip cannot be generated. (Opening/decoding errors surface on
+/// the ingest thread later — they must never fail the *build* of a never-ending
+/// live source.)
+fn ingest_plan_for(
     source: &Source,
     tile_w: u32,
     tile_h: u32,
-    tag: mosaic_core::color::ColorInfo,
-) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
-    let owned_path; // keeps a generated test clip's tempdir alive for the decode
-    let location: SourceLocation = match &source.kind {
+    store: Arc<TileStore<Nv12Image>>,
+) -> Result<IngestPlan, PipelineError> {
+    let mut owned = None;
+    let (location, live) = match &source.kind {
         SourceKind::Test => {
-            owned_path =
-                generate_test_clip(&source.id).map_err(|reason| PipelineError::Ingest {
-                    id: source.id.clone(),
-                    reason,
-                })?;
-            SourceLocation::Path(owned_path.0.clone())
+            let clip = generate_test_clip(&source.id).map_err(|reason| PipelineError::Ingest {
+                id: source.id.clone(),
+                reason,
+            })?;
+            let location = SourceLocation::Path(clip.0.clone());
+            owned = Some(clip);
+            (location, false)
         }
-        SourceKind::File { path } => SourceLocation::Path(PathBuf::from(path)),
+        SourceKind::File { path } => (SourceLocation::Path(PathBuf::from(path)), false),
         SourceKind::Rtsp { url, .. }
         | SourceKind::Hls { url }
         | SourceKind::Ts { url }
         | SourceKind::Srt { url }
-        | SourceKind::Rtmp { url } => SourceLocation::Url(url.clone()),
+        | SourceKind::Rtmp { url } => (SourceLocation::Url(url.clone()), true),
         SourceKind::Ndi { .. } => {
             return Err(PipelineError::Ingest {
                 id: source.id.clone(),
@@ -905,18 +1187,15 @@ fn decode_source(
         }
     };
 
-    let frames =
-        decode_to_nv12(&location, tile_w, tile_h, tag).map_err(|reason| PipelineError::Ingest {
-            id: source.id.clone(),
-            reason,
-        })?;
-    if frames.is_empty() {
-        return Err(PipelineError::Ingest {
-            id: source.id.clone(),
-            reason: "source decoded to zero frames".to_owned(),
-        });
-    }
-    Ok(frames.into_iter().map(Arc::new).collect())
+    Ok(IngestPlan {
+        id: source.id.clone(),
+        location,
+        tile_w,
+        tile_h,
+        store,
+        live,
+        _owned: owned,
+    })
 }
 
 /// Where a source's media lives.
@@ -927,8 +1206,8 @@ enum SourceLocation {
     Url(String),
 }
 
-/// A generated test clip plus the tempdir that owns it (kept alive until decode
-/// completes).
+/// A generated test clip plus the tempdir that owns it (kept alive for as long
+/// as the owning [`IngestPlan`] lives, so the ingest thread can open it).
 struct GeneratedClip(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
 /// Generate a small LGPL `testsrc` clip for a `test` source. Uses `mpeg2video`
@@ -967,21 +1246,68 @@ fn generate_test_clip(id: &str) -> Result<GeneratedClip, String> {
     Ok(GeneratedClip(clip, dir))
 }
 
-/// Open `location`, decode its best video stream to NV12 frames scaled to
-/// `(tile_w, tile_h)`, tag them like the canvas, and collect them.
+/// Reconnect backoff for a live source whose `open_and_stream` returned (EOF or
+/// error). Capped so a flapping source retries promptly but does not hot-loop.
+const INGEST_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+
+/// How long [`IngestSupervisor::join_all`] waits for an ingest thread to observe
+/// the stop flag and exit before detaching it. Generous enough that a thread in
+/// a normal decode loop (which checks `stop` every packet) always joins cleanly,
+/// short enough that a thread wedged in a blocking libav network call never
+/// stalls the bounded run's teardown.
+const INGEST_JOIN_GRACE: Duration = Duration::from_secs(2);
+
+/// The per-source streaming-ingest loop, run on a dedicated thread (BUG-2 fix).
+///
+/// Opens the source, decodes its best video stream to NV12 scaled to the tile
+/// size, and **publishes each frame into the store as it is decoded** — paced to
+/// wall-clock by the frame's PTS (invariant #4; `-re` is never used). Returns
+/// when the `stop` flag is raised (a bounded/`stop`ped run tearing ingest down)
+/// or — for a finite source — when the stream ends. A `live` source reconnects
+/// after [`INGEST_RECONNECT_BACKOFF`] on EOF/error, so a transient HLS/RTSP drop
+/// recovers; the tile holds its last-good frame meanwhile (invariant #2). The
+/// loop only ever *writes* the lock-free store, so it can neither pace nor stall
+/// the output clock (invariant #1) nor back-pressure the engine (invariant #10).
+fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
+    let tag = CanvasColor::default().output_tag();
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        match open_and_stream(plan, tag, stop) {
+            Ok(()) => {}
+            Err(reason) => {
+                tracing::warn!(source = %plan.id, %reason, "ingest stream ended/errored");
+            }
+        }
+        if !plan.live || stop.load(Ordering::Acquire) {
+            // A finite source has played out (its tile now holds its last-good
+            // frame forever); a stop was requested. Either way, this thread ends.
+            return;
+        }
+        // Live source: brief backoff, then reconnect (checking `stop` in slices
+        // so teardown stays prompt).
+        sleep_interruptible(INGEST_RECONNECT_BACKOFF, stop);
+    }
+}
+
+/// Open `plan.location`, decode its best video stream to NV12 scaled to the tile
+/// size, and publish each frame into `plan.store` paced to wall-clock by PTS.
+///
+/// Returns `Ok(())` at clean EOF (a finite source played out), or `Err` on an
+/// open/decode error. Returns early (still `Ok`) the moment `stop` is observed.
 ///
 /// Uses `ffmpeg-next`'s safe `Input`/`Parameters` value types only to bridge the
 /// container's stream parameters into `mosaic-ffmpeg`'s safe `StreamVideoDecoder`
 /// (which `mosaic-ffmpeg`'s `Demuxer` does not yet surface). No `unsafe`, no FFI.
-fn decode_to_nv12(
-    location: &SourceLocation,
-    tile_w: u32,
-    tile_h: u32,
+fn open_and_stream(
+    plan: &IngestPlan,
     tag: mosaic_core::color::ColorInfo,
-) -> Result<Vec<Nv12Image>, String> {
+    stop: &AtomicBool,
+) -> Result<(), String> {
     mosaic_ffmpeg::ensure_initialized().map_err(|e| e.to_string())?;
 
-    let mut input = match location {
+    let mut input = match &plan.location {
         SourceLocation::Path(p) => ffmpeg::format::input(p).map_err(|e| e.to_string())?,
         SourceLocation::Url(u) => ffmpeg::format::input(&u.as_str()).map_err(|e| e.to_string())?,
     };
@@ -999,17 +1325,31 @@ fn decode_to_nv12(
     };
 
     let mut decoder = StreamVideoDecoder::new(params, time_base).map_err(|e| e.to_string())?;
-    let mut to_tile = TileScaler::new(tile_w, tile_h);
-    let mut frames = Vec::new();
+    let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
+    // The wall-clock pacer: maps the first frame's PTS to "now" and releases
+    // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
+    let mut pacer = PtsWallClock::new();
 
-    // Pump packets, draining decoded frames, then flush at EOF.
+    // Pump packets, publishing each decoded+scaled frame into the store.
     let mut drained = false;
     loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
-            frames.push(to_tile.convert(&decoded.frame, tag)?);
+            let image = to_tile.convert(&decoded.frame, tag)?;
+            // Pace to the frame's PTS (invariant #4), then publish it stamped
+            // with elapsed wall-clock so the tile's freshness ladder tracks real
+            // arrival time. Re-check `stop` after the (possibly long) pace wait.
+            pacer.wait_for(decoded.meta.pts, stop);
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            plan.store
+                .publish(image, pacer.publish_time(decoded.meta.pts));
         }
         if drained {
-            break;
+            return Ok(());
         }
         let mut packet = ffmpeg::codec::packet::Packet::empty();
         match packet.read(&mut input) {
@@ -1025,7 +1365,80 @@ fn decode_to_nv12(
             Err(other) => return Err(other.to_string()),
         }
     }
-    Ok(frames)
+}
+
+/// Sleep up to `total`, waking early (in <= 50 ms slices) if `stop` is raised,
+/// so ingest teardown stays prompt without a condvar.
+fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
+    let slice = Duration::from_millis(50);
+    let mut remaining = total;
+    while remaining > Duration::ZERO {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let chunk = remaining.min(slice);
+        std::thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+    }
+}
+
+/// A wall-clock pacer keyed on frame PTS (invariant #4 — pace live/VOD by PTS,
+/// never `-re`).
+///
+/// On the first frame it anchors `base_instant = now` to `base_pts = pts`; each
+/// later frame is released when `now - base_instant >= pts - base_pts`. A frame
+/// whose PTS goes backwards (a discontinuity / wrap) re-anchors rather than
+/// stalling, so a misbehaving source can never block ingest for long.
+struct PtsWallClock {
+    anchor: Option<(Instant, MediaTime)>,
+}
+
+impl PtsWallClock {
+    fn new() -> Self {
+        Self { anchor: None }
+    }
+
+    /// Block (in `stop`-checked slices) until wall-clock reaches `pts`'s release
+    /// instant. The first call anchors the timeline and returns immediately.
+    fn wait_for(&mut self, pts: MediaTime, stop: &AtomicBool) {
+        let Some((base_instant, base_pts)) = self.anchor else {
+            self.anchor = Some((Instant::now(), pts));
+            return;
+        };
+        // A backwards PTS (discontinuity / wrap) re-anchors rather than stalls.
+        if pts < base_pts {
+            self.anchor = Some((Instant::now(), pts));
+            return;
+        }
+        // Target media offset from the anchor.
+        let delta = pts.saturating_sub(base_pts);
+        let target_ns = u64::try_from(delta.as_nanos()).unwrap_or(0);
+        let target = base_instant + Duration::from_nanos(target_ns);
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            let now = Instant::now();
+            if now >= target {
+                return;
+            }
+            let remaining = target.saturating_duration_since(now);
+            std::thread::sleep(remaining.min(Duration::from_millis(50)));
+        }
+    }
+
+    /// The timeline instant to stamp a published frame with: the elapsed
+    /// wall-clock since the anchor, so the store's freshness ladder advances in
+    /// real time (it is *input*-time-agnostic; the output clock re-stamps PTS).
+    fn publish_time(&self, pts: MediaTime) -> MediaTime {
+        match self.anchor {
+            Some((base_instant, _)) => {
+                let elapsed = base_instant.elapsed();
+                MediaTime::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX))
+            }
+            None => pts,
+        }
+    }
 }
 
 /// Lazily-built scaler from a decoded NV12 frame's geometry to the tile size,

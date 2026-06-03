@@ -71,6 +71,11 @@ required-features = ["ffmpeg"]
 name = "overlay_pipeline"
 required-features = ["ffmpeg", "overlay"]
 
+# The subtitle-burn-in + real-audio-meter test needs both `ffmpeg` and `overlay`.
+[[test]]
+name = "subtitle_meter_pipeline"
+required-features = ["ffmpeg", "overlay"]
+
 # Feature presets for the `mosaic` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented

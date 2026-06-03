@@ -120,6 +120,12 @@ async fn run_real(config: &MosaicConfig, args: &RunArgs) -> anyhow::Result<ExitC
     use mosaic_cli::pipeline::RealPipeline;
 
     let mut pipeline = RealPipeline::build(config).context("building the real pipeline")?;
+    if let Some(subs) = &args.subtitles {
+        let track = load_subtitles(subs)
+            .with_context(|| format!("loading subtitles {}", subs.display()))?;
+        tracing::info!(file = %subs.display(), cues = track.len(), "burning in subtitles");
+        pipeline = pipeline.with_subtitles(track);
+    }
     let cadence = pipeline.cadence();
     tracing::info!(
         sources = pipeline.source_count(),
@@ -164,7 +170,12 @@ async fn run_real(config: &MosaicConfig, args: &RunArgs) -> anyhow::Result<ExitC
 // reason: this is the no-`ffmpeg` half of an `async fn` pair; the `ffmpeg`
 // counterpart awaits the real pipeline, so the signature must match for the one
 // `run_real(..).await` call site to compile under either feature set.
-async fn run_real(config: &MosaicConfig, _args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_real(config: &MosaicConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+    if args.subtitles.is_some() {
+        tracing::warn!(
+            "--subtitles needs the `ffmpeg`+`overlay` features (real pipeline); ignoring"
+        );
+    }
     let engine = HeadlessEngine::build(config)?;
     println!(
         "ready: built engine for {} source(s) at {}/{} fps; \
@@ -199,6 +210,26 @@ async fn run_until_ctrl_c(engine: &mut HeadlessEngine) -> anyhow::Result<RunRepo
         .context("headless run until Ctrl-C")?;
     signal.abort();
     Ok(report)
+}
+
+/// Parse an external SRT/`WebVTT` subtitle file into a [`CueTrack`]. The format
+/// is chosen by the extension (`.vtt`/`.webvtt` ⇒ `WebVTT`, otherwise `SubRip`).
+#[cfg(feature = "ffmpeg")]
+fn load_subtitles(path: &Path) -> anyhow::Result<mosaic_overlay::subtitle::CueTrack> {
+    use mosaic_overlay::subtitle::CueTrack;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading subtitles {}", path.display()))?;
+    let is_vtt = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|e| e.eq_ignore_ascii_case("vtt") || e.eq_ignore_ascii_case("webvtt"));
+    let track = if is_vtt {
+        CueTrack::parse_vtt(&text)
+    } else {
+        CueTrack::parse_srt(&text)
+    }
+    .with_context(|| format!("parsing subtitles {}", path.display()))?;
+    Ok(track)
 }
 
 /// Load and validate a config, failing with a clear error if it is invalid.

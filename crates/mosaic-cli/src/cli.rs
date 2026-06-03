@@ -91,6 +91,13 @@ pub struct RunArgs {
     /// `--ticks`; if both are given, `--ticks` wins.
     #[arg(long, value_name = "SECS")]
     pub duration: Option<u64>,
+
+    /// Burn an external SRT/`WebVTT` subtitle file into the program: the active
+    /// cue is rendered (bottom-centre) on every output frame while it is on
+    /// screen. Requires the `ffmpeg` + `overlay` features; ignored otherwise.
+    /// The format is chosen by the file extension (`.vtt` ⇒ `WebVTT`, else SRT).
+    #[arg(long, value_name = "FILE")]
+    pub subtitles: Option<PathBuf>,
 }
 
 impl RunArgs {

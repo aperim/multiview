@@ -280,3 +280,157 @@ fn neutral_gray_survives_cross_matrix_pipeline() {
     // Luma preserved (same transfer family, neutral axis is gamut-invariant).
     assert!((i16::from(out.y_plane()[0]) - 150).abs() <= 2, "luma");
 }
+
+/// Build an NV12 image whose chroma varies left/right so a wrong chroma
+/// stride/offset (or half-resolution indexing) would corrupt it: the left half
+/// is saturated red `(Y=81, Cb=90, Cr=240)`, the right half saturated blue
+/// `(Y=41, Cb=240, Cr=110)`. Both round-trip 1:1 through the BT.709-matched
+/// pipeline (verified by [`full_canvas_tile_preserves_saturated_chroma`]).
+fn red_blue_split(width: u32, height: u32) -> Nv12Image {
+    let w = usize::try_from(width).unwrap();
+    let h = usize::try_from(height).unwrap();
+    let half = w / 2;
+    let mut y = vec![0_u8; w * h];
+    let mut uv = vec![0_u8; w * h / 2];
+    for row in 0..h {
+        for col in 0..w {
+            y[row * w + col] = if col < half { 81 } else { 41 };
+        }
+    }
+    // One interleaved Cb/Cr pair per 2x2 chroma block; the chroma row stride is
+    // `w` bytes (`w/2` pairs). Left half red, right half blue.
+    for crow in 0..h / 2 {
+        for cpair in 0..w / 2 {
+            let idx = crow * w + cpair * 2;
+            let left = cpair < half / 2;
+            uv[idx] = if left { 90 } else { 240 }; // Cb
+            uv[idx + 1] = if left { 240 } else { 110 }; // Cr
+        }
+    }
+    Nv12Image::new(width, height, y, uv, bt709_limited()).unwrap()
+}
+
+#[test]
+fn full_canvas_tile_preserves_saturated_chroma() {
+    // REGRESSION (BUG 1: full-frame/PiP green chroma cast). A source whose
+    // destination covers the FULL canvas must have its chroma sampled + written
+    // at the correct 4:2:0 positions — exactly as a sub-region (grid) tile does.
+    // A mis-addressed chroma plane (wrong stride/offset, half-resolution
+    // indexing, or a zeroed second plane) collapses chroma toward neutral 128 or
+    // 0,0, which renders as a green wash with luma still visible. Here we
+    // composite a saturated red|blue split tile onto a MATCHING full-canvas dest
+    // (1:1) and assert the chroma comes back saturated + correct per side — never
+    // green.
+    let canvas_w: u32 = 64;
+    let canvas_h: u32 = 36;
+    let src = red_blue_split(canvas_w, canvas_h);
+    let tiles = [Tile {
+        image: &src,
+        dst_x: 0,
+        dst_y: 0,
+        opacity: 1.0,
+    }];
+    let out = composite(
+        canvas_w,
+        canvas_h,
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+        &tiles,
+    )
+    .unwrap();
+
+    let w = usize::try_from(canvas_w).unwrap();
+    let h = usize::try_from(canvas_h).unwrap();
+    let half = w / 2;
+    // Inspect chroma at every 2x2 block (UV plane is `h/2` rows of `w` bytes).
+    for crow in 0..h / 2 {
+        for cpair in 0..half {
+            let idx = crow * w + cpair * 2;
+            let cb = i16::from(out.uv_plane()[idx]);
+            let cr = i16::from(out.uv_plane()[idx + 1]);
+            if cpair < half / 2 {
+                // Left = saturated red: Cb≈90, Cr≈240. NOT neutral, NOT zeroed.
+                assert!((cb - 90).abs() <= 2, "left Cb {cb} (expected ~90, red)");
+                assert!((cr - 240).abs() <= 2, "left Cr {cr} (expected ~240, red)");
+            } else {
+                // Right = saturated blue: Cb≈240, Cr≈110.
+                assert!((cb - 240).abs() <= 2, "right Cb {cb} (expected ~240, blue)");
+                assert!((cr - 110).abs() <= 2, "right Cr {cr} (expected ~110, blue)");
+            }
+        }
+    }
+
+    // Explicit anti-green guard: the full-frame chroma must be genuinely
+    // saturated (mean |Cb-128| + |Cr-128| large), proving it was neither
+    // flattened to neutral 128 nor zeroed to 0 (both of which read as green).
+    let mut chroma_energy: u64 = 0;
+    for pair in out.uv_plane().chunks_exact(2) {
+        chroma_energy += u64::from((i16::from(pair[0]) - 128).unsigned_abs());
+        chroma_energy += u64::from((i16::from(pair[1]) - 128).unsigned_abs());
+    }
+    let pairs = u64::try_from(out.uv_plane().len() / 2).unwrap();
+    let mean_chroma_dev = chroma_energy / (2 * pairs);
+    // Saturated red|blue averages ~70 here; a chroma collapsed to neutral 128
+    // averages ~0. A floor of 40 cleanly distinguishes "still saturated" from
+    // "flattened toward neutral" (the green-cast failure mode).
+    assert!(
+        mean_chroma_dev > 40,
+        "full-canvas chroma collapsed toward neutral (mean |chroma-128| = {mean_chroma_dev}); \
+         this is the green-cast defect — chroma must stay saturated"
+    );
+}
+
+#[test]
+fn full_canvas_chroma_matches_sub_region_tile() {
+    // The full-canvas placement and a sub-region placement of the SAME source
+    // must produce identical chroma in the covered area — i.e. the chroma path
+    // is size-independent (the green-cast bug would make the full-frame case
+    // differ from a grid sub-tile).
+    let src = red_blue_split(32, 16);
+
+    // (a) Full-canvas: the tile IS the canvas.
+    let full = composite(
+        32,
+        16,
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+        &[Tile {
+            image: &src,
+            dst_x: 0,
+            dst_y: 0,
+            opacity: 1.0,
+        }],
+    )
+    .unwrap();
+
+    // (b) Sub-region: the same 32x16 tile placed at an even offset inside a
+    //     larger canvas; the covered window must match the full-canvas chroma.
+    let big = composite(
+        64,
+        32,
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+        &[Tile {
+            image: &src,
+            dst_x: 16,
+            dst_y: 8,
+            opacity: 1.0,
+        }],
+    )
+    .unwrap();
+
+    let fw = 32_usize;
+    let bw = 64_usize;
+    for crow in 0..8_usize {
+        for cpair in 0..16_usize {
+            let full_idx = crow * fw + cpair * 2;
+            // Sub-region tile origin (16,8): chroma block offset is (8, 4).
+            let big_idx = (crow + 4) * bw + (cpair + 8) * 2;
+            assert_eq!(
+                (full.uv_plane()[full_idx], full.uv_plane()[full_idx + 1]),
+                (big.uv_plane()[big_idx], big.uv_plane()[big_idx + 1]),
+                "chroma differs between full-canvas and sub-region at block ({cpair},{crow})"
+            );
+        }
+    }
+}
