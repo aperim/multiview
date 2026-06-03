@@ -23,6 +23,27 @@ and extract frames from the produced `program.ts`.
 | `10-wallclock-real-time-of-day.png` | **Wall-clock time-of-day read from the OS clock** (`17:xx:xx` = the actual render instant) with a `SYS locked` timing-reference badge, on a legible backing chip. |
 | `web-01-dashboard-dark.png` … `web-08-mobile.png` | The **React management web UI**: dashboard (dark + light), layouts list, drag-and-drop layout editor (+ form), sources, outputs, settings, and a mobile view. Captured from the built SPA via headless Chromium. |
 
+## Frame rate / smoothness — important note on the `seq_*` strips
+
+The `seq_*.png` frame strips in the (git-ignored) `demo-output/` working dir were
+extracted with `ffmpeg -vf fps=2` — **one frame every 0.5 s**. They prove a tile
+is *advancing* (not frozen), but flipping through them looks like 2 fps because
+that's the sampling rate of the strip, **not** the rendered output. Don't judge
+smoothness from those.
+
+The rendered output is genuine **25 fps**, verified objectively: rendering the
+burned-timecode diag source (whose digits change every single frame, so a held
+or duplicate frame is impossible to hide) and running `mpdecimate` over the
+result yields **250 unique frames out of 250** for a 10 s clip — i.e. no
+duplicate/held frames, smooth 25 fps. (A few-fps judder would show as ~25 unique
+frames; it does not.)
+
+- `11-consecutive-frames-40ms-apart.png` — 8 **consecutive** output frames (40 ms
+  apart, 280 ms total) of the 5+1 layout; each frame differs from the last (slow
+  news content, so the per-frame change is small but real).
+- `12-multiview-1plus5-25fps.mp4` / `13-multiview-3x3-25fps.mp4` — the actual
+  **25 fps playback** clips. Watch these for true motion, not the `seq_*` strips.
+
 ## Independent verification (re-run fresh, not asserted)
 
 - `cargo fmt --check` · `clippy --workspace --all-targets -D warnings` · clippy under `ffmpeg,overlay` / `ffmpeg,test-fixtures` / `cuda` — all clean.
