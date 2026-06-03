@@ -49,7 +49,6 @@ use mosaic_overlay::clock::{
 use mosaic_overlay::geometry::PixelRect;
 use mosaic_overlay::resolve::CanvasSize;
 use mosaic_overlay::safearea::{SafeAreaKind, SafeAreaMarkers};
-use mosaic_overlay::subtitle::CueTrack;
 
 /// Opaque white / amber / cyan / green linear overlay colours for the surface.
 const WHITE: OverlayColor = OverlayColor::opaque(0.92, 0.92, 0.92);
@@ -120,16 +119,17 @@ impl TileMeter {
 ///
 /// Holds the (single, shared) text engine, the per-tile static placement
 /// ([`TileSpec`]), each tile's conflated-meter + peak-hold state, and an optional
-/// program-wide clock + burned-in subtitle track. Constructed once per run, then
-/// queried per collected output frame with [`OverlayBaker::draw_list`].
+/// program-wide clock. Constructed once per run, then queried per collected
+/// output frame with [`OverlayBaker::draw_list`], which is also handed that
+/// frame's **per-source active caption lines** (sampled from each source's cue
+/// store by the pipeline, off the hot path) to burn each tile's caption into
+/// *its own* cell rect.
 pub struct OverlayBaker {
     engine: TextEngine,
-    canvas: CanvasSize,
     tiles: Vec<TileSpec>,
     meters: Vec<TileMeter>,
     clock: Option<ClockModel>,
     analog_clock: Option<AnalogClockSpec>,
-    subtitles: Option<CueTrack>,
     base_unix_secs: i64,
     per_tile_safe_area: bool,
 }
@@ -188,30 +188,23 @@ impl AnalogClockSpec {
 }
 
 impl OverlayBaker {
-    /// Build a per-tile baker for a `width`×`height` canvas over `tiles`.
+    /// Build a per-tile baker over `tiles` (each carrying its own cell rect).
     ///
-    /// `subtitles` is an optional parsed SRT/VTT track whose active cue is burned
-    /// in bottom-centre; `base_unix_secs` anchors the program-wide wall-clock
-    /// label so the rendered time advances with the media timeline
-    /// deterministically. The program clock is always shown top-left;
-    /// per-tile safe-area markers are off by default (enable with
-    /// [`OverlayBaker::with_per_tile_safe_area`]).
+    /// `base_unix_secs` anchors the program-wide wall-clock label so the rendered
+    /// time advances with the media timeline deterministically. The program clock
+    /// is always shown top-left; per-tile safe-area markers are off by default
+    /// (enable with [`OverlayBaker::with_per_tile_safe_area`]). Captions are
+    /// burned in per tile from the per-source active cue lines passed to
+    /// [`OverlayBaker::draw_list`].
     ///
     /// # Errors
     ///
     /// Returns the compositor [`CompositorError`] if the bundled OFL fonts fail
     /// to load.
-    pub fn new(
-        width: u32,
-        height: u32,
-        tiles: Vec<TileSpec>,
-        subtitles: Option<CueTrack>,
-        base_unix_secs: i64,
-    ) -> Result<Self, CompositorError> {
+    pub fn new(tiles: Vec<TileSpec>, base_unix_secs: i64) -> Result<Self, CompositorError> {
         let meters = tiles.iter().map(|_| TileMeter::new()).collect();
         Ok(Self {
             engine: TextEngine::new()?,
-            canvas: CanvasSize::new(width, height),
             tiles,
             meters,
             clock: Some(ClockModel::new(
@@ -220,7 +213,6 @@ impl OverlayBaker {
                 TimeRef::new(RefSource::System, RefStatus::Freerun),
             )),
             analog_clock: None,
-            subtitles,
             base_unix_secs,
             per_tile_safe_area: false,
         })
@@ -259,13 +251,17 @@ impl OverlayBaker {
     }
 
     /// Build the overlay draw-data for the output instant `pts`, given each
-    /// tile's live [`TileDynamics`] keyed by source id.
+    /// tile's live [`TileDynamics`] keyed by source id and the per-source active
+    /// caption lines (`captions[source_id]` = the cue lines on screen at `pts`
+    /// for that source, sampled by the pipeline from its cue store).
     ///
     /// For every tile this draws — *inside that tile's cell rect* — the input
-    /// label, the source's own peak-held dB meter, and a state/fault flag; plus
-    /// the optional per-tile safe-area and the program-wide clock + subtitle cue.
-    /// A source absent from `dynamics` is treated as `NO_SIGNAL` at the meter
-    /// floor (a missing source never stalls — invariant #1).
+    /// label, the source's own peak-held dB meter, a state/fault flag, **and that
+    /// source's active caption lines** (bottom-centre of the cell); plus the
+    /// optional per-tile safe-area and the program-wide clock. A source absent
+    /// from `dynamics` is treated as `NO_SIGNAL` at the meter floor and a source
+    /// absent from `captions` simply shows no caption (a missing source never
+    /// stalls — invariant #1).
     ///
     /// # Errors
     ///
@@ -275,6 +271,7 @@ impl OverlayBaker {
         &mut self,
         pts: MediaTime,
         dynamics: &HashMap<String, TileDynamics>,
+        captions: &HashMap<String, Vec<String>>,
     ) -> Result<OverlayDrawList, CompositorError> {
         let mut list = OverlayDrawList::new();
         let now_ns = pts.as_nanos();
@@ -303,6 +300,13 @@ impl OverlayBaker {
             let bar = self.meters.get(i).map(|m| m.bar);
 
             self.draw_tile(&mut list, &label, rect, dyn_.state, bar)?;
+
+            // Burn this source's active caption (if any) into THIS tile's cell
+            // rect, bottom-centre — never canvas-wide.
+            let cue_lines = captions.get(&source_id).cloned().unwrap_or_default();
+            if !cue_lines.is_empty() {
+                self.draw_tile_caption(&mut list, rect, &cue_lines)?;
+            }
         }
 
         // Program-wide wall-clock label, top-left of the whole canvas.
@@ -337,39 +341,56 @@ impl OverlayBaker {
             }
         }
 
-        // The active subtitle cue, burned in bottom-centre. Clone the cue lines
-        // so the immutable borrow of `self.subtitles` ends before `push_text`
-        // borrows `self.engine` mutably.
-        let cue_lines: Vec<String> = self
-            .subtitles
-            .as_ref()
-            .and_then(|track| track.active_cue(pts))
-            .map(|cue| cue.lines.clone())
-            .unwrap_or_default();
-        if !cue_lines.is_empty() {
-            let (w, h) = (self.canvas.width, self.canvas.height);
-            let size = 30.0;
-            let y = i32_dim(h.saturating_sub(80));
-            for (i, line) in cue_lines.iter().enumerate() {
-                let line_y = y.saturating_add(i32_dim(u32_from_usize(i).saturating_mul(36)));
-                let approx_w =
-                    u32_from_usize(line.chars().count()).saturating_mul(quantize_advance(size));
-                let x = i32_dim(w.saturating_sub(approx_w) / 2);
-                self.push_text(
-                    &mut list,
-                    line,
-                    TextRun {
-                        family: FontFamily::Sans,
-                        size_px: size,
-                        x,
-                        y: line_y,
-                        color: AMBER,
-                    },
-                )?;
-            }
-        }
-
         Ok(list)
+    }
+
+    /// Burn `cue_lines` into the cell `rect`, bottom-centre of THAT tile (never
+    /// canvas-wide). The caption size scales with the cell so a small tile gets a
+    /// proportionally smaller caption; the lines stack upward from a bottom inset.
+    fn draw_tile_caption(
+        &mut self,
+        list: &mut OverlayDrawList,
+        rect: PixelRect,
+        cue_lines: &[String],
+    ) -> Result<(), CompositorError> {
+        let geom = TileGeometry::resolve(rect);
+        if geom.width < MIN_TILE_PX || geom.height < MIN_TILE_PX {
+            return Ok(());
+        }
+        // Caption text ~6% of the cell height, clamped to a legible band.
+        let size = f32_dim((geom.height / 16).clamp(12, 36));
+        let line_step = round_dim(size * 1.2).max(1);
+        // Bottom inset (~one chip height) so the caption clears the label band.
+        let bottom_inset = geom.chip_height().saturating_add(geom.pad());
+        let n = u32_from_usize(cue_lines.len());
+        // Top y of the first line so the block of `n` lines sits above the inset.
+        let block_h = n.saturating_mul(line_step);
+        let base_y = geom.y.saturating_add(i32_dim(
+            geom.height
+                .saturating_sub(bottom_inset)
+                .saturating_sub(block_h),
+        ));
+        for (i, line) in cue_lines.iter().enumerate() {
+            let line_y =
+                base_y.saturating_add(i32_dim(u32_from_usize(i).saturating_mul(line_step)));
+            // Centre each line within the cell using the coarse advance estimate.
+            let approx_w =
+                u32_from_usize(line.chars().count()).saturating_mul(quantize_advance(size));
+            let x_off = geom.width.saturating_sub(approx_w.min(geom.width)) / 2;
+            let x = geom.x.saturating_add(i32_dim(x_off));
+            self.push_text(
+                list,
+                line,
+                TextRun {
+                    family: FontFamily::Sans,
+                    size_px: size,
+                    x,
+                    y: line_y,
+                    color: AMBER,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Draw one tile's overlay surface inside its cell `rect`: optional safe-area,
@@ -832,6 +853,24 @@ mod tests {
             .collect()
     }
 
+    /// An empty per-source caption map (no tile shows a caption).
+    fn no_captions() -> HashMap<String, Vec<String>> {
+        HashMap::new()
+    }
+
+    /// Build a per-source caption map: `source_id -> active cue lines`.
+    fn captions(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(id, lines)| {
+                (
+                    (*id).to_owned(),
+                    lines.iter().map(|l| (*l).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Glyph primitives whose top-left falls inside `rect` (canvas pixels).
     fn glyphs_in(list: &OverlayDrawList, rect: OverlayRect) -> usize {
         list.primitives
@@ -883,7 +922,7 @@ mod tests {
     #[test]
     fn resolver_emits_label_meter_and_flag_per_cell() {
         let tiles = quad_tiles();
-        let mut baker = OverlayBaker::new(1280, 720, tiles.clone(), None, 0).unwrap();
+        let mut baker = OverlayBaker::new(tiles.clone(), 0).unwrap();
 
         // in_a loud + LIVE; in_b silent + LIVE; in_c missing (defaults NO_SIGNAL);
         // in_d explicitly NO_SIGNAL.
@@ -905,7 +944,7 @@ mod tests {
         let mut list = OverlayDrawList::new();
         for tick in 0..5 {
             let pts = MediaTime::from_nanos(tick * 40_000_000);
-            list = baker.draw_list(pts, &dyns).unwrap();
+            list = baker.draw_list(pts, &dyns, &no_captions()).unwrap();
         }
 
         // Each cell must host glyphs for its label + flag, somewhere inside it.
@@ -932,12 +971,72 @@ mod tests {
         );
     }
 
+    /// The horizontal-centre caption band of a cell: the lower portion of the
+    /// cell, with the leftmost quarter (where the bottom-left label chip sits)
+    /// excluded so only centred caption glyphs are counted.
+    fn caption_glyphs_centred_in_cell(list: &OverlayDrawList, geom: TileGeometry) -> usize {
+        let left_inset = geom.width / 4;
+        let band = OverlayRect::new(
+            geom.x.saturating_add(i32_dim(left_inset)),
+            geom.y
+                .saturating_add(i32_dim(geom.height.saturating_mul(3) / 5)),
+            geom.width.saturating_sub(left_inset),
+            geom.height.saturating_mul(2) / 5,
+        );
+        glyphs_in(list, band)
+    }
+
+    #[test]
+    fn caption_burns_into_only_its_own_tile() {
+        // A cue published for in_a must render centred caption glyphs inside in_a's
+        // cell rect; a sibling tile (in_b) with no cue must render none in its
+        // centred caption band. This is the per-tile burn-in contract (replacing
+        // the old program-wide canvas-bottom cue).
+        let tiles = quad_tiles();
+        let mut baker = OverlayBaker::new(tiles.clone(), 0).unwrap();
+
+        let dyns = dynamics(&[
+            ("in_a", -3.0, SourceState::Live),
+            ("in_b", -3.0, SourceState::Live),
+        ]);
+        let caps = captions(&[("in_a", &["English subtitle 1 -Unforced-"])]);
+
+        let pts = MediaTime::from_nanos(1_500_000_000);
+        let list = baker.draw_list(pts, &dyns, &caps).unwrap();
+
+        let geom_a = TileGeometry::resolve(tiles[0].rect);
+        let geom_b = TileGeometry::resolve(tiles[1].rect);
+
+        let a_caption = caption_glyphs_centred_in_cell(&list, geom_a);
+        let b_caption = caption_glyphs_centred_in_cell(&list, geom_b);
+        assert!(
+            a_caption > 0,
+            "in_a's caption must render centred glyphs inside in_a's cell (got {a_caption})"
+        );
+        assert_eq!(
+            b_caption, 0,
+            "in_b has no cue: its centred caption band must be empty (got {b_caption})"
+        );
+
+        // Every caption glyph in_a drew must lie within in_a's cell rect (the
+        // caption is cell-local, not canvas-wide). Count all glyphs in in_a's
+        // caption band vs the whole canvas's caption-row centred bands of OTHER
+        // cells in the same row — in_b (same row, no cue) already proved zero.
+        let in_a_cell = OverlayRect::new(geom_a.x, geom_a.y, geom_a.width, geom_a.height);
+        assert!(
+            glyphs_in(&list, in_a_cell) >= a_caption,
+            "every in_a caption glyph must fall inside in_a's cell rect"
+        );
+    }
+
     #[test]
     fn missing_source_defaults_to_no_signal_flag() {
         let tiles = quad_tiles();
-        let mut baker = OverlayBaker::new(1280, 720, tiles.clone(), None, 0).unwrap();
+        let mut baker = OverlayBaker::new(tiles.clone(), 0).unwrap();
         // No dynamics at all: every tile must be NO_SIGNAL (never panics/stalls).
-        let list = baker.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let list = baker
+            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .unwrap();
         // The "NO SIGNAL" flag draws glyphs near each tile's top-left.
         for spec in &tiles {
             let geom = TileGeometry::resolve(spec.rect);
@@ -953,11 +1052,13 @@ mod tests {
     #[test]
     fn meter_and_flag_stay_inside_the_cell_rect() {
         let tiles = quad_tiles();
-        let mut baker = OverlayBaker::new(1280, 720, tiles.clone(), None, 0)
+        let mut baker = OverlayBaker::new(tiles.clone(), 0)
             .unwrap()
             .with_per_tile_safe_area(true);
         let dyns = dynamics(&[("in_a", 0.0, SourceState::Live)]);
-        let list = baker.draw_list(MediaTime::ZERO, &dyns).unwrap();
+        let list = baker
+            .draw_list(MediaTime::ZERO, &dyns, &no_captions())
+            .unwrap();
 
         // Every per-tile primitive for tile A must lie within tile A's rect (the
         // per-tile safe-area / meter / flag must NOT span the whole canvas — this
@@ -991,10 +1092,12 @@ mod tests {
                 height: 10.0,
             },
         )];
-        let mut baker = OverlayBaker::new(64, 64, tiles, None, 0).unwrap();
+        let mut baker = OverlayBaker::new(tiles, 0).unwrap();
         let dyns = dynamics(&[("in_tiny", 0.0, SourceState::Live)]);
         // Must not panic; produces (at most) the clock label, no tile chrome.
-        let _ = baker.draw_list(MediaTime::ZERO, &dyns).unwrap();
+        let _ = baker
+            .draw_list(MediaTime::ZERO, &dyns, &no_captions())
+            .unwrap();
     }
 
     /// Count the ring + stroke primitives (the analog clock-face vocabulary) in a
@@ -1019,8 +1122,10 @@ mod tests {
         // vocabulary: a bezel ring + 12 ticks + 3 hands (the digital baseline
         // emits NONE of these ring/stroke primitives).
         let tiles = quad_tiles();
-        let mut plain = OverlayBaker::new(1280, 720, tiles.clone(), None, 0).unwrap();
-        let plain_list = plain.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let mut plain = OverlayBaker::new(tiles.clone(), 0).unwrap();
+        let plain_list = plain
+            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .unwrap();
         let (plain_rings, plain_strokes) = rings_and_strokes(&plain_list);
         assert_eq!(
             (plain_rings, plain_strokes),
@@ -1028,15 +1133,18 @@ mod tests {
             "the digital baseline draws no analog face"
         );
 
-        let mut baker = OverlayBaker::new(1280, 720, tiles, None, 0)
-            .unwrap()
-            .with_analog_clock(AnalogClockSpec::new(
-                TimeZoneOffset::UTC,
-                1160.0,
-                600.0,
-                90.0,
-            ));
-        let list = baker.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let mut baker =
+            OverlayBaker::new(tiles, 0)
+                .unwrap()
+                .with_analog_clock(AnalogClockSpec::new(
+                    TimeZoneOffset::UTC,
+                    1160.0,
+                    600.0,
+                    90.0,
+                ));
+        let list = baker
+            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .unwrap();
         let (rings, strokes) = rings_and_strokes(&list);
         assert_eq!(rings, 1, "the analog face draws exactly one bezel ring");
         assert_eq!(strokes, 15, "12 hour ticks + 3 hands are stroke primitives");
@@ -1048,14 +1156,15 @@ mod tests {
         // endpoint angle changes, proving the hands are driven by the timeline
         // (not a fixed picture).
         let tiles = quad_tiles();
-        let mut baker = OverlayBaker::new(1280, 720, tiles, None, 0)
-            .unwrap()
-            .with_analog_clock(AnalogClockSpec::new(
-                TimeZoneOffset::UTC,
-                1160.0,
-                600.0,
-                90.0,
-            ));
+        let mut baker =
+            OverlayBaker::new(tiles, 0)
+                .unwrap()
+                .with_analog_clock(AnalogClockSpec::new(
+                    TimeZoneOffset::UTC,
+                    1160.0,
+                    600.0,
+                    90.0,
+                ));
 
         // The longest stroke from the centre is the second hand; track its tip.
         let second_tip = |list: &OverlayDrawList| -> (f32, f32) {
@@ -1074,9 +1183,15 @@ mod tests {
                 .unwrap()
         };
 
-        let t0 = baker.draw_list(MediaTime::ZERO, &HashMap::new()).unwrap();
+        let t0 = baker
+            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .unwrap();
         let t1 = baker
-            .draw_list(MediaTime::from_nanos(1_000_000_000), &HashMap::new())
+            .draw_list(
+                MediaTime::from_nanos(1_000_000_000),
+                &HashMap::new(),
+                &no_captions(),
+            )
             .unwrap();
         let (x0, y0) = second_tip(&t0);
         let (x1, y1) = second_tip(&t1);

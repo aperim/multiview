@@ -49,3 +49,10 @@ pub mod overlays;
 /// `gpl-codecs` on top.
 #[cfg(feature = "ffmpeg")]
 pub mod pipeline;
+
+/// Native in-pipeline **HLS WebVTT caption ingest**: resolve a source's subtitle
+/// rendition from its HLS master playlist, demux + decode it on an isolated
+/// reader thread, and publish cues into a per-source store the overlay baker
+/// samples per output tick (per-tile burn-in). Behind the `ffmpeg` feature.
+#[cfg(feature = "ffmpeg")]
+pub mod captions;

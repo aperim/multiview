@@ -83,6 +83,12 @@ required-features = ["ffmpeg", "overlay"]
 name = "subtitle_meter_pipeline"
 required-features = ["ffmpeg", "overlay"]
 
+# The live HLS WebVTT caption-ingest proof needs both `ffmpeg` and `overlay`. Its
+# only test is `#[ignore]`d (it hits the network); run with `-- --ignored`.
+[[test]]
+name = "caption_ingest"
+required-features = ["ffmpeg", "overlay"]
+
 # Feature presets for the `mosaic` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented

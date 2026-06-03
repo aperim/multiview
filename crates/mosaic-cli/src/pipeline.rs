@@ -257,11 +257,30 @@ pub struct RealPipeline {
     layout: Arc<Layout>,
     /// The fixed output cadence (exact rational).
     cadence: Rational,
-    /// An optional parsed subtitle track whose active cue is burned into the
-    /// program by the overlay baker (GAP-3). Wired from a `--subtitles` file or
-    /// a future per-source caption declaration. `None` ⇒ no subtitle overlay.
+    /// Per-source native caption cue stores, keyed by source id. Each store is
+    /// written by an isolated caption reader thread (HLS `WebVTT` rendition demux)
+    /// and **sampled** at each output tick by the overlay baker, which burns the
+    /// active cue into *that source's tile* (per-tile burn-in). A source with no
+    /// caption selector (or whose rendition could not be resolved) is absent here
+    /// and simply shows no caption. Native caption burn-in needs the `overlay`
+    /// feature to render, so the stores are only built/sampled under it.
+    #[cfg(feature = "overlay")]
+    caption_stores: std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
+    /// Per-source caption reader plans (resolved at build time): the rendition
+    /// `m3u8` to demux + the store to publish into. Consumed by the ingest
+    /// supervisor (one reader thread each) on the first `drive`, like the video
+    /// ingest plans. Empty ⇒ no native caption readers.
+    #[cfg(feature = "overlay")]
+    caption_plans: Vec<crate::captions::CaptionPlan>,
+    /// An optional legacy `--subtitles` sidecar track, routed through the SAME
+    /// per-tile burn-in path as native captions: its active cue is sampled per
+    /// tick and burned into [`Self::sidecar_target`]'s tile. `None` ⇒ no sidecar.
     #[cfg(feature = "overlay")]
     subtitles: Option<mosaic_overlay::subtitle::CueTrack>,
+    /// The source id the legacy `--subtitles` sidecar burns into (the first
+    /// source-bound cell). `None` ⇒ no bound target (the sidecar shows nowhere).
+    #[cfg(feature = "overlay")]
+    sidecar_target: Option<String>,
     /// Per-source per-tick audio-loudness timelines (dBFS), keyed by source id,
     /// one inner entry per output tick, derived off the hot path from each
     /// source's own decoded audio (the per-input meter). A source absent from the
@@ -350,6 +369,20 @@ impl RealPipeline {
         let mut stores: HashMapStores = std::collections::HashMap::new();
         let mut ingest_plans: Vec<IngestPlan> = Vec::with_capacity(config.sources.len());
 
+        // Per-source native caption stores + reader plans. Built best-effort: a
+        // source whose selector resolves to an HLS WebVTT rendition gets a store
+        // (sampled per tile) and a reader plan (one isolated demux thread); a
+        // resolve failure logs and yields no store (the tile shows no caption) —
+        // it must never fail the build of a live source (invariant #1/#10). Only
+        // built under `overlay` (native burn-in needs the renderer).
+        #[cfg(feature = "overlay")]
+        let mut caption_stores: std::collections::HashMap<
+            String,
+            Arc<crate::captions::CueStore>,
+        > = std::collections::HashMap::new();
+        #[cfg(feature = "overlay")]
+        let mut caption_plans: Vec<crate::captions::CaptionPlan> = Vec::new();
+
         for source in &config.sources {
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
@@ -361,6 +394,12 @@ impl RealPipeline {
             let plan = ingest_plan_for(source, tile_w, tile_h, Arc::clone(&store))?;
             stores.insert(source.id.clone(), store);
             ingest_plans.push(plan);
+
+            #[cfg(feature = "overlay")]
+            if let Some(caption_plan) = crate::captions::caption_plan_for(source) {
+                caption_stores.insert(source.id.clone(), Arc::clone(&caption_plan.store));
+                caption_plans.push(caption_plan);
+            }
         }
 
         let nosignal_card =
@@ -417,11 +456,20 @@ impl RealPipeline {
         let analog_clock =
             analog_clock_from_config(&config.overlays, config.canvas.width, config.canvas.height);
 
+        // The legacy `--subtitles` sidecar (if attached later) burns into the
+        // first source-bound cell. Pre-resolve that target id once here.
+        #[cfg(feature = "overlay")]
+        let sidecar_target = layout.cells.iter().find_map(|c| c.source.clone());
+
         Ok(Self {
             layout,
             cadence,
             stores,
             ingest_plans,
+            #[cfg(feature = "overlay")]
+            caption_stores,
+            #[cfg(feature = "overlay")]
+            caption_plans,
             canvas_color,
             nosignal_card,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
@@ -429,6 +477,8 @@ impl RealPipeline {
             outputs,
             #[cfg(feature = "overlay")]
             subtitles: None,
+            #[cfg(feature = "overlay")]
+            sidecar_target,
             #[cfg(feature = "overlay")]
             meter_db_timelines,
             #[cfg(feature = "overlay")]
@@ -535,7 +585,13 @@ impl RealPipeline {
         // plans by value means a second `drive` call simply ingests nothing
         // (the stores hold their last frames / slate) rather than double-spawning.
         let plans = std::mem::take(&mut self.ingest_plans);
-        let supervisor = IngestSupervisor::start(plans);
+        // Native caption readers exist only under `overlay` (they feed the
+        // per-tile burn-in renderer); without it there are none.
+        #[cfg(feature = "overlay")]
+        let caption_plans = std::mem::take(&mut self.caption_plans);
+        #[cfg(not(feature = "overlay"))]
+        let caption_plans: Vec<crate::captions::CaptionPlan> = Vec::new();
+        let supervisor = IngestSupervisor::start(plans, caption_plans);
 
         // Collected composited canvases (Arc to avoid copies), in tick order,
         // each paired with the per-source lifecycle states sampled that tick (so
@@ -552,11 +608,25 @@ impl RealPipeline {
         // SAMPLES the latest-good frame per tick (inputs sampled, never pacing —
         // invariant #1).
         let collect = Arc::clone(&collected);
+        // Snapshot the per-source active caption lines AT THIS TICK by sampling
+        // each source's cue store at the frame's pts, on the hot loop alongside
+        // the canvas. This is the correct point to sample a bounded drop-oldest
+        // store: the off-hot-path bake runs only after the whole run, by which
+        // time early cues would have been evicted from the small live window — so
+        // we capture the cue active right now and stash it with this tick. The
+        // sample is a pure lock-free read; it never paces or stalls the engine
+        // (invariants #1/#10). Only under `overlay` (the burn-in renderer).
+        #[cfg(feature = "overlay")]
+        let caption_stores = self.caption_stores.clone();
         let state_of = move |frame: &CompositedFrame| -> TickState {
+            #[cfg(feature = "overlay")]
+            let captions = sample_caption_stores(&caption_stores, frame.pts());
             if let Ok(mut sink) = collect.lock() {
                 sink.push(CollectedTick {
                     canvas: Arc::new(frame.canvas.clone()),
                     source_states: frame.source_states.clone(),
+                    #[cfg(feature = "overlay")]
+                    captions,
                 });
             }
             TickState {
@@ -631,6 +701,28 @@ impl RealPipeline {
         }
     }
 
+    /// The legacy `--subtitles` **sidecar** caption lines active for source `id`
+    /// at output instant `pts`, if `id` is the sidecar's target source
+    /// ([`Self::sidecar_target`]).
+    ///
+    /// The sidecar track is fully in memory (no eviction), so it is sampled here
+    /// in the off-hot-path bake rather than per-tick. Native HLS `WebVTT` cues
+    /// are sampled per-tick on the hot loop instead (the cue store is a small
+    /// live window), and merged ahead of this so both families share ONE per-tile
+    /// burn-in path. A pure read; it never paces or stalls anything (#1/#10).
+    #[cfg(feature = "overlay")]
+    fn sidecar_caption_lines(&self, id: &str, pts: MediaTime) -> Option<Vec<String>> {
+        if self.sidecar_target.as_deref() != Some(id) {
+            return None;
+        }
+        let cue = self.subtitles.as_ref().and_then(|t| t.active_cue(pts))?;
+        if cue.lines.is_empty() {
+            None
+        } else {
+            Some(cue.lines.clone())
+        }
+    }
+
     /// Build the per-tile [`TileSpec`](crate::overlays::TileSpec) list from the
     /// solved layout's cells: one entry per source-bound cell, carrying the cell's
     /// pixel rectangle and the source's display label.
@@ -680,14 +772,8 @@ impl RealPipeline {
     ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
         use mosaic_compositor::overlay::apply_overlays_to_nv12;
 
-        let mut baker = crate::overlays::OverlayBaker::new(
-            self.layout.canvas.width,
-            self.layout.canvas.height,
-            self.tile_specs(),
-            self.subtitles.clone(),
-            0,
-        )
-        .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
+        let mut baker = crate::overlays::OverlayBaker::new(self.tile_specs(), 0)
+            .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
         // Wire a configured analog clock face (the digital label stays on too).
         if let Some(spec) = self.analog_clock {
             baker = baker.with_analog_clock(spec);
@@ -705,6 +791,15 @@ impl RealPipeline {
             // conflators thin the meter to ~30 Hz so the tap stays cheap and
             // cannot couple to the engine (invariant #10).
             let mut dynamics = std::collections::HashMap::new();
+            // Per-source active caption lines at this output instant, sampled from
+            // each source's cue store (native HLS WebVTT) plus the legacy sidecar
+            // routed onto its target source — ONE per-tile burn-in path. Sampling
+            // is a pure lock-free read; it never paces or stalls anything (#1/#10).
+            // Native cues were sampled per-tick into `tick.captions` (the cue
+            // store is a small live window); the in-memory sidecar track has no
+            // eviction, so it is sampled here at `pts`. Native wins on overlap.
+            let mut captions: std::collections::HashMap<String, Vec<String>> =
+                tick.captions.clone();
             for spec in baker.tiles() {
                 let state = tick
                     .source_states
@@ -718,9 +813,14 @@ impl RealPipeline {
                         state,
                     },
                 );
+                if !captions.contains_key(&spec.source_id) {
+                    if let Some(lines) = self.sidecar_caption_lines(&spec.source_id, pts) {
+                        captions.insert(spec.source_id.clone(), lines);
+                    }
+                }
             }
             let list = baker
-                .draw_list(pts, &dynamics)
+                .draw_list(pts, &dynamics, &captions)
                 .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
             let overlaid = apply_overlays_to_nv12(&tick.canvas, &list, self.canvas_color)
                 .map_err(|e| PipelineError::Engine(format!("overlay blend: {e}")))?;
@@ -814,6 +914,34 @@ struct CollectedTick {
     // unconditionally to keep one `CollectedTick` shape across features.
     #[cfg_attr(not(feature = "overlay"), allow(dead_code))]
     source_states: std::collections::HashMap<String, mosaic_core::traits::SourceState>,
+    /// Per-source active caption lines sampled from the cue stores at THIS tick's
+    /// pts (`source_id -> on-screen lines`). Captured on the hot loop because the
+    /// bounded drop-oldest cue store only holds a small live window — sampling it
+    /// once after the whole run would miss cues evicted meanwhile. A source with
+    /// no active cue this tick is absent.
+    #[cfg(feature = "overlay")]
+    captions: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Sample every per-source caption cue store at `pts`, returning the active
+/// caption lines per source (`source_id -> on-screen lines`). Only text cues
+/// carry display lines; a source with no active cue at `pts` is omitted. Called
+/// per tick on the hot loop — a pure lock-free read that can neither pace nor
+/// stall the engine (invariants #1/#10).
+#[cfg(feature = "overlay")]
+fn sample_caption_stores(
+    stores: &std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
+    pts: MediaTime,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out = std::collections::HashMap::new();
+    for (id, store) in stores {
+        if let Some(mosaic_ffmpeg::caption::CaptionCue::Text { text, .. }) = store.active_at(pts) {
+            if !text.lines.is_empty() {
+                out.insert(id.clone(), text.lines);
+            }
+        }
+    }
+    out
 }
 
 /// Owns the per-source streaming-ingest decode threads and a shared stop flag.
@@ -831,10 +959,16 @@ struct IngestSupervisor {
 }
 
 impl IngestSupervisor {
-    /// Spawn one decode thread per plan and return the running supervisor.
-    fn start(plans: Vec<IngestPlan>) -> Self {
+    /// Spawn one decode thread per video plan **and** one caption reader thread
+    /// per caption plan, then return the running supervisor.
+    ///
+    /// A caption reader is just another best-effort writer of a lock-free store
+    /// (the cue store) — it shares the same stop flag and is joined the same way,
+    /// so it can neither pace nor stall the output clock (invariant #1) nor
+    /// back-pressure the engine (invariant #10).
+    fn start(plans: Vec<IngestPlan>, caption_plans: Vec<crate::captions::CaptionPlan>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::with_capacity(plans.len());
+        let mut handles = Vec::with_capacity(plans.len().saturating_add(caption_plans.len()));
         for plan in plans {
             let stop = Arc::clone(&stop);
             let id = plan.id.clone();
@@ -846,6 +980,20 @@ impl IngestSupervisor {
                     // simply rides NO_SIGNAL (slate) rather than failing the run
                     // (invariant #1 — the output clock is independent of inputs).
                     tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
+                }
+            }
+        }
+        for plan in caption_plans {
+            let stop = Arc::clone(&stop);
+            let id = plan.id.clone();
+            let builder = std::thread::Builder::new().name(format!("mosaic-captions-{id}"));
+            match builder.spawn(move || crate::captions::caption_loop(&plan, &stop)) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // A caption reader that cannot spawn is logged and skipped:
+                    // its tile simply shows no caption (best-effort — invariant
+                    // #1; captions never gate the output clock).
+                    tracing::error!(error = %e, source = %id, "could not spawn caption reader thread");
                 }
             }
         }
