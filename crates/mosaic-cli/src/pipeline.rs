@@ -460,6 +460,11 @@ impl RealPipeline {
         let collected_count = u64::try_from(frames.len()).unwrap_or(u64::MAX);
         let faltered = collected_count != outcome.ticks;
 
+        // Bake configured overlays into the collected program OFF the hot path
+        // (the protected output core has already emitted these frames). When the
+        // `overlay` feature is off this is a no-op identity.
+        let frames = self.bake_overlays(frames)?;
+
         let output_lines = self.encode_outputs(&frames)?;
 
         Ok(PipelineReport {
@@ -471,6 +476,59 @@ impl RealPipeline {
             outputs: output_lines,
             faltered,
         })
+    }
+
+    /// Bake the configured overlays into each collected program frame, off the
+    /// hot path. With the `overlay` feature compiled in this rasterizes the
+    /// overlay surface (clock/meter/safe-area/tally/subtitles) and blends it into
+    /// each NV12 frame via the compositor sub-pass; without it the frames pass
+    /// through unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PipelineError::Engine`] if the overlay baker or sub-pass rejects
+    /// the canvas (font load / unresolved color).
+    // reason: the `not(feature)` sibling consumes `frames` by value (identity
+    // pass-through), so both arms share one by-value signature for the caller.
+    #[cfg(feature = "overlay")]
+    #[allow(clippy::needless_pass_by_value)]
+    fn bake_overlays(
+        &self,
+        frames: Vec<Arc<Nv12Image>>,
+    ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
+        use mosaic_compositor::overlay::apply_overlays_to_nv12;
+
+        let mut baker = crate::overlays::OverlayBaker::new(
+            self.layout.canvas.width,
+            self.layout.canvas.height,
+            None,
+            0,
+        )
+        .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
+
+        let mut out_frames = Vec::with_capacity(frames.len());
+        for (i, frame) in frames.iter().enumerate() {
+            let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
+            // A synthetic meter reading so the dB bar is alive in the output.
+            baker.observe_meter_db(-6.0);
+            let list = baker
+                .draw_list(pts)
+                .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
+            let overlaid = apply_overlays_to_nv12(frame, &list, self.canvas_color)
+                .map_err(|e| PipelineError::Engine(format!("overlay blend: {e}")))?;
+            out_frames.push(Arc::new(overlaid));
+        }
+        Ok(out_frames)
+    }
+
+    /// Overlays disabled at compile time: pass the frames through unchanged.
+    #[cfg(not(feature = "overlay"))]
+    #[allow(clippy::unnecessary_wraps)] // reason: mirrors the `overlay`-on signature.
+    fn bake_overlays(
+        &self,
+        frames: Vec<Arc<Nv12Image>>,
+    ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
+        Ok(frames)
     }
 
     /// Publish each source's first decoded frame into its store at t=0 so the

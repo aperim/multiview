@@ -15,6 +15,9 @@
 //!   each with the standardised integration/decay constants.
 //! - [`correlation`] — stereo phase-correlation meter, goniometer (Lissajous)
 //!   points, and ITU-R BS.775 Lo/Ro + Lt/Rt surround-downmix metering.
+//! - [`meterdata`] — the meter → overlay draw-data bridge: sample the meters
+//!   read-only and **conflate** them to ~30 Hz for the on-screen meters/scopes
+//!   (the dB→deflection mapping itself lives in `mosaic-compositor`).
 //! - [`chanmap`] — channel mapping / shuffle / de-embed routing matrix for
 //!   multichannel (16+) streams.
 //! - [`probe`] — content-aware audio fault probes (silence, over-level, clip,
@@ -45,6 +48,7 @@ pub mod error;
 pub mod filter;
 pub mod format;
 pub mod loudness;
+pub mod meterdata;
 pub mod mixer;
 pub mod probe;
 pub mod truepeak;
@@ -57,5 +61,6 @@ pub use decode::{meter_file, AudioFileDecoder, DecodedBlock};
 pub use error::{AudioError, Result};
 pub use format::{AudioBlock, AudioFormat, ChannelLayout};
 pub use loudness::LoudnessMeter;
+pub use meterdata::{Conflator, MeterSample, StereoMeterSample, DISPLAY_HZ};
 pub use mixer::{Mixer, RoutePoint};
 pub use probe::{AudioProbeBank, AudioProbeConfig, ProbeSeverityProfile};

@@ -60,6 +60,17 @@ tempfile = { version = "3", optional = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 
+# The real-pipeline integration test needs the `ffmpeg` feature (a real libav*
+# build + the `ffmpeg`/`ffprobe` CLIs at runtime).
+[[test]]
+name = "real_pipeline"
+required-features = ["ffmpeg"]
+
+# The overlay-baking end-to-end test needs both `ffmpeg` and `overlay`.
+[[test]]
+name = "overlay_pipeline"
+required-features = ["ffmpeg", "overlay"]
+
 # Feature presets for the `mosaic` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented
@@ -71,6 +82,15 @@ default = ["software"]
 
 # Software-only reference path (always available).
 software = []
+
+# Overlay rasterization: bakes the configured overlays (clock/labels, dB
+# meters, safe-area graticules, tally borders, burned-in SRT/VTT subtitles) into
+# the composited program before encode, via mosaic-compositor's pure-Rust
+# overlay sub-pass (cosmic-text + swash + bundled OFL fonts). OFF by default so
+# the baseline build stays minimal; GPU-free and LGPL-clean. Combine with
+# `ffmpeg` (`run --features ffmpeg,overlay`) to overlay the real pipeline's
+# output; it works alone with the headless software run too.
+overlay = ["mosaic-compositor/overlay"]
 
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once

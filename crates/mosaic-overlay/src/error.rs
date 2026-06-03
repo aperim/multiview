@@ -46,6 +46,11 @@ pub enum Error {
     /// zero).
     #[error("invalid timer parameter: {0}")]
     InvalidTimer(String),
+
+    /// A subtitle/caption document (SRT/VTT) was malformed: a bad timing line,
+    /// an out-of-order cue window, or an unparseable timestamp.
+    #[error("invalid subtitle: {0}")]
+    InvalidSubtitle(String),
 }
 
 impl From<Error> for mosaic_core::Error {

@@ -37,6 +37,12 @@ pub mod cli;
 pub mod run;
 pub mod validate;
 
+/// The overlay draw-data baker (feature `overlay`): builds the per-frame overlay
+/// primitives — clock label, dB meter, safe-area, tally, burned-in subtitles —
+/// that the run paths bake into the composited program off the hot path.
+#[cfg(feature = "overlay")]
+pub mod overlays;
+
 /// The **real** libav\* end-to-end `mosaic run` pipeline (ingest → composite →
 /// encode-once → fan out to file/HLS sinks). Behind the off-by-default `ffmpeg`
 /// feature so the baseline build stays pure-Rust; software H.264/H.265 needs

@@ -28,6 +28,11 @@
 //!   back-to-front [`DrawList`] of
 //!   [`DrawQuad`]s: the portable premultiplied-RGBA quad list
 //!   any compositor backend (wgpu / Metal / CUDA-NPP) consumes (ADR-R008).
+//! - [`subtitle`] — pure SRT/WebVTT timed-text ingest into a time-indexed
+//!   [`CueTrack`]; the compositor's text engine rasterizes the active cue.
+//! - [`libass`] — the ASS/SSA capability gate: native libass styling behind the
+//!   off-by-default `libass` feature, gracefully falling back to the SRT/VTT
+//!   text path when it is not compiled in (ADR-R007).
 //!
 //! ## Operator surface (broadcast multiviewer, brief §2/§5)
 //!
@@ -70,9 +75,11 @@ pub mod error;
 pub mod geometry;
 pub mod identify;
 pub mod layer;
+pub mod libass;
 pub mod resolve;
 pub mod safearea;
 pub mod scopes;
+pub mod subtitle;
 pub mod tally;
 pub mod timecode;
 pub mod timer;
@@ -80,4 +87,6 @@ pub mod umd;
 
 pub use error::{Error, Result};
 pub use layer::{OverlayLayer, OverlayStack};
+pub use libass::{AssCapability, SubtitleFallback};
 pub use resolve::{CanvasSize, DrawList, DrawQuad};
+pub use subtitle::{Cue, CueTrack, SubtitleFormat};

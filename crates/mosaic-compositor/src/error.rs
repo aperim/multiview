@@ -78,6 +78,20 @@ pub enum Error {
     #[cfg(feature = "wgpu")]
     #[error("GPU limit exceeded: {0}")]
     GpuLimit(String),
+
+    /// A bundled OFL font failed to load into the overlay text engine's font
+    /// database (corrupt embedded asset or an unparseable face).
+    #[cfg(feature = "overlay")]
+    #[error("overlay font load failed: {0}")]
+    FontLoad(String),
+
+    /// A single glyph's rasterized coverage box was larger than the overlay
+    /// atlas could ever hold (even when empty) — i.e. it exceeds the byte cap on
+    /// its own, so no eviction can make room. The caller should hold last-good
+    /// or skip the layer rather than crash (hot-path safety rule #3).
+    #[cfg(feature = "overlay")]
+    #[error("overlay glyph too large for atlas: {0}")]
+    AtlasGlyphTooLarge(String),
 }
 
 impl From<Error> for mosaic_core::Error {

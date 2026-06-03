@@ -30,6 +30,10 @@
 //! - [`pipeline`] — the fixed-order pipeline + CPU reference compositor.
 //! - `gpu` *(feature `wgpu`)* — the portable GPU compositor + WGSL shaders
 //!   (named as a plain code span: the module is absent from the default doc build).
+//! - `overlay` *(feature `overlay`)* — the overlay text engine: cosmic-text +
+//!   swash shaping/rasterization into an etagere shelf-packed, byte-capped,
+//!   LRU-evicting glyph atlas with bundled OFL fonts (ADR-0016 §3.2). Pure-Rust,
+//!   GPU-free; the GPU sub-pass and CPU-reference blit consume it.
 //! - [`error`] — the per-crate [`Error`] taxonomy.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -39,6 +43,8 @@ pub mod error;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
 pub mod matrix;
+#[cfg(feature = "overlay")]
+pub mod overlay;
 pub mod pipeline;
 pub mod primaries;
 pub mod range;

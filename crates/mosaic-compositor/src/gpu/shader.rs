@@ -21,6 +21,11 @@ pub const COMPOSITE_BODY_WGSL: &str = include_str!("shaders/composite.wgsl");
 /// Encode-pass body (back half: OETF -> RGB->YUV -> range compress -> NV12).
 pub const ENCODE_BODY_WGSL: &str = include_str!("shaders/encode.wgsl");
 
+/// Overlay sub-pass body (batched premultiplied-linear `over` blend into the
+/// existing canvas, between composite and encode — feature `overlay`).
+#[cfg(feature = "overlay")]
+pub const OVERLAY_BODY_WGSL: &str = include_str!("shaders/overlay.wgsl");
+
 /// Full composite-pass WGSL source (prelude + body).
 #[must_use]
 pub fn composite_wgsl() -> String {
@@ -31,6 +36,24 @@ pub fn composite_wgsl() -> String {
 #[must_use]
 pub fn encode_wgsl() -> String {
     format!("{COMMON_WGSL}\n{ENCODE_BODY_WGSL}")
+}
+
+/// Full overlay sub-pass WGSL source (prelude + body), feature `overlay`.
+#[cfg(feature = "overlay")]
+#[must_use]
+pub fn overlay_wgsl() -> String {
+    format!("{COMMON_WGSL}\n{OVERLAY_BODY_WGSL}")
+}
+
+/// Validate the overlay sub-pass shader ([`overlay_wgsl`]) on the CPU (no GPU).
+///
+/// # Errors
+///
+/// Returns [`Error::ShaderParse`] / [`Error::ShaderValidation`] if the WGSL is
+/// malformed or fails `naga` validation.
+#[cfg(feature = "overlay")]
+pub fn validate_overlay_shader() -> Result<()> {
+    validate_module("overlay.wgsl", &overlay_wgsl())
 }
 
 /// Parse and validate one WGSL module with `naga`.
