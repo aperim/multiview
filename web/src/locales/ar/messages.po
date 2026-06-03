@@ -62,7 +62,7 @@ msgstr ""
 #: src/app/navigation.tsx:27
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
-msgstr ""
+msgstr "لوحة القيادة"
 
 #: src/components/ConnectionStatus.tsx:47
 msgid "Disconnected"
@@ -85,7 +85,7 @@ msgstr ""
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/LayoutsPage.tsx:81
 msgid "Layouts"
-msgstr ""
+msgstr "التخطيطات"
 
 #: src/components/TileStateBadge.tsx:29
 msgid "Live"
@@ -117,7 +117,7 @@ msgstr ""
 
 #: src/app/Sidebar.tsx:22
 msgid "Mosaic"
-msgstr ""
+msgstr "موزاييك"
 
 #: src/pages/LayoutsPage.tsx:83
 msgid "Mosaic layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
@@ -158,12 +158,12 @@ msgstr ""
 #: src/app/navigation.tsx:30
 #: src/pages/SimplePages.tsx:21
 msgid "Outputs"
-msgstr ""
+msgstr "المخرجات"
 
 #: src/app/navigation.tsx:31
 #: src/pages/SimplePages.tsx:31
 msgid "Overlays"
-msgstr ""
+msgstr "الطبقات"
 
 #: src/pages/NotFoundPage.tsx:14
 msgid "Page not found"
@@ -181,7 +181,7 @@ msgstr ""
 #: src/app/navigation.tsx:32
 #: src/pages/SettingsPage.tsx:26
 msgid "Settings"
-msgstr ""
+msgstr "الإعدادات"
 
 #: src/pages/SettingsPage.tsx:84
 msgid "Show a test notification"
@@ -194,7 +194,7 @@ msgstr ""
 #: src/app/navigation.tsx:29
 #: src/pages/SimplePages.tsx:11
 msgid "Sources"
-msgstr ""
+msgstr "المصادر"
 
 #: src/components/TileStateBadge.tsx:35
 msgid "Stale"

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "generate:api": "openapi-typescript ../docs/api/openapi.json -o src/api/schema.ts",
-    "build": "tsc --noEmit && vite build",
+    "build": "lingui compile && tsc --noEmit && vite build",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
