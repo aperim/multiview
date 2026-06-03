@@ -6,11 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Workspace-internal implementation crate; never published to crates.io
+# (matches xtask). This lets cargo-deny's allow-wildcard-paths exempt the
+# intra-workspace path deps while still denying real "*" version wildcards.
+publish = false
 
 [dependencies]
 mosaic-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.11.0"
 
 [features]
 "default" = []
@@ -18,3 +25,6 @@ tracing = { workspace = true }
 "vaapi" = []
 "qsv" = []
 "videotoolbox" = []
+
+[lints]
+workspace = true
