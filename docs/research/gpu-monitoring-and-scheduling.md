@@ -1,4 +1,6 @@
 > **Design brief — GPU/CPU monitoring & multi-GPU work placement.** Authoritative research/design record backing the implementation. Produced by a verification-hardened research pass (2026-06-03) and synthesised against the existing `mosaic-hal` capability/cost/planner model and the `mosaic-telemetry` metrics registry. Canonical crate/API naming lives in [docs/architecture](../architecture/). The decision derived from this brief is [ADR-0017](../decisions/ADR-0017.md). Where research and adversarial verification disagreed, the verification wins and is noted inline.
+>
+> **Extended by [gpu-placement-engine.md](gpu-placement-engine.md) ([ADR-0018](../decisions/ADR-0018.md)).** This brief defines *what can be measured* and the affinity-gated least-loaded **ranking function**. The placement-engine brief builds on it to specify the full **decision engine**: the multi-resource (DRF + Tetris) scoring model, the deliberate-split-when-it-doesn't-fit cut points, and the **closed-loop re-placement controller** (sense external load -> detect sustained overload -> SHED-or-MIGRATE via make-before-break). Read this brief first, then the placement-engine brief for the decision-making and recovery design.
 
 ---
 
