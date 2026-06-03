@@ -6,12 +6,33 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Workspace-internal implementation crate; never published to crates.io
+# (matches xtask). This lets cargo-deny's allow-wildcard-paths exempt the
+# intra-workspace path deps while still denying real "*" version wildcards.
+publish = false
 
 [dependencies]
 mosaic-core = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# Real audio demux/decode/resample lives behind the off-by-default `ffmpeg`
+# feature so the DEFAULT build stays pure-Rust with no native deps. mosaic-audio
+# NEVER touches libav directly (this crate is `unsafe_code = forbid`); it calls
+# only mosaic-ffmpeg's SAFE wrappers, whose own `ffmpeg` feature is enabled by
+# ours. Decode/test use only LGPL software codecs (the default build stays
+# LGPL-clean; x264/x265 remain behind `gpl-codecs` and are never pulled here).
+mosaic-ffmpeg = { workspace = true, optional = true }
+
+[dev-dependencies]
+approx = "0.5.1"
+proptest = "1.11.0"
+tempfile = "3"
+
 [features]
 "default" = []
-"ffmpeg" = []
+"ffmpeg" = ["dep:mosaic-ffmpeg", "mosaic-ffmpeg/ffmpeg"]
+
+[lints]
+workspace = true

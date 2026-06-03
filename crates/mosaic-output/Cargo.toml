@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Workspace-internal implementation crate; never published to crates.io
+# (matches xtask). This lets cargo-deny's allow-wildcard-paths exempt the
+# intra-workspace path deps while still denying real "*" version wildcards.
+publish = false
 
 [dependencies]
 mosaic-core = { workspace = true }
@@ -13,7 +17,48 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
+# Real libav* encode/mux path — opt-in only behind the `ffmpeg` feature so the
+# DEFAULT build stays pure-Rust / native-dep-free. All raw FFI is owned by
+# `mosaic-ffmpeg`; this crate only calls its SAFE wrappers (it stays
+# `unsafe_code = forbid`). `cargo deny check` runs with all-features=false so it
+# never sees this opt-in dependency.
+mosaic-ffmpeg = { workspace = true, optional = true }
+
+# Opt-in alongside `mosaic-ffmpeg`, used ONLY to name `ffmpeg-next`'s safe value
+# types (`format::Pixel`, the encoded-packet/`Video` frame types) when calling
+# `mosaic-ffmpeg`'s safe encoder/scaler/muxer wrappers — e.g. naming the
+# `yuv420p` working format LGPL software codecs require. This crate writes NO
+# `unsafe` and performs NO FFI (it stays `unsafe_code = forbid`); all raw libav*
+# remains owned by `mosaic-ffmpeg`. Pinned to match its binding. `cargo deny`
+# runs with all-features=false so it never sees this opt-in dependency.
+ffmpeg-next = { version = "7.1", optional = true }
+
+[dev-dependencies]
+proptest = "1.11.0"
+tempfile = "3"
+# Round-trip codec tests ONLY: encode here, decode with mosaic-input's TSL
+# decoders, asserting encode∘decode == identity on the wire. A DEV-dependency
+# only — it never enters the (non-test) crate graph, so the sibling relationship
+# (mosaic-input and mosaic-output do not depend on each other) is preserved.
+# mosaic-input's default build is pure-Rust (no `ffmpeg`/`ndi` pulled here), so
+# the baseline stays native-dep-free. `cargo deny` runs with all-features=false
+# and ignores dev-dependencies, so this is invisible to the licence gate.
+mosaic-input = { workspace = true }
+# NOTE: the `ffmpeg`-feature integration tests also use `ffmpeg-next` (to bridge
+# demux -> decode when feeding the sinks). It is NOT listed here as a
+# dev-dependency on purpose: an unconditional dev-dependency would compile native
+# libav* even for the DEFAULT `cargo test` (dev-deps ignore features), breaking
+# the pure-Rust baseline. Instead those tests rely on the *optional* `ffmpeg-next`
+# dependency above, which is only present (and only buildable) when the `ffmpeg`
+# feature is enabled — exactly when the tests that need it are compiled.
+
 [features]
 "default" = []
-"ffmpeg" = []
+# Wires the real encode-once-mux-many output (FileSink / SegmentSink) onto
+# mosaic-ffmpeg's safe Encoder/Muxer wrappers. Pulls mosaic-ffmpeg with its own
+# `ffmpeg` feature; never escalates to GPL (LGPL software codecs only).
+"ffmpeg" = ["dep:mosaic-ffmpeg", "mosaic-ffmpeg/ffmpeg", "dep:ffmpeg-next"]
 "ndi" = []
+
+[lints]
+workspace = true
