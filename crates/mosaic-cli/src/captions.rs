@@ -146,6 +146,42 @@ fn split_origin(url: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Whether a [`mosaic_config::Source`]'s selector resolves to the **native
+/// in-container DVB-sub (bitmap) caption** path: a `Ts`/`File` source with an
+/// `Auto` or `Track` selector. The DVB-sub stream lives in the SAME container as
+/// the video, so this path decodes it on the source's own ingest thread (no
+/// second demux) and publishes bitmap cues into the per-source store.
+///
+/// `TeletextPage` is explicitly **not** this path (it is the teletext decoder),
+/// and `Off`/`EmbeddedCc`/`Sidecar` are other paths. HLS sources take the
+/// separate WebVTT-rendition path ([`webvtt_language`]).
+#[must_use]
+pub fn dvbsub_selector(kind: &mosaic_config::SourceKind, selector: &CaptionSelector) -> bool {
+    use mosaic_config::SourceKind;
+    // Only an in-container TS/file source carries a muxed DVB-sub stream the
+    // video-ingest thread can decode as a sibling of the video packets.
+    if !matches!(kind, SourceKind::Ts { .. } | SourceKind::File { .. }) {
+        return false;
+    }
+    matches!(
+        selector,
+        CaptionSelector::Auto | CaptionSelector::Track { .. }
+    )
+}
+
+/// Publish each decoded **bitmap** cue into the store using its own `[start,
+/// end)` window — the DVB-sub sibling of [`publish_cues`], but with **no
+/// `CuePacer`**: these cues are decoded inside the source's already-PTS-paced
+/// video ingest loop, so the bitmap cue is published at the same media instant
+/// its packet arrives (no separate wall-clock pacing needed). The store is the
+/// lock-free hand-off the off-hot-path baker samples per tick (#1/#10).
+pub fn publish_bitmap_cues(store: &CueStore, cues: Vec<CaptionCue>) {
+    for cue in cues {
+        let (start, end) = (cue.start(), cue.end());
+        store.publish(start, end, cue);
+    }
+}
+
 /// Whether a [`mosaic_config::Source`] should attempt native HLS `WebVTT` caption
 /// ingest for the given selector, and the language to prefer.
 ///
@@ -470,6 +506,53 @@ mod tests {
         assert_eq!(got, "/srv/streams/subs/index.m3u8");
         let abs = resolve_rendition_uri(master, "/abs/index.m3u8");
         assert_eq!(abs, "/abs/index.m3u8");
+    }
+
+    #[test]
+    fn dvbsub_selector_only_for_ts_or_file_auto_or_track() {
+        use mosaic_config::SourceKind;
+        let ts = SourceKind::Ts {
+            url: "udp://x".to_owned(),
+        };
+        let file = SourceKind::File {
+            path: "/x.ts".to_owned(),
+        };
+        let hls = SourceKind::Hls {
+            url: "https://x/m.m3u8".to_owned(),
+        };
+        assert!(dvbsub_selector(&ts, &CaptionSelector::Auto));
+        assert!(dvbsub_selector(
+            &file,
+            &CaptionSelector::Track {
+                id: "eng".to_owned()
+            }
+        ));
+        // Teletext stays out (it is the teletext decoder, not dvbsub).
+        assert!(!dvbsub_selector(
+            &ts,
+            &CaptionSelector::TeletextPage { page: 801 }
+        ));
+        assert!(!dvbsub_selector(&file, &CaptionSelector::Off));
+        // HLS is the WebVTT-rendition path, not the in-container dvbsub path.
+        assert!(!dvbsub_selector(&hls, &CaptionSelector::Auto));
+    }
+
+    #[test]
+    fn publish_bitmap_cues_inserts_each_cue_at_its_window() {
+        use mosaic_ffmpeg::caption::{CaptionCue, CueRect};
+        let store = CueStore::new();
+        let rgba = vec![0_u8; 2 * 2 * 4];
+        let rect = CueRect::new(0, 0, 2, 2);
+        let cue = CaptionCue::try_bitmap(
+            MediaTime::from_nanos(1_000),
+            MediaTime::from_nanos(3_000),
+            rgba,
+            rect,
+        )
+        .expect("valid bitmap cue");
+        publish_bitmap_cues(&store, vec![cue]);
+        assert!(store.active_at(MediaTime::from_nanos(2_000)).is_some());
+        assert!(store.active_at(MediaTime::from_nanos(500)).is_none());
     }
 
     #[test]

@@ -89,6 +89,13 @@ required-features = ["ffmpeg", "overlay"]
 name = "caption_ingest"
 required-features = ["ffmpeg", "overlay"]
 
+# The native DVB-sub (bitmap) caption ingest + burn-in end-to-end proof needs
+# both `ffmpeg` and `overlay`; the libav fixture generator comes from the
+# `mosaic-ffmpeg/test-fixtures` dev-dependency feature.
+[[test]]
+name = "dvbsub_ingest"
+required-features = ["ffmpeg", "overlay"]
+
 # Feature presets for the `mosaic` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented
@@ -118,7 +125,14 @@ overlay = ["mosaic-compositor/overlay", "dep:serde_json"]
 ffmpeg = [
     "dep:ffmpeg-next",
     "dep:tempfile",
-    "mosaic-ffmpeg/ffmpeg",
+    # `test-fixtures` (⊇ `mosaic-ffmpeg/ffmpeg`) exposes the libav-built `dvbsub`
+    # MPEG-TS fixture generator the DVB-sub end-to-end test needs (the FFmpeg CLI
+    # cannot transcode text → bitmap subtitle). It is forwarded via the `ffmpeg`
+    # feature — not as a hard dev-dependency — so `ffmpeg-next` (WTFPL) stays
+    # behind the off-by-default `ffmpeg` feature and never enters the default
+    # `cargo deny check --all-features=false` graph. The `#[doc(hidden)]` module
+    # is test-only and adds no product surface.
+    "mosaic-ffmpeg/test-fixtures",
     "mosaic-input/ffmpeg",
     "mosaic-output/ffmpeg",
     "mosaic-audio/ffmpeg",

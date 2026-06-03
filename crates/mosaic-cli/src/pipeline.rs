@@ -337,9 +337,30 @@ struct IngestPlan {
     /// reopened on EOF/error (a transient HLS/RTSP drop reconnects); a finite
     /// file/VOD source plays once and then holds its last frame.
     live: bool,
+    /// An optional **in-container DVB-sub route**: the muxed subtitle stream's
+    /// index + time-base + the per-source cue store. When present, the video
+    /// ingest loop decodes that stream's packets as a sibling of the video
+    /// packets and publishes bitmap cues into the store (#36 Phase 2). `None` ⇒
+    /// this source carries no native bitmap-caption decode. Only built under
+    /// `overlay` (the burn-in renderer consumes the cues).
+    #[cfg(feature = "overlay")]
+    dvbsub: Option<DvbSubRoute>,
     /// A generated `test` clip's tempdir, kept alive for the life of the
     /// pipeline so the decode thread can open it.
     _owned: Option<GeneratedClip>,
+}
+
+/// The in-container DVB-sub decode route stashed on an [`IngestPlan`]: which
+/// muxed subtitle stream to decode (index + its time-base) and the per-source
+/// cue store the decoded bitmap cues are published into (shared with the baker).
+#[cfg(feature = "overlay")]
+struct DvbSubRoute {
+    /// The subtitle stream index within the source container.
+    stream_index: usize,
+    /// The subtitle stream time-base (for the caption decoder's PTS rebase).
+    time_base: Rational,
+    /// The lock-free store the decoded bitmap cues are published into.
+    store: Arc<crate::captions::CueStore>,
 }
 
 impl RealPipeline {
@@ -391,15 +412,17 @@ impl RealPipeline {
                 TileThresholds::default(),
                 NoSignalPolicy::HoldForever,
             ));
-            let plan = ingest_plan_for(source, tile_w, tile_h, Arc::clone(&store))?;
+            #[cfg_attr(not(feature = "overlay"), allow(unused_mut))]
+            let mut plan = ingest_plan_for(source, tile_w, tile_h, Arc::clone(&store))?;
+
+            // Wire this source's native captions (HLS WebVTT rendition thread +/or
+            // in-container DVB-sub route), registering any cue store + reader plan
+            // and stashing the dvbsub route on `plan`. Only under `overlay`.
+            #[cfg(feature = "overlay")]
+            wire_source_captions(source, &mut plan, &mut caption_stores, &mut caption_plans);
+
             stores.insert(source.id.clone(), store);
             ingest_plans.push(plan);
-
-            #[cfg(feature = "overlay")]
-            if let Some(caption_plan) = crate::captions::caption_plan_for(source) {
-                caption_stores.insert(source.id.clone(), Arc::clone(&caption_plan.store));
-                caption_plans.push(caption_plan);
-            }
         }
 
         let nosignal_card =
@@ -634,6 +657,8 @@ impl RealPipeline {
         let state_of = move |frame: &CompositedFrame| -> TickState {
             #[cfg(feature = "overlay")]
             let captions = sample_caption_stores(&caption_stores, frame.pts());
+            #[cfg(feature = "overlay")]
+            let caption_bitmaps = sample_caption_bitmaps(&caption_stores, frame.pts());
             // Sample + classify each tile's content fault for THIS tick (a pure
             // lock-free read of the stores; fail-safe to no-fault on any error).
             #[cfg(feature = "overlay")]
@@ -644,6 +669,8 @@ impl RealPipeline {
                     source_states: frame.source_states.clone(),
                     #[cfg(feature = "overlay")]
                     captions,
+                    #[cfg(feature = "overlay")]
+                    caption_bitmaps,
                     #[cfg(feature = "overlay")]
                     faults,
                 });
@@ -854,7 +881,7 @@ impl RealPipeline {
                 }
             }
             let list = baker
-                .draw_list(pts, &dynamics, &captions)
+                .draw_list(pts, &dynamics, &captions, &tick.caption_bitmaps)
                 .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
             let overlaid = apply_overlays_to_nv12(&tick.canvas, &list, self.canvas_color)
                 .map_err(|e| PipelineError::Engine(format!("overlay blend: {e}")))?;
@@ -955,6 +982,12 @@ struct CollectedTick {
     /// no active cue this tick is absent.
     #[cfg(feature = "overlay")]
     captions: std::collections::HashMap<String, Vec<String>>,
+    /// Per-source active **bitmap** caption cue sampled from the cue stores at
+    /// THIS tick's pts (`source_id -> CueBitmap`). Same hot-loop sampling
+    /// rationale as `captions` (the bounded store holds a small live window); a
+    /// pure lock-free read (#1/#10). A source with no active bitmap cue is absent.
+    #[cfg(feature = "overlay")]
+    caption_bitmaps: std::collections::HashMap<String, mosaic_ffmpeg::caption::CueBitmap>,
     /// Per-source content fault sampled this tick (`source_id -> fault`), folded
     /// through dwell/hysteresis by the [`FaultDetector`]. Captured on the hot
     /// loop because freeze needs the *previous* sampled frame and the dwell needs
@@ -981,6 +1014,28 @@ fn sample_caption_stores(
             if !text.lines.is_empty() {
                 out.insert(id.clone(), text.lines);
             }
+        }
+    }
+    out
+}
+
+/// Sample every per-source caption cue store at `pts`, returning the active
+/// **bitmap** cue per source (`source_id -> CueBitmap`). The sibling of
+/// [`sample_caption_stores`] for the [`CaptionCue::Bitmap`] shape (DVB-sub); a
+/// source with no active bitmap cue at `pts` is omitted. Called per tick on the
+/// hot loop — a pure lock-free read that can neither pace nor stall the engine
+/// (invariants #1/#10).
+#[cfg(feature = "overlay")]
+fn sample_caption_bitmaps(
+    stores: &std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
+    pts: MediaTime,
+) -> std::collections::HashMap<String, mosaic_ffmpeg::caption::CueBitmap> {
+    let mut out = std::collections::HashMap::new();
+    for (id, store) in stores {
+        if let Some(mosaic_ffmpeg::caption::CaptionCue::Bitmap { bitmap, .. }) =
+            store.active_at(pts)
+        {
+            out.insert(id.clone(), bitmap);
         }
     }
     out
@@ -1940,8 +1995,103 @@ fn ingest_plan_for(
         tile_h,
         store,
         live,
+        #[cfg(feature = "overlay")]
+        dvbsub: None,
         _owned: owned,
     })
+}
+
+/// Wire a source's native caption paths at build time: the HLS `WebVTT` rendition
+/// (a second isolated demux thread) and/or the in-container DVB-sub route (#36
+/// Phase 2, decoded on this source's own video-ingest thread). Registers any cue
+/// store (for the baker to sample) + reader plan, and stashes the dvbsub route on
+/// `plan`. Best-effort: a source whose captions cannot be resolved simply shows
+/// none — this never fails the build (invariants #1/#10).
+#[cfg(feature = "overlay")]
+fn wire_source_captions(
+    source: &Source,
+    plan: &mut IngestPlan,
+    caption_stores: &mut std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
+    caption_plans: &mut Vec<crate::captions::CaptionPlan>,
+) {
+    // HLS WebVTT rendition path (a second isolated demux thread).
+    if let Some(caption_plan) = crate::captions::caption_plan_for(source) {
+        caption_stores.insert(source.id.clone(), Arc::clone(&caption_plan.store));
+        caption_plans.push(caption_plan);
+    }
+
+    // In-container DVB-sub (bitmap) path: the muxed subtitle stream is decoded on
+    // THIS source's video-ingest thread (a sibling of the video packets), so the
+    // route is stashed on the plan and its store registered for the baker. Only
+    // when the selector takes the dvbsub path, the source has not already taken
+    // the WebVTT path, and the container actually carries a dvbsub stream.
+    if let Some(selector) = source.captions.as_ref() {
+        if crate::captions::dvbsub_selector(&source.kind, selector)
+            && !caption_stores.contains_key(&source.id)
+        {
+            if let Some((route, cue_store)) = resolve_dvbsub_route(source, &plan.location) {
+                caption_stores.insert(source.id.clone(), cue_store);
+                plan.dvbsub = Some(route);
+            }
+        }
+    }
+}
+
+/// Resolve the in-container **DVB-sub route** for a source whose selector takes
+/// the native bitmap-caption path ([`crate::captions::dvbsub_selector`]): open
+/// the source container once, find its subtitle stream and confirm it is a
+/// `dvbsub` stream, and build the cue store. Returns `(route, store)` so the
+/// caller can both stash the route on the ingest plan AND register the store for
+/// the baker to sample. Best-effort: an open failure or a container with no
+/// dvbsub stream logs and returns `None` (the tile simply shows no caption — it
+/// must never fail the pipeline build, invariants #1/#10).
+#[cfg(feature = "overlay")]
+fn resolve_dvbsub_route(
+    source: &Source,
+    location: &SourceLocation,
+) -> Option<(DvbSubRoute, Arc<crate::captions::CueStore>)> {
+    use mosaic_ffmpeg::convert::MediaKind;
+    use mosaic_ffmpeg::Demuxer;
+
+    // Only a local-path container can be opened by `Demuxer` here; a `Ts` URL
+    // source is decoded by the URL ingest path and is out of this MVP's scope.
+    let path = match location {
+        SourceLocation::Path(p) => p.as_path(),
+        SourceLocation::Url(_) => return None,
+    };
+    let demux = match Demuxer::open(path) {
+        Ok(d) => d,
+        Err(err) => {
+            tracing::warn!(source = %source.id, error = %err, "could not open container for dvbsub captions");
+            return None;
+        }
+    };
+    let stream_index = demux.best_stream(MediaKind::Subtitle)?;
+    // Confirm it is a DVB-sub (bitmap) stream; teletext/other subtitle codecs are
+    // not this path.
+    let params = demux.streams();
+    let is_dvbsub = params
+        .iter()
+        .find(|s| s.index == stream_index)
+        .is_some_and(|s| s.codec_name == "dvbsub");
+    if !is_dvbsub {
+        tracing::info!(source = %source.id, "subtitle stream is not dvbsub; no in-container bitmap captions");
+        return None;
+    }
+    let time_base = params
+        .iter()
+        .find(|s| s.index == stream_index)
+        .map(|s| s.time_base)?;
+    let store = Arc::new(crate::captions::CueStore::new());
+    tracing::info!(source = %source.id, stream_index, "native in-container DVB-sub caption route resolved");
+    Some((
+        DvbSubRoute {
+            stream_index,
+            time_base,
+            store: Arc::clone(&store),
+        },
+        store,
+    ))
 }
 
 /// Where a source's media lives.
@@ -2078,6 +2228,14 @@ fn open_and_stream(
         .map_err(|e| e.to_string())?
         .with_declared_fps(Some(declared_fps));
     let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
+
+    // Build the in-container DVB-sub decoder once, from the SAME open container's
+    // subtitle stream parameters (#36 Phase 2). Its packets are pumped as a
+    // sibling of the video packets below — they never go through `receive_frame`.
+    // A build failure logs and disables the route for this open (best-effort; the
+    // video still streams). Only under `overlay`.
+    #[cfg(feature = "overlay")]
+    let mut dvbsub = build_dvbsub_decoder(plan, &input);
     // The wall-clock pacer: maps the first frame's PTS to "now" and releases
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
     let mut pacer = PtsWallClock::new();
@@ -2110,6 +2268,14 @@ fn open_and_stream(
             Ok(()) => {
                 if packet.stream() == stream_index {
                     decoder.send_packet(&packet).map_err(|e| e.to_string())?;
+                } else {
+                    // A non-video packet: route it to the in-container DVB-sub
+                    // decoder if it belongs to that subtitle stream (sibling
+                    // branch — it never goes through the video `receive_frame`
+                    // pump). A decode error on one cue is logged and skipped:
+                    // captions are intermittent and must never stall ingest.
+                    #[cfg(feature = "overlay")]
+                    pump_dvbsub(plan, dvbsub.as_mut(), &packet);
                 }
             }
             Err(ffmpeg::Error::Eof) => {
@@ -2117,6 +2283,51 @@ fn open_and_stream(
                 drained = true;
             }
             Err(other) => return Err(other.to_string()),
+        }
+    }
+}
+
+/// Build the in-container DVB-sub [`CaptionDecoder`] for `plan`'s route, from the
+/// open container's subtitle stream parameters. Returns `None` when the source
+/// has no dvbsub route or the decoder cannot be built (logged, best-effort).
+#[cfg(feature = "overlay")]
+fn build_dvbsub_decoder(
+    plan: &IngestPlan,
+    input: &ffmpeg::format::context::Input,
+) -> Option<mosaic_ffmpeg::CaptionDecoder> {
+    let route = plan.dvbsub.as_ref()?;
+    let params = input.stream(route.stream_index)?.parameters();
+    match mosaic_ffmpeg::CaptionDecoder::from_parameters(
+        mosaic_ffmpeg::CaptionSource::DvbSubtitle,
+        params,
+        route.time_base,
+    ) {
+        Ok(dec) => Some(dec),
+        Err(err) => {
+            tracing::warn!(source = %plan.id, error = %err, "could not build dvbsub decoder; no bitmap captions");
+            None
+        }
+    }
+}
+
+/// Decode one packet on the in-container DVB-sub route (if the packet belongs to
+/// that subtitle stream) and publish any bitmap cues into the route's store.
+#[cfg(feature = "overlay")]
+fn pump_dvbsub(
+    plan: &IngestPlan,
+    decoder: Option<&mut mosaic_ffmpeg::CaptionDecoder>,
+    packet: &ffmpeg::codec::packet::Packet,
+) {
+    let (Some(route), Some(decoder)) = (plan.dvbsub.as_ref(), decoder) else {
+        return;
+    };
+    if packet.stream() != route.stream_index {
+        return;
+    }
+    match decoder.decode(packet) {
+        Ok(cues) => crate::captions::publish_bitmap_cues(&route.store, cues),
+        Err(err) => {
+            tracing::debug!(source = %plan.id, error = %err, "dvbsub packet decode error");
         }
     }
 }

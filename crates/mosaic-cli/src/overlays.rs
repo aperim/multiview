@@ -357,6 +357,7 @@ impl OverlayBaker {
         pts: MediaTime,
         dynamics: &HashMap<String, TileDynamics>,
         captions: &HashMap<String, Vec<String>>,
+        bitmaps: &HashMap<String, mosaic_ffmpeg::caption::CueBitmap>,
     ) -> Result<OverlayDrawList, CompositorError> {
         let mut list = OverlayDrawList::new();
         let now_ns = pts.as_nanos();
@@ -392,6 +393,13 @@ impl OverlayBaker {
             let cue_lines = captions.get(&source_id).cloned().unwrap_or_default();
             if !cue_lines.is_empty() {
                 self.draw_tile_caption(&mut list, rect, &cue_lines)?;
+            }
+
+            // Burn this source's active BITMAP caption (DVB-sub) into THIS tile's
+            // cell rect, bottom-anchored — the per-tile bitmap burn-in. A bitmap
+            // and a text cue can both be present; both are cell-local.
+            if let Some(bitmap) = bitmaps.get(&source_id) {
+                draw_tile_bitmap(&mut list, rect, bitmap);
             }
         }
 
@@ -697,6 +705,92 @@ impl OverlayBaker {
             });
         }
         Ok(())
+    }
+}
+
+/// Burn a **bitmap caption cue** (DVB-sub) into the cell `rect`, bottom-anchored
+/// within THAT tile (never canvas-wide) — mirroring [`OverlayBaker::draw_tile_caption`]'s
+/// bottom-inset model but for a premultiplied-RGBA image instead of text.
+///
+/// The cue's source rect is in *source* pixels; it is scaled to fit the cell
+/// **width** (minus a small horizontal inset) preserving aspect, clamped so it
+/// never exceeds the cell's usable height, then placed centred horizontally with
+/// its bottom edge a chip-height above the cell bottom (clearing the label band).
+/// The `Image` primitive carries the premultiplied RGBA verbatim — the
+/// compositor sub-pass blits it without re-premultiplying.
+///
+/// A degenerate cue (zero dims) or a sub-minimum tile draws nothing.
+fn draw_tile_bitmap(
+    list: &mut OverlayDrawList,
+    rect: PixelRect,
+    bitmap: &mosaic_ffmpeg::caption::CueBitmap,
+) {
+    let geom = TileGeometry::resolve(rect);
+    if geom.width < MIN_TILE_PX || geom.height < MIN_TILE_PX {
+        return;
+    }
+    let src_w = bitmap.rect.width;
+    let src_h = bitmap.rect.height;
+    if src_w == 0 || src_h == 0 {
+        return;
+    }
+
+    let pad = geom.pad();
+    // The usable width: cell width minus a left+right inset.
+    let max_w = geom.width.saturating_sub(pad.saturating_mul(2)).max(1);
+    // Bottom inset (clear the label band) and a matching top headroom.
+    let bottom_inset = geom.chip_height().saturating_add(pad);
+    let max_h = geom
+        .height
+        .saturating_sub(bottom_inset.saturating_add(pad))
+        .max(1);
+
+    // Scale to fit the width preserving aspect; clamp to the usable height.
+    let (dest_w, dest_h) = fit_preserving_aspect(src_w, src_h, max_w, max_h);
+    if dest_w == 0 || dest_h == 0 {
+        return;
+    }
+
+    // Centre horizontally; bottom-anchor a chip-height above the cell bottom.
+    let x_off = geom.width.saturating_sub(dest_w) / 2;
+    let dest_x = geom.x.saturating_add(i32_dim(x_off));
+    let dest_bottom_off = geom.height.saturating_sub(bottom_inset);
+    let dest_y = geom
+        .y
+        .saturating_add(i32_dim(dest_bottom_off.saturating_sub(dest_h)));
+
+    list.push(OverlayPrimitive::Image {
+        dest: OverlayRect::new(dest_x, dest_y, dest_w, dest_h),
+        src_width: src_w,
+        src_height: src_h,
+        rgba: bitmap.rgba.clone(),
+        alpha: 1.0,
+    });
+}
+
+/// Scale `(src_w, src_h)` to fit within `(max_w, max_h)` preserving aspect
+/// ratio (the larger-constraint side touches its bound). Pure integer math, no
+/// `as` cast; returns `(0, 0)` for a degenerate input.
+fn fit_preserving_aspect(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 || max_w == 0 || max_h == 0 {
+        return (0, 0);
+    }
+    // Scale by width first: dest_w = max_w, dest_h = src_h * max_w / src_w.
+    let by_width_h = u64::from(src_h)
+        .saturating_mul(u64::from(max_w))
+        .checked_div(u64::from(src_w))
+        .unwrap_or(0);
+    if by_width_h <= u64::from(max_h) {
+        let h = u32::try_from(by_width_h.max(1)).unwrap_or(max_h);
+        (max_w, h.min(max_h).max(1))
+    } else {
+        // Height-bound: dest_h = max_h, dest_w = src_w * max_h / src_h.
+        let by_height_w = u64::from(src_w)
+            .saturating_mul(u64::from(max_h))
+            .checked_div(u64::from(src_h))
+            .unwrap_or(0);
+        let w = u32::try_from(by_height_w.max(1)).unwrap_or(max_w);
+        (w.min(max_w).max(1), max_h)
     }
 }
 
@@ -1143,6 +1237,11 @@ mod tests {
         HashMap::new()
     }
 
+    /// An empty per-source bitmap-cue map (no tile shows a bitmap caption).
+    fn no_bitmaps() -> HashMap<String, mosaic_ffmpeg::caption::CueBitmap> {
+        HashMap::new()
+    }
+
     /// Build a per-source caption map: `source_id -> active cue lines`.
     fn captions(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         entries
@@ -1229,7 +1328,9 @@ mod tests {
         let mut list = OverlayDrawList::new();
         for tick in 0..5 {
             let pts = MediaTime::from_nanos(tick * 40_000_000);
-            list = baker.draw_list(pts, &dyns, &no_captions()).unwrap();
+            list = baker
+                .draw_list(pts, &dyns, &no_captions(), &no_bitmaps())
+                .unwrap();
         }
 
         // Each cell must host glyphs for its label + flag, somewhere inside it.
@@ -1287,7 +1388,7 @@ mod tests {
         let caps = captions(&[("in_a", &["English subtitle 1 -Unforced-"])]);
 
         let pts = MediaTime::from_nanos(1_500_000_000);
-        let list = baker.draw_list(pts, &dyns, &caps).unwrap();
+        let list = baker.draw_list(pts, &dyns, &caps, &no_bitmaps()).unwrap();
 
         let geom_a = TileGeometry::resolve(tiles[0].rect);
         let geom_b = TileGeometry::resolve(tiles[1].rect);
@@ -1312,6 +1413,111 @@ mod tests {
             glyphs_in(&list, in_a_cell) >= a_caption,
             "every in_a caption glyph must fall inside in_a's cell rect"
         );
+    }
+
+    /// Build a per-source bitmap-cue map: `source_id -> CueBitmap`. The
+    /// `#[non_exhaustive]` `CueBitmap`/`CueRect` are built only inside
+    /// `mosaic-ffmpeg`, so the cue is constructed via `CaptionCue::try_bitmap` and
+    /// its bitmap matched out.
+    fn bitmaps(entries: &[(&str, u32, u32)]) -> HashMap<String, mosaic_ffmpeg::caption::CueBitmap> {
+        use mosaic_ffmpeg::caption::{CaptionCue, CueRect};
+        entries
+            .iter()
+            .map(|(id, w, h)| {
+                // Opaque-white premultiplied band (rgb == a == 255), w*h*4 bytes.
+                let rgba: Vec<u8> = (0..(*w * *h))
+                    .flat_map(|_| [255_u8, 255, 255, 255])
+                    .collect();
+                let rect = CueRect::new(0, 0, *w, *h);
+                let cue = CaptionCue::try_bitmap(
+                    MediaTime::from_nanos(0),
+                    MediaTime::from_nanos(1_000),
+                    rgba,
+                    rect,
+                )
+                .expect("valid bitmap cue");
+                let CaptionCue::Bitmap { bitmap, .. } = cue else {
+                    panic!("try_bitmap must yield a bitmap cue");
+                };
+                ((*id).to_owned(), bitmap)
+            })
+            .collect()
+    }
+
+    /// The Image primitives whose dest rect lies inside `rect` (canvas pixels).
+    fn images_in(list: &OverlayDrawList, rect: OverlayRect) -> Vec<OverlayRect> {
+        list.primitives
+            .iter()
+            .filter_map(|p| match p {
+                OverlayPrimitive::Image { dest, .. }
+                    if dest.x >= rect.x
+                        && dest.x < rect.x + i32_dim(rect.width)
+                        && dest.y >= rect.y
+                        && dest.y < rect.y + i32_dim(rect.height) =>
+                {
+                    Some(*dest)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bitmap_caption_burns_into_only_its_own_tile_bottom_anchored() {
+        // A CueBitmap published for in_a must produce >=1 Image primitive whose
+        // dest is inside in_a's cell rect; in_b (no bitmap) gets none. The dest is
+        // bottom-anchored within the cell (mirrors the text caption model).
+        let tiles = quad_tiles();
+        let mut baker = OverlayBaker::new(tiles.clone(), epoch_clock()).unwrap();
+
+        let dyns = dynamics(&[
+            ("in_a", -3.0, SourceState::Live),
+            ("in_b", -3.0, SourceState::Live),
+        ]);
+        // A source-resolution band (like a 400x60 DVB-sub rect on a 640x480 src).
+        let bmps = bitmaps(&[("in_a", 400, 60)]);
+
+        let pts = MediaTime::from_nanos(1_500_000_000);
+        let list = baker.draw_list(pts, &dyns, &no_captions(), &bmps).unwrap();
+
+        let geom_a = TileGeometry::resolve(tiles[0].rect);
+        let geom_b = TileGeometry::resolve(tiles[1].rect);
+        let cell_a = OverlayRect::new(geom_a.x, geom_a.y, geom_a.width, geom_a.height);
+        let cell_b = OverlayRect::new(geom_b.x, geom_b.y, geom_b.width, geom_b.height);
+
+        let a_images = images_in(&list, cell_a);
+        let b_images = images_in(&list, cell_b);
+        assert!(
+            !a_images.is_empty(),
+            "in_a's bitmap cue must produce >=1 Image inside in_a's cell"
+        );
+        assert!(
+            b_images.is_empty(),
+            "in_b has no bitmap cue: no Image in its cell (got {})",
+            b_images.len()
+        );
+
+        // The image dest is bottom-anchored: its bottom edge sits in the lower
+        // half of the cell, and the whole dest stays within the cell rect.
+        let cell_mid_y = geom_a.y.saturating_add(i32_dim(geom_a.height / 2));
+        let cell_bottom = geom_a.y.saturating_add(i32_dim(geom_a.height));
+        for d in &a_images {
+            let dest_bottom = d.y.saturating_add(i32_dim(d.height));
+            assert!(
+                dest_bottom > cell_mid_y,
+                "image dest bottom {dest_bottom} should be in the lower half (mid {cell_mid_y})"
+            );
+            assert!(
+                dest_bottom <= cell_bottom,
+                "image dest bottom {dest_bottom} within cell bottom {cell_bottom}"
+            );
+            assert!(d.x >= geom_a.x, "image dest left within cell");
+            assert!(
+                d.x.saturating_add(i32_dim(d.width))
+                    <= geom_a.x.saturating_add(i32_dim(geom_a.width)),
+                "image dest right within cell"
+            );
+        }
     }
 
     /// The TOP-RIGHT fault-badge band of a cell: the upper chip-height strip,
@@ -1352,7 +1558,7 @@ mod tests {
         ]);
 
         let list = baker
-            .draw_list(MediaTime::ZERO, &dyns, &no_captions())
+            .draw_list(MediaTime::ZERO, &dyns, &no_captions(), &no_bitmaps())
             .unwrap();
 
         let geom_a = TileGeometry::resolve(tiles[0].rect);
@@ -1385,7 +1591,12 @@ mod tests {
         let mut baker = OverlayBaker::new(tiles.clone(), epoch_clock()).unwrap();
         // No dynamics at all: every tile must be NO_SIGNAL (never panics/stalls).
         let list = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         // The "NO SIGNAL" flag draws glyphs near each tile's top-left.
         for spec in &tiles {
@@ -1407,7 +1618,7 @@ mod tests {
             .with_per_tile_safe_area(true);
         let dyns = dynamics(&[("in_a", 0.0, SourceState::Live)]);
         let list = baker
-            .draw_list(MediaTime::ZERO, &dyns, &no_captions())
+            .draw_list(MediaTime::ZERO, &dyns, &no_captions(), &no_bitmaps())
             .unwrap();
 
         // Every per-tile primitive for tile A must lie within tile A's rect (the
@@ -1446,7 +1657,7 @@ mod tests {
         let dyns = dynamics(&[("in_tiny", 0.0, SourceState::Live)]);
         // Must not panic; produces (at most) the clock label, no tile chrome.
         let _ = baker
-            .draw_list(MediaTime::ZERO, &dyns, &no_captions())
+            .draw_list(MediaTime::ZERO, &dyns, &no_captions(), &no_bitmaps())
             .unwrap();
     }
 
@@ -1474,7 +1685,12 @@ mod tests {
         let tiles = quad_tiles();
         let mut plain = OverlayBaker::new(tiles.clone(), epoch_clock()).unwrap();
         let plain_list = plain
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         let (plain_rings, plain_strokes) = rings_and_strokes(&plain_list);
         assert_eq!(
@@ -1492,7 +1708,12 @@ mod tests {
                 90.0,
             ));
         let list = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         let (rings, strokes) = rings_and_strokes(&list);
         assert_eq!(rings, 1, "the analog face draws exactly one bezel ring");
@@ -1528,7 +1749,12 @@ mod tests {
         // The baker draws SOMETHING in the clock band (the digital readout +
         // reference badge), proving the clock overlay renders.
         let list = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         assert!(
             clock_band_glyphs(&list) > 0,
@@ -1562,7 +1788,12 @@ mod tests {
 
         // Bake at tick 0: the readout the BAKER drew is the wall instant.
         let list_t0 = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         let fp_t0 = clock_readout_fingerprint(&list_t0);
         assert!(!fp_t0.is_empty(), "the digital readout must draw glyphs");
@@ -1577,6 +1808,7 @@ mod tests {
                 MediaTime::from_nanos(4_000_000_000),
                 &HashMap::new(),
                 &no_captions(),
+                &no_bitmaps(),
             )
             .unwrap();
         assert_eq!(
@@ -1590,7 +1822,12 @@ mod tests {
         // tracks the live wall clock, and the model agrees.
         fake.advance(125);
         let list_wall = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         assert_ne!(
             clock_readout_fingerprint(&list_wall),
@@ -1636,12 +1873,22 @@ mod tests {
         };
 
         let t0 = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         // Advance ONLY the wall clock by 1 s; hold the tick at ZERO.
         fake.advance(1);
         let t1 = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         let (x0, y0) = second_tip(&t0);
         let (x1, y1) = second_tip(&t1);
@@ -1663,7 +1910,12 @@ mod tests {
 
         let mut baker = OverlayBaker::new(quad_tiles(), src).unwrap();
         let list = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
 
         // The reference badge glyph must be present among the rasterized runs. We
