@@ -9,3 +9,11 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# gen-openapi serializes mosaic-control's utoipa OpenApi document. The `openapi`
+# feature (default-on in mosaic-control) is what brings in utoipa + the ApiDoc.
+mosaic-control = { workspace = true, features = ["openapi"] }
+utoipa = { version = "5.5.0" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

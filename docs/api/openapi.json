@@ -1,0 +1,206 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Mosaic Control API",
+    "description": "REST + WebSocket + SSE management API for the Mosaic engine.",
+    "contact": {
+      "name": "The Mosaic Authors"
+    },
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/layouts": {
+      "get": {
+        "tags": [
+          "layouts"
+        ],
+        "summary": "`GET /api/v1/layouts` — list all layouts (role: read).",
+        "operationId": "list_layouts",
+        "responses": {
+          "200": {
+            "description": "All layouts, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Layout"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AcceptedBody": {
+        "type": "object",
+        "description": "A `202 Accepted` body returned for an asynchronously-applied command.",
+        "required": [
+          "operation_id",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The command kind (e.g. `start`)."
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id correlating this command's eventual outcome on the\nrealtime stream."
+          }
+        }
+      },
+      "Layout": {
+        "type": "object",
+        "description": "A persisted layout resource.\n\nThe `body` is the opaque, validated layout document the editor produces; the\ncontrol plane stores and version-stamps it without interpreting its\ninternals here. (Engine-side validation against `mosaic-config` happens\nbefore a layout is applied.)",
+        "required": [
+          "id",
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "description": "The opaque layout document (canvas + cells), as canonical JSON."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable resource id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
+      "LayoutInput": {
+        "type": "object",
+        "description": "The fields a create/update accepts (the id is supplied separately on create\nand immutable on update).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "description": "The opaque layout document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
+      "OperationId": {
+        "type": "string",
+        "description": "A correlation id for an asynchronously-applied control command.\n\nReturned to the client in a `202 Accepted` response and echoed by the engine\non the realtime stream (`corr`) when the command's outcome is known."
+      },
+      "Problem": {
+        "type": "object",
+        "description": "An RFC 9457 problem-details document.\n\nSerialized as `application/problem+json`. The `status` field is authoritative\nand is also used as the HTTP status code by the [`IntoResponse`] impl. A\n`status` outside the valid `100..=599` range falls back to `500`.",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A human-readable explanation specific to this occurrence."
+          },
+          "instance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A URI reference identifying this specific occurrence (e.g. the request\npath or an operation id)."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The HTTP status code, duplicated into the body per RFC 9457.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "A short, human-readable summary of the problem type."
+          },
+          "type": {
+            "type": "string",
+            "description": "A URI reference identifying the problem type (here a `/problems/<slug>`)."
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "description": "A coarse role governing which actions a principal may perform.\n\nOrdered by privilege: `Viewer < Operator < Admin`. [`Role::can`] expresses\nthe action gate.",
+        "enum": [
+          "viewer",
+          "operator",
+          "admin"
+        ]
+      },
+      "SwapRequest": {
+        "type": "object",
+        "description": "The body of a `POST /commands/swap` request.",
+        "required": [
+          "tile",
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "The new source/input id to bind."
+          },
+          "tile": {
+            "type": "string",
+            "description": "The tile/cell id whose source binding changes."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "layouts",
+      "description": "Layout resource CRUD"
+    },
+    {
+      "name": "commands",
+      "description": "Operational commands (start/stop/swap)"
+    },
+    {
+      "name": "realtime",
+      "description": "WebSocket + SSE event stream"
+    }
+  ]
+}

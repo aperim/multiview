@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Workspace-internal implementation crate; never published to crates.io
+# (matches xtask). This lets cargo-deny's allow-wildcard-paths exempt the
+# intra-workspace path deps while still denying real "*" version wildcards.
+publish = false
+
+[lib]
+name = "mosaic_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mosaic"
@@ -17,14 +25,88 @@ mosaic-engine = { workspace = true }
 mosaic-control = { workspace = true }
 mosaic-config = { workspace = true }
 mosaic-telemetry = { workspace = true }
-tokio = { workspace = true }
+mosaic-compositor = { workspace = true }
+mosaic-framestore = { workspace = true }
+mosaic-hal = { workspace = true }
+mosaic-ffmpeg = { workspace = true }
+mosaic-input = { workspace = true }
+mosaic-output = { workspace = true }
+mosaic-audio = { workspace = true }
+mosaic-overlay = { workspace = true }
+mosaic-preview = { workspace = true }
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+# Feature presets for the `mosaic` binary. The DEFAULT build is `software`:
+# pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
+# presets aggregate the owning sub-crates' feature flags exactly as documented
+# in docs/architecture/conventions.md §4. They are NOT built in CI (they need
+# the vendor toolchains/SDKs installed); they exist so a release build can opt
+# in with one flag.
 [features]
 default = ["software"]
+
+# Software-only reference path (always available).
 software = []
-nvidia = []
-apple = []
-linux-vaapi = []
-full = []
+
+# NVIDIA: CUDA decode/encode + CUDA compositor fast path + FFmpeg demux/mux,
+# wgpu baseline compositor. (cuda + ffmpeg + wgpu.)
+nvidia = [
+    "mosaic-hal/cuda",
+    "mosaic-compositor/cuda",
+    "mosaic-compositor/wgpu",
+    "mosaic-ffmpeg/ffmpeg",
+    "mosaic-input/ffmpeg",
+    "mosaic-output/ffmpeg",
+    "mosaic-audio/ffmpeg",
+]
+
+# Apple Silicon / Intel macOS: VideoToolbox codecs + Metal compositor + FFmpeg.
+# (videotoolbox + metal + ffmpeg.)
+apple = [
+    "mosaic-hal/videotoolbox",
+    "mosaic-compositor/metal",
+    "mosaic-ffmpeg/ffmpeg",
+    "mosaic-input/ffmpeg",
+    "mosaic-output/ffmpeg",
+    "mosaic-audio/ffmpeg",
+]
+
+# Linux VAAPI/QSV: VAAPI + QuickSync codecs + wgpu compositor + FFmpeg.
+# (vaapi + qsv + ffmpeg + wgpu.)
+linux-vaapi = [
+    "mosaic-hal/vaapi",
+    "mosaic-hal/qsv",
+    "mosaic-compositor/vaapi",
+    "mosaic-compositor/wgpu",
+    "mosaic-ffmpeg/ffmpeg",
+    "mosaic-input/ffmpeg",
+    "mosaic-output/ffmpeg",
+    "mosaic-audio/ffmpeg",
+]
+
+# Everything non-GPL: all codec backends, every compositor backend, FFmpeg,
+# libass overlays, the embedded SPA, OpenAPI docs, WebRTC preview, and NDI I/O.
+# Deliberately excludes `gpl-codecs` (which would relicense the whole build GPL).
+full = [
+    "nvidia",
+    "linux-vaapi",
+    "mosaic-hal/videotoolbox",
+    "mosaic-compositor/metal",
+    "mosaic-overlay/libass",
+    "mosaic-input/ndi",
+    "mosaic-output/ndi",
+    "mosaic-control/embed-web",
+    "mosaic-control/openapi",
+    "mosaic-preview/webrtc",
+]
+
+[lints]
+workspace = true

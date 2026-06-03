@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Workspace-internal implementation crate; never published to crates.io
+# (matches xtask). This lets cargo-deny's allow-wildcard-paths exempt the
+# intra-workspace path deps while still denying real "*" version wildcards.
+publish = false
 
 [dependencies]
 mosaic-core = { workspace = true }
@@ -14,7 +18,32 @@ mosaic-events = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+# HMAC-SHA256 for short-lived signed preview access tokens. RustCrypto, pinned;
+# hmac/sha2/digest/crypto-common are MIT OR Apache-2.0 (cargo-deny allowlisted).
+hmac = "0.12.1"
+sha2 = "0.10.9"
+# Pure-Rust baseline JPEG encoder for the default (GPU-free) preview build. Pinned
+# EXACTLY to 0.6.0: that single release is licensed `MIT OR Apache-2.0` (cargo-deny
+# allowlisted) and, with the `simd` feature OFF (we never enable it), the crate is
+# itself `forbid(unsafe_code)` and dependency-free. Both 0.6.1 and the 0.7 line add
+# an extra `IJG` license term that is NOT in our allowlist and would fail
+# `cargo deny`, so we deliberately do not float to them.
+jpeg-encoder = { version = "=0.6.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+# Decoder used ONLY in tests to prove the bytes we emit are a real, decodable JPEG
+# of the expected geometry and colour — never linked into the shipped crate.
+zune-jpeg = { version = "0.4", default-features = false }
 
 [features]
 "default" = []
+# Off-by-default: WHEP/WebRTC focus transport pulls native ICE/DTLS/SRTP stacks.
+# The default build is pure-Rust (MJPEG/snapshot model + tokens only). Enabling it
+# turns on the WHEP offer/answer scaffold + preview-encoder selection; the actual
+# ICE/DTLS/SRTP transport remains a separately-gated TODO (no native dep is pulled
+# yet, so the gated build stays green and deny-clean).
 "webrtc" = []
+
+[lints]
+workspace = true
