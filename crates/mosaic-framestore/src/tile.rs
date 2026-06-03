@@ -17,11 +17,47 @@
 use core::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use mosaic_core::time::MediaTime;
 use mosaic_core::traits::SourceState;
 
 use crate::latest::LatestSlot;
 use crate::state::{classify, TileThresholds};
+
+/// Select the entry whose `at` is nearest-but-not-after `now`, falling back to
+/// the earliest retained entry when every entry is still ahead of `now`.
+/// Returns `None` only for an empty ring. The ring is ascending in `at`, so this
+/// is a binary search for the rightmost entry `<= now`.
+fn select_nearest_not_after<T>(ring: &[RingEntry<T>], now: MediaTime) -> Option<&RingEntry<T>> {
+    let first = ring.first()?;
+    // Partition point: count of entries with `at <= now`. The last such entry is
+    // the latch; if there are none, every entry is ahead of `now` → earliest.
+    let idx = ring.partition_point(|e| e.at <= now);
+    if idx == 0 {
+        Some(first)
+    } else {
+        ring.get(idx.saturating_sub(1)).or(Some(first))
+    }
+}
+
+/// One retained frame in the media-time ring: the source-relative media instant
+/// it represents, paired with the frame. Ordered by `at` (publishes are
+/// monotonic in media time on the normal path; an out-of-order or backwards
+/// stamp re-anchors the ring, see [`TileStore::publish_arc`]).
+#[derive(Debug)]
+struct RingEntry<T> {
+    at: MediaTime,
+    frame: Arc<T>,
+}
+
+impl<T> Clone for RingEntry<T> {
+    fn clone(&self) -> Self {
+        Self {
+            at: self.at,
+            frame: Arc::clone(&self.frame),
+        }
+    }
+}
 
 /// Sentinel stored in [`TileStore::last_frame_at_ns`] meaning "no frame has
 /// ever been published". `i64::MIN` can never be a real publish instant
@@ -116,9 +152,24 @@ pub struct TileStore<T> {
     /// (not an `Arc` cell) so a reader observes it lock-free with no allocation
     /// and no extra reclamation machinery alongside the frame slot.
     last_frame_at_ns: AtomicI64,
+    /// A bounded, media-time-ordered ring of recently-published frames, used by
+    /// [`read_at`](TileStore::read_at) to latch the frame nearest-but-not-after
+    /// the output clock's instant (streaming-gotchas §1). Stored as a snapshot
+    /// behind an [`ArcSwap`] so the reader is **lock-free and never blocks** on a
+    /// writer (invariant #1): the writer copies the (≤ [`RING_CAPACITY`]) ring,
+    /// appends, drops the oldest beyond capacity, and atomically swaps it in.
+    ///
+    /// [`RING_CAPACITY`]: TileStore::RING_CAPACITY
+    ring: ArcSwap<Vec<RingEntry<T>>>,
 }
 
 impl<T> TileStore<T> {
+    /// Capacity of the bounded media-time ring used by
+    /// [`read_at`](TileStore::read_at). Sized to absorb a producer running well
+    /// ahead of a temporarily-slow output loop (drop-oldest beyond this), while
+    /// staying small and bounded (invariant: queues drop, never grow).
+    pub const RING_CAPACITY: usize = 256;
+
     /// Create an empty tile store with the given id, thresholds, and no-signal
     /// policy. Until the first [`publish`](TileStore::publish), the tile is in
     /// [`SourceState::NoSignal`].
@@ -134,6 +185,7 @@ impl<T> TileStore<T> {
             thresholds,
             policy,
             last_frame_at_ns: AtomicI64::new(NEVER_PUBLISHED),
+            ring: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -171,7 +223,29 @@ impl<T> TileStore<T> {
     /// As [`publish`](TileStore::publish), for a frame already wrapped in an
     /// [`Arc`].
     pub fn publish_arc(&self, frame: Arc<T>, at: MediaTime) -> u64 {
-        let seq = self.slot.publish_arc(frame);
+        let seq = self.slot.publish_arc(Arc::clone(&frame));
+        // Append to the media-time ring (drop-oldest, bounded — invariant: queues
+        // drop, never grow). The ring backs the latch-on-tick `read_at`. A frame
+        // whose stamp goes backwards (a discontinuity / new source generation
+        // after reconnect) re-anchors the ring on itself rather than leaving a
+        // stale future-stamped frame ahead of it, so sampling cannot get stuck
+        // pointing past the new content.
+        let entry = RingEntry { at, frame };
+        self.ring.rcu(|current| {
+            let mut next: Vec<RingEntry<T>> = if current.last().is_some_and(|tail| at < tail.at) {
+                // Backwards stamp: discard the now-superseded future and restart.
+                Vec::with_capacity(1)
+            } else {
+                Vec::clone(current)
+            };
+            next.push(entry.clone());
+            // Drop the oldest entries beyond the bounded capacity.
+            let overflow = next.len().saturating_sub(Self::RING_CAPACITY);
+            if overflow > 0 {
+                next.drain(0..overflow);
+            }
+            next
+        });
         // Record the arrival instant after the frame is visible in the slot, so
         // a reader that observes a fresh `last_frame_at_ns` is guaranteed to
         // also see (at least) this frame in the slot — never a newer timestamp
@@ -241,6 +315,57 @@ impl<T> TileStore<T> {
                     frame,
                     state: self.state(now),
                 },
+                NoSignalPolicy::Slate => TileRead::NoSignal,
+            },
+        }
+    }
+
+    /// Read the tile latched to **output media time** `now` (streaming-gotchas
+    /// §1, "latch-on-tick"): selects the retained frame whose source-relative
+    /// `media_time` is *nearest-but-not-after* `now`, so the tile advances exactly
+    /// in step with the output clock regardless of how fast the producer decoded
+    /// (a producer that ran far ahead does not race the tile; a stalled producer
+    /// holds; a finite source past its end freezes on its last frame).
+    ///
+    /// Selection rule:
+    /// * the latest entry with `entry.at <= now` (the latched frame), else
+    /// * the earliest *retained* entry (the first frame's stamp may sit a touch
+    ///   after the very first tick, or old entries were evicted — show content,
+    ///   not a slate), else
+    /// * [`TileRead::NoSignal`] when nothing has ever been published.
+    ///
+    /// The freshness ladder is evaluated on the *latched* frame's lag behind
+    /// `now` (`now - entry.at`), so a frozen / exhausted source correctly ages
+    /// into `STALE` → `NO_SIGNAL` as output time runs on past its last frame,
+    /// while a source tracking output time stays `LIVE`.
+    ///
+    /// Never blocks: it reads an atomic snapshot of the bounded ring.
+    #[must_use]
+    pub fn read_at(&self, now: MediaTime) -> TileRead<T> {
+        let ring = self.ring.load();
+        let Some(selected) = select_nearest_not_after(&ring, now) else {
+            return TileRead::NoSignal;
+        };
+        // The latched frame's lag behind output time drives the failure ladder:
+        // a frame at-or-after `now` is fresh (lag 0); a frame falling behind (the
+        // producer stalled / the clip ended) ages exactly as the ladder expects.
+        let lag = now.saturating_sub(selected.at);
+        let state = classify(lag, self.thresholds);
+        let frame = Arc::clone(&selected.frame);
+        match state {
+            SourceState::Live => TileRead::Fresh { frame },
+            SourceState::Stale | SourceState::Reconnecting => TileRead::Held { frame, state },
+            SourceState::NoSignal => match self.policy {
+                NoSignalPolicy::HoldForever => TileRead::Held {
+                    frame,
+                    state: SourceState::NoSignal,
+                },
+                NoSignalPolicy::Slate => TileRead::NoSignal,
+            },
+            // `SourceState` is `#[non_exhaustive]`; treat any future state
+            // conservatively (mirror `read`).
+            _ => match self.policy {
+                NoSignalPolicy::HoldForever => TileRead::Held { frame, state },
                 NoSignalPolicy::Slate => TileRead::NoSignal,
             },
         }

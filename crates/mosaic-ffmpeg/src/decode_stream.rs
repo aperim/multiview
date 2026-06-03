@@ -52,9 +52,24 @@ pub struct StreamVideoDecoder {
     /// not already a canonical working format). Keyed implicitly by the source
     /// geometry/format it was built for; rebuilt on a mid-stream change.
     to_nv12: Option<Scaler>,
+    /// Last emitted presentation time (ns). Feeds the genpts fallback so a frame
+    /// that carries no usable timestamp still advances the timeline (invariant
+    /// #3) — otherwise every such frame would map to 0 and a downstream PTS
+    /// pacer would release the whole stream at once.
+    last_pts_ns: Option<i64>,
+    /// Inter-frame step (ns) used only by the genpts fallback in
+    /// [`Self::next_pts`]. Defaults to the NTSC nominal (`1/29.97`); set from the
+    /// stream's declared cadence via [`Self::with_declared_fps`] so 25/24 fps
+    /// sources advance at their true rate rather than an NTSC-shaped guess.
+    fallback_step_ns: i64,
 }
 
 impl StreamVideoDecoder {
+    /// Default genpts fallback inter-frame step (NTSC nominal `1/29.97`), used
+    /// only when the stream declares no usable frame rate. A real cadence is
+    /// derived from the declared fps via [`Self::with_declared_fps`].
+    const DEFAULT_FALLBACK_STEP_NS: i64 = 33_366_667;
+
     /// Build a decoder from a [`Demuxer`](crate::demux::Demuxer) stream's
     /// parameters and time-base.
     ///
@@ -68,7 +83,22 @@ impl StreamVideoDecoder {
             decoder,
             time_base,
             to_nv12: None,
+            last_pts_ns: None,
+            fallback_step_ns: Self::DEFAULT_FALLBACK_STEP_NS,
         })
+    }
+
+    /// Set the genpts fallback inter-frame step from the stream's declared frame
+    /// rate (e.g. the demuxer's `avg_frame_rate`). A non-positive or zero rate is
+    /// ignored and the NTSC default retained — the cadence is never fabricated
+    /// (invariant #3: real timing only, never a float-fps guess). Chainable after
+    /// [`Self::new`].
+    #[must_use]
+    pub fn with_declared_fps(mut self, fps: Option<Rational>) -> Self {
+        if let Some(step) = fps.and_then(fallback_step_ns_from_fps) {
+            self.fallback_step_ns = step;
+        }
+        self
     }
 
     /// Send one coded packet to the decoder.
@@ -116,7 +146,10 @@ impl StreamVideoDecoder {
             decoded.color_transfer_characteristic(),
             decoded.color_range(),
         );
-        let raw_pts = decoded.pts();
+        // Prefer the decoder's best-effort timestamp: a bare `.pts()` is
+        // frequently absent after decoding (mpeg2/H.264 with B-frames), which
+        // would map every frame to 0 and defeat downstream PTS pacing.
+        let raw_pts = decoded.timestamp().or_else(|| decoded.pts());
         let nv12 = self.ensure_nv12(decoded)?;
 
         // After `ensure_nv12` the frame is NV12 (8-bit) or P010LE (10-bit); any
@@ -127,7 +160,7 @@ impl StreamVideoDecoder {
             _ => PixelFormat::Nv12,
         };
 
-        let pts = self.pts_to_media_time(raw_pts);
+        let pts = self.next_pts(raw_pts);
         let meta = FrameMeta {
             pts,
             width: nv12.width(),
@@ -163,16 +196,39 @@ impl StreamVideoDecoder {
     }
 
     /// Rebase a raw stream PTS into the internal nanosecond timeline using the
-    /// stream time-base. An absent PTS maps to [`MediaTime::ZERO`].
-    fn pts_to_media_time(&self, raw: Option<i64>) -> MediaTime {
-        match raw {
-            Some(ticks) => {
-                let ns = rescale(ticks, self.time_base, Rational::new(1, 1_000_000_000));
-                MediaTime::from_nanos(ns)
-            }
-            None => MediaTime::ZERO,
-        }
+    /// stream time-base, with a genpts fallback (invariant #3): a frame with no
+    /// usable timestamp advances by one nominal frame from the last emitted PTS
+    /// rather than collapsing to 0, so a downstream PTS-to-wall-clock pacer keeps
+    /// pacing instead of releasing the whole stream at once.
+    fn next_pts(&mut self, raw: Option<i64>) -> MediaTime {
+        let ns = match raw {
+            Some(ticks) => rescale(ticks, self.time_base, Rational::new(1, 1_000_000_000)),
+            None => match self.last_pts_ns {
+                Some(last) => last.saturating_add(self.fallback_step_ns),
+                None => 0,
+            },
+        };
+        self.last_pts_ns = Some(ns);
+        MediaTime::from_nanos(ns)
     }
+}
+
+/// Derive the genpts fallback inter-frame step (ns) from a declared frame rate
+/// (`num/den` fps). Returns `None` for a non-positive or zero rate so the caller
+/// keeps its default — the cadence is never fabricated (invariant #3).
+///
+/// `period_ns = 1e9 / fps = 1e9 * den / num`, computed via the exact-rational
+/// [`rescale`] so NTSC fractional rates stay exact (`30000/1001 → 33_366_667`).
+fn fallback_step_ns_from_fps(fps: Rational) -> Option<i64> {
+    if fps.num <= 0 || fps.den <= 0 {
+        return None;
+    }
+    let step = rescale(
+        1_000_000_000,
+        Rational::new(fps.den, fps.num),
+        Rational::new(1, 1),
+    );
+    (step > 0).then_some(step)
 }
 
 /// A decoded audio frame plus a minimal description.
@@ -282,4 +338,59 @@ pub fn nanos_from_ticks(ticks: i64, time_base: ffmpeg::Rational) -> i64 {
         from_ff_rational(time_base),
         Rational::new(1, 1_000_000_000),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_step_matches_declared_cadence() {
+        // PAL 25 fps → 40.000 ms; the bug was every source advancing at the
+        // NTSC-shaped ~33.367 ms regardless of its real rate.
+        assert_eq!(
+            fallback_step_ns_from_fps(Rational::new(25, 1)),
+            Some(40_000_000)
+        );
+        // Film 24 fps → 41.666… ms (rounded half away from zero).
+        assert_eq!(
+            fallback_step_ns_from_fps(Rational::new(24, 1)),
+            Some(41_666_667)
+        );
+        // 50 fps → 20 ms.
+        assert_eq!(
+            fallback_step_ns_from_fps(Rational::new(50, 1)),
+            Some(20_000_000)
+        );
+    }
+
+    #[test]
+    fn fallback_step_keeps_ntsc_rates_exact() {
+        // 29.97 (30000/1001) reproduces the historical default constant exactly.
+        assert_eq!(
+            fallback_step_ns_from_fps(Rational::FPS_29_97),
+            Some(StreamVideoDecoder::DEFAULT_FALLBACK_STEP_NS)
+        );
+        // 23.976 film (24000/1001) → ~41.708 ms.
+        assert_eq!(
+            fallback_step_ns_from_fps(Rational::FPS_23_976),
+            Some(41_708_333)
+        );
+        // 59.94 (60000/1001) → ~16.683 ms.
+        assert_eq!(
+            fallback_step_ns_from_fps(Rational::FPS_59_94),
+            Some(16_683_333)
+        );
+    }
+
+    #[test]
+    fn fallback_step_rejects_unusable_rates_without_fabricating() {
+        // Unknown rate (libav reports 0/0 or 0/1) and malformed rationals are
+        // ignored so the caller keeps its default rather than dividing by zero
+        // or inventing a cadence.
+        assert_eq!(fallback_step_ns_from_fps(Rational::new(0, 1)), None);
+        assert_eq!(fallback_step_ns_from_fps(Rational::new(0, 0)), None);
+        assert_eq!(fallback_step_ns_from_fps(Rational::new(25, 0)), None);
+        assert_eq!(fallback_step_ns_from_fps(Rational::new(-25, 1)), None);
+    }
 }

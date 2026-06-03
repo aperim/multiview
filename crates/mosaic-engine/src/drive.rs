@@ -246,7 +246,13 @@ impl CompositorDrive<Nv12Image> {
         let Some(store) = self.stores.get(source) else {
             return (Arc::clone(&self.nosignal_card), SourceState::NoSignal);
         };
-        let read = store.read(now);
+        // Latch-on-tick: sample by the OUTPUT media instant `now`, selecting the
+        // source frame nearest-but-not-after it (streaming-gotchas §1). This is
+        // what makes a tile advance 1:1 with output time even when the output
+        // loop momentarily runs slower than real-time and the producer decoded
+        // ahead — a plain latest-wins read would race the tile to the newest
+        // decoded frame.
+        let read = store.read_at(now);
         let state = read.state();
         match read.frame() {
             Some(frame) => (Arc::clone(frame), state),

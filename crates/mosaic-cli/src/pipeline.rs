@@ -716,7 +716,10 @@ impl RealPipeline {
 
     /// Overlays disabled at compile time: hand back the bare collected canvases.
     #[cfg(not(feature = "overlay"))]
-    #[allow(clippy::unnecessary_wraps)] // reason: mirrors the `overlay`-on signature.
+    // reason: both arms share one `(&self, …) -> Result<…>` signature so the
+    // caller stays feature-agnostic; this identity stub simply needs neither
+    // `self` nor a fallible return.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
     fn bake_overlays(
         &self,
         ticks: Vec<CollectedTick>,
@@ -790,6 +793,11 @@ struct CollectedTick {
     /// Per-source lifecycle state sampled this tick (`source_id -> state`); a
     /// cell with no bound source is omitted (and a source absent here is treated
     /// as `NO_SIGNAL` by the baker).
+    // reason: only the `overlay`-on baker reads this (it drives the per-tile
+    // fault flag); with overlays compiled out there is no flag to render, so the
+    // field is legitimately unread in that build. The collector still samples it
+    // unconditionally to keep one `CollectedTick` shape across features.
+    #[cfg_attr(not(feature = "overlay"), allow(dead_code))]
     source_states: std::collections::HashMap<String, mosaic_core::traits::SourceState>,
 }
 
@@ -1417,7 +1425,7 @@ fn open_and_stream(
         SourceLocation::Url(u) => ffmpeg::format::input(&u.as_str()).map_err(|e| e.to_string())?,
     };
 
-    let (stream_index, params, time_base) = {
+    let (stream_index, params, time_base, declared_fps) = {
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)
@@ -1426,10 +1434,16 @@ fn open_and_stream(
             stream.index(),
             stream.parameters(),
             mosaic_ffmpeg::from_ff_rational(stream.time_base()),
+            mosaic_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
         )
     };
 
-    let mut decoder = StreamVideoDecoder::new(params, time_base).map_err(|e| e.to_string())?;
+    // Feed the declared cadence so the decoder's genpts fallback advances at the
+    // source's true rate (PAL 25, film 24, …) rather than an NTSC-shaped guess;
+    // an unusable rate is ignored inside `with_declared_fps` (invariant #3).
+    let mut decoder = StreamVideoDecoder::new(params, time_base)
+        .map_err(|e| e.to_string())?
+        .with_declared_fps(Some(declared_fps));
     let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
     // The wall-clock pacer: maps the first frame's PTS to "now" and releases
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
@@ -1443,9 +1457,11 @@ fn open_and_stream(
         }
         while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
             let image = to_tile.convert(&decoded.frame, tag)?;
-            // Pace to the frame's PTS (invariant #4), then publish it stamped
-            // with elapsed wall-clock so the tile's freshness ladder tracks real
-            // arrival time. Re-check `stop` after the (possibly long) pace wait.
+            // Pace to the frame's PTS (invariant #4) so a file/VOD source is not
+            // slurped into the ring faster than real time, then publish it
+            // stamped with its SOURCE-RELATIVE media time — the timeline the
+            // output clock latches against (latch-on-tick; see `publish_time`).
+            // Re-check `stop` after the (possibly long) pace wait.
             pacer.wait_for(decoded.meta.pts, stop);
             if stop.load(Ordering::Acquire) {
                 return Ok(());
@@ -1532,16 +1548,24 @@ impl PtsWallClock {
         }
     }
 
-    /// The timeline instant to stamp a published frame with: the elapsed
-    /// wall-clock since the anchor, so the store's freshness ladder advances in
-    /// real time (it is *input*-time-agnostic; the output clock re-stamps PTS).
+    /// The timeline instant to stamp a published frame with: the frame's
+    /// **source-relative media time** (`pts - first_pts`), i.e. how far into the
+    /// clip this frame sits, measured from the first decoded frame.
+    ///
+    /// This is the timeline the output clock samples against (latch-on-tick,
+    /// streaming-gotchas §1): output tick `N` latches the source frame whose
+    /// source-relative media time is nearest-but-not-after `N * tick_period`, so
+    /// the tile advances exactly 1:1 with output media time regardless of how
+    /// fast the producer decoded. Stamping wall-clock-elapsed here instead would
+    /// re-introduce the race whenever the output loop runs slower than real time
+    /// (the producer would have published far ahead of the output's own clock).
+    ///
+    /// A frame whose PTS precedes the anchor (a re-anchor case the caller already
+    /// handles in [`Self::wait_for`]) clamps to zero rather than going negative.
     fn publish_time(&self, pts: MediaTime) -> MediaTime {
         match self.anchor {
-            Some((base_instant, _)) => {
-                let elapsed = base_instant.elapsed();
-                MediaTime::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX))
-            }
-            None => pts,
+            Some((_, base_pts)) => pts.saturating_sub(base_pts),
+            None => MediaTime::ZERO,
         }
     }
 }
