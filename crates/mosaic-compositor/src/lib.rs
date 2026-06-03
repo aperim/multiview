@@ -25,6 +25,8 @@
 //! - [`range`] — limited<->full quantization range expand/compress (8-bit).
 //! - [`matrix`] — YUV'<->R'G'B' matrices (BT.601/709/2020-NCL).
 //! - [`transfer`] — EOTF/OETF (sRGB, BT.709/BT.1886, PQ ST 2084, HLG B67).
+//! - [`transfer_lut`] — table-of-values evaluation of the EOTF/OETF for the
+//!   real-time compositor (ADR-0022); `transfer` stays the golden oracle.
 //! - [`primaries`] — linear-light gamut conversion (709<->2020 via XYZ).
 //! - [`blend`] — premultiplied-alpha source-over in linear light.
 //! - [`pipeline`] — the fixed-order pipeline + CPU reference compositor.
@@ -49,11 +51,14 @@ pub mod pipeline;
 pub mod primaries;
 pub mod range;
 pub mod transfer;
+pub mod transfer_lut;
 
 pub use error::{Error, Result};
 pub use pipeline::{
-    canvas_linear_to_output_yuv, composite, tile_yuv_to_canvas_linear, CanvasColor, Nv12Image, Tile,
+    canvas_linear_to_output_yuv, composite, composite_with, tile_yuv_to_canvas_linear, CanvasColor,
+    Nv12Image, Tile,
 };
+pub use transfer_lut::LutSet;
 
 #[cfg(feature = "wgpu")]
 pub use gpu::{GpuCompositor, GpuContext};

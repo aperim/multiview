@@ -19,6 +19,7 @@ use mosaic_core::color::{
 
 use crate::blend::{over, LinearRgba, PremulRgba};
 use crate::error::{Error, Result};
+use crate::transfer_lut::LutSet;
 use crate::{matrix, primaries, range, transfer};
 
 /// The fixed canvas color description (ADR-C001).
@@ -332,6 +333,29 @@ pub fn composite(
     background: LinearRgba,
     tiles: &[Tile<'_>],
 ) -> Result<Nv12Image> {
+    composite_with(canvas_w, canvas_h, canvas, background, tiles, true)
+}
+
+/// Composite as [`composite`], but with explicit control over whether the
+/// per-pixel EOTF/OETF run through the lookup-table path (`use_lut == true`,
+/// ADR-0022) or the un-LUT'd transcendental **oracle** (`use_lut == false`).
+///
+/// [`composite`] calls this with `use_lut == true`; the oracle path exists so
+/// equivalence tests can render the same canvas both ways (the LUT must match
+/// the oracle within `±1` code value). The pipeline **order** (invariant #8) is
+/// identical on both paths — only the EOTF/OETF *evaluation* changes.
+///
+/// # Errors
+///
+/// Same as [`composite`].
+pub fn composite_with(
+    canvas_w: u32,
+    canvas_h: u32,
+    canvas: CanvasColor,
+    background: LinearRgba,
+    tiles: &[Tile<'_>],
+    use_lut: bool,
+) -> Result<Nv12Image> {
     if canvas_w == 0 || canvas_h == 0 || canvas_w % 2 != 0 || canvas_h % 2 != 0 {
         return Err(Error::Geometry(format!(
             "canvas dimensions must be positive and even (got {canvas_w}x{canvas_h})"
@@ -342,12 +366,67 @@ pub fn composite(
     let h = usize::try_from(canvas_h)
         .map_err(|_| Error::Geometry("canvas height overflow".to_owned()))?;
 
-    let bg_premul = background.premultiplied();
+    // Build the transfer LUTs once per composite for exactly the transfers
+    // present (tiles + canvas); empty when `use_lut` is false. Unsupported
+    // transfers are absent and fall back to the oracle (same Err).
+    let luts = if use_lut {
+        let mut transfers: Vec<TransferCharacteristic> = vec![canvas.transfer];
+        for tile in tiles {
+            transfers.push(tile.image.color().transfer);
+        }
+        Some(LutSet::for_transfers(transfers))
+    } else {
+        None
+    };
+
     let mut y_plane = vec![0_u8; w * h];
     let mut uv_plane = vec![0_u8; w * h / 2];
 
-    for py in 0..canvas_h {
-        for px in 0..canvas_w {
+    composite_band(
+        &mut y_plane,
+        &mut uv_plane,
+        w,
+        0,
+        canvas_h,
+        canvas,
+        background,
+        tiles,
+        luts.as_ref(),
+    )?;
+
+    Nv12Image::new(canvas_w, canvas_h, y_plane, uv_plane, canvas.output_tag())
+}
+
+/// Render the canvas rows `[py_start, py_start + band_h)` into band-local Y/UV
+/// planes (`band_y` is `band_h` rows of `w` bytes; `band_uv` is `band_h/2` rows
+/// of `w` bytes). The tile/canvas coordinate space is the **global** canvas;
+/// `py_start` rebases the band-local row index to the global row used for tile
+/// addressing.
+///
+/// This is the single per-pixel pipeline used by both the serial path and the
+/// parallel bands: it runs the front half (`tile_yuv_to_canvas_linear`), the
+/// premultiplied linear `over`, and the back half (`canvas_linear_to_output_yuv`)
+/// — via the LUT when `luts` is `Some`, else the oracle.
+#[allow(clippy::too_many_arguments)]
+// reason: this is the internal band kernel; the arguments are the band slices
+// plus the shared composite parameters. Grouping them into a struct would not
+// reduce the surface and would obscure the disjoint-`&mut` band ownership that
+// makes the parallel split race-free.
+fn composite_band(
+    band_y: &mut [u8],
+    band_uv: &mut [u8],
+    w: usize,
+    py_start: u32,
+    band_h: u32,
+    canvas: CanvasColor,
+    background: LinearRgba,
+    tiles: &[Tile<'_>],
+    luts: Option<&LutSet>,
+) -> Result<()> {
+    let bg_premul = background.premultiplied();
+    for py_local in 0..band_h {
+        let py = py_start.saturating_add(py_local);
+        for px in 0..u32::try_from(w).unwrap_or(u32::MAX) {
             // Fold the covering tiles back-to-front in linear light.
             let mut acc = bg_premul;
             for tile in tiles {
@@ -357,7 +436,12 @@ pub fn composite(
                 let Some((y8, cb8, cr8)) = tile.image.sample(sx, sy) else {
                     continue;
                 };
-                let lin = tile_yuv_to_canvas_linear(y8, cb8, cr8, tile.image.color(), canvas)?;
+                let lin = match luts {
+                    Some(lut) => {
+                        lut.tile_yuv_to_canvas_linear(y8, cb8, cr8, tile.image.color(), canvas)?
+                    }
+                    None => tile_yuv_to_canvas_linear(y8, cb8, cr8, tile.image.color(), canvas)?,
+                };
                 let src = LinearRgba {
                     r: lin[0],
                     g: lin[1],
@@ -374,12 +458,16 @@ pub fn composite(
                 a: acc.a,
             }
             .unpremultiplied();
-            let out = canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas)?;
-            write_pixel(&mut y_plane, &mut uv_plane, w, px, py, out);
+            let out = match luts {
+                Some(lut) => {
+                    lut.canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas)?
+                }
+                None => canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas)?,
+            };
+            write_pixel(band_y, band_uv, w, px, py_local, out);
         }
     }
-
-    Nv12Image::new(canvas_w, canvas_h, y_plane, uv_plane, canvas.output_tag())
+    Ok(())
 }
 
 /// Map a canvas pixel to the tile-local coordinate it samples, or [`None`] if
