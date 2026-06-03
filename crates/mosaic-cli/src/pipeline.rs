@@ -1003,6 +1003,31 @@ const SILENCE_FLOOR_DB: f64 = -50.0;
 /// [`mosaic_engine::AlarmStateMachine`] so the badge dwells/hysteresis rather than
 /// flapping. Any probe/geometry error logs and yields *no fault* (fail-safe):
 /// fault detection must never break the output clock (inv #1) or the engine (#10).
+///
+/// ## Freeze on a REAL encoded source (not just byte-identical frames)
+///
+/// A genuinely frozen feed delivered as compressed video is **not** byte-identical
+/// frame-to-frame: at every GOP boundary the codec re-quantizes the (unchanging)
+/// picture, perturbing a small fraction of luma samples. Instrumenting the demo's
+/// `frozen.ts` (mpeg2, ~1 s GOP) through this exact decode→scale→NV12 path showed
+/// the per-frame changed-fraction sits at `0.0` for most frames but **spikes to
+/// 1.2 %–4.6 % once per GOP** at the default tolerance (`diff_tolerance = 2`). The
+/// engine [`FreezeConfig::default`] threshold is `0.1 %`, so each GOP spike reads
+/// "not frozen" and, fed straight to the 2 s dwell machine, *resets the dwell*
+/// every ~1 s — the freeze alarm never sustains long enough to raise.
+///
+/// We must not change the shared engine probe defaults (the alarm system depends
+/// on them), so the CLI configures **its** freeze probe for real-world codec
+/// noise (see [`Self::new`]): raising `diff_tolerance` to `6` collapses the GOP
+/// spikes (the same source then sees max `1.27 %`, with `148 / 150` frames at or
+/// below the engine-default `0.1 %` change threshold, which is therefore KEPT —
+/// it cleanly separates a frozen feed from a moving-but-silent one, which stays
+/// `> 0.1 %` on `146 / 150` frames). On top of that, the instantaneous freeze
+/// condition is **debounced** over a short sliding window
+/// ([`FREEZE_DEBOUNCE_WINDOW`]/[`FREEZE_DEBOUNCE_MIN_PRESENT`]) before it reaches
+/// the dwell machine, so the *one or two* residual per-GOP noisy frames (and the
+/// first decoded frame) cannot reset an otherwise-sustained freeze. Black and
+/// silence are unaffected.
 #[cfg(feature = "overlay")]
 struct FaultDetector {
     /// The per-source last-good stores, shared with the engine drive loop.
@@ -1013,16 +1038,37 @@ struct FaultDetector {
     machines: std::collections::HashMap<String, SourceFaultMachines>,
     /// The stateless black probe (default broadcast threshold).
     black: mosaic_engine::BlackProbe,
-    /// The stateless freeze probe (default tolerance/threshold).
+    /// The stateless freeze probe, tuned for real encoded sources (see
+    /// [`Self::new`]): wider per-sample tolerance + change threshold than the
+    /// engine default so GOP re-quantization noise does not read as motion.
     freeze: mosaic_engine::FreezeProbe,
     /// The previous sampled frame per source, for the freeze comparison (held by
     /// `Arc`, so caching it copies no pixels).
     previous: std::collections::HashMap<String, Arc<Nv12Image>>,
+    /// Per-source sliding window of the most recent instantaneous freeze
+    /// conditions (newest pushed back, oldest popped front), used to debounce a
+    /// single noisy frame so it cannot reset the freeze dwell.
+    freeze_window: std::collections::HashMap<String, std::collections::VecDeque<bool>>,
     /// Dwell-up/dwell-down windows (derived from the cadence) per fault class.
     hysteresis_black: mosaic_engine::AlarmHysteresis,
     hysteresis_freeze: mosaic_engine::AlarmHysteresis,
     hysteresis_silence: mosaic_engine::AlarmHysteresis,
 }
+
+/// The number of recent sampled frames over which the instantaneous freeze
+/// condition is debounced before it reaches the dwell machine (~0.5 s at 25 fps).
+/// Sized so it spans more than one GOP boundary, so an isolated per-GOP noise
+/// spike is outvoted by the surrounding frozen frames.
+#[cfg(feature = "overlay")]
+const FREEZE_DEBOUNCE_WINDOW: usize = 12;
+
+/// How many of the [`FREEZE_DEBOUNCE_WINDOW`] most-recent frames must read frozen
+/// for the debounced freeze condition to be "present". At `9 / 12` (75 %) a single
+/// (or even a couple of) noisy GOP-boundary frame(s) inside the window cannot
+/// flip the condition to absent and reset the dwell, while a genuinely moving
+/// picture (mostly-changed frames) stays well below the bar.
+#[cfg(feature = "overlay")]
+const FREEZE_DEBOUNCE_MIN_PRESENT: usize = 9;
 
 /// The three per-source dwell state machines (black / freeze / silence).
 #[cfg(feature = "overlay")]
@@ -1052,13 +1098,30 @@ impl FaultDetector {
             MediaTime::from_nanos(secs_num.saturating_mul(1_000_000_000) / secs_den.max(1))
         };
         let down = dwell(3, 10); // 0.3 s
+                                 // The CLI freeze probe widens only the PER-SAMPLE tolerance vs the engine
+                                 // default — the root cause of the missed badge was tolerance, not the
+                                 // change threshold. Instrumented across the three real demo sources scaled
+                                 // to a 636x356 tile, the changed-fraction with diff_tolerance=6 was:
+                                 //   frozen:  median 0.000%, max 1.27%, 148/150 frames <= 0.1%
+                                 //   silent:  median 0.229%, max 1.91%,   4/150 frames <= 0.1%  (moving)
+                                 //   healthy: median 3.13%,  max 71%,      5/150 frames <= 0.1%
+                                 // diff_tolerance=6 collapses GOP re-quantization noise (the frozen source's
+                                 // per-GOP spike drops from 1.2-4.6% at the default tolerance 2 to <= 1.27%,
+                                 // its steady frames to 0.000%); the engine-default change_threshold (0.1%)
+                                 // is KEPT because at tolerance 6 it already separates a frozen feed (148/150
+                                 // below) from a moving-but-silent feed (only 4/150 below). An earlier 0.5%
+                                 // threshold over-loosened this and wrongly flagged the moving silent tile.
+                                 // The two residual per-GOP spikes the frozen source still shows are absorbed
+                                 // by the debounce window below, not by a looser threshold.
+        let freeze_cfg = FreezeConfig::default().with_tolerance(6);
         Self {
             stores,
             meter_db_timelines,
             machines: std::collections::HashMap::new(),
             black: BlackProbe::new(BlackConfig::default()),
-            freeze: FreezeProbe::new(FreezeConfig::default()),
+            freeze: FreezeProbe::new(freeze_cfg),
             previous: std::collections::HashMap::new(),
+            freeze_window: std::collections::HashMap::new(),
             hysteresis_black: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
             hysteresis_freeze: AlarmHysteresis::new(dwell(2, 1), down), // 2 s up
             hysteresis_silence: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
@@ -1124,21 +1187,26 @@ impl FaultDetector {
                 None => (false, false),
             };
             // Update the previous-frame cache for the next freeze comparison.
-            match &frame {
-                Some(img) => {
-                    self.previous.insert(id.clone(), Arc::clone(img));
-                }
-                None => {
-                    self.previous.remove(&id);
-                }
+            // On a missing frame (NoSignal) drop both the previous frame AND the
+            // debounce window so a recovered source restarts freeze cleanly rather
+            // than inheriting stale frozen votes across the gap.
+            if let Some(img) = &frame {
+                self.previous.insert(id.clone(), Arc::clone(img));
+            } else {
+                self.previous.remove(&id);
+                self.freeze_window.remove(&id);
             }
             // Instantaneous silence from the per-input meter timeline.
             let silence_now = self.silence_now(&id, index);
 
+            // Debounce the freeze condition over a short window so a single noisy
+            // GOP-boundary / warm-up frame cannot reset the 2 s freeze dwell.
+            let freeze_debounced = self.debounce_freeze(&id, freeze_now);
+
             // Fold each condition through its per-source dwell machine.
             let machines = self.machines_for(&id);
             machines.black.observe(black_now, pts);
-            machines.freeze.observe(freeze_now, pts);
+            machines.freeze.observe(freeze_debounced, pts);
             machines.silence.observe(silence_now, pts);
 
             // Precedence: black > freeze > silence (a black picture is the most
@@ -1183,6 +1251,37 @@ impl FaultDetector {
             None => false,
         };
         (black, frozen)
+    }
+
+    /// Push this tick's instantaneous freeze condition into `id`'s sliding window
+    /// and return the **debounced** condition: frozen-now iff at least
+    /// [`FREEZE_DEBOUNCE_MIN_PRESENT`] of the last [`FREEZE_DEBOUNCE_WINDOW`]
+    /// frames read frozen.
+    ///
+    /// This is the anti-flap layer between the per-frame probe and the dwell
+    /// machine: the engine's [`AlarmStateMachine`](mosaic_engine::AlarmStateMachine)
+    /// resets its raise dwell on a *single* absent sample (correct for its general
+    /// use, and not ours to change), but a real frozen feed emits an occasional
+    /// noisy frame at each GOP boundary. Requiring a strong majority of the recent
+    /// window to be frozen lets those isolated spikes pass without resetting the
+    /// dwell, while a genuinely moving picture (mostly-changed frames) never
+    /// reaches the majority and so never debounces to frozen. Until the window
+    /// has filled it reports the simple majority of what it has seen so far.
+    fn debounce_freeze(&mut self, id: &str, freeze_now: bool) -> bool {
+        let window = self.freeze_window.entry(id.to_owned()).or_default();
+        window.push_back(freeze_now);
+        while window.len() > FREEZE_DEBOUNCE_WINDOW {
+            window.pop_front();
+        }
+        let present = window.iter().filter(|&&f| f).count();
+        if window.len() >= FREEZE_DEBOUNCE_WINDOW {
+            // Full window: require the strong majority threshold.
+            present >= FREEZE_DEBOUNCE_MIN_PRESENT
+        } else {
+            // Warming up: a simple majority of the frames seen so far. A genuinely
+            // frozen source reads frozen from frame 2 onward; a moving one does not.
+            present.saturating_mul(2) > window.len()
+        }
     }
 
     /// The instantaneous silence condition for `id` at tick `index`: the source's
@@ -2285,6 +2384,62 @@ mod fault_detector_tests {
         Nv12Image::new(64, 64, y, uv, tag).expect("moving frame")
     }
 
+    /// A 64x64 NV12 frame for a **near-frozen, real-codec-like** source: a fixed
+    /// bright base picture (Y=180) perturbed by two kinds of change keyed on the
+    /// frame `tick`, simulating what the `FreezeProbe` actually sees off an encoded
+    /// frozen feed (see the instrumentation in the commit message):
+    ///
+    ///  * every frame, a tiny ±2-level dither on a sparse set of samples — well
+    ///    inside the probe's per-sample tolerance, so it reads as unchanged;
+    ///  * every 25th frame (a simulated GOP boundary), a LARGER ±12-level shift on
+    ///    ~1.5 % of samples — beyond the per-sample tolerance, so that single frame
+    ///    spikes the changed-fraction above the freeze threshold.
+    ///
+    /// A correct detector must still raise FROZEN: the lone per-GOP spike must not
+    /// reset the dwell. The pre-fix detector (engine-default probe, no debounce)
+    /// would NOT — this is the regression this frame shape guards.
+    fn near_frozen(tick: u64) -> Nv12Image {
+        let tag = CanvasColor::default().output_tag();
+        let mut y = vec![180_u8; 64 * 64];
+        // Per-frame tiny dither (±2, within tolerance) on every 7th sample, phase
+        // by tick so it genuinely differs frame-to-frame but stays "unchanged".
+        let phase = u8::try_from(tick % 2).unwrap_or(0);
+        for (i, px) in y.iter_mut().enumerate() {
+            if i % 7 == 0 {
+                *px = if phase == 0 { 180 } else { 182 };
+            }
+        }
+        // Simulated GOP boundary every 25 frames: a larger ±12 shift on a band of
+        // samples (~1.6 % of the 4096) — a single-frame spike above tolerance.
+        if tick % 25 == 0 && tick > 0 {
+            for px in y.iter_mut().take(64) {
+                *px = 168; // 180 - 12, beyond the ±6 tolerance
+            }
+        }
+        let uv = vec![128_u8; 64 * 64 / 2];
+        Nv12Image::new(64, 64, y, uv, tag).expect("near-frozen frame")
+    }
+
+    /// A 64x64 NV12 frame for a **barely-moving** source: a fixed bright base with
+    /// a small moving band that changes by more than the per-sample tolerance on
+    /// ~0.5 % of samples EVERY frame (above the 0.1 % freeze threshold), keyed on
+    /// `tick`. This mimics the real silent demo source (a moving testsrc scaled to
+    /// a tile: continuous small motion, instrumented median ~0.23 % changed). It
+    /// must NOT be flagged frozen — it is the over-loosening guard for the freeze
+    /// threshold (a 0.5 % threshold would wrongly call this frozen).
+    fn barely_moving(tick: u64) -> Nv12Image {
+        let tag = CanvasColor::default().output_tag();
+        let mut y = vec![160_u8; 64 * 64];
+        // ~0.5 % of 4096 = ~20 samples flip between two well-separated values each
+        // frame (diff 40 >> tolerance), giving a steady changed-fraction ~0.5 %.
+        let bright = u8::try_from(tick % 2).unwrap_or(0) == 0;
+        for px in y.iter_mut().take(20) {
+            *px = if bright { 200 } else { 60 };
+        }
+        let uv = vec![128_u8; 64 * 64 / 2];
+        Nv12Image::new(64, 64, y, uv, tag).expect("barely-moving frame")
+    }
+
     /// Build a single-source store map keyed by `id`, holding-forever so a frozen
     /// source keeps reporting its last-good frame (matches the pipeline).
     fn store_for(id: &str) -> (HashMapStores, Arc<TileStore<Nv12Image>>) {
@@ -2395,6 +2550,62 @@ mod fault_detector_tests {
                 "a healthy moving+bright+loud source must never raise a fault (tick {i})"
             );
         }
+    }
+
+    #[test]
+    fn near_frozen_source_with_gop_noise_still_raises_frozen() {
+        // REGRESSION (commit 08bb78a defect): a genuinely frozen feed delivered as
+        // ENCODED video is not byte-identical — each GOP boundary perturbs a small
+        // fraction of luma. The first cut shipped the engine-default freeze probe
+        // (0.1 % threshold, tol 2) with no debounce, so each per-GOP spike reset
+        // the 2 s dwell and the FROZEN badge never appeared on the real source.
+        // This drives the SAME near-frozen + per-GOP-spike shape and asserts the
+        // tuned probe + debounce still raise FROZEN after the dwell.
+        let id = "nearfrz";
+        let (stores, store) = store_for(id);
+        // Loud meter so silence never fires — freeze must be the only fault.
+        let mut timelines = std::collections::HashMap::new();
+        timelines.insert(id.to_owned(), vec![-6.0_f64; 120]);
+        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let states = live_states(id);
+
+        // Drive 90 ticks (3.6 s > the 2 s freeze dwell), crossing >=3 simulated
+        // GOP boundaries (ticks 25/50/75) so the dwell must survive the spikes.
+        let mut last = std::collections::HashMap::new();
+        for i in 0..90 {
+            store.publish(near_frozen(i), pts_of(i));
+            last = det.sample(pts_of(i), i, &states);
+        }
+        assert_eq!(
+            last.get(id).copied(),
+            Some(TileFault::Frozen),
+            "a near-frozen encoded source (per-GOP noise spikes) must still raise FROZEN"
+        );
+    }
+
+    #[test]
+    fn barely_moving_quiet_source_is_silent_not_frozen() {
+        // OVER-LOOSENING guard (the second-order defect found while fixing the
+        // first): a source with small-but-continuous motion and a quiet meter is
+        // SILENT, never FROZEN. An over-loose freeze threshold (e.g. 0.5 %) would
+        // wrongly call this real moving-but-silent feed frozen.
+        let id = "barely";
+        let (stores, store) = store_for(id);
+        let mut timelines = std::collections::HashMap::new();
+        timelines.insert(id.to_owned(), vec![-80.0_f64; 120]);
+        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let states = live_states(id);
+
+        let mut last = std::collections::HashMap::new();
+        for i in 0..90 {
+            store.publish(barely_moving(i), pts_of(i));
+            last = det.sample(pts_of(i), i, &states);
+        }
+        assert_eq!(
+            last.get(id).copied(),
+            Some(TileFault::Silent),
+            "a barely-moving but quiet source must read SILENT, not FROZEN"
+        );
     }
 
     #[test]
