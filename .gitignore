@@ -36,3 +36,6 @@ dist/
 
 # Per-host, uncommitted dev container override (e.g. VAAPI /dev/dri device + render GID)
 .devcontainer/devcontainer.local.json
+
+# Demo/multiview screenshots for manual inspection (not part of the product)
+/demo-output/

@@ -19,6 +19,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 94 ADRs tot
 - [ADR-0013](ADR-0013.md) — Deadline-driven compositor with per-tile FrameSync and continuous drift correction
 - [ADR-0014](ADR-0014.md) — Encode the mosaic once per output; size density to physical NVENC chips
 - [ADR-0015](ADR-0015.md) — YouTube live ingest via an external runtime-discovered resolver (yt-dlp) *(Proposed)*
+- [ADR-0016](ADR-0016.md) — Efficient overlay rendering: GPU glyph-atlas text + libass subtitles + cached/dirty-region compositing *(Proposed)*
 
 ## Resilience & A/V
 

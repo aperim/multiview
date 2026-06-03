@@ -255,6 +255,11 @@ in the same frame (a Class-1 seamless edit — see
 
 ### 4.2 Rendering stack
 
+> **Deep brief:** the efficient overlay-rendering subsystem (atlas/dirty-region/budget model, the
+> three render paths, and the integration with the compositor's linear-light canvas) is detailed in
+> [overlay-rendering.md](overlay-rendering.md) / [ADR-0016](../decisions/ADR-0016.md). The table
+> below is the summary.
+
 | Element | Renderer |
 |---|---|
 | Text + small images | `cosmic-text` + `glyphon` on wgpu (CPU shaping/raster cached in an `etagere` atlas; `CustomGlyph` also draws arbitrary RGBA for logos/icons/meter caps). One `SwashCache`; reuse `Buffer`s; re-shape only changed strings. |
