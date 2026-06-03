@@ -791,8 +791,15 @@ impl RealPipeline {
     ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
         use mosaic_compositor::overlay::apply_overlays_to_nv12;
 
-        let mut baker = crate::overlays::OverlayBaker::new(self.tile_specs(), 0)
-            .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
+        // Drive the on-screen clock from the REAL OS clock (CLOCK_REALTIME via
+        // std; the host disciplines it via NTP). The displayed time-of-day is
+        // sampled live at each bake (anti-drift) — it is a pure display concern
+        // and never touches the engine's output cadence (invariant #1).
+        let mut baker = crate::overlays::OverlayBaker::new(
+            self.tile_specs(),
+            crate::wallclock::WallClockSource::system(),
+        )
+        .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
         // Wire a configured analog clock face (the digital label stays on too).
         if let Some(spec) = self.analog_clock {
             baker = baker.with_analog_clock(spec);

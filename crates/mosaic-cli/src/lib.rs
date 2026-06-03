@@ -43,6 +43,15 @@ pub mod validate;
 #[cfg(feature = "overlay")]
 pub mod overlays;
 
+/// The **real wall-clock time-of-day source** for the on-screen clock overlay
+/// (feature `overlay`): reads the OS `CLOCK_REALTIME` via `std` (no NTP
+/// reimplementation), exposes an injectable [`wallclock::WallClock`] seam for
+/// tests, and carries the [`mosaic_overlay::clock::TimeRef`] reference badge. The
+/// displayed time-of-day is sampled live at bake time (anti-drift), never derived
+/// from the output-tick counter — the engine's output cadence stays untouched.
+#[cfg(feature = "overlay")]
+pub mod wallclock;
+
 /// The **real** libav\* end-to-end `mosaic run` pipeline (ingest → composite →
 /// encode-once → fan out to file/HLS sinks). Behind the off-by-default `ffmpeg`
 /// feature so the baseline build stays pure-Rust; software H.264/H.265 needs
