@@ -68,6 +68,7 @@
 
 pub mod dash;
 pub mod error;
+pub mod hls;
 pub mod jitter;
 pub mod mpegts;
 pub mod normalize;
