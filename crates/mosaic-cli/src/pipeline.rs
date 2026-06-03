@@ -618,15 +618,34 @@ impl RealPipeline {
         // (invariants #1/#10). Only under `overlay` (the burn-in renderer).
         #[cfg(feature = "overlay")]
         let caption_stores = self.caption_stores.clone();
+        // The per-tile content-fault detector: shares (by `Arc`) the SAME
+        // lock-free per-source last-good stores the engine samples, plus the
+        // build-time per-source meter timeline (for silence). Each tick it
+        // SAMPLES each tile's last-good luma + meter and folds black/freeze/
+        // silence through per-source dwell/hysteresis. Sampling-only and
+        // non-blocking: it can neither pace the output (inv #1) nor back-pressure
+        // the engine (inv #10). Only built under `overlay` (the badge renderer).
+        #[cfg(feature = "overlay")]
+        let mut fault_detector = FaultDetector::new(
+            self.stores.clone(),
+            self.meter_db_timelines.clone(),
+            self.cadence,
+        );
         let state_of = move |frame: &CompositedFrame| -> TickState {
             #[cfg(feature = "overlay")]
             let captions = sample_caption_stores(&caption_stores, frame.pts());
+            // Sample + classify each tile's content fault for THIS tick (a pure
+            // lock-free read of the stores; fail-safe to no-fault on any error).
+            #[cfg(feature = "overlay")]
+            let faults = fault_detector.sample(frame.pts(), frame.tick.index, &frame.source_states);
             if let Ok(mut sink) = collect.lock() {
                 sink.push(CollectedTick {
                     canvas: Arc::new(frame.canvas.clone()),
                     source_states: frame.source_states.clone(),
                     #[cfg(feature = "overlay")]
                     captions,
+                    #[cfg(feature = "overlay")]
+                    faults,
                 });
             }
             TickState {
@@ -806,11 +825,19 @@ impl RealPipeline {
                     .get(&spec.source_id)
                     .copied()
                     .unwrap_or(mosaic_core::traits::SourceState::NoSignal);
+                // The content fault sampled + dwelled on the hot loop this tick;
+                // a source absent from the map is healthy (no badge).
+                let fault = tick
+                    .faults
+                    .get(&spec.source_id)
+                    .copied()
+                    .unwrap_or(crate::overlays::TileFault::None);
                 dynamics.insert(
                     spec.source_id.clone(),
                     crate::overlays::TileDynamics {
                         meter_db: self.meter_db_for(&spec.source_id, i),
                         state,
+                        fault,
                     },
                 );
                 if !captions.contains_key(&spec.source_id) {
@@ -921,6 +948,14 @@ struct CollectedTick {
     /// no active cue this tick is absent.
     #[cfg(feature = "overlay")]
     captions: std::collections::HashMap<String, Vec<String>>,
+    /// Per-source content fault sampled this tick (`source_id -> fault`), folded
+    /// through dwell/hysteresis by the [`FaultDetector`]. Captured on the hot
+    /// loop because freeze needs the *previous* sampled frame and the dwell needs
+    /// every tick in order — sampling once after the run would lose both. A
+    /// healthy source maps to [`crate::overlays::TileFault::None`] (or is absent,
+    /// which the baker treats as `None`).
+    #[cfg(feature = "overlay")]
+    faults: std::collections::HashMap<String, crate::overlays::TileFault>,
 }
 
 /// Sample every per-source caption cue store at `pts`, returning the active
@@ -942,6 +977,232 @@ fn sample_caption_stores(
         }
     }
     out
+}
+
+/// The dBFS floor at/below which the per-input meter is treated as **silent**
+/// for the audio-loss fault. Just above the meter's true floor so a genuinely
+/// quiet-but-present programme does not trip it; sustained past the silence
+/// dwell before the `NO AUDIO` badge raises (anti-flap). A source with no
+/// build-time meter timeline rides [`mosaic_audio::Ballistics::FLOOR_DB`], which
+/// is below this floor, so an audio-free tile reads silent (intended).
+#[cfg(feature = "overlay")]
+const SILENCE_FLOOR_DB: f64 = -50.0;
+
+/// Samples each tile's last-good frame + per-input loudness once per output tick
+/// and classifies a per-tile **content fault** (black / frozen / silent),
+/// distinct from the lifecycle [`SourceState`](mosaic_core::traits::SourceState).
+///
+/// It shares the SAME lock-free per-source [`TileStore`]s the engine samples (by
+/// `Arc`), so it never copies the picture and never blocks: a [`TileStore::read_at`]
+/// is a wait-free atomic snapshot. Black/freeze come from the stateless engine
+/// probes ([`mosaic_engine::BlackProbe`]/[`mosaic_engine::FreezeProbe`]) run over
+/// a borrowed [`mosaic_engine::LumaView`] of the sampled frame's tightly-packed
+/// luma plane; freeze compares the current sample to the *previous* sampled frame
+/// (held by `Arc`, no copy). Silence comes from the build-time per-source meter
+/// timeline. Each instantaneous condition is folded through a per-source
+/// [`mosaic_engine::AlarmStateMachine`] so the badge dwells/hysteresis rather than
+/// flapping. Any probe/geometry error logs and yields *no fault* (fail-safe):
+/// fault detection must never break the output clock (inv #1) or the engine (#10).
+#[cfg(feature = "overlay")]
+struct FaultDetector {
+    /// The per-source last-good stores, shared with the engine drive loop.
+    stores: HashMapStores,
+    /// Build-time per-source per-tick loudness timelines (dBFS) for silence.
+    meter_db_timelines: std::collections::HashMap<String, Vec<f64>>,
+    /// Per-source dwell/hysteresis state machines for each fault class.
+    machines: std::collections::HashMap<String, SourceFaultMachines>,
+    /// The stateless black probe (default broadcast threshold).
+    black: mosaic_engine::BlackProbe,
+    /// The stateless freeze probe (default tolerance/threshold).
+    freeze: mosaic_engine::FreezeProbe,
+    /// The previous sampled frame per source, for the freeze comparison (held by
+    /// `Arc`, so caching it copies no pixels).
+    previous: std::collections::HashMap<String, Arc<Nv12Image>>,
+    /// Dwell-up/dwell-down windows (derived from the cadence) per fault class.
+    hysteresis_black: mosaic_engine::AlarmHysteresis,
+    hysteresis_freeze: mosaic_engine::AlarmHysteresis,
+    hysteresis_silence: mosaic_engine::AlarmHysteresis,
+}
+
+/// The three per-source dwell state machines (black / freeze / silence).
+#[cfg(feature = "overlay")]
+struct SourceFaultMachines {
+    black: mosaic_engine::AlarmStateMachine,
+    freeze: mosaic_engine::AlarmStateMachine,
+    silence: mosaic_engine::AlarmStateMachine,
+}
+
+#[cfg(feature = "overlay")]
+impl FaultDetector {
+    /// Build a detector over the shared `stores` + build-time meter `timelines`.
+    /// The dwell windows are absolute media durations (cadence-agnostic), so the
+    /// output `cadence` is taken only to make the timeline these dwells run on
+    /// explicit at the call site.
+    fn new(
+        stores: HashMapStores,
+        meter_db_timelines: std::collections::HashMap<String, Vec<f64>>,
+        _cadence: Rational,
+    ) -> Self {
+        use mosaic_engine::{AlarmHysteresis, BlackConfig, BlackProbe, FreezeConfig, FreezeProbe};
+        // Dwell windows on the media timeline. Black/silence raise after ~0.5 s of
+        // the condition and clear after ~0.3 s of its absence; freeze needs a
+        // longer ~2 s of identical frames so a brief genuine still does not trip
+        // it. These give the anti-flap hysteresis without coupling to wall-clock.
+        let dwell = |secs_num: i64, secs_den: i64| -> MediaTime {
+            MediaTime::from_nanos(secs_num.saturating_mul(1_000_000_000) / secs_den.max(1))
+        };
+        let down = dwell(3, 10); // 0.3 s
+        Self {
+            stores,
+            meter_db_timelines,
+            machines: std::collections::HashMap::new(),
+            black: BlackProbe::new(BlackConfig::default()),
+            freeze: FreezeProbe::new(FreezeConfig::default()),
+            previous: std::collections::HashMap::new(),
+            hysteresis_black: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
+            hysteresis_freeze: AlarmHysteresis::new(dwell(2, 1), down), // 2 s up
+            hysteresis_silence: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
+        }
+    }
+
+    /// Get-or-create the dwell machines for `id` (one per fault class).
+    fn machines_for(&mut self, id: &str) -> &mut SourceFaultMachines {
+        use mosaic_core::alarm::{AlarmId, AlarmKind, AlarmScope, PerceivedSeverity};
+        use mosaic_engine::{AlarmHysteresis, AlarmStateMachine};
+        let hb = self.hysteresis_black;
+        let hf = self.hysteresis_freeze;
+        let hs = self.hysteresis_silence;
+        self.machines.entry(id.to_owned()).or_insert_with(|| {
+            let mk = |kind: AlarmKind, sev: PerceivedSeverity, hyst: AlarmHysteresis| {
+                AlarmStateMachine::new(
+                    AlarmId::new(format!("{id}:{kind:?}")),
+                    kind,
+                    AlarmScope::Probe { id: id.to_owned() },
+                    sev,
+                    hyst,
+                )
+            };
+            SourceFaultMachines {
+                black: mk(AlarmKind::Black, PerceivedSeverity::Major, hb),
+                freeze: mk(AlarmKind::Freeze, PerceivedSeverity::Major, hf),
+                silence: mk(AlarmKind::Silence, PerceivedSeverity::Minor, hs),
+            }
+        })
+    }
+
+    /// Sample + classify every cell-bound source's content fault for the output
+    /// instant `pts` (tick `index`), returning the active fault per source.
+    ///
+    /// `source_states` names the cell-bound sources this tick. For each, this
+    /// reads its last-good frame (lock-free), runs the black + freeze probes over
+    /// its luma, reads its silence condition from the build-time meter timeline,
+    /// folds each through the per-source dwell machine, and returns the
+    /// highest-precedence active fault (black > freeze > silence). A source with
+    /// no usable frame (`NoSignal`) contributes no content fault (its lifecycle
+    /// badge already conveys the loss). Errors are logged and treated as no-fault.
+    fn sample(
+        &mut self,
+        pts: MediaTime,
+        index: u64,
+        source_states: &std::collections::HashMap<String, mosaic_core::traits::SourceState>,
+    ) -> std::collections::HashMap<String, crate::overlays::TileFault> {
+        use crate::overlays::TileFault;
+        let mut out = std::collections::HashMap::new();
+        // Snapshot the source ids this tick (sorted for deterministic logging).
+        let mut ids: Vec<String> = source_states.keys().cloned().collect();
+        ids.sort_unstable();
+        for id in ids {
+            // Sample this tile's last-good frame (lock-free; never blocks).
+            let frame = self
+                .stores
+                .get(&id)
+                .and_then(|store| store.read_at(pts).frame().map(Arc::clone));
+
+            // Instantaneous black / freeze conditions from the sampled luma.
+            let (black_now, freeze_now) = match &frame {
+                Some(img) => self.picture_conditions(&id, img),
+                None => (false, false),
+            };
+            // Update the previous-frame cache for the next freeze comparison.
+            match &frame {
+                Some(img) => {
+                    self.previous.insert(id.clone(), Arc::clone(img));
+                }
+                None => {
+                    self.previous.remove(&id);
+                }
+            }
+            // Instantaneous silence from the per-input meter timeline.
+            let silence_now = self.silence_now(&id, index);
+
+            // Fold each condition through its per-source dwell machine.
+            let machines = self.machines_for(&id);
+            machines.black.observe(black_now, pts);
+            machines.freeze.observe(freeze_now, pts);
+            machines.silence.observe(silence_now, pts);
+
+            // Precedence: black > freeze > silence (a black picture is the most
+            // specific/severe content fault; a still or silent tile is lesser).
+            let fault = if machines.black.is_active() {
+                TileFault::Black
+            } else if machines.freeze.is_active() {
+                TileFault::Frozen
+            } else if machines.silence.is_active() {
+                TileFault::Silent
+            } else {
+                TileFault::None
+            };
+            if fault.is_present() {
+                out.insert(id, fault);
+            }
+        }
+        out
+    }
+
+    /// The instantaneous (black, frozen) conditions for `id`'s sampled `frame`,
+    /// over a borrowed luma view of its tightly-packed Y plane. Any geometry
+    /// error logs and yields `(false, false)` (fail-safe to no fault).
+    fn picture_conditions(&self, id: &str, frame: &Nv12Image) -> (bool, bool) {
+        use mosaic_engine::LumaView;
+        // The Y plane is tightly packed (`stride == width`) per `Nv12Image`.
+        let current = match LumaView::packed(frame.y_plane(), frame.width(), frame.height()) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(source = %id, error = %e, "fault probe: luma view build failed");
+                return (false, false);
+            }
+        };
+        let black = self.black.detect(&current).condition_present;
+        // Freeze needs the previous sampled frame; if none yet (first frame or a
+        // gap), it is not frozen this tick (fail-safe toward "live").
+        let frozen = match self.previous.get(id) {
+            Some(prev) => match LumaView::packed(prev.y_plane(), prev.width(), prev.height()) {
+                Ok(prev_view) => self.freeze.detect(&current, &prev_view).condition_present,
+                Err(_) => false,
+            },
+            None => false,
+        };
+        (black, frozen)
+    }
+
+    /// The instantaneous silence condition for `id` at tick `index`: the source's
+    /// build-time meter reading is at/below [`SILENCE_FLOOR_DB`]. A source with no
+    /// meter timeline rides the meter floor (which is below the silence floor), so
+    /// an audio-free tile reads silent.
+    fn silence_now(&self, id: &str, index: u64) -> bool {
+        let db = match self.meter_db_timelines.get(id) {
+            Some(timeline) => {
+                let i = usize::try_from(index).unwrap_or(usize::MAX);
+                timeline
+                    .get(i)
+                    .copied()
+                    .or_else(|| timeline.last().copied())
+                    .unwrap_or(mosaic_audio::Ballistics::FLOOR_DB)
+            }
+            None => mosaic_audio::Ballistics::FLOOR_DB,
+        };
+        db <= SILENCE_FLOOR_DB
+    }
 }
 
 /// Owns the per-source streaming-ingest decode threads and a shared stop flag.
@@ -1976,6 +2237,186 @@ mod overlay_clock_tests {
         assert!(
             (spec.radius() - 64.0).abs() < 0.5,
             "explicit radius honoured"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "overlay"))]
+mod fault_detector_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::overlays::TileFault;
+
+    /// A 25/1 fps cadence (40 ms per tick), so the dwell windows below convert to
+    /// a small, deterministic number of ticks.
+    fn cadence() -> Rational {
+        Rational { num: 25, den: 1 }
+    }
+
+    /// The output media instant of tick `i` at 25 fps (exact, integer ns).
+    fn pts_of(i: u64) -> MediaTime {
+        MediaTime::from_nanos(
+            i64::try_from(i)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(40_000_000),
+        )
+    }
+
+    /// A solid 64x64 NV12 image at luma `y` (chroma neutral), canvas-tagged.
+    fn solid(y: u8) -> Nv12Image {
+        let tag = CanvasColor::default().output_tag();
+        Nv12Image::solid(64, 64, y, 128, 128, tag).expect("solid frame")
+    }
+
+    /// A 64x64 NV12 image whose luma carries a per-pixel gradient seeded by
+    /// `seed`, so two frames with different seeds differ in (nearly) every sample
+    /// — a genuinely *moving*, *bright* picture (never black, never frozen).
+    fn moving(seed: u8) -> Nv12Image {
+        let tag = CanvasColor::default().output_tag();
+        let mut y = vec![0_u8; 64 * 64];
+        for (i, px) in y.iter_mut().enumerate() {
+            // Bright base (well above the black threshold) + a seed-varying ramp.
+            let ramp = u8::try_from(i % 200).unwrap_or(0);
+            *px = 120u8
+                .saturating_add(ramp / 4)
+                .wrapping_add(seed.wrapping_mul(37));
+        }
+        let uv = vec![128_u8; 64 * 64 / 2];
+        Nv12Image::new(64, 64, y, uv, tag).expect("moving frame")
+    }
+
+    /// Build a single-source store map keyed by `id`, holding-forever so a frozen
+    /// source keeps reporting its last-good frame (matches the pipeline).
+    fn store_for(id: &str) -> (HashMapStores, Arc<TileStore<Nv12Image>>) {
+        let store = Arc::new(TileStore::new(
+            id.to_owned(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let mut stores: HashMapStores = std::collections::HashMap::new();
+        stores.insert(id.to_owned(), Arc::clone(&store));
+        (stores, store)
+    }
+
+    /// The states map naming `id` as a LIVE cell-bound source (what `sample`
+    /// iterates over).
+    fn live_states(
+        id: &str,
+    ) -> std::collections::HashMap<String, mosaic_core::traits::SourceState> {
+        let mut s = std::collections::HashMap::new();
+        s.insert(id.to_owned(), mosaic_core::traits::SourceState::Live);
+        s
+    }
+
+    #[test]
+    fn sustained_all_black_frames_raise_a_black_fault() {
+        let id = "blk";
+        let (stores, store) = store_for(id);
+        let mut det = FaultDetector::new(stores, std::collections::HashMap::new(), cadence());
+        let states = live_states(id);
+
+        // Drive 40 ticks (1.6 s > the 0.5 s black dwell) publishing an all-black
+        // (Y=16) frame each tick so the tile stays LIVE and black.
+        let mut last = std::collections::HashMap::new();
+        for i in 0..40 {
+            store.publish(solid(16), pts_of(i));
+            last = det.sample(pts_of(i), i, &states);
+        }
+        assert_eq!(
+            last.get(id).copied(),
+            Some(TileFault::Black),
+            "an all-black source sustained past the dwell must raise a BLACK fault"
+        );
+    }
+
+    #[test]
+    fn sustained_identical_frames_raise_a_frozen_fault() {
+        let id = "frz";
+        let (stores, store) = store_for(id);
+        let mut det = FaultDetector::new(stores, std::collections::HashMap::new(), cadence());
+        let states = live_states(id);
+
+        // Publish the SAME bright, non-black content every tick (Y=200 solid):
+        // successive frames are identical → frozen. Drive 70 ticks (2.8 s > the
+        // 2 s freeze dwell).
+        let mut last = std::collections::HashMap::new();
+        for i in 0..70 {
+            store.publish(solid(200), pts_of(i));
+            last = det.sample(pts_of(i), i, &states);
+        }
+        assert_eq!(
+            last.get(id).copied(),
+            Some(TileFault::Frozen),
+            "an unchanging bright source past the freeze dwell must raise a FROZEN fault"
+        );
+    }
+
+    #[test]
+    fn sustained_quiet_meter_raises_a_silent_fault() {
+        let id = "sil";
+        let (stores, store) = store_for(id);
+        // A meter timeline pinned below the silence floor for every tick.
+        let mut timelines = std::collections::HashMap::new();
+        timelines.insert(id.to_owned(), vec![-80.0_f64; 80]);
+        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let states = live_states(id);
+
+        // Publish a MOVING, bright picture so neither black nor freeze fires —
+        // only silence should. Drive 30 ticks (1.2 s > the 0.5 s silence dwell).
+        let mut last = std::collections::HashMap::new();
+        for i in 0..30 {
+            store.publish(moving(u8::try_from(i % 251).unwrap_or(0)), pts_of(i));
+            last = det.sample(pts_of(i), i, &states);
+        }
+        assert_eq!(
+            last.get(id).copied(),
+            Some(TileFault::Silent),
+            "a moving bright source with a sustained-quiet meter must raise a SILENT fault"
+        );
+    }
+
+    #[test]
+    fn moving_bright_loud_source_reports_no_fault() {
+        let id = "ok";
+        let (stores, store) = store_for(id);
+        // A loud meter timeline (well above the silence floor) for every tick.
+        let mut timelines = std::collections::HashMap::new();
+        timelines.insert(id.to_owned(), vec![-6.0_f64; 80]);
+        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let states = live_states(id);
+
+        // Publish a MOVING, bright picture (changes every tick) and a loud meter:
+        // no content fault should ever raise across a long run.
+        for i in 0..70 {
+            store.publish(moving(u8::try_from(i % 251).unwrap_or(0)), pts_of(i));
+            let faults = det.sample(pts_of(i), i, &states);
+            assert!(
+                faults.get(id).copied().unwrap_or(TileFault::None) == TileFault::None,
+                "a healthy moving+bright+loud source must never raise a fault (tick {i})"
+            );
+        }
+    }
+
+    #[test]
+    fn black_takes_precedence_over_silence() {
+        // A source that is BOTH black AND silent surfaces BLACK (the higher-
+        // precedence content fault), not SILENT.
+        let id = "both";
+        let (stores, store) = store_for(id);
+        let mut timelines = std::collections::HashMap::new();
+        timelines.insert(id.to_owned(), vec![-80.0_f64; 80]);
+        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let states = live_states(id);
+
+        let mut last = std::collections::HashMap::new();
+        for i in 0..40 {
+            store.publish(solid(16), pts_of(i));
+            last = det.sample(pts_of(i), i, &states);
+        }
+        assert_eq!(
+            last.get(id).copied(),
+            Some(TileFault::Black),
+            "black must outrank silence when both conditions hold"
         );
     }
 }

@@ -88,15 +88,88 @@ impl TileSpec {
     }
 }
 
+/// A per-tile **content fault**, distinct from the lifecycle [`SourceState`].
+///
+/// Where [`SourceState`] tracks the *transport* health of a tile
+/// (`LIVE`/`STALE`/`RECONNECTING`/`NO_SIGNAL`), a [`TileFault`] tracks a
+/// *content* condition detected by sampling the tile's last-good frame /
+/// audio: an all-black picture, a frozen (non-advancing) picture, or sustained
+/// audio silence. A healthy tile carries [`TileFault::None`] and shows no fault
+/// badge.
+///
+/// This is the CLI's compact, exhaustive view of the engine's content-aware
+/// probes; it maps from [`mosaic_core::alarm::AlarmKind`] for the three picture
+/// / audio faults the multiviewer surfaces as a per-tile badge (see
+/// [`TileFault::from_alarm_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TileFault {
+    /// No content fault: the tile's picture is advancing, not black, and its
+    /// audio is above the silence floor. No badge is drawn.
+    #[default]
+    None,
+    /// The picture is black (mean luma at/below the black threshold) for the
+    /// dwell window — drawn as a `BLACK` badge.
+    Black,
+    /// The picture is frozen (too few luma samples change between successive
+    /// sampled frames) for the dwell — drawn as a `FROZEN` badge.
+    Frozen,
+    /// Audio is silent (the per-input meter sits at/below the silence floor)
+    /// for the dwell — drawn as a `NO AUDIO` badge.
+    Silent,
+}
+
+impl TileFault {
+    /// Whether a fault is present (anything other than [`TileFault::None`]).
+    #[must_use]
+    pub const fn is_present(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Map an [`AlarmKind`](mosaic_core::alarm::AlarmKind) to the CLI's per-tile
+    /// fault badge, for the three content faults the multiviewer surfaces.
+    ///
+    /// Returns [`None`] for any alarm kind without a dedicated per-tile badge
+    /// (over-level, clipping, caption loss, …) — those roll up through the
+    /// alarm engine rather than the tile fault badge.
+    #[must_use]
+    pub fn from_alarm_kind(kind: mosaic_core::alarm::AlarmKind) -> Option<Self> {
+        use mosaic_core::alarm::AlarmKind;
+        match kind {
+            AlarmKind::Black => Some(Self::Black),
+            AlarmKind::Freeze => Some(Self::Frozen),
+            AlarmKind::Silence => Some(Self::Silent),
+            // Other alarm kinds have no per-tile content badge here.
+            _ => None,
+        }
+    }
+
+    /// The short, all-text badge label for this fault (text carries the meaning,
+    /// not colour alone — the accessibility requirement). [`TileFault::None`]
+    /// has no badge and returns [`None`].
+    #[must_use]
+    pub const fn badge_text(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Black => Some("BLACK"),
+            Self::Frozen => Some("FROZEN"),
+            Self::Silent => Some("NO AUDIO"),
+        }
+    }
+}
+
 /// The live per-tile dynamics for one output frame: the source's current
-/// loudness (dBFS) and its lifecycle state. A tile with no decodable audio
-/// passes its meter floor; a missing/unconnected source is `NO_SIGNAL`.
+/// loudness (dBFS), its lifecycle state, and any detected content fault. A tile
+/// with no decodable audio passes its meter floor; a missing/unconnected source
+/// is `NO_SIGNAL`; a healthy tile carries [`TileFault::None`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TileDynamics {
     /// The source's current program loudness in dBFS (its own audio).
     pub meter_db: f64,
     /// The tile's lifecycle state sampled this tick.
     pub state: SourceState,
+    /// The tile's detected content fault sampled this tick (distinct from
+    /// `state`). [`TileFault::None`] ⇒ no fault badge.
+    pub fault: TileFault,
 }
 
 /// The per-tile peak-hold meter + conflator state, kept across frames so the
@@ -287,6 +360,7 @@ impl OverlayBaker {
             let dyn_ = dynamics.get(&source_id).copied().unwrap_or(TileDynamics {
                 meter_db: mosaic_audio::Ballistics::FLOOR_DB,
                 state: SourceState::NoSignal,
+                fault: TileFault::None,
             });
 
             // Advance this tile's meter from its own audio (conflated ~30 Hz).
@@ -299,7 +373,7 @@ impl OverlayBaker {
             }
             let bar = self.meters.get(i).map(|m| m.bar);
 
-            self.draw_tile(&mut list, &label, rect, dyn_.state, bar)?;
+            self.draw_tile(&mut list, &label, rect, dyn_.state, dyn_.fault, bar)?;
 
             // Burn this source's active caption (if any) into THIS tile's cell
             // rect, bottom-centre — never canvas-wide.
@@ -402,6 +476,7 @@ impl OverlayBaker {
         label: &str,
         rect: PixelRect,
         state: SourceState,
+        fault: TileFault,
         bar: Option<MeterBar>,
     ) -> Result<(), CompositorError> {
         let geom = TileGeometry::resolve(rect);
@@ -455,6 +530,36 @@ impl OverlayBaker {
                 color: flag_color,
             },
         )?;
+
+        // The per-tile content-fault badge: a TOP-RIGHT chip whose TEXT names the
+        // fault (BLACK / FROZEN / NO AUDIO), drawn ONLY when a fault is present so
+        // a healthy tile shows nothing. Positioned top-right (right-aligned, inset
+        // left of the meter track) so it never collides with the top-left state
+        // flag, the bottom-left label, the bottom-centre caption, or the
+        // right-edge meter. Meaning is the text; the warning colour reinforces it.
+        if let Some(badge) = fault.badge_text() {
+            let badge_h = geom.chip_height();
+            let badge_w = geom.flag_width(badge.chars().count());
+            // Right-align within the cell, clear of the right-edge meter track.
+            let badge_right = geom.x.saturating_add(i32_dim(geom.meter_left()));
+            let badge_x = badge_right.saturating_sub(i32_dim(badge_w)).max(geom.x);
+            push_filled_rect(
+                list,
+                OverlayRect::new(badge_x, geom.y, badge_w, badge_h),
+                CHROME_BG,
+            );
+            self.push_text(
+                list,
+                badge,
+                TextRun {
+                    family: FontFamily::Sans,
+                    size_px: geom.chip_text_px(),
+                    x: badge_x.saturating_add(geom.pad_i32()),
+                    y: geom.y.saturating_add(geom.pad_i32() / 2),
+                    color: RED,
+                },
+            )?;
+        }
 
         // The input label: bottom-left of the tile, on a translucent backing.
         let label_h = geom.chip_height();
@@ -847,6 +952,27 @@ mod tests {
                     TileDynamics {
                         meter_db: *db,
                         state: *state,
+                        fault: TileFault::None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Build a dynamics map carrying an explicit per-source fault, so a test can
+    /// assert the fault badge renders only for the faulted tile(s).
+    fn dynamics_with_faults(
+        entries: &[(&str, f64, SourceState, TileFault)],
+    ) -> HashMap<String, TileDynamics> {
+        entries
+            .iter()
+            .map(|(id, db, state, fault)| {
+                (
+                    (*id).to_owned(),
+                    TileDynamics {
+                        meter_db: *db,
+                        state: *state,
+                        fault: *fault,
                     },
                 )
             })
@@ -1026,6 +1152,71 @@ mod tests {
         assert!(
             glyphs_in(&list, in_a_cell) >= a_caption,
             "every in_a caption glyph must fall inside in_a's cell rect"
+        );
+    }
+
+    /// The TOP-RIGHT fault-badge band of a cell: the upper chip-height strip,
+    /// with the leftmost half (where the top-left state flag sits) excluded so
+    /// only the right-aligned fault badge is counted. The right-edge meter draws
+    /// FilledRect/Line primitives, not glyphs, so a glyph here is the badge.
+    fn fault_badge_glyphs_in_cell(list: &OverlayDrawList, geom: TileGeometry) -> usize {
+        let half = geom.width / 2;
+        let band = OverlayRect::new(
+            geom.x.saturating_add(i32_dim(half)),
+            geom.y,
+            geom.width.saturating_sub(half),
+            geom.chip_height(),
+        );
+        glyphs_in(list, band)
+    }
+
+    #[test]
+    fn fault_badge_renders_only_on_the_faulted_tile() {
+        // A tile carrying a content fault (BLACK / FROZEN / NO AUDIO) must render
+        // fault-badge glyphs in its TOP-RIGHT band; a healthy sibling tile
+        // (TileFault::None) must render none there. Mirrors the per-tile caption
+        // burn-in contract: the badge is cell-local, drawn only where the fault is.
+        let tiles = quad_tiles();
+        let mut baker = OverlayBaker::new(tiles.clone(), 0).unwrap();
+
+        // in_a black, in_b frozen, in_c silent, in_d healthy (no fault).
+        let dyns = dynamics_with_faults(&[
+            ("in_a", -3.0, SourceState::Live, TileFault::Black),
+            ("in_b", -3.0, SourceState::Live, TileFault::Frozen),
+            (
+                "in_c",
+                mosaic_audio::Ballistics::FLOOR_DB,
+                SourceState::Live,
+                TileFault::Silent,
+            ),
+            ("in_d", -3.0, SourceState::Live, TileFault::None),
+        ]);
+
+        let list = baker
+            .draw_list(MediaTime::ZERO, &dyns, &no_captions())
+            .unwrap();
+
+        let geom_a = TileGeometry::resolve(tiles[0].rect);
+        let geom_b = TileGeometry::resolve(tiles[1].rect);
+        let geom_c = TileGeometry::resolve(tiles[2].rect);
+        let geom_d = TileGeometry::resolve(tiles[3].rect);
+
+        assert!(
+            fault_badge_glyphs_in_cell(&list, geom_a) > 0,
+            "the BLACK-faulted tile (in_a) must draw a fault badge top-right"
+        );
+        assert!(
+            fault_badge_glyphs_in_cell(&list, geom_b) > 0,
+            "the FROZEN-faulted tile (in_b) must draw a fault badge top-right"
+        );
+        assert!(
+            fault_badge_glyphs_in_cell(&list, geom_c) > 0,
+            "the SILENT-faulted tile (in_c) must draw a fault badge top-right"
+        );
+        assert_eq!(
+            fault_badge_glyphs_in_cell(&list, geom_d),
+            0,
+            "the healthy tile (in_d) must draw NO fault badge"
         );
     }
 
