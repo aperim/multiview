@@ -10,6 +10,7 @@ Deep, verification-hardened design records that back the Mosaic implementation. 
 - [Color Management](color-management.md) — Color
 - [Streaming Robustness Runbook](streaming-gotchas.md) — Streaming/Timing
 - [Timing Architecture](timing-architecture.md) — Streaming/Timing (pacing + reference-lock + frame-sync + wall-clock + timecode)
+- [Input Timing & Frame-Sync](input-timing-and-sync.md) — Streaming/Timing (best-effort PTS normalisation + wall-clock pacer + sample-at-tick)
 - [Preview Subsystem](preview-subsystem.md) — Preview
 - [Realtime / Eventing API](realtime-api.md) — Realtime API
 - [Management Capability Matrix](management-capability-matrix.md) — Management
