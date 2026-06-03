@@ -61,6 +61,12 @@ const SAFE: OverlayColor = OverlayColor::new(0.9, 0.9, 0.9, 0.7);
 /// A translucent dark backing for the per-tile label / flag chrome so the text
 /// reads over any underlying picture (the meaning is the *text*, not the colour).
 const CHROME_BG: OverlayColor = OverlayColor::new(0.0, 0.0, 0.0, 0.55);
+/// A near-opaque dark backing for the program-wide clock readout. Unlike the
+/// per-tile chrome it must fully cover whatever sits beneath it — the top-left
+/// tile's own state flag would otherwise bleed through and garble the digits —
+/// so the program clock cleanly owns its corner (a standard multiviewer
+/// convention). The meaning is still the text, not the colour (#38).
+const CLOCK_BG: OverlayColor = OverlayColor::new(0.0, 0.0, 0.0, 0.92);
 
 /// The static placement of one mosaic tile's overlay surface: the cell's pixel
 /// rectangle on the canvas plus the (immutable) label text for the bound source.
@@ -412,12 +418,33 @@ impl OverlayBaker {
         let wall = self.wall_clock.now();
         if let Some(clock) = self.clock {
             if let Some(text) = clock.render_digital(wall) {
+                // Translucent backing behind the readout so it stays legible over
+                // whatever sits beneath it — in particular the top-left tile's
+                // own state flag would otherwise bleed green through the white
+                // digits (#38). Meaning is the text; the chip is contrast only,
+                // sized to the coarse mono advance like the other chrome chips.
+                const CLOCK_SIZE_PX: f32 = 26.0;
+                const CLOCK_PAD: u32 = 4;
+                let clock_w = u32_from_usize(text.chars().count())
+                    .saturating_mul(quantize_advance(CLOCK_SIZE_PX))
+                    .saturating_add(CLOCK_PAD.saturating_mul(2));
+                let clock_h = round_dim(CLOCK_SIZE_PX).saturating_add(CLOCK_PAD.saturating_mul(2));
+                push_filled_rect(
+                    &mut list,
+                    OverlayRect::new(
+                        12i32.saturating_sub(i32_dim(CLOCK_PAD)),
+                        6i32.saturating_sub(i32_dim(CLOCK_PAD)),
+                        clock_w,
+                        clock_h,
+                    ),
+                    CLOCK_BG,
+                );
                 self.push_text(
                     &mut list,
                     &text,
                     TextRun {
                         family: FontFamily::Mono,
-                        size_px: 26.0,
+                        size_px: CLOCK_SIZE_PX,
                         x: 12,
                         y: 6,
                         color: WHITE,
@@ -1768,6 +1795,36 @@ mod tests {
             src.reference(),
         );
         assert_eq!(rendered_digital(clock, &src), "20:26:40");
+    }
+
+    #[test]
+    fn program_clock_readout_sits_on_a_legibility_chip() {
+        // #38: the digital clock draws a translucent backing rect behind its
+        // readout (top-left, at (8,2)) so it stays legible over a tile's state
+        // flag underneath — the chip is contrast only; the meaning is the text.
+        let (src, _fake) = fake_source_at(1_780_000_000);
+        let mut baker = OverlayBaker::new(quad_tiles(), src).unwrap();
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
+            .unwrap();
+        let has_clock_chip = list.primitives.iter().any(|p| {
+            matches!(
+                p,
+                OverlayPrimitive::FilledRect { rect, .. }
+                    if rect.x <= 8 && rect.y <= 2 && rect.width >= 26 && rect.height >= 26
+            )
+        });
+        assert!(
+            has_clock_chip,
+            "the program clock readout must sit on a translucent backing chip (#38)"
+        );
+        // The readout glyphs still render on top of the chip.
+        assert!(clock_band_glyphs(&list) > 0);
     }
 
     #[test]
