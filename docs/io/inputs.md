@@ -283,7 +283,7 @@ select the right elementary streams.
 | TS program | `ts.program` | program id | Pick one program from a multi-program transport. |
 | Decode size | `decode.target_size` + `decode.scale_to_display` | auto / WxH | Decode at display resolution (fused NVDEC / best-effort VT / VPP / no-op sw). |
 | Audio tracks | `audio.tracks[]` | track ids + channels | Feeds the output audio routing matrix. |
-| Subtitle | `subtitle.source` + `subtitle.track`/`page` | `608/708 · dvbsub · teletext · webvtt · srt · ass · mov_text` | Caption ingest selection (owned by Source). |
+| Captions | `captions.mode` (+ `page`/`id`/`field`/`path`) | `auto · off · teletext_page · track · embedded_cc · sidecar` | Native caption ingest selection (owned by Source) — see [io/captions.md](captions.md). |
 | Frame skip | `decode.skip_frame` | `none · bidir · nonref · nonkey · all` | Coarse decode-cost reduction. |
 
 The source **owns** per-input attributes (track select, gain, mute, metering); the *cross-product*

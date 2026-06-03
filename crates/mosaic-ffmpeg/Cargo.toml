@@ -13,6 +13,9 @@ publish = false
 
 [dependencies]
 mosaic-core = { workspace = true }
+# The unified caption-cue model (`caption` module) is pure and always compiled;
+# it round-trips TOML/JSON via serde (adjacently-tagged, never `untagged`).
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
@@ -38,6 +41,7 @@ ffmpeg-next = { version = "7.1", optional = true }
 "cuda" = []
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = "3"
 
 # FFI crate exception. The workspace forbids `unsafe_code`, and a `forbid` level

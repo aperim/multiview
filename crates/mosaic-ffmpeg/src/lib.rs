@@ -55,6 +55,12 @@
 //! See [`docs/research/core-engine.md`](../docs/research/core-engine.md) §7,
 //! §8.1, §12 for the FFI / hardware-frame design this crate builds toward.
 
+/// The unified **caption cue** model (`CaptionCue` text/bitmap shapes, regions,
+/// rects) plus the pure ASS-event markup stripper. Always compiled and
+/// native-dep-free; the feature-gated [`caption_decode`] decoders emit these
+/// types. See [`docs/io/captions.md`](../docs/io/captions.md) §1.
+pub mod caption;
+
 /// Video-codec identity + encoder selection. The logical [`codec::VideoCodec`]
 /// enum and the feature-gated candidate-list logic are pure (always compiled,
 /// unit-tested); only the libav-backed `codec::select_encoder` run-time probe
@@ -68,6 +74,10 @@ pub mod error;
 /// libav-backed `probe`/`is_available` runtime queries live behind the
 /// `ffmpeg` feature.
 pub mod jpegxs;
+
+pub use caption::{
+    strip_ass_event, CaptionCue, CueAnchor, CueBitmap, CueError, CueRect, CueRegion, CueText,
+};
 
 pub use codec::{can_encode, candidate_encoders, VideoCodec};
 
@@ -85,6 +95,11 @@ pub use jpegxs::{is_available as jpegxs_is_available, probe as jpegxs_probe};
 
 #[cfg(feature = "ffmpeg")]
 pub mod audio_file;
+
+/// Safe RAII caption decoders over the linked libav subtitle decoders, emitting
+/// the unified [`caption::CaptionCue`] model. Behind the `ffmpeg` feature.
+#[cfg(feature = "ffmpeg")]
+pub mod caption_decode;
 
 #[cfg(feature = "ffmpeg")]
 pub mod convert;
@@ -115,6 +130,9 @@ pub mod scale;
 
 #[cfg(feature = "ffmpeg")]
 pub use audio_file::{AudioFileDecoder, AudioSamplesF32};
+
+#[cfg(feature = "ffmpeg")]
+pub use caption_decode::{CaptionDecoder, CaptionSource, CcChannel};
 
 #[cfg(feature = "ffmpeg")]
 pub use convert::{
