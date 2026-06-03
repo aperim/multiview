@@ -6,6 +6,7 @@ Deep, verification-hardened design records that back the Mosaic implementation. 
 - [Bulletproof Output, Resilience & A/V](resilience-and-av.md) — Resilience & A/V
 - [Efficiency on Commodity Hardware](efficiency.md) — Efficiency
 - [GPU/CPU Monitoring & Multi-GPU Work Placement](gpu-monitoring-and-scheduling.md) — Efficiency
+- [GPU Work-Placement Decision Engine](gpu-placement-engine.md) — Efficiency
 - [Color Management](color-management.md) — Color
 - [Streaming Robustness Runbook](streaming-gotchas.md) — Streaming/Timing
 - [Preview Subsystem](preview-subsystem.md) — Preview

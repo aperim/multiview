@@ -45,6 +45,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 95 ADRs tot
 - [ADR-E008](ADR-E008.md) — Cost-model-driven planner with a capability+cost registry
 - [ADR-E009](ADR-E009.md) — Per-tier efficiency budgets enforced by perf-regression CI
 - [ADR-0017](ADR-0017.md) — GPU/CPU utilisation monitoring + affinity-aware least-loaded multi-GPU work placement *(Proposed)*
+- [ADR-0018](ADR-0018.md) — Adaptive affinity-first GPU work-placement with deliberate split + closed-loop re-placement *(Proposed)*
 
 ## Color
 
