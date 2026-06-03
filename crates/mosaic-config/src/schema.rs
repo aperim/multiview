@@ -252,6 +252,52 @@ pub struct Source {
     /// Per-source color override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ColorOverride>,
+    /// Per-source caption/subtitle selector for native in-pipeline decode.
+    ///
+    /// Absent means no captions are decoded for this source — the engine never
+    /// decodes a track it will not display (an efficiency lever, not a default
+    /// cost). See [`CaptionSelector`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captions: Option<CaptionSelector>,
+}
+
+/// How captions/subtitles are sourced for one input, decoded **natively from the
+/// source stream** (the primary path, superseding external sidecar files).
+///
+/// Internally tagged by `mode` (robust across TOML and JSON; never `untagged`).
+/// Each family maps onto `mosaic_ffmpeg`'s `CaptionDecoder` at ingest time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CaptionSelector {
+    /// Auto-select the first usable caption track on the source (surface
+    /// whatever the stream carries).
+    Auto,
+    /// Captions explicitly disabled — equivalent to omitting the field, but
+    /// expressible so a template can pin "no captions".
+    Off,
+    /// DVB teletext, addressed by page (e.g. `801` for English subtitles).
+    TeletextPage {
+        /// Teletext page number (magazine-addressed, typically `100`–`899`).
+        page: u16,
+    },
+    /// A subtitle track identified by stream id or language tag (e.g. `"eng"`).
+    Track {
+        /// The track identifier (a language tag or a stream-relative id).
+        id: String,
+    },
+    /// Embedded CEA-608/708 captions carried in the video stream, addressed by
+    /// field/service (e.g. `"cc1"`).
+    EmbeddedCc {
+        /// The caption field/service selector (e.g. `cc1`..`cc4` or a service).
+        field: String,
+    },
+    /// An external sidecar subtitle file (SRT/WebVTT) — the legacy path, kept so
+    /// it routes through the same per-tile burn-in as native decode.
+    Sidecar {
+        /// Filesystem path to the `.srt`/`.vtt` sidecar.
+        path: String,
+    },
 }
 
 /// The layout placement strategy, internally tagged by `kind`.
