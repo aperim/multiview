@@ -14,6 +14,9 @@ publish = false
 [dependencies]
 mosaic-core = { workspace = true }
 mosaic-framestore = { workspace = true }
+# Lock-free read-copy-update for the per-source caption cue store (same
+# primitive the frame stores use); no native deps, keeps the crate `unsafe`-free.
+arc-swap = "1.9.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

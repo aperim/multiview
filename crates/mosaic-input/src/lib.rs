@@ -66,6 +66,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod caption_store;
 pub mod dash;
 pub mod error;
 pub mod hls;
