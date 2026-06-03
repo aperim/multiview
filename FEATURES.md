@@ -4,13 +4,40 @@ The full capability matrix for Mosaic: every planned feature, its current status
 lands in ([ROADMAP.md](ROADMAP.md)), and the design doc that specifies it. This is the living
 support matrix — update a row's status as it is implemented.
 
-**Status:** 📐 Designed (spec complete, not yet implemented) · 🔵 In progress · ✅ Implemented
+**Status:** 📐 Designed (spec complete, not yet implemented) · 📋 Backlog/planned (folded into a milestone, not started) · 🔵 In progress · ✅ Implemented
 
-> The engine is **pre-implementation**: feature rows are 📐 *Designed* (the design is complete and
-> pinned in `docs/`). The repository itself — docs, ADRs, agent-instruction system, compiling
-> workspace scaffold, dev container, CI — is ✅ delivered (milestone M0). See the
-> [212-item management-completeness checklist](docs/development/completeness-checklist.md) for the
-> fine-grained UI/API surface.
+> **Foundation build-out (in progress).** The pure-Rust foundation is built and tested: the 16-crate
+> workspace compiles, the default (GPU-free, native-dep-free) build is green across the full CI gate
+> set (fmt/clippy `-D warnings`/test/deny/inclusive-language), and there are ~500 tests (unit +
+> property + integration). What has landed beyond the M0 scaffold:
+>
+> - **`mosaic-core`** — shared types/traits expanded (`Frame`, NV12 `PixelFormat`, 4-axis `ColorInfo`,
+>   `MediaTime`/clock, layout model, error taxonomy, stage traits).
+> - **The 10 leaf crates** (`hal`, `framestore`, `audio`, `overlay`, `input`, `output`, `config`,
+>   `events`, `telemetry`, plus the color modules of `compositor`) — built with real unit/property
+>   tests against the documented contracts.
+> - **`mosaic-engine`** — the protected output core: fixed-cadence output clock, compositor drive
+>   loop, `EngineRuntime`, engine→outside isolation (arc-swap latest-state + bounded drop-oldest
+>   broadcast), actor supervisor, and the degradation control loop. **Invariants #1 (output-clock)
+>   and #10 (isolation) are exercised by tests** in this crate.
+> - **Layer C** — `mosaic-control` (axum REST/WS/SSE API, OpenAPI, SQLite, command bus, auth),
+>   `mosaic-preview` (isolated taps), and `mosaic-cli` (`validate` + `run --headless`); `cargo xtask
+>   gen-openapi` emits the OpenAPI document.
+> - **Web SPA** (`web/`) — design system, react-konva + dnd-kit layout editor, realtime client,
+>   i18n + accessibility scaffolding.
+> - **Feature-gated paths (NOT in the default build, NOT yet CI-gated here):** the GPU **wgpu**
+>   compositor (`wgpu` feature) and the **FFmpeg** media path (`ffmpeg` feature). These compile
+>   behind off-by-default features and have not been exercised on real hardware in this environment.
+>   **NDI** remains design-only.
+>
+> **Not yet verified on hardware here:** real HW decode/encode (NVDEC/NVENC, VideoToolbox, VAAPI/QSV),
+> GPU compositing on a device, and any end-to-end run against live sources. The headless software
+> engine runs and produces frames per the output clock, but a full software decode→compose→serve
+> pipeline is not yet wired end-to-end. Rows below are 📐 *Designed* unless a crate has shipped
+> working code for that feature; 🔵 marks partial/feature-gated work in progress. The repository
+> baseline — docs, ADRs, agent-instruction system, dev container, CI — remains ✅ delivered (M0).
+> See the [212-item management-completeness checklist](docs/development/completeness-checklist.md)
+> for the fine-grained UI/API surface.
 
 ## Inputs
 
@@ -22,9 +49,10 @@ support matrix — update a row's status as it is implemented.
 | SRT ingest | 📐 | M4 | [io/inputs.md](docs/io/inputs.md) |
 | RTMP ingest | 📐 | M4 | [io/inputs.md](docs/io/inputs.md) |
 | NDI input (first-class; opt-in `ndi` feature + runtime license gate) | 📐 | M4 | [io/ndi.md](docs/io/ndi.md) |
-| File / test-pattern sources | 📐 | M1 | [io/inputs.md](docs/io/inputs.md) |
-| Input pacer, jitter buffers, timestamp normalization | 📐 | M3 | [timing-and-sync](docs/architecture/timing-and-sync.md) |
-| Supervised reconnect / backoff / circuit breaker | 📐 | M3 | [resilience](docs/architecture/resilience.md) |
+| Live YouTube input (yt-dlp resolver → existing HLS ingest; opt-in `youtube` feature, runtime-discovered binary) | 📋 backlog | M4+ | [io/youtube-live.md](docs/io/youtube-live.md), [ADR-0015](docs/decisions/ADR-0015.md) |
+| File / test-pattern sources | 🔵 | M1 | [io/inputs.md](docs/io/inputs.md) |
+| Input pacer, jitter buffers, timestamp normalization | 🔵 | M3 | [timing-and-sync](docs/architecture/timing-and-sync.md) |
+| Supervised reconnect / backoff / circuit breaker | 🔵 | M3 | [resilience](docs/architecture/resilience.md) |
 | Per-source color override (4 axes) | 📐 | M5 | [color](docs/architecture/color.md) |
 | Per-input audio/subtitle track selection | 📐 | M4/M5 | [media](docs/media/audio-subtitles-overlays.md) |
 
@@ -33,10 +61,10 @@ support matrix — update a row's status as it is implemented.
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
 | RTSP server endpoint | 📐 | M1/M4 | [io/outputs.md](docs/io/outputs.md) |
-| HLS + Low-Latency HLS | 📐 | M4 | [io/outputs.md](docs/io/outputs.md) |
+| HLS + Low-Latency HLS | 🔵 | M4 | [io/outputs.md](docs/io/outputs.md) |
 | NDI output (opt-in `ndi` feature + runtime license gate) | 📐 | M4 | [io/ndi.md](docs/io/ndi.md) |
 | RTMP / SRT push | 📐 | M4 | [io/outputs.md](docs/io/outputs.md) |
-| Encode-once, mux-many fan-out | 📐 | M4 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
+| Encode-once, mux-many fan-out | 🔵 | M4 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
 | Per-output transcode profiles (codec/bitrate/GOP/rate-control) | 📐 | M6 | [management matrix](docs/research/management-capability-matrix.md) |
 | Output color tagging (CICP) + ffprobe verify | 📐 | M5 | [color](docs/architecture/color.md) |
 | Multistream discrete audio tracks + program bus | 📐 | M4 | [media](docs/media/audio-subtitles-overlays.md) |
@@ -45,11 +73,11 @@ support matrix — update a row's status as it is implemented.
 
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
-| Custom GPU compositor (wgpu baseline) | 📐 | M2 | [pipeline](docs/architecture/pipeline.md) |
+| Custom GPU compositor (wgpu baseline) | 🔵 | M2 | [pipeline](docs/architecture/pipeline.md) |
 | Vendor fast paths (CUDA, Metal) | 📐 | M2/M8 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
 | HW decode (NVDEC, VideoToolbox, VAAPI, QSV) | 📐 | M2 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
 | HW encode (NVENC, VideoToolbox, VAAPI, QSV) | 📐 | M2 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
-| Per-stage backend auto-negotiation + cost model | 📐 | M2/M8 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
+| Per-stage backend auto-negotiation + cost model | 🔵 | M2/M8 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
 | Zero-copy within a vendor island; NV12-throughout | 📐 | M2 | [overview](docs/architecture/overview.md), [ADR-0004](docs/decisions/ADR-0004.md) |
 | Decode-at-display-resolution | 📐 | M8 | [ADR-E001](docs/decisions/ADR-E001.md) |
 
@@ -57,45 +85,45 @@ support matrix — update a row's status as it is implemented.
 
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
-| Presets: 2x2, 3x3, 1+5, PiP | 📐 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
-| Grid + absolute (free-form / overlap) layouts | 📐 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
-| Fit modes, borders, gaps, corner radius, z-order | 📐 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
+| Presets: 2x2, 3x3, 1+5, PiP | 🔵 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
+| Grid + absolute (free-form / overlap) layouts | 🔵 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
+| Fit modes, borders, gaps, corner radius, z-order | 🔵 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
 | Live hot-swap of a cell's source (no black flash) | 📐 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
 | Transitions (cut / crossfade) | 📐 | M3 | [templates/layout-and-config.md](docs/templates/layout-and-config.md) |
-| Config-as-code (TOML/JSON, validate, import/export, rollback) | 📐 | M6 | [ADR-M006](docs/decisions/ADR-M006.md) |
+| Config-as-code (TOML/JSON, validate, import/export, rollback) | 🔵 | M6 | [ADR-M006](docs/decisions/ADR-M006.md) |
 
 ## Audio, subtitles & overlays
 
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
-| EBU R128 / true-peak metering | 📐 | M4 | [media](docs/media/audio-subtitles-overlays.md) |
+| EBU R128 / true-peak metering | 🔵 | M4 | [media](docs/media/audio-subtitles-overlays.md) |
 | Subtitle ingest (CEA-608/708, DVB, teletext, WebVTT) | 📐 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
 | Subtitle burn-in (libass) + passthrough tracks | 📐 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
-| Overlays: labels, clocks, logos, audio meters, alert cards | 📐 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
-| Color: 4-axis detect/convert, linear-light, HDR/SDR tone-map | 📐 | M5 | [color](docs/architecture/color.md) |
+| Overlays: labels, clocks, logos, audio meters, alert cards | 🔵 | M5 | [media](docs/media/audio-subtitles-overlays.md) |
+| Color: 4-axis detect/convert, linear-light, HDR/SDR tone-map | 🔵 | M5 | [color](docs/architecture/color.md) |
 
 ## Resilience & efficiency
 
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
-| Output-clock invariant (never-falters) | 📐 | M3 | [resilience](docs/architecture/resilience.md) |
-| Last-good-frame stores + tile state machine + "no signal" cards | 📐 | M3 | [resilience](docs/architecture/resilience.md) |
+| Output-clock invariant (never-falters) | 🔵 | M3 | [resilience](docs/architecture/resilience.md) |
+| Last-good-frame stores + tile state machine + "no signal" cards | 🔵 | M3 | [resilience](docs/architecture/resilience.md) |
 | Hot reconfiguration (live-apply vs controlled reset) | 📐 | M3/M6 | [ADR-M005](docs/decisions/ADR-M005.md) |
 | GPU device-loss recovery; encoder hot-standby | 📐 | M3 | [resilience](docs/architecture/resilience.md) |
-| Resource-adaptive degradation + admission control | 📐 | M8 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
+| Resource-adaptive degradation + admission control | 🔵 | M8 | [hardware-and-efficiency](docs/architecture/hardware-and-efficiency.md) |
 | Commodity-tier density targets + perf-regression CI | 📐 | M8 | [efficiency](docs/research/efficiency.md) |
 
 ## Management API, realtime & web UI
 
 | Feature | Status | Target | Design |
 |---------|--------|--------|--------|
-| REST API `/api/v1` (RFC 9457, ETag, idempotency) | 📐 | M6 | [api/rest.md](docs/api/rest.md) |
-| OpenAPI 3.1 + Scalar "try-it-out" test env | 📐 | M6 | [api/rest.md](docs/api/rest.md) |
-| Auth (sessions + API keys), RBAC, per-object authz | 📐 | M6 | [web-api-stack](docs/research/web-api-stack.md) |
-| Realtime: WebSocket (primary) + SSE + AsyncAPI | 📐 | M7 | [api/realtime.md](docs/api/realtime.md) |
-| Web app: dashboard, sources, outputs, settings/users | 📐 | M7 | [web/management-app.md](docs/web/management-app.md) |
-| Drag-and-drop visual layout editor (react-konva + dnd-kit) | 📐 | M7 | [web/management-app.md](docs/web/management-app.md) |
-| Preview: input (incl. off-air cue), program, output | 📐 | M7 | [web/preview.md](docs/web/preview.md) |
+| REST API `/api/v1` (RFC 9457, ETag, idempotency) | 🔵 | M6 | [api/rest.md](docs/api/rest.md) |
+| OpenAPI 3.1 + Scalar "try-it-out" test env | 🔵 | M6 | [api/rest.md](docs/api/rest.md) |
+| Auth (sessions + API keys), RBAC, per-object authz | 🔵 | M6 | [web-api-stack](docs/research/web-api-stack.md) |
+| Realtime: WebSocket (primary) + SSE + AsyncAPI | 🔵 | M7 | [api/realtime.md](docs/api/realtime.md) |
+| Web app: dashboard, sources, outputs, settings/users | 🔵 | M7 | [web/management-app.md](docs/web/management-app.md) |
+| Drag-and-drop visual layout editor (react-konva + dnd-kit) | 🔵 | M7 | [web/management-app.md](docs/web/management-app.md) |
+| Preview: input (incl. off-air cue), program, output | 🔵 | M7 | [web/preview.md](docs/web/preview.md) |
 
 ## Operations & tooling
 
@@ -105,7 +133,7 @@ support matrix — update a row's status as it is implemented.
 | CI (fmt/clippy/test/deny/inclusive-language/web) | ✅ | M0 | `.github/workflows/ci.yml` |
 | Agent guardrails (typing, TDD, adversarial review) | ✅ (docs) | M0 | [agent-guardrails](docs/development/agent-guardrails.md) |
 | Linux container (NVIDIA Toolkit / VAAPI) | 📐 | M9 | [operations/containerization.md](docs/operations/containerization.md) |
-| Observability (tracing, Prometheus, health) | 📐 | M3/M8 | [operations/observability.md](docs/operations/observability.md) |
+| Observability (tracing, Prometheus, health) | 🔵 | M3/M8 | [operations/observability.md](docs/operations/observability.md) |
 | Testing: synthetic sources, chaos/soak, mutation, density | 📐 | M3/M9 | [operations/testing-and-benchmarking.md](docs/operations/testing-and-benchmarking.md) |
 
 ## Broadcast multiviewer (proposed — established, standards-based capabilities)
@@ -343,14 +371,14 @@ WCAG 2.2 AA + i18n for the management web app — see [accessibility](docs/web/a
 | Capability | Status | Target | Notes |
 |---|---|---|---|
 | WCAG 2.2 AA conformance + CI a11y gate (jsx-a11y, jest-axe, @axe-core/playwright) | 📐 | M7 | Per-area plan in docs/web/accessibility.md (ADR-W009). Layered lint + axe component/E2E scans fail the build on new violations; manual SR matrix (NVDA, JAWS, VoiceOver macOS+iOS) per milestone. Adds 2.2 AA SCs 2.4.11, 2.5.7, 2.5.8, 3.3.8. |
-| Accessible layout-editor equivalent path (Cells list + Inspector, keyboard grab/move/drop) | 📐 | M7 | ADR-W010. Non-canvas DOM editor drives the same layout model as react-konva; numeric x/y/w/h/z/rotation + steppers + z-order buttons satisfy SC 2.5.7 by single pointer; arrow-nudge/resize satisfies 2.1.1; drawn pseudo focus ring on canvas. dnd-kit KeyboardSensor (custom 1px/grid coordinateGetter) for DOM reorder/palette-drop. |
+| Accessible layout-editor equivalent path (Cells list + Inspector, keyboard grab/move/drop) | 🔵 | M7 | ADR-W010. Non-canvas DOM editor drives the same layout model as react-konva; numeric x/y/w/h/z/rotation + steppers + z-order buttons satisfy SC 2.5.7 by single pointer; arrow-nudge/resize satisfies 2.1.1; drawn pseudo focus ring on canvas. dnd-kit KeyboardSensor (custom 1px/grid coordinateGetter) for DOM reorder/palette-drop. |
 | No-color-alone realtime status: triple-encoded tally/alarm severity (color+icon/shape+text) | 📐 | M7 | ADR-W011. SC 1.4.1; CVD-safe Wong/Okabe-Ito palette contrast-verified both themes (1.4.11 3:1, 1.4.3 4.5:1). |
 | aria-live announcement strategy (pre-mounted status/alert + role=log, debounced) | 📐 | M7 | SC 4.1.3. Global announcer/message-bus; polite for ~90%, assertive only for critical alarm raises; per-tile debounce/coalesce (~1-2s tunable) + aria-busy; alarm history role=log. |
 | Accessible audio meters (silent <meter>/role=meter gauges, threshold-only announcements) | 📐 | M7 | Never stream meter values over aria-live; focusable wrapper + aria-valuetext for on-demand read; announce only clip (assertive) / silence (polite). |
 | prefers-reduced-motion across meters, alarm pulses, tile + drag transitions | 📐 | M7 | matchMedia/CSS gate to static state; pulse/blink never the sole signal; nothing flashes >3x/s (SC 2.3.1). |
 | Target size, focus-visible, focus-not-obscured, contrast in dark+light themes | 📐 | M7 | SC 2.5.8 (24x24 CSS px or spacing exception), 2.4.7, 2.4.11 (scroll-margin), 1.4.3/1.4.11/1.4.10 verified per theme; accessible TanStack tables (th[scope], single moving aria-sort, sort announcements). |
-| i18n framework: Lingui v5 + ICU MessageFormat + extraction/pseudolocale/TMS in CI | 📐 | M7 | ADR-W012. SWC macro + Vite plugin; auto content-hash IDs; <Trans> rich-text; CLDR plural/select; lazy per-locale catalogs; pseudoLocale + fail-on-new-untranslated in CI. |
-| Intl-based locale formatting (date/time/number/relative) + multi-timezone clock + timecode | 📐 | M7 | ECMAScript Intl owns all value formatting, memoized per (locale,options); one cached Intl.DateTimeFormat per displayed timezone (locale orthogonal to zone); SMPTE timecode structure app-controlled; dB/fps formatted as number + literal (not Intl units). |
+| i18n framework: Lingui v5 + ICU MessageFormat + extraction/pseudolocale/TMS in CI | 🔵 | M7 | ADR-W012. SWC macro + Vite plugin; auto content-hash IDs; <Trans> rich-text; CLDR plural/select; lazy per-locale catalogs; pseudoLocale + fail-on-new-untranslated in CI. |
+| Intl-based locale formatting (date/time/number/relative) + multi-timezone clock + timecode | 🔵 | M7 | ECMAScript Intl owns all value formatting, memoized per (locale,options); one cached Intl.DateTimeFormat per displayed timezone (locale orthogonal to zone); SMPTE timecode structure app-controlled; dB/fps formatted as number + literal (not Intl units). |
 | RTL support incl. logical properties, Tailwind logical utilities, and konva canvas mirroring | 📐 | M7 | dir on <html> via feature-detected getTextInfo() + static fallback map; canvas mirrored by explicit mirroredX=stageWidth-(x+width); selective mirroring (nav/chevrons yes; video/transport/timecode/numbers no); SC 3.1.1/3.1.2. |
 | Locale negotiation + client-localized RFC 9457 API errors from stable code/type | 📐 | M7 | navigator.languages via RFC 4647 lookup + persisted override + Accept-Language; OpenAPI 3.1 error schema exposes machine code/type the client maps to localized ICU; server title/detail fallback only. |
 | Localization boundary enforcement (chrome localized; user/operator content verbatim) | 📐 | M7 | Lint guidance + reviewer checklist: never wrap source names/overlay text/template names/IDs in t/<Trans>; never hardcode chrome; user content rendered with lang/dir=auto. |

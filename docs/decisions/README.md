@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-These ADRs are **Proposed** — derived from the design briefs in [../research](../research/). They capture the load-bearing decisions for the Mosaic engine. 89 ADRs total.
+These ADRs capture the load-bearing decisions for the Mosaic engine. 94 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -18,6 +18,7 @@ These ADRs are **Proposed** — derived from the design briefs in [../research](
 - [ADR-0012](ADR-0012.md) — LGPL-clean default build; GPL/nonfree/NDI strictly opt-in; project dual MIT OR Apache-2.0
 - [ADR-0013](ADR-0013.md) — Deadline-driven compositor with per-tile FrameSync and continuous drift correction
 - [ADR-0014](ADR-0014.md) — Encode the mosaic once per output; size density to physical NVENC chips
+- [ADR-0015](ADR-0015.md) — YouTube live ingest via an external runtime-discovered resolver (yt-dlp) *(Proposed)*
 
 ## Resilience & A/V
 
@@ -127,6 +128,15 @@ These ADRs are **Proposed** — derived from the design briefs in [../research](
 - [ADR-MV003](ADR-MV003.md) — Add loudness logging and multi-standard audio metering for compliance
 - [ADR-MV004](ADR-MV004.md) — Introduce a multi-head output model and salvo/scheduled layout automation
 - [ADR-MV005](ADR-MV005.md) — Adopt NMOS (IS-04/05/07/08, IS-10, IS-12) and router-control bridges (Ember+, SW-P-08) for IP-facility integration
+
+## Implementation Build-out
+
+Decisions **Accepted** during the foundation build-out — the as-built state of the engine, compositor, control plane, and broadcast-feature placement (some deliberately and temporarily diverge from a Proposed ADR or from conventions, with a tracked follow-up noted in the ADR).
+
+- [ADR-I001](ADR-I001.md) — Engine isolation primitives: `arc_swap::ArcSwapOption` (wait-free latest-state) + `tokio::sync::broadcast` (drop-oldest events), replacing a hand-rolled Mutex ring (realizes invariant #10)
+- [ADR-I002](ADR-I002.md) — GPU compositor: wgpu behind an off-by-default `wgpu` feature; WGSL shaders are naga-validated GPU-free and SSIM≥0.98/PSNR≥40 dB-gated at runtime (follow-up: flip `wgpu` to default per conventions §3)
+- [ADR-I003](ADR-I003.md) — Control persistence: SQLite/sqlx behind an off-by-default `sqlite` feature; in-memory trait `Repository` is the tested default; scoped cargo-deny ignore of RUSTSEC-2024-0436
+- [ADR-I004](ADR-I004.md) — Broadcast multiviewer (M10–M12) feature placement: modules inside the existing 16 crates (no new crates), native/hardware behind off-by-default features
 
 ## Accessibility & Internationalization
 

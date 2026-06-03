@@ -65,6 +65,12 @@ a protocol-specific options block. Canonical set:
 | `file` | libavformat | no (loopable) | — | `ffmpeg` | Slate/standby clip; `-re`-style pacing valid here. |
 | `test` | internal lavfi-style generator | yes | — | — | Reproducible slate / CI tile; no network. |
 
+> **Resolver-backed extension (opt-in):** a **`youtube`** source kind is planned (backlog) as a thin
+> wrapper that resolves a YouTube live URL to an HLS master playlist via an external, runtime-discovered
+> **`yt-dlp`** binary, then feeds the resolved URL into the `hls` path above. It is off by default behind
+> a `youtube` feature and is **not** one of the eight canonical protocol kinds — see
+> [io/youtube-live.md](youtube-live.md) and [ADR-0015](../decisions/ADR-0015.md).
+
 > **Decode-at-display-resolution applies to every protocol.** Each source is decoded near its
 > displayed tile size where the backend supports it, and a smaller substream/rendition is preferred
 > over the full-resolution feed ([conventions §5 invariant 6](../architecture/conventions.md),
