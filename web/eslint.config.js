@@ -9,10 +9,22 @@ import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
+import jsxA11y from 'eslint-plugin-jsx-a11y';
 
 export default tseslint.config(
   // Never lint build output, generated clients, or vendored code.
-  { ignores: ['dist/**', 'build/**', 'coverage/**', 'src/api/generated/**', '*.config.js'] },
+  // `src/api/schema.ts` is emitted verbatim by openapi-typescript from the
+  // OpenAPI spec — it is generated, not hand-authored, so it is not linted.
+  {
+    ignores: [
+      'dist/**',
+      'build/**',
+      'coverage/**',
+      'src/api/generated/**',
+      'src/api/schema.ts',
+      '*.config.js',
+    ],
+  },
 
   eslint.configs.recommended,
   tseslint.configs.strictTypeChecked,
@@ -24,17 +36,29 @@ export default tseslint.config(
       ecmaVersion: 2022,
       sourceType: 'module',
       // Type-aware linting — REQUIRED for strictTypeChecked's no-unsafe-* rules.
+      // `vite.config.ts` lives outside the app `tsconfig` (which includes only
+      // `src/`); allow it as a default-project file so it is still type-aware
+      // linted without polluting the app's strict program.
       parserOptions: {
-        projectService: true,
+        projectService: {
+          allowDefaultProject: [
+            'vite.config.ts',
+            'vitest.config.ts',
+            'lingui.config.ts',
+          ],
+        },
         tsconfigRootDir: import.meta.dirname,
       },
     },
     plugins: {
       'react-hooks': reactHooks,
       'react-refresh': reactRefresh,
+      'jsx-a11y': jsxA11y,
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      // Static JSX accessibility checks at author time (accessibility.md).
+      ...jsxA11y.flatConfigs.recommended.rules,
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
 
       // --- Absolute typing: no untyped escape hatches (made explicit). ---
@@ -63,6 +87,27 @@ export default tseslint.config(
     },
   },
 
+  // Shared modules (UI primitives, providers, hooks, route/nav tables) legitimately
+  // co-export components alongside variants, contexts, hooks, and constants — the
+  // shadcn/ui and React-context conventions. `react-refresh/only-export-components`
+  // is a DX-only Fast-Refresh hint, not a correctness or a11y rule; disable it for
+  // these non-page modules rather than fragmenting each primitive into two files.
+  {
+    files: [
+      'src/components/ui/**/*.{ts,tsx}',
+      'src/theme/**/*.{ts,tsx}',
+      'src/i18n/**/*.{ts,tsx}',
+      'src/realtime/**/*.{ts,tsx}',
+      'src/app/navigation.tsx',
+      // Test render helpers co-export a provider component + a render function;
+      // Fast Refresh does not apply to test infra.
+      'src/test/**/*.{ts,tsx}',
+    ],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+
   // Tests may mock — relax the strictest type-flow rules ONLY here, and document why.
   // Note: this does NOT permit weakening assertions; see agent-guardrails.md §B.2.
   {
@@ -73,6 +118,9 @@ export default tseslint.config(
       '@typescript-eslint/no-unsafe-member-access': 'off',
       '@typescript-eslint/no-unsafe-call': 'off',
       '@typescript-eslint/no-unsafe-argument': 'off',
+      // Tests narrow mocked HTTP bodies to their known request shape; this is the
+      // same category as the unsafe-* relaxations above (mocking only).
+      '@typescript-eslint/no-unsafe-type-assertion': 'off',
     },
   },
 );

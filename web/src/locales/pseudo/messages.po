@@ -1,0 +1,245 @@
+msgid ""
+msgstr ""
+"POT-Creation-Date: 2026-06-02 23:39+0000\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: @lingui/cli\n"
+"Language: pseudo\n"
+
+#: src/pages/LayoutsPage.tsx:137
+msgid "Accessible editing path: planned (Cells form + Inspector)"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:71
+msgid "Accessible toasts announce via a live region."
+msgstr ""
+
+#: src/pages/SimplePages.tsx:12
+msgid "Add and manage live ingest sources."
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:104
+msgid "All configured layouts."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:34
+msgid "Appearance"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:27
+msgid "Appearance and language preferences."
+msgstr ""
+
+#: src/pages/NotFoundPage.tsx:19
+msgid "Back to dashboard"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:37
+msgid "Choose light, dark, or follow the system."
+msgstr ""
+
+#: src/pages/SimplePages.tsx:22
+msgid "Configure output servers and renditions."
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:61
+msgid "Configured mosaic layouts."
+msgstr ""
+
+#: src/components/ConnectionStatus.tsx:29
+msgid "Connected"
+msgstr ""
+
+#: src/components/ConnectionStatus.tsx:35
+msgid "Connecting"
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:96
+msgid "Could not load layouts:"
+msgstr ""
+
+#: src/app/navigation.tsx:27
+#: src/pages/DashboardPage.tsx:50
+msgid "Dashboard"
+msgstr ""
+
+#: src/components/ConnectionStatus.tsx:47
+msgid "Disconnected"
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:119
+msgid "Frame rate"
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:47
+msgid "Identifier"
+msgstr ""
+
+#: src/components/LocaleSwitcher.tsx:35
+#: src/pages/SettingsPage.tsx:51
+msgid "Language"
+msgstr ""
+
+#: src/app/navigation.tsx:28
+#: src/pages/DashboardPage.tsx:58
+#: src/pages/LayoutsPage.tsx:81
+msgid "Layouts"
+msgstr ""
+
+#: src/components/TileStateBadge.tsx:29
+msgid "Live"
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:51
+msgid "Live engine status at a glance."
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:87
+msgid "Live tiles from the engine stream."
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:92
+msgid "Loading layouts…"
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:67
+msgid "Loading…"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:59
+msgid "Locale"
+msgstr ""
+
+#: src/pages/SimplePages.tsx:32
+msgid "Manage overlay layers and subtitles."
+msgstr ""
+
+#: src/app/Sidebar.tsx:22
+msgid "Mosaic"
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:83
+msgid "Mosaic layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:37
+msgid "Name"
+msgstr ""
+
+#: src/app/AppLayout.tsx:66
+msgid "Navigation"
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:123
+msgid "No frame-rate sample."
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:100
+msgid "No layouts are defined yet."
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:102
+msgid "No live tiles yet. They appear once the engine streams a snapshot."
+msgstr ""
+
+#: src/components/TileStateBadge.tsx:47
+msgid "No signal"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:68
+msgid "Notifications"
+msgstr ""
+
+#: src/app/AppLayout.tsx:60
+msgid "Open navigation"
+msgstr ""
+
+#: src/app/navigation.tsx:30
+#: src/pages/SimplePages.tsx:21
+msgid "Outputs"
+msgstr ""
+
+#: src/app/navigation.tsx:31
+#: src/pages/SimplePages.tsx:31
+msgid "Overlays"
+msgstr ""
+
+#: src/pages/NotFoundPage.tsx:14
+msgid "Page not found"
+msgstr ""
+
+#: src/app/Sidebar.tsx:20
+msgid "Primary"
+msgstr ""
+
+#: src/components/ConnectionStatus.tsx:41
+#: src/components/TileStateBadge.tsx:41
+msgid "Reconnecting"
+msgstr ""
+
+#: src/app/navigation.tsx:32
+#: src/pages/SettingsPage.tsx:26
+msgid "Settings"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:84
+msgid "Show a test notification"
+msgstr ""
+
+#: src/app/AppLayout.tsx:43
+msgid "Skip to content"
+msgstr ""
+
+#: src/app/navigation.tsx:29
+#: src/pages/SimplePages.tsx:11
+msgid "Sources"
+msgstr ""
+
+#: src/components/TileStateBadge.tsx:35
+msgid "Stale"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:54
+msgid "Switch the interface language and text direction."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:79
+msgid "Test notification"
+msgstr ""
+
+#: src/pages/NotFoundPage.tsx:15
+msgid "The requested screen does not exist."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:42
+msgid "Theme"
+msgstr ""
+
+#: src/components/ThemeToggle.tsx:23
+msgid "Theme: dark. Switch to system."
+msgstr ""
+
+#: src/components/ThemeToggle.tsx:21
+msgid "Theme: light. Switch to dark."
+msgstr ""
+
+#: src/components/ThemeToggle.tsx:24
+msgid "Theme: system. Switch to light."
+msgstr ""
+
+#: src/pages/PlaceholderPage.tsx:27
+msgid "This screen is part of an upcoming milestone."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:80
+msgid "This toast is announced to assistive technology."
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:98
+msgid "Tile status"
+msgstr ""
+
+#: src/pages/DashboardPage.tsx:84
+msgid "Tiles"
+msgstr ""
