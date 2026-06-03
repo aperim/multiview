@@ -7,7 +7,17 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-# ignore = []   # add RUSTSEC-IDs here with justification if ever needed
+# RUSTSEC-IDs ignored here MUST carry a justification (no silent suppression).
+ignore = [
+  # RUSTSEC-2024-0436: `paste` is unmaintained (informational advisory, not a
+  # vulnerability). It is a compile-time-only proc-macro with no runtime attack
+  # surface, pulled in transitively only by `utoipa-axum` (the OpenAPI/axum
+  # bindings used by mosaic-control). RustSec reports "No safe upgrade is
+  # available" and there is no `utoipa-axum` release that drops it, so this is
+  # unavoidable until the upstream migrates (e.g. to `pastey`). Scoped to this
+  # single advisory id; revisit when `utoipa-axum` updates.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro `paste`, transitive via utoipa-axum; no safe upgrade upstream" },
+]
 
 [licenses]
 version = 2
@@ -31,7 +41,13 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
+# Deny real `version = "*"` wildcards on registry crates, but exempt
+# intra-workspace `path` dependencies: the `mosaic-*` crates depend on each
+# other by path and carry no version requirement (which cargo-deny otherwise
+# reports as a wildcard). This narrowly excludes path deps only — a `"*"`
+# version requirement on a crates.io dependency is still denied.
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

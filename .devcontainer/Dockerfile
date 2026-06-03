@@ -33,8 +33,14 @@ RUN apt-get update \
       libavdevice-dev libswscale-dev libswresample-dev libpostproc-dev \
       libass-dev \
       ffmpeg \
-      # VAAPI (Intel/AMD) userspace + verification + runtime drivers
-      libva-dev vainfo va-driver-all intel-media-va-driver-non-free mesa-va-drivers \
+      # VAAPI (Intel/AMD) userspace + verification + arch-portable runtime drivers
+      libva-dev vainfo va-driver-all mesa-va-drivers \
+ # The Intel media driver is x86_64-only; it has no arm64 package, so installing
+ # it unconditionally breaks `docker buildx build` on Apple Silicon (arm64). Only
+ # pull it on amd64, where Intel VAAPI hardware can actually exist.
+ && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+      apt-get install -y --no-install-recommends intel-media-va-driver-non-free; \
+    fi \
  && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------

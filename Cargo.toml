@@ -38,3 +38,37 @@ mosaic-cli = { path = "crates/mosaic-cli" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.rust]
+unsafe_code = "forbid"          # FFI crates override locally to "deny" + // SAFETY:
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+# Groups MUST carry priority < 0 so individual overrides below are not clobbered
+# (cargo emits lints alphabetically on the rustc command line).
+all      = { level = "deny",  priority = -2 }
+pedantic = { level = "warn",  priority = -1 }
+
+# No panics / panicking accessors in non-test code.
+unwrap_used      = "deny"
+expect_used      = "deny"
+panic            = "deny"
+todo             = "deny"
+unimplemented    = "deny"
+unreachable      = "deny"
+get_unwrap       = "deny"
+indexing_slicing = "deny"
+# No untyped/lossy conversions — use TryFrom / TryInto / From.
+as_conversions   = "deny"
+# No process exit, leaks, stray debug / stdio (use `tracing`).
+exit             = "deny"
+mem_forget       = "deny"
+dbg_macro        = "deny"
+print_stdout     = "deny"
+print_stderr     = "deny"
+str_to_string    = "deny"
+# Force documenting failure modes.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+must_use_candidate = "warn"
