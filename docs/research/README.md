@@ -9,6 +9,7 @@ Deep, verification-hardened design records that back the Mosaic implementation. 
 - [GPU Work-Placement Decision Engine](gpu-placement-engine.md) — Efficiency
 - [Color Management](color-management.md) — Color
 - [Streaming Robustness Runbook](streaming-gotchas.md) — Streaming/Timing
+- [Timing Architecture](timing-architecture.md) — Streaming/Timing (pacing + reference-lock + frame-sync + wall-clock + timecode)
 - [Preview Subsystem](preview-subsystem.md) — Preview
 - [Realtime / Eventing API](realtime-api.md) — Realtime API
 - [Management Capability Matrix](management-capability-matrix.md) — Management

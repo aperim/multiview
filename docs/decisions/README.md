@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-These ADRs capture the load-bearing decisions for the Mosaic engine. 95 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -20,6 +20,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 95 ADRs tot
 - [ADR-0014](ADR-0014.md) — Encode the mosaic once per output; size density to physical NVENC chips
 - [ADR-0015](ADR-0015.md) — YouTube live ingest via an external runtime-discovered resolver (yt-dlp) *(Proposed)*
 - [ADR-0016](ADR-0016.md) — Efficient overlay rendering: GPU glyph-atlas text + libass subtitles + cached/dirty-region compositing *(Proposed)*
+- [ADR-0019](ADR-0019.md) — Native multi-form caption ingest: unified cue model decoded in-demux into a per-tile sampled cue store *(Proposed)*
 
 ## Resilience & A/V
 
@@ -66,6 +67,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 95 ADRs tot
 - [ADR-T006](ADR-T006.md) — Long-run clock drift: monotonic master + PI/dead-band loop + adaptive audio resampling
 - [ADR-T007](ADR-T007.md) — Codec edge-case & decode/encode policy: one bad input never stalls the mosaic
 - [ADR-T008](ADR-T008.md) — A/V sync & per-input jitter-buffer model
+- [ADR-0020](ADR-0020.md) — Layered timing: monotonic pacing + optional reference-lock + per-input frame-sync *(Proposed)*
 
 ## Preview
 
