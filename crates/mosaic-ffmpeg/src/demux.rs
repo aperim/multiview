@@ -14,6 +14,7 @@
 
 use std::path::Path;
 
+use ffmpeg::codec::Parameters;
 use ffmpeg::media::Type;
 use ffmpeg_next as ffmpeg;
 
@@ -48,6 +49,9 @@ pub struct StreamParams {
     pub sample_rate: u32,
     /// Audio channel count (`0` for non-audio / unknown).
     pub channels: u16,
+    /// The stream's `language` metadata tag (BCP-47 / ISO 639 as declared by the
+    /// container), if present. Used to resolve a caption rendition by language.
+    pub language: Option<String>,
 }
 
 /// A read coded packet plus the index of the stream it belongs to.
@@ -130,6 +134,7 @@ impl Demuxer {
                     height: 0,
                     sample_rate: 0,
                     channels: 0,
+                    language: stream.metadata().get("language").map(str::to_owned),
                 };
                 // Decode-side geometry/audio params come from the codec context
                 // built from the stream parameters; build a throwaway context to
@@ -148,7 +153,10 @@ impl Demuxer {
                                 p.channels = a.channels();
                             }
                         }
-                        MediaKind::Other => {}
+                        // Subtitle streams carry no decode-side geometry/audio to
+                        // read here; the caption decoder reads what it needs from
+                        // the stream parameters (`stream_parameters`).
+                        MediaKind::Subtitle | MediaKind::Other => {}
                     }
                 }
                 p
@@ -162,9 +170,23 @@ impl Demuxer {
         let ty = match kind {
             MediaKind::Video => Type::Video,
             MediaKind::Audio => Type::Audio,
+            MediaKind::Subtitle => Type::Subtitle,
             MediaKind::Other => return None,
         };
         self.input.streams().best(ty).map(|s| s.index())
+    }
+
+    /// Clone the codec [`Parameters`] of the stream at `index`, or [`None`] if
+    /// there is no such stream.
+    ///
+    /// This is what [`crate::caption_decode::CaptionDecoder::from_parameters`]
+    /// consumes: a self-contained snapshot of the stream's codec parameters
+    /// (codec id, extradata, geometry) that borrows nothing from the demuxer, so
+    /// the caption decoder can be built on the input thread while the demuxer
+    /// keeps reading.
+    #[must_use]
+    pub fn stream_parameters(&self, index: usize) -> Option<Parameters> {
+        self.input.stream(index).map(|s| s.parameters())
     }
 
     /// Read the next coded packet from any stream, or [`None`] at end-of-stream.

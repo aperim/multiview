@@ -33,7 +33,10 @@ pub enum MediaKind {
     Video,
     /// An audio stream.
     Audio,
-    /// Any other media type (subtitle, data, attachment, unknown).
+    /// A subtitle stream (teletext, DVB-sub, CEA-608/708 carried as its own
+    /// stream, `WebVTT`, …) — the caption decoders consume these.
+    Subtitle,
+    /// Any other media type (data, attachment, unknown).
     Other,
 }
 
@@ -42,6 +45,7 @@ impl From<media::Type> for MediaKind {
         match value {
             media::Type::Video => Self::Video,
             media::Type::Audio => Self::Audio,
+            media::Type::Subtitle => Self::Subtitle,
             _ => Self::Other,
         }
     }

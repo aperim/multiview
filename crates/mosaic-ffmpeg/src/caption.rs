@@ -156,6 +156,21 @@ pub struct CueRect {
     pub height: u32,
 }
 
+impl CueRect {
+    /// Construct a [`CueRect`] from its source-pixel `x`/`y` origin and
+    /// `width`/`height`. (`CueRect` is `#[non_exhaustive]`, so this is the way to
+    /// build one outside this crate.)
+    #[must_use]
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
 /// The displayable payload of a [`CaptionCue::Text`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]

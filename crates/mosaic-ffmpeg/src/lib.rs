@@ -128,6 +128,14 @@ pub mod resample;
 #[cfg(feature = "ffmpeg")]
 pub mod scale;
 
+/// Test-only DVB-sub MPEG-TS fixture generator (`test-fixtures` feature).
+/// `#[doc(hidden)]` — **not** part of the public API; it exists so the
+/// strictly-`forbid(unsafe)` `mosaic-cli` tests (and this crate's own demux
+/// test) can build a real `dvbsub` clip the FFmpeg CLI cannot transcode.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod test_fixtures;
+
 #[cfg(feature = "ffmpeg")]
 pub use audio_file::{AudioFileDecoder, AudioSamplesF32};
 
