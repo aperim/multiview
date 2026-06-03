@@ -262,12 +262,17 @@ pub struct RealPipeline {
     /// a future per-source caption declaration. `None` ⇒ no subtitle overlay.
     #[cfg(feature = "overlay")]
     subtitles: Option<mosaic_overlay::subtitle::CueTrack>,
-    /// The real per-tick program-audio loudness timeline (dBFS), one entry per
-    /// output tick, derived off the hot path from the decoded program audio's
-    /// ballistics DSP (GAP-3). Empty ⇒ no decodable program audio (the meter
-    /// then rides its floor rather than showing a fabricated constant).
+    /// Per-source per-tick audio-loudness timelines (dBFS), keyed by source id,
+    /// one inner entry per output tick, derived off the hot path from each
+    /// source's own decoded audio (the per-input meter). A source absent from the
+    /// map (a live URL, NDI, or an audio-free clip) rides its meter floor rather
+    /// than showing a fabricated constant.
     #[cfg(feature = "overlay")]
-    meter_db_timeline: Vec<f64>,
+    meter_db_timelines: std::collections::HashMap<String, Vec<f64>>,
+    /// Per-source human label (`display_name`, or the id when unnamed), keyed by
+    /// source id — the text drawn bottom-left of each tile.
+    #[cfg(feature = "overlay")]
+    tile_labels: std::collections::HashMap<String, String>,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
@@ -384,14 +389,24 @@ impl RealPipeline {
             return Err(PipelineError::NoOutput("file/HLS"));
         }
 
-        // Derive the real per-tick program-audio loudness timeline off the build
-        // path (GAP-3): decode the first file-backed source's audio with
-        // mosaic-audio's ballistics DSP and snapshot the meter at each tick. A
-        // live URL or audio-free source yields an empty timeline (the meter then
+        // Derive the real PER-SOURCE per-tick audio-loudness timelines off the
+        // build path: decode each file-backed source's OWN audio with
+        // mosaic-audio's ballistics DSP and snapshot the meter at each tick, so a
+        // tile's vertical meter reflects that input's own audio. A live URL /
+        // NDI / audio-free source contributes no timeline (its tile meter then
         // rides its floor — no fabricated constant). This never touches the hot
         // path: it is computed once at build time.
         #[cfg(feature = "overlay")]
-        let meter_db_timeline = build_meter_timeline(config, cadence);
+        let meter_db_timelines = build_meter_timelines(config, cadence);
+        #[cfg(feature = "overlay")]
+        let tile_labels = config
+            .sources
+            .iter()
+            .map(|s| {
+                let label = s.display_name.clone().unwrap_or_else(|| s.id.clone());
+                (s.id.clone(), label)
+            })
+            .collect();
 
         Ok(Self {
             layout,
@@ -406,7 +421,9 @@ impl RealPipeline {
             #[cfg(feature = "overlay")]
             subtitles: None,
             #[cfg(feature = "overlay")]
-            meter_db_timeline,
+            meter_db_timelines,
+            #[cfg(feature = "overlay")]
+            tile_labels,
         })
     }
 
@@ -509,21 +526,27 @@ impl RealPipeline {
         let plans = std::mem::take(&mut self.ingest_plans);
         let supervisor = IngestSupervisor::start(plans);
 
-        // Collected composited canvases (Arc to avoid copies), in tick order.
-        let collected: Arc<Mutex<Vec<Arc<Nv12Image>>>> = Arc::new(Mutex::new(Vec::new()));
+        // Collected composited canvases (Arc to avoid copies), in tick order,
+        // each paired with the per-source lifecycle states sampled that tick (so
+        // the off-hot-path per-tile overlay flag reflects the real tile state).
+        let collected: Arc<Mutex<Vec<CollectedTick>>> = Arc::new(Mutex::new(Vec::new()));
 
         // The projection runs once per tick on the hot loop. It snapshots the
-        // composited canvas into the collection — cheap, panic-free, and never
-        // blocks the engine (the collection lock is held only for a push;
-        // invariant #10 is not at risk because this is a bounded offline
-        // collection, not a realtime consumer that could back-pressure a live
-        // engine). Frame *advancement* is no longer done here: the ingest threads
-        // publish into the stores asynchronously, and the drive loop SAMPLES the
-        // latest-good frame per tick (inputs sampled, never pacing — invariant #1).
+        // composited canvas + per-source states into the collection — cheap,
+        // panic-free, and never blocks the engine (the collection lock is held
+        // only for a push; invariant #10 is not at risk because this is a bounded
+        // offline collection, not a realtime consumer that could back-pressure a
+        // live engine). Frame *advancement* is no longer done here: the ingest
+        // threads publish into the stores asynchronously, and the drive loop
+        // SAMPLES the latest-good frame per tick (inputs sampled, never pacing —
+        // invariant #1).
         let collect = Arc::clone(&collected);
         let state_of = move |frame: &CompositedFrame| -> TickState {
             if let Ok(mut sink) = collect.lock() {
-                sink.push(Arc::new(frame.canvas.clone()));
+                sink.push(CollectedTick {
+                    canvas: Arc::new(frame.canvas.clone()),
+                    source_states: frame.source_states.clone(),
+                });
             }
             TickState {
                 tick: frame.tick.index,
@@ -554,17 +577,18 @@ impl RealPipeline {
 
         let outcome = outcome?;
 
-        let frames = match collected.lock() {
+        let ticks = match collected.lock() {
             Ok(g) => g.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         };
-        let collected_count = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+        let collected_count = u64::try_from(ticks.len()).unwrap_or(u64::MAX);
         let faltered = collected_count != outcome.ticks;
 
-        // Bake configured overlays into the collected program OFF the hot path
-        // (the protected output core has already emitted these frames). When the
-        // `overlay` feature is off this is a no-op identity.
-        let frames = self.bake_overlays(frames)?;
+        // Bake configured per-tile overlays into the collected program OFF the hot
+        // path (the protected output core has already emitted these frames). When
+        // the `overlay` feature is off this is a no-op identity returning the bare
+        // canvases.
+        let frames = self.bake_overlays(ticks)?;
 
         let output_lines = self.encode_outputs(&frames)?;
 
@@ -579,76 +603,125 @@ impl RealPipeline {
         })
     }
 
-    /// Bake the configured overlays into each collected program frame, off the
-    /// hot path. With the `overlay` feature compiled in this rasterizes the
-    /// overlay surface (clock/meter/safe-area/tally/subtitles) and blends it into
-    /// each NV12 frame via the compositor sub-pass; without it the frames pass
-    /// through unchanged.
+    /// The loudness (dBFS) to show for source `id` at output tick `i`. Reads that
+    /// source's own per-tick timeline derived at build time; falls back to the
+    /// meter floor ([`mosaic_audio::Ballistics::FLOOR_DB`]) when the source has no
+    /// decodable audio, so a silent / audio-free tile shows an empty bar rather
+    /// than a fabricated constant.
+    #[cfg(feature = "overlay")]
+    fn meter_db_for(&self, id: &str, i: usize) -> f64 {
+        match self.meter_db_timelines.get(id) {
+            Some(timeline) => timeline
+                .get(i)
+                .copied()
+                .or_else(|| timeline.last().copied())
+                .unwrap_or(mosaic_audio::Ballistics::FLOOR_DB),
+            None => mosaic_audio::Ballistics::FLOOR_DB,
+        }
+    }
+
+    /// Build the per-tile [`TileSpec`](crate::overlays::TileSpec) list from the
+    /// solved layout's cells: one entry per source-bound cell, carrying the cell's
+    /// pixel rectangle and the source's display label.
+    #[cfg(feature = "overlay")]
+    fn tile_specs(&self) -> Vec<crate::overlays::TileSpec> {
+        use mosaic_overlay::geometry::PixelRect;
+        let (cw, ch) = (self.layout.canvas.width, self.layout.canvas.height);
+        let mut specs = Vec::new();
+        for cell in &self.layout.cells {
+            let Some(id) = cell.source.as_deref() else {
+                continue;
+            };
+            let label = self
+                .tile_labels
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.to_owned());
+            let rect = PixelRect {
+                x: norm_to_px_f32(cell.x, cw),
+                y: norm_to_px_f32(cell.y, ch),
+                width: norm_to_px_f32(cell.w, cw),
+                height: norm_to_px_f32(cell.h, ch),
+            };
+            specs.push(crate::overlays::TileSpec::new(id, label, rect));
+        }
+        specs
+    }
+
+    /// Bake the configured **per-tile** overlays into each collected program
+    /// frame, off the hot path. With the `overlay` feature compiled in this
+    /// rasterizes, for each layout cell, an input label + the source's own dB
+    /// meter + a state/fault flag (plus the program clock + subtitle cue) and
+    /// blends them into the NV12 frame via the compositor sub-pass; without it the
+    /// bare canvases pass through unchanged.
     ///
     /// # Errors
     ///
     /// Returns [`PipelineError::Engine`] if the overlay baker or sub-pass rejects
     /// the canvas (font load / unresolved color).
-    /// The program-audio loudness (dBFS) to show at output tick `i`. Reads the
-    /// real per-tick timeline derived at build time; falls back to the meter
-    /// floor ([`mosaic_audio::Ballistics::FLOOR_DB`]) when no decodable program
-    /// audio exists, so a silent / audio-free run shows an empty bar rather than
-    /// a fabricated constant.
-    #[cfg(feature = "overlay")]
-    fn meter_db_at(&self, i: usize) -> f64 {
-        self.meter_db_timeline
-            .get(i)
-            .copied()
-            .or_else(|| self.meter_db_timeline.last().copied())
-            .unwrap_or(mosaic_audio::Ballistics::FLOOR_DB)
-    }
-
-    // reason: the `not(feature)` sibling consumes `frames` by value (identity
+    // reason: the `not(feature)` sibling consumes `ticks` by value (identity
     // pass-through), so both arms share one by-value signature for the caller.
     #[cfg(feature = "overlay")]
     #[allow(clippy::needless_pass_by_value)]
     fn bake_overlays(
         &self,
-        frames: Vec<Arc<Nv12Image>>,
+        ticks: Vec<CollectedTick>,
     ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
         use mosaic_compositor::overlay::apply_overlays_to_nv12;
 
         let mut baker = crate::overlays::OverlayBaker::new(
             self.layout.canvas.width,
             self.layout.canvas.height,
+            self.tile_specs(),
             self.subtitles.clone(),
             0,
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
 
-        let mut out_frames = Vec::with_capacity(frames.len());
-        for (i, frame) in frames.iter().enumerate() {
+        let mut out_frames = Vec::with_capacity(ticks.len());
+        for (i, tick) in ticks.iter().enumerate() {
             let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
-            // Feed the REAL per-tick program-audio loudness (GAP-3) so the dB bar
-            // tracks the decoded audio. Where no decodable program audio exists
-            // the timeline is empty and the meter rides its floor (silence) —
-            // never a fabricated constant. The conflator inside the baker thins
-            // these to ~30 Hz, so even at higher cadences the tap stays cheap and
-            // can never couple to the engine (invariant #10).
-            baker.observe_meter_db(self.meter_db_at(i));
+            // Compose the per-tile dynamics for this output tick: each tile's OWN
+            // decoded-audio loudness (its tile meter) + the real per-source
+            // lifecycle state sampled by the engine that tick (its fault flag). A
+            // source with no decodable audio rides the meter floor; a source not
+            // present in the sampled states defaults to NO_SIGNAL inside the baker
+            // (a missing source never stalls — invariant #1). The baker's per-tile
+            // conflators thin the meter to ~30 Hz so the tap stays cheap and
+            // cannot couple to the engine (invariant #10).
+            let mut dynamics = std::collections::HashMap::new();
+            for spec in baker.tiles() {
+                let state = tick
+                    .source_states
+                    .get(&spec.source_id)
+                    .copied()
+                    .unwrap_or(mosaic_core::traits::SourceState::NoSignal);
+                dynamics.insert(
+                    spec.source_id.clone(),
+                    crate::overlays::TileDynamics {
+                        meter_db: self.meter_db_for(&spec.source_id, i),
+                        state,
+                    },
+                );
+            }
             let list = baker
-                .draw_list(pts)
+                .draw_list(pts, &dynamics)
                 .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
-            let overlaid = apply_overlays_to_nv12(frame, &list, self.canvas_color)
+            let overlaid = apply_overlays_to_nv12(&tick.canvas, &list, self.canvas_color)
                 .map_err(|e| PipelineError::Engine(format!("overlay blend: {e}")))?;
             out_frames.push(Arc::new(overlaid));
         }
         Ok(out_frames)
     }
 
-    /// Overlays disabled at compile time: pass the frames through unchanged.
+    /// Overlays disabled at compile time: hand back the bare collected canvases.
     #[cfg(not(feature = "overlay"))]
     #[allow(clippy::unnecessary_wraps)] // reason: mirrors the `overlay`-on signature.
     fn bake_overlays(
         &self,
-        frames: Vec<Arc<Nv12Image>>,
+        ticks: Vec<CollectedTick>,
     ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
-        Ok(frames)
+        Ok(ticks.into_iter().map(|t| t.canvas).collect())
     }
 
     /// Encode the collected composited canvases once and fan them out to every
@@ -705,6 +778,19 @@ impl RealPipeline {
 struct TickState {
     tick: u64,
     pts: MediaTime,
+}
+
+/// One collected output tick held for off-hot-path overlay baking: the bare
+/// composited canvas plus the per-source lifecycle states sampled that tick (so
+/// the per-tile fault flag reflects the real tile state, not a guess).
+#[derive(Debug, Clone)]
+struct CollectedTick {
+    /// The composited canvas the protected output core emitted this tick.
+    canvas: Arc<Nv12Image>,
+    /// Per-source lifecycle state sampled this tick (`source_id -> state`); a
+    /// cell with no bound source is omitted (and a source absent here is treated
+    /// as `NO_SIGNAL` by the baker).
+    source_states: std::collections::HashMap<String, mosaic_core::traits::SourceState>,
 }
 
 /// Owns the per-source streaming-ingest decode threads and a shared stop flag.
@@ -837,6 +923,18 @@ fn frac_to_px(frac: f32, extent: u32) -> u32 {
     lo
 }
 
+/// Convert a normalized fraction in `[0,1]` to a pixel coordinate `f32` against
+/// `extent`, `as`-cast-free, for placing the per-tile overlay surface. Reuses the
+/// exact integer [`frac_to_px`] then widens losslessly (overlay sizes are well
+/// under 2^24).
+#[cfg(feature = "overlay")]
+fn norm_to_px_f32(frac: f32, extent: u32) -> f32 {
+    let px = frac_to_px(frac, extent);
+    let high = u16::try_from(px >> 16).unwrap_or(u16::MAX);
+    let low = u16::try_from(px & 0xFFFF).unwrap_or(u16::MAX);
+    f32::from(high) * 65_536.0 + f32::from(low)
+}
+
 /// Whole ticks in one second at `cadence` (`num/den`), rounded to nearest, used
 /// as the GOP / segment length. Exact integer arithmetic (never float fps).
 fn ticks_per_second(cadence: Rational) -> u32 {
@@ -846,22 +944,27 @@ fn ticks_per_second(cadence: Rational) -> u32 {
     u32::try_from(rounded.max(1)).unwrap_or(u32::MAX)
 }
 
-/// Build the real per-tick program-audio loudness timeline (dBFS) off the build
-/// path (GAP-3).
+/// Build the real **per-source** per-tick audio-loudness timelines (dBFS) off the
+/// build path — one entry per **file-backed** source that decodes to audio.
 ///
-/// Picks the first **file-backed** source (a `file` path or a generated `test`
-/// clip) that decodes to audio, runs its decoded 48 kHz samples through a
-/// sample-peak [`mosaic_audio::Ballistics`] meter, and snapshots the meter's
-/// reading at each output-tick boundary, producing one dBFS value per tick. The
+/// For each `file`/`test` source it runs that source's own decoded 48 kHz
+/// samples through a sample-peak [`mosaic_audio::Ballistics`] meter and snapshots
+/// the meter at each output-tick boundary, producing one dBFS value per tick. The
 /// meter is the program-loudness DSP, so a silent track reads its floor and a
-/// loud track reads high — the on-screen bar reflects the real audio.
+/// loud track reads high — each tile's on-screen bar reflects *that input's* own
+/// audio.
 ///
-/// Returns an empty `Vec` when no source has decodable audio (live URLs are not
-/// pre-decoded here, and an audio-free clip yields nothing); the caller then
-/// rides the meter floor rather than fabricating a constant. This runs once at
-/// build time and never touches the hot path (invariant #1/#10).
+/// A source with no decodable audio is simply omitted from the map (live URLs are
+/// not pre-decoded here — they never EOF; NDI/unknown carry no file; an
+/// audio-free clip yields nothing); its tile then rides the meter floor rather
+/// than fabricating a constant. This runs once at build time and never touches
+/// the hot path (invariant #1/#10).
 #[cfg(feature = "overlay")]
-fn build_meter_timeline(config: &MosaicConfig, cadence: Rational) -> Vec<f64> {
+fn build_meter_timelines(
+    config: &MosaicConfig,
+    cadence: Rational,
+) -> std::collections::HashMap<String, Vec<f64>> {
+    let mut timelines = std::collections::HashMap::new();
     for source in &config.sources {
         // Resolve a decodable local path, keeping any generated `test` clip's
         // tempdir alive (`_clip`) for the whole decode.
@@ -876,14 +979,16 @@ fn build_meter_timeline(config: &MosaicConfig, cadence: Rational) -> Vec<f64> {
             _ => continue,
         };
         match meter_timeline_for_file(&path, cadence) {
-            Ok(timeline) if !timeline.is_empty() => return timeline,
+            Ok(timeline) if !timeline.is_empty() => {
+                timelines.insert(source.id.clone(), timeline);
+            }
             Ok(_) => {}
             Err(reason) => {
-                tracing::debug!(source = %source.id, %reason, "no program-audio meter timeline");
+                tracing::debug!(source = %source.id, %reason, "no per-input meter timeline");
             }
         }
     }
-    Vec::new()
+    timelines
 }
 
 /// Decode `path`'s audio and snapshot a sample-peak meter at each output-tick
