@@ -55,6 +55,12 @@
 //! See [`docs/research/core-engine.md`](../docs/research/core-engine.md) §7,
 //! §8.1, §12 for the FFI / hardware-frame design this crate builds toward.
 
+/// Video-codec identity + encoder selection. The logical [`codec::VideoCodec`]
+/// enum and the feature-gated candidate-list logic are pure (always compiled,
+/// unit-tested); only the libav-backed `codec::select_encoder` run-time probe
+/// lives behind the `ffmpeg` feature.
+pub mod codec;
+
 pub mod error;
 
 /// ST 2110-22 JPEG XS codec identity + capability detection. The selection
@@ -62,6 +68,11 @@ pub mod error;
 /// libav-backed `probe`/`is_available` runtime queries live behind the
 /// `ffmpeg` feature.
 pub mod jpegxs;
+
+pub use codec::{can_encode, candidate_encoders, VideoCodec};
+
+#[cfg(feature = "ffmpeg")]
+pub use codec::select_encoder;
 
 pub use error::{FfmpegError, Result};
 

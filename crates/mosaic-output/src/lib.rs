@@ -48,4 +48,7 @@ pub mod sink;
 pub use error::{Error, Result};
 
 #[cfg(feature = "ffmpeg")]
-pub use sink::{EncodeConfig, EncodeStats, FileSink, SegmentResult, SegmentSink, VideoFrameSource};
+pub use sink::{
+    EncodeConfig, EncodeStats, FileSink, PushProtocol, PushSink, SegmentResult, SegmentSink,
+    VideoFrameSource,
+};

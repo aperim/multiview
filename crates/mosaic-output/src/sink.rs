@@ -244,27 +244,15 @@ impl FileSink {
             .add_stream(encoder.as_codec_context(), time_base)
             .map_err(ff)?;
         muxer.write_header().map_err(ff)?;
-
-        let mut tick: i64 = 0;
-        let mut stats = EncodeStats::default();
-        let mut converter = FrameConverter::new(self.config.format);
-        while let Some(frame) = source.next_frame()? {
-            // Convert NV12 -> encoder format and re-stamp PTS from the tick
-            // counter: out_pts = f(tick) (inv #1/#3).
-            let prepared = converter.prepare(frame.frame, tick)?;
-            encoder.send_frame(&prepared).map_err(ff)?;
-            // `packet`'s type is inferred — this crate never names a libav type.
-            while let Some(packet) = encoder.receive_packet().map_err(ff)? {
-                record(&mut stats, packet.is_key());
-                muxer.write_packet(stream_index, packet).map_err(ff)?;
-            }
-            tick = tick.saturating_add(1);
-        }
-        encoder.send_eof().map_err(ff)?;
-        while let Some(packet) = encoder.receive_packet().map_err(ff)? {
-            record(&mut stats, packet.is_key());
-            muxer.write_packet(stream_index, packet).map_err(ff)?;
-        }
+        // Composite/decode once, encode once, mux every packet to the single
+        // container stream (invariant #7).
+        let stats = drive_to_single_muxer(
+            &mut encoder,
+            &mut muxer,
+            stream_index,
+            self.config.format,
+            source,
+        )?;
         muxer.finish().map_err(ff)?;
         Ok(stats)
     }
@@ -274,6 +262,45 @@ impl FileSink {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Drive the shared encode-once-mux-many loop: pull frames from `source`,
+/// convert NV12 -> the encoder format, re-stamp each PTS from the tick counter
+/// (invariants #1/#3), encode once, and write every packet to `muxer` on the
+/// single registered `stream_index`. Flushes the encoder at end-of-source. The
+/// caller writes the muxer header before and the trailer after.
+///
+/// Both [`FileSink`] and [`PushSink`] share this so a container file and a
+/// live push are the *same* one-encode stream fanned to different muxers
+/// (invariant #7) — never a per-output re-encode.
+fn drive_to_single_muxer<S: VideoFrameSource>(
+    encoder: &mut VideoEncoder,
+    muxer: &mut Muxer,
+    stream_index: usize,
+    format: Pixel,
+    source: &mut S,
+) -> Result<EncodeStats> {
+    let mut tick: i64 = 0;
+    let mut stats = EncodeStats::default();
+    let mut converter = FrameConverter::new(format);
+    while let Some(frame) = source.next_frame()? {
+        // Convert NV12 -> encoder format and re-stamp PTS from the tick
+        // counter: out_pts = f(tick) (inv #1/#3).
+        let prepared = converter.prepare(frame.frame, tick)?;
+        encoder.send_frame(&prepared).map_err(ff)?;
+        // `packet`'s type is inferred — this crate never names a libav type.
+        while let Some(packet) = encoder.receive_packet().map_err(ff)? {
+            record(&mut stats, packet.is_key());
+            muxer.write_packet(stream_index, packet).map_err(ff)?;
+        }
+        tick = tick.saturating_add(1);
+    }
+    encoder.send_eof().map_err(ff)?;
+    while let Some(packet) = encoder.receive_packet().map_err(ff)? {
+        record(&mut stats, packet.is_key());
+        muxer.write_packet(stream_index, packet).map_err(ff)?;
+    }
+    Ok(stats)
 }
 
 /// Result of a [`SegmentSink`] run: the segments written and the playlist that
@@ -382,6 +409,121 @@ impl SegmentSink {
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+}
+
+/// A live push transport: the container/muxer libav uses to stream the encoded
+/// program to a remote peer over the matching protocol.
+///
+/// The protocol fixes the on-the-wire container the same way a file extension
+/// fixes a file's: RTMP carries FLV, MPEG-TS-over-{SRT,UDP,RTP} carries an
+/// MPEG-TS, and RTSP its own framing. The selected libav muxer name is an
+/// implementation detail surfaced by [`PushProtocol::muxer_name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PushProtocol {
+    /// RTMP push (`rtmp://…`) — FLV-framed, the common ingest protocol.
+    Rtmp,
+    /// SRT push (`srt://…`) — an MPEG-TS payload over the SRT transport.
+    Srt,
+    /// RTSP announce/record (`rtsp://…`).
+    Rtsp,
+    /// Raw MPEG-TS over UDP (`udp://…`).
+    UdpTs,
+}
+
+impl PushProtocol {
+    /// The libav output-muxer short-name this protocol streams through.
+    #[must_use]
+    pub const fn muxer_name(self) -> &'static str {
+        match self {
+            Self::Rtmp => "flv",
+            // SRT and plain UDP both carry an MPEG-TS payload; the URL scheme
+            // selects the transport, the muxer is the container.
+            Self::Srt | Self::UdpTs => "mpegts",
+            Self::Rtsp => "rtsp",
+        }
+    }
+}
+
+/// A sink that encodes the canvas once and pushes the *same* packet stream to a
+/// remote peer over a live transport (RTMP / SRT / RTSP / MPEG-TS-over-UDP).
+///
+/// This is the egress twin of [`FileSink`]: identical encode-once-mux-many drive
+/// loop (invariant #7), but the muxer targets a network URL instead of a file.
+/// Opening the muxer **connects** to the peer, so [`PushSink::run`] only succeeds
+/// when a peer is listening; with no peer it surfaces the libav connect error as
+/// [`Error::Output`] rather than blocking or panicking. (CI has no peer, so the
+/// run path is exercised only against a local listener; construction and muxer
+/// selection are always testable.)
+pub struct PushSink {
+    config: EncodeConfig,
+    protocol: PushProtocol,
+    url: String,
+}
+
+impl PushSink {
+    /// Create a push sink that will stream the encoded program to `url` using
+    /// `protocol`.
+    #[must_use]
+    pub fn new(config: EncodeConfig, protocol: PushProtocol, url: impl Into<String>) -> Self {
+        Self {
+            config,
+            protocol,
+            url: url.into(),
+        }
+    }
+
+    /// The libav muxer name this sink streams through (derived from the
+    /// protocol).
+    #[must_use]
+    pub fn muxer_name(&self) -> &'static str {
+        self.protocol.muxer_name()
+    }
+
+    /// The push protocol.
+    #[must_use]
+    pub const fn protocol(&self) -> PushProtocol {
+        self.protocol
+    }
+
+    /// The destination URL.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Encode `source` once and push every packet to the remote peer.
+    ///
+    /// Opens a libav muxer on the URL (which connects to the peer), forcing the
+    /// protocol's container muxer, then runs the shared encode-once-mux-many
+    /// loop and writes the trailer.
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if no peer is reachable (the connect fails), or
+    /// if the encoder/muxer/source errors. A push never blocks the caller
+    /// waiting for a peer beyond libav's own connect.
+    pub fn run<S: VideoFrameSource>(&self, source: &mut S) -> Result<EncodeStats> {
+        self.config.validate()?;
+        let mut encoder = VideoEncoder::new(&self.config.target()).map_err(ff)?;
+        let time_base = encoder.time_base();
+        // The URL is passed as a path; libav's avio resolves the scheme
+        // (rtmp://, srt://, …) and the forced muxer name fixes the container.
+        let mut muxer =
+            Muxer::create_as(Path::new(&self.url), self.protocol.muxer_name()).map_err(ff)?;
+        let stream_index = muxer
+            .add_stream(encoder.as_codec_context(), time_base)
+            .map_err(ff)?;
+        muxer.write_header().map_err(ff)?;
+        let stats = drive_to_single_muxer(
+            &mut encoder,
+            &mut muxer,
+            stream_index,
+            self.config.format,
+            source,
+        )?;
+        muxer.finish().map_err(ff)?;
+        Ok(stats)
     }
 }
 

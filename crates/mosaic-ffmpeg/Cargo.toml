@@ -29,6 +29,13 @@ ffmpeg-next = { version = "7.1", optional = true }
 "default" = []
 "ffmpeg" = ["dep:ffmpeg-next"]
 "gpl-codecs" = []
+# NVENC hardware-encoder selection (h264_nvenc / hevc_nvenc). Compile-only here:
+# the NVENC encoders live in the linked libavcodec, so this gates only which
+# encoder *names* the codec selector is allowed to consider — it pulls no native
+# crate. Best paired with `ffmpeg` (selection's run-time availability probe needs
+# libav); on a box with no GPU the NVENC name simply fails to resolve and the
+# selector falls through to software (graceful degradation).
+"cuda" = []
 
 [dev-dependencies]
 tempfile = "3"
