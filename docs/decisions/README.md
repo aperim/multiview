@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-These ADRs capture the load-bearing decisions for the Mosaic engine. 94 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Mosaic engine. 95 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -44,6 +44,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 94 ADRs tot
 - [ADR-E007](ADR-E007.md) — Resource-adaptive degradation & admission control without breaking output
 - [ADR-E008](ADR-E008.md) — Cost-model-driven planner with a capability+cost registry
 - [ADR-E009](ADR-E009.md) — Per-tier efficiency budgets enforced by perf-regression CI
+- [ADR-0017](ADR-0017.md) — GPU/CPU utilisation monitoring + affinity-aware least-loaded multi-GPU work placement *(Proposed)*
 
 ## Color
 
