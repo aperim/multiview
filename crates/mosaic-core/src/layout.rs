@@ -261,7 +261,9 @@ impl Layout {
     ///   (`x + w <= 1.0`, `y + h <= 1.0`), and has positive extent (`w > 0`,
     ///   `h > 0`);
     /// - any per-cell [`crop`](Cell::crop) region-of-interest is finite, lies
-    ///   within the source unit square `0.0..=1.0`, and has positive extent.
+    ///   within the source unit square `0.0..=1.0`, and has positive extent;
+    /// - every cell's [`opacity`](Cell::opacity) is finite and within the
+    ///   closed straight-alpha interval `0.0..=1.0`.
     ///
     /// Cells **may** overlap — that is how picture-in-picture and stacked
     /// layers are expressed — so overlap is intentionally not rejected.
@@ -318,6 +320,18 @@ fn validate_cell(index: usize, cell: &Cell) -> Result<()> {
         return Err(Error::Config(format!(
             "cell {index}: y + h = {} exceeds 1.0",
             cell.y + cell.h
+        )));
+    }
+    if !cell.opacity.is_finite() {
+        return Err(Error::Config(format!(
+            "cell {index}: opacity must be finite (got {})",
+            cell.opacity
+        )));
+    }
+    if cell.opacity < 0.0 || cell.opacity > 1.0 {
+        return Err(Error::Config(format!(
+            "cell {index}: opacity must be within 0.0..=1.0 (got {})",
+            cell.opacity
         )));
     }
     if let Some(crop) = cell.crop {

@@ -210,10 +210,14 @@ impl CompositorDrive<Nv12Image> {
                 image_index: held.len().saturating_sub(1),
                 dst_x,
                 dst_y,
+                opacity: cell.opacity,
             });
         }
 
-        // Borrow the held images for the compositor's `Tile` slice.
+        // Borrow the held images for the compositor's `Tile` slice. The cell's
+        // per-tile opacity drives the compositor's premultiplied linear-light
+        // `over` blend (the compositor re-clamps to `[0, 1]`; the layout is
+        // validated to that interval at construction/swap).
         let tiles: Vec<Tile<'_>> = placements
             .iter()
             .filter_map(|p| {
@@ -221,7 +225,7 @@ impl CompositorDrive<Nv12Image> {
                     image: img.as_ref(),
                     dst_x: p.dst_x,
                     dst_y: p.dst_y,
-                    opacity: 1.0,
+                    opacity: p.opacity,
                 })
             })
             .collect();
@@ -276,6 +280,8 @@ struct Placement {
     image_index: usize,
     dst_x: u32,
     dst_y: u32,
+    /// The cell's per-tile opacity (straight alpha), carried to the compositor.
+    opacity: f32,
 }
 
 /// Map a cell's normalized top-left origin to canvas pixel coordinates,

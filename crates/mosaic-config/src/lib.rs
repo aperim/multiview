@@ -268,6 +268,11 @@ impl MosaicConfig {
             z: cell.z,
             fit: parse_fit(cell.fit.as_deref()),
             source: cell.source.input_id.clone(),
+            // Per-tile opacity: a fully-opaque hard-cover (1.0) when the document
+            // omits it, matching the core `Cell` default. The compositor honours
+            // it in the premultiplied linear-light `over` blend; out-of-range
+            // values are rejected by `Layout::validate` downstream.
+            opacity: cell.opacity.unwrap_or(1.0),
             // Broadcast per-tile crop/rotation are additive, defaulted fields on
             // the shared `Cell`; this mapper does not yet surface them from the
             // config schema, so spread their defaults.
