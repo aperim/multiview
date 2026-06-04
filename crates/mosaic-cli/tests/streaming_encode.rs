@@ -154,13 +154,26 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
         result.report.frames, TICKS,
         "the output clock must emit all N ticks regardless of a stalled sink (inv #1)"
     );
-    // Invariant #10 / bounded memory: the in-flight channel occupancy never
-    // exceeded the fixed cap — memory is O(cap), not O(ticks).
+    // Invariant #10 / bounded memory: occupancy is O(cap) — bounded by the fixed
+    // cap, INDEPENDENT of the run length (it stays tiny next to TICKS=400, never
+    // growing with the number of frames; that is the OOM the ADR fixes).
+    //
+    // The bound is cap+1, not cap, and that ceiling is exact and race-free — NOT
+    // a fudge. `peak_occupancy` is a gauge: the single engine sender does
+    // `in_flight.fetch_add(1)` AFTER a successful send, and the single bake
+    // consumer does `in_flight.fetch_sub(1)` AFTER `recv()`. The channel itself
+    // (`sync_channel(cap)`) never buffers more than cap by construction. The gauge
+    // exceeds the true buffered count by at most one, and only at the full
+    // boundary: the consumer's `recv()` frees a slot, the sender refills it and
+    // increments before the consumer's matching `fetch_sub` lands — exactly one
+    // in-transit frame double-counted. One sender + one consumer ⇒ at most one
+    // such pending decrement ⇒ the gauge's high-watermark is at most cap+1.
     assert!(
-        result.peak_occupancy <= result.capacity,
-        "peak channel occupancy {} must never exceed the cap {} (bounded memory, inv #10)",
+        result.peak_occupancy <= result.capacity + 1,
+        "peak occupancy {} must stay within cap+1 = {} — O(cap) bounded memory, \
+         not O(ticks); the +1 is the single-consumer in-transit transient (inv #10)",
         result.peak_occupancy,
-        result.capacity
+        result.capacity + 1
     );
     // Overload was shed and COUNTED (visible, not hidden), so the run faltered.
     assert!(

@@ -931,11 +931,15 @@ impl RealPipeline {
         // Dropping the runtime here only releases the engine's own resources.
         drop(runtime);
 
+        // Join the bake consumer + sink threads FIRST — folding their outcome and
+        // writing the trailers (the sinks' own `run()` finalisation) — BEFORE
+        // propagating any engine error, so a mid-run engine error still finalises
+        // the partial output and never detaches the egress threads with a trailer
+        // unwritten. The engine error (the root cause) is surfaced first; an
+        // egress/sink error second.
+        let egress_result = egress.join();
         let outcome = outcome?;
-
-        // Join the bake consumer + sink threads, folding their outcome. This is
-        // where the trailers are written (the sinks' own `run()` finalisation).
-        let egress_out = egress.join()?;
+        let egress_out = egress_result?;
 
         let dropped_count = dropped.load(Ordering::Acquire);
         let report = PipelineReport {
@@ -1398,7 +1402,12 @@ struct StreamEgress {
     /// Frames currently queued in the hot-loop → consumer channel (bumped by the
     /// hot loop on send, decremented by the consumer on recv).
     in_flight: Arc<AtomicI64>,
-    /// The high-watermark of `in_flight` (the proof of bounded memory).
+    /// The high-watermark of `in_flight` — the evidence of bounded memory
+    /// (O(cap), independent of run length). It is a gauge: with the single engine
+    /// sender incrementing after a send and the single consumer decrementing after
+    /// `recv`, its ceiling is `cap + 1` (one in-transit frame can be double-counted
+    /// at the full boundary), while the channel itself never buffers more than
+    /// `cap`. So a reader must bound it by `cap + 1`, not `cap`.
     peak_occupancy: Arc<AtomicUsize>,
 }
 
