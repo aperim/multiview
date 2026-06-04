@@ -54,19 +54,20 @@ fn pq_bt2020() -> ColorInfo {
 fn varied_image(width: u32, height: u32, seed: u32, color: ColorInfo) -> Nv12Image {
     let w = usize::try_from(width).unwrap();
     let h = usize::try_from(height).unwrap();
+    let seed_u = usize::try_from(seed).unwrap();
     let mut y = vec![0_u8; w * h];
     let mut uv = vec![0_u8; w * h / 2];
     for row in 0..h {
         for col in 0..w {
-            let v = (row.wrapping_mul(7) ^ col.wrapping_mul(5) ^ seed as usize) % 220;
-            y[row * w + col] = 16 + u8::try_from(v).unwrap_or(0);
+            let val = (row.wrapping_mul(7) ^ col.wrapping_mul(5) ^ seed_u) % 220;
+            y[row * w + col] = 16 + u8::try_from(val).unwrap_or(0);
         }
     }
     for crow in 0..h / 2 {
         for cpair in 0..w / 2 {
             let idx = crow * w + cpair * 2;
-            let cb = (crow.wrapping_mul(11) ^ cpair.wrapping_mul(3) ^ seed as usize) % 240;
-            let cr = (crow.wrapping_mul(3) ^ cpair.wrapping_mul(13) ^ seed as usize) % 240;
+            let cb = (crow.wrapping_mul(11) ^ cpair.wrapping_mul(3) ^ seed_u) % 240;
+            let cr = (crow.wrapping_mul(3) ^ cpair.wrapping_mul(13) ^ seed_u) % 240;
             uv[idx] = u8::try_from(cb).unwrap_or(128);
             uv[idx + 1] = u8::try_from(cr).unwrap_or(128);
         }
@@ -88,10 +89,9 @@ fn assert_equivalent(
         let reference =
             composite_reference(canvas_w, canvas_h, canvas, background, tiles, use_lut).unwrap();
         for &n in &[1_usize, 2, 3, 8] {
-            let prod = composite_with_threads(
-                canvas_w, canvas_h, canvas, background, tiles, use_lut, n,
-            )
-            .unwrap();
+            let prod =
+                composite_with_threads(canvas_w, canvas_h, canvas, background, tiles, use_lut, n)
+                    .unwrap();
             assert_eq!(
                 prod.y_plane(),
                 reference.y_plane(),
@@ -126,12 +126,22 @@ fn all_background_canvas_is_solid_background_constant() {
     // Encode the background straight color once via the public back half.
     let straight = bg.premultiplied().unpremultiplied();
     let yuv = canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas).unwrap();
-    let expected =
-        Nv12Image::solid(canvas_w, canvas_h, yuv[0], yuv[1], yuv[2], canvas.output_tag()).unwrap();
+    let expected = Nv12Image::solid(
+        canvas_w,
+        canvas_h,
+        yuv[0],
+        yuv[1],
+        yuv[2],
+        canvas.output_tag(),
+    )
+    .unwrap();
 
     assert_eq!(out.y_plane(), expected.y_plane(), "Y plane != solid bg");
     assert_eq!(out.uv_plane(), expected.uv_plane(), "UV plane != solid bg");
-    assert_eq!(out, expected, "all-background canvas != Nv12Image::solid(bg)");
+    assert_eq!(
+        out, expected,
+        "all-background canvas != Nv12Image::solid(bg)"
+    );
 }
 
 #[test]
@@ -170,9 +180,24 @@ fn overlapping_partial_opacity_matches_reference() {
     let b = varied_image(40, 30, 2, pq_bt2020());
     let c = varied_image(40, 30, 3, bt709_limited());
     let tiles = [
-        Tile { image: &a, dst_x: 0, dst_y: 0, opacity: 0.7 },
-        Tile { image: &b, dst_x: 10, dst_y: 8, opacity: 0.4 },
-        Tile { image: &c, dst_x: 18, dst_y: 14, opacity: 0.55 },
+        Tile {
+            image: &a,
+            dst_x: 0,
+            dst_y: 0,
+            opacity: 0.7,
+        },
+        Tile {
+            image: &b,
+            dst_x: 10,
+            dst_y: 8,
+            opacity: 0.4,
+        },
+        Tile {
+            image: &c,
+            dst_x: 18,
+            dst_y: 14,
+            opacity: 0.55,
+        },
     ];
     assert_equivalent(
         64,
@@ -192,11 +217,26 @@ fn off_canvas_and_clipped_tiles_match_reference() {
     let away = varied_image(10, 10, 7, bt709_limited());
     let tiles = [
         // Overhangs the right + bottom edges.
-        Tile { image: &big, dst_x: 30, dst_y: 20, opacity: 1.0 },
+        Tile {
+            image: &big,
+            dst_x: 30,
+            dst_y: 20,
+            opacity: 1.0,
+        },
         // Hugs the bottom-right corner, partly clipped.
-        Tile { image: &edge, dst_x: 56, dst_y: 40, opacity: 0.8 },
+        Tile {
+            image: &edge,
+            dst_x: 56,
+            dst_y: 40,
+            opacity: 0.8,
+        },
         // Entirely off-canvas (dst beyond canvas): contributes nothing.
-        Tile { image: &away, dst_x: 200, dst_y: 200, opacity: 1.0 },
+        Tile {
+            image: &away,
+            dst_x: 200,
+            dst_y: 200,
+            opacity: 1.0,
+        },
     ];
     assert_equivalent(
         64,
@@ -272,8 +312,9 @@ proptest! {
     }
 }
 
-/// Build a solid / split / PQ rotation of `n` grid tiles covering 1080p, mirror
-/// of the bench's `build_sources`/`build_tiles`, for the budget smoke.
+/// Build a solid / split / PQ rotation of 9 grid tile *images* covering 1080p,
+/// mirror of the bench's `build_sources`, for the budget smokes. Tiles borrow
+/// these, so the caller holds the vec.
 fn nine_up_1080p() -> Vec<Nv12Image> {
     let cols = 3_u32;
     let rows = 3_u32;
@@ -288,21 +329,13 @@ fn nine_up_1080p() -> Vec<Nv12Image> {
         .collect()
 }
 
-#[test]
-fn tile_driven_meets_budget_9up_1080p() {
-    // CI per-tick budget gate as a #[test] (not only a bench). A debug build is
-    // far slower than release, so the ceiling is generous (150 ms) — it guards
-    // against the O(pixels × tiles) regression returning (the old kernel ran
-    // ~18.6M coverage tests/frame here), not against absolute release timing.
-    const CANVAS_W: u32 = 1920;
-    const CANVAS_H: u32 = 1080;
-    const CEILING: Duration = Duration::from_millis(150);
-
-    let images = nine_up_1080p();
+/// Place the 9-up `images` as a 3×3 grid over the 1080p canvas.
+fn nine_up_tiles(images: &[Nv12Image]) -> Vec<Tile<'_>> {
     let cols = 3_u32;
+    let rows = 3_u32;
     let tile_w = ((1920 / cols) & !1).max(2);
-    let tile_h = ((1080 / 3) & !1).max(2);
-    let tiles: Vec<Tile<'_>> = images
+    let tile_h = ((1080 / rows) & !1).max(2);
+    images
         .iter()
         .enumerate()
         .map(|(i, img)| {
@@ -314,25 +347,110 @@ fn tile_driven_meets_budget_9up_1080p() {
                 opacity: 1.0,
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Median wall time of `samples` `composite_with_threads` calls (4 threads, LUT
+/// path), after one warm-up.
+fn median_composite_time(
+    canvas_w: u32,
+    canvas_h: u32,
+    tiles: &[Tile<'_>],
+    samples: usize,
+) -> Duration {
     let canvas = CanvasColor::default();
     let bg = LinearRgba::opaque(0.02, 0.02, 0.02);
-
-    // Warm-up, then median of 5.
-    let warm = composite_with_threads(CANVAS_W, CANVAS_H, canvas, bg, &tiles, true, 4).unwrap();
+    let warm = composite_with_threads(canvas_w, canvas_h, canvas, bg, tiles, true, 4).unwrap();
     std::hint::black_box(&warm);
-    let mut durations: Vec<Duration> = Vec::with_capacity(5);
-    for _ in 0..5 {
+    let mut durations: Vec<Duration> = Vec::with_capacity(samples);
+    for _ in 0..samples {
         let start = Instant::now();
-        let out = composite_with_threads(CANVAS_W, CANVAS_H, canvas, bg, &tiles, true, 4).unwrap();
+        let out = composite_with_threads(canvas_w, canvas_h, canvas, bg, tiles, true, 4).unwrap();
         durations.push(start.elapsed());
         std::hint::black_box(&out);
     }
     durations.sort_unstable();
-    let median = durations[durations.len() / 2];
+    durations[durations.len() / 2]
+}
+
+#[test]
+fn tile_driven_meets_budget_9up_1080p() {
+    // CI per-tick budget gate as a #[test] (not only a bench, ADR-0022). In
+    // release this is the real 40 ms/tick (25 fps) gate; debug runs the color
+    // math unoptimized (~10×+ slower), so it uses a generous ceiling — the test
+    // still proves the composite completes per-tick-shaped work without the
+    // O(pixels × tiles) blow-up (separately pinned by
+    // `tile_driven_scales_with_coverage_not_tile_count`).
+    const CANVAS_W: u32 = 1920;
+    const CANVAS_H: u32 = 1080;
+    let ceiling = if cfg!(debug_assertions) {
+        Duration::from_millis(1500)
+    } else {
+        Duration::from_millis(40)
+    };
+
+    let images = nine_up_1080p();
+    let tiles = nine_up_tiles(&images);
+
+    let median = median_composite_time(CANVAS_W, CANVAS_H, &tiles, 5);
     assert!(
-        median <= CEILING,
-        "tile-driven composite 1080p×9 median {median:?} exceeds {CEILING:?} \
-         (the O(pixels × tiles) regression may have returned)"
+        median <= ceiling,
+        "tile-driven composite 1080p×9 median {median:?} exceeds the {ceiling:?} \
+         per-tick budget (ADR-0022)"
+    );
+}
+
+#[test]
+fn tile_driven_scales_with_coverage_not_tile_count() {
+    // Regression guard for the O(pixels × tiles) blow-up that the rewrite kills:
+    // with MANY small, mostly-disjoint tiles, the old kernel coverage-tested
+    // EVERY tile at EVERY canvas pixel (here 256 tiles × ~2M px ≈ 530M tests),
+    // while the tile-driven kernel touches only Σ tile-area (~2M). So a 256-tile
+    // canvas must NOT be dramatically slower than the same canvas with 9 tiles
+    // covering the same total area — if it is, the per-pixel-all-tiles loop has
+    // returned. This holds regardless of build profile (it is a *ratio*, not an
+    // absolute time), so it gates in both debug and release.
+    const CANVAS_W: u32 = 1920;
+    const CANVAS_H: u32 = 1080;
+    let canvas = CanvasColor::default();
+
+    // 16×16 = 256 disjoint tiles tiling the canvas (each pixel covered once).
+    let many_cols = 16_u32;
+    let many_rows = 16_u32;
+    let mw = ((CANVAS_W / many_cols) & !1).max(2);
+    let mh = ((CANVAS_H / many_rows) & !1).max(2);
+    let many_imgs: Vec<Nv12Image> = (0..(many_cols * many_rows))
+        .map(|i| varied_image(mw, mh, i, bt709_limited()))
+        .collect();
+    let many_tiles: Vec<Tile<'_>> = many_imgs
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            let iu = u32::try_from(i).unwrap_or(0);
+            Tile {
+                image: img,
+                dst_x: ((iu % many_cols) * mw) & !1,
+                dst_y: ((iu / many_cols) * mh) & !1,
+                opacity: 1.0,
+            }
+        })
+        .collect();
+    let _ = canvas;
+
+    let few_imgs = nine_up_1080p();
+    let few_tiles = nine_up_tiles(&few_imgs);
+
+    let many = median_composite_time(CANVAS_W, CANVAS_H, &many_tiles, 5);
+    let few = median_composite_time(CANVAS_W, CANVAS_H, &few_tiles, 5);
+
+    // Both composite ~the same covered area; with the old kernel `many` would be
+    // ~28× the coverage-test work of `few`. Allow a generous 4× headroom for the
+    // extra per-tile rect setup + scheduler noise; a true O(pixels × tiles)
+    // regression blows far past this.
+    let bound = few.saturating_mul(4) + Duration::from_millis(20);
+    assert!(
+        many <= bound,
+        "256-tile composite ({many:?}) is far slower than 9-tile ({few:?}); \
+         the O(pixels × tiles) coverage loop appears to have returned"
     );
 }

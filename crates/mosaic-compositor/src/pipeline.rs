@@ -460,6 +460,67 @@ pub fn composite_with_threads(
     Nv12Image::new(canvas_w, canvas_h, y_plane, uv_plane, canvas.output_tag())
 }
 
+/// Render the whole canvas with the **reference** (pixel-driven) kernel
+/// ([`composite_band_reference`]) — the byte-exact oracle the tile-driven
+/// production kernel ([`composite_band`]) is pinned against.
+///
+/// This is the original O(pixels × all-tiles) kernel, preserved verbatim so the
+/// equivalence proptest can assert the optimized kernel is bit-identical. It is
+/// **not** the production path (use [`composite`]); it is exposed only so tests
+/// and benches can compare. The result is computed single-threaded so it never
+/// depends on the band split being correct.
+///
+/// `use_lut` selects the LUT (`true`, ADR-0022) or transcendental-oracle
+/// (`false`) EOTF/OETF evaluation, exactly as [`composite_with`].
+///
+/// # Errors
+///
+/// Same as [`composite_with_threads`].
+#[doc(hidden)]
+pub fn composite_reference(
+    canvas_w: u32,
+    canvas_h: u32,
+    canvas: CanvasColor,
+    background: LinearRgba,
+    tiles: &[Tile<'_>],
+    use_lut: bool,
+) -> Result<Nv12Image> {
+    if canvas_w == 0 || canvas_h == 0 || canvas_w % 2 != 0 || canvas_h % 2 != 0 {
+        return Err(Error::Geometry(format!(
+            "canvas dimensions must be positive and even (got {canvas_w}x{canvas_h})"
+        )));
+    }
+    let w = usize::try_from(canvas_w)
+        .map_err(|_| Error::Geometry("canvas width overflow".to_owned()))?;
+    let h = usize::try_from(canvas_h)
+        .map_err(|_| Error::Geometry("canvas height overflow".to_owned()))?;
+
+    let luts = if use_lut {
+        let mut transfers: Vec<TransferCharacteristic> = vec![canvas.transfer];
+        for tile in tiles {
+            transfers.push(tile.image.color().transfer);
+        }
+        Some(LutSet::for_transfers(transfers))
+    } else {
+        None
+    };
+
+    let mut y_plane = vec![0_u8; w * h];
+    let mut uv_plane = vec![0_u8; w * h / 2];
+    composite_band_reference(
+        &mut y_plane,
+        &mut uv_plane,
+        w,
+        0,
+        canvas_h,
+        canvas,
+        background,
+        tiles,
+        luts.as_ref(),
+    )?;
+    Nv12Image::new(canvas_w, canvas_h, y_plane, uv_plane, canvas.output_tag())
+}
+
 /// Fan the composite across `workers` scoped threads over even-row-aligned
 /// bands. `total_pairs` is `canvas_h / 2`; each band owns `pairs_per_band`
 /// chroma row-pairs (= `2 * pairs_per_band` luma rows) of a **disjoint** `&mut`
@@ -537,16 +598,20 @@ fn composite_parallel(
 /// `py_start` rebases the band-local row index to the global row used for tile
 /// addressing.
 ///
-/// This is the single per-pixel pipeline used by both the serial path and the
-/// parallel bands: it runs the front half (`tile_yuv_to_canvas_linear`), the
-/// premultiplied linear `over`, and the back half (`canvas_linear_to_output_yuv`)
-/// — via the LUT when `luts` is `Some`, else the oracle.
+/// This is the byte-exact **oracle** kernel: pixel-driven, testing every tile at
+/// every band pixel. It is O(pixels × all-tiles) and is kept only as the
+/// reference the tile-driven production [`composite_band`] is pinned against
+/// (see [`composite_reference`]); the production path no longer uses it.
+///
+/// It runs the front half (`tile_yuv_to_canvas_linear`), the premultiplied
+/// linear `over`, and the back half (`canvas_linear_to_output_yuv`) — via the
+/// LUT when `luts` is `Some`, else the oracle.
 #[allow(clippy::too_many_arguments)]
 // reason: this is the internal band kernel; the arguments are the band slices
 // plus the shared composite parameters. Grouping them into a struct would not
 // reduce the surface and would obscure the disjoint-`&mut` band ownership that
 // makes the parallel split race-free.
-fn composite_band(
+fn composite_band_reference(
     band_y: &mut [u8],
     band_uv: &mut [u8],
     w: usize,
@@ -604,6 +669,270 @@ fn composite_band(
     Ok(())
 }
 
+/// Render the canvas rows `[py_start, py_start + band_h)` into band-local Y/UV
+/// planes — the **tile-driven** production kernel (the optimized replacement for
+/// [`composite_band_reference`]). `band_y` is `band_h` rows of `w` bytes;
+/// `band_uv` is `band_h/2` rows of `w` bytes. The tile/canvas coordinate space
+/// is the **global** canvas; `py_start` rebases the band-local row index to the
+/// global row used for tile addressing.
+///
+/// This is the single per-pixel pipeline used by both the serial path and the
+/// parallel bands. It is **byte-identical** to [`composite_band_reference`] for
+/// every tile stack (pinned by `tests/composite_tile_driven.rs`) but does
+/// O(pixels + Σ tile-area-in-band) work instead of O(pixels × all-tiles):
+///
+/// 1. Encode the background straight color through the back half **once**
+///    (killing the per-uncovered-pixel colour round-trip) and fill the entire
+///    band with that constant.
+/// 2. Maintain a band-sized accumulator of premultiplied linear `bg`, then for
+///    each tile in slice order (back-to-front) fold `over` into **only** the
+///    pixels in its `rect ∩ band` — so each covered pixel sees the identical
+///    per-pixel fold sequence as the reference, in the identical order.
+/// 3. Re-encode through the back half **only** the pixels at least one tile
+///    touched, leaving the precomputed background constant for the rest.
+///
+/// Invariant #5 (NV12-throughout) holds: the accumulator is the same per-pixel
+/// linear-RGBA the reference already used transiently — bounded to one band, not
+/// a full-frame RGBA tile materialization — and the output stays NV12. Invariant
+/// #8 (fixed colour order) is unchanged: the same front-half/`over`/back-half
+/// order runs; only the *iteration* changed.
+#[allow(clippy::too_many_arguments)]
+// reason: this is the internal band kernel; the arguments are the band slices
+// plus the shared composite parameters. Grouping them into a struct would not
+// reduce the surface and would obscure the disjoint-`&mut` band ownership that
+// makes the parallel split race-free.
+fn composite_band(
+    band_y: &mut [u8],
+    band_uv: &mut [u8],
+    w: usize,
+    py_start: u32,
+    band_h: u32,
+    canvas: CanvasColor,
+    background: LinearRgba,
+    tiles: &[Tile<'_>],
+    luts: Option<&LutSet>,
+) -> Result<()> {
+    let band_rows = usize::try_from(band_h).unwrap_or(0);
+    if band_rows == 0 || w == 0 {
+        return Ok(());
+    }
+    let band_pixels = band_rows.saturating_mul(w);
+
+    // 1. Background-encoded constant, computed ONCE (critic finding #3).
+    let bg_premul = background.premultiplied();
+    let bg_straight = PremulRgba {
+        r: bg_premul.r,
+        g: bg_premul.g,
+        b: bg_premul.b,
+        a: bg_premul.a,
+    }
+    .unpremultiplied();
+    let bg_yuv = match luts {
+        Some(lut) => {
+            lut.canvas_linear_to_output_yuv([bg_straight.r, bg_straight.g, bg_straight.b], canvas)?
+        }
+        None => canvas_linear_to_output_yuv([bg_straight.r, bg_straight.g, bg_straight.b], canvas)?,
+    };
+    fill_band_solid(band_y, band_uv, w, band_rows, bg_yuv);
+
+    // 2. Per-pixel premultiplied accumulator, all background, plus a coverage
+    //    bitmap of which pixels at least one tile touched. Fold each tile's
+    //    rect ∩ band in slice order (back-to-front).
+    let mut acc = vec![bg_premul; band_pixels];
+    let mut covered = vec![false; band_pixels];
+    for tile in tiles {
+        fold_tile_into_band(
+            &mut acc,
+            &mut covered,
+            w,
+            band_rows,
+            py_start,
+            tile,
+            canvas,
+            luts,
+        )?;
+    }
+
+    // 3. Re-encode through the back half ONLY the pixels a tile touched; the
+    //    rest already hold the precomputed background constant.
+    encode_covered_pixels(band_y, band_uv, w, band_rows, &acc, &covered, canvas, luts)
+}
+
+/// Fold one tile's `rect ∩ band` into the band-local premultiplied accumulator
+/// `acc` (back-to-front `over`), marking `covered` for each touched pixel. Only
+/// the pixels inside the tile's clipped destination rect are visited — the
+/// tile-driven inner loop (vs. the reference's per-pixel-all-tiles scan).
+#[allow(clippy::too_many_arguments)]
+// reason: the band accumulator + coverage, the band geometry, and the tile +
+// shared composite parameters; a struct would not shrink the surface.
+fn fold_tile_into_band(
+    acc: &mut [PremulRgba],
+    covered: &mut [bool],
+    w: usize,
+    band_rows: usize,
+    py_start: u32,
+    tile: &Tile<'_>,
+    canvas: CanvasColor,
+    luts: Option<&LutSet>,
+) -> Result<()> {
+    let band_top = i64::from(py_start);
+    let band_bottom = band_top.saturating_add(i64::try_from(band_rows).unwrap_or(0)); // exclusive
+    let w_i64 = i64::try_from(w).unwrap_or(i64::MAX);
+
+    let dst_x = i64::from(tile.dst_x);
+    let dst_y = i64::from(tile.dst_y);
+    let tile_w = i64::from(tile.image.width());
+    let tile_h = i64::from(tile.image.height());
+
+    // Global x range covered: [dst_x, dst_x + tile_w) ∩ [0, w).
+    let gx0 = dst_x.max(0);
+    let gx1 = dst_x.saturating_add(tile_w).min(w_i64);
+    // Global y range covered: [dst_y, dst_y + tile_h) ∩ [band_top, band_bottom).
+    let gy0 = dst_y.max(band_top);
+    let gy1 = dst_y.saturating_add(tile_h).min(band_bottom);
+    if gx0 >= gx1 || gy0 >= gy1 {
+        return Ok(()); // disjoint from this band (or fully off-canvas)
+    }
+    let opacity = tile.opacity.clamp(0.0, 1.0);
+
+    let mut gy = gy0;
+    while gy < gy1 {
+        // Tile-local + band-local rows. Both ranges are derived from the same
+        // clip, so the conversions below are in-range by construction.
+        let (Ok(py_local), Ok(src_y)) = (usize::try_from(gy - band_top), u32::try_from(gy - dst_y))
+        else {
+            break;
+        };
+        let row_base = py_local.saturating_mul(w);
+        let mut gx = gx0;
+        while gx < gx1 {
+            // Bands split only rows, so the band-local column == global x.
+            let (Ok(col), Ok(src_x)) = (usize::try_from(gx), u32::try_from(gx - dst_x)) else {
+                gx += 1;
+                continue;
+            };
+            if let Some((y8, cb8, cr8)) = tile.image.sample(src_x, src_y) {
+                let lin = match luts {
+                    Some(lut) => {
+                        lut.tile_yuv_to_canvas_linear(y8, cb8, cr8, tile.image.color(), canvas)?
+                    }
+                    None => tile_yuv_to_canvas_linear(y8, cb8, cr8, tile.image.color(), canvas)?,
+                };
+                let src = LinearRgba {
+                    r: lin[0],
+                    g: lin[1],
+                    b: lin[2],
+                    a: opacity,
+                }
+                .premultiplied();
+                if let Some(slot) = acc.get_mut(row_base + col) {
+                    *slot = over(src, *slot);
+                }
+                if let Some(flag) = covered.get_mut(row_base + col) {
+                    *flag = true;
+                }
+            }
+            gx += 1;
+        }
+        gy += 1;
+    }
+    Ok(())
+}
+
+/// Encode the back half (`canvas_linear_to_output_yuv`) for ONLY the band pixels
+/// a tile touched, writing into the band Y/UV planes (uncovered pixels keep the
+/// precomputed background constant the fill wrote).
+///
+/// Y is per-pixel independent: write the encoded luma of every covered pixel.
+/// Chroma is 4:2:0, and the reference's `write_pixel` writes the same UV slot
+/// for all 4 pixels of a 2×2 block in raster order — so a block's final chroma
+/// is whatever its **bottom-right** pixel (band-local row odd, col odd, the last
+/// written) produced. We reproduce that exactly: write a block's chroma only
+/// when its bottom-right pixel is covered (an uncovered bottom-right pixel would
+/// re-emit the background chroma the fill already wrote — identical). This keeps
+/// chroma byte-identical to the reference's last-writer-wins without re-encoding
+/// uncovered pixels.
+#[allow(clippy::too_many_arguments)]
+// reason: the band slices + geometry + accumulator/coverage + shared composite
+// parameters; a struct would not shrink the surface.
+fn encode_covered_pixels(
+    band_y: &mut [u8],
+    band_uv: &mut [u8],
+    w: usize,
+    band_rows: usize,
+    acc: &[PremulRgba],
+    covered: &[bool],
+    canvas: CanvasColor,
+    luts: Option<&LutSet>,
+) -> Result<()> {
+    for row in 0..band_rows {
+        let row_base = row.saturating_mul(w);
+        let Ok(row_u32) = u32::try_from(row) else {
+            break;
+        };
+        let row_is_block_bottom = row % 2 == 1;
+        for col in 0..w {
+            let idx = row_base + col;
+            let Some(true) = covered.get(idx).copied() else {
+                continue;
+            };
+            let Some(&p) = acc.get(idx) else {
+                continue;
+            };
+            let straight = PremulRgba {
+                r: p.r,
+                g: p.g,
+                b: p.b,
+                a: p.a,
+            }
+            .unpremultiplied();
+            let out = match luts {
+                Some(lut) => {
+                    lut.canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas)?
+                }
+                None => canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas)?,
+            };
+            let Ok(col_u32) = u32::try_from(col) else {
+                continue;
+            };
+            // Always write this pixel's luma.
+            write_luma(band_y, w, col_u32, row_u32, out[0]);
+            // Write chroma only for the bottom-right pixel of a 2×2 block — the
+            // last writer in the reference's raster order.
+            if row_is_block_bottom && col % 2 == 1 {
+                write_chroma(band_uv, w, col_u32, row_u32, out[1], out[2]);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fill an entire band's Y and interleaved UV planes with one solid output
+/// `(y, cb, cr)` — the precomputed background constant (`band_rows` luma rows of
+/// `w` bytes; `band_rows/2` interleaved UV rows of `w` bytes).
+fn fill_band_solid(
+    band_y: &mut [u8],
+    band_uv: &mut [u8],
+    w: usize,
+    band_rows: usize,
+    yuv: [u8; 3],
+) {
+    let y_len = band_rows.saturating_mul(w);
+    if let Some(slice) = band_y.get_mut(..y_len.min(band_y.len())) {
+        slice.fill(yuv[0]);
+    }
+    let uv_rows = band_rows / 2;
+    let uv_len = uv_rows.saturating_mul(w);
+    if let Some(slice) = band_uv.get_mut(..uv_len.min(band_uv.len())) {
+        for pair in slice.chunks_exact_mut(2) {
+            if let [cb, cr] = pair {
+                *cb = yuv[1];
+                *cr = yuv[2];
+            }
+        }
+    }
+}
+
 /// Map a canvas pixel to the tile-local coordinate it samples, or [`None`] if
 /// the pixel is outside the tile's placed rectangle.
 fn tile_local_coords(tile: &Tile<'_>, px: u32, py: u32) -> Option<(u32, u32)> {
@@ -617,21 +946,39 @@ fn tile_local_coords(tile: &Tile<'_>, px: u32, py: u32) -> Option<(u32, u32)> {
 
 /// Write one output pixel's `(y, cb, cr)` into the NV12 planes. Chroma is
 /// written for every pixel (last-writer-wins within a 2x2 block, matching the
-/// reference's nearest-neighbour model).
+/// reference's nearest-neighbour model). Used by the reference (oracle) kernel;
+/// the tile-driven kernel splits this into [`write_luma`] + [`write_chroma`].
 fn write_pixel(y_plane: &mut [u8], uv_plane: &mut [u8], w: usize, px: u32, py: u32, yuv: [u8; 3]) {
+    write_luma(y_plane, w, px, py, yuv[0]);
+    write_chroma(uv_plane, w, px, py, yuv[1], yuv[2]);
+}
+
+/// Write one output pixel's luma into the Y plane (a no-op if out of bounds).
+fn write_luma(y_plane: &mut [u8], w: usize, px: u32, py: u32, y: u8) {
     let (Ok(xi), Ok(yi)) = (usize::try_from(px), usize::try_from(py)) else {
         return;
     };
     if let Some(slot) = y_plane.get_mut(yi * w + xi) {
-        *slot = yuv[0];
+        *slot = y;
     }
+}
+
+/// Write one output pixel's chroma into the interleaved Cb/Cr plane at the 2×2
+/// block containing `(px, py)` (a no-op if out of bounds). The reference's
+/// nearest-neighbour model writes the same UV slot for every pixel of the block;
+/// the tile-driven kernel calls this only for the block's bottom-right pixel so
+/// the result matches the reference's last-writer-wins exactly.
+fn write_chroma(uv_plane: &mut [u8], w: usize, px: u32, py: u32, cb: u8, cr: u8) {
+    let (Ok(xi), Ok(yi)) = (usize::try_from(px), usize::try_from(py)) else {
+        return;
+    };
     let cx = xi / 2;
     let cy = yi / 2;
     let uv_index = (cy * w) + (cx * 2);
     if let Some(slot) = uv_plane.get_mut(uv_index) {
-        *slot = yuv[1];
+        *slot = cb;
     }
     if let Some(slot) = uv_plane.get_mut(uv_index + 1) {
-        *slot = yuv[2];
+        *slot = cr;
     }
 }
