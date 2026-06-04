@@ -181,6 +181,12 @@ pub struct TileStore<T> {
     /// writer (invariant #1): the writer copies the (≤ [`RING_CAPACITY`]) ring,
     /// appends, drops the oldest beyond capacity, and atomically swaps it in.
     ///
+    /// The publish is O(capacity) copy-on-write **by design** (ADR-T009): that is
+    /// what gives the binary-search read a stable, fully-ordered, torn-read-free
+    /// snapshot. An in-place O(1) ring would either move O(capacity) onto this hot
+    /// read path or require a seqlock that adds retry to it — the wrong trade,
+    /// since the copy runs on the *sampled input thread* (never the output clock).
+    ///
     /// [`RING_CAPACITY`]: TileStore::RING_CAPACITY
     ring: ArcSwap<Vec<RingEntry<T>>>,
 }

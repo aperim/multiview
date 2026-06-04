@@ -71,6 +71,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs tot
 - [ADR-T006](ADR-T006.md) — Long-run clock drift: monotonic master + PI/dead-band loop + adaptive audio resampling
 - [ADR-T007](ADR-T007.md) — Codec edge-case & decode/encode policy: one bad input never stalls the mosaic
 - [ADR-T008](ADR-T008.md) — A/V sync & per-input jitter-buffer model
+- [ADR-T009](ADR-T009.md) — Per-tile media-time ring uses O(capacity) copy-on-write publish, not an in-place O(1) ring
 - [ADR-0020](ADR-0020.md) — Layered timing: monotonic pacing + optional reference-lock + per-input frame-sync *(Proposed)*
 - [ADR-0021](ADR-0021.md) — Input timing & frame-sync: best-effort PTS normalisation + wall-clock pacer + sample-at-tick *(Proposed)*
 
