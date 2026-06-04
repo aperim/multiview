@@ -138,7 +138,11 @@ fn target(fps: u32, gop: u32) -> VideoEncodeTarget {
 /// Encode the whole `src` clip ONCE into a vector of [`EncodedPacket`]s, plus the
 /// `Send` codec-params snapshot and the encoder time-base — exactly the trio the
 /// cli's consumer thread would hand to its mux sinks.
-fn encode_once(src: &Path, fps: u32, gop: u32) -> (Vec<EncodedPacket>, StreamCodecParameters, Rational) {
+fn encode_once(
+    src: &Path,
+    fps: u32,
+    gop: u32,
+) -> (Vec<EncodedPacket>, StreamCodecParameters, Rational) {
     let mut encoder = VideoEncoder::new(&target(fps, gop)).expect("open encoder");
     let time_base = encoder.time_base();
     let params = StreamCodecParameters::from_encoder(&encoder);
@@ -197,7 +201,9 @@ struct FailAfter {
 impl PacketSource for FailAfter {
     fn next_packet(&mut self) -> Result<Option<EncodedPacket>> {
         if self.remaining == 0 {
-            return Err(Error::Output("injected mid-stream packet failure".to_owned()));
+            return Err(Error::Output(
+                "injected mid-stream packet failure".to_owned(),
+            ));
         }
         self.remaining -= 1;
         self.inner.next_packet()
@@ -246,7 +252,7 @@ fn file_packet_sink_muxes_a_decodable_container() {
     assert!(frames_in > 0);
 
     let (packets, params, time_base) = encode_once(&src, 30, 30);
-    let packet_total = packets.len() as u64;
+    let packet_total = u64::try_from(packets.len()).expect("packet count fits u64");
     assert!(packet_total > 0);
 
     let out = dir.path().join("program.ts");
@@ -351,7 +357,10 @@ fn packet_sink_finalizes_mp4_when_source_errors_mid_stream() {
         ffprobe_opens_cleanly(&out),
         "partial MP4 missing its moov trailer"
     );
-    assert!(decode_frame_count(&out) > 0, "partial MP4 decoded zero frames");
+    assert!(
+        decode_frame_count(&out) > 0,
+        "partial MP4 decoded zero frames"
+    );
 }
 
 #[test]
@@ -390,7 +399,11 @@ fn one_encode_fans_to_file_and_segment_with_equal_frame_counts() {
     };
 
     let file_frames = decode_frame_count(&file_out);
-    let seg_frames: usize = seg_result.segments.iter().map(|p| decode_frame_count(p)).sum();
+    let seg_frames: usize = seg_result
+        .segments
+        .iter()
+        .map(|p| decode_frame_count(p))
+        .sum();
     assert!(file_frames > 0 && seg_frames > 0);
     assert_eq!(
         file_frames, seg_frames,

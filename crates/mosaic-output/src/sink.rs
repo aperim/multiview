@@ -40,7 +40,10 @@ use std::path::{Path, PathBuf};
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::util::frame::Video;
 use mosaic_core::time::{rescale, MediaTime, Rational};
-use mosaic_ffmpeg::{DecodedVideoFrame, Muxer, ScaleSpec, Scaler, VideoEncodeTarget, VideoEncoder};
+use mosaic_ffmpeg::{
+    DecodedVideoFrame, EncodedPacket, Muxer, ScaleSpec, Scaler, StreamCodecParameters,
+    VideoEncodeTarget, VideoEncoder,
+};
 
 use crate::error::{Error, Result};
 use crate::hls::{MediaPlaylist, Segment, SegmentType};
@@ -102,6 +105,27 @@ pub trait VideoFrameSource {
     /// # Errors
     /// Returns an [`Error`] if the underlying source failed to produce a frame.
     fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>>;
+}
+
+/// A source of already-encoded packets to mux (the packet-fed twin of
+/// [`VideoFrameSource`]).
+///
+/// Encode-once-mux-many (invariant #7, ADR-0026): the canvas is encoded **once**
+/// upstream and the *same* coded packets are fanned to N mux-only
+/// [`PacketMuxSink`]s, each driving its own muxer off the engine hot path. Each
+/// sink pulls owned packet copies from one of these. `Ok(None)` signals
+/// end-of-program, at which point the sink finalizes its container/trailer.
+///
+/// The yielded packet's timestamps were already re-stamped from the output tick
+/// counter before encode (invariant #3); this trait never re-stamps — it only
+/// carries packets to the muxer, which performs the mechanical encoder→stream
+/// time-base rescale.
+pub trait PacketSource {
+    /// Pull the next encoded packet, or `Ok(None)` at end of program.
+    ///
+    /// # Errors
+    /// Returns an [`Error`] if the upstream packet feed failed.
+    fn next_packet(&mut self) -> Result<Option<EncodedPacket>>;
 }
 
 /// Map a `mosaic-ffmpeg` error onto this crate's output error taxonomy.
@@ -332,6 +356,40 @@ fn finalize_or_propagate(muxer: &mut Muxer, driven: Result<EncodeStats>) -> Resu
     }
 }
 
+/// Finalize a segmentation run after its drive loop, preserving error priority
+/// the same way [`finalize_or_propagate`] does for a single muxer.
+///
+/// On a drive failure the currently-open segment is finalized **best-effort**
+/// (so its container is structurally closed) and the drive error propagates — no
+/// playlist is built. On success the final segment is closed and the populated,
+/// finished HLS [`MediaPlaylist`] is returned alongside the segment paths and
+/// stats.
+///
+/// Shared by the encoder-fed [`SegmentSink`] and the packet-fed
+/// [`PacketMuxSink`] segment flavour so both finalize identically.
+fn finish_segments(
+    mut state: SegmentState<'_>,
+    driven: Result<()>,
+    time_base: Rational,
+) -> Result<SegmentResult> {
+    if let Err(err) = driven {
+        state.finalize_open_segment_best_effort();
+        return Err(err);
+    }
+    let frame_ns = rescale(1, time_base, Rational::new(1, NANOS_PER_SEC));
+    let mut playlist = MediaPlaylist::new(SegmentType::MpegTs);
+    state.finish(&mut playlist, frame_ns)?;
+    // TARGETDURATION must be >= the longest EXTINF, as an integer.
+    playlist.recompute_target_duration();
+    playlist.set_finished(true);
+    let run_stats = state.stats;
+    Ok(SegmentResult {
+        segments: state.into_segment_paths(),
+        playlist,
+        stats: run_stats,
+    })
+}
+
 /// Drive the shared encode-once-mux-many loop: pull frames from `source`,
 /// convert NV12 -> the encoder format, re-stamp each PTS from the tick counter
 /// (invariants #1/#3), encode once, and write every packet to `muxer` on the
@@ -367,6 +425,31 @@ fn drive_to_single_muxer<S: VideoFrameSource>(
     while let Some(packet) = encoder.receive_packet().map_err(ff)? {
         record(&mut stats, packet.is_key());
         muxer.write_packet(stream_index, packet).map_err(ff)?;
+    }
+    Ok(stats)
+}
+
+/// Drive a single-container mux from a [`PacketSource`]: pull each pre-encoded
+/// packet and write its own owned copy to `muxer` on `stream_index` (no encode
+/// — the canvas was encoded once upstream, invariant #7). The caller writes the
+/// header before and the trailer after.
+///
+/// The packet-fed twin of [`drive_to_single_muxer`], shared by the
+/// [`PacketMuxSink`] file and push flavours.
+fn drive_packets_to_single_muxer<P: PacketSource>(
+    muxer: &mut Muxer,
+    stream_index: usize,
+    source: &mut P,
+) -> Result<EncodeStats> {
+    let mut stats = EncodeStats::default();
+    while let Some(packet) = source.next_packet()? {
+        record(&mut stats, packet.is_keyframe());
+        // Each muxer gets its OWN owned packet, so write_packet's in-place
+        // set_stream + rescale_ts is sound even when the same packet fans to
+        // many muxers (invariant #7).
+        muxer
+            .write_packet(stream_index, packet.into_owned_packet())
+            .map_err(ff)?;
     }
     Ok(stats)
 }
@@ -422,34 +505,30 @@ impl SegmentSink {
     /// configuration).
     pub fn run<S: VideoFrameSource>(&self, source: &mut S) -> Result<SegmentResult> {
         self.config.validate()?;
+        // The encode-once-mux-many seed (invariant #7): a single opened encoder
+        // whose codec parameters every segment muxer's stream is copied from. It
+        // is separate from the `drive` encoder below only because the drive
+        // encoder is borrowed mutably to produce packets while the seed is
+        // borrowed immutably into the segmentation state; both are the SAME fixed
+        // codec, built once for the whole run (never per segment).
+        let seed = VideoEncoder::new(&self.config.target()).map_err(ff)?;
+        note_seed_encoder_built();
         let mut encoder = VideoEncoder::new(&self.config.target()).map_err(ff)?;
         let time_base = encoder.time_base();
-        let frame_ns = rescale(1, time_base, Rational::new(1, NANOS_PER_SEC));
 
-        let mut state = SegmentState::new(&self.config, &self.dir, &self.prefix, time_base)?;
         let mut converter = FrameConverter::new(self.config.format);
+        let mut state = SegmentState::new(
+            StreamSeed::Encoder(&seed),
+            &self.dir,
+            &self.prefix,
+            time_base,
+        );
 
         // Drive the encode/segment loop, capturing any mid-run failure so the
         // currently-open segment can be finalized best-effort before the error
-        // propagates (finalize-on-error). On the error path we do not build the
-        // playlist; we only ensure the open segment's container is closed.
-        if let Err(err) = state.drive(&mut encoder, &mut converter, source) {
-            state.finalize_open_segment_best_effort();
-            return Err(err);
-        }
-
-        let mut playlist = MediaPlaylist::new(SegmentType::MpegTs);
-        state.finish(&mut playlist, frame_ns)?;
-        // TARGETDURATION must be >= the longest EXTINF, as an integer.
-        playlist.recompute_target_duration();
-        playlist.set_finished(true);
-
-        let run_stats = state.stats;
-        Ok(SegmentResult {
-            segments: state.into_segment_paths(),
-            playlist,
-            stats: run_stats,
-        })
+        // propagates (finalize-on-error).
+        let driven = state.drive(&mut encoder, &mut converter, source);
+        finish_segments(state, driven, time_base)
     }
 
     /// The directory segments are written into.
@@ -576,16 +655,195 @@ impl PushSink {
     }
 }
 
+/// What a [`PacketMuxSink::run`] produced.
+///
+/// A single-container sink yields just the [`EncodeStats`] (packets muxed);
+/// a segmented sink yields the full [`SegmentResult`] (segment paths, playlist,
+/// and stats).
+///
+/// Closed (not `#[non_exhaustive]`): a packet mux is inherently either
+/// single-container or segmented, so callers `match` both arms exhaustively.
+#[derive(Debug)]
+pub enum PacketMuxOutcome {
+    /// A file/push (single-container) sink finished: the muxed-packet stats.
+    Single(EncodeStats),
+    /// A segmented (HLS) sink finished: segments + playlist + stats.
+    ///
+    /// Boxed because [`SegmentResult`] is much larger than [`EncodeStats`];
+    /// keeping it behind an indirection keeps the enum small.
+    Segment(Box<SegmentResult>),
+}
+
+/// Where a single-container [`PacketMuxSink`] writes its one muxer.
+enum SingleTarget {
+    /// A container file; the muxer is inferred from the path extension.
+    File(PathBuf),
+    /// A live push URL with a forced container muxer name (FLV / MPEG-TS / …).
+    Push {
+        url: String,
+        muxer_name: &'static str,
+    },
+}
+
+impl SingleTarget {
+    /// Open the muxer for this target.
+    fn open(&self) -> Result<Muxer> {
+        match self {
+            Self::File(path) => Muxer::create(path),
+            Self::Push { url, muxer_name } => Muxer::create_as(Path::new(url), muxer_name),
+        }
+        .map_err(ff)
+    }
+}
+
+/// A **mux-only** sink fed pre-encoded packets — the encode-once-mux-many egress
+/// (invariant #7, ADR-0026).
+///
+/// Unlike [`FileSink`]/[`SegmentSink`]/[`PushSink`] (which build their own
+/// encoder), a `PacketMuxSink` holds **no encoder**: the canvas is encoded once
+/// upstream and the *same* coded packets are fanned, as owned copies, to N of
+/// these. Each builds its muxer stream from a [`StreamCodecParameters`] snapshot
+/// (so no encoder instance is needed on the sink thread), writes the header,
+/// muxes every packet pulled from a [`PacketSource`], and finalizes the trailer
+/// on stop **and** on error (the same finalize-on-error contract the encoder-fed
+/// sinks honour). Two flavours:
+///
+/// * **single-container** ([`PacketMuxSink::file`] / [`PacketMuxSink::push`]):
+///   one muxer, every packet to its one stream.
+/// * **segmented** ([`PacketMuxSink::segment`]): rotates the MPEG-TS segment
+///   muxer on a keyframe-flagged packet (the GOP boundary, decided by
+///   [`EncodedPacket::is_keyframe`] — never an encoder GOP counter) and emits the
+///   HLS media playlist exactly as [`SegmentSink`] does.
+///
+/// These sinks run off the engine hot path; a slow one paces only its own
+/// consumer, never the engine (invariants #1/#10).
+pub struct PacketMuxSink {
+    kind: PacketMuxKind,
+}
+
+/// The two `PacketMuxSink` flavours (private; the public surface is the
+/// [`PacketMuxSink::file`]/[`push`](PacketMuxSink::push)/[`segment`](PacketMuxSink::segment)
+/// constructors + [`run`](PacketMuxSink::run)).
+enum PacketMuxKind {
+    /// Single-container mux (file or live push).
+    Single(SingleTarget),
+    /// GOP-segmented MPEG-TS mux with an HLS playlist (`dir`, segment `prefix`).
+    Segment { dir: PathBuf, prefix: String },
+}
+
+impl PacketMuxSink {
+    /// A single-container sink that muxes every packet into the container file
+    /// at `path` (`.mkv`, `.mp4`, `.ts`, … inferred from the extension).
+    #[must_use]
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            kind: PacketMuxKind::Single(SingleTarget::File(path.into())),
+        }
+    }
+
+    /// A single-container sink that pushes every packet to `url` over `protocol`
+    /// (the protocol fixes the on-the-wire container muxer).
+    #[must_use]
+    pub fn push(protocol: PushProtocol, url: impl Into<String>) -> Self {
+        Self {
+            kind: PacketMuxKind::Single(SingleTarget::Push {
+                url: url.into(),
+                muxer_name: protocol.muxer_name(),
+            }),
+        }
+    }
+
+    /// A segmented (HLS) sink writing `prefix{n}.ts` MPEG-TS segments into `dir`
+    /// and producing the referencing media playlist.
+    #[must_use]
+    pub fn segment(dir: impl Into<PathBuf>, prefix: impl Into<String>) -> Self {
+        Self {
+            kind: PacketMuxKind::Segment {
+                dir: dir.into(),
+                prefix: prefix.into(),
+            },
+        }
+    }
+
+    /// Mux the whole `source` packet stream, seeding every muxer stream from
+    /// `codec_params` and rescaling packets out of `time_base`.
+    ///
+    /// Pulls packets until [`PacketSource::next_packet`] yields `Ok(None)` (end
+    /// of program → finalize), writing each packet's own owned copy to the
+    /// muxer. The trailer (and, for HLS, the playlist) is finalized on a clean
+    /// stop; on a mid-stream source error the open container is finalized
+    /// best-effort before the error propagates (so e.g. an MP4 `moov` atom is
+    /// still written).
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if the muxer cannot be opened (a push connect
+    /// failure surfaces here, never a block/panic), the source errors, or a
+    /// packet cannot be written.
+    pub fn run<P: PacketSource>(
+        &self,
+        source: &mut P,
+        codec_params: &StreamCodecParameters,
+        time_base: Rational,
+    ) -> Result<PacketMuxOutcome> {
+        match &self.kind {
+            PacketMuxKind::Single(target) => {
+                let mut muxer = target.open()?;
+                let stream_index = muxer
+                    .add_stream_from_parameters(codec_params, time_base)
+                    .map_err(ff)?;
+                muxer.write_header().map_err(ff)?;
+                let driven = drive_packets_to_single_muxer(&mut muxer, stream_index, source);
+                // Finalize-on-error: always write the trailer best-effort so a
+                // mid-stream failure still leaves a structurally valid container.
+                finalize_or_propagate(&mut muxer, driven).map(PacketMuxOutcome::Single)
+            }
+            PacketMuxKind::Segment { dir, prefix } => {
+                let mut state =
+                    SegmentState::new(StreamSeed::Params(codec_params), dir, prefix, time_base);
+                let driven = state.drive_from_packets(source);
+                finish_segments(state, driven, time_base)
+                    .map(|result| PacketMuxOutcome::Segment(Box::new(result)))
+            }
+        }
+    }
+}
+
+/// The single, run-wide source of the codec parameters each new segment muxer's
+/// stream is seeded from (invariant #7: the codec is fixed across the encode, so
+/// this is borrowed once and reused for every segment — never rebuilt).
+///
+/// Two forms, so the same segmentation state machine serves both egress paths:
+/// the encoder-fed [`SegmentSink`] borrows its run's seed [`VideoEncoder`]; the
+/// packet-fed [`PacketMuxSink`] borrows the [`StreamCodecParameters`] snapshot
+/// the cli's single encoder produced (no encoder instance on this thread).
+enum StreamSeed<'a> {
+    /// Seed a stream from a live encoder's codec context.
+    Encoder(&'a VideoEncoder),
+    /// Seed a stream from a thread-movable codec-parameters snapshot.
+    Params(&'a StreamCodecParameters),
+}
+
+impl StreamSeed<'_> {
+    /// Register a stream seeded from this codec source on `muxer`, returning the
+    /// stream index.
+    fn add_stream(&self, muxer: &mut Muxer, time_base: Rational) -> Result<usize> {
+        match self {
+            Self::Encoder(encoder) => muxer.add_stream(encoder.as_codec_context(), time_base),
+            Self::Params(params) => muxer.add_stream_from_parameters(params, time_base),
+        }
+        .map_err(ff)
+    }
+}
+
 /// Per-run segmentation state: the open segment, completed segments, and stats.
 struct SegmentState<'a> {
     dir: &'a Path,
     prefix: &'a str,
     time_base: Rational,
-    /// The **single** seed encoder for the whole run. Each new segment muxer
-    /// copies its codec parameters from this one opened encoder; the codec is
-    /// fixed across the encode (invariant #7), so the seed is built once here —
-    /// never once per segment.
-    seed: VideoEncoder,
+    /// The **single** run-wide codec-parameter seed. Each new segment muxer
+    /// copies the same codec parameters from this; the codec is fixed across the
+    /// encode (invariant #7), so the seed is borrowed once — never per segment.
+    seed: StreamSeed<'a>,
     current: Option<OpenSegment>,
     /// Completed `(path, duration_seconds)` in order.
     done: Vec<(PathBuf, f64)>,
@@ -604,17 +862,12 @@ struct OpenSegment {
 }
 
 impl<'a> SegmentState<'a> {
-    /// Build the per-run segmentation state, opening the **single** seed encoder
-    /// here (invariant #7: one fixed codec for the whole run).
-    fn new(
-        config: &'a EncodeConfig,
-        dir: &'a Path,
-        prefix: &'a str,
-        time_base: Rational,
-    ) -> Result<Self> {
-        let seed = VideoEncoder::new(&config.target()).map_err(ff)?;
-        note_seed_encoder_built();
-        Ok(Self {
+    /// Build the per-run segmentation state around the single run-wide codec
+    /// seed (invariant #7: one fixed codec for the whole run). The caller owns
+    /// the seed (a [`VideoEncoder`] or a [`StreamCodecParameters`]) and borrows
+    /// it in for the duration of the run.
+    fn new(seed: StreamSeed<'a>, dir: &'a Path, prefix: &'a str, time_base: Rational) -> Self {
+        Self {
             dir,
             prefix,
             time_base,
@@ -623,7 +876,7 @@ impl<'a> SegmentState<'a> {
             done: Vec::new(),
             last_pts: MediaTime::ZERO,
             stats: EncodeStats::default(),
-        })
+        }
     }
 
     /// Run the encode/segment drive loop: pull frames from `source`, convert and
@@ -665,6 +918,27 @@ impl<'a> SegmentState<'a> {
         Ok(())
     }
 
+    /// Drive the segment loop from a [`PacketSource`] (the encode-once-mux-many
+    /// packet-fed path): pull each pre-encoded packet, split on its keyframe flag
+    /// (the GOP boundary — invariant #7), and write its own owned copy into the
+    /// current segment muxer. Mirrors [`Self::drain_packets`] exactly, but the
+    /// packets arrive already encoded rather than from a local encoder, so a
+    /// File and a Segment sink fed the SAME packets produce the SAME media.
+    fn drive_from_packets<P: PacketSource>(&mut self, source: &mut P) -> Result<()> {
+        while let Some(packet) = source.next_packet()? {
+            let is_key = packet.is_keyframe();
+            let pts = pts_from_packet(packet.pts(), self.stats.packets, self.time_base);
+            if is_key {
+                self.start_segment(pts)?;
+            }
+            let owned = packet.into_owned_packet();
+            let (muxer, index) = self.current_muxer()?;
+            muxer.write_packet(index, owned).map_err(ff)?;
+            self.record(is_key, pts);
+        }
+        Ok(())
+    }
+
     /// Best-effort finalize of the currently-open segment on the error path: the
     /// open segment muxer's trailer is written (so its container is structurally
     /// closed) and the segment dropped. Any finish failure is intentionally
@@ -695,9 +969,7 @@ impl<'a> SegmentState<'a> {
         // its own self-contained MPEG-TS container. The seed is reused for every
         // segment — never rebuilt per segment.
         let mut muxer = Muxer::create_as(&path, "mpegts").map_err(ff)?;
-        let stream_index = muxer
-            .add_stream(self.seed.as_codec_context(), self.time_base)
-            .map_err(ff)?;
+        let stream_index = self.seed.add_stream(&mut muxer, self.time_base)?;
         muxer.write_header().map_err(ff)?;
         self.current = Some(OpenSegment {
             muxer,
