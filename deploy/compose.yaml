@@ -1,0 +1,85 @@
+# deploy/compose.yaml — Multiview quick-start (software / LGPL-clean image).
+#
+# Brings up two services:
+#   * testsrc   — a MediaMTX RTSP server that, on init, runs ffmpeg to publish a
+#                 SYNTHETIC `testsrc2` video + `sine` audio feed at
+#                 rtsp://testsrc:8554/test. No real/private feeds.
+#   * multiview — the Multiview engine, ingesting that feed + 3 built-in test
+#                 patterns into a 2x2 canvas and writing HLS to a named volume.
+#
+# Bring it up:   docker compose -f deploy/compose.yaml up -d
+# Tear it down:  docker compose -f deploy/compose.yaml down -v
+#
+# GPU overlays (compose merges left-to-right; the GPU files swap the image +
+# add device access):
+#   docker compose -f deploy/compose.yaml -f deploy/compose.gpu-nvidia.yaml up -d
+#   docker compose -f deploy/compose.yaml -f deploy/compose.gpu-vaapi.yaml  up -d
+#
+# NOTE on ports: the Multiview control/serving HTTP surface (web UI + OpenAPI +
+# /api/v1 + health) is intended to bind :8080, and the RTSP output server :8554,
+# once the binary wires those listeners (the current scaffold drives the
+# pipeline + writes HLS files but does not yet bind a listener). The mappings
+# below are the documented target so the file is ready when serving lands.
+
+services:
+  testsrc:
+    # MediaMTX with a bundled ffmpeg; `runOnInit` publishes a synthetic feed.
+    image: bluenviron/mediamtx:1.19.0-ffmpeg
+    restart: unless-stopped
+    environment:
+      MTX_PROTOCOLS: tcp
+      # Publish a synthetic 1280x720@30 testsrc2 + sine feed to the `test` path.
+      MTX_PATHS_TEST_RUNONINIT: >-
+        ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30
+        -f lavfi -i sine=frequency=1000:sample_rate=48000
+        -pix_fmt yuv420p -c:v libx264 -preset veryfast -tune zerolatency -g 60
+        -c:a aac -f rtsp rtsp://localhost:8554/test
+      MTX_PATHS_TEST_RUNONINITRESTART: "yes"
+    ports:
+      # Exposed for host inspection (e.g. ffplay rtsp://localhost:8554/test).
+      - "8554:8554"
+    healthcheck:
+      # MediaMTX serves its API/metrics on :9997; a TCP connect proves liveness.
+      test: ["CMD", "sh", "-c", "nc -z localhost 8554 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  multiview:
+    image: ghcr.io/aperim/multiview:latest
+    restart: unless-stopped
+    depends_on:
+      testsrc:
+        condition: service_started
+    command: ["run", "/etc/multiview/multiview.toml"]
+    volumes:
+      # The quick-start config (read-only) and the HLS output (named volume).
+      - ./config/multiview.toml:/etc/multiview/multiview.toml:ro
+      - multiview-hls:/var/lib/multiview/hls
+    ports:
+      # Control / web UI / OpenAPI / health (target: binds once serving lands).
+      - "8080:8080"
+      # RTSP output server (target).
+      - "8554"
+    healthcheck:
+      # Readiness probe at /readyz (served by the control plane once wired).
+      # `start_period` + `start_interval` give a fast-but-tolerant warm-up:
+      # frequent probes during startup, then the normal interval.
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/readyz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 3s
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
+        reservations:
+          cpus: "1.0"
+          memory: 1g
+
+volumes:
+  multiview-hls:

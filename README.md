@@ -110,99 +110,171 @@ flags, and invariants.
 
 ---
 
-## Quickstart
+## Quick start (Docker Compose)
 
-> [!IMPORTANT]
-> Multiview links **FFmpeg / libav** for demux/decode/encode. The default build expects an
-> **LGPL FFmpeg** with NVENC/NVDEC headers (`nv-codec-headers`); it does **not** require — and must
-> not link — x264/x265 or libnpp. See [Licensing](#licensing). Build instructions for fetching and
-> compiling an LGPL-clean FFmpeg live in `xtask` once implemented; until then, a recent
-> shared FFmpeg (8.x) with the backends for your platform is the prerequisite.
+The fastest way to see Multiview running. It brings up the engine plus a small companion
+container that publishes a **synthetic** `testsrc2` + `sine` RTSP feed (no real or private
+sources), composites a 2×2 canvas, and writes HLS.
 
-### Build
+```bash
+git clone https://github.com/aperim/multiview.git
+cd multiview
+
+# Pulls ghcr.io/aperim/multiview:latest + a MediaMTX testsrc companion.
+docker compose -f deploy/compose.yaml up -d
+
+# HLS output lands in the `multiview-hls` named volume; the control/web UI is
+# served on http://localhost:8080 once the binary wires the control plane.
+docker compose -f deploy/compose.yaml logs -f multiview
+```
+
+The quick-start config is [`deploy/config/multiview.toml`](deploy/config/multiview.toml) — one tile
+reads the companion's `rtsp://testsrc:8554/test`, the other three are built-in synthetic test
+patterns. Edit it and re-run `up -d` to point a tile at your own source. Tear down with
+`docker compose -f deploy/compose.yaml down -v`.
+
+> [!NOTE]
+> The web UI (`:8080`) and RTSP output (`:8554`) ports are wired in the compose file as the target
+> serving surface. The current scaffold drives the pipeline and writes HLS files; binding the
+> control/serving listeners is in progress (see [`ROADMAP.md`](ROADMAP.md)).
+
+### GPU one-liners
+
+```bash
+# NVIDIA (NVDEC/NVENC/CUDA): needs the NVIDIA driver + Container Toolkit on the host.
+docker compose -f deploy/compose.yaml -f deploy/compose.gpu-nvidia.yaml up -d
+
+# Intel/AMD VAAPI: passes through /dev/dri; set RENDER_GID to your host's render group id.
+RENDER_GID=$(getent group render | cut -d: -f3) \
+  docker compose -f deploy/compose.yaml -f deploy/compose.gpu-vaapi.yaml up -d
+```
+
+---
+
+## Install
+
+### Container image (GHCR)
+
+```bash
+# LGPL-clean default image (software + VAAPI). Encodes the canvas with LGPL mpeg2video.
+docker pull ghcr.io/aperim/multiview:latest
+
+# NVIDIA variant (NVDEC/NVENC/CUDA).
+docker pull ghcr.io/aperim/multiview:latest-nvidia
+```
+
+Images are multi-arch (`linux/amd64` + `linux/arm64`), built on native runners, and published with
+SLSA build-provenance attestations + keyless cosign signatures.
+
+### Prebuilt binaries (GitHub Releases)
+
+Each tagged release attaches a `tar.gz` (+ `.sha256`) per platform on the
+[Releases page](https://github.com/aperim/multiview/releases):
+
+| Platform | Asset target |
+|----------|--------------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux aarch64 | `aarch64-unknown-linux-gnu` |
+| macOS Apple Silicon | `aarch64-apple-darwin` (signed + notarized) |
+| macOS Intel | `x86_64-apple-darwin` (signed + notarized) |
+
+> Two separate macOS binaries are shipped (not a universal2 `lipo`): Homebrew's FFmpeg bottle is
+> arm64-only on the build runner, so a true universal2 link isn't yet available.
+
+### Runtime requirement: FFmpeg 7.x
+
+The released binaries link **FFmpeg / libav 7.x dynamically** — the `libavcodec.so.61` soname
+family. You must have a matching FFmpeg 7.x on the host:
+
+- **macOS:** `brew install ffmpeg` (Homebrew ships 7.x).
+- **Linux:** distro libav 7.x — e.g. **Debian trixie** ships FFmpeg 7.1 (`libavcodec61` …). On
+  **Ubuntu 24.04** apt ships FFmpeg **6.1**, so install 7.x from a maintained PPA
+  (`ppa:ubuntuhandbook1/ffmpeg7`) or use the container image instead.
+- Verify with `pkg-config --modversion libavcodec` → expect `61.x`.
+
+The default container image bundles the correct FFmpeg 7.x runtime, so no host FFmpeg is needed when
+running via Docker.
+
+### Build from source
 
 ```bash
 # Default build: pure-Rust trait/type layer, no native GPU deps, LGPL-clean.
 cargo build
 
 # Platform umbrella presets (defined in multiview-cli):
-cargo build --features nvidia       # cuda + ffmpeg + wgpu (NVENC/NVDEC/CUDA)
-cargo build --features apple        # videotoolbox + metal + ffmpeg (macOS)
-cargo build --features linux-vaapi  # vaapi + qsv + ffmpeg + wgpu (Intel/AMD)
-cargo build --features full         # everything non-GPL
+cargo build --features ffmpeg                  # real libav* pipeline, LGPL mpeg2video
+cargo build --features nvidia                  # cuda + ffmpeg + wgpu (NVENC/NVDEC/CUDA)
+cargo build --features apple                   # videotoolbox + metal + ffmpeg (macOS)
+cargo build --features linux-vaapi             # vaapi + qsv + ffmpeg + wgpu (Intel/AMD)
+cargo build --features full                    # everything non-GPL
+cargo build --features ffmpeg,gpl-codecs       # adds x264/x265 — relicenses the build GPL
 ```
 
 ### Run a 2×2 multiview
 
-Multiview is configured by a declarative TOML/JSON document — canvas, layout, cells (sources),
-overlays, and outputs. Example configs live in `examples/` (added alongside the implementation).
+Multiview is configured by a declarative TOML document — canvas, layout, sources, cells, overlays,
+and outputs. Self-contained examples live in [`examples/`](examples/) (all built-in `test` sources,
+no network needed).
 
 ```bash
 # Validate a config without starting the pipeline
 multiview validate examples/2x2.toml
 
-# Run it
-multiview run examples/2x2.toml
+# Run it (real libav* pipeline). Bound the run with --duration / --ticks, or
+# --headless for the GPU/FFmpeg-free software output-clock smoke.
+multiview run examples/2x2.toml --duration 10
+multiview run examples/2x2.toml --headless --ticks 300
 ```
 
-A minimal 2×2 canvas drawing from four sources:
+A minimal 2×2 canvas drawing from four synthetic sources (see [`examples/2x2.toml`](examples/2x2.toml)):
 
 ```toml
-# examples/2x2.toml
 schema_version = 1
 
 [canvas]
 width = 1920
 height = 1080
-fps = "30000/1001"   # exact rational — never float fps
+fps = "30000/1001"          # exact rational string — never a float fps
 pixel_format = "nv12"
 background = "#101014"
 
+[canvas.color]
+profile = "sdr-bt709-limited"
+
 [layout]
-kind = "grid:2x2"
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr", "1fr"]
+gap = 8
+areas = ["a b", "c d"]
+
+[[sources]]
+id = "in_a"
+kind = "test"               # built-in synthetic pattern; swap to rtsp/hls/ts/srt/file/ndi
+# ... in_b / in_c / in_d likewise ...
 
 [[cells]]
-area = "0,0"
-fit  = "cover"
+id = "cell_a"
+area = "a"
+fit = "contain"
 [cells.source]
-kind = "hls"
-url  = "https://samples.example.net/abc-news.m3u8"
+input_id = "in_a"
+# ... cell_b / cell_c / cell_d likewise ...
 
-[[cells]]
-area = "1,0"
-fit  = "cover"
-[cells.source]
-kind = "rtsp"
-url  = "rtsp://gpu-test-box.example.net:8554/webcam"
-transport = "tcp"
-
-[[cells]]
-area = "0,1"
-fit  = "contain"
-[cells.source]
-kind = "test"          # synthetic source — always available, deterministic
-pattern = "smptebars"
-
-[[cells]]
-area = "1,1"
-fit  = "cover"
-[cells.source]
-kind = "test"
-pattern = "testsrc2"
-
+# Encode once, fan out to many transports (invariant #7).
 [[outputs]]
-kind = "rtsp"
+kind = "rtsp_server"
 mount = "/multiview"
 codec = "h264"
-profile = "low_latency"
+latency_profile = "low_latency"
 ```
 
-The web UI and OpenAPI docs are served from the same process and port once running (Scalar
-try-it-out at `/docs`, spec at `/api/v1/openapi.json`).
+Once the control plane is wired, the web UI and OpenAPI docs are served from the same process on
+`:8080` (Scalar try-it-out at `/docs`, spec at `/api/v1/openapi.json`).
 
-> Real and synthetic test streams — including the ABC/CNN/Frigate demo set, a deliberately diverse
-> "gotcha" matrix (mixed fps, codecs, untagged color, subtitles), and reproducible synthetic
-> sources — are cataloged in **[docs/reference/example-streams.md](docs/reference/example-streams.md)**.
+> Synthetic and public test-stream recipes — reproducible `lavfi testsrc2`/`sine` feeds, Big Buck
+> Bunny, and a deliberately diverse "gotcha" matrix (mixed fps, codecs, untagged color, subtitles) —
+> are cataloged in **[docs/reference/example-streams.md](docs/reference/example-streams.md)**.
 
 ---
 
@@ -244,6 +316,12 @@ done in-house (no libnpp, no x264/x265). Two capabilities are strictly opt-in:
 |---------|--------|
 | `gpl-codecs` | Pulls in x264/x265 → the resulting build is **GPL**. Off by default. |
 | `ndi` | Uses the **proprietary** NDI SDK (royalty-free, runtime-loaded, never vendored). Carries the NDI EULA and **mandatory attribution** — "NDI® is a registered trademark of Vizrt NDI AB." Off by default. |
+
+The published container images and release binaries are built **LGPL-clean** (no `gpl-codecs`): the
+canvas is encoded with LGPL `mpeg2video`, so a config naming `h264` falls back to MPEG-2. A separate
+**`-gpl` image tag** (built with `--build-arg CARGO_FEATURES=ffmpeg,linux-vaapi,gpl-codecs`) provides
+true x264/x265 H.264/HEVC output and is, as a whole, **GPL-licensed** — use it only if that license
+is acceptable for your deployment.
 
 Codec **patent** licensing (H.264/HEVC/AAC pools) is a separate question from software copyright and
 may apply to your outputs regardless of build flags. CI gates licenses and advisories with
