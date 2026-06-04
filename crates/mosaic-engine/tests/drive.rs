@@ -13,8 +13,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mosaic_compositor::blend::LinearRgba;
-use mosaic_compositor::pipeline::{CanvasColor, Nv12Image};
+use mosaic_compositor::blend::{over, LinearRgba};
+use mosaic_compositor::pipeline::{
+    canvas_linear_to_output_yuv, tile_yuv_to_canvas_linear, CanvasColor, Nv12Image,
+};
 use mosaic_core::color::ColorInfo;
 use mosaic_core::layout::{Canvas, Cell, FitMode, Layout};
 use mosaic_core::time::{MediaTime, Rational};
@@ -376,4 +378,122 @@ fn hot_swapping_layout_takes_effect_between_ticks() {
     assert!(drive.set_layout(Arc::new(bad)).is_err());
     let f3 = drive.compose(tick_at(2)).unwrap();
     assert!(f3.source_states.is_empty(), "bad swap must not apply");
+}
+
+#[test]
+fn per_cell_opacity_cross_fades_overlapping_tiles_in_linear_light() {
+    // PER-CELL OPACITY regression: an overlapping TOP cell at opacity 0.5 over an
+    // opaque bottom cell must produce the premultiplied linear-light `over` blend
+    // — NOT a hard-cover of the top colour. This fails while `drive.rs` hardwires
+    // every `Tile.opacity = 1.0` (the compositor already honours `Tile.opacity`,
+    // but the drive never sets it from the cell).
+    let (w, h) = (64, 64);
+
+    // Two achromatic (cb=cr=128) sources at distinct lumas, each full-frame.
+    let bottom_luma: u8 = 60;
+    let top_luma: u8 = 210;
+    let store_bottom = Arc::new(TileStore::<Nv12Image>::with_defaults("bottom"));
+    let store_top = Arc::new(TileStore::<Nv12Image>::with_defaults("top"));
+    store_bottom.publish(solid(w, h, bottom_luma), MediaTime::ZERO);
+    store_top.publish(solid(w, h, top_luma), MediaTime::ZERO);
+    let mut stores = HashMap::new();
+    stores.insert("bottom".to_owned(), store_bottom);
+    stores.insert("top".to_owned(), store_top);
+
+    // Two fully-overlapping full-canvas cells: bottom opaque (z=0), top at
+    // opacity 0.5 (z=1, drawn on top).
+    let layout = Layout {
+        name: "pip-ghost".to_owned(),
+        canvas: Canvas {
+            width: w,
+            height: h,
+            fps_num: 60,
+            fps_den: 1,
+        },
+        cells: vec![
+            Cell {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                fit: FitMode::Contain,
+                source: Some("bottom".to_owned()),
+                opacity: 1.0,
+                ..Cell::default()
+            },
+            Cell {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 1,
+                fit: FitMode::Contain,
+                source: Some("top".to_owned()),
+                opacity: 0.5,
+                ..Cell::default()
+            },
+        ],
+    };
+
+    // The drive's background is `LinearRgba::TRANSPARENT` (see `make_drive`); the
+    // opaque bottom fully covers it, so it does not affect the centre pixel.
+    let drive = make_drive(layout, stores, w, h);
+
+    // Independently compute the EXPECTED centre pixel via the compositor's own
+    // public pipeline functions, in the documented back-to-front order:
+    //   acc = over(bottom@1.0, transparent) = bottom_opaque
+    //   acc = over(top@0.5, bottom_opaque)
+    // then encode through the back half. This is NOT tautological: it derives the
+    // blend from the colour primitives, never from the drive output.
+    let canvas_color = CanvasColor::default();
+    let color = resolved_color();
+    let lin_bottom = tile_yuv_to_canvas_linear(bottom_luma, 128, 128, color, canvas_color).unwrap();
+    let lin_top = tile_yuv_to_canvas_linear(top_luma, 128, 128, color, canvas_color).unwrap();
+    let bottom_premul = LinearRgba {
+        r: lin_bottom[0],
+        g: lin_bottom[1],
+        b: lin_bottom[2],
+        a: 1.0,
+    }
+    .premultiplied();
+    let top_premul = LinearRgba {
+        r: lin_top[0],
+        g: lin_top[1],
+        b: lin_top[2],
+        a: 0.5,
+    }
+    .premultiplied();
+    let folded = over(
+        top_premul,
+        over(bottom_premul, LinearRgba::TRANSPARENT.premultiplied()),
+    );
+    let straight = folded.unpremultiplied();
+    let expected =
+        canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas_color).unwrap();
+
+    let frame = drive.compose(tick_at(0)).unwrap();
+    let (cx, cy) = (w / 2, h / 2);
+    let (y, cb, cr) = frame.canvas.sample(cx, cy).unwrap();
+
+    // The composited centre pixel is the linear 50/50 blend (within ±1 code
+    // value for chroma rounding), NOT the opaque top colour.
+    assert!(
+        i32::from(y).abs_diff(i32::from(expected[0])) <= 1,
+        "centre luma {y} must equal the linear blend {} (top opacity 0.5), not the \
+         hard-covered top luma {top_luma}",
+        expected[0]
+    );
+    assert!(i32::from(cb).abs_diff(i32::from(expected[1])) <= 1);
+    assert!(i32::from(cr).abs_diff(i32::from(expected[2])) <= 1);
+
+    // Guard the regression directly: the blended luma must sit strictly between
+    // the two source lumas — a hard cover would render the top luma (~210), the
+    // bug today.
+    let y_i = i32::from(y);
+    assert!(
+        y_i > i32::from(bottom_luma) && y_i < i32::from(top_luma),
+        "blended luma {y} must lie strictly between bottom {bottom_luma} and top {top_luma}; \
+         equal-to-top means opacity was ignored (hard cover)"
+    );
 }

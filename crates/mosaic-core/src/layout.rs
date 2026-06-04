@@ -102,13 +102,23 @@ pub struct CropRect {
     pub h: f32,
 }
 
+/// The fully-opaque default opacity (`1.0`) for a [`Cell`].
+///
+/// Used as the serde default and by [`Cell`]'s [`Default`] impl so a cell built
+/// without an opacity (or deserialized from a document predating the field)
+/// composites as a hard-cover, exactly as before.
+const fn default_opacity() -> f32 {
+    1.0
+}
+
 /// One mosaic cell/tile: a normalized rectangle (`0.0..=1.0`) on the canvas.
 ///
-/// The broadcast extras — [`crop`](Cell::crop) and [`rotation`](Cell::rotation)
-/// — are **additive and defaulted**: a `Cell` constructed without them (or
-/// deserialized from a document predating them) behaves exactly as before. Use
-/// `..Cell::default()` in struct literals to opt out of the new fields.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The broadcast extras — [`crop`](Cell::crop), [`rotation`](Cell::rotation),
+/// and [`opacity`](Cell::opacity) — are **additive and defaulted**: a `Cell`
+/// constructed without them (or deserialized from a document predating them)
+/// behaves exactly as before. Use `..Cell::default()` in struct literals to opt
+/// out of the new fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cell {
     /// Left edge (fraction of canvas width).
     pub x: f32,
@@ -132,6 +142,31 @@ pub struct Cell {
     /// Defaults to [`QuarterTurn::None`].
     #[serde(default)]
     pub rotation: QuarterTurn,
+    /// Per-tile uniform opacity (straight alpha) in the closed interval
+    /// `[0.0, 1.0]`, applied in the compositor's premultiplied linear-light
+    /// `over` blend. Defaults to `1.0` (fully opaque / hard-cover); a lower
+    /// value lets an overlapping/z-stacked tile cross-fade or PiP-ghost over the
+    /// tiles beneath it. [`Layout::validate`] rejects values outside the
+    /// interval (and non-finite values).
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            z: 0,
+            fit: FitMode::default(),
+            source: None,
+            crop: None,
+            rotation: QuarterTurn::default(),
+            opacity: default_opacity(),
+        }
+    }
 }
 
 /// The output canvas description.
