@@ -691,11 +691,16 @@ fn composite_band_reference(
 /// 3. Re-encode through the back half **only** the pixels at least one tile
 ///    touched, leaving the precomputed background constant for the rest.
 ///
-/// Invariant #5 (NV12-throughout) holds: the accumulator is the same per-pixel
-/// linear-RGBA the reference already used transiently — bounded to one band, not
-/// a full-frame RGBA tile materialization — and the output stays NV12. Invariant
-/// #8 (fixed colour order) is unchanged: the same front-half/`over`/back-half
-/// order runs; only the *iteration* changed.
+/// Invariant #5 (NV12-throughout): the output stays NV12 and no per-*tile* RGBA
+/// is materialised. The tile-driven fold does, however, hold a per-pixel
+/// premultiplied-linear accumulator for the band it is processing — bounded to
+/// one band on the parallel path, but equal to the whole frame on the
+/// single-threaded path (`composite_band` over one full-canvas band). That is a
+/// bounded, transient, CPU-reference-only buffer (the GPU pipeline inv #5 targets
+/// never allocates it); a follow-up row-sizes the accumulator to one scanline to
+/// keep it sub-frame on the serial/low-core path too. Invariant #8 (fixed colour
+/// order) is unchanged: the same front-half/`over`/back-half order runs; only the
+/// *iteration* changed.
 #[allow(clippy::too_many_arguments)]
 // reason: this is the internal band kernel; the arguments are the band slices
 // plus the shared composite parameters. Grouping them into a struct would not
