@@ -235,6 +235,68 @@ pub fn caption_plan_for_with(
     resolve_caption_plan(&source.id, master_url, language.as_deref(), fetcher)
 }
 
+/// Resolve EVERY source's HLS `WebVTT` caption plan **concurrently**, off the
+/// serial build path (#48). Each source's master-playlist fetch is independent
+/// and network-bound, so running them on one scoped thread apiece overlaps the
+/// I/O: the build waits roughly the slowest single fetch, not the sum of all of
+/// them (the old loop fetched one source after another, each up to the 30s
+/// budget). Non-captioned / non-HLS sources resolve to nothing and are dropped.
+/// Best-effort throughout — a source whose master cannot be fetched/parsed simply
+/// yields no plan and never fails the build (invariants #1/#10).
+#[must_use]
+pub fn resolve_caption_plans(sources: &[mosaic_config::Source]) -> Vec<CaptionPlan> {
+    resolve_caption_plans_with(sources, &LibavFetcher)
+}
+
+/// [`resolve_caption_plans`] with an injectable, thread-shareable fetcher — the
+/// concurrent fetch seam, exercised offline in tests with canned bytes (no
+/// network, no FFI).
+#[must_use]
+fn resolve_caption_plans_with(
+    sources: &[mosaic_config::Source],
+    fetcher: &(dyn PlaylistFetcher + Sync),
+) -> Vec<CaptionPlan> {
+    par_filter_map(sources, |source| caption_plan_for_with(source, fetcher))
+}
+
+/// Map every item in `items` through `f` on its OWN scoped thread (all at once,
+/// no serial blocking and no concurrency cap), collecting the `Some` results in
+/// arbitrary order. `f` must be `Sync` (it is shared across the threads) and its
+/// output `Send`; empty input does no work. This is the concurrency primitive
+/// behind [`resolve_caption_plans`]: N independent, blocking, network-bound
+/// fetches overlap instead of serialising. A panicking closure is logged and its
+/// item dropped (best-effort), rather than poisoning the whole resolve.
+fn par_filter_map<T, R, F>(items: &[T], f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> Option<R> + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let f = &f;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .iter()
+            .map(|item| scope.spawn(move || f(item)))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| {
+                if let Ok(result) = handle.join() {
+                    result
+                } else {
+                    tracing::warn!(
+                        "a caption-plan resolver thread panicked; that source shows no captions"
+                    );
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
 /// Fetch + parse the master at `master_url`, pick the `language` subtitle
 /// rendition, and resolve its URL into a [`CaptionPlan`].
 ///

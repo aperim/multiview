@@ -482,6 +482,11 @@ impl RealPipeline {
         #[cfg(feature = "overlay")]
         let mut caption_plans: Vec<crate::captions::CaptionPlan> = Vec::new();
 
+        // Resolve every source's HLS WebVTT caption plan CONCURRENTLY, off the
+        // serial build path (#48), indexed by id for the loop's cheap lookup.
+        #[cfg(feature = "overlay")]
+        let mut prefetched_captions = prefetch_caption_plans(config);
+
         for source in &config.sources {
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
@@ -497,7 +502,13 @@ impl RealPipeline {
             // in-container DVB-sub route), registering any cue store + reader plan
             // and stashing the dvbsub route on `plan`. Only under `overlay`.
             #[cfg(feature = "overlay")]
-            wire_source_captions(source, &mut plan, &mut caption_stores, &mut caption_plans);
+            wire_source_captions(
+                source,
+                &mut plan,
+                &mut caption_stores,
+                &mut caption_plans,
+                &mut prefetched_captions,
+            );
 
             stores.insert(source.id.clone(), store);
             ingest_plans.push(plan);
@@ -2741,15 +2752,31 @@ fn ingest_plan_for(
 /// store (for the baker to sample) + reader plan, and stashes the dvbsub route on
 /// `plan`. Best-effort: a source whose captions cannot be resolved simply shows
 /// none — this never fails the build (invariants #1/#10).
+/// Resolve every source's HLS `WebVTT` caption plan concurrently (#48) and index
+/// them by source id for the build loop's cheap per-source lookup. The N
+/// network-bound master-fetches overlap off the serial build path. Only under
+/// `overlay` (the baker that consumes the cues is overlay-gated).
+#[cfg(feature = "overlay")]
+fn prefetch_caption_plans(
+    config: &MosaicConfig,
+) -> std::collections::HashMap<String, crate::captions::CaptionPlan> {
+    crate::captions::resolve_caption_plans(&config.sources)
+        .into_iter()
+        .map(|plan| (plan.id.clone(), plan))
+        .collect()
+}
+
 #[cfg(feature = "overlay")]
 fn wire_source_captions(
     source: &Source,
     plan: &mut IngestPlan,
     caption_stores: &mut std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
     caption_plans: &mut Vec<crate::captions::CaptionPlan>,
+    prefetched: &mut std::collections::HashMap<String, crate::captions::CaptionPlan>,
 ) {
-    // HLS WebVTT rendition path (a second isolated demux thread).
-    if let Some(caption_plan) = crate::captions::caption_plan_for(source) {
+    // HLS WebVTT rendition path: take this source's plan, already resolved
+    // concurrently off the build path (#48). A cheap map lookup — no network here.
+    if let Some(caption_plan) = prefetched.remove(&source.id) {
         caption_stores.insert(source.id.clone(), Arc::clone(&caption_plan.store));
         caption_plans.push(caption_plan);
     }
