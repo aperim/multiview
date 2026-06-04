@@ -73,6 +73,14 @@ tempfile = "3"
 name = "real_pipeline"
 required-features = ["ffmpeg"]
 
+# The streaming-encode behavioural tests (ADR-0025) drive the bounded
+# bake→encode→fan-out path with injected fake sinks; they need the `ffmpeg`
+# feature (the streaming machinery lives in the `pipeline` module) but no
+# `ffprobe`/codec at runtime.
+[[test]]
+name = "streaming_encode"
+required-features = ["ffmpeg"]
+
 # The overlay-baking end-to-end test needs both `ffmpeg` and `overlay`.
 [[test]]
 name = "overlay_pipeline"
