@@ -14,7 +14,10 @@ on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
-  pull_request:
+  # No per-PR image build: the CI workflow validates PR code, and building the
+  # multi-arch image on every PR (incl. Dependabot's) floods the runners. The
+  # image is built on push to main + release tags.
+  workflow_dispatch:
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -119,7 +122,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
 
       - name: Create multi-arch manifest
         id: manifest
