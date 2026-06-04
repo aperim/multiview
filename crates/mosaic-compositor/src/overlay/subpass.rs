@@ -1101,7 +1101,12 @@ fn scale_u32(len: u32, frac: f32) -> u32 {
 ///
 /// Returns the compositor [`crate::error::Error`] if the image color is
 /// unresolved/unsupported (the same guard the composite pass applies).
-pub fn apply_overlays_to_nv12(
+///
+/// This is the **full-canvas oracle reference** (un-LUT'd, every pixel
+/// round-tripped). The production bake is [`apply_overlays_to_nv12`], which is
+/// region-limited + LUT'd (ADR-0023) and validated against this function within
+/// |Δ|≤1. Kept public as the correctness oracle + the perf baseline.
+pub fn apply_overlays_to_nv12_reference(
     image: &Nv12Image,
     list: &OverlayDrawList,
     canvas: CanvasColor,
@@ -1147,6 +1152,278 @@ pub fn apply_overlays_to_nv12(
     Nv12Image::new(width, height, y_plane, uv_plane, canvas.output_tag())
 }
 
+/// Burn `list` into `image`, returning a new NV12 program frame — the CPU
+/// overlay bake the CLI/software path uses.
+///
+/// **Region-limited (ADR-0023).** Only the overlay primitives' even-aligned
+/// footprints (one dirty rect each — *not* a single union box, so gaps between
+/// spread-out overlays stay untouched) are colour round-tripped; every pixel no
+/// overlay rect covers is passed through the NV12 planes byte-identically, so the
+/// per-frame cost tracks the overlay footprint, not the canvas. Inside the rects
+/// the output is **byte-identical** to [`apply_overlays_to_nv12_reference`] (same
+/// transcendental oracle, same raster-order chroma); outside, it is exact
+/// passthrough.
+///
+/// Runs **off the hot path** (on collected output frames); never blocks.
+///
+/// # Errors
+///
+/// Propagates the colour-conversion errors (unresolved/unsupported colour) and
+/// the [`Nv12Image::new`] geometry check, exactly as
+/// [`apply_overlays_to_nv12_reference`] does.
+pub fn apply_overlays_to_nv12(
+    image: &Nv12Image,
+    list: &OverlayDrawList,
+    canvas: CanvasColor,
+) -> Result<Nv12Image> {
+    let width = image.width();
+    let height = image.height();
+    let color = image.color();
+
+    // Passing untouched pixels through verbatim is colour-correct only when the
+    // input already sits in the canvas colour space — which it does: the bake
+    // input is the composited canvas. If that ever differs, the whole frame
+    // needs conversion, so fall back to the full-canvas reference.
+    if color != canvas.output_tag() {
+        return apply_overlays_to_nv12_reference(image, list, canvas);
+    }
+
+    // Start from the input planes verbatim (exact passthrough); only the dirty
+    // region is overwritten below.
+    let mut y_plane = image.y_plane().to_vec();
+    let mut uv_plane = image.uv_plane().to_vec();
+
+    // One even-aligned rect per primitive footprint — NOT a single union box, so
+    // the gaps between spread-out overlays (labels/meters/clock across the frame)
+    // stay exact passthrough and only the real footprints are processed.
+    let rects = overlay_dirty_rects(list, width, height);
+    if rects.is_empty() {
+        // Nothing lands on the canvas: the bake is a no-op (planes unchanged).
+        return Nv12Image::new(width, height, y_plane, uv_plane, canvas.output_tag());
+    }
+
+    // Seed a linear accumulator over the dirty rects only, decoding with the SAME
+    // transcendental oracle the reference uses (no LUT: the overlay footprint is
+    // small, so the per-pixel oracle cost is negligible here — unlike the
+    // full-canvas per-tile composite hot path that ADR-0022 must LUT — and using
+    // the oracle keeps the output byte-identical to the full-canvas reference
+    // inside the rects). The rest of the buffer stays transparent and is never
+    // read. The rects are even-aligned (whole NV12 2×2 chroma blocks) and walked
+    // in raster order, so `write_nv12_pixel`'s last-writer-wins chroma matches the
+    // reference exactly; overlapping rects re-process the same value (idempotent).
+    let mut buffer = LinearCanvasBuffer::transparent(width, height);
+    for rect in &rects {
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let Some((y8, cb8, cr8)) = image.sample(x, y) else {
+                    continue;
+                };
+                let lin = tile_yuv_to_canvas_linear(y8, cb8, cr8, color, canvas)?;
+                if let Some(idx) = buffer.index(x, y) {
+                    if let Some(slot) = buffer.pixels.get_mut(idx) {
+                        *slot = [lin[0], lin[1], lin[2], 1.0];
+                    }
+                }
+            }
+        }
+    }
+
+    blend_overlays(&mut buffer, list);
+
+    let w = usize::try_from(width).unwrap_or(0);
+    for rect in &rects {
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let premul = buffer.pixel(x, y).unwrap_or(PremulRgba::TRANSPARENT);
+                let straight = premul.unpremultiplied();
+                let out =
+                    canvas_linear_to_output_yuv([straight.r, straight.g, straight.b], canvas)?;
+                write_nv12_pixel(&mut y_plane, &mut uv_plane, w, x, y, out);
+            }
+        }
+    }
+
+    Nv12Image::new(width, height, y_plane, uv_plane, canvas.output_tag())
+}
+
+/// An even-aligned, canvas-clamped half-open rectangle `[x0, x1) × [y0, y1)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirtyRect {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+/// One even-aligned, canvas-clamped dirty rect **per primitive footprint** (not
+/// a single union box — so gaps between spread-out overlays stay exact
+/// passthrough and only the real footprints are colour-processed). Empty when
+/// nothing lands on the canvas.
+fn overlay_dirty_rects(list: &OverlayDrawList, width: u32, height: u32) -> Vec<DirtyRect> {
+    list.primitives
+        .iter()
+        .filter_map(|primitive| primitive_dirty_rect(primitive, width, height))
+        .collect()
+}
+
+/// The even-aligned, canvas-clamped dirty rect of one primitive, or `None` if it
+/// touches nothing on-canvas.
+fn primitive_dirty_rect(
+    primitive: &OverlayPrimitive,
+    width: u32,
+    height: u32,
+) -> Option<DirtyRect> {
+    let (x0, y0, x1, y1) = primitive_bounds(primitive, width, height)?;
+    // Snap outward to even boundaries so each NV12 2×2 chroma block is wholly
+    // inside or outside — matching [`write_nv12_pixel`]'s 2×2 model so a region
+    // edge never splits a chroma pair. The canvas dims are even (NV12), so
+    // snapping up never exceeds them; clamp anyway for safety.
+    let x0 = x0 - (x0 & 1);
+    let y0 = y0 - (y0 & 1);
+    let x1 = x1 + (x1 & 1);
+    let y1 = y1 + (y1 & 1);
+    let wq = i64::from(width);
+    let hq = i64::from(height);
+    let x0 = x0.clamp(0, wq);
+    let y0 = y0.clamp(0, hq);
+    let x1 = x1.clamp(0, wq);
+    let y1 = y1.clamp(0, hq);
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    Some(DirtyRect {
+        x0: u32::try_from(x0).unwrap_or(0),
+        y0: u32::try_from(y0).unwrap_or(0),
+        x1: u32::try_from(x1).unwrap_or(0),
+        y1: u32::try_from(y1).unwrap_or(0),
+    })
+}
+
+/// The canvas extent (half-open, pre-even-snap, clamped to the canvas) of one
+/// primitive — exactly the region its `blend_*` routine walks, so the union is a
+/// provably-conservative cover. `None` if it touches nothing on-canvas.
+fn primitive_bounds(
+    primitive: &OverlayPrimitive,
+    width: u32,
+    height: u32,
+) -> Option<(i64, i64, i64, i64)> {
+    match primitive {
+        OverlayPrimitive::Glyph {
+            dest_x,
+            dest_y,
+            width: gw,
+            height: gh,
+            ..
+        } => rect_bounds(
+            i64::from(*dest_x),
+            i64::from(*dest_y),
+            *gw,
+            *gh,
+            width,
+            height,
+        ),
+        OverlayPrimitive::FilledRect { rect, .. } | OverlayPrimitive::Line { rect, .. } => {
+            rect_bounds(
+                i64::from(rect.x),
+                i64::from(rect.y),
+                rect.width,
+                rect.height,
+                width,
+                height,
+            )
+        }
+        OverlayPrimitive::Image { dest, .. } => rect_bounds(
+            i64::from(dest.x),
+            i64::from(dest.y),
+            dest.width,
+            dest.height,
+            width,
+            height,
+        ),
+        OverlayPrimitive::Stroke {
+            x0,
+            y0,
+            x1,
+            y1,
+            half_thickness,
+            ..
+        } => {
+            let half = half_thickness.max(0.0);
+            if half <= 0.0 {
+                return None;
+            }
+            let pad = half + 1.0;
+            let (min_x, max_x) = ordered(*x0, *x1);
+            let (min_y, max_y) = ordered(*y0, *y1);
+            span_bounds(
+                min_x - pad,
+                max_x + pad,
+                min_y - pad,
+                max_y + pad,
+                width,
+                height,
+            )
+        }
+        OverlayPrimitive::Ring {
+            cx,
+            cy,
+            outer_radius,
+            ..
+        } => {
+            if *outer_radius <= 0.0 {
+                return None;
+            }
+            let pad = outer_radius + 1.0;
+            span_bounds(cx - pad, cx + pad, cy - pad, cy + pad, width, height)
+        }
+    }
+}
+
+/// Canvas extent of a `dest`/coverage rectangle, clamped to the canvas exactly
+/// as `canvas_xy` clips the blend.
+fn rect_bounds(
+    x: i64,
+    y: i64,
+    w: u32,
+    h: u32,
+    width: u32,
+    height: u32,
+) -> Option<(i64, i64, i64, i64)> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let wq = i64::from(width);
+    let hq = i64::from(height);
+    let x0 = x.clamp(0, wq);
+    let y0 = y.clamp(0, hq);
+    let x1 = (x + i64::from(w)).clamp(0, wq);
+    let y1 = (y + i64::from(h)).clamp(0, hq);
+    if x0 >= x1 || y0 >= y1 {
+        None
+    } else {
+        Some((x0, y0, x1, y1))
+    }
+}
+
+/// Canvas extent of an antialiased span, using the same [`bbox_span`] the
+/// `blend_stroke`/`blend_ring` routines walk (so the cover is exact).
+fn span_bounds(
+    lo_x: f32,
+    hi_x: f32,
+    lo_y: f32,
+    hi_y: f32,
+    width: u32,
+    height: u32,
+) -> Option<(i64, i64, i64, i64)> {
+    let (sx, ex) = bbox_span(lo_x, hi_x, width);
+    let (sy, ey) = bbox_span(lo_y, hi_y, height);
+    if sx >= ex || sy >= ey {
+        None
+    } else {
+        Some((i64::from(sx), i64::from(sy), i64::from(ex), i64::from(ey)))
+    }
+}
+
 /// Write one output pixel's `(y, cb, cr)` into NV12 planes (chroma per pixel,
 /// last-writer-wins in each 2×2 block — the reference's nearest-neighbour
 /// model, matching [`crate::pipeline::composite`]).
@@ -1172,5 +1449,126 @@ fn write_nv12_pixel(
     }
     if let Some(slot) = uv_plane.get_mut(uv_index.saturating_add(1)) {
         *slot = yuv[2];
+    }
+}
+
+#[cfg(test)]
+mod dirty_rects_tests {
+    use super::{
+        overlay_dirty_rects, DirtyRect, OverlayColor, OverlayDrawList, OverlayPrimitive,
+        OverlayRect,
+    };
+
+    fn green() -> OverlayColor {
+        OverlayColor::opaque(0.0, 1.0, 0.0)
+    }
+
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> OverlayPrimitive {
+        OverlayPrimitive::FilledRect {
+            rect: OverlayRect::new(x, y, w, h),
+            corner_radius: 0,
+            color: green(),
+        }
+    }
+
+    #[test]
+    fn empty_list_has_no_dirty_rects() {
+        assert!(overlay_dirty_rects(&OverlayDrawList::new(), 64, 64).is_empty());
+    }
+
+    #[test]
+    fn a_single_even_rect_is_its_own_dirty_rect() {
+        let mut list = OverlayDrawList::new();
+        list.push(rect(8, 4, 8, 6));
+        assert_eq!(
+            overlay_dirty_rects(&list, 64, 64),
+            vec![DirtyRect {
+                x0: 8,
+                y0: 4,
+                x1: 16,
+                y1: 10
+            }]
+        );
+    }
+
+    #[test]
+    fn an_odd_rect_snaps_outward_to_even() {
+        let mut list = OverlayDrawList::new();
+        // x[5,9) y[3,7) -> even-snapped to x[4,10) y[2,8).
+        list.push(rect(5, 3, 4, 4));
+        assert_eq!(
+            overlay_dirty_rects(&list, 64, 64),
+            vec![DirtyRect {
+                x0: 4,
+                y0: 2,
+                x1: 10,
+                y1: 8
+            }]
+        );
+    }
+
+    #[test]
+    fn two_separated_rects_stay_separate_not_unioned() {
+        let mut list = OverlayDrawList::new();
+        list.push(rect(2, 2, 4, 4));
+        list.push(rect(20, 16, 6, 6));
+        assert_eq!(
+            overlay_dirty_rects(&list, 64, 64),
+            vec![
+                DirtyRect {
+                    x0: 2,
+                    y0: 2,
+                    x1: 6,
+                    y1: 6
+                },
+                DirtyRect {
+                    x0: 20,
+                    y0: 16,
+                    x1: 26,
+                    y1: 22
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rect_is_clamped_to_the_canvas() {
+        let mut list = OverlayDrawList::new();
+        list.push(rect(60, 60, 20, 20));
+        assert_eq!(
+            overlay_dirty_rects(&list, 64, 64),
+            vec![DirtyRect {
+                x0: 60,
+                y0: 60,
+                x1: 64,
+                y1: 64
+            }]
+        );
+    }
+
+    #[test]
+    fn a_fully_offscreen_primitive_yields_no_rect() {
+        let mut list = OverlayDrawList::new();
+        list.push(rect(-40, -40, 10, 10));
+        assert!(overlay_dirty_rects(&list, 64, 64).is_empty());
+    }
+
+    #[test]
+    fn a_ring_rect_covers_centre_plus_radius_and_aa() {
+        let mut list = OverlayDrawList::new();
+        list.push(OverlayPrimitive::Ring {
+            cx: 32.0,
+            cy: 32.0,
+            outer_radius: 10.0,
+            thickness: 3.0,
+            color: green(),
+        });
+        let rects = overlay_dirty_rects(&list, 64, 64);
+        assert_eq!(rects.len(), 1, "one ring -> one rect");
+        let b = rects[0];
+        assert!(
+            b.x0 <= 21 && b.x1 >= 43 && b.y0 <= 21 && b.y1 >= 43,
+            "ring rect must cover centre±(radius+1): {b:?}"
+        );
     }
 }

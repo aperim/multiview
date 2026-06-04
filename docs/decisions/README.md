@@ -47,6 +47,8 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs tot
 - [ADR-E009](ADR-E009.md) — Per-tier efficiency budgets enforced by perf-regression CI
 - [ADR-0017](ADR-0017.md) — GPU/CPU utilisation monitoring + affinity-aware least-loaded multi-GPU work placement *(Proposed)*
 - [ADR-0018](ADR-0018.md) — Adaptive affinity-first GPU work-placement with deliberate split + closed-loop re-placement *(Proposed)*
+- [ADR-0022](ADR-0022.md) — Real-time software compositor: parallelize + LUT the per-pixel colour pipeline; content-aware smoothness gate *(Accepted)*
+- [ADR-0023](ADR-0023.md) — Region-limited overlay bake: per-primitive dirty rects + exact passthrough, end the full-canvas colour round-trip (inv #5) *(Accepted)*
 
 ## Color
 

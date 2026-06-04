@@ -112,6 +112,11 @@ required-features = ["overlay"]
 name = "overlay_meters"
 required-features = ["overlay"]
 
+# The region-limited overlay bake (ADR-0023) tests need only `overlay`.
+[[test]]
+name = "overlay_bake_region"
+required-features = ["overlay"]
+
 # The GPU overlay sub-pass shader validation needs `overlay` + `wgpu` (naga
 # validates the WGSL with no GPU).
 [[test]]

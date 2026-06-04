@@ -216,6 +216,50 @@ fn bench_t5_prep_constant_in_label_count(c: &mut Criterion) {
 /// A tiny manual-timing sanity bench using `iter_custom` so the harness records a
 /// real number even when the others are filtered out (keeps the bench binary
 /// self-describing for the CI gate).
+/// ADR-0023: the region-limited overlay **bake** must cost only the overlay
+/// footprint, not the whole canvas. A small overlay (a few labels + a meter + a
+/// border) burned into a 1280×720 program frame must run **much faster** than the
+/// full-canvas reference — the structural proof that the per-frame bake tracks
+/// the footprint, not the canvas. (The `assert!` makes a regression *fail* the
+/// bench, not just slow it, like `composite_realtime.rs`.)
+fn bench_region_limited_bake(c: &mut Criterion) {
+    use mosaic_compositor::overlay::subpass::{
+        apply_overlays_to_nv12, apply_overlays_to_nv12_reference,
+    };
+    use mosaic_compositor::pipeline::{CanvasColor, Nv12Image};
+
+    fn time_avg<F: Fn()>(iters: u32, f: F) -> Duration {
+        let start = Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        start.elapsed() / iters.max(1)
+    }
+
+    let canvas = CanvasColor::default();
+    let image = Nv12Image::solid(1280, 720, 128, 128, 128, canvas.output_tag()).expect("nv12");
+    let mut engine = TextEngine::new().expect("fonts load");
+    let list = build_draw_list(&mut engine, &["CAM 1", "CAM 2", "LIVE"]);
+
+    let optimized = time_avg(20, || {
+        std::hint::black_box(apply_overlays_to_nv12(&image, &list, canvas).expect("bake"));
+    });
+    let reference = time_avg(20, || {
+        std::hint::black_box(apply_overlays_to_nv12_reference(&image, &list, canvas).expect("ref"));
+    });
+    assert!(
+        optimized * 3 < reference,
+        "region-limited bake ({optimized:?}) must be >3x faster than the full-canvas \
+         reference ({reference:?}) for a small overlay on a 1280x720 canvas (ADR-0023)"
+    );
+
+    c.bench_function("overlay/bake_region_limited", |b| {
+        b.iter(|| {
+            std::hint::black_box(apply_overlays_to_nv12(&image, &list, canvas).expect("bake"))
+        });
+    });
+}
+
 fn bench_meta_smoke(c: &mut Criterion) {
     c.bench_function("overlay/smoke", |b| {
         b.iter_custom(|iters| {
@@ -238,6 +282,7 @@ criterion_group!(
     bench_t3_zero_alloc_draw_path,
     bench_t4_bounded_atlas,
     bench_t5_prep_constant_in_label_count,
+    bench_region_limited_bake,
     bench_meta_smoke,
 );
 criterion_main!(benches);
