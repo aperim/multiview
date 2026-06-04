@@ -15,7 +15,7 @@ Independent crystals drift tens-hundreds of ppm; uncorrected -> overrun/underrun
 
 ## Alternatives considered
 
-async=1 alone (no stretch, glitchy); making an input/audio-HW clock the master (one hiccup stalls the mosaic); ignoring drift (eventual desync/buffer blowup); audio-only resampling (video buffers still overrun/underrun).
+async=1 alone (no stretch, glitchy); making an input/audio-HW clock the master (one hiccup stalls the multiview); ignoring drift (eventual desync/buffer blowup); audio-only resampling (video buffers still overrun/underrun).
 
 ## Consequences
 

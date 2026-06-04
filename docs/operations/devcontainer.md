@@ -1,4 +1,4 @@
-# Mosaic Dev Container
+# Multiview Dev Container
 
 A single-image Dev Container that builds **and** lets you test hardware
 decode/encode where the host supports it: NVIDIA (NVDEC/NVENC) and Intel/AMD

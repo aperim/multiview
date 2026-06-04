@@ -2,9 +2,9 @@
 
 ---
 
-# Mosaic — Management Capability Matrix (Authoritative)
+# Multiview — Management Capability Matrix (Authoritative)
 
-**Lead document proving the web UI + HTTP API FULLY and COMPLETELY manage the Mosaic engine.** Every controllable parameter the engine exposes is reachable through a versioned (`/v1/...`) API resource and surfaced in a named web-UI screen+control. Nothing the engine can do is left unmanageable.
+**Lead document proving the web UI + HTTP API FULLY and COMPLETELY manage the Multiview engine.** Every controllable parameter the engine exposes is reachable through a versioned (`/v1/...`) API resource and surfaced in a named web-UI screen+control. Nothing the engine can do is left unmanageable.
 
 ---
 
@@ -438,7 +438,7 @@ HDR canvas variant: `"color": { "profile": "hdr-pq-bt2020", "primaries": "bt2020
 ### 3.3 Output (with EncodeProfile + color + audio track-mapping)
 ```json
 {
-  "id": "out_rtsp_main", "name": "RTSP /mosaic (primary)", "enabled": true, "kind": "rtsp_server",
+  "id": "out_rtsp_main", "name": "RTSP /multiview (primary)", "enabled": true, "kind": "rtsp_server",
   "source": { "canvas_id": "program", "rendition_id": "r_1080p" },
   "encode": {
     "video": {
@@ -476,7 +476,7 @@ HDR canvas variant: `"color": { "profile": "hdr-pq-bt2020", "primaries": "bt2020
     "burn_in": { "enabled": false, "target": "canvas", "style": null },
     "tracks": [ { "id": "s_eng", "input_id": "in_cam1", "source_track": 0, "language": "eng", "format": "webvtt" } ]
   },
-  "container": { "kind": "rtsp_server", "mount": "/mosaic", "config_interval": -1, "shared": true, "transports": ["tcp","udp"] },
+  "container": { "kind": "rtsp_server", "mount": "/multiview", "config_interval": -1, "shared": true, "transports": ["tcp","udp"] },
   "failover": { "on_fail": "retry_backoff", "backoff": { "base_ms": 500, "max_ms": 30000, "jitter": true },
     "backup_endpoints": [], "redundancy": "none",
     "slate": { "enabled": true, "card_asset": "signal_lost", "show_clock": true, "audio_on_blackout": "silence" } },
@@ -558,7 +558,7 @@ Pinned (→Class-2): `kind`, `video.codec/profile/level`, `pixel_format/bit_dept
 }
 ```
 
-### 3.7 Source TOML (config-as-code, mirrors mosaic.toml)
+### 3.7 Source TOML (config-as-code, mirrors multiview.toml)
 ```toml
 [[sources]]
 id = "gpu-test-box-syd2"

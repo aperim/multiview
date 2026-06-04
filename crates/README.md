@@ -1,7 +1,7 @@
 # `crates/` — Rust workspace
 
 > [!NOTE]
-> **Early scaffold — implementation in progress.** This is the real Mosaic engine workspace, at an
+> **Early scaffold — implementation in progress.** This is the real Multiview engine workspace, at an
 > early stage. The crate boundaries are established (per the
 > [canonical crate map](../docs/architecture/conventions.md#3-canonical-crate-map)) and the
 > workspace compiles (`cargo check`/`clippy`/`fmt` green), but most crate bodies are trait/type
@@ -11,7 +11,7 @@
 ## What exists today
 
 - The **workspace shape** and crate boundaries match `docs/architecture/conventions.md` §3.
-- `mosaic-core` defines the foundational **types/traits** (frame, color, time, layout, errors).
+- `multiview-core` defines the foundational **types/traits** (frame, color, time, layout, errors).
 - All hardware/FFI/GPU/web integration is **feature-gated and not yet implemented**; the default
   build is pure-Rust so `cargo check` is green with no native dependencies.
 

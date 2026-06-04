@@ -2,14 +2,14 @@
 
 ---
 
-# Mosaic — Color Management Brief (Authoritative)
+# Multiview — Color Management Brief (Authoritative)
 
-**Project:** Mosaic — live GPU video mosaic compositor (heterogeneous RTSP/HLS/TS/SRT/NDI in; custom CUDA/Metal/wgpu compositor; RTSP/HLS/NDI/RTMP/SRT out).
+**Project:** Multiview — live GPU video multiview compositor (heterogeneous RTSP/HLS/TS/SRT/NDI in; custom CUDA/Metal/wgpu compositor; RTSP/HLS/NDI/RTMP/SRT out).
 **Status:** Authoritative color-correctness runbook (source of truth for downstream docs/agent instructions).
 **Platforms:** Linux (NVIDIA NVDEC/NVENC, Intel/AMD VAAPI) + macOS (VideoToolbox).
 **Date:** 2026-06-02
 
-> **Why this document exists.** Mosaic composites *heterogeneous* sources — each tile can carry different color primaries, transfer function, YUV↔RGB matrix, and range — into ONE canvas. Because we run a **custom GPU compositor and deliberately bypass swscale/FFmpeg filters for the composite**, libav does **no** implicit color conversion for us. We own color correctness end-to-end: detect → convert → composite (ideally in linear light) → encode → **tag** → **verify**. Getting any of the four axes wrong produces output that is silently, visibly wrong on some players. This is the class of bug the project has been repeatedly burned by.
+> **Why this document exists.** Multiview composites *heterogeneous* sources — each tile can carry different color primaries, transfer function, YUV↔RGB matrix, and range — into ONE canvas. Because we run a **custom GPU compositor and deliberately bypass swscale/FFmpeg filters for the composite**, libav does **no** implicit color conversion for us. We own color correctness end-to-end: detect → convert → composite (ideally in linear light) → encode → **tag** → **verify**. Getting any of the four axes wrong produces output that is silently, visibly wrong on some players. This is the class of bug the project has been repeatedly burned by.
 
 ---
 
@@ -75,7 +75,7 @@ flowchart TD
 
 ## 3. Detection & Default Policy for Untagged Inputs
 
-**The untagged trap is the heart of this domain.** Enormous amounts of real-world live content (RTSP/SRT/TS feeds, IP cameras, webcams) ship UNTAGGED, and every consumer guesses *differently*. swscale silently uses **index-0 = BT.601** for an unspecified matrix **regardless of resolution** (`yuv2rgb.c`); players/libplacebo/mpv apply a **resolution heuristic** instead. **We must reproduce the PLAYER behavior**, not swscale's, or the mosaic disagrees with how a source looks in a real player.
+**The untagged trap is the heart of this domain.** Enormous amounts of real-world live content (RTSP/SRT/TS feeds, IP cameras, webcams) ship UNTAGGED, and every consumer guesses *differently*. swscale silently uses **index-0 = BT.601** for an unspecified matrix **regardless of resolution** (`yuv2rgb.c`); players/libplacebo/mpv apply a **resolution heuristic** instead. **We must reproduce the PLAYER behavior**, not swscale's, or the multiview disagrees with how a source looks in a real player.
 
 ### 3.1 Detection precedence (per tile, every frame)
 1. **`AVFrame.color_*`** (preferred — may differ per frame).
@@ -146,7 +146,7 @@ Use **full-precision** constants (e.g. `0.16455312684366`, not `0.1645`) to avoi
 **Recommended default canvas: SDR BT.709, limited range** (primaries=1, transfer=1, matrix=1, full_range_flag=0). It is the universally and correctly-rendered lingua franca across RTSP/HLS/RTMP/SRT/NDI players; downstream HDR rendering is fragile (tags dropped, players misrender). Make canvas color space a **config option** (`sdr-bt709` default; `hdr-pq` / `hdr-hlg` opt-in).
 
 ### 5.1 Mixing HDR tiles into the SDR canvas — the wash-out rule
-The bug the user has been burned by: one HDR tile washes out the SDR mosaic. **Fix: tone-map each HDR tile DOWN, per-tile (not per-canvas), with a roll-off curve anchored at diffuse white**, NOT a linear scale to peak. Anchor on **BT.2408 reference white = 203 cd/m²**: HDR diffuse white (≈203 nits / ≈58% PQ) maps to SDR 100% white; highlights above it roll off. Linear normalization to peak crushes the SDR tiles.
+The bug the user has been burned by: one HDR tile washes out the SDR multiview. **Fix: tone-map each HDR tile DOWN, per-tile (not per-canvas), with a roll-off curve anchored at diffuse white**, NOT a linear scale to peak. Anchor on **BT.2408 reference white = 203 cd/m²**: HDR diffuse white (≈203 nits / ≈58% PQ) maps to SDR 100% white; highlights above it roll off. Linear normalization to peak crushes the SDR tiles.
 
 **Never composite PQ/HLG/BT.709 code values directly** — `PQ 0.58 ≠ HLG 0.58 ≠ BT.709 0.58` in linear light. Linearize + tone-map each tile in its own space, converge in BT.709 linear, then blend.
 
@@ -163,7 +163,7 @@ Feasible but more fragile: keep HDR tiles native, **inverse-tone-map SDR tiles U
 
 - **Mastering-display (SMPTE ST 2086) + MaxCLL/MaxFALL (CTA-861)** are **RECOMMENDED, not required** for HDR. They distinguish formal HDR10 from generic PQ10 and **guide tone-mapping**; **omitting them does NOT demote the stream to SDR** — the player just uses a default tone-map target (~1000 nits).
 - The "dim / SDR BT.2020 / washed-out" failure is caused by **omitting the VUI color tags** (player applies an SDR EOTF to PQ pixels), **not** by omitting ST 2086/MaxCLL. The earlier research claim swapped the cause; **honor the corrected understanding.**
-- **Pipeline traps:** NVENC/AMD VCN have historically written HDR static metadata **only to the container, not in-band SEI**; older NVENC could not emit HDR SEI at all (needs a bitstream patcher). For elementary-stream transports (RTSP/SRT/MPEG-TS), **prefer a path that injects ST 2086 + MaxCLL/MaxFALL as in-band SEI** (e.g. x265 `--master-display`/`--max-cll`) so it survives. For a mixed-source mosaic, **author canonical static metadata for the composited canvas** (do not pass through one source's), measuring or conservatively defaulting MaxCLL/MaxFALL.
+- **Pipeline traps:** NVENC/AMD VCN have historically written HDR static metadata **only to the container, not in-band SEI**; older NVENC could not emit HDR SEI at all (needs a bitstream patcher). For elementary-stream transports (RTSP/SRT/MPEG-TS), **prefer a path that injects ST 2086 + MaxCLL/MaxFALL as in-band SEI** (e.g. x265 `--master-display`/`--max-cll`) so it survives. For a mixed-source multiview, **author canonical static metadata for the composited canvas** (do not pass through one source's), measuring or conservatively defaulting MaxCLL/MaxFALL.
 
 ---
 
@@ -175,8 +175,8 @@ Feasible but more fragile: keep HDR tiles native, **inverse-tone-map SDR tiles U
 **BT.709 limited:** `color_primaries=bt709 (1)`, `color_trc=bt709 (1)`, `colorspace=bt709 (1)`, `color_range=tv (limited)`, pixel format NV12/yuv420p limited. Set **all four** every time to remove the player's resolution guess.
 
 ### 6.2 Per-encoder pitfalls
-- **libx264 / libx265:** default all four to **undef (not signaled)**. x265 "emits a VUI with only the timing info by default." Set `colorprim/transfer/colormatrix` (+ `range`/`fullrange`). FFmpeg's `libx264.c` only writes the VUI when avctx color ≠ `UNSPECIFIED`. (Note: x264/x265 are GPL — in Mosaic's LGPL-clean default build the software encoder path differs, but the *same tagging discipline applies to whatever encoder is used*.)
-- **NVENC (`h264_nvenc`/`hevc_nvenc`/`av1_nvenc`):** writes `videoFullRangeFlag=1` **only when** `color_range == AVCOL_RANGE_JPEG` **or** the pixfmt is YUVJ420/422/444. **NV12 can never satisfy the YUVJ branch** → for full-range NV12 output you MUST set `AVCOL_RANGE_JPEG` on avctx (CLI `-color_range pc`) **and confirm it reaches the encoder**, or NVENC writes flag=0 and players crush/expand. Writes a colour-description **only when** matrix/primaries/trc ≠ 2. **Driving the NVENC SDK directly** (likely for Mosaic's custom pipeline): you OWN setting `videoSignalTypePresentFlag=1`, `colourDescriptionPresentFlag=1`, `videoFullRangeFlag`, and the three CICP fields yourself — NVENC assumes full range only for RGB input surfaces.
+- **libx264 / libx265:** default all four to **undef (not signaled)**. x265 "emits a VUI with only the timing info by default." Set `colorprim/transfer/colormatrix` (+ `range`/`fullrange`). FFmpeg's `libx264.c` only writes the VUI when avctx color ≠ `UNSPECIFIED`. (Note: x264/x265 are GPL — in Multiview's LGPL-clean default build the software encoder path differs, but the *same tagging discipline applies to whatever encoder is used*.)
+- **NVENC (`h264_nvenc`/`hevc_nvenc`/`av1_nvenc`):** writes `videoFullRangeFlag=1` **only when** `color_range == AVCOL_RANGE_JPEG` **or** the pixfmt is YUVJ420/422/444. **NV12 can never satisfy the YUVJ branch** → for full-range NV12 output you MUST set `AVCOL_RANGE_JPEG` on avctx (CLI `-color_range pc`) **and confirm it reaches the encoder**, or NVENC writes flag=0 and players crush/expand. Writes a colour-description **only when** matrix/primaries/trc ≠ 2. **Driving the NVENC SDK directly** (likely for Multiview's custom pipeline): you OWN setting `videoSignalTypePresentFlag=1`, `colourDescriptionPresentFlag=1`, `videoFullRangeFlag`, and the three CICP fields yourself — NVENC assumes full range only for RGB input surfaces.
 - **VideoToolbox (Apple):** defaults to **MPEG/limited** when `color_range` is unset; the verbatim log is **"Color range not set for yuv420p. Using MPEG range."** (NOT "assuming limited" — wording corrected). For full-range output set frame `AVCOL_RANGE_JPEG` (`-color_range pc`) explicitly. Maps binary: JPEG → FullRange CoreVideo format; anything else → VideoRange.
 - **VAAPI:** full_range_flag/colour-description behavior **varies by driver** (Intel iHD vs Mesa/AMD) — **not verified here; test per driver with ffprobe** (open item).
 - **SVT-AV1 / libaom AV1 `color_config`:** inferred to follow the same pattern but **not independently confirmed** — verify the AV1 `color_range`/CICP fields land.
@@ -201,7 +201,7 @@ Check both the bitstream VUI **and** (for MP4) the `colr` atom; re-verify after 
 
 ## 7. Summary Table — Axis × Detection × Symptom × Handling
 
-| Axis | Common values | Detected via (FFmpeg field) | Symptom if wrong | Mosaic handling |
+| Axis | Common values | Detected via (FFmpeg field) | Symptom if wrong | Multiview handling |
 |------|---------------|-----------------------------|------------------|-----------------|
 | **Primaries** | BT.709, BT.601-525/625, BT.2020, P3-D65 | `AVColorPrimaries` (`color_primaries`); unspec=2 | Wrong saturation/gamut; over/under-shoot mixing gamuts | Resolve via precedence; linear-light RGB→XYZ→RGB to canvas; identity if same-D65 709 |
 | **Transfer/TRC** | BT.709, sRGB, BT.1886, PQ(2084), HLG(B67), γ2.2/2.4 | `AVColorTransferCharacteristic` (`color_transfer`); unspec=2 | Wrong gamma/contrast; PQ-on-SDR → dark/washed | Linearize per-tile EOTF (BT.1886 video, sRGB graphics, PQ/HLG+OOTF for HDR); canvas OETF on encode |

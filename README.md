@@ -1,12 +1,12 @@
-# Mosaic
+# Multiview
 
-**An efficient, hardware-accelerated, Rust live video mosaic generator.** Ingest many live
-sources, composite them into a templated mosaic on the GPU, and serve the result robustly —
+**An efficient, hardware-accelerated, Rust live video multiview generator.** Ingest many live
+sources, composite them into a templated multiview on the GPU, and serve the result robustly —
 built to run great on **commodity hardware** with **bulletproof, never-falters output**.
 
 > [!NOTE]
 > **Status: early stage — design complete, implementation beginning.** This repository is the whole
-> Mosaic application. Its architecture, full API/UI design, 89 ADRs, and verification-hardened
+> Multiview application. Its architecture, full API/UI design, 89 ADRs, and verification-hardened
 > research are finished and pinned in [`docs/`](docs/). Implementation is just starting: the
 > `crates/`, `xtask/`, and `web/` trees are an early scaffold — they compile
 > (`cargo check`/`clippy`/`fmt` are green), but bodies are trait/type stubs being built out against
@@ -18,7 +18,7 @@ built to run great on **commodity hardware** with **bulletproof, never-falters o
 
 ## What it does
 
-Mosaic is a headless, scriptable compositor/router. It samples many independent live inputs into
+Multiview is a headless, scriptable compositor/router. It samples many independent live inputs into
 a fixed, templated canvas, encodes that canvas **once per rendition**, and fans the same stream out
 to many transports — RTSP, HLS/LL-HLS, NDI, RTMP, SRT — all managed over a web UI and an
 OpenAPI-described HTTP API.
@@ -28,10 +28,10 @@ The two non-negotiable theses:
 1. **Bulletproof, continuous output.** At every tick of a single fixed-cadence internal clock the
    output stage emits exactly one valid, correctly-timestamped frame (plus matching audio),
    *forever*, independent of any input. Inputs are *sampled*, never *pacing*. A dead camera shows a
-   "no signal" card in its tile — it never freezes, stalls, or corrupts the mosaic.
+   "no signal" card in its tile — it never freezes, stalls, or corrupts the multiview.
 2. **Commodity hardware first.** The binding resource on an Intel iGPU, an AMD APU, a base Apple
    Silicon Mac, or an entry NVIDIA card is **memory bandwidth and fixed-function decode/encode**,
-   not compositor math. Mosaic decodes at display resolution, stays NV12 end-to-end, keeps frames
+   not compositor math. Multiview decodes at display resolution, stays NV12 end-to-end, keeps frames
    on-device within a vendor island, and degrades tile-by-tile under load before the program output
    is ever touched. A 4-GPU server is the trivial case, not the target.
 
@@ -62,35 +62,35 @@ owns the clock and emits a frame every tick regardless of upstream state.
 
 ```mermaid
 flowchart TB
-    subgraph Ingest["Ingest — per-source supervised (mosaic-input)"]
+    subgraph Ingest["Ingest — per-source supervised (multiview-input)"]
         SRCS["RTSP · HLS · MPEG-TS · SRT · RTMP · NDI · file · test"]
     end
 
     subgraph Data["Data plane — dedicated threads"]
-        DEC["Decode (mosaic-ffmpeg, HAL backends)"]
-        FS["Per-tile last-good-frame store + state machine (mosaic-framestore)"]
-        COMP["Custom GPU compositor (mosaic-compositor)"]
+        DEC["Decode (multiview-ffmpeg, HAL backends)"]
+        FS["Per-tile last-good-frame store + state machine (multiview-framestore)"]
+        COMP["Custom GPU compositor (multiview-compositor)"]
         ENC["Encode (HAL backends)"]
     end
 
-    subgraph Core["Protected output core (mosaic-engine)"]
+    subgraph Core["Protected output core (multiview-engine)"]
         CLK(["Fixed-cadence output clock — PTS = f(tick)"])
-        AUD["Audio mix + program bus (mosaic-audio)"]
+        AUD["Audio mix + program bus (multiview-audio)"]
     end
 
-    subgraph HAL["mosaic-hal — capability detect + negotiation + cost model"]
+    subgraph HAL["multiview-hal — capability detect + negotiation + cost model"]
         PLAN["Backend planner (admission + degradation)"]
     end
 
-    subgraph Serve["Outputs — encode-once-mux-many (mosaic-output)"]
+    subgraph Serve["Outputs — encode-once-mux-many (multiview-output)"]
         OUTS["RTSP · HLS/LL-HLS · NDI · RTMP · SRT"]
     end
 
     subgraph Mgmt["Control / IO plane (Tokio)"]
-        API["REST + WS + SSE API (mosaic-control, axum + OpenAPI)"]
+        API["REST + WS + SSE API (multiview-control, axum + OpenAPI)"]
         WEB["Embedded React SPA (web/)"]
-        PREV["Preview taps — WHEP / MJPEG (mosaic-preview)"]
-        TEL["Telemetry + health (mosaic-telemetry)"]
+        PREV["Preview taps — WHEP / MJPEG (multiview-preview)"]
+        TEL["Telemetry + health (multiview-telemetry)"]
     end
 
     SRCS --> DEC --> FS --> COMP --> ENC --> OUTS
@@ -113,7 +113,7 @@ flags, and invariants.
 ## Quickstart
 
 > [!IMPORTANT]
-> Mosaic links **FFmpeg / libav** for demux/decode/encode. The default build expects an
+> Multiview links **FFmpeg / libav** for demux/decode/encode. The default build expects an
 > **LGPL FFmpeg** with NVENC/NVDEC headers (`nv-codec-headers`); it does **not** require — and must
 > not link — x264/x265 or libnpp. See [Licensing](#licensing). Build instructions for fetching and
 > compiling an LGPL-clean FFmpeg live in `xtask` once implemented; until then, a recent
@@ -125,24 +125,24 @@ flags, and invariants.
 # Default build: pure-Rust trait/type layer, no native GPU deps, LGPL-clean.
 cargo build
 
-# Platform umbrella presets (defined in mosaic-cli):
+# Platform umbrella presets (defined in multiview-cli):
 cargo build --features nvidia       # cuda + ffmpeg + wgpu (NVENC/NVDEC/CUDA)
 cargo build --features apple        # videotoolbox + metal + ffmpeg (macOS)
 cargo build --features linux-vaapi  # vaapi + qsv + ffmpeg + wgpu (Intel/AMD)
 cargo build --features full         # everything non-GPL
 ```
 
-### Run a 2×2 mosaic
+### Run a 2×2 multiview
 
-Mosaic is configured by a declarative TOML/JSON document — canvas, layout, cells (sources),
+Multiview is configured by a declarative TOML/JSON document — canvas, layout, cells (sources),
 overlays, and outputs. Example configs live in `examples/` (added alongside the implementation).
 
 ```bash
 # Validate a config without starting the pipeline
-mosaic validate examples/2x2.toml
+multiview validate examples/2x2.toml
 
 # Run it
-mosaic run examples/2x2.toml
+multiview run examples/2x2.toml
 ```
 
 A minimal 2×2 canvas drawing from four sources:
@@ -192,7 +192,7 @@ pattern = "testsrc2"
 
 [[outputs]]
 kind = "rtsp"
-mount = "/mosaic"
+mount = "/multiview"
 codec = "h264"
 profile = "low_latency"
 ```

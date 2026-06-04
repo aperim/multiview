@@ -1,9 +1,9 @@
-# Building Mosaic from Source
+# Building Multiview from Source
 
-This guide covers building the `mosaic` binary (and its web UI) from source on **Linux** and
+This guide covers building the `multiview` binary (and its web UI) from source on **Linux** and
 **macOS** — the only supported platforms. **There is no Windows build.**
 
-Mosaic is a Cargo workspace. The **default build is pure-Rust, LGPL-clean, and needs no native
+Multiview is a Cargo workspace. The **default build is pure-Rust, LGPL-clean, and needs no native
 libraries** (`cargo check` is green in GPU-free CI). Everything that links FFmpeg/libav, touches a
 GPU, or loads the NDI SDK is **behind off-by-default Cargo features**. You opt into hardware and
 codecs with umbrella feature presets at build time, and the engine then **auto-negotiates** the
@@ -22,15 +22,15 @@ best available backend at runtime.
 
 ```bash
 # 1. Clone
-git clone https://github.com/aperim/mosaic.git
-cd mosaic
+git clone https://github.com/aperim/multiview.git
+cd multiview
 
 # 2. Default build — pure Rust, no native deps, LGPL-clean, no GPU/FFmpeg/NDI
 cargo build --release
 
 # 3. Validate a config and run the daemon (software/CPU path)
-cargo run --release -p mosaic-cli -- validate examples/mosaic.toml
-cargo run --release -p mosaic-cli -- run      examples/mosaic.toml
+cargo run --release -p multiview-cli -- validate examples/multiview.toml
+cargo run --release -p multiview-cli -- run      examples/multiview.toml
 ```
 
 The default binary builds and runs anywhere a Rust toolchain works. To do real media work you must
@@ -59,12 +59,12 @@ pinned).
 
 ### 2.2 FFmpeg / libav (only for `ffmpeg`-feature builds)
 
-The media crates ([`mosaic-ffmpeg`](../architecture/conventions.md#3-canonical-crate-map),
-`mosaic-input`, `mosaic-output`, `mosaic-audio`) link the system **libav\*** via `rsmpeg`. The
+The media crates ([`multiview-ffmpeg`](../architecture/conventions.md#3-canonical-crate-map),
+`multiview-input`, `multiview-output`, `multiview-audio`) link the system **libav\*** via `rsmpeg`. The
 default build does **not** link FFmpeg — only feature presets that enable `ffmpeg` do.
 
 > [!IMPORTANT]
-> **The default Mosaic build is LGPL-clean.** That means FFmpeg must be built **`--enable-shared`
+> **The default Multiview build is LGPL-clean.** That means FFmpeg must be built **`--enable-shared`
 > without `--enable-gpl` and without `--enable-nonfree`** (NVENC/NVDEC come from MIT
 > `nv-codec-headers`; scaling is in-house via `scale_cuda`, never `scale_npp`). A distro/Homebrew
 > FFmpeg may already be GPL or nonfree — verify before relying on the LGPL-clean guarantee
@@ -83,7 +83,7 @@ ffmpeg -hwaccels         # expect videotoolbox
 > `--enable-gpl --enable-version3 --enable-libx264 --enable-libx265 --enable-openssl`. That is
 > **fine for local development and testing**, but a binary linked against it is **GPL** and is
 > **not** the LGPL-clean redistributable artifact. For release/redistribution, build FFmpeg
-> yourself with the LGPL flags (see [§6](#6-licensing--build-profiles)) and point Mosaic at it via
+> yourself with the LGPL flags (see [§6](#6-licensing--build-profiles)) and point Multiview at it via
 > `PKG_CONFIG_PATH`. VideoToolbox HW accel is present in this Homebrew build.
 
 #### Linux (system libav)
@@ -105,7 +105,7 @@ ffmpeg -hwaccels                                  # vaapi / cuda depending on bu
 export its location:
 
 ```bash
-export PKG_CONFIG_PATH=/opt/mosaic-ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH
+export PKG_CONFIG_PATH=/opt/multiview-ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH
 ```
 
 ### 2.3 Optional hardware acceleration (Linux)
@@ -125,7 +125,7 @@ Enable only the backend your hardware has; the planner falls back to CPU if abse
 ### 2.4 NDI SDK (optional, proprietary — never vendored)
 
 NDI is **feature-gated (`ndi`) and off by default**. The SDK is **proprietary (royalty-free,
-attribution required, redistribution restricted)** and is **never vendored into the repo**. Mosaic
+attribution required, redistribution restricted)** and is **never vendored into the repo**. Multiview
 uses a **runtime dynamic-load** path (`NDIlib_v6_load()`), so you build *with* the `ndi` feature but
 provide the runtime yourself.
 
@@ -162,7 +162,7 @@ during UI development use the Vite dev server with the API proxy instead.
 
 ```bash
 cargo build --release            # the whole workspace, default features
-cargo build --release -p mosaic-cli   # just the `mosaic` binary
+cargo build --release -p multiview-cli   # just the `multiview` binary
 ```
 
 ### 3.2 Workspace checks (what CI runs GPU-free)
@@ -192,17 +192,17 @@ cargo xtask gen-openapi          # regenerate the API spec
 
 ```bash
 # Validate a config without starting the engine
-cargo run --release -p mosaic-cli -- validate examples/mosaic.toml
+cargo run --release -p multiview-cli -- validate examples/multiview.toml
 
 # Run the daemon (loads config, wires engine + control plane)
-cargo run --release -p mosaic-cli -- run examples/mosaic.toml
+cargo run --release -p multiview-cli -- run examples/multiview.toml
 
 # Or run the built binary directly
-./target/release/mosaic run examples/mosaic.toml
+./target/release/multiview run examples/multiview.toml
 ```
 
 The control plane (REST `/api/v1`, WebSocket `/api/v1/ws`, interactive docs at `/docs`) and the
-embedded SPA are served by `mosaic-control`. Health probes (`/livez`, `/readyz`) run on a separate
+embedded SPA are served by `multiview-control`. Health probes (`/livez`, `/readyz`) run on a separate
 lightweight runtime so they never contend with the video threads. See the
 [example configs](../../examples/) and [io/inputs.md](../io/inputs.md).
 
@@ -211,31 +211,31 @@ lightweight runtime so they never contend with the video threads. See the
 ## 5. Feature-flag build profiles
 
 The canonical feature taxonomy is in
-[conventions §4](../architecture/conventions.md#4-feature-flag-taxonomy-canonical). `mosaic-cli`
+[conventions §4](../architecture/conventions.md#4-feature-flag-taxonomy-canonical). `multiview-cli`
 exposes **umbrella presets** that roll up the right per-stage backends for a platform. Build with a
 preset via `--features` (disable defaults only if you want a minimal codec-less build):
 
 ```bash
 # NVIDIA Linux box (NVDEC/NVENC + CUDA compositor + wgpu baseline + FFmpeg)
-cargo build --release -p mosaic-cli --features nvidia
+cargo build --release -p multiview-cli --features nvidia
 
 # macOS native (VideoToolbox + Metal + FFmpeg)
-cargo build --release -p mosaic-cli --features apple
+cargo build --release -p multiview-cli --features apple
 
 # Linux Intel/AMD (VAAPI + QSV + wgpu + FFmpeg)
-cargo build --release -p mosaic-cli --features linux-vaapi
+cargo build --release -p multiview-cli --features linux-vaapi
 
 # Everything non-GPL (still LGPL-clean / redistributable)
-cargo build --release -p mosaic-cli --features full
+cargo build --release -p multiview-cli --features full
 
 # Add proprietary NDI (runtime-loaded SDK) on top of any preset
-cargo build --release -p mosaic-cli --features "nvidia,ndi"
+cargo build --release -p multiview-cli --features "nvidia,ndi"
 
 # Opt into GPL codecs (x264/x265) — makes the whole build GPL
-cargo build --release -p mosaic-cli --features "linux-vaapi,gpl-codecs"
+cargo build --release -p multiview-cli --features "linux-vaapi,gpl-codecs"
 
 # Embed the prebuilt web UI into the binary (single deployable)
-cargo build --release -p mosaic-cli --features "apple,embed-web"
+cargo build --release -p multiview-cli --features "apple,embed-web"
 ```
 
 ### Preset → backend map
@@ -287,11 +287,11 @@ The **effective license of the artifact depends on the features you enable.** Pr
 | **+ `ndi-advanced`** | + NDI Advanced SDK (HX H.264/HEVC) | Separate **paid** commercial license + codec royalties |
 
 **Build-your-own LGPL FFmpeg (release path).** Because distro/Homebrew FFmpeg is frequently GPL,
-compile an LGPL-clean FFmpeg yourself and link Mosaic against it. Key flags and verification:
+compile an LGPL-clean FFmpeg yourself and link Multiview against it. Key flags and verification:
 
 ```bash
 # Illustrative LGPL-clean configure (NVIDIA example):
-./configure --prefix=/opt/mosaic-ffmpeg --enable-shared \
+./configure --prefix=/opt/multiview-ffmpeg --enable-shared \
   --enable-ffnvcodec --enable-nvenc --enable-nvdec \
   # NO --enable-gpl, NO --enable-nonfree, NO --enable-libnpp, NO --enable-libx264/x265
 

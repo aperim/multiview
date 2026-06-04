@@ -1,6 +1,6 @@
 # NDI — Network Device Interface (In & Out)
 
-Mosaic treats **NDI as a first-class source and sink** for both ingest and output, but it is
+Multiview treats **NDI as a first-class source and sink** for both ingest and output, but it is
 **isolated** from the rest of the build: NDI is proprietary software, so it is off by default,
 runtime-loaded, and carries **mandatory licensing and attribution obligations** that this document
 makes prominent (see [§ Licensing](#licensing--redistribution--attribution-must-read)).
@@ -9,11 +9,11 @@ makes prominent (see [§ Licensing](#licensing--redistribution--attribution-must
 
 | | |
 |---|---|
-| **Crates** | `mosaic-input` (NDI in), `mosaic-output` (NDI out) |
+| **Crates** | `multiview-input` (NDI in), `multiview-output` (NDI out) |
 | **Cargo feature** | `ndi` (off by default); `ndi-advanced` for HX (separate paid license) |
 | **Binding** | `grafton-ndi` (Apache-2.0, NDI 6) + a `NDIlib_v6_load()` dynamic-load path |
 | **Frame memory** | **Host memory** — always one host↔GPU copy at the NDI boundary |
-| **Per-source timing** | Wrapped in a per-source **FrameSync** (see [`mosaic-framestore`](../architecture/conventions.md)) |
+| **Per-source timing** | Wrapped in a per-source **FrameSync** (see [`multiview-framestore`](../architecture/conventions.md)) |
 | **Key ADRs** | [ADR-0008](../decisions/ADR-0008.md) (NDI model), [ADR-0012](../decisions/ADR-0012.md) (licensing), [ADR-0004](../decisions/ADR-0004.md) (copy boundary) |
 | **Deep briefs** | [core-engine.md § 10](../research/core-engine.md), [resilience-and-av.md](../research/resilience-and-av.md) |
 
@@ -22,11 +22,11 @@ makes prominent (see [§ Licensing](#licensing--redistribution--attribution-must
 ## 1. What NDI is, and why it is special here
 
 NDI (Network Device Interface) is Vizrt's low-latency IP video transport widely used in
-broadcast/AV. Mosaic supports:
+broadcast/AV. Multiview supports:
 
 - **NDI in** — discover sources on the LAN and receive video + audio (+ PTZ/tally/metadata),
   feeding each source into a tile like any other ingest.
-- **NDI out** — publish the composited mosaic canvas as a single NDI sender.
+- **NDI out** — publish the composited multiview canvas as a single NDI sender.
 
 The reason NDI gets its own document (rather than living alongside RTSP/SRT/HLS) is twofold:
 
@@ -50,7 +50,7 @@ Finder/Receiver/Sender/FrameSync/audio/PTZ/tally plus Advanced-SDK hooks, with b
 is absent.** That means a plain `grafton-ndi` dependency would make the *whole build* require the
 proprietary SDK — unacceptable for a default open-source build.
 
-Mosaic therefore uses **two layers** behind the `ndi` feature:
+Multiview therefore uses **two layers** behind the `ndi` feature:
 
 | Path | When | Mechanism | SDK required to build? |
 |---|---|---|---|
@@ -59,7 +59,7 @@ Mosaic therefore uses **two layers** behind the `ndi` feature:
 
 > Note: NDI 6 uses **`NDIlib_v6_load`** (not the v5 symbol). The dynamic-load backend loads the
 > user-provided runtime at startup and resolves the function table; if the runtime is absent, the
-> `ndi` capability is simply reported unavailable and Mosaic continues without it.
+> `ndi` capability is simply reported unavailable and Multiview continues without it.
 
 ```mermaid
 flowchart TB
@@ -77,8 +77,8 @@ flowchart TB
 
 Per the [canonical feature taxonomy](../architecture/conventions.md):
 
-- **`ndi`** — proprietary SDK; **off by default**; runtime-loaded. Enables NDI in (`mosaic-input`)
-  and NDI out (`mosaic-output`).
+- **`ndi`** — proprietary SDK; **off by default**; runtime-loaded. Enables NDI in (`multiview-input`)
+  and NDI out (`multiview-output`).
 - **`ndi-advanced`** — NDI **Advanced SDK** (compressed HX H.264/HEVC). A **separate paid
   commercial license**, with codec royalties on you; strictly opt-in and distributed separately.
 
@@ -101,7 +101,7 @@ NDI delivers and accepts frames in **host memory** in YUV/packed layouts — nev
 ### 3.1 NDI in (receive)
 
 - Common receive layouts: **UYVY** (8-bit 4:2:2 packed), **P216** (16-bit 4:2:2), **BGRA**.
-- Mosaic reads the SDK-owned **borrowed** buffer directly into the host→GPU upload — "zero-extra-copy"
+- Multiview reads the SDK-owned **borrowed** buffer directly into the host→GPU upload — "zero-extra-copy"
   here means avoiding an *additional* CPU `memcpy`, **not** avoiding the unavoidable PCIe upload.
 - After upload, frames are converted in the compositor toward the canonical **NV12-throughout**
   internal representation; YUV→RGB and color conversion happen in-shader per the
@@ -110,11 +110,11 @@ NDI delivers and accepts frames in **host memory** in YUV/packed layouts — nev
 
 ### 3.2 NDI out (send)
 
-A single NDI **Sender** publishes the composited mosaic. The canvas is copied GPU→host, then sent:
+A single NDI **Sender** publishes the composited multiview. The canvas is copied GPU→host, then sent:
 
 | Color mode | Layout | Use when |
 |---|---|---|
-| `fastest` | UYVY / UYVA | **Latency** priority (default for live mosaic) |
+| `fastest` | UYVY / UYVA | **Latency** priority (default for live multiview) |
 | `best` | P216 / PA16 | **Quality / HDR** priority |
 
 The example config selects this directly:
@@ -122,7 +122,7 @@ The example config selects this directly:
 ```toml
 [[outputs]]
 kind  = "ndi"
-name  = "MOSAIC OUT"
+name  = "MULTIVIEW OUT"
 color = "fastest"      # or "best"
 ```
 
@@ -160,7 +160,7 @@ push→pull, hold-last-frame), exactly as for every other ingest
 This feeds directly into the **bulletproof output guarantee**: NDI tiles ride the standard per-tile
 state machine **LIVE → STALE → RECONNECTING → NO_SIGNAL**
 ([ADR-R001](../decisions/ADR-R001.md), [resilience-and-av.md](../research/resilience-and-av.md)).
-A dead or hung NDI source never freezes the mosaic — its tile shows last-good then a placeholder
+A dead or hung NDI source never freezes the multiview — its tile shows last-good then a placeholder
 card; the output clock keeps emitting.
 
 **Source binding is by name.** NDI tiles bind to a source name (e.g. `STUDIO (CAM 1)`), with an
@@ -248,7 +248,7 @@ These obligations appear in the **UI/About box and docs** as part of the `ndi` f
 not optional documentation niceties; the management surface ([web/API](../research/web-api-stack.md))
 must render them when NDI is enabled.
 
-### 7.3 How Mosaic stays clean by default
+### 7.3 How Multiview stays clean by default
 
 - **The default build never contains NDI.** No SDK, no proprietary symbols, no obligations — the
   default profile is **LGPL-clean and redistributable**

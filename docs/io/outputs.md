@@ -1,10 +1,10 @@
 # Outputs & Sinks
 
-How Mosaic publishes the composited program: the sink subsystem. One canvas is composited, encoded **once per rendition**, and the resulting packets are **fanned out** to every transport that can share them — RTSP server, HLS/LL-HLS packager, NDI out, and RTMP/SRT push. Per-output encode profiles, color tagging, multistream audio, segment/continuity settings, and failover are all managed declaratively and verified at runtime.
+How Multiview publishes the composited program: the sink subsystem. One canvas is composited, encoded **once per rendition**, and the resulting packets are **fanned out** to every transport that can share them — RTSP server, HLS/LL-HLS packager, NDI out, and RTMP/SRT push. Per-output encode profiles, color tagging, multistream audio, segment/continuity settings, and failover are all managed declaratively and verified at runtime.
 
-- **Crate:** [`mosaic-output`](../architecture/conventions.md#3-canonical-crate-map) — *"Output sinks/servers: RTSP server, HLS/LL-HLS packager, NDI out, RTMP/SRT push; encode-once-mux-many fan-out."* Features: `ffmpeg`, `ndi`.
-- **Driven by:** [`mosaic-engine`](../architecture/conventions.md#3-canonical-crate-map) (the protected output core: fixed-cadence output clock, supervisor, hot-reconfiguration).
-- **Managed by:** [`mosaic-control`](../architecture/conventions.md#3-canonical-crate-map) at `/api/v1/outputs/{id}`.
+- **Crate:** [`multiview-output`](../architecture/conventions.md#3-canonical-crate-map) — *"Output sinks/servers: RTSP server, HLS/LL-HLS packager, NDI out, RTMP/SRT push; encode-once-mux-many fan-out."* Features: `ffmpeg`, `ndi`.
+- **Driven by:** [`multiview-engine`](../architecture/conventions.md#3-canonical-crate-map) (the protected output core: fixed-cadence output clock, supervisor, hot-reconfiguration).
+- **Managed by:** [`multiview-control`](../architecture/conventions.md#3-canonical-crate-map) at `/api/v1/outputs/{id}`.
 
 > Companion docs: [inputs.md](./inputs.md) (ingest), the deep briefs [`../research/core-engine.md`](../research/core-engine.md), [`../research/streaming-gotchas.md`](../research/streaming-gotchas.md), [`../research/resilience-and-av.md`](../research/resilience-and-av.md), and the management matrix [`../research/management-capability-matrix.md`](../research/management-capability-matrix.md).
 
@@ -61,7 +61,7 @@ appsrc (is-live=true, format=TIME, correct PTS/duration)
 
 | Setting | Value / behaviour | API |
 |---|---|---|
-| `mount` | RTSP mount point (e.g. `/mosaic`) | `PATCH .../container/rtsp {mount}` |
+| `mount` | RTSP mount point (e.g. `/multiview`) | `PATCH .../container/rtsp {mount}` |
 | `transports` | `tcp`, `udp` (client `SETUP`s each) | `PATCH .../container/rtsp {transports}` |
 | `config_interval` | `-1` → SPS/PPS inline every IDR so **late joiners** decode immediately | `PATCH .../container/rtsp {config_interval}` |
 | `shared` | `factory.set_shared(true)` → one encode fans out to all clients | `PATCH .../container/rtsp {shared}` |
@@ -74,7 +74,7 @@ appsrc (is-live=true, format=TIME, correct PTS/duration)
 
 ## 4. HLS / LL-HLS packager
 
-**CMAF-first, custom-built.** FFmpeg's `hls` muxer **cannot emit Apple LL-HLS** (`-lhls` is the legacy `EXT-X-PREFETCH` DASH variant), so Mosaic owns the segmenter and origin.
+**CMAF-first, custom-built.** FFmpeg's `hls` muxer **cannot emit Apple LL-HLS** (`-lhls` is the legacy `EXT-X-PREFETCH` DASH variant), so Multiview owns the segmenter and origin.
 
 - Encode once into **fragmented MP4** via libav `movenc` (`-movflags cmaf+frag_custom+empty_moov+delay_moov`) and derive HLS, LL-HLS, and (optionally) DASH from **one** in-memory segment/part store.
 - **Tag layer** is reused from the `hls-playlist` crate (EXT-X-PART, PART-INF, SERVER-CONTROL with `CAN-BLOCK-RELOAD` + `PART-HOLD-BACK`, PRELOAD-HINT, RENDITION-REPORT, SKIP).
@@ -97,11 +97,11 @@ appsrc (is-live=true, format=TIME, correct PTS/duration)
 
 ## 5. NDI out
 
-A single NDI **Sender** publishes the composited mosaic. NDI frames live in **host memory**, so there is always one GPU→host copy off the canvas (no encode session consumed).
+A single NDI **Sender** publishes the composited multiview. NDI frames live in **host memory**, so there is always one GPU→host copy off the canvas (no encode session consumed).
 
 | Setting | Options | API |
 |---|---|---|
-| `sender_name` | NDI source name (e.g. `MOSAIC OUT`) | `PATCH .../container/ndi {sender_name}` |
+| `sender_name` | NDI source name (e.g. `MULTIVIEW OUT`) | `PATCH .../container/ndi {sender_name}` |
 | `groups` | NDI group membership | `PATCH .../container/ndi {groups}` |
 | `color_format` | `fastest` (UYVY/UYVA, latency) · `best` (P216/PA16, HDR/quality) | `PATCH .../container/ndi {color_format}` |
 | `clock` | clock-to-video / clock-to-audio | `PATCH .../container/ndi {clock}` |
@@ -334,7 +334,7 @@ The Outputs editor's protocol dropdown re-renders the form to that protocol's **
 | [ADR-0007](../decisions/ADR-0007.md) | CMAF-first HLS with custom Apple LL-HLS |
 | [ADR-0008](../decisions/ADR-0008.md) | NDI first-class, feature-gated, dynamically loaded, attribution |
 | [ADR-0012](../decisions/ADR-0012.md) | LGPL-clean default; GPL/nonfree/NDI opt-in |
-| [ADR-0014](../decisions/ADR-0014.md) | Encode the mosaic once; size density to physical NVENC chips |
+| [ADR-0014](../decisions/ADR-0014.md) | Encode the multiview once; size density to physical NVENC chips |
 | [ADR-E003](../decisions/ADR-E003.md) / [E004](../decisions/ADR-E004.md) | Composite once; encode-once mux-many fan-out |
 | [ADR-C006](../decisions/ADR-C006.md) | Tag output across encoder + container, verify with ffprobe |
 | [ADR-T001](../decisions/ADR-T001.md) / [T005](../decisions/ADR-T005.md) | Output clock; wall-clock-paced GOP-aligned LL-HLS segments |

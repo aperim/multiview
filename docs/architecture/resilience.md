@@ -1,4 +1,4 @@
-# Mosaic — Bulletproof Output & Resilience
+# Multiview — Bulletproof Output & Resilience
 
 > **Status:** Architecture overview. Authoritative depth lives in the deep brief
 > [`../research/resilience-and-av.md`](../research/resilience-and-av.md); the load-bearing
@@ -6,7 +6,7 @@
 > and [ADR-R009](../decisions/ADR-R009.md). Where this page and a brief differ, the
 > [canonical conventions](./conventions.md) win.
 
-Mosaic exists to do one thing without compromise: **once an output session starts, it never
+Multiview exists to do one thing without compromise: **once an output session starts, it never
 falters.** Inputs may die, change resolution mid-stream, hang in a C library, or vanish entirely;
 the GPU may be reset out from under us; an encoder may leak itself to death. None of that is allowed
 to reach the wire. This document describes the mechanisms that make that guarantee provable rather
@@ -52,7 +52,7 @@ flowchart LR
       IN["Input N"]
     end
 
-    subgraph Stores["mosaic-framestore: last-good-frame stores"]
+    subgraph Stores["multiview-framestore: last-good-frame stores"]
       FS1["Tile 1 store<br/>+ state machine"]
       FS2["Tile 2 store"]
       FSN["Tile N store"]
@@ -64,7 +64,7 @@ flowchart LR
 
     OC(["OUTPUT CLOCK<br/>monotonic media tick"])
 
-    subgraph Core["Protected output core (mosaic-engine — never killed)"]
+    subgraph Core["Protected output core (multiview-engine — never killed)"]
       COMP["GPU Compositor (wgpu)<br/>always emits a frame<br/>+ overlays + cards"]
       RGBA2NV12["RGBA→NV12 compute<br/>+ pre-alloc readback ring"]
       MIX["Audio mixer<br/>resample to program clock<br/>silence-fill on dropout"]
@@ -88,8 +88,8 @@ flowchart LR
 **Structural rules** (see [ADR-R001](../decisions/ADR-R001.md)):
 
 1. **Output clock = locally-generated monotonic media clock** (a frame/sample counter), only
-   *loosely* disciplined to wall-clock. Owned by `mosaic-engine`; inputs are *sampled*, never pacing.
-2. **Per-tile last-good-frame store** (`mosaic-framestore`) = lock-free single-slot / triple-buffer
+   *loosely* disciplined to wall-clock. Owned by `multiview-engine`; inputs are *sampled*, never pacing.
+2. **Per-tile last-good-frame store** (`multiview-framestore`) = lock-free single-slot / triple-buffer
    (`Arc`-swap, SPSC). The decoder writes freely, the compositor always reads the latest complete
    frame, stale updates are dropped, and **neither side ever blocks**.
 3. **The compositor always emits.** Every tick it renders into the fixed canvas, substituting a
@@ -108,7 +108,7 @@ flowchart LR
 
 Each tile rides a configurable failure ladder, modeled on AWS Elemental MediaLive's rule that *a
 running channel must always be encoding content* (repeat-frame → black → slate). The state machine
-lives in `mosaic-framestore`; the cards are drawn by `mosaic-overlay`.
+lives in `multiview-framestore`; the cards are drawn by `multiview-overlay`.
 
 ```mermaid
 stateDiagram-v2
@@ -162,7 +162,7 @@ corruption — only an OS process can be `SIGKILL`ed cleanly. Hence a **three-ti
 | **A — Control / compositor logic** | Pure Rust (layout engine, scene graph, control plane) | Supervised `tokio` tasks/threads + `catch_unwind` at boundaries | Cheap; shares the GPU context; only panics need containment. |
 | **B — Per-input FFI ingest** | FFmpeg / NDI / SRT decode | OS-process-isolated worker (Linux); in-process re-initable on macOS | FFI hangs/segfaults must be `SIGKILL`-able; libav interrupt callbacks handle the *common* network stalls in-process without a kill. |
 | **C — NVENC / CUDA encoder** | Hardware encode | OS-process-isolated worker; proactive recycling | Documented multi-day host/kernel leaks and `INVALID_DEVICE` degradation clear only by process restart. |
-| **Core — Output / clock** | Clock, mux, slate generator (`mosaic-engine`) | Most-protected; never restarted; decoupled by bounded drop-newest queues | The invariant lives here. |
+| **Core — Output / clock** | Clock, mux, slate generator (`multiview-engine`) | Most-protected; never restarted; decoupled by bounded drop-newest queues | The invariant lives here. |
 
 **Platform split:** macOS/Apple-Silicon (VideoToolbox/Metal) FFI is more stable, so inputs/encoder
 may run as in-process threads with an aggressive watchdog + re-init; Linux/NVENC uses process
@@ -171,7 +171,7 @@ isolation. Cross-process transport uses shared-memory ring buffers; GPU frames s
 
 ### Supervision mechanics ([ADR-R003](../decisions/ADR-R003.md))
 
-- **Supervision tree** (`mosaic-engine` supervisor): OTP-style — `OneForOne` for independent inputs,
+- **Supervision tree** (`multiview-engine` supervisor): OTP-style — `OneForOne` for independent inputs,
   `RestForOne` where a downstream stage depends on an upstream one.
 - **Restart intensity:** per-level `max_restarts / max_window` meltdown limits. Intensities must
   **not** be equal at every level (they multiply: 10×10 = 100 leaf restarts). Window 5–10 min.
@@ -242,7 +242,7 @@ session**; "session restart" (a Class-2 migration) is the only path to change th
 
 The invariant is encoded as numeric SLOs from an always-on **output-validity probe**
 ([ADR-R009](../decisions/ADR-R009.md); see [the deep brief §9](../research/resilience-and-av.md)),
-exported via `mosaic-telemetry` as Prometheus histograms with custom buckets around the nominal frame
+exported via `multiview-telemetry` as Prometheus histograms with custom buckets around the nominal frame
 interval:
 
 - Output frame-interval jitter within bound; **zero gaps** (interval > N× nominal); PTS strictly
@@ -269,17 +269,17 @@ reproduce NVENC reset / CUDA device loss / VRAM exhaustion, so the real-GPU job 
 
 | Concern | Crate |
 |---|---|
-| Output clock, compositor drive, supervisor/actors, hot-reconfig, admission/degradation loop | [`mosaic-engine`](./conventions.md) |
-| Per-tile last-good-frame store + tile state machine | `mosaic-framestore` |
-| GPU compositor, scene-graph atomic swap, RGBA→NV12, readback ring, device-lost `rebuild()` | `mosaic-compositor` |
-| Slate / placeholder cards, alert overlays, atlas-resident must-never-fail assets | `mosaic-overlay` |
-| Process-isolated FFI ingest workers, interrupt callbacks, supervised reconnect | `mosaic-input` |
-| Encode-once-mux-many fan-out, continuity-configured muxers, hot-standby encoder | `mosaic-output` |
-| Validity probe, health, Prometheus metrics, `/livez` `/readyz` | `mosaic-telemetry` |
-| Live-apply Class-1/Class-2 classification surfaced over the API | `mosaic-control` |
+| Output clock, compositor drive, supervisor/actors, hot-reconfig, admission/degradation loop | [`multiview-engine`](./conventions.md) |
+| Per-tile last-good-frame store + tile state machine | `multiview-framestore` |
+| GPU compositor, scene-graph atomic swap, RGBA→NV12, readback ring, device-lost `rebuild()` | `multiview-compositor` |
+| Slate / placeholder cards, alert overlays, atlas-resident must-never-fail assets | `multiview-overlay` |
+| Process-isolated FFI ingest workers, interrupt callbacks, supervised reconnect | `multiview-input` |
+| Encode-once-mux-many fan-out, continuity-configured muxers, hot-standby encoder | `multiview-output` |
+| Validity probe, health, Prometheus metrics, `/livez` `/readyz` | `multiview-telemetry` |
+| Live-apply Class-1/Class-2 classification surfaced over the API | `multiview-control` |
 
-> Note: the deep brief proposes finer crate splits (`mosaic-clock`, `mosaic-encoder`,
-> `mosaic-mux`, `mosaic-supervisor`, `mosaic-ipc`). Per the [conventions](./conventions.md) these
+> Note: the deep brief proposes finer crate splits (`multiview-clock`, `multiview-encoder`,
+> `multiview-mux`, `multiview-supervisor`, `multiview-ipc`). Per the [conventions](./conventions.md) these
 > responsibilities are folded into the canonical crate map above; the brief's names are indicative,
 > not normative.
 

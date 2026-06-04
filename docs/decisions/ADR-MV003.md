@@ -11,7 +11,7 @@ Extend EBU R128 metering into a compliance-grade audio subsystem: expose all lou
 
 ## Rationale
 
-Loudness logging and multi-standard metering are near-universal in 24/7 monitoring multiviewers and are the legal proof-of-compliance artifact for CALM Act / R128 / A/85. Mosaic already measures R128 live; the delta is multi-profile selection, richer meter types and persistence/export — all DSP/storage on the decoded PCM Mosaic already has.
+Loudness logging and multi-standard metering are near-universal in 24/7 monitoring multiviewers and are the legal proof-of-compliance artifact for CALM Act / R128 / A/85. Multiview already measures R128 live; the delta is multi-profile selection, richer meter types and persistence/export — all DSP/storage on the decoded PCM Multiview already has.
 
 ## Alternatives considered
 

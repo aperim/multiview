@@ -10,12 +10,12 @@ import createClient from 'openapi-fetch';
 
 import type { paths } from './schema';
 
-/** Options for constructing a {@link MosaicApiClient}. */
+/** Options for constructing a {@link MultiviewApiClient}. */
 export interface ApiClientOptions {
   /**
    * Base URL the API is served from. Defaults to the same origin (`''`), which
    * the Vite dev server proxies to the control plane and which is correct when
-   * the SPA is embedded in the `mosaic` binary.
+   * the SPA is embedded in the `multiview` binary.
    */
   readonly baseUrl?: string;
   /**
@@ -27,13 +27,13 @@ export interface ApiClientOptions {
 }
 
 /** A typed openapi-fetch client bound to the control-plane `paths`. */
-export type MosaicApiClient = ReturnType<typeof createClient<paths>>;
+export type MultiviewApiClient = ReturnType<typeof createClient<paths>>;
 
 /**
  * Build a typed API client. The returned client's `GET`/`POST`/… methods only
  * accept paths and shapes that exist in the generated schema.
  */
-export function createApiClient(options: ApiClientOptions = {}): MosaicApiClient {
+export function createApiClient(options: ApiClientOptions = {}): MultiviewApiClient {
   const headers: Record<string, string> = {};
   if (options.token !== undefined && options.token !== '') {
     headers.Authorization = `Bearer ${options.token}`;

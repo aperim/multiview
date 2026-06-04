@@ -1,4 +1,4 @@
-# Mosaic — Data-Plane Pipeline
+# Multiview — Data-Plane Pipeline
 
 The **data plane** is the media hot path: from raw bytes on the wire to encoded packets
 fanned out to every transport. It runs on **dedicated OS threads** (never Tokio workers —
@@ -10,7 +10,7 @@ this document refines.
 > monotonic clock; inputs are **sampled** into the output, they never **pace** it.* This is the
 > **output-clock invariant** ([conventions §5.1](./conventions.md)) and it makes the output
 > bulletproof — a stalled, bursting, or wrong-fps input cannot stall, speed up, or skew the
-> mosaic. Everything below exists to honour it.
+> multiview. Everything below exists to honour it.
 
 ---
 
@@ -26,16 +26,16 @@ Two halves meet at the **per-tile framestore**:
 
 | Stage | Owning crate | Off the hot path? | Key invariant |
 |-------|--------------|-------------------|---------------|
-| Ingest / demux | `mosaic-input` | per-source task | `AVIOInterruptCB` + outer DNS watchdog |
-| Pace (HLS / jitter) | `mosaic-input` | per-source task | custom PTS→wall-clock pacer, **not** `-re` |
-| Decode | `mosaic-ffmpeg` + `mosaic-hal` | per-source thread | generic hwaccel + per-input SW fallback; conceal, never abort |
-| Normalize (timestamps) | `mosaic-input` | per-source | unwrap → rebase → monotonic guard, all in i64 ns |
-| Convert (color/format) | `mosaic-compositor` (in-shader) | fused into composite | NV12-throughout; resolve 4 color axes, never `UNSPECIFIED` |
-| Framestore | `mosaic-framestore` | lock-free slot | last-good-frame + LIVE→STALE→RECONNECTING→NO_SIGNAL |
-| Output clock | `mosaic-engine` | **the** core thread | `out_pts = f(tick)`, exact rationals, never float fps |
-| Compositor | `mosaic-compositor` | core thread | deadline-driven; **never** wait-for-all-inputs |
-| Encode | `mosaic-output` + `mosaic-hal` | encode thread(s) | composite once, encode **once per rendition** |
-| Mux / serve | `mosaic-output` | Tokio egress | encode-once-**mux-many**; wall-clock-paced HLS |
+| Ingest / demux | `multiview-input` | per-source task | `AVIOInterruptCB` + outer DNS watchdog |
+| Pace (HLS / jitter) | `multiview-input` | per-source task | custom PTS→wall-clock pacer, **not** `-re` |
+| Decode | `multiview-ffmpeg` + `multiview-hal` | per-source thread | generic hwaccel + per-input SW fallback; conceal, never abort |
+| Normalize (timestamps) | `multiview-input` | per-source | unwrap → rebase → monotonic guard, all in i64 ns |
+| Convert (color/format) | `multiview-compositor` (in-shader) | fused into composite | NV12-throughout; resolve 4 color axes, never `UNSPECIFIED` |
+| Framestore | `multiview-framestore` | lock-free slot | last-good-frame + LIVE→STALE→RECONNECTING→NO_SIGNAL |
+| Output clock | `multiview-engine` | **the** core thread | `out_pts = f(tick)`, exact rationals, never float fps |
+| Compositor | `multiview-compositor` | core thread | deadline-driven; **never** wait-for-all-inputs |
+| Encode | `multiview-output` + `multiview-hal` | encode thread(s) | composite once, encode **once per rendition** |
+| Mux / serve | `multiview-output` | Tokio egress | encode-once-**mux-many**; wall-clock-paced HLS |
 
 ### End-to-end flow
 
@@ -43,7 +43,7 @@ Two halves meet at the **per-tile framestore**:
 flowchart LR
   subgraph IN["Per-input chain  (× N sources, isolated)"]
     direction TB
-    DEMUX["Ingest / Demux<br/>RTSP·HLS·TS·SRT·RTMP·NDI·file·test<br/>(mosaic-input)"]
+    DEMUX["Ingest / Demux<br/>RTSP·HLS·TS·SRT·RTMP·NDI·file·test<br/>(multiview-input)"]
     PACE["Pace<br/>HLS PTS→wall-clock<br/>+ jitter buffer"]
     DEC["Decode (HAL)<br/>NVDEC·VAAPI·QSV·VideoToolbox·SW<br/>conceal + continue"]
     NORM["Normalize PTS<br/>unwrap·genpts·monotonic<br/>rebase → i64 ns"]
@@ -51,11 +51,11 @@ flowchart LR
     DEMUX --> PACE --> DEC --> NORM --> CONV
   end
 
-  CONV --> FS[("Per-tile framestore<br/>lock-free last-good slot<br/>state machine<br/>(mosaic-framestore)")]
+  CONV --> FS[("Per-tile framestore<br/>lock-free last-good slot<br/>state machine<br/>(multiview-framestore)")]
 
-  CLK[["Output clock<br/>fixed rational cadence<br/>CLOCK_MONOTONIC_RAW / mach<br/>(mosaic-engine)"]]
+  CLK[["Output clock<br/>fixed rational cadence<br/>CLOCK_MONOTONIC_RAW / mach<br/>(multiview-engine)"]]
   CLK -->|tick N| COMP
-  FS -->|sample nearest ≤ target_ns| COMP["Deadline-driven compositor<br/>fused convert+scale+place<br/>linear-light blend<br/>(mosaic-compositor)"]
+  FS -->|sample nearest ≤ target_ns| COMP["Deadline-driven compositor<br/>fused convert+scale+place<br/>linear-light blend<br/>(multiview-compositor)"]
 
   COMP --> ENC["Encode (HAL)<br/>NVENC·VAAPI·QSV·VT·x264·SVT-AV1<br/>CFR · closed GOP · counter PTS"]
   COMP -->|host copy| NDIOUT["NDI out<br/>(host memory)"]
@@ -83,7 +83,7 @@ get their own sibling architecture docs: [`timing-and-sync.md`](./timing-and-syn
 
 Each source runs its **own task/thread with bounded drop-oldest (leaky-downstream) queues**, so
 `av_read_frame` on one source never blocks the composite loop, and one dead source never freezes
-the mosaic. Channels carry **ref-counted pooled frame handles, never pixels**.
+the multiview. Channels carry **ref-counted pooled frame handles, never pixels**.
 
 ### 2.1 Ingest / demux
 
@@ -140,7 +140,7 @@ See [ADR-T004](../decisions/ADR-T004.md) (HLS ingest pacing) and
   failure (returning a software format silently disables HW), and is a **re-negotiation hook**:
   geometry/`sw_format` may change mid-stream, so it (re)builds `AVHWFramesContext` per call and the
   compositor re-imports textures on change.
-- **Conceal-and-continue, never abort the mosaic** (from
+- **Conceal-and-continue, never abort the multiview** (from
   [`streaming-gotchas.md` §6](../research/streaming-gotchas.md)): set `err_recognition` **without**
   `AV_EF_EXPLODE`; gate compositing on **both** `AV_FRAME_FLAG_CORRUPT` clear **and**
   `decode_error_flags == 0`, plus format sanity. Wait-for-IDR is the default (do not set
@@ -182,7 +182,7 @@ if media_time <= last_media_time_i: media_time = last_media_time_i + 1   # monot
 ### 2.5 Convert (color + format)
 
 Because the **custom GPU compositor deliberately bypasses swscale**, libav does **no** implicit
-color conversion — Mosaic owns color end-to-end. Conversion is **fused into the composite kernel**
+color conversion — Multiview owns color end-to-end. Conversion is **fused into the composite kernel**
 (no separate RGBA materialization), but the *detection* logic lives at the ingest seam:
 
 - **Resolve all four color axes** per tile, per frame, to a **never-`UNSPECIFIED`** 4-tuple
@@ -206,7 +206,7 @@ The full conversion math (range numerics, matrices, EOTFs, primaries, tone-mappi
 ### 2.6 Framestore (the seam)
 
 The handoff from per-input chains to the output core. Per-tile **last-good-frame** stores
-(`mosaic-framestore`, [conventions §5.2](./conventions.md), [ADR-R001](../decisions/ADR-R001.md)):
+(`multiview-framestore`, [conventions §5.2](./conventions.md), [ADR-R001](../decisions/ADR-R001.md)):
 
 - **Lock-free single-slot triple-buffer** (overwrite policy → bounded memory, **newest wins**).
   Inputs write; the compositor always reads the latest (or a placeholder card) and **never blocks**.

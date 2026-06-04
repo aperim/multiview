@@ -2,7 +2,7 @@
 
 ---
 
-## Mosaic Dev Container — Design Brief
+## Multiview Dev Container — Design Brief
 
 A **single-image** Dev Container (Dockerfile-based, no docker-compose: there are no sidecar services — the API and Vite SPA run as processes inside one container) that builds **and** tests hardware decode/encode where the host allows it, with honest graceful degradation everywhere else.
 

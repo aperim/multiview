@@ -3,8 +3,8 @@
 > **Area:** Media / Compositor · Overlays
 > **Status:** Verification-hardened design brief (no code this phase)
 > **Date:** 2026-06-03
-> **Owns crates:** [`mosaic-overlay`](../../crates/mosaic-overlay) (models + draw-list),
-> [`mosaic-compositor`](../../crates/mosaic-compositor) (rasterizer + GPU/CPU draw)
+> **Owns crates:** [`multiview-overlay`](../../crates/multiview-overlay) (models + draw-list),
+> [`multiview-compositor`](../../crates/multiview-compositor) (rasterizer + GPU/CPU draw)
 > **Decision:** [ADR-0016](../decisions/ADR-0016.md) (this brief's load-bearing choices)
 > **Builds on:** [ADR-R008](../decisions/ADR-R008.md), [ADR-R007](../decisions/ADR-R007.md),
 > [ADR-E006](../decisions/ADR-E006.md), [ADR-C003](../decisions/ADR-C003.md),
@@ -14,7 +14,7 @@
 > [efficiency §2.2,§2.6](../research/efficiency.md),
 > [core-engine §8.2,§13](../research/core-engine.md)
 
-This brief is the authoritative source for **how Mosaic draws overlays onto the program/tile
+This brief is the authoritative source for **how Multiview draws overlays onto the program/tile
 output most efficiently**: per-tile text labels, clocks (analog + digital), audio meters
 (PPM/VU/peak/true-peak bars + goniometer/correlation + R128), confidence scopes
 (waveform/vectorscope/histogram/parade), subtitle burn-in (SRT/VTT/ASS), safe-area / center-cross
@@ -28,18 +28,18 @@ choice below is justified against bytes-moved and per-frame allocation, not feat
 1. **One blend path, in the engine's linear canvas.** Overlays are blended into the existing
    `Rgba16Float` **linear-light** canvas *after* the tile composite pass and *before* the NV12
    encode pass, using the same premultiplied source-over operator the tiles use
-   ([`blend::over`](../../crates/mosaic-compositor/src/blend.rs), invariant #8). We do **not** use
+   ([`blend::over`](../../crates/multiview-compositor/src/blend.rs), invariant #8). We do **not** use
    any third-party renderer's own render pass — doing so would blend text in the framebuffer's
    color space (sRGB/8-bit) and bypass linear-light + NV12-throughout. (See §4.)
-2. **Raster glyph atlas, not SDF/MSDF.** Mosaic renders overlays at a known, fixed canvas pixel
+2. **Raster glyph atlas, not SDF/MSDF.** Multiview renders overlays at a known, fixed canvas pixel
    size (decode-at-display-res, invariant #6), so SDF/MSDF scale-invariance buys nothing while
    costing offline generation, rounded-corner artifacts (SDF) and ~3× atlas memory (MSDF). A raster
    shelf-packed atlas wins. Reserve a hand-written SDF *only* for vector chrome (rounded alert-card
    corners, meter-bar rounding). (See §3.1.)
-3. **`cosmic-text` for CPU shape+layout+rasterize+atlas; Mosaic's compositor for the draw.** We
+3. **`cosmic-text` for CPU shape+layout+rasterize+atlas; Multiview's compositor for the draw.** We
    adopt the `glyphon` stack (`cosmic-text` + `swash` + `etagere`) for **shaping, rasterization and
-   atlas management only**, and feed the cached glyph quads into Mosaic's own
-   [`DrawList`/`DrawQuad`](../../crates/mosaic-overlay/src/resolve.rs) contract (ADR-R008). The same
+   atlas management only**, and feed the cached glyph quads into Multiview's own
+   [`DrawList`/`DrawQuad`](../../crates/multiview-overlay/src/resolve.rs) contract (ADR-R008). The same
    `swash` bitmaps serve the GPU path (atlas upload) **and** the CPU reference path (blit into the
    linear canvas) — one text engine, two consumers, no metric divergence. (See §3.2, §4.4.)
 4. **Cache static, re-rasterize only dynamic.** Per-glyph caching is automatic and is the key lever:
@@ -100,13 +100,13 @@ wgpu** ([efficiency §2.5](../research/efficiency.md)), which is exactly why the
 ## 2. Where it lives
 
 ```
-mosaic-overlay  (pure Rust, no native dep in default build)
+multiview-overlay  (pure Rust, no native dep in default build)
   ├─ layer.rs / resolve.rs   OverlayStack → DrawList<DrawQuad>   (the WHAT + WHERE)
   ├─ clock / scopes / tally / umd / timer / identify / safearea / alert
   │                          pure render MODELS (values, angles, bin counts, phases)
   └─ caption_probe.rs        subtitle/caption metadata model
 
-mosaic-compositor  (rasterizer + draw; GPU behind `wgpu`, CPU reference always on)
+multiview-compositor  (rasterizer + draw; GPU behind `wgpu`, CPU reference always on)
   ├─ blend.rs                premultiplied OVER in linear light (shared by tiles + overlays)
   ├─ gpu/compositor.rs       composite pass → Rgba16Float linear canvas → encode pass → NV12
   └─ overlay/ (new, gated)   text rasterizer (cosmic-text/swash/etagere), atlas, primitive shaders,
@@ -115,11 +115,11 @@ mosaic-compositor  (rasterizer + draw; GPU behind `wgpu`, CPU reference always o
 
 **Division of responsibility (unchanged from the existing scaffold):**
 
-- `mosaic-overlay` stays **pure model + layout math**. It already emits the backend-agnostic
-  [`DrawList`](../../crates/mosaic-overlay/src/resolve.rs); the scope/meter/clock modules already
+- `multiview-overlay` stays **pure model + layout math**. It already emits the backend-agnostic
+  [`DrawList`](../../crates/multiview-overlay/src/resolve.rs); the scope/meter/clock modules already
   produce drawable values (`Histogram::bins`, `Waveform::columns`, `Vectorscope::bins`, hand angles,
   square-wave phase). It must **never** touch the GPU or a C library.
-- `mosaic-compositor` gains a new **feature-gated overlay module** that turns those models into
+- `multiview-compositor` gains a new **feature-gated overlay module** that turns those models into
   pixels: the glyph rasterizer + atlas, the primitive shaders, and the overlay blend sub-pass.
 - The **rasterizer is shared** between the GPU fast path and the CPU reference path so the two
   oracles never diverge on text metrics.
@@ -135,11 +135,11 @@ libass/HarfBuzz/FriBidi C toolchain. SRT/VTT need **no** native dependency.
 
 ### 3.1 Why raster atlas, not SDF/MSDF
 
-A raster glyph atlas wins for Mosaic on every axis that matters here: fast preprocessing (rasterize
+A raster glyph atlas wins for Multiview on every axis that matters here: fast preprocessing (rasterize
 on demand, no offline build), correct hinting, color/emoji glyphs, and "all characters." SDF/MSDF
 only pay off when you scale/rotate/zoom *the same glyph* arbitrarily or want cheap outline/glow/
 shadow effects — at the cost of slow offline generation, SDF rounded-corner artifacts, and ~3×
-atlas memory for MSDF (distance in RGB). Mosaic renders overlays at a **known, fixed canvas pixel
+atlas memory for MSDF (distance in RGB). Multiview renders overlays at a **known, fixed canvas pixel
 size** (invariant #6), so the scale-invariance benefit is unused.
 [Red Blob Games, *Distance field fonts*](https://www.redblobgames.com/articles/sdf-fonts/) is
 explicit: "SDF is not always the best choice for fonts."
@@ -156,15 +156,15 @@ We adopt the `glyphon` stack but use it surgically:
   fallback) and owns `SwashCache`. As of `cosmic-text` 0.15+ the shaper is **HarfRust** (a Rust
   HarfBuzz port; earlier versions used `rustybuzz`) — still MIT/Apache, cargo-deny clean.
 - **`swash`** rasterizes glyphs to bitmaps; **`etagere`** shelf-packs them into a dynamic atlas.
-- **Mosaic's compositor draws the cached glyph quads** through the existing `DrawList`/`DrawQuad`
+- **Multiview's compositor draws the cached glyph quads** through the existing `DrawList`/`DrawQuad`
   premultiplied-RGBA-atlas + quad-list contract — **not** through `glyphon`'s `TextRenderer::render`.
 
 **Why not `glyphon`'s renderer directly (load-bearing):** `glyphon`'s `prepare()/render()` targets a
 wgpu **render pass** with fixed-function alpha blending against an 8-bit sRGB/linear surface
 (`ColorMode::Accurate = Rgba8UnormSrgb`, `ColorMode::Web = Rgba8Unorm`) and blends in the
-framebuffer's color space. Mosaic's compositor has **no render pass** — it composites tiles into an
+framebuffer's color space. Multiview's compositor has **no render pass** — it composites tiles into an
 `Rgba16Float` **linear** canvas inside **compute** passes
-([`gpu/compositor.rs`](../../crates/mosaic-compositor/src/gpu/compositor.rs)) then a compute encode
+([`gpu/compositor.rs`](../../crates/multiview-compositor/src/gpu/compositor.rs)) then a compute encode
 pass writes NV12. Using `glyphon`'s `render()` would composite text in the wrong color space,
 bypassing invariant #8 (blend in linear light) and invariant #5 (NV12-throughout). So we take
 `cosmic-text`/`swash`/`etagere` for shaping + rasterization + atlas management and keep **one**
@@ -173,7 +173,7 @@ linear-light premultiplied blend path for tiles *and* overlays.
 **Version compatibility (verified 2026-06):** `glyphon` 0.11.0 (2026-04-13) requires `wgpu ^29.0.0`
 and `cosmic-text ^0.18`; the workspace pins **wgpu 29.0.3**
 ([`Cargo.lock`](../../Cargo.lock)) and the compositor depends on `wgpu = "29"`
-([`mosaic-compositor/Cargo.toml`](../../crates/mosaic-compositor/Cargo.toml)). So the stack is
+([`multiview-compositor/Cargo.toml`](../../crates/multiview-compositor/Cargo.toml)). So the stack is
 version-compatible **today, no fork needed**. `cosmic-text`/`swash`/`etagere` are all
 permissive (MIT OR Apache-2.0, + Zlib for some), so the default build stays LGPL-clean with **no
 native C dependency**. Pin the transitive `cosmic-text` via `glyphon`'s lockfile and re-run
@@ -182,10 +182,10 @@ shaping dependency graph).
 
 **Alpha correctness (load-bearing, verified):** `swash`/`cosmic-text` rasterize normal glyphs as
 **straight 8-bit coverage** (`swash::image::Image` `Alpha` format; subpixel RGBA only for color
-emoji). Mosaic's blend operates on **premultiplied linear RGBA**
-([`blend::over`](../../crates/mosaic-compositor/src/blend.rs)), so we **must** premultiply
+emoji). Multiview's blend operates on **premultiplied linear RGBA**
+([`blend::over`](../../crates/multiview-compositor/src/blend.rs)), so we **must** premultiply
 (`rgb * coverage, coverage`) at/just-before atlas upload — exactly as
-[`TextStyle.color`](../../crates/mosaic-overlay/src/layer.rs) already documents ("premultiplied at
+[`TextStyle.color`](../../crates/multiview-overlay/src/layer.rs) already documents ("premultiplied at
 upload time, ADR-R008"). This is the opposite of `libass`, whose bitmaps are **already**
 premultiplied (`r,g,b ≤ a`) and must **not** be premultiplied again. A mismatch halos *every*
 antialiased edge — a silent, pervasive bug ([resilience-and-av §7](../research/resilience-and-av.md)).
@@ -196,7 +196,7 @@ PPM/VU/peak/true-peak bars, peak-hold ticks, the R128 momentary/short/integrated
 graticule, the goniometer (Lissajous) trace, and the correlation meter are **uniform-driven quads,
 lines, and points** evaluated in the compositor shader. The per-frame data is a *handful of floats*
 pushed in a small uniform — not a rasterized image (ADR-R008 "meters-as-geometry"). The
-[`MeterStyle`](../../crates/mosaic-overlay/src/layer.rs) carries the static styling
+[`MeterStyle`](../../crates/multiview-overlay/src/layer.rs) carries the static styling
 (channels, orientation, peak-hold); the engine pushes levels each tick. Because audio meters are
 **high-rate**, the values are **conflated to ~10–30 Hz at the source** before they ever reach the
 draw path ([realtime-api](../research/realtime-api.md), invariant #10) — the engine never blocks on
@@ -216,13 +216,13 @@ a meter consumer.
   Sample extraction is conflated like meters.
 - **Safe-area / center-cross markers** are **static line primitives** — pure geometry, drawn once
   into the atlas (or evaluated in-shader) and never re-rasterized. The
-  [`safearea`](../../crates/mosaic-overlay/src/safearea.rs) model already produces the rectangles
+  [`safearea`](../../crates/multiview-overlay/src/safearea.rs) model already produces the rectangles
   and cross.
 - **Tally borders** are **quad fills** with brightness-scaled color from
-  [`tally::TallyState`](../../crates/mosaic-overlay/src/tally.rs); plus a small text label per lit
+  [`tally::TallyState`](../../crates/multiview-overlay/src/tally.rs); plus a small text label per lit
   region so the state reads beyond color alone (WCAG, ADR-W011). They change only on state.
 - **IDENTIFY flash** is a single full-tile quad whose alpha follows a square wave over the media
-  clock ([`identify.rs`](../../crates/mosaic-overlay/src/identify.rs)) — one uniform, no raster.
+  clock ([`identify.rs`](../../crates/multiview-overlay/src/identify.rs)) — one uniform, no raster.
 - **Alert cards** combine an **SDF rounded-rect** background with a text headline; the background is
   evaluated in-shader (crisp corners, no bitmap) and the text rides the atlas. Critical cards
   (SIGNAL LOST) keep their glyphs **atlas-resident at startup** so they draw at the instant of
@@ -305,9 +305,9 @@ static-image overlays + atlas-resident critical assets:
 
 ### 4.4 CPU reference path
 
-The CPU reference compositor ([`pipeline.rs`](../../crates/mosaic-compositor/src/pipeline.rs)) uses
+The CPU reference compositor ([`pipeline.rs`](../../crates/multiview-compositor/src/pipeline.rs)) uses
 the **same** `cosmic-text`/`swash` rasterizer: it blits the same coverage bitmaps into the
-`Rgba16Float` linear canvas with the same [`blend::over`](../../crates/mosaic-compositor/src/blend.rs).
+`Rgba16Float` linear canvas with the same [`blend::over`](../../crates/multiview-compositor/src/blend.rs).
 No second font engine is introduced, so the CPU oracle and GPU path produce identical text geometry
 (metrics, kerning, wrap) — only sub-pixel rounding differs, covered by the SSIM/PSNR threshold.
 Primitives are evaluated by the same closed-form math on CPU. (If a lighter CPU-only build ever
@@ -340,7 +340,7 @@ mpv's `osd-overlay` performance regression
 ([mpv #7615](https://github.com/mpv-player/mpv/issues/7615)) is the canonical bug: calling
 `osd:update()` at high rate with **unchanged** content drove the GPU to 60–100% because it
 re-rendered + flushed caches every frame. The fix is change-detection — do work only when content
-differs. **Mosaic must gate `set_text()` / re-`prepare()` / atlas upload on a content
+differs. **Multiview must gate `set_text()` / re-`prepare()` / atlas upload on a content
 hash/revision, never per frame.** The overlay models already carry the hooks: `ClockStyle.show_seconds`
 drives the per-second upload; UMD updates on a revision bump that fires only on a *visible* change.
 
@@ -410,7 +410,7 @@ correctness; the budgets above validate efficiency.
 | Complex shaping engine | HarfRust (via `cosmic-text` 0.15+) | MIT/Apache | transitive; cargo-deny clean |
 | ASS/SSA subtitle raster | `libass` (≥ 0.17 + HarfBuzz + FriBidi + libunibreak) | ISC/GPL-compatible C lib | **off-by-default `libass` feature** (adds C toolchain, ADR-R007) |
 | SRT/VTT subtitle raster | `cosmic-text` (same as labels) | MIT/Apache | pure Rust, no native dep |
-| Vector chrome (rounded rects, meters, scopes, markers) | hand-written WGSL SDF / quad / line shaders in `mosaic-compositor` | project (MIT OR Apache-2.0) | in-house; no dep |
+| Vector chrome (rounded rects, meters, scopes, markers) | hand-written WGSL SDF / quad / line shaders in `multiview-compositor` | project (MIT OR Apache-2.0) | in-house; no dep |
 
 **Bundled font:** ship a permissively-licensed, broad-coverage default font so labels/clocks/UMD
 render with **no host-font dependency** and deterministic metrics across platforms. Candidates:

@@ -1,7 +1,7 @@
-# Contributing to Mosaic
+# Contributing to Multiview
 
-Thanks for your interest in **Mosaic** — an efficient, hardware-accelerated, Rust live
-video mosaic generator. This guide covers everything you need to get a dev environment
+Thanks for your interest in **Multiview** — an efficient, hardware-accelerated, Rust live
+video multiview generator. This guide covers everything you need to get a dev environment
 running, build and test the workspace, follow our coding/feature conventions, and propose
 changes (including new architecture decisions).
 
@@ -42,7 +42,7 @@ changes (including new architecture decisions).
 
 ## Development environment
 
-Mosaic targets **Linux** (x86_64 + aarch64) and **macOS** (Apple Silicon + Intel). There
+Multiview targets **Linux** (x86_64 + aarch64) and **macOS** (Apple Silicon + Intel). There
 is **no Windows support**. The default build is **pure-Rust, LGPL-clean, and has no native
 dependencies** — you can build and run the full software pipeline with nothing but a Rust
 toolchain.
@@ -55,7 +55,7 @@ Install via [rustup](https://rustup.rs) and the pin is honoured automatically:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-cd mosaic
+cd multiview
 rustc --version # rustup auto-installs the pinned stable toolchain
 cargo build # default features: builds the pure-Rust trait/type layer
 ```
@@ -70,7 +70,7 @@ cargo install --locked cargo-deny
 ### Optional: FFmpeg (libav) — the `ffmpeg` feature
 
 Media crates that demux/decode/encode link **libav\*** behind the `ffmpeg` feature
-(`mosaic-ffmpeg` and the crates that use it). For any hardware path or real ingest/output
+(`multiview-ffmpeg` and the crates that use it). For any hardware path or real ingest/output
 you need an FFmpeg with the right capabilities.
 
 - The default build expects an **LGPL-clean FFmpeg** (no `--enable-gpl`,
@@ -111,7 +111,7 @@ current LTS Node and the lockfile in `web/`:
 ```bash
 cd web
 npm ci # install exactly per lockfile
-npm run dev # Vite dev server (proxies to the running mosaic API)
+npm run dev # Vite dev server (proxies to the running multiview API)
 npm run build # production build (embedded into the binary via the embed-web feature)
 ```
 
@@ -129,19 +129,19 @@ and attribution requirements. See [conventions §7](docs/architecture/convention
 
 ## Workspace layout
 
-Cargo workspace (`resolver = "2"`). All Rust crates are prefixed `mosaic-` and live under
+Cargo workspace (`resolver = "2"`). All Rust crates are prefixed `multiview-` and live under
 `crates/`. The full canonical map is in
 [conventions §2–§3](docs/architecture/conventions.md); the headline structure:
 
 ```
-mosaic/
+multiview/
 ├── Cargo.toml # workspace
 ├── rust-toolchain.toml rustfmt.toml .editorconfig deny.toml clippy.toml
 ├── LICENSE-MIT LICENSE-APACHE README.md CONTRIBUTING.md SECURITY.md
-├── crates/ # all mosaic-* crates
+├── crates/ # all multiview-* crates
 ├── web/ # management SPA (React + TS + Vite)
 ├── docs/ # architecture, decisions (ADRs), research briefs, ops
-├── examples/ # example mosaic configs + layout templates
+├── examples/ # example multiview configs + layout templates
 ├── deploy/ # Dockerfile, compose, container assets
 ├── xtask/ # dev automation (cargo xtask ...)
 └── .github/workflows/ # CI
@@ -151,12 +151,12 @@ Key crates you'll touch most often:
 
 | Crate | What it owns |
 |---|---|
-| `mosaic-core` | Shared types & stage traits (`Frame`, `PixelFormat`, `Source`, `Sink`, `Compositor`, …). **No FFI.** |
-| `mosaic-engine` | The protected output core: output clock, compositor drive, supervisor, hot-reconfig. |
-| `mosaic-compositor` | The custom GPU compositor (wgpu baseline + vendor fast paths). |
-| `mosaic-ffmpeg` | Safe RAII wrappers over libav\*. |
-| `mosaic-control` | axum REST + WebSocket + SSE API, OpenAPI, SQLite. |
-| `mosaic-cli` | The `mosaic` binary; aggregates feature flags. |
+| `multiview-core` | Shared types & stage traits (`Frame`, `PixelFormat`, `Source`, `Sink`, `Compositor`, …). **No FFI.** |
+| `multiview-engine` | The protected output core: output clock, compositor drive, supervisor, hot-reconfig. |
+| `multiview-compositor` | The custom GPU compositor (wgpu baseline + vendor fast paths). |
+| `multiview-ffmpeg` | Safe RAII wrappers over libav\*. |
+| `multiview-control` | axum REST + WebSocket + SSE API, OpenAPI, SQLite. |
+| `multiview-cli` | The `multiview` binary; aggregates feature flags. |
 | `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint). |
 
 **Dependency direction:** `core` ← everything; `engine` depends on the media crates;
@@ -193,12 +193,12 @@ and hardware):
 
 ```bash
 # A single feature
-cargo build -p mosaic-cli --features ffmpeg
+cargo build -p multiview-cli --features ffmpeg
 
-# An umbrella preset from mosaic-cli (see feature taxonomy below)
-cargo build -p mosaic-cli --features nvidia # cuda + ffmpeg + wgpu
-cargo build -p mosaic-cli --features apple # videotoolbox + metal + ffmpeg
-cargo build -p mosaic-cli --features linux-vaapi # vaapi + qsv + ffmpeg + wgpu
+# An umbrella preset from multiview-cli (see feature taxonomy below)
+cargo build -p multiview-cli --features nvidia # cuda + ffmpeg + wgpu
+cargo build -p multiview-cli --features apple # videotoolbox + metal + ffmpeg
+cargo build -p multiview-cli --features linux-vaapi # vaapi + qsv + ffmpeg + wgpu
 ```
 
 Dev automation lives in `xtask` — prefer it over ad-hoc scripts:
@@ -224,7 +224,7 @@ cargo xtask --help # build web, regenerate OpenAPI/AsyncAPI, lint, etc.
 
 ## Feature-flag conventions
 
-Feature flags are how Mosaic stays LGPL-clean and GPU-free by default while still shipping
+Feature flags are how Multiview stays LGPL-clean and GPU-free by default while still shipping
 full hardware acceleration. The taxonomy is canonical in
 [conventions §4](docs/architecture/conventions.md). Rules:
 
@@ -238,7 +238,7 @@ full hardware acceleration. The taxonomy is canonical in
 - **License-escalating features are opt-in only:**
  - `gpl-codecs` (x264/x265) makes the resulting build **GPL** — off by default.
  - `ndi` pulls the proprietary, runtime-loaded NDI path — off by default.
-- **Umbrella presets live in `mosaic-cli`** (`nvidia`, `apple`, `linux-vaapi`, `full` =
+- **Umbrella presets live in `multiview-cli`** (`nvidia`, `apple`, `linux-vaapi`, `full` =
  everything non-GPL). Don't scatter platform presets across leaf crates.
 
 Quick reference:
@@ -259,9 +259,9 @@ Quick reference:
 
 From [conventions §9](docs/architecture/conventions.md):
 
-- **Crates:** `mosaic-<area>` (kebab); the library target is `mosaic_<area>` (snake).
+- **Crates:** `multiview-<area>` (kebab); the library target is `multiview_<area>` (snake).
 - **Types:** `UpperCamel`; **functions/fields:** `snake_case`; **features:** `kebab-case`.
-- **Errors:** a per-crate `Error` enum via `thiserror`; app boundaries (e.g. `mosaic-cli`)
+- **Errors:** a per-crate `Error` enum via `thiserror`; app boundaries (e.g. `multiview-cli`)
  may use `anyhow`.
 - **Async** runtime is `tokio`; **logging/tracing** is `tracing`; **serialization** is
  `serde`.
@@ -379,7 +379,7 @@ template):
 
 ### Project license
 
-Mosaic is dual-licensed **MIT OR Apache-2.0** (see [`LICENSE-MIT`](LICENSE-MIT) and
+Multiview is dual-licensed **MIT OR Apache-2.0** (see [`LICENSE-MIT`](LICENSE-MIT) and
 [`LICENSE-APACHE`](LICENSE-APACHE)). By contributing, you agree your contributions are
 licensed under those same terms. The dual license is deliberate: the Apache-2.0 patent
 grant plus MIT's GPLv2 compatibility matter for the `gpl-codecs` build profile.
@@ -431,4 +431,4 @@ rebased with sign-offs before merge.
 Questions that aren't answered here usually are in
 [`docs/architecture/conventions.md`](docs/architecture/conventions.md) (the source of
 truth), the briefs in [`docs/research/`](docs/research/), or the decisions in
-[`docs/decisions/`](docs/decisions/). Thanks for contributing to Mosaic!
+[`docs/decisions/`](docs/decisions/). Thanks for contributing to Multiview!

@@ -15,7 +15,7 @@ export type Locale = (typeof SUPPORTED_LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = "en";
 
 /** The key used to persist an explicit user locale choice. */
-export const LOCALE_STORAGE_KEY = "mosaic.locale";
+export const LOCALE_STORAGE_KEY = "multiview.locale";
 
 /** Human-readable, self-named labels for the locale switcher. */
 export const LOCALE_LABELS: Readonly<Record<Locale, string>> = {

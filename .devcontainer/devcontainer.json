@@ -1,4 +1,4 @@
-// Mosaic dev container — Rust + FFmpeg/libav* + GPU (NVIDIA NVDEC/NVENC + Intel/AMD VAAPI) + Node + 1Password CLI.
+// Multiview dev container — Rust + FFmpeg/libav* + GPU (NVIDIA NVDEC/NVENC + Intel/AMD VAAPI) + Node + 1Password CLI.
 //
 // Cross-platform by design:
 //   * Linux NVIDIA host  -> --gpus all is auto-injected by hostRequirements.gpu:"optional"
@@ -10,7 +10,7 @@
 //
 // JSONC: comments are allowed in devcontainer.json.
 {
-  "name": "Mosaic (Rust + FFmpeg + GPU)",
+  "name": "Multiview (Rust + FFmpeg + GPU)",
 
   "build": {
     "dockerfile": "Dockerfile",
@@ -79,9 +79,9 @@
   // Named volumes for the cargo registry/git cache and the build target dir.
   // Empty named volumes mount as root; post-create.sh chowns them to vscode.
   "mounts": [
-    "source=mosaic-cargo-registry,target=/usr/local/cargo/registry,type=volume",
-    "source=mosaic-cargo-git,target=/usr/local/cargo/git,type=volume",
-    "source=mosaic-target,target=${containerWorkspaceFolder}/target,type=volume"
+    "source=multiview-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=multiview-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=multiview-target,target=${containerWorkspaceFolder}/target,type=volume"
   ],
 
   // HOST script: guarantees .env exists (so --env-file never fails), seeds the
@@ -99,7 +99,7 @@
   // API/serving port + Vite dev server.
   "forwardPorts": [8080, 5173],
   "portsAttributes": {
-    "8080": { "label": "Mosaic API / serving", "onAutoForward": "notify" },
+    "8080": { "label": "Multiview API / serving", "onAutoForward": "notify" },
     "5173": { "label": "Web SPA (Vite dev)", "onAutoForward": "silent" }
   },
 
@@ -123,7 +123,7 @@
         "files.watcherExclude": {
           "**/target/**": true,
           "**/node_modules/**": true,
-          "**/.mosaic-build/**": true
+          "**/.multiview-build/**": true
         }
       }
     }

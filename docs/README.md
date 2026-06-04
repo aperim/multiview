@@ -1,7 +1,7 @@
-# Mosaic Documentation
+# Multiview Documentation
 
-**Mosaic** is an efficient, hardware-accelerated, Rust live video mosaic generator: ingest many
-live sources, composite a templated mosaic on the GPU, and serve it robustly. It is built to run
+**Multiview** is an efficient, hardware-accelerated, Rust live video multiview generator: ingest many
+live sources, composite a templated multiview on the GPU, and serve it robustly. It is built to run
 great on **commodity hardware** and to produce **bulletproof, continuous output** — at every tick
 of one fixed internal clock, the engine emits exactly one valid frame, **forever**, independent of
 any input.
@@ -24,7 +24,7 @@ For the implementation plan and per-feature status, see [ROADMAP.md](../ROADMAP.
 
 | | |
 |---|---|
-| **Binary / daemon** | `mosaic` |
+| **Binary / daemon** | `multiview` |
 | **Language / edition** | Rust 2021 (stable, pinned via `rust-toolchain.toml`) |
 | **License (project)** | MIT OR Apache-2.0 — see [Licensing model](architecture/conventions.md#7-licensing-model-build-profiles) |
 | **Platforms** | Linux (x86_64 + aarch64; NVIDIA, Intel/AMD VAAPI) and macOS (Apple Silicon + Intel). **No Windows.** |
@@ -37,12 +37,12 @@ flowchart LR
     I1[rtsp/hls/ts/srt/rtmp]
     I2[ndi/file/test]
   end
-  I1 & I2 --> FS[mosaic-framestore<br/>last-good-frame stores]
-  FS --> C[mosaic-compositor<br/>GPU mosaic, linear-light]
+  I1 & I2 --> FS[multiview-framestore<br/>last-good-frame stores]
+  FS --> C[multiview-compositor<br/>GPU multiview, linear-light]
   CLK[(fixed-cadence<br/>output clock)] --> C
   C --> ENC[encode-once]
   ENC --> OUT[mux-many fan-out<br/>RTSP / HLS / NDI / RTMP / SRT]
-  CTRL[mosaic-control<br/>REST + WS/SSE] -. best-effort, cannot back-pressure .-> ENG[mosaic-engine]
+  CTRL[multiview-control<br/>REST + WS/SSE] -. best-effort, cannot back-pressure .-> ENG[multiview-engine]
   ENG --- C
 ```
 
@@ -82,7 +82,7 @@ and [research/core-engine.md](research/core-engine.md).)
 | [audio-subtitles-overlays.md](media/audio-subtitles-overlays.md) | Multistream discrete audio + program bus + EBU R128 metering; subtitle ingest/burn-in (libass) + passthrough; overlay layers. |
 
 ### Templates & layout (`templates/`)
-The mosaic layout and template model that drives compositing.
+The multiview layout and template model that drives compositing.
 
 | Doc | Description |
 |-----|-------------|
@@ -107,7 +107,7 @@ The management single-page app embedded in the binary.
 | [internationalization.md](web/internationalization.md) | i18n/l10n: library, ICU MessageFormat, Intl date/time/number, multi-timezone clocks, RTL, and the localization policy. |
 
 ### Operations (`operations/`)
-Building, deploying, and running Mosaic.
+Building, deploying, and running Multiview.
 
 | Doc | Description |
 |-----|-------------|
@@ -185,7 +185,7 @@ Every doc and implementation respects these; full details in
 
 ## Conventions for these docs
 
-- **Crate names** are always `mosaic-<area>` (kebab); types `UpperCamel`; features `kebab-case`.
+- **Crate names** are always `multiview-<area>` (kebab); types `UpperCamel`; features `kebab-case`.
 - **Link** to the deep brief in [`research/`](research/) or an [`ADR`](decisions/) rather than
   duplicating it.
 - Where any doc disagrees with [`architecture/conventions.md`](architecture/conventions.md), the

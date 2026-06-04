@@ -1,11 +1,11 @@
-# Mosaic — management web app
+# Multiview — management web app
 
 > [!NOTE]
-> **Early scaffold — implementation in progress.** This will be the real Mosaic management app; the
+> **Early scaffold — implementation in progress.** This will be the real Multiview management app; the
 > full design is in [`../docs/web/management-app.md`](../docs/web/management-app.md). Right now it is
 > a minimal compiling skeleton being built out against that design.
 
-The polished management console for Mosaic. This is a **scaffold**: a minimal
+The polished management console for Multiview. This is a **scaffold**: a minimal
 React 19 + TypeScript + Vite app that builds today. The full stack described in
 [`../docs/web/management-app.md`](../docs/web/management-app.md) is layered in
 during implementation:
@@ -28,6 +28,6 @@ npm run dev      # http://localhost:5173 (proxies /api -> http://localhost:8080)
 npm run build    # type-check + production build into web/dist
 ```
 
-In production the built assets are embedded into the `mosaic` binary via
-`rust-embed` and served by `mosaic-control` (single deployable). See
+In production the built assets are embedded into the `multiview` binary via
+`rust-embed` and served by `multiview-control` (single deployable). See
 [`../docs/architecture/conventions.md`](../docs/architecture/conventions.md) §8.

@@ -58,7 +58,7 @@ export function DashboardPage(): JSX.Element {
               <Trans>Layouts</Trans>
             </CardTitle>
             <CardDescription>
-              <Trans>Configured mosaic layouts.</Trans>
+              <Trans>Configured multiview layouts.</Trans>
             </CardDescription>
           </CardHeader>
           <CardContent>

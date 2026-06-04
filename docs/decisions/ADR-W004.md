@@ -7,7 +7,7 @@
 
 ## Decision
 
-Implement the visual mosaic/template editor on react-konva (canvas) with snap-to-grid, a Transformer for resize/rotate, and layer-based z-order, using dnd-kit for the accessible source palette and reorderable lists.
+Implement the visual multiview/template editor on react-konva (canvas) with snap-to-grid, a Transformer for resize/rotate, and layer-based z-order, using dnd-kit for the accessible source palette and reorderable lists.
 
 ## Rationale
 

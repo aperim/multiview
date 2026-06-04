@@ -2,9 +2,9 @@
 
 ---
 
-# Mosaic Realtime / Eventing API — Authoritative Brief
+# Multiview Realtime / Eventing API — Authoritative Brief
 
-**Status:** Proposed (lead-merged from 3 area designs) · **Date:** 2026-06-02 · **Owning crate:** `mosaic-control` (axum REST + WS) · **Shared types crate:** `mosaic-events`
+**Status:** Proposed (lead-merged from 3 area designs) · **Date:** 2026-06-02 · **Owning crate:** `multiview-control` (axum REST + WS) · **Shared types crate:** `multiview-events`
 
 This brief merges (1) the event model, (2) transport/auth/resilience/backpressure, and (3) documentation + typed client + web integration into one design. It is subordinate to and consistent with `core-engine.md` (control = Tokio/axum, data plane = dedicated threads), `resilience-av.md` (bulletproof output invariant, tile state machine §1.3, audio metering SPSC ring §5), and `efficiency.md` ("bound every queue to depth 1–3, drop-oldest; unbounded queues are the OOM failure mode").
 
@@ -12,7 +12,7 @@ This brief merges (1) the event model, (2) transport/auth/resilience/backpressur
 
 ## 1. Architecture: REST = commands, WS = events/state, SSE = degraded fallback
 
-Mosaic has two complementary control-plane surfaces, both served by the same axum router in `mosaic-control` under `/api/v1`:
+Multiview has two complementary control-plane surfaces, both served by the same axum router in `multiview-control` under `/api/v1`:
 
 - **REST (OpenAPI 3.1, served at `/docs` via Scalar):** synchronous **commands / CRUD** — create/patch/delete inputs, tiles, outputs, layouts; `apply` config; trigger session restart. Long-running work returns `202 Accepted` + a `correlationId` (a.k.a. `corr`); the result streams on the realtime channel.
 - **Realtime WebSocket (PRIMARY, AsyncAPI 3.0, served at `/docs/events`):** bidirectional **events / state** — full snapshot on connect then deltas, tile state-machine transitions, input events, audio meters, output status, alerts, layout/config changes, log tail, job progress, and WHEP preview signaling.
@@ -43,8 +43,8 @@ Every message — events, control frames, WHEP signaling — uses ONE envelope s
 
 - **Rust:** `struct Envelope<T>{v,t,topic,id,seq,ts,corr,data:T}` with an internally-tagged `EventPayload` enum (`#[serde(tag="t", content="data")]`) → renders as a JSON-Schema `oneOf` with a `const` discriminator → a perfect TypeScript discriminated union for exhaustive `switch` handling.
 - **Control frames** (`$hello`/`$subscribe`/`$subscribed`/`$unsubscribe`/`$snapshot`/`$resume`/`$resync`/`$lag`/`$ping`/`$pong`/`$error`) reuse the same envelope with `topic="$control"`.
-- **Binary fast-path:** high-rate meter frames MAY use a compact CBOR/MessagePack/fixed-LE body (same envelope shape, `t="audio.meter"`) when the client negotiates subprotocol `mosaic.bin.v1`. JSON is the canonical *documented* form; the AsyncAPI schema describes the decoded shape and notes the binary `contentType`.
-- **Versioning policy:** additive event types/fields → minor (clients ignore unknown `t`/fields); breaking → bump `v` major. `hello.server_v` advertises supported majors; the server may speak multiple majors during a migration window. The negotiated subprotocol `mosaic.v1` makes the wire major explicit.
+- **Binary fast-path:** high-rate meter frames MAY use a compact CBOR/MessagePack/fixed-LE body (same envelope shape, `t="audio.meter"`) when the client negotiates subprotocol `multiview.bin.v1`. JSON is the canonical *documented* form; the AsyncAPI schema describes the decoded shape and notes the binary `contentType`.
+- **Versioning policy:** additive event types/fields → minor (clients ignore unknown `t`/fields); breaking → bump `v` major. `hello.server_v` advertises supported majors; the server may speak multiple majors during a migration window. The negotiated subprotocol `multiview.v1` makes the wire major explicit.
 
 ### Key control schemas
 
@@ -181,7 +181,7 @@ Client controls its own view with control frames; the server filters server-side
 Server supports all three; **the one-time ticket is the recommended/default path for browsers.** Validation happens **before `on_upgrade`** so failures are debuggable HTTP responses, not silent socket closes.
 
 1. **One-time ticket (default):** authenticated `POST /api/v1/realtime/ticket` (normal bearer/cookie) → `{ticket, expires_in:30, bound_to:{ip,origin}, ws_url}`. Ticket is a random 256-bit single-use token (short-TTL in-memory map, or signed/HMAC stateless), bound to user/scopes + IP + Origin. Browser connects `wss://…/api/v1/realtime?ticket=…&last_seq=N`. Server consumes the ticket atomically on upgrade. Keeps long-lived tokens out of URLs/logs/history/Referer.
-2. **Subprotocol token:** `new WebSocket(url, ['mosaic.v1','mosaic.token.'+jwt])`; server reads `Sec-WebSocket-Protocol`, validates the JWT (same signer/scopes as REST), and **MUST echo back exactly one** non-secret subprotocol (`mosaic.v1`) or the browser silently closes (classic gotcha — integration-tested). Logging risk: token may land in proxy logs; documented, ticket preferred.
+2. **Subprotocol token:** `new WebSocket(url, ['multiview.v1','multiview.token.'+jwt])`; server reads `Sec-WebSocket-Protocol`, validates the JWT (same signer/scopes as REST), and **MUST echo back exactly one** non-secret subprotocol (`multiview.v1`) or the browser silently closes (classic gotcha — integration-tested). Logging risk: token may land in proxy logs; documented, ticket preferred.
 3. **Cookie (same-origin UI):** session cookie + **mandatory strict `Origin` allow-list check** in the upgrade handler (WS is NOT subject to CORS → CSWSH risk without it).
 
 **API/non-browser clients** can send `Authorization: Bearer` directly on the upgrade. **SSE** uses the Authorization header or the same ticket query param. All paths converge on one `AuthContext{principal, scopes}` shared with the REST identity system. Failure closes with WS code **4401** (auth required) / **4403** (forbidden scope) before any data. First server frame is always `$hello`.
@@ -237,12 +237,12 @@ Live preview uses WHEP (WebRTC-HTTP Egress Protocol); its SDP offer/answer + tri
 
 ## 10. Documentation, typed client, web reconciliation
 
-**Single source of truth:** every wire message is a Rust type in `mosaic-events` deriving `serde::{Serialize,Deserialize}` + `schemars::JsonSchema`. The SAME types feed `utoipa` (OpenAPI 3.1) and the AsyncAPI 3.0 generator, so a field added once shows up in both docs and both generated clients — docs cannot drift from the wire.
+**Single source of truth:** every wire message is a Rust type in `multiview-events` deriving `serde::{Serialize,Deserialize}` + `schemars::JsonSchema`. The SAME types feed `utoipa` (OpenAPI 3.1) and the AsyncAPI 3.0 generator, so a field added once shows up in both docs and both generated clients — docs cannot drift from the wire.
 
 - **AsyncAPI 3.0** (event-driven analog of OpenAPI) describes the WS server (ticket/subprotocol/cookie `securitySchemes`), the SSE server (modeled as a receive-only channel), every channel/topic + `$control` + `preview`, operations (send/receive), and the envelope message as a `oneOf` over payloads. Generated by an `xtask` (`gen-asyncapi`) using `asyncapi-rust` (v0.2) with a documented `serde_json` post-process to inject the WS `bindings` (method GET, ticket/last_seq query schema) that the crate does not yet emit; validated with `npx @asyncapi/cli validate`. **Fallback** if proc-macro coverage is thin: assemble the AsyncAPI document by hand from `schemars::schema_for!(T)` — same source of truth, more code.
 - **Interactive docs hub** served from the binary (rust-embed, no internet): `GET /docs` = Scalar over `/openapi.json` (REST/commands); `GET /docs/events` = `@asyncapi/react-component` (UMD bundle, zero build step) over `/asyncapi.json` (events/state). A landing page explains the split and cross-links (each mutating REST endpoint says "subscribe to topic X / event Y for the result").
 - **In-browser WS "Try it" console** beside `/docs/events` (<200 lines, vanilla): token field, Connect (using the documented subprotocol handshake), live auto-scrolling type-filtered envelope log with seq, and a send box pre-filled from AsyncAPI `send` examples (subscribe, command, WHEP offer). "Show meter frames" off by default so it isn't flooded. Doubles as the manual resume/Last-Event-ID smoke test.
-- **Typed clients (CI-generated, build fails on git diff):** Modelina emits TS interfaces + the envelope discriminated union from `asyncapi.json` (types only). A thin **hand-written** `MosaicRealtimeClient` (TS + Rust) owns the lifecycle (subprotocol auth, ping/pong, backoff reconnect, Last-Event-ID/seq resume, snapshot-vs-delta dispatch) typed BY the generated models, exposing `client.on(type, handler)` with full narrowing and `client.send(op, payload)` checked against `send` messages. (Generated WS *runtimes* are avoided — they fight the conflation/resume semantics.)
+- **Typed clients (CI-generated, build fails on git diff):** Modelina emits TS interfaces + the envelope discriminated union from `asyncapi.json` (types only). A thin **hand-written** `MultiviewRealtimeClient` (TS + Rust) owns the lifecycle (subprotocol auth, ping/pong, backoff reconnect, Last-Event-ID/seq resume, snapshot-vs-delta dispatch) typed BY the generated models, exposing `client.on(type, handler)` with full narrowing and `client.send(op, payload)` checked against `send` messages. (Generated WS *runtimes* are avoided — they fight the conflation/resume semantics.)
 
 **Web app (React + TanStack Query) reconciliation:**
 - A single `<RealtimeProvider>` instantiates the client once. The connect **SNAPSHOT seeds caches** via `queryClient.setQueryData(['tiles'|'outputs'|'layout'|'config'|'alerts'], …)` → existing `useQuery` hooks render instantly with no HTTP. Set high `staleTime` / disable `refetchOnWindowFocus` (WS is the source of truth; REST GETs are cold-start/fallback only).
@@ -299,7 +299,7 @@ flowchart LR
 - **Route handler (validate ticket/origin BEFORE upgrade):**
   ```rust
   async fn realtime_ws(ws: WebSocketUpgrade, ticket: WsTicket, State(rt): State<RealtimeState>) -> impl IntoResponse {
-      ws.protocols(["mosaic.v1"]).on_upgrade(move |sock| session(sock, ticket.auth, rt))
+      ws.protocols(["multiview.v1"]).on_upgrade(move |sock| session(sock, ticket.auth, rt))
   }
   ```
   `WsTicket` is an axum extractor resolving in the handler pre-`on_upgrade` (TTL + single-use consume + Origin/IP match). Keep the ticket store behind a trait (in-proc map now; Redis later for multi-node).
@@ -308,7 +308,7 @@ flowchart LR
   - **Pump task:** `tokio::select!`s over each subscribed `watch::Receiver::changed()`, each `broadcast::Receiver::recv()` (handle `Lagged(n)` → `$lag` + re-snapshot), the meter `interval` tick, and `rx.next()` for inbound (subscribe/set_rate, WHEP, client pings/acks); assigns `seq`, conflates, `try_send`s (never awaits a full queue).
 - **SSE:** reuse the pump via `axum::response::Sse<impl Stream>` adapting the same `OutFrame` stream to `event:`/`id:`/`data:` lines (`id:` = `seq`); require HTTP/2 (per-origin connection cap; SSE is UTF-8 text only so meters are base64/JSON — extra reason WS is preferred for the high-rate lane).
 - **Channels:** `tokio::watch` for snapshot-able latest-wins state (incl. single `MeterSnapshot` watch); `tokio::broadcast` for fan-out event streams; per-conn bounded `tokio::mpsc`/`thingbuf` (`try_send`) as the only client-fillable queue; `flume` to bridge sync data-plane producers; `backon` for client reconnect backoff.
-- **Crate placement:** lives in `mosaic-control`; wire types in a shared no-deps `mosaic-events` crate (the contract shared by engine, REST, WS, AsyncAPI generator, and codegen). `xtask` emits the combined OpenAPI + AsyncAPI + JSON-Schema bundle.
+- **Crate placement:** lives in `multiview-control`; wire types in a shared no-deps `multiview-events` crate (the contract shared by engine, REST, WS, AsyncAPI generator, and codegen). `xtask` emits the combined OpenAPI + AsyncAPI + JSON-Schema bundle.
 - **Metrics (bound cardinality — never label by connection id):** aggregate counters `dropped_meters`, `lagged_events`, `mpsc_full_disconnects`, `active_connections`, `resyncs`.
 - **Close codes (documented for clients):** 1000 normal, 1008/4401 auth, 4403 forbidden scope, 1011/4408 server/backpressure, 1013 try-later.
 - **Testability:** (a) every example envelope is a CI fixture validated against the generated schema (serde round-trip + JSON-Schema); (b) a conformance harness drives subscribe→snapshot→delta→disconnect→resume asserting seq monotonicity, gap-replay correctness, re-snapshot on overflow, rate clamping; (c) a **backpressure test** attaches a deliberately-stalled consumer and asserts ZERO effect on engine tick/output-validity SLO and bounded memory — the load-bearing automated proof; (d) fuzz the envelope/control parser (cargo-fuzz + arbitrary); (e) integration-test the subprotocol-echo handshake.

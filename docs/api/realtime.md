@@ -1,11 +1,11 @@
 # Realtime / Eventing API
 
 > **Audience:** integrators building dashboards, automation, or alternative UIs against a running
-> `mosaic` daemon. **Source of truth:** the wire types in the `mosaic-events` crate and the generated
+> `multiview` daemon. **Source of truth:** the wire types in the `multiview-events` crate and the generated
 > AsyncAPI document at `/asyncapi.json` (rendered at `/docs/events`). This page is a stable, skimmable
 > map of that contract — where it differs from generated specs, the generated specs win.
 
-Mosaic exposes **two complementary control-plane surfaces** on the same axum router in `mosaic-control`
+Multiview exposes **two complementary control-plane surfaces** on the same axum router in `multiview-control`
 under `/api/v1`:
 
 - **REST** (OpenAPI 3.1, docs at `/docs`) — synchronous **commands / CRUD**. See the
@@ -85,11 +85,11 @@ JSON-Schema `oneOf` with a `const` discriminator → a TypeScript discriminated 
 exhaustive `switch`.
 
 **Binary fast-path:** high-rate meter frames MAY use a compact CBOR/MessagePack/fixed-LE body (same
-envelope shape, `t = "audio.meter"`) when the client negotiates subprotocol **`mosaic.bin.v1`**. JSON
+envelope shape, `t = "audio.meter"`) when the client negotiates subprotocol **`multiview.bin.v1`**. JSON
 is the canonical *documented* form; the AsyncAPI schema describes the decoded shape and notes the
 binary `contentType`.
 
-**Subprotocol = wire major:** the negotiated subprotocol `mosaic.v1` makes the major explicit;
+**Subprotocol = wire major:** the negotiated subprotocol `multiview.v1` makes the major explicit;
 `$hello.server_v` advertises all supported majors (the server may speak several during a migration
 window).
 
@@ -274,7 +274,7 @@ socket closes. See [ADR-RT005](../decisions/ADR-RT005.md).
 | Method | Flow | Notes |
 |---|---|---|
 | **One-time ticket** (default) | `POST /api/v1/realtime/ticket` (bearer/cookie) → `{ticket, expires_in:30, bound_to:{ip,origin}, ws_url}`, then `wss://…/api/v1/ws?ticket=…&last_seq=N` | 256-bit single-use, short-TTL, bound to user/scopes + IP + Origin. Consumed atomically on upgrade. Keeps long-lived tokens out of URLs/logs. |
-| **Subprotocol token** | `new WebSocket(url, ['mosaic.v1','mosaic.token.'+jwt])` | Server validates the JWT and **MUST echo back exactly one** non-secret subprotocol (`mosaic.v1`) or the browser silently closes. Token may leak into proxy logs — ticket preferred. |
+| **Subprotocol token** | `new WebSocket(url, ['multiview.v1','multiview.token.'+jwt])` | Server validates the JWT and **MUST echo back exactly one** non-secret subprotocol (`multiview.v1`) or the browser silently closes. Token may leak into proxy logs — ticket preferred. |
 | **Cookie** (same-origin UI) | session cookie + **mandatory strict `Origin` allow-list** | WS is NOT subject to CORS → CSWSH risk without the check. |
 
 **API/non-browser clients** may send `Authorization: Bearer` directly on the upgrade. **SSE** uses the
@@ -443,13 +443,13 @@ Live preview uses **WHEP** (WebRTC-HTTP Egress Protocol). Its SDP offer/answer +
   endpoint (`POST offer → 201 answer + Location for ICE/DELETE`), or preview is disabled.
 
 Preview internals (taps, encoder pool, MJPEG/snapshot, signed tokens, auto-stop) are documented with the
-`mosaic-preview` crate; see [`../research/preview-subsystem.md`](../research/preview-subsystem.md).
+`multiview-preview` crate; see [`../research/preview-subsystem.md`](../research/preview-subsystem.md).
 
 ---
 
 ## 9. Documentation, schemas, and typed clients
 
-**Single source of truth:** every wire message is a Rust type in **`mosaic-events`** deriving
+**Single source of truth:** every wire message is a Rust type in **`multiview-events`** deriving
 `serde::{Serialize, Deserialize}` + `schemars::JsonSchema`. The same types feed `utoipa` (OpenAPI 3.1)
 and the AsyncAPI 3.0 generator, so a field added once shows up in both docs and both generated clients —
 **docs cannot drift from the wire.** See [ADR-RT006](../decisions/ADR-RT006.md).
@@ -469,7 +469,7 @@ and the AsyncAPI 3.0 generator, so a field added once shows up in both docs and 
   documented subprotocol handshake, a live type-filtered envelope log with `seq`, and a send box
   pre-filled from AsyncAPI `send` examples. "Show meter frames" is off by default.
 - **Typed clients (CI-generated, build fails on git diff):** Modelina emits TS interfaces + the envelope
-  discriminated union from `asyncapi.json` (types only). A thin **hand-written** `MosaicRealtimeClient`
+  discriminated union from `asyncapi.json` (types only). A thin **hand-written** `MultiviewRealtimeClient`
   (TS + Rust) owns the lifecycle — subprotocol auth, ping/pong, backoff reconnect,
   `Last-Event-ID`/`seq` resume, snapshot-vs-delta dispatch — typed by the generated models, exposing
   `client.on(type, handler)` with full narrowing and `client.send(op, payload)`. Generated WS *runtimes*
@@ -495,8 +495,8 @@ and the AsyncAPI 3.0 generator, so a field added once shows up in both docs and 
 
 ## 10. Operational notes & metrics
 
-- **Crate placement:** the realtime layer lives in `mosaic-control`; wire types live in the shared
-  no-deps **`mosaic-events`** crate — the contract shared by engine, REST, WS, the AsyncAPI generator,
+- **Crate placement:** the realtime layer lives in `multiview-control`; wire types live in the shared
+  no-deps **`multiview-events`** crate — the contract shared by engine, REST, WS, the AsyncAPI generator,
   and codegen. `xtask` emits the combined OpenAPI + AsyncAPI + JSON-Schema bundle.
 - **Metrics** (bound cardinality — **never** label by connection id): aggregate counters
   `dropped_meters`, `lagged_events`, `mpsc_full_disconnects`, `active_connections`, `resyncs`.

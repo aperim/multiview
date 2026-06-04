@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { lingui } from "@lingui/vite-plugin";
 
 // During development the SPA proxies the API; in production it is embedded into
-// the `mosaic` binary via rust-embed (see docs/web/management-app.md).
+// the `multiview` binary via rust-embed (see docs/web/management-app.md).
 //
 // Lingui compiles ICU catalogs to plain JS at build time; the macro plugin
 // transforms `t`/`<Trans>` macros (see docs/web/internationalization.md). We

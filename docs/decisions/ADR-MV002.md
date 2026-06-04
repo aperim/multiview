@@ -11,11 +11,11 @@ Implement the royalty-free TSL UMD protocol family as the dynamic-label/tally tr
 
 ## Rationale
 
-UMD + tally is the most universal, standards-anchored multiviewer capability, and TSL is the open de-facto standard. Mosaic already has the rendering primitives (label, tally_border); the gap is purely protocol ingestion/emission and bus-to-tile arbitration. The wire format and version differences were field-verified against the primary TSL spec.
+UMD + tally is the most universal, standards-anchored multiviewer capability, and TSL is the open de-facto standard. Multiview already has the rendering primitives (label, tally_border); the gap is purely protocol ingestion/emission and bus-to-tile arbitration. The wire format and version differences were field-verified against the primary TSL spec.
 
 ## Alternatives considered
 
-Internal-only tally from Mosaic's own state (rejected: a multiviewer must reflect the external on-air bus); a bespoke label/tally API only (rejected: no interop with switchers/routers/controllers); assume a fixed UDP port / 16-char field / always-on DLE-STX (rejected: contradicts the spec — port undefined, v5 text variable-length, framing TCP-only).
+Internal-only tally from Multiview's own state (rejected: a multiviewer must reflect the external on-air bus); a bespoke label/tally API only (rejected: no interop with switchers/routers/controllers); assume a fixed UDP port / 16-char field / always-on DLE-STX (rejected: contradicts the spec — port undefined, v5 text variable-length, framing TCP-only).
 
 ## Consequences
 

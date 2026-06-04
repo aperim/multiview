@@ -1,10 +1,10 @@
 # Hardware Abstraction & Commodity-Hardware Efficiency
 
-How Mosaic stays fast and bounded on real hardware: the **Hardware Abstraction Layer (HAL)**, per-stage backend **negotiation** and **cost model**, and the **commodity-first efficiency strategy** (decode-at-display-resolution, NV12-throughout, encode-once-mux-many, frame pooling, and resource-adaptive degradation).
+How Multiview stays fast and bounded on real hardware: the **Hardware Abstraction Layer (HAL)**, per-stage backend **negotiation** and **cost model**, and the **commodity-first efficiency strategy** (decode-at-display-resolution, NV12-throughout, encode-once-mux-many, frame pooling, and resource-adaptive degradation).
 
 > Canonical names, crate boundaries, feature flags, and invariants live in [`conventions.md`](./conventions.md) — that document wins on any naming conflict. This page links to the deep briefs at [`../research/core-engine.md`](../research/core-engine.md) and [`../research/efficiency.md`](../research/efficiency.md) rather than duplicating them.
 
-**Governing constraint:** an N-tile live mosaic must run *well* on a single entry/old GPU, an Intel iGPU (QSV/VAAPI), an AMD APU, a base Apple-silicon Mac, and low-RAM/few-core boxes. A 4-GPU/1 TB server is the trivial case, never the design target.
+**Governing constraint:** an N-tile live multiview must run *well* on a single entry/old GPU, an Intel iGPU (QSV/VAAPI), an AMD APU, a base Apple-silicon Mac, and low-RAM/few-core boxes. A 4-GPU/1 TB server is the trivial case, never the design target.
 
 ---
 
@@ -12,27 +12,27 @@ How Mosaic stays fast and bounded on real hardware: the **Hardware Abstraction L
 
 | Concern | Canonical crate | What it owns |
 |---|---|---|
-| Capability detection, backend registry, **negotiation** + **cost model/planner** | [`mosaic-hal`](./conventions.md#3-canonical-crate-map) | Probes hardware; ranks/scores backends per stage; emits a plan; feeds admission + degradation inputs |
-| Shared traits & types | `mosaic-core` | `Frame`, `PixelFormat` (NV12 canonical), `ColorInfo`, the stage traits (`Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`, `Backend`) |
-| Last-good-frame stores + tile state machine | `mosaic-framestore` | Lock-free single-slot stores; LIVE→STALE→RECONNECTING→NO_SIGNAL |
-| The GPU compositor (NV12-in → NV12-out, single pass) | `mosaic-compositor` | wgpu baseline + CUDA/Metal/VAAPI fast paths |
-| The protected output core + **adaptive control loop** | `mosaic-engine` | Output clock, compositor drive, admission/degradation loop, hot-reconfiguration |
-| Per-engine telemetry behind a `GpuStats` trait | `mosaic-telemetry` | NVML / macmon-IOReport / no-op; corroborates the cost model |
+| Capability detection, backend registry, **negotiation** + **cost model/planner** | [`multiview-hal`](./conventions.md#3-canonical-crate-map) | Probes hardware; ranks/scores backends per stage; emits a plan; feeds admission + degradation inputs |
+| Shared traits & types | `multiview-core` | `Frame`, `PixelFormat` (NV12 canonical), `ColorInfo`, the stage traits (`Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`, `Backend`) |
+| Last-good-frame stores + tile state machine | `multiview-framestore` | Lock-free single-slot stores; LIVE→STALE→RECONNECTING→NO_SIGNAL |
+| The GPU compositor (NV12-in → NV12-out, single pass) | `multiview-compositor` | wgpu baseline + CUDA/Metal/VAAPI fast paths |
+| The protected output core + **adaptive control loop** | `multiview-engine` | Output clock, compositor drive, admission/degradation loop, hot-reconfiguration |
+| Per-engine telemetry behind a `GpuStats` trait | `multiview-telemetry` | NVML / macmon-IOReport / no-op; corroborates the cost model |
 
-> The efficiency brief sketches `mosaic-planner` / `mosaic-sensors` / `mosaic-frame` as separate crates; per [`conventions.md`](./conventions.md), those responsibilities are **folded into `mosaic-hal`, `mosaic-engine`, `mosaic-telemetry`, and `mosaic-framestore`** respectively. The triangle that matters is **planner ↔ capability+cost registry ↔ frame pool**: the registry says *what is possible and what it costs*, the pool *bounds the bytes*, and the planner *chooses the cheapest plan that fits and degrades gracefully when it does not*.
+> The efficiency brief sketches `multiview-planner` / `multiview-sensors` / `multiview-frame` as separate crates; per [`conventions.md`](./conventions.md), those responsibilities are **folded into `multiview-hal`, `multiview-engine`, `multiview-telemetry`, and `multiview-framestore`** respectively. The triangle that matters is **planner ↔ capability+cost registry ↔ frame pool**: the registry says *what is possible and what it costs*, the pool *bounds the bytes*, and the planner *chooses the cheapest plan that fits and degrades gracefully when it does not*.
 
 ---
 
 ## 2. The HAL: per-stage backends behind one trait set
 
-Each pipeline stage is a trait in `mosaic-core` with multiple **feature-gated** implementations. Stages are negotiated **independently**, but the planner heavily penalizes any cross-vendor/device seam. Channels carry **backend-tagged frame handles, never pixels** — a handle wraps the concrete surface (CUDA `CUdeviceptr` + pitch, `VkImage`/wgpu `Texture`, `IOSurface`/`MTLTexture`, or a host buffer) plus color matrix/range/`sw_format`/geometry metadata.
+Each pipeline stage is a trait in `multiview-core` with multiple **feature-gated** implementations. Stages are negotiated **independently**, but the planner heavily penalizes any cross-vendor/device seam. Channels carry **backend-tagged frame handles, never pixels** — a handle wraps the concrete surface (CUDA `CUdeviceptr` + pitch, `VkImage`/wgpu `Texture`, `IOSurface`/`MTLTexture`, or a host buffer) plus color matrix/range/`sw_format`/geometry metadata.
 
 ```mermaid
 flowchart LR
-    subgraph Core["mosaic-core traits"]
+    subgraph Core["multiview-core traits"]
         S[Source] --> D[Decoder] --> C[Compositor] --> E[Encoder] --> O[Sink]
     end
-    subgraph HAL["mosaic-hal"]
+    subgraph HAL["multiview-hal"]
         DET[Capability detection<br/>L1/L2/L3] --> REG[("Capability + Cost Registry<br/>per stage x backend x codec")]
         REG --> PLAN[Backend planner<br/>scored assignment]
     end
@@ -72,7 +72,7 @@ plan(stream):
 
 ### 2.3 Zero-copy islands, costed seams
 
-Mosaic treats each GPU vendor as a **zero-copy island** and budgets an explicit `av_hwframe_transfer_data` (host) copy at every seam ([ADR-0004](../decisions/ADR-0004.md)). **Cross-vendor on-GPU zero-copy does not exist on desktop** — never architect for it.
+Multiview treats each GPU vendor as a **zero-copy island** and budgets an explicit `av_hwframe_transfer_data` (host) copy at every seam ([ADR-0004](../decisions/ADR-0004.md)). **Cross-vendor on-GPU zero-copy does not exist on desktop** — never architect for it.
 
 | Path | Status | Note |
 |---|---|---|
@@ -104,7 +104,7 @@ Feature flags (canonical, [conventions §4](./conventions.md#4-feature-flag-taxo
 
 ## 4. Efficiency philosophy
 
-1. **Bandwidth and memory are the wall, not compositor arithmetic.** A mosaic is sample-scale-into-a-grid; that math is cheap. Especially on iGPUs/APUs/Apple-silicon (GPU shares DDR with CPU), the binding resource is **memory bandwidth** and **VRAM/RAM footprint**, then fixed-function decode/encode throughput. **Optimize bytes moved before FLOPs.**
+1. **Bandwidth and memory are the wall, not compositor arithmetic.** A multiview is sample-scale-into-a-grid; that math is cheap. Especially on iGPUs/APUs/Apple-silicon (GPU shares DDR with CPU), the binding resource is **memory bandwidth** and **VRAM/RAM footprint**, then fixed-function decode/encode throughput. **Optimize bytes moved before FLOPs.**
 2. **Pixels you never materialize cost nothing.** Never decode/carry a tile at more pixels than displayed; never expand to RGBA. Both reductions are multiplicative across N tiles.
 3. **Encode is the most expensive and capacity-capped stage.** Composite once, encode the canvas once, fan the *same* bitstream to many transports. Per-output/per-tile re-encode is the cardinal sin.
 4. **Stay on-device, refcount, bound everything.** One shared context, device-resident surfaces, refcounted pooled frames, tiny bounded queues that **drop** rather than buffer.
@@ -158,7 +158,7 @@ Composite all tiles into the canvas, **encode exactly once per rendition**, and 
 
 ## 8. Frame pooling & bounded working set
 
-[ADR-E005](../decisions/ADR-E005.md); the lock-free single-slot stores live in `mosaic-framestore` ([invariant §5.2](./conventions.md#5-canonical-technical-invariants)).
+[ADR-E005](../decisions/ADR-E005.md); the lock-free single-slot stores live in `multiview-framestore` ([invariant §5.2](./conventions.md#5-canonical-technical-invariants)).
 
 - **Reference-count, never copy.** FFmpeg `AVFrame`/`AVBuffer` refcounting + `av_buffer_pool`; `bytes::Bytes` for CPU fan-out; stream-ordered GPU pools (`cudaMallocAsync`/`gpu-allocator`) for scratch.
 - **Pooling needs explicit recycle-on-drop.** Plain `Bytes`/`AVFrame` last-drop returns memory to the **global allocator, not your pool** — wrap in a pooled handle with a custom drop. Refcounting alone gives sharing, not reuse. **Drop refs early** — a slow sink holding refs drains the pool.
@@ -248,7 +248,7 @@ Sanity-check `per-tile budget × tile count < measured engine fps ceiling` on th
 
 ## 11. Commodity hardware tiers & default configs
 
-Decode-heavy/encode-light (mosaic profile). The binding limit per tier is **bold**; defaults are conservative — overcommit on the weakest box drops frames.
+Decode-heavy/encode-light (multiview profile). The binding limit per tier is **bold**; defaults are conservative — overcommit on the weakest box drops frames.
 
 | Tier | Example hardware | Binding limit | Realistic density | Session/engine caps | Recommended default |
 |---|---|---|---|---|---|

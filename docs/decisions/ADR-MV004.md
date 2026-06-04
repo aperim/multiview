@@ -7,11 +7,11 @@
 
 ## Decision
 
-Generalize the single composited output into a multi-head model: one engine renders multiple independent output heads, each with its own canvas resolution, layout/preset, source assignment and overlay set, with optional video-wall spanning of one logical layout across heads (per-display geometry/offset + bezel compensation) where Mosaic feeds a physical wall. Add named salvos — atomic multi-tile recalls (layout + source assignment + UMD + tally arming) applied on an arm/take, recallable by API, soft/hardware panel, GPI, NMOS, schedule (time/calendar) or event (SCTE-104/35, BXF). Output orientation (portrait/landscape) and per-tile rotation are per-head properties.
+Generalize the single composited output into a multi-head model: one engine renders multiple independent output heads, each with its own canvas resolution, layout/preset, source assignment and overlay set, with optional video-wall spanning of one logical layout across heads (per-display geometry/offset + bezel compensation) where Multiview feeds a physical wall. Add named salvos — atomic multi-tile recalls (layout + source assignment + UMD + tally arming) applied on an arm/take, recallable by API, soft/hardware panel, GPI, NMOS, schedule (time/calendar) or event (SCTE-104/35, BXF). Output orientation (portrait/landscape) and per-tile rotation are per-head properties.
 
 ## Rationale
 
-Multi-head independent layouts and salvo/scheduled recall are near-universal in professional multiviewers and unlock operational workflows (different walls/operators, event-driven layout changes) that a single-output compositor cannot express. The salvo concept is the multiviewer analogue of a router salvo and composes cleanly with Mosaic's existing layout presets and live hot-swap.
+Multi-head independent layouts and salvo/scheduled recall are near-universal in professional multiviewers and unlock operational workflows (different walls/operators, event-driven layout changes) that a single-output compositor cannot express. The salvo concept is the multiviewer analogue of a router salvo and composes cleanly with Multiview's existing layout presets and live hot-swap.
 
 ## Alternatives considered
 

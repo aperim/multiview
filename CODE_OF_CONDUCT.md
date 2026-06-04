@@ -51,7 +51,7 @@ The goal is a project that is welcoming to everyone, always.
 
 ## Original work & third-party intellectual property
 
-Mosaic is built from **open industry standards and original engineering** — never by copying
+Multiview is built from **open industry standards and original engineering** — never by copying
 others' work. Contributors must **not**:
 
 - Copy, paste, or closely paraphrase **proprietary or copyrighted** code, designs, UI, or

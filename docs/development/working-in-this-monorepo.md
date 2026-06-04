@@ -1,7 +1,7 @@
 # Working in this monorepo (for agents)
 
-This is the orientation guide for Claude Code and any coding agent working in the Mosaic
-repository. Mosaic is a complex greenfield monorepo: a 16-crate Cargo workspace under
+This is the orientation guide for Claude Code and any coding agent working in the Multiview
+repository. Multiview is a complex greenfield monorepo: a 16-crate Cargo workspace under
 `crates/`, a React/TypeScript SPA under `web/`, dev automation in `xtask/`, and a large
 `docs/` tree (architecture, 10 research briefs, 89 ADRs). This page tells you **how to move
 through it efficiently without drowning your context window** — applying the official Claude
@@ -12,7 +12,7 @@ and [How Claude remembers your project](https://code.claude.com/docs/en/memory).
 ## TL;DR — the five habits
 
 1. **Start Claude from the crate you're working in**, not always the repo root. From
-   `crates/mosaic-input/` you get the root `CLAUDE.md` **plus** `crates/mosaic-input/CLAUDE.md`,
+   `crates/multiview-input/` you get the root `CLAUDE.md` **plus** `crates/multiview-input/CLAUDE.md`,
    and *nothing* from the other 15 crates. ([why](https://code.claude.com/docs/en/large-codebases#choose-where-to-start-claude))
 2. **Read the brief before you touch the subsystem.** Each crate's nested `CLAUDE.md` names the
    exact research brief(s) and ADRs to read first. The briefs are verification-hardened — they
@@ -65,7 +65,7 @@ Claude Code reads `CLAUDE.md`, not `AGENTS.md`
   crate." This is what we added.
 - `.claude/rules/*.md` (with a `paths:` glob in frontmatter) load when Claude touches matching
   files anywhere. Useful later for cross-cutting rules that span scattered paths (e.g. a color
-  pipeline rule over both `mosaic-compositor` and `mosaic-ffmpeg`). Optional follow-up.
+  pipeline rule over both `multiview-compositor` and `multiview-ffmpeg`). Optional follow-up.
 - **Skills** (`.claude/skills/<name>/SKILL.md`) load only when invoked — for multi-step
   *procedures* (run the invariant audit, generate the OpenAPI client), not for orientation.
   ([compare](https://code.claude.com/docs/en/large-codebases#choose-between-per-directory-claude-md-and-path-scoped-rules))
@@ -89,7 +89,7 @@ Context is the fundamental constraint in a 16-crate workspace. Treat it as a bud
 - **Work one crate/area at a time**; `/clear` between unrelated tasks.
 - **Don't read whole briefs into the main thread** to answer a narrow question. Send a subagent.
 - **Don't read generated/build output.** Searches respect `.gitignore`, so `target/`,
-  `node_modules/`, `.mosaic-build/` stay out of results. Don't open them manually.
+  `node_modules/`, `.multiview-build/` stay out of results. Don't open them manually.
 - **Prefer `rg` over broad file reads** to locate symbols/usages (see Navigation below).
 - Per the docs, keep instruction files lean: target **under ~200 lines per CLAUDE.md** so
   adherence stays high. The per-crate files are intentionally a few dozen lines each.
@@ -103,7 +103,7 @@ and returns only the summary
 ([docs](https://code.claude.com/docs/en/subagents)). Good uses here:
 
 - "Read `streaming-gotchas.md` §1–§3 and summarize the PTS-normalization rules" before editing
-  `mosaic-input`.
+  `multiview-input`.
 - "Find every place `out_pts` / the tick counter is computed across the workspace."
 - "Review this diff against invariants #1 and #10 and report violations with ADR refs."
 
@@ -113,8 +113,8 @@ The repo is large; use targeted search, not tree-walking.
 
 ```bash
 rg -n "out_pts|tick"                 # find the output-clock timing logic
-rg -n "trait Source|trait Sink"      # locate stage trait definitions (mosaic-core)
-rg --type rust -l "AVHWFramesContext" crates/mosaic-ffmpeg   # FFI hwframe lifecycle
+rg -n "trait Source|trait Sink"      # locate stage trait definitions (multiview-core)
+rg --type rust -l "AVHWFramesContext" crates/multiview-ffmpeg   # FFI hwframe lifecycle
 rg -n "ADR-T003" docs/                # everywhere a decision is referenced
 fd CLAUDE.md crates web              # list all nested agent docs
 ```

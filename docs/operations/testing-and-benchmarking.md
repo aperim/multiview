@@ -1,6 +1,6 @@
 # Testing & Benchmarking
 
-How Mosaic proves it is **bulletproof** and **efficient on commodity hardware** — the two
+How Multiview proves it is **bulletproof** and **efficient on commodity hardware** — the two
 load-bearing promises of the project. This page is the operational map of the test strategy: what we
 test, how we inject faults, the numeric SLOs that gate "never falters," the density/perf benchmarks
 that gate efficiency regressions, and how almost all of it runs **without a GPU** on every PR.
@@ -47,21 +47,21 @@ Layers U → C run on **every PR with no GPU**; S and B run on dedicated/self-ho
 The default `cargo test` builds the LGPL-clean, no-native-deps layer (conventions §4), so unit tests
 never need a GPU or libav. High-value targets, by crate:
 
-- **`mosaic-core` / `mosaic-clock`** — `out_pts = f(tick)` is a *pure function*: exhaustively assert
+- **`multiview-core` / `multiview-clock`** — `out_pts = f(tick)` is a *pure function*: exhaustively assert
   monotonicity and gap-freeness, including the NTSC `1001` rational cadences (60000/1001, 30000/1001)
   carried as exact rationals/ns — **never float fps**. Test **past the wrap boundary**: feed
   synthetic 33-bit TS / 32-bit RTP timestamps that roll over and assert the delta-based unwrap stays
   monotonic (the MediaMTX #622 false-rollover trap). See the [timing model](../research/streaming-gotchas.md#0-the-unified-timing-model).
-- **`mosaic-framestore`** — the per-tile LIVE → STALE → RECONNECTING → NO_SIGNAL ladder is a state
+- **`multiview-framestore`** — the per-tile LIVE → STALE → RECONNECTING → NO_SIGNAL ladder is a state
   machine: table-driven tests over `(state, event, elapsed)`; assert the lock-free single-slot store
   is latest-wins and never blocks either side.
-- **`mosaic-input`** — timestamp normalize (unwrap, genpts fallback, monotonic guard, discontinuity
+- **`multiview-input`** — timestamp normalize (unwrap, genpts fallback, monotonic guard, discontinuity
   re-anchor) and the HLS PTS→wall-clock pacer math, with **deterministic time** via the tokio paused
   clock so a 26.5 h wrap is simulated in milliseconds.
-- **`mosaic-hal` / planner** — the capability+cost **registry** and the degradation **ladder** are
+- **`multiview-hal` / planner** — the capability+cost **registry** and the degradation **ladder** are
   pure data + ordering logic: assert the cheapest-impact-first order and hysteresis/cooldown never
   oscillate.
-- **`mosaic-config` / `mosaic-control`** — schema round-trip (serde), and the **capability-aware
+- **`multiview-config` / `multiview-control`** — schema round-trip (serde), and the **capability-aware
   validator** that greys out impossible routes per output (e.g. N discrete audio tracks on legacy
   RTMP, channel-map on NDI) — the [verified matrix](../research/resilience-and-av.md#42-output-discrete-audio-capability-matrix-verified) is a first-class data structure under test.
 
@@ -92,7 +92,7 @@ The synthetic matrix is engineered to exercise every documented failure axis det
 
 | Axis | What the fixture forces | Source recipe |
 |---|---|---|
-| **Mismatched fps** | 25 / 29.92 / 29.97 / 30 / 50 / 60 in one mosaic | `testsrc2=rate=…` per tile |
+| **Mismatched fps** | 25 / 29.92 / 29.97 / 30 / 50 / 60 in one multiview | `testsrc2=rate=…` per tile |
 | **Fractional NTSC** | 30000/1001 carried as exact rational | `smptebars=rate=30000/1001` |
 | **Color tagging** | untagged · BT.709 limited · BT.601 (smpte170m) · full-range | `scale=out_range=tv/pc` + `-color_*` tags |
 | **Codec paths** | H.264 + HEVC | `libx264` / `libx265` |
@@ -133,7 +133,7 @@ liveness:
 ## 5. The CHAOS plan: fault injection + output-validity SLOs
 
 This is the heart of "never falters." The invariant is encoded as **numeric SLOs** measured by an
-**always-on output-validity probe** (`mosaic-telemetry` Prometheus histograms + an error budget),
+**always-on output-validity probe** (`multiview-telemetry` Prometheus histograms + an error budget),
 and chaos is injected *against a running output* while the probe arbitrates. Deep detail:
 [Resilience brief §9](../research/resilience-and-av.md#9-resilience-testing) and
 [ADR-R009](../decisions/ADR-R009.md).
@@ -168,7 +168,7 @@ flowchart LR
       DEV["device.destroy() / Xid-class\nGPU device loss"]
       PBT["proptest-state-machine\nrandomized live config/layout commands"]
     end
-    INJECT --> PIPE["Running Mosaic pipeline"]
+    INJECT --> PIPE["Running Multiview pipeline"]
     PIPE --> PROBE["Always-on output-validity probe (SLOs)"]
     PROBE --> GATE{"No-falter gate"}
 ```

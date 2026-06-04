@@ -40,7 +40,7 @@ export interface components {
          *
          *     The `body` is the opaque, validated layout document the editor produces; the
          *     control plane stores and version-stamps it without interpreting its
-         *     internals here. (Engine-side validation against `mosaic-config` happens
+         *     internals here. (Engine-side validation against `multiview-config` happens
          *     before a layout is applied.)
          */
         Layout: {

@@ -11,7 +11,7 @@ When HDR (PQ/HLG/BT.2020) tiles are composited into the default SDR BT.709 canva
 
 ## Rationale
 
-A roll-off curve anchored at diffuse white is the single rule that prevents one bright HDR tile from washing out/crushing the SDR tiles (the burned-by bug); linear normalization to peak crushes SDR. Per-tile (not per-canvas) tone-mapping is required because tiles differ. BT.2390 EETF is standardized, cheap, deterministic, and temporally stable (avoids live flicker). 203 nits is ITU-R BT.2408 operational guidance matching Android/W3C compositing practice. Dynamic per-scene HDR metadata is impractical for a live mosaic.
+A roll-off curve anchored at diffuse white is the single rule that prevents one bright HDR tile from washing out/crushing the SDR tiles (the burned-by bug); linear normalization to peak crushes SDR. Per-tile (not per-canvas) tone-mapping is required because tiles differ. BT.2390 EETF is standardized, cheap, deterministic, and temporally stable (avoids live flicker). 203 nits is ITU-R BT.2408 operational guidance matching Android/W3C compositing practice. Dynamic per-scene HDR metadata is impractical for a live multiview.
 
 ## Alternatives considered
 

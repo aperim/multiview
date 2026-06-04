@@ -1,4 +1,4 @@
-# ADR-T007: Codec edge-case & decode/encode policy: one bad input never stalls the mosaic
+# ADR-T007: Codec edge-case & decode/encode policy: one bad input never stalls the multiview
 
 - **Status:** Proposed
 - **Area:** Streaming/Timing

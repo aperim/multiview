@@ -1,6 +1,6 @@
-# Mosaic — Glossary
+# Multiview — Glossary
 
-Domain terms used across the Mosaic documentation, alphabetised. Each entry is a single
+Domain terms used across the Multiview documentation, alphabetised. Each entry is a single
 paragraph; cross-links point to the deep research briefs in [`research/`](research/), the
 decision records in [`decisions/`](decisions/), and the architecture docs in
 [`architecture/`](architecture/). The canonical names, crate map, feature flags, and
@@ -24,7 +24,7 @@ loop; the second half is degradation. See [`architecture/hardware-and-efficiency
 **AVHWDeviceContext** — A libav structure describing a GPU **device** (the CUDA context, the
 VAAPI display, the VideoToolbox device, etc.). It is created once per physical device and
 shared by every stage pinned to that device so they can stay on one zero-copy island. Lives
-behind the safe RAII wrappers in `mosaic-ffmpeg`.
+behind the safe RAII wrappers in `multiview-ffmpeg`.
 
 **AVHWFramesContext** — The libav structure describing a **pool of GPU frames** (its
 `sw_format`, dimensions, and allocation) hanging off an `AVHWDeviceContext`. It is rebuilt by
@@ -43,7 +43,7 @@ is always compiled in as the universal fallback. See
 
 ## C
 
-**Canvas** — The single output frame the mosaic is composed onto: its width, height, fps
+**Canvas** — The single output frame the multiview is composed onto: its width, height, fps
 (carried as an exact rational such as `60000/1001`), pixel format (NV12 canonical), and
 background. The canvas also has a configurable working/output **color space** — default
 `sdr-bt709-limited`, with opt-in `hdr-pq-bt2020` / `hdr-hlg-bt2020`. See the
@@ -62,11 +62,11 @@ color: **primaries** (gamut), **transfer / TRC** (the gamma curve), **matrix / c
 (YUV↔RGB coefficients), and **range** (limited vs full quantization). They are signaled and
 defaulted independently and must never be collapsed into one "colorspace" concept. Getting
 any one wrong silently corrupts output on some players. Modeled by `ColorInfo` in
-`mosaic-core`; see the [color brief](research/color-management.md) §1 and
+`multiview-core`; see the [color brief](research/color-management.md) §1 and
 [ADR-C001](decisions/ADR-C001.md).
 
 **Compositor** — The custom GPU stage that scales, places, color-converts, and blends every
-tile into the canvas. Mosaic deliberately owns this (rather than using FFmpeg filter graphs)
+tile into the canvas. Multiview deliberately owns this (rather than using FFmpeg filter graphs)
 because no FFmpeg/GStreamer stack filter does per-cell fit/cover/crop. Implemented as
 `CudaCompositor` / `MetalCompositor` / `VulkanCompositor` (with wgpu as the portable
 baseline). See [`architecture/pipeline.md`](architecture/pipeline.md) and the
@@ -76,7 +76,7 @@ baseline). See [`architecture/pipeline.md`](architecture/pipeline.md) and the
 
 **Deadline-driven compositor** — A compositor that produces a frame at each fixed output
 deadline using whatever tiles are currently available, **never** waiting for all inputs (one
-stalled source must never freeze the mosaic). Stalled tiles render their last-good frame, then
+stalled source must never freeze the multiview). Stalled tiles render their last-good frame, then
 a "no signal" card after a stale timeout. Mirrors `GstAggregator`'s deadline model; note the
 GStreamer default is wait-for-all, so the deadline path is deliberately engineered as the
 primary mode. See [`architecture/timing-and-sync.md`](architecture/timing-and-sync.md) and the
@@ -95,7 +95,7 @@ counterpart to admission. See [`architecture/hardware-and-efficiency.md`](archit
 and [`architecture/conventions.md`](architecture/conventions.md) §5.9.
 
 **DTS (Decode TimeStamp)** — The timestamp telling the decoder/muxer *when to decode* a
-packet, which differs from PTS (display order) whenever B-frames reorder frames. Mosaic
+packet, which differs from PTS (display order) whenever B-frames reorder frames. Multiview
 schedules by `best_effort_timestamp` (display order) on input and lets libavcodec assign DTS
 on the encoded output; any stream-copy path must clamp `dts = max(dts, last+1)` because
 `av_interleaved_write_frame` aborts on the first non-monotonic DTS. See
@@ -105,12 +105,12 @@ on the encoded output; any stream-copy path must clamp `dts = max(dts, last+1)` 
 ## E
 
 **EBU R128** — The loudness-normalisation standard (integrated LUFS, loudness range, true
-peak) used by `mosaic-audio` for metering the program bus and discrete tracks. High-rate
+peak) used by `multiview-audio` for metering the program bus and discrete tracks. High-rate
 meters are sampled/conflated (~10–30 Hz) before going to clients so the realtime layer never
 back-pressures the engine. See [`architecture/conventions.md`](architecture/conventions.md) §3.
 
 **EBU R37** — The lip-sync tolerance window (audio +40 ms ahead / −60 ms behind video).
-Mosaic biases audio slightly behind video because audio-ahead is more perceptible, and uses
+Multiview biases audio slightly behind video because audio-ahead is more perceptible, and uses
 this window as a soak-test acceptance criterion. See the
 [streaming-gotchas brief](research/streaming-gotchas.md) §5, §7.
 
@@ -133,13 +133,13 @@ math. Its inverse, the **OETF**, is applied on encode. See the
 source (src-rect); contain/scale_down pad the destination (letterbox). Fit modes lower to
 (src-rect, dst-rect) pairs in the compositor. See the [core-engine brief](research/core-engine.md) §13.
 
-**Frame** — The canonical media unit in `mosaic-core`, carrying a backend-tagged surface
+**Frame** — The canonical media unit in `multiview-core`, carrying a backend-tagged surface
 handle (CUDA pointer + pitch / wgpu texture / IOSurface / host buffer), its `PixelFormat`,
 its resolved `ColorInfo` (the 4 axes), and its `MediaTime`. Channels carry frame *handles*,
 never pixels. See [`architecture/conventions.md`](architecture/conventions.md) §3.
 
 **Frame store** — The per-tile **single-slot, lock-free** store (a triple-buffer in
-`mosaic-framestore`) into which an input writes its newest decoded frame and from which the
+`multiview-framestore`) into which an input writes its newest decoded frame and from which the
 compositor reads the latest at each output tick. Overwrite semantics give bounded memory
 (newest wins); the store never blocks the compositor. See
 [`architecture/pipeline.md`](architecture/pipeline.md) and the
@@ -152,8 +152,8 @@ Modeled on the NDI framesync / broadcast TBC. See [`architecture/timing-and-sync
 
 ## H
 
-**HAL (Hardware Abstraction Layer)** — The backend-agnostic trait layer (`mosaic-hal` plus the
-stage traits in `mosaic-core`: `Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`,
+**HAL (Hardware Abstraction Layer)** — The backend-agnostic trait layer (`multiview-hal` plus the
+stage traits in `multiview-core`: `Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`,
 `Backend`) that lets each pipeline stage be negotiated independently across vendors. It also
 owns capability detection, the backend registry, and the cost-model planner. See
 [`architecture/overview.md`](architecture/overview.md) and the
@@ -161,7 +161,7 @@ owns capability detection, the backend registry, and the cost-model planner. See
 
 **hwaccel** — The generic FFmpeg path in which a software-named decoder delegates to hardware
 via an `AVHWDeviceContext` plus a `get_format` callback, yielding GPU-resident frames and
-supporting automatic software fallback. Mosaic prefers this generic path over the `*_cuvid` /
+supporting automatic software fallback. Multiview prefers this generic path over the `*_cuvid` /
 `*_qsv` wrapper decoders precisely because only it offers uniform negotiation and fallback.
 See the [core-engine brief](research/core-engine.md) §6.5.
 
@@ -185,8 +185,8 @@ axes). See the [color brief](research/color-management.md) §1–2 and [ADR-C002
 **LL-HLS (Low-Latency HLS)** — Apple's low-latency HLS: partial segments (`EXT-X-PART`),
 preload hints, `EXT-X-SERVER-CONTROL` with `CAN-BLOCK-RELOAD`/`PART-HOLD-BACK`, and blocking
 playlist reload (`_HLS_msn`/`_HLS_part`) over HTTP/2. FFmpeg's `hls` muxer **cannot** emit it
-(its `-lhls` is the unrelated `EXT-X-PREFETCH` variant), so Mosaic builds a custom CMAF
-segmenter + blocking-reload origin in `mosaic-output`, reusing the `hls-playlist` crate for the
+(its `-lhls` is the unrelated `EXT-X-PREFETCH` variant), so Multiview builds a custom CMAF
+segmenter + blocking-reload origin in `multiview-output`, reusing the `hls-playlist` crate for the
 tag layer. Target latency ~2–5 s. See [`io/outputs.md`](io/outputs.md), the
 [streaming-gotchas brief](research/streaming-gotchas.md) §4, and the
 [core-engine brief](research/core-engine.md) §9.2.
@@ -199,10 +199,10 @@ gamma/YUV space causes dark fringing on edges and wrong mids. The canvas working
 
 ## M
 
-**MediaTime** — Mosaic's internal monotonic timeline value, carried as i64 nanoseconds (NTSC
+**MediaTime** — Multiview's internal monotonic timeline value, carried as i64 nanoseconds (NTSC
 `1001` rates kept as exact rationals/ns, never float fps). Per-input PTS is normalized and
 rebased onto this single timeline, and the output re-stamps all PTS/DTS from the tick counter.
-Defined in `mosaic-core`. See [`architecture/timing-and-sync.md`](architecture/timing-and-sync.md).
+Defined in `multiview-core`. See [`architecture/timing-and-sync.md`](architecture/timing-and-sync.md).
 
 ## N
 
@@ -224,7 +224,7 @@ See the [core-engine brief](research/core-engine.md) §6.3, [ADR-0003](decisions
 and [ADR-E008](decisions/ADR-E008.md).
 
 **NV12 / P010** — YUV pixel layouts. **NV12** is 8-bit 4:2:0 semi-planar (1.5 B/px) and is
-Mosaic's canonical pixel format — frames stay NV12 throughout and YUV→RGB happens in-shader at
+Multiview's canonical pixel format — frames stay NV12 throughout and YUV→RGB happens in-shader at
 tile size; RGBA is never materialised per tile. **P010** is the 10-bit equivalent (10 bits
 stored in the high bits of 16-bit words; descale before normalizing). Related host layouts:
 P216 (16-bit 4:2:2), UYVY (packed 4:2:2). See
@@ -279,19 +279,19 @@ on `sw_format` for plane layout and bit depth, and it can change mid-stream (han
 
 ## T
 
-**Tile / Cell** — One source rendered into a sub-rectangle of the mosaic canvas. Each tile owns
+**Tile / Cell** — One source rendered into a sub-rectangle of the multiview canvas. Each tile owns
 its own decode→FrameSync chain, frame store, last-good frame, and resolved color tuple, and
 rides a state machine independently of every other tile. See **Tile state machine** and the
 [core-engine brief](research/core-engine.md) §3.
 
 **Tile state machine** — The per-tile lifecycle **LIVE → STALE → RECONNECTING → NO_SIGNAL**
 that governs what the compositor draws: the latest frame when LIVE, the last-good frame while
-STALE/RECONNECTING, and a placeholder card at NO_SIGNAL. Lives in `mosaic-framestore`. See
+STALE/RECONNECTING, and a placeholder card at NO_SIGNAL. Lives in `multiview-framestore`. See
 [`architecture/resilience.md`](architecture/resilience.md) and
 [`architecture/conventions.md`](architecture/conventions.md) §5.2.
 
 **Timebase** — The rational unit (e.g. `1/90000`, `1/1000000000`) in which a stream's
-timestamps are counted. Mosaic rescales every input timebase to its internal ns timeline via
+timestamps are counted. Multiview rescales every input timebase to its internal ns timeline via
 `av_rescale_q` and carries NTSC `1001`-family cadences as exact rationals — never float fps,
 which drifts ~3.6 s/hour. See the [streaming-gotchas brief](research/streaming-gotchas.md) §2.
 
@@ -307,7 +307,7 @@ mapping linear light to code values; `AVColorTransferCharacteristic`, unspecifie
 ## W
 
 **WHEP (WebRTC-HTTP Egress Protocol)** — The sub-second-latency, signed-token-gated transport
-used by the isolated **preview** subsystem (`mosaic-preview`, `webrtc` feature) for input/
+used by the isolated **preview** subsystem (`multiview-preview`, `webrtc` feature) for input/
 program/output taps. Preview is physically incapable of back-pressuring the engine and
 auto-stops with no subscribers; cheaper MJPEG/JPEG grids cover the high-density case. WebRTC is
 *not* a program-output transport in v1. See [`architecture/conventions.md`](architecture/conventions.md) §6

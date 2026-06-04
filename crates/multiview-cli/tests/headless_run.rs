@@ -1,0 +1,240 @@
+//! End-to-end software smoke of invariant #1 via the `run --headless` path.
+//!
+//! This wires the *real* engine the CLI builds — output clock + CPU reference
+//! compositor + per-source framestores fed by built-in test-pattern sources —
+//! and drives it deterministically (manual time source + cooperative pacer, no
+//! real sleeps). It asserts the load-bearing property of the whole product:
+//! **exactly N frames for N ticks, at the configured cadence, output never
+//! faltered** — independent of input health.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use multiview_cli::run::HeadlessEngine;
+use multiview_config::MultiviewConfig;
+use multiview_engine::{CooperativePacer, ManualTimeSource};
+
+fn example(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join(name)
+}
+
+fn load(name: &str) -> MultiviewConfig {
+    let text = std::fs::read_to_string(example(name)).expect("read example");
+    let cfg = MultiviewConfig::load_from_toml(&text).expect("parse example");
+    cfg.validate().expect("example validates");
+    cfg
+}
+
+/// A small (320x240) 2x2 grid of built-in test sources, exercising the full
+/// config parse + grid-solve path. The CPU reference compositor is O(pixels x
+/// tiles) per frame, so a small canvas keeps the deterministic frame-count and
+/// PTS tests fast in a debug build while proving the exact same invariant the
+/// 1080p example would (frames == ticks, PTS = f(tick)).
+fn small_config() -> MultiviewConfig {
+    let toml = r##"
+schema_version = 1
+
+[canvas]
+width = 320
+height = 240
+fps = "30000/1001"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr", "1fr"]
+areas = ["a b", "c d"]
+
+[[sources]]
+id = "in_a"
+kind = "test"
+[[sources]]
+id = "in_b"
+kind = "test"
+[[sources]]
+id = "in_c"
+kind = "test"
+[[sources]]
+id = "in_d"
+kind = "test"
+
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[cells]]
+id = "cell_c"
+area = "c"
+[cells.source]
+input_id = "in_c"
+[[cells]]
+id = "cell_d"
+area = "d"
+[cells.source]
+input_id = "in_d"
+
+[[outputs]]
+kind = "rtsp_server"
+mount = "/multiview"
+codec = "h264"
+"##;
+    let cfg = MultiviewConfig::load_from_toml(toml).expect("parse small config");
+    cfg.validate().expect("small config validates");
+    cfg
+}
+
+#[tokio::test]
+async fn headless_run_emits_exactly_n_frames_for_n_ticks() {
+    const TICKS: u64 = 90;
+
+    let cfg = small_config();
+    let cadence = cfg.canvas.fps.rational();
+
+    let mut engine = HeadlessEngine::build(&cfg).expect("build headless engine");
+
+    // Deterministic clock: the engine jumps the manual time source past the last
+    // tick's deadline so the pacer never gates — no wall-clock sleeps.
+    let time = Arc::new(ManualTimeSource::new());
+    let pacer = CooperativePacer;
+
+    let report = engine
+        .run_for(Arc::clone(&time), pacer, TICKS)
+        .await
+        .expect("headless run succeeds");
+
+    assert_eq!(
+        report.frames, TICKS,
+        "N ticks must produce exactly N frames"
+    );
+    assert_eq!(report.ticks, TICKS);
+    assert!(!report.faltered, "output must never falter (invariant #1)");
+    assert_eq!(
+        report.cadence, cadence,
+        "the reported cadence must be the canvas cadence (exact rational, never float)"
+    );
+    // Every produced frame carries the right canvas geometry.
+    assert_eq!(report.canvas_width, cfg.canvas.width);
+    assert_eq!(report.canvas_height, cfg.canvas.height);
+}
+
+#[tokio::test]
+async fn headless_frame_pts_advances_by_exactly_one_tick_period() {
+    let cfg = small_config();
+    let cadence = cfg.canvas.fps.rational();
+    let mut engine = HeadlessEngine::build(&cfg).expect("build");
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = engine
+        .run_for(Arc::clone(&time), CooperativePacer, 30)
+        .await
+        .expect("run");
+
+    // PTS of tick i must equal MediaTime::from_tick(i, cadence) — pure f(tick).
+    let first = multiview_core::time::MediaTime::from_tick(0, cadence);
+    let last = multiview_core::time::MediaTime::from_tick(29, cadence);
+    assert_eq!(report.first_pts, Some(first));
+    assert_eq!(report.last_pts, Some(last));
+    // Strictly monotone increasing pts (positive cadence) — never stalls.
+    assert!(report.last_pts.unwrap().as_nanos() > report.first_pts.unwrap().as_nanos());
+}
+
+#[tokio::test]
+async fn headless_run_survives_a_config_with_no_live_inputs() {
+    // The test sources normally publish frames; here we additionally prove the
+    // loop produces frames even without any published frame, because a starved
+    // tile yields the NoSignal slate rather than stalling.
+    let cfg = small_config();
+    let mut engine = HeadlessEngine::build(&cfg).expect("build");
+    // Do NOT pump the test sources: leave every store empty.
+    engine.set_publish_test_frames(false);
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = engine
+        .run_for(Arc::clone(&time), CooperativePacer, 10)
+        .await
+        .expect("run with no inputs still succeeds");
+    assert_eq!(report.frames, 10, "output is independent of input health");
+    assert!(!report.faltered);
+}
+
+#[tokio::test]
+async fn headless_run_builds_and_drives_the_real_1080p_example() {
+    // Prove the shipped 1920x1080 example builds the engine and composites real
+    // frames end-to-end. Kept to two ticks because the CPU reference compositor
+    // is O(pixels x tiles) and a full 1080p canvas is expensive in debug.
+    let cfg = load("2x2.toml");
+    let mut engine = HeadlessEngine::build(&cfg).expect("build 1080p engine");
+    assert_eq!(
+        engine.source_count(),
+        4,
+        "the 2x2 example wires four sources"
+    );
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = engine
+        .run_for(Arc::clone(&time), CooperativePacer, 2)
+        .await
+        .expect("1080p headless run");
+    assert_eq!(report.frames, 2);
+    assert_eq!(report.canvas_width, 1920);
+    assert_eq!(report.canvas_height, 1080);
+    assert!(!report.faltered);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_headless_run_paces_to_wall_clock() {
+    // With the production realtime pacer over the real monotonic clock, a small
+    // bounded run produces exactly N frames and consumes roughly N tick-periods
+    // of real wall-clock — proving the loop paces (against true elapsed time)
+    // rather than free-running. A small canvas keeps composite cost negligible
+    // so the (~167 ms) pacing dominates.
+    const TICKS: u64 = 5;
+
+    let cfg = small_config();
+    let cadence = cfg.canvas.fps.rational();
+    let mut engine = HeadlessEngine::build(&cfg).expect("build");
+
+    let start = std::time::Instant::now();
+    let report = engine
+        .run_for_realtime(TICKS)
+        .await
+        .expect("realtime headless run");
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        report.frames, TICKS,
+        "N ticks must produce exactly N frames"
+    );
+    assert!(!report.faltered, "output must never falter (invariant #1)");
+
+    // One tick period at 30000/1001 ≈ 33.37 ms; 5 ticks ≈ 167 ms. Allow a wide
+    // lower band (half) — we only need to prove it paced, not spun.
+    let period_ns = multiview_core::time::MediaTime::from_tick(1, cadence).as_nanos();
+    let expected =
+        Duration::from_nanos(u64::try_from(period_ns).unwrap()) * u32::try_from(TICKS).unwrap();
+    assert!(
+        elapsed >= expected / 2,
+        "realtime pacing should consume roughly N tick-periods, got {elapsed:?} (expected ~{expected:?})"
+    );
+}

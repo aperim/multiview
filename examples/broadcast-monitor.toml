@@ -77,7 +77,7 @@ input_id = "cam_d"
 
 # --- Content-aware fault probes (broadcast-multiviewer §4) ---
 
-# Severity uses the X.733 PerceivedSeverity tokens from mosaic-core
+# Severity uses the X.733 PerceivedSeverity tokens from multiview-core
 # (Cleared / Indeterminate / Warning / Minor / Major / Critical); tally/colour
 # tokens are the shared TallyColor names (Off / Red / Green / Amber).
 
@@ -167,6 +167,6 @@ format = "%H:%M:%S"
 
 [[outputs]]
 kind = "rtsp_server"
-mount = "/mosaic"
+mount = "/multiview"
 codec = "h264"
 latency_profile = "low_latency"

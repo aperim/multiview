@@ -46,7 +46,7 @@ must_use_candidate = "warn"
 # [lints]
 # workspace = true
 
-# ===== FFI/vendor crates only (e.g. crates/mosaic-ffmpeg/Cargo.toml) =====
+# ===== FFI/vendor crates only (e.g. crates/multiview-ffmpeg/Cargo.toml) =====
 # Inherit the workspace set, then relax unsafe (every block needs a // SAFETY: comment).
 # [lints.rust]
 # unsafe_code = "deny"

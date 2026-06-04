@@ -1,9 +1,9 @@
 {
-  "name": "mosaic-web",
+  "name": "multiview-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Mosaic management web app. Minimal real app shell: TanStack Query + a typed API client generated from the control-plane OpenAPI spec (openapi-typescript + openapi-fetch). The full layout editor (react-konva/dnd-kit/shadcn) is milestone M7; see ../docs/web/management-app.md.",
+  "description": "Multiview management web app. Minimal real app shell: TanStack Query + a typed API client generated from the control-plane OpenAPI spec (openapi-typescript + openapi-fetch). The full layout editor (react-konva/dnd-kit/shadcn) is milestone M7; see ../docs/web/management-app.md.",
   "scripts": {
     "dev": "vite",
     "generate:api": "openapi-typescript ../docs/api/openapi.json -o src/api/schema.ts",

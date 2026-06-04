@@ -11,7 +11,7 @@ Add a probe-driven monitoring engine inspecting DECODED essence (not just transp
 
 ## Rationale
 
-This is the single biggest capability gap between a compositor with a transport-level LIVE/STALE/NO_SIGNAL state machine and a professional broadcast multiviewer, and it is near-universal and standards-anchored (X.733, TR 101 290, RFC 4445/5424, SNMP). It reuses Mosaic's existing per-tile state machine, alert_card overlay and R128 metering rather than replacing them.
+This is the single biggest capability gap between a compositor with a transport-level LIVE/STALE/NO_SIGNAL state machine and a professional broadcast multiviewer, and it is near-universal and standards-anchored (X.733, TR 101 290, RFC 4445/5424, SNMP). It reuses Multiview's existing per-tile state machine, alert_card overlay and R128 metering rather than replacing them.
 
 ## Alternatives considered
 

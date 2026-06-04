@@ -1,14 +1,14 @@
-# Mosaic — Input / Source Subsystem
+# Multiview — Input / Source Subsystem
 
 The input subsystem ingests every live (and file/test) source, normalises its timing and
 colour, and hands frames to the compositor through per-tile last-good-frame stores. It is
-implemented in the **`mosaic-input`** crate (ingest sources, the input pacer, jitter buffers,
+implemented in the **`multiview-input`** crate (ingest sources, the input pacer, jitter buffers,
 timestamp normalisation, supervised reconnect; features `ffmpeg`, `ndi`).
 
 > **The one principle that governs everything:** *the output is driven by a single internal
 > monotonic clock; inputs are **sampled** into the output, never allowed to **pace** it.* A
 > stalled, bursting, drifting, or corrupt source can degrade its own tile but can **never** stall,
-> speed up, or back-pressure the mosaic. See the deep
+> speed up, or back-pressure the multiview. See the deep
 > [Streaming Robustness Runbook](../research/streaming-gotchas.md) and
 > [ADR-T001](../decisions/ADR-T001.md) / [ADR-R001](../decisions/ADR-R001.md).
 
@@ -24,7 +24,7 @@ Related canonical references:
 
 Each source runs as an **isolated supervised task** (one decode actor per source) feeding a
 bounded, drop-oldest queue. `av_read_frame` on one source never blocks the composite loop, and one
-dead RTSP camera never freezes the mosaic ([ADR-0013](../decisions/ADR-0013.md),
+dead RTSP camera never freezes the multiview ([ADR-0013](../decisions/ADR-0013.md),
 [ADR-R001](../decisions/ADR-R001.md)).
 
 ```mermaid
@@ -201,7 +201,7 @@ timestamps.
 | Rationals | NTSC `1001` rates carried as exact rationals / ns — never float fps (drifts ~3.6 s/hour). |
 
 > **No single FFmpeg flag "just works."** `+genpts`, `avoid_negative_ts`, `correct_ts_overflow`,
-> and `use_wallclock_as_timestamps` each handle only one slice of the problem. Mosaic **owns the
+> and `use_wallclock_as_timestamps` each handle only one slice of the problem. Multiview **owns the
 > timeline** and tests past the wrap boundary. Full algorithm in
 > [Streaming Gotchas §0, §2](../research/streaming-gotchas.md).
 
@@ -211,7 +211,7 @@ timestamps.
 
 Each input has its own adaptive jitter buffer, sized by transport and capped by the latency budget.
 A high-latency / flaky tile is treated as **leaky** (drop/hold) so the worst source never inflates
-or stalls the mosaic — it contributes via MIN, not MAX, latency
+or stalls the multiview — it contributes via MIN, not MAX, latency
 ([conventions §11](../architecture/conventions.md)).
 
 - **Config:** `jitter.buffer_ms` (LAN/WAN presets), `jitter.queue_depth`,
@@ -249,7 +249,7 @@ stateDiagram-v2
 - **State machine:** every tile rides `LIVE → STALE → RECONNECTING → NO_SIGNAL`. The compositor
   always reads the latest good frame (or a placeholder card) and never blocks
   ([conventions invariant 2](../architecture/conventions.md), implemented via the
-  **`mosaic-framestore`** last-good stores).
+  **`multiview-framestore`** last-good stores).
 - **Ladder timers:** `resilience.hold_ms`, `resilience.stale_ms`, `resilience.nosignal_ms`;
   `resilience.placeholder` (offline card / slate, atlas-resident).
 - **Backoff:** `reconnect.{initial_ms, max_ms, multiplier, jitter}`; `reconnect.max_attempts`
@@ -259,7 +259,7 @@ stateDiagram-v2
   `POST .../reset` (rebases PTS, clears the jitter buffer). Disabling a source drops the tile to
   `NO_SIGNAL` with **no output reset**.
 - **Decoder resilience:** the per-input `DecoderWorker` conceals-and-continues (never aborts the
-  mosaic): `err_recognition` without `AV_EF_EXPLODE`, gate compositing on the CORRUPT +
+  multiview): `err_recognition` without `AV_EF_EXPLODE`, gate compositing on the CORRUPT +
   `decode_error_flags` clear, wait-for-IDR, per-input error-counter + no-output watchdog, and
   per-input HW→SW fallback ([ADR-T007](../decisions/ADR-T007.md),
   [Streaming Gotchas §6](../research/streaming-gotchas.md)).
@@ -380,7 +380,7 @@ inlined ([ADR-M006](../decisions/ADR-M006.md)).
 | [ADR-T002](../decisions/ADR-T002.md) | Per-tile resampling: hold-last-good + duplicate/drop on output tick |
 | [ADR-T003](../decisions/ADR-T003.md) | Timestamp normalisation: unwrap, genpts, monotonic guard, re-anchor |
 | [ADR-T004](../decisions/ADR-T004.md) | HLS ingest pacing: custom PTS→wall-clock pacer, not `-re` |
-| [ADR-T007](../decisions/ADR-T007.md) | Codec edge-case & decode policy: one bad input never stalls the mosaic |
+| [ADR-T007](../decisions/ADR-T007.md) | Codec edge-case & decode policy: one bad input never stalls the multiview |
 | [ADR-T008](../decisions/ADR-T008.md) | A/V sync & per-input jitter-buffer model |
 | [ADR-R001](../decisions/ADR-R001.md) | Continuous-output guarantee, output clock, last-good stores |
 | [ADR-R003](../decisions/ADR-R003.md) | Supervision, backoff, circuit breakers, watchdogs, bounded memory |

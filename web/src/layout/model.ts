@@ -10,7 +10,7 @@
 // ----------------------------
 // The control plane stores a layout as `{ id, name, body }` where `body` is an
 // opaque, validated document (see the OpenAPI `Layout` schema — `body: unknown`).
-// `body` mirrors the `mosaic-config` document (crates/mosaic-config/src/schema.rs):
+// `body` mirrors the `multiview-config` document (crates/multiview-config/src/schema.rs):
 // a `[canvas]` (width/height/fps), an absolute `[layout]` (`kind = "absolute"`),
 // and `[[cells]]` carrying a normalized `rect` (`0..1` per axis), a stacking `z`,
 // a `fit` mode, and a `source` binding (`input_id`).
@@ -349,7 +349,7 @@ const FPS_PATTERN = /^\s*\d+\s*\/\s*[1-9]\d*\s*$/;
 /**
  * Validate a whole layout, returning every issue found (an empty array means
  * the layout is valid). Geometry rules mirror {@link clampRect}; the fps rule
- * mirrors `mosaic-config`'s rational-string requirement (invariant #3 — never a
+ * mirrors `multiview-config`'s rational-string requirement (invariant #3 — never a
  * float). This runs live in the editor so geometry is checked as it is edited.
  */
 export function validateLayout(model: LayoutModel): readonly ValidationIssue[] {
@@ -512,7 +512,7 @@ export function fromLayoutBody(
 
 /**
  * Serialize a view-model back to the opaque config `body` (canonical JSON). The
- * shape matches `mosaic-config`'s document so the engine validates it on apply.
+ * shape matches `multiview-config`'s document so the engine validates it on apply.
  * `z` is renumbered from the authoring order so list order and stacking agree.
  */
 export function toLayoutBody(model: LayoutModel): Record<string, unknown> {

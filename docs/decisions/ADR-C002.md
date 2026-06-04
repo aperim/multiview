@@ -11,7 +11,7 @@ Resolve each of the four axes per tile via precedence frame > AVCodecContext > c
 
 ## Rationale
 
-This reproduces libplacebo/mpv/player behavior, so the mosaic renders untagged content the same way a correct player would, and it avoids swscale's flat BT.601-for-everything mistake. Refusing to auto-guess wide-gamut/HDR prevents catastrophic SDR->HDR mis-promotion. Per-axis independence (each can be unspecified separately) means each must be resolved separately. Storing the resolved never-UNSPECIFIED tuple keeps the kernel deterministic.
+This reproduces libplacebo/mpv/player behavior, so the multiview renders untagged content the same way a correct player would, and it avoids swscale's flat BT.601-for-everything mistake. Refusing to auto-guess wide-gamut/HDR prevents catastrophic SDR->HDR mis-promotion. Per-axis independence (each can be unspecified separately) means each must be resolved separately. Storing the resolved never-UNSPECIFIED tuple keeps the kernel deterministic.
 
 ## Alternatives considered
 

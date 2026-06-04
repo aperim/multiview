@@ -7,8 +7,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/aperim/mosaic"
-authors = ["The Mosaic Authors"]
+repository = "https://github.com/aperim/multiview"
+authors = ["The Multiview Authors"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -18,22 +18,22 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Internal crates
-mosaic-core = { path = "crates/mosaic-core" }
-mosaic-hal = { path = "crates/mosaic-hal" }
-mosaic-ffmpeg = { path = "crates/mosaic-ffmpeg" }
-mosaic-compositor = { path = "crates/mosaic-compositor" }
-mosaic-framestore = { path = "crates/mosaic-framestore" }
-mosaic-audio = { path = "crates/mosaic-audio" }
-mosaic-overlay = { path = "crates/mosaic-overlay" }
-mosaic-input = { path = "crates/mosaic-input" }
-mosaic-output = { path = "crates/mosaic-output" }
-mosaic-engine = { path = "crates/mosaic-engine" }
-mosaic-config = { path = "crates/mosaic-config" }
-mosaic-events = { path = "crates/mosaic-events" }
-mosaic-control = { path = "crates/mosaic-control" }
-mosaic-preview = { path = "crates/mosaic-preview" }
-mosaic-telemetry = { path = "crates/mosaic-telemetry" }
-mosaic-cli = { path = "crates/mosaic-cli" }
+multiview-core = { path = "crates/multiview-core" }
+multiview-hal = { path = "crates/multiview-hal" }
+multiview-ffmpeg = { path = "crates/multiview-ffmpeg" }
+multiview-compositor = { path = "crates/multiview-compositor" }
+multiview-framestore = { path = "crates/multiview-framestore" }
+multiview-audio = { path = "crates/multiview-audio" }
+multiview-overlay = { path = "crates/multiview-overlay" }
+multiview-input = { path = "crates/multiview-input" }
+multiview-output = { path = "crates/multiview-output" }
+multiview-engine = { path = "crates/multiview-engine" }
+multiview-config = { path = "crates/multiview-config" }
+multiview-events = { path = "crates/multiview-events" }
+multiview-control = { path = "crates/multiview-control" }
+multiview-preview = { path = "crates/multiview-preview" }
+multiview-telemetry = { path = "crates/multiview-telemetry" }
+multiview-cli = { path = "crates/multiview-cli" }
 
 [profile.release]
 lto = "thin"

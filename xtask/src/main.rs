@@ -1,4 +1,4 @@
-//! Developer automation for the Mosaic workspace: `cargo xtask <task>`.
+//! Developer automation for the Multiview workspace: `cargo xtask <task>`.
 //!
 //! This is a developer-facing command-line tool (not engine or data-plane code), so
 //! it legitimately writes to stdout/stderr and sets a process exit code. The
@@ -21,7 +21,7 @@ fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_else(|| "help".to_owned());
     match task.as_str() {
         "help" => {
-            println!("xtask — Mosaic developer automation");
+            println!("xtask — Multiview developer automation");
             println!("  gen-openapi   write the OpenAPI 3.1 document to {OPENAPI_OUT}");
             println!("  (more tasks coming soon: build-web, gen-asyncapi, ...)");
             ExitCode::SUCCESS
@@ -43,11 +43,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Serialize `mosaic-control`'s utoipa [`OpenApi`] document to pretty JSON and
+/// Serialize `multiview-control`'s utoipa [`OpenApi`] document to pretty JSON and
 /// write it to `docs/api/openapi.json` (relative to the workspace root),
 /// creating the directory if needed. Returns the path written.
 fn gen_openapi() -> Result<PathBuf, GenError> {
-    let doc = mosaic_control::openapi::ApiDoc::openapi();
+    let doc = multiview_control::openapi::ApiDoc::openapi();
     let json = doc.to_pretty_json().map_err(GenError::Serialize)?;
 
     let out = workspace_root().join(OPENAPI_OUT);

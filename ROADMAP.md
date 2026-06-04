@@ -1,6 +1,6 @@
 # Roadmap
 
-Mosaic's design is **complete and pinned** (architecture, API/UI, 89 ADRs, 10 verification-hardened
+Multiview's design is **complete and pinned** (architecture, API/UI, 89 ADRs, 10 verification-hardened
 research briefs); implementation proceeds in the phased milestones below. This is the top-level
 overview — the detailed per-milestone plan with exit criteria and tasks is in
 [`docs/roadmap.md`](docs/roadmap.md), the per-feature status is in [`FEATURES.md`](FEATURES.md), and
@@ -22,7 +22,7 @@ the management-completeness gate is the [212-item checklist](docs/development/co
 | **M9** — Hardening | Chaos, soak & release | Chaos/fault-injection + multi-day soak; mutation-score gate; packaging (container + macOS native); first release | 📋 Planned |
 | **M10** — Monitoring & alarm engine | Content-aware fault/QC probes (black/freeze with zone+dwell, audio silence/over/clip/phase/imbalance, loudness violation + dialnorm mismatch, caption presence-loss, format/AFD/colorimetry mismatch, optional open-metric QoE, ETSI TR 101… | Each probe is configurable (threshold/zone/dwell) and verifiable under synthetic fault injection; alarms carry X.733 severity with dwell/hysteresis, latch, ack and probe->tile->group->system roll-up, exposed over REST/WebSocket; SNMP… | 📋 Planned |
 | **M11** — UMD, tally & broadcast control surface | Dynamic labels, tally and operator control: TSL UMD v3.1/v4.0/v5.0 listener+sender (configurable port; v5.0 over UDP primary; DLE/STX only on TCP; ASCII/UTF-16LE; 0xFFFF broadcast) driving label + multi-region (LH/RH/text) tally with… | TSL v3.1/4.0/5.0 round-trips with at least one third-party controller; tiles tally red/green/amber from an external bus via the arbiter; UMD text updates live without layout reload; virtual GPI/GPO + IS-07 trigger and emit; salvos apply… | 📋 Planned |
-| **M12** — IP-broadcast I/O, multi-head walls & router control | Professional IP-facility tier: native SMPTE ST 2110-20/-30/-40 ingest+egress, ST 2110-22 (JPEG XS), ST 2022-6, ST 2022-7 hitless dual-path (in+out), PTP/ST 2059-2 timing + per-input frame-sync; AMWA NMOS IS-04/05 (each tile a routable… | Mosaic ingests and emits ST 2110-20/-30/-40 locked to PTP, with ST 2022-7 hitless across two NICs proven under path-loss injection; registers/discovers via NMOS IS-04/05 and is patchable by an external controller; control APIs securable… | 📋 Planned |
+| **M12** — IP-broadcast I/O, multi-head walls & router control | Professional IP-facility tier: native SMPTE ST 2110-20/-30/-40 ingest+egress, ST 2110-22 (JPEG XS), ST 2022-6, ST 2022-7 hitless dual-path (in+out), PTP/ST 2059-2 timing + per-input frame-sync; AMWA NMOS IS-04/05 (each tile a routable… | Multiview ingests and emits ST 2110-20/-30/-40 locked to PTP, with ST 2022-7 hitless across two NICs proven under path-loss injection; registers/discovers via NMOS IS-04/05 and is patchable by an external controller; control APIs securable… | 📋 Planned |
 
 > **M0 is delivered by this repository:** the design docs, ADRs, agent-instruction system, compiling
 > workspace scaffold, CI, dev container, and example configs. Everything M1+ is implementation against
@@ -33,12 +33,12 @@ the management-completeness gate is the [212-item checklist](docs/development/co
 > built and tested: all 16 crates compile, the default GPU-free / native-dep-free build passes the
 > full CI gate set (fmt, clippy `-D warnings`, test, `cargo deny`, inclusive-language), and there are
 > ~500 tests (unit + property + integration). Concretely landed:
-> - **`mosaic-core`** types/traits expanded; the **10 leaf crates** built with real tests; the
->   **`mosaic-engine`** protected output core (output clock, compositor drive, `EngineRuntime`,
+> - **`multiview-core`** types/traits expanded; the **10 leaf crates** built with real tests; the
+>   **`multiview-engine`** protected output core (output clock, compositor drive, `EngineRuntime`,
 >   arc-swap + drop-oldest broadcast isolation, supervisor, degradation loop) with **invariants #1
 >   and #10 exercised by tests**.
-> - **Layer C:** `mosaic-control` (axum REST/WS/SSE, OpenAPI, SQLite, command bus, auth),
->   `mosaic-preview` (isolated taps), `mosaic-cli` (`validate` + `run --headless`); `cargo xtask
+> - **Layer C:** `multiview-control` (axum REST/WS/SSE, OpenAPI, SQLite, command bus, auth),
+>   `multiview-preview` (isolated taps), `multiview-cli` (`validate` + `run --headless`); `cargo xtask
 >   gen-openapi` emits the spec. The **web SPA** has its design system, react-konva/dnd-kit layout
 >   editor, realtime client, and i18n/a11y scaffolding.
 > - **Feature-gated, NOT yet CI-gated and NOT verified on hardware here:** the **wgpu** GPU

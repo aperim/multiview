@@ -1,6 +1,6 @@
-# Mosaic — Architecture Overview
+# Multiview — Architecture Overview
 
-> The front door to the Mosaic architecture. This page tells the end-to-end story, draws the
+> The front door to the Multiview architecture. This page tells the end-to-end story, draws the
 > master component diagram, splits the **data plane** from the **control plane**, summarizes the
 > canonical **invariants**, maps the **crates**, and points you to the deep research briefs and ADRs.
 >
@@ -10,12 +10,12 @@
 
 ---
 
-## 1. What Mosaic is
+## 1. What Multiview is
 
-**Mosaic** is an efficient, hardware-accelerated, Rust live video mosaic generator. It:
+**Multiview** is an efficient, hardware-accelerated, Rust live video multiview generator. It:
 
 1. **Ingests** many live sources — RTSP, HLS/M3U, MPEG-TS, SRT, RTMP, NDI, file, and test patterns.
-2. **Composites** them into a templated mosaic (2×2, 3×3, 1-large+5-small, PiP, custom) **on the GPU**.
+2. **Composites** them into a templated multiview (2×2, 3×3, 1-large+5-small, PiP, custom) **on the GPU**.
 3. **Serves** the result robustly over RTSP, HLS/LL-HLS, NDI, and RTMP/SRT push.
 
 It is a **hybrid engine**: FFmpeg/libav handles demux/decode/encode (where libav is strongest), while a
@@ -48,7 +48,7 @@ threads) carries pixels; the control/preview/telemetry planes (Tokio async) are 
 
 ```mermaid
 flowchart LR
-  subgraph INGEST["Ingest — per-source supervised workers (mosaic-input)"]
+  subgraph INGEST["Ingest — per-source supervised workers (multiview-input)"]
     direction TB
     SRC["RTSP · HLS · MPEG-TS · SRT · RTMP · NDI · file · test"]
     PACE["Input pacer + jitter buffer<br/>(HLS PTS→wallclock; reconnect)"]
@@ -57,27 +57,27 @@ flowchart LR
     SRC --> PACE --> DEC --> NORM
   end
 
-  subgraph STORE["Framestore (mosaic-framestore)"]
+  subgraph STORE["Framestore (multiview-framestore)"]
     direction TB
     FS["Per-tile last-good-frame store<br/>(lock-free single-slot)"]
     SM["Tile state machine<br/>LIVE→STALE→RECONNECTING→NO_SIGNAL"]
     FS --- SM
   end
 
-  CLK(["OUTPUT CLOCK (mosaic-engine)<br/>single fixed-cadence monotonic tick<br/>out_pts = f(tick)"])
+  CLK(["OUTPUT CLOCK (multiview-engine)<br/>single fixed-cadence monotonic tick<br/>out_pts = f(tick)"])
 
-  subgraph CORE["Protected output core — data plane (mosaic-engine)"]
+  subgraph CORE["Protected output core — data plane (multiview-engine)"]
     direction TB
-    COMP["GPU Compositor (mosaic-compositor)<br/>NV12 · linear-light blend · fit/cover/crop<br/>+ overlays/cards · always emits"]
-    OVL["Overlays + subtitles<br/>(mosaic-overlay)"]
-    AUD["Audio mix + R128 meter<br/>(mosaic-audio) · silence-fill"]
+    COMP["GPU Compositor (multiview-compositor)<br/>NV12 · linear-light blend · fit/cover/crop<br/>+ overlays/cards · always emits"]
+    OVL["Overlays + subtitles<br/>(multiview-overlay)"]
+    AUD["Audio mix + R128 meter<br/>(multiview-audio) · silence-fill"]
     ENC["Encoder (HAL) + hot standby<br/>pinned geometry/GOP · encode-once"]
     COMP --> ENC
     OVL -. layers .-> COMP
     AUD --> ENC
   end
 
-  subgraph OUT["Outputs — sinks/servers (mosaic-output)"]
+  subgraph OUT["Outputs — sinks/servers (multiview-output)"]
     direction TB
     MUX["Mux / packetize<br/>RTP · CMAF · FLV · MPEG-TS"]
     RTSP["RTSP server"]
@@ -87,17 +87,17 @@ flowchart LR
     MUX --> RTSP & HLS & PUSH
   end
 
-  subgraph HAL["HAL + planner (mosaic-hal)"]
+  subgraph HAL["HAL + planner (multiview-hal)"]
     DETECT["Capability detection<br/>NVML · VAAPI · oneVPL · VideoToolbox · wgpu + probe"]
     PLAN["Cost-model planner<br/>admission + degradation"]
     DETECT --> PLAN
   end
 
   subgraph CTRL["Control plane — Tokio (best-effort, isolated)"]
-    API["Control API (mosaic-control)<br/>axum REST + WS + SSE · OpenAPI · SQLite · SPA"]
-    CFG["Config / templates (mosaic-config)"]
-    PREV["Preview taps (mosaic-preview)<br/>WHEP · MJPEG · snapshot"]
-    TEL["Telemetry (mosaic-telemetry)<br/>tracing · Prometheus · /livez /readyz"]
+    API["Control API (multiview-control)<br/>axum REST + WS + SSE · OpenAPI · SQLite · SPA"]
+    CFG["Config / templates (multiview-config)"]
+    PREV["Preview taps (multiview-preview)<br/>WHEP · MJPEG · snapshot"]
+    TEL["Telemetry (multiview-telemetry)<br/>tracing · Prometheus · /livez /readyz"]
   end
 
   NORM -- "write latest" --> FS
@@ -125,7 +125,7 @@ Solid arrows are the **pixel/sample data path**; dotted arrows are **control, pr
 
 ## 3. End-to-end narrative
 
-1. **Ingest.** Each source runs an isolated, supervised worker (`mosaic-input`). The input pacer
+1. **Ingest.** Each source runs an isolated, supervised worker (`multiview-input`). The input pacer
    absorbs jitter and — for HLS/VOD-as-live — paces frames to wall-clock by PTS (a custom pacer; `-re`
    is for files, never live). Decode uses the **generic internal hwaccel path** with software fallback;
    a corrupt packet is concealed, never fatal. ([streaming-gotchas](../research/streaming-gotchas.md),
@@ -134,16 +134,16 @@ Solid arrows are the **pixel/sample data path**; dotted arrows are **control, pr
    monotonic-guarded, and rebased onto one internal nanosecond timeline; discontinuities re-anchor
    smoothly. ([ADR-T003](../decisions/ADR-T003.md))
 3. **Framestore.** The normalized frame is written into the tile's **lock-free last-good-frame store**
-   (`mosaic-framestore`). The decoder never blocks; the newest frame wins; stale updates are dropped.
+   (`multiview-framestore`). The decoder never blocks; the newest frame wins; stale updates are dropped.
    Each tile rides a **state machine** (LIVE → STALE → RECONNECTING → NO_SIGNAL).
    ([ADR-R001](../decisions/ADR-R001.md), [ADR-T002](../decisions/ADR-T002.md))
-4. **Output clock.** A single fixed-cadence monotonic clock in `mosaic-engine` ticks forever. At each
+4. **Output clock.** A single fixed-cadence monotonic clock in `multiview-engine` ticks forever. At each
    tick it **pulls** the latest valid frame from every tile (or a placeholder card) — it **never waits
    for all inputs**. ([ADR-T001](../decisions/ADR-T001.md), [ADR-0013](../decisions/ADR-0013.md))
-5. **Composite.** The GPU compositor (`mosaic-compositor`) keeps frames in **NV12**, converts YUV→RGB
+5. **Composite.** The GPU compositor (`multiview-compositor`) keeps frames in **NV12**, converts YUV→RGB
    in-shader at tile size, blends in **linear light** with premultiplied alpha, applies the resolved
    layout (fit/cover/crop/gaps/borders), and stamps on overlays/subtitles
-   (`mosaic-overlay`). The exact, never-reordered color pipeline is in [Invariant 8](#5-canonical-invariants).
+   (`multiview-overlay`). The exact, never-reordered color pipeline is in [Invariant 8](#5-canonical-invariants).
    ([ADR-0005](../decisions/ADR-0005.md), [ADR-E002](../decisions/ADR-E002.md), [ADR-C003](../decisions/ADR-C003.md))
 6. **Audio.** Each input's audio is rebased on the same clock, resampled to 48 kHz, silence-filled on
    dropout, routed to discrete tracks + a program bus, and EBU R128-metered (read-only, off the hot
@@ -151,12 +151,12 @@ Solid arrows are the **pixel/sample data path**; dotted arrows are **control, pr
 7. **Encode-once.** The canvas is encoded **once per rendition** (low-latency profile, pinned
    geometry/GOP), with a hot-standby encoder for seamless recovery.
    ([ADR-0014](../decisions/ADR-0014.md), [ADR-R004](../decisions/ADR-R004.md))
-8. **Mux-many.** The *same* packets fan out to all transports (`mosaic-output`): RTSP server, custom
+8. **Mux-many.** The *same* packets fan out to all transports (`multiview-output`): RTSP server, custom
    CMAF/LL-HLS origin, NDI out (one host copy), RTMP/SRT push. A different codec/resolution/bitrate is
    the *only* reason to encode again. ([ADR-E004](../decisions/ADR-E004.md), [ADR-0006](../decisions/ADR-0006.md),
    [ADR-0007](../decisions/ADR-0007.md), [ADR-T005](../decisions/ADR-T005.md))
 
-Throughout, the **HAL** (`mosaic-hal`) detects hardware, negotiates the cheapest viable per-stage
+Throughout, the **HAL** (`multiview-hal`) detects hardware, negotiates the cheapest viable per-stage
 backend, prefers single-vendor zero-copy islands, and runs the **resource-adaptive degradation** loop
 that sheds load tile-by-tile before the program output is ever touched.
 
@@ -226,32 +226,32 @@ canonical text lives there. Every implementation and doc must respect them.
 ## 6. Crate map
 
 The canonical crate list lives in [`conventions.md` §3](conventions.md#3-canonical-crate-map). All
-crates are `mosaic-*` under `crates/`; hardware/FFI/GPU code is behind **off-by-default features** so
+crates are `multiview-*` under `crates/`; hardware/FFI/GPU code is behind **off-by-default features** so
 the default `cargo check` builds the pure-Rust, LGPL-clean, no-native-deps layer. Dependency direction:
 `core` ← everything; leaf crates depend on `core` (+ `hal`/`ffmpeg`/`events`); `engine` depends on the
 media crates; `control`/`preview` depend on `engine` + `events`; `cli` depends on all. No cycles.
 
 | Plane | Crate | Role |
 |---|---|---|
-| Foundation | `mosaic-core` | Shared types/traits: `Frame`, `PixelFormat`, `ColorInfo`, `MediaTime`, layout model, stage traits, errors. No FFI. |
-| Foundation | `mosaic-hal` | Capability detection, backend registry, per-stage negotiation + cost-model planner. |
-| Foundation | `mosaic-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, hwframe lifecycle). |
-| Foundation | `mosaic-events` | Shared realtime event types + versioned envelope. |
-| Data plane | `mosaic-compositor` | Custom GPU compositor (wgpu baseline; CUDA/Metal/VAAPI fast paths). |
-| Data plane | `mosaic-framestore` | Per-tile last-good-frame stores + tile state machine. |
-| Data plane | `mosaic-input` | Ingest sources, input pacer, jitter buffers, timestamp normalization, reconnect. |
-| Data plane | `mosaic-output` | RTSP server, HLS/LL-HLS, NDI out, RTMP/SRT push; encode-once-mux-many fan-out. |
-| Data plane | `mosaic-audio` | Per-input audio decode/resample/mix/route + EBU R128 metering. |
-| Data plane | `mosaic-overlay` | Overlay layers, text, subtitle ingest/render (libass), passthrough. |
-| Data plane | `mosaic-engine` | The protected output core: output clock, compositor drive, supervisor/actors, hot-reconfig, admission/degradation loop. |
-| Control plane | `mosaic-config` | Config & template schema (serde), validation, config-as-code. |
-| Control plane | `mosaic-control` | axum REST + WS + SSE API: OpenAPI, auth, SQLite, command-bus shell, embedded SPA. |
-| Control plane | `mosaic-preview` | Preview taps + encoder pool; WHEP/MJPEG/snapshot; isolated from program path. |
-| Control plane | `mosaic-telemetry` | tracing + Prometheus + health (`/livez`, `/readyz`). |
-| Binary / dev | `mosaic-cli` | Binary `mosaic`: wires engine + control plane; aggregates feature presets. |
+| Foundation | `multiview-core` | Shared types/traits: `Frame`, `PixelFormat`, `ColorInfo`, `MediaTime`, layout model, stage traits, errors. No FFI. |
+| Foundation | `multiview-hal` | Capability detection, backend registry, per-stage negotiation + cost-model planner. |
+| Foundation | `multiview-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, hwframe lifecycle). |
+| Foundation | `multiview-events` | Shared realtime event types + versioned envelope. |
+| Data plane | `multiview-compositor` | Custom GPU compositor (wgpu baseline; CUDA/Metal/VAAPI fast paths). |
+| Data plane | `multiview-framestore` | Per-tile last-good-frame stores + tile state machine. |
+| Data plane | `multiview-input` | Ingest sources, input pacer, jitter buffers, timestamp normalization, reconnect. |
+| Data plane | `multiview-output` | RTSP server, HLS/LL-HLS, NDI out, RTMP/SRT push; encode-once-mux-many fan-out. |
+| Data plane | `multiview-audio` | Per-input audio decode/resample/mix/route + EBU R128 metering. |
+| Data plane | `multiview-overlay` | Overlay layers, text, subtitle ingest/render (libass), passthrough. |
+| Data plane | `multiview-engine` | The protected output core: output clock, compositor drive, supervisor/actors, hot-reconfig, admission/degradation loop. |
+| Control plane | `multiview-config` | Config & template schema (serde), validation, config-as-code. |
+| Control plane | `multiview-control` | axum REST + WS + SSE API: OpenAPI, auth, SQLite, command-bus shell, embedded SPA. |
+| Control plane | `multiview-preview` | Preview taps + encoder pool; WHEP/MJPEG/snapshot; isolated from program path. |
+| Control plane | `multiview-telemetry` | tracing + Prometheus + health (`/livez`, `/readyz`). |
+| Binary / dev | `multiview-cli` | Binary `multiview`: wires engine + control plane; aggregates feature presets. |
 | Binary / dev | `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint). |
 
-**Feature presets** (in `mosaic-cli`): `nvidia` = cuda+ffmpeg+wgpu · `apple` = videotoolbox+metal+ffmpeg ·
+**Feature presets** (in `multiview-cli`): `nvidia` = cuda+ffmpeg+wgpu · `apple` = videotoolbox+metal+ffmpeg ·
 `linux-vaapi` = vaapi+qsv+ffmpeg+wgpu · `full` = everything non-GPL. The default build is LGPL-clean;
 `gpl-codecs` (x264/x265) and `ndi` are strictly opt-in. See [`conventions.md` §4](conventions.md#4-feature-flag-taxonomy-canonical)
 and [§7](conventions.md#7-licensing-model-build-profiles).

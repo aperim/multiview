@@ -2,15 +2,15 @@
 
 ---
 
-# Efficiency Brief: Live Video Mosaic on Constrained Commodity Hardware
+# Efficiency Brief: Live Video Multiview on Constrained Commodity Hardware
 
-> **Authoritative efficiency brief for the Mosaic engine.** This is the source of truth that downstream agents expand into repo docs. Where research and adversarial verification disagreed, the verification wins and is noted inline. The single governing constraint: **make an N-tile live mosaic run well on a single entry/old GPU, an Intel iGPU (QSV/VAAPI), an AMD APU, a base Apple-silicon Mac, and low-RAM/few-core boxes.** A 4-GPU/1TB server is out of scope as a target — it is merely the trivial case.
+> **Authoritative efficiency brief for the Multiview engine.** This is the source of truth that downstream agents expand into repo docs. Where research and adversarial verification disagreed, the verification wins and is noted inline. The single governing constraint: **make an N-tile live multiview run well on a single entry/old GPU, an Intel iGPU (QSV/VAAPI), an AMD APU, a base Apple-silicon Mac, and low-RAM/few-core boxes.** A 4-GPU/1TB server is out of scope as a target — it is merely the trivial case.
 
 ---
 
 ## 1. Efficiency philosophy & guiding principles
 
-1. **Bandwidth and memory are the wall, not compositor arithmetic.** A mosaic is just sample-scale-into-a-grid; that math is cheap. On every commodity tier — and *especially* on iGPUs/APUs/Apple-silicon where the GPU shares DDR with the CPU — the binding resource is **memory bandwidth** and **VRAM/RAM footprint**, followed by fixed-function decode/encode throughput. Optimize bytes moved before optimizing FLOPs.
+1. **Bandwidth and memory are the wall, not compositor arithmetic.** A multiview is just sample-scale-into-a-grid; that math is cheap. On every commodity tier — and *especially* on iGPUs/APUs/Apple-silicon where the GPU shares DDR with the CPU — the binding resource is **memory bandwidth** and **VRAM/RAM footprint**, followed by fixed-function decode/encode throughput. Optimize bytes moved before optimizing FLOPs.
 2. **Pixels you never materialize cost nothing.** The biggest single win is to **never decode or carry a tile at more pixels than it is displayed**, and to **never expand to RGBA**. Both reductions are quadratic/multiplicative across N tiles.
 3. **Encode is the most expensive and most capacity-capped stage.** Composite once, encode the canvas once, and fan the *same compressed bitstream* out to many transports. Per-output or per-tile re-encode is the cardinal sin.
 4. **Stay on-device, refcount, and bound everything.** One shared GPU/CUDA context, device-resident surfaces end-to-end, reference-counted pooled frames, and tiny bounded queues that *drop* rather than buffer. Continuous output is achieved by dropping stale frames, never by stalling a decoder or growing a queue.
@@ -93,7 +93,7 @@ Adopt the WebRTC-proven loop generalized to a multi-tile pipeline: **Sensors →
 | **macOS** | **`ProcessInfo.thermalState`** (nominal/fair/serious/critical) + change notification — the only fully public signal, and **coarse** (moderate and heavy throttle both report "fair"). GPU util/VRAM only via **private IOReport/IOKit** (AGXAccelerator) or root `powermetrics`. | Treat "serious" as start-degrading, "critical" as aggressive shed; corroborate with rising encode-ms. |
 
 **Verified GPU-attribution traps:**
-- **Apple: VideoToolbox runs on a dedicated Media Engine, NOT the GPU** (GPU ≈ 2 mW during HW decode). A density model sized from GPU-util% is badly wrong (reads ~0 during pure transcode; for a compositing mosaic it reflects only the compositor, never the decode/encode load that gates tile count). **Correction:** do **not** use `powermetrics` package/ANE counters — package power was removed in Ventura+, and **ANE = Apple Neural Engine (ML), unrelated to video**. The media-engine power domain ("AVE") is read via **IOReport's Energy Model** (tools like `macpow`). Size Apple-tier density by **max concurrent decode/encode sessions sustained without frame drops**, scaled per chip tier.
+- **Apple: VideoToolbox runs on a dedicated Media Engine, NOT the GPU** (GPU ≈ 2 mW during HW decode). A density model sized from GPU-util% is badly wrong (reads ~0 during pure transcode; for a compositing multiview it reflects only the compositor, never the decode/encode load that gates tile count). **Correction:** do **not** use `powermetrics` package/ANE counters — package power was removed in Ventura+, and **ANE = Apple Neural Engine (ML), unrelated to video**. The media-engine power domain ("AVE") is read via **IOReport's Energy Model** (tools like `macpow`). Size Apple-tier density by **max concurrent decode/encode sessions sustained without frame drops**, scaled per chip tier.
 - **NVIDIA: `nvidia-smi`/DCGM `%enc`/`%dec` are time-averaged busy-fraction, NOT session counts or throughput headroom.** Documented cases: `%enc=0` while NVENC active (Ada drivers); `%dec` capping at ~50% on 2-NVDEC parts (TU104) because the percentage doesn't aggregate across engines. **Corroborate with measured fps/`speed=` and `ffmpeg -benchmark`**, never util% alone.
 
 ### 3.2 Admission control & capacity model
@@ -167,7 +167,7 @@ Sanity-check `per-tile budget × tile count < measured engine fps ceiling` at ta
 
 ## 5. Commodity hardware tiers, densities & default configs
 
-> Densities are decode-heavy/encode-light (mosaic profile). The binding limit per tier is in **bold**. Defaults are conservative — overcommit on the weakest box drops frames.
+> Densities are decode-heavy/encode-light (multiview profile). The binding limit per tier is in **bold**. Defaults are conservative — overcommit on the weakest box drops frames.
 
 | Tier | Example hardware | Binding limit | Realistic density | Session/engine caps | Recommended default |
 |---|---|---|---|---|---|
@@ -201,12 +201,12 @@ Sanity-check `per-tile budget × tile count < measured engine fps ceiling` at ta
 
 ## 8. How this shapes the data model & crate layout
 
-- **`mosaic-hal`** — per-stage backend traits (Decoder, Scaler, Compositor, Encoder, Muxer) + the **capability+cost registry** (per stage×backend×codec: decode-scale tier, zero-copy flag, session caps, measured cost). Negotiation lives here.
-- **`mosaic-planner`** — the CapacityEstimator + Adapter + Applier control loop; admission control; degradation ladder; per-tile QoS. Consumes the registry, emits plan steps.
-- **`mosaic-sensors`** — Linux PSI/cgroup/thermal/NVML/intel_gpu_top + macOS thermalState/IOReport, behind a fallible `Sensor` trait so absent backends degrade cleanly (e.g. `nvml-wrapper` errors → no-GPU path).
-- **`mosaic-frame`** — the frame/surface type wrapping refcounted NV12 device/host buffers + the **frame pool** (pooled handles with recycle-on-drop), bounded latest-frame slots, format/linesize metadata, backend tag.
-- **`mosaic-compositor`** — backend-agnostic NV12-in/NV12-out single-pass core (wgpu portable path + native Vulkan/Metal/CUDA interop where zero-copy demands it), dirty-region + fps-harmonization gating.
-- **`mosaic-serve`** — in-process tee-equivalent: one encoder → N protocol muxers with per-output thread + bounded queue + failure isolation.
-- **`mosaic-profile`** — Tracy/NVTX/signpost integration + the cost-table harness feeding the registry.
+- **`multiview-hal`** — per-stage backend traits (Decoder, Scaler, Compositor, Encoder, Muxer) + the **capability+cost registry** (per stage×backend×codec: decode-scale tier, zero-copy flag, session caps, measured cost). Negotiation lives here.
+- **`multiview-planner`** — the CapacityEstimator + Adapter + Applier control loop; admission control; degradation ladder; per-tile QoS. Consumes the registry, emits plan steps.
+- **`multiview-sensors`** — Linux PSI/cgroup/thermal/NVML/intel_gpu_top + macOS thermalState/IOReport, behind a fallible `Sensor` trait so absent backends degrade cleanly (e.g. `nvml-wrapper` errors → no-GPU path).
+- **`multiview-frame`** — the frame/surface type wrapping refcounted NV12 device/host buffers + the **frame pool** (pooled handles with recycle-on-drop), bounded latest-frame slots, format/linesize metadata, backend tag.
+- **`multiview-compositor`** — backend-agnostic NV12-in/NV12-out single-pass core (wgpu portable path + native Vulkan/Metal/CUDA interop where zero-copy demands it), dirty-region + fps-harmonization gating.
+- **`multiview-serve`** — in-process tee-equivalent: one encoder → N protocol muxers with per-output thread + bounded queue + failure isolation.
+- **`multiview-profile`** — Tracy/NVTX/signpost integration + the cost-table harness feeding the registry.
 
 The **planner ↔ registry ↔ frame-pool** triangle is the heart of the efficiency design: the registry says *what's possible and what it costs*, the pool *bounds the bytes*, and the planner *chooses the cheapest plan that fits and degrades gracefully when it doesn't.*

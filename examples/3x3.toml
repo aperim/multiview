@@ -103,7 +103,7 @@ input_id = "in_i"
 
 [[outputs]]
 kind = "ll_hls"
-path = "/hls/mosaic"
+path = "/hls/multiview"
 codec = "h264"
 part_target_ms = 250
 segment_ms = 2000

@@ -1,7 +1,7 @@
 # Containerization
 
-How Mosaic is packaged as a Linux container image: a **multi-stage build** that compiles an
-**LGPL-clean FFmpeg** plus the `mosaic` binary, then ships a lean runtime that relies on the
+How Multiview is packaged as a Linux container image: a **multi-stage build** that compiles an
+**LGPL-clean FFmpeg** plus the `multiview` binary, then ships a lean runtime that relies on the
 **NVIDIA Container Toolkit** (NVENC/NVDEC) for discrete GPUs and **VAAPI `/dev/dri` passthrough**
 for Intel/AMD. The container assets will live under `deploy/` (Dockerfile, compose, entrypoint), added during
 implementation; the build itself is described below.
@@ -48,9 +48,9 @@ flowchart LR
         R["cargo build --release<br/>(feature preset per variant)"]
         H --> F --> R
     end
-    R -->|copy mosaic + libav*.so| S2
+    R -->|copy multiview + libav*.so| S2
     subgraph S2["Stage 2 — runtime (nvidia/cuda:*-runtime or slim)"]
-        BIN["/usr/local/bin/mosaic"]
+        BIN["/usr/local/bin/multiview"]
         LIB["dynamically-linked libav* (LGPL)"]
         ENT["entrypoint: HW probe + GID resolve"]
     end
@@ -92,7 +92,7 @@ Bake the capability into the image `ENV` and require the GPU at run time:
 docker run --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
   -e NVIDIA_VISIBLE_DEVICES=all \
-  mosaic:nvidia
+  multiview:nvidia
 ```
 
 - **Driver ↔ SDK pinning:** the **host driver must satisfy the Video Codec SDK the build targets**.
@@ -115,7 +115,7 @@ docker run \
   --device /dev/dri:/dev/dri \
   --group-add "$(getent group render | cut -d: -f3)" \
   --group-add "$(getent group video | cut -d: -f3)" \
-  mosaic:generic
+  multiview:generic
 ```
 
 - **Resolve render/video GIDs dynamically** — they vary per host (and per distro); **never
@@ -167,7 +167,7 @@ attribution obligations documented. See [licensing.md](../architecture/conventio
 
 ## 5. Image-size tips
 
-A mosaic runtime is "decode-heavy, encode-light" and benefits from a minimal footprint
+A multiview runtime is "decode-heavy, encode-light" and benefits from a minimal footprint
 ([efficiency](../research/efficiency.md) §6). Concrete levers:
 
 - **Multi-stage, always.** Compilers, `-devel` headers, the CUDA toolkit, and Rust artifacts stay
@@ -184,7 +184,7 @@ A mosaic runtime is "decode-heavy, encode-light" and benefits from a minimal foo
 - **mimalloc** as the global allocator reduces long-running fragmentation; it adds negligible size
   while improving the runtime's RAM behavior.
 - **`.dockerignore`** the workspace target dir, `web/node_modules`, `.git`, and the transient
-  `.mosaic-build/` so the build context stays small and cache-friendly.
+  `.multiview-build/` so the build context stays small and cache-friendly.
 - **Order layers cache-first:** dependency fetch/compile before source copy; FFmpeg build before the
   Rust build, so source edits don't re-trigger the (slow) FFmpeg compile.
 

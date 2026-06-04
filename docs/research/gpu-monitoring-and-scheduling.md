@@ -1,4 +1,4 @@
-> **Design brief — GPU/CPU monitoring & multi-GPU work placement.** Authoritative research/design record backing the implementation. Produced by a verification-hardened research pass (2026-06-03) and synthesised against the existing `mosaic-hal` capability/cost/planner model and the `mosaic-telemetry` metrics registry. Canonical crate/API naming lives in [docs/architecture](../architecture/). The decision derived from this brief is [ADR-0017](../decisions/ADR-0017.md). Where research and adversarial verification disagreed, the verification wins and is noted inline.
+> **Design brief — GPU/CPU monitoring & multi-GPU work placement.** Authoritative research/design record backing the implementation. Produced by a verification-hardened research pass (2026-06-03) and synthesised against the existing `multiview-hal` capability/cost/planner model and the `multiview-telemetry` metrics registry. Canonical crate/API naming lives in [docs/architecture](../architecture/). The decision derived from this brief is [ADR-0017](../decisions/ADR-0017.md). Where research and adversarial verification disagreed, the verification wins and is noted inline.
 >
 > **Extended by [gpu-placement-engine.md](gpu-placement-engine.md) ([ADR-0018](../decisions/ADR-0018.md)).** This brief defines *what can be measured* and the affinity-gated least-loaded **ranking function**. The placement-engine brief builds on it to specify the full **decision engine**: the multi-resource (DRF + Tetris) scoring model, the deliberate-split-when-it-doesn't-fit cut points, and the **closed-loop re-placement controller** (sense external load -> detect sustained overload -> SHED-or-MIGRATE via make-before-break). Read this brief first, then the placement-engine brief for the decision-making and recovery design.
 
@@ -6,9 +6,9 @@
 
 # GPU/CPU Utilisation Monitoring & Affinity-Aware Multi-GPU Work Placement
 
-> **Governing question.** When a host has more than one GPU and the operator has **not** pinned specific GPUs to specific tasks, which GPU should the engine place a tile's pipeline on? The working hypothesis was: *"use GPU memory + encoder/decoder utilisation to select the least-loaded GPU."* This brief validates that hypothesis and **refines it** with the one constraint it omits — **pipeline affinity** — because Mosaic's "zero-copy islands per vendor" invariant ([ADR-0004](../decisions/ADR-0004.md)) makes splitting a tile's `decode -> composite -> encode` across two GPUs cost an explicit PCIe round-trip plus latency. Least-loaded is the *tie-breaker among GPUs that can host the whole pipeline*, not the primary axis.
+> **Governing question.** When a host has more than one GPU and the operator has **not** pinned specific GPUs to specific tasks, which GPU should the engine place a tile's pipeline on? The working hypothesis was: *"use GPU memory + encoder/decoder utilisation to select the least-loaded GPU."* This brief validates that hypothesis and **refines it** with the one constraint it omits — **pipeline affinity** — because Multiview's "zero-copy islands per vendor" invariant ([ADR-0004](../decisions/ADR-0004.md)) makes splitting a tile's `decode -> composite -> encode` across two GPUs cost an explicit PCIe round-trip plus latency. Least-loaded is the *tie-breaker among GPUs that can host the whole pipeline*, not the primary axis.
 
-This brief extends [efficiency.md](efficiency.md) §3 (resource-adaptive degradation), §3.1 (pressure detection), §3.2 (admission control), and §4 (cost model). It does **not** restate them; it adds the **per-device live-load probe** and the **GPU-selection policy** that sit on top of the capability+cost+planner model already in `crates/mosaic-hal`.
+This brief extends [efficiency.md](efficiency.md) §3 (resource-adaptive degradation), §3.1 (pressure detection), §3.2 (admission control), and §4 (cost model). It does **not** restate them; it adds the **per-device live-load probe** and the **GPU-selection policy** that sit on top of the capability+cost+planner model already in `crates/multiview-hal`.
 
 ---
 
@@ -47,7 +47,7 @@ Additional verified caveats already noted in efficiency §3.1 and reaffirmed her
 
 ### 1.1 The NVENC concurrent-session ceiling (hard admission gate)
 
-The NVENC concurrent-encode-session limit is a **per-system aggregate across all non-qualified (GeForce) cards combined**, enforced by the driver at session-create, and it is a **moving driver-version number** — do not hard-code it. The Video Codec SDK 13.0 NVENC Application Note states verbatim: "On non-qualified GPUs, the number of concurrent encode sessions is limited to **8 per system**" and "On qualified GPUs, the number of concurrent encode sessions is limited by available system resources" [N4, verified 2026-06-03]. Historically the cap has climbed 2 -> 3 (2020) -> 5 (Mar 2023) -> 8 (Jan 2024) and consumer reporting in 2025 cites 12 [N5][N6]; **probe at runtime, never assume.** NVDEC has no session cap but is bounded by physical NVDEC engine count (often 1, sometimes 0 on entry SKUs), per-engine pixels/sec, and VRAM. Because there is no clean "sessions remaining" query, **Mosaic must track its own live session count** (it owns every encoder it creates) and treat the discovered system ceiling as a hard gate at admission — this is an extension of the admission control in efficiency §3.2, applied at GPU-selection time.
+The NVENC concurrent-encode-session limit is a **per-system aggregate across all non-qualified (GeForce) cards combined**, enforced by the driver at session-create, and it is a **moving driver-version number** — do not hard-code it. The Video Codec SDK 13.0 NVENC Application Note states verbatim: "On non-qualified GPUs, the number of concurrent encode sessions is limited to **8 per system**" and "On qualified GPUs, the number of concurrent encode sessions is limited by available system resources" [N4, verified 2026-06-03]. Historically the cap has climbed 2 -> 3 (2020) -> 5 (Mar 2023) -> 8 (Jan 2024) and consumer reporting in 2025 cites 12 [N5][N6]; **probe at runtime, never assume.** NVDEC has no session cap but is bounded by physical NVDEC engine count (often 1, sometimes 0 on entry SKUs), per-engine pixels/sec, and VRAM. Because there is no clean "sessions remaining" query, **Multiview must track its own live session count** (it owns every encoder it creates) and treat the discovered system ceiling as a hard gate at admission — this is an extension of the admission control in efficiency §3.2, applied at GPU-selection time.
 
 ---
 
@@ -57,34 +57,34 @@ The probe is a **bounded, off-hot-path sampler** that refreshes a live-load snap
 
 ```mermaid
 flowchart LR
-    subgraph Probe["mosaic-hal live-load probe (feature-gated, ~1-4 Hz, dedicated blocking thread)"]
+    subgraph Probe["multiview-hal live-load probe (feature-gated, ~1-4 Hz, dedicated blocking thread)"]
         NVML["NVML (cuda feature)\nutil/mem/enc/dec/sessions"]
         I915["i915 PMU + DRM fdinfo (vaapi/qsv)"]
         AMDGPU["amdgpu sysfs + fdinfo (vaapi)"]
         IOREP["IOReport + thermalState (videotoolbox/macOS)"]
     end
     Probe -->|"set()"| SNAP[("DeviceLoad snapshot\narc_swap::ArcSwap, wait-free read")]
-    Probe -->|"gauge.set()"| MET[("mosaic-telemetry MetricsRegistry\nper-GPU gauges")]
+    Probe -->|"gauge.set()"| MET[("multiview-telemetry MetricsRegistry\nper-GPU gauges")]
     SNAP --> SEL["GPU selection policy\n(admission / reconfig time only)"]
-    SEL --> PLAN["mosaic-hal Planner\n(admit / degrade)"]
-    MET --> API["mosaic-control REST + realtime\n(per-GPU dashboard)"]
+    SEL --> PLAN["multiview-hal Planner\n(admit / degrade)"]
+    MET --> API["multiview-control REST + realtime\n(per-GPU dashboard)"]
     style Probe fill:#eef
 ```
 
 **Design rules (all load-bearing):**
 
-1. **Runtime-loaded, feature-gated, no build-time native deps.** NVML is loaded at runtime from `libnvidia-ml.so.1` via `dlopen` — exactly Mosaic's conventions §7 posture for vendor libs (NDI/NVENC). The `nvml-wrapper` crate does this through `libloading`; "the NVML library gets loaded upon calling `Nvml::init` and can return an error if NVML isn't present" [N7]. So the whole NVIDIA path sits behind the off-by-default `cuda` feature with **zero native build deps** and a clean no-GPU fallback (matches the existing `probe.rs` "feature-on but no device -> Absent, never panic" contract). The Linux Intel/AMD paths read `/sys` and `/proc/<pid>/fdinfo` — std file I/O, no native lib. The Apple IOReport path is private API behind `videotoolbox` + `target_os = "macos"`.
+1. **Runtime-loaded, feature-gated, no build-time native deps.** NVML is loaded at runtime from `libnvidia-ml.so.1` via `dlopen` — exactly Multiview's conventions §7 posture for vendor libs (NDI/NVENC). The `nvml-wrapper` crate does this through `libloading`; "the NVML library gets loaded upon calling `Nvml::init` and can return an error if NVML isn't present" [N7]. So the whole NVIDIA path sits behind the off-by-default `cuda` feature with **zero native build deps** and a clean no-GPU fallback (matches the existing `probe.rs` "feature-on but no device -> Absent, never panic" contract). The Linux Intel/AMD paths read `/sys` and `/proc/<pid>/fdinfo` — std file I/O, no native lib. The Apple IOReport path is private API behind `videotoolbox` + `target_os = "macos"`.
 2. **Bounded poll, ~1-4 Hz, on a dedicated blocking thread.** NVML calls are synchronous and can take milliseconds; the i915-PMU/fdinfo path requires two snapshots a fixed interval apart to derive a busy %. Poll on its own thread (or `tokio::task::spawn_blocking`), never on the data plane and never on a Tokio reactor thread. NVML's internal utilisation sample window is device-dependent (NVIDIA staff: between 1 s and 1/6 s); the encoder/decoder calls return their **own** `samplingPeriodUs` — **read it, do not assume it** [N1][N8].
 3. **Wait-free hand-off to the scheduler.** The probe publishes a `DeviceLoad` snapshot per GPU into an `arc_swap::ArcSwapOption` (the same wait-free latest-state primitive the engine already uses — [ADR-I001](../decisions/ADR-I001.md)). The scheduler reads the latest snapshot with no lock and no await; a stale snapshot is acceptable because **selection only happens at admission/reconfig time, not per-frame** (§3.5). If the probe thread dies, the engine keeps running on the last snapshot (and on the static cost model); telemetry is best-effort.
-4. **Mirror into the telemetry registry.** Each poll also calls `gauge.set()` on the per-GPU gauges in the existing `mosaic-telemetry` `MetricsRegistry` (§4). Those handles are lock-free atomics; updating them is allocation-free and never blocks.
+4. **Mirror into the telemetry registry.** Each poll also calls `gauge.set()` on the per-GPU gauges in the existing `multiview-telemetry` `MetricsRegistry` (§4). Those handles are lock-free atomics; updating them is allocation-free and never blocks.
 5. **Graceful absence.** A vendor that exposes nothing (Apple per-engine, AMD pre/post-VCN4 differences) yields a `DeviceLoad` with the available fields populated and the rest marked **unknown**; the policy in §3 handles `unknown` by falling back to `{free VRAM + overall-busy + cost-model estimate}`. No metric is fabricated.
 
 ### 2.1 Where it lives in the crate map
 
-The probe is the natural fourth seam in `mosaic-hal`, beside `probe.rs` (presence detection), `cost.rs`, and `planner.rs`. Suggested module shape (no code this round):
+The probe is the natural fourth seam in `multiview-hal`, beside `probe.rs` (presence detection), `cost.rs`, and `planner.rs`. Suggested module shape (no code this round):
 
-- `mosaic-hal::load` — the `DeviceLoad` snapshot type (`{ gpu_busy: Option<f32>, vram_used/total: Option<u64>, enc_util/dec_util: Option<f32>, enc_sessions: Option<u32>, enc_capacity_pct: Option<f32>, device_id: DeviceId }`) plus the `LoadProbe` trait (the vendor seam, mirroring the existing injectable `DeviceProbe`). All `Option`/typed so "unknown" is a first-class state, never a sentinel.
-- `mosaic-hal::select` — the pure, deterministic selection policy (§3), consuming `&[DeviceLoad]` + the existing `Capability`/`CostBudget`/affinity and returning a chosen `DeviceId` or a documented fallback. Pure = unit-testable with injected snapshots, no hardware.
+- `multiview-hal::load` — the `DeviceLoad` snapshot type (`{ gpu_busy: Option<f32>, vram_used/total: Option<u64>, enc_util/dec_util: Option<f32>, enc_sessions: Option<u32>, enc_capacity_pct: Option<f32>, device_id: DeviceId }`) plus the `LoadProbe` trait (the vendor seam, mirroring the existing injectable `DeviceProbe`). All `Option`/typed so "unknown" is a first-class state, never a sentinel.
+- `multiview-hal::select` — the pure, deterministic selection policy (§3), consuming `&[DeviceLoad]` + the existing `Capability`/`CostBudget`/affinity and returning a chosen `DeviceId` or a documented fallback. Pure = unit-testable with injected snapshots, no hardware.
 - Feature-gated `LoadProbe` impls (`nvml`, `i915`, `amdgpu`, `ioreport`) behind the existing `cuda`/`vaapi`/`qsv`/`videotoolbox` features.
 
 `DeviceId` should be the **stable** identity (NVML UUID / PCI bus id; DRM render-node + PCI; Metal registryID) — **never the enumeration index**, which is unstable across reboots and `CUDA_VISIBLE_DEVICES` reorderings [N1]. This is what operator pins (§3.4) bind to.
@@ -95,7 +95,7 @@ The probe is the natural fourth seam in `mosaic-hal`, beside `probe.rs` (presenc
 
 ### 3.1 The refinement: affinity gates least-loaded
 
-The user's hypothesis — *least-loaded by VRAM + enc/dec util* — is **correct as the ranking function but incomplete as the algorithm**, because it implicitly assumes work is freely placeable. Under Mosaic's "zero-copy islands" invariant ([ADR-0004](../decisions/ADR-0004.md)), cross-vendor/cross-GPU on-GPU zero-copy **does not exist on desktop**: a tile whose decode lands on GPU-A but whose composite/encode lands on GPU-B pays an explicit **GPU-A -> host -> GPU-B copy** plus latency on every frame. So the correct algorithm is:
+The user's hypothesis — *least-loaded by VRAM + enc/dec util* — is **correct as the ranking function but incomplete as the algorithm**, because it implicitly assumes work is freely placeable. Under Multiview's "zero-copy islands" invariant ([ADR-0004](../decisions/ADR-0004.md)), cross-vendor/cross-GPU on-GPU zero-copy **does not exist on desktop**: a tile whose decode lands on GPU-A but whose composite/encode lands on GPU-B pays an explicit **GPU-A -> host -> GPU-B copy** plus latency on every frame. So the correct algorithm is:
 
 > **Pick the least-loaded *single GPU that can host the whole `decode -> composite -> encode` pipeline*. Splitting a pipeline across GPUs is a last-resort, explicitly-accounted degradation step, never the default.**
 
@@ -144,7 +144,7 @@ GPU selection is a **placement decision**, made when a source/output is added or
 |---|---|
 | **Apple** (no public per-engine util) | `{free unified-memory pressure (IOReport, private) + thermalState + cost-model decode/encode-session estimate}`. Size by *max concurrent sessions sustained without drops* (efficiency §3.2), not util%. On a single-GPU Apple box this is moot — there is one island. |
 | **AMD VCN4+** (decode/encode merged in fdinfo) | Treat the merged "Media engine" figure as a **combined** enc+dec headroom signal; do not pretend to separate them. Corroborate with `gpu_busy_percent` + cost model. Pre-VCN4, the separate `drm-engine-dec`/`-enc` fdinfo keys are usable [A2][A3]. |
-| **AMD any** (no per-engine sysfs %, fdinfo is per-process) | Sum Mosaic's *own* per-fd engine ns deltas (we own our processes) for our contribution; use `gpu_busy_percent` + VRAM + cost model for the whole-device picture. |
+| **AMD any** (no per-engine sysfs %, fdinfo is per-process) | Sum Multiview's *own* per-fd engine ns deltas (we own our processes) for our contribution; use `gpu_busy_percent` + VRAM + cost model for the whole-device picture. |
 | **Any vendor, probe failed/absent** | Pure **cost-model placement**: rank by predicted Mpix/s headroom from `CostBudget` + VRAM-from-pool-sizing estimate. Degrades to the static planner that already exists. |
 
 The invariant: **a blind vendor never blocks placement** — it falls back to VRAM + overall-busy + the cost-model estimate, which is always available. The user's enc/dec-util term is an *enhancement* where the silicon reports it, not a hard dependency.
@@ -153,18 +153,18 @@ The invariant: **a blind vendor never blocks placement** — it falls back to VR
 
 ## 4. API + WebUI exposure
 
-### 4.1 Prometheus gauges (mosaic-telemetry)
+### 4.1 Prometheus gauges (multiview-telemetry)
 
 The probe mirrors each poll into the existing `MetricsRegistry` as per-GPU gauges, labelled `{gpu, vendor, uuid}` (bounded cardinality — one series set per physical GPU). Proposed series (gauges unless noted):
 
-- `mosaic_gpu_compute_utilization_ratio{gpu,vendor}` — 0.0-1.0 core/compute busy.
-- `mosaic_gpu_encoder_utilization_ratio{gpu,vendor}` — 0.0-1.0 (absent label-value or NaN where unknown).
-- `mosaic_gpu_decoder_utilization_ratio{gpu,vendor}` — 0.0-1.0 (unknown where unsupported).
-- `mosaic_gpu_memory_used_bytes{gpu,vendor}` / `mosaic_gpu_memory_total_bytes{gpu,vendor}` — the authoritative VRAM-pressure pair.
-- `mosaic_gpu_encoder_sessions_active{gpu,vendor}` — Mosaic's own tracked count (NVIDIA-corroborated by `nvmlDeviceGetEncoderStats` where available).
-- `mosaic_gpu_encoder_session_ceiling{scope="system"}` — the discovered NVENC per-system ceiling (§1.1).
-- `mosaic_gpu_temperature_celsius` / `mosaic_gpu_power_watts` / `mosaic_gpu_clock_mhz{domain}` — NVIDIA where available; sysfs hwmon on Linux Intel/AMD.
-- `mosaic_gpu_pipeline_placements{gpu,role}` — how many decode/composite/encode roles the scheduler has placed on each GPU (the operator's view of the balance the policy produced).
+- `multiview_gpu_compute_utilization_ratio{gpu,vendor}` — 0.0-1.0 core/compute busy.
+- `multiview_gpu_encoder_utilization_ratio{gpu,vendor}` — 0.0-1.0 (absent label-value or NaN where unknown).
+- `multiview_gpu_decoder_utilization_ratio{gpu,vendor}` — 0.0-1.0 (unknown where unsupported).
+- `multiview_gpu_memory_used_bytes{gpu,vendor}` / `multiview_gpu_memory_total_bytes{gpu,vendor}` — the authoritative VRAM-pressure pair.
+- `multiview_gpu_encoder_sessions_active{gpu,vendor}` — Multiview's own tracked count (NVIDIA-corroborated by `nvmlDeviceGetEncoderStats` where available).
+- `multiview_gpu_encoder_session_ceiling{scope="system"}` — the discovered NVENC per-system ceiling (§1.1).
+- `multiview_gpu_temperature_celsius` / `multiview_gpu_power_watts` / `multiview_gpu_clock_mhz{domain}` — NVIDIA where available; sysfs hwmon on Linux Intel/AMD.
+- `multiview_gpu_pipeline_placements{gpu,role}` — how many decode/composite/encode roles the scheduler has placed on each GPU (the operator's view of the balance the policy produced).
 
 These join the existing engine gauges (per-tile fps, queue depth, VRAM bytes, active encode sessions named in `metrics.rs`). **Convention to honour:** unknown is *not* `0.0` — a gauge that would lie (e.g. encoder util on Apple) is simply **not registered** for that GPU, so the dashboard shows "n/a" rather than a false zero. (The registry stores `f64`; the probe omits the `set()` for unknown metrics.)
 
@@ -179,23 +179,23 @@ These join the existing engine gauges (per-tile fps, queue depth, VRAM bytes, ac
 ## 5. Open questions & risks
 
 1. **`samplingPeriodUs` heterogeneity.** NVML encoder/decoder utilisation each report their own (device-chosen, variable) sampling window; the i915-PMU path uses our chosen interval; AMD fdinfo is a ns counter we difference ourselves. The composite score blends three signals with **different time bases**. Risk: a fast spike on one engine and a slow average on another are not directly comparable. Mitigation: low-pass each signal to a common ~1 s effective window before blending; document that the score is a *steering heuristic*, with the hard gates (VRAM, session ceiling, cost budget) as the real safety.
-2. **Consumer-GeForce blind spots.** `nvmlDeviceGetEncoderSessions` and `nvmlDeviceGetProcessUtilization` are frequently `NOT_SUPPORTED` / return 0 on GeForce [N3]. Mosaic must rely on its **own** session bookkeeping (it owns its encoders) and the aggregate `nvmlDeviceGetEncoderStats`, not on per-session enumeration, for the session-headroom term. **Unverified:** the exact set of GeForce SKUs/drivers where `GetEncoderSessions` works — treat as best-effort and never a hard dependency.
+2. **Consumer-GeForce blind spots.** `nvmlDeviceGetEncoderSessions` and `nvmlDeviceGetProcessUtilization` are frequently `NOT_SUPPORTED` / return 0 on GeForce [N3]. Multiview must rely on its **own** session bookkeeping (it owns its encoders) and the aggregate `nvmlDeviceGetEncoderStats`, not on per-session enumeration, for the session-headroom term. **Unverified:** the exact set of GeForce SKUs/drivers where `GetEncoderSessions` works — treat as best-effort and never a hard dependency.
 3. **AMD VCN4 merge.** The decode/encode merge into one "Media engine" figure [A2][A3] means the policy cannot give AMD a separate `dec_util` and `enc_util` on recent silicon — the score uses one combined media term there. Acceptable, but it slightly weakens balance quality on AMD; VRAM + `gpu_busy_percent` + cost model carry the decision.
 4. **Apple is effectively single-island for selection.** On the common base-M-series target there is one GPU and one media-engine pair, so "which GPU" is trivial — the real Apple problem is *admission* (session count), which efficiency §3.2 already owns. The per-engine-util blind spot therefore costs little in practice, but a true public Apple per-engine API would be a future improvement (**none verified to exist**).
 5. **Cross-GPU split cost is an estimate.** When the last-resort split path runs, the PCIe copy + latency added to the cost model is a *modelled* number until measured per host. Risk: under-estimating it could make a split look cheaper than re-balancing. Mitigation: bias the model conservatively (splits are last-resort) and measure the boundary copy at startup like the other cost-table entries (efficiency §4).
 6. **NVENC ceiling discovery.** Since the ceiling is a moving driver number with no clean query, "discover by attempt-and-handle session-create failure" is the robust path — but that means the *first* over-ceiling placement learns the limit by failing. Mitigation: cache the discovered ceiling, seed it from a conservative known floor, and surface it as the `encoder_session_ceiling` gauge.
-7. **Probe cost on tiny boxes.** On an N100-class iGPU the fdinfo-walk over many `/proc/<pid>/fdinfo` entries at ~4 Hz is non-trivial. Mitigation: only walk Mosaic's own PIDs for the per-process contribution, and lean on the global i915-PMU engine counters for the whole-device figure.
+7. **Probe cost on tiny boxes.** On an N100-class iGPU the fdinfo-walk over many `/proc/<pid>/fdinfo` entries at ~4 Hz is non-trivial. Mitigation: only walk Multiview's own PIDs for the per-process contribution, and lean on the global i915-PMU engine counters for the whole-device figure.
 
 ---
 
 ## 6. How this shapes the data model
 
-- **`mosaic-hal`** gains a `load` module (the `DeviceLoad` snapshot + `LoadProbe` trait, mirroring the injectable `DeviceProbe` seam) and a pure `select` module (the affinity-gated least-loaded policy). The vendor `LoadProbe` impls are feature-gated exactly like the existing presence detectors. `DeviceId` (stable UUID/PCI/registryID) becomes the placement + pin key.
-- **`mosaic-telemetry`** gains the per-GPU gauge series in §4.1, registered against the existing `MetricsRegistry`; the probe owns the `set()` calls. "Unknown" metrics are simply not registered for that GPU.
-- **`mosaic-engine`** drives the probe thread (off the data plane), reads the wait-free `DeviceLoad` snapshot at admission/reconfig, and runs the make-before-break migration when re-balancing (Class-2, hysteresis-gated).
-- **`mosaic-control` + `web/`** expose the inventory + placement + per-GPU dashboard + the pin override, over REST + the conflated realtime channel.
+- **`multiview-hal`** gains a `load` module (the `DeviceLoad` snapshot + `LoadProbe` trait, mirroring the injectable `DeviceProbe` seam) and a pure `select` module (the affinity-gated least-loaded policy). The vendor `LoadProbe` impls are feature-gated exactly like the existing presence detectors. `DeviceId` (stable UUID/PCI/registryID) becomes the placement + pin key.
+- **`multiview-telemetry`** gains the per-GPU gauge series in §4.1, registered against the existing `MetricsRegistry`; the probe owns the `set()` calls. "Unknown" metrics are simply not registered for that GPU.
+- **`multiview-engine`** drives the probe thread (off the data plane), reads the wait-free `DeviceLoad` snapshot at admission/reconfig, and runs the make-before-break migration when re-balancing (Class-2, hysteresis-gated).
+- **`multiview-control` + `web/`** expose the inventory + placement + per-GPU dashboard + the pin override, over REST + the conflated realtime channel.
 
-The selection policy is a **pure function over `(affinity set, capability, cost budget, DeviceLoad[], pins)`** — deterministic and unit-testable with injected snapshots, holding to the same "pure core, feature-gated hardware seam" discipline as the rest of `mosaic-hal`.
+The selection policy is a **pure function over `(affinity set, capability, cost budget, DeviceLoad[], pins)`** — deterministic and unit-testable with injected snapshots, holding to the same "pure core, feature-gated hardware seam" discipline as the rest of `multiview-hal`.
 
 ---
 
@@ -226,7 +226,7 @@ Apple (macOS)
 - [P2] `powermetrics` GPU telemetry is system-level, text-only, not per-process; Activity Monitor shows GPU history without per-process util/VRAM. support.apple.com / Apple Community.
 - [P3] efficiency.md §3.1 (verified) — VideoToolbox runs on a dedicated Media Engine, NOT the GPU; GPU-util% does not reflect decode/encode load; size by max concurrent sessions, not util%.
 
-Mosaic internal
+Multiview internal
 - [efficiency.md](efficiency.md) §1.7, §3, §3.1, §3.2, §3.3, §4 — per-engine measurement, resource-adaptive degradation, admission control, cost model.
 - [ADR-0004](../decisions/ADR-0004.md) — zero-copy islands per vendor (the affinity constraint).
 - [ADR-I001](../decisions/ADR-I001.md) — `arc_swap` wait-free latest-state + `broadcast` drop-oldest (the isolation primitives the probe hand-off reuses).

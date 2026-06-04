@@ -7,7 +7,7 @@
 
 ## Decision
 
-Use a single axum router in mosaic-control exposing REST (OpenAPI, commands/CRUD) plus a PRIMARY bidirectional WebSocket realtime channel for events/state and WHEP signaling, with SSE as a one-way server→client degraded fallback carrying the identical envelope. WS and SSE share one transport-agnostic fan-out core with two wire encoders (WsJson/WsBinary, SseText).
+Use a single axum router in multiview-control exposing REST (OpenAPI, commands/CRUD) plus a PRIMARY bidirectional WebSocket realtime channel for events/state and WHEP signaling, with SSE as a one-way server→client degraded fallback carrying the identical envelope. WS and SSE share one transport-agnostic fan-out core with two wire encoders (WsJson/WsBinary, SseText).
 
 ## Rationale
 

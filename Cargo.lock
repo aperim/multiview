@@ -1574,12 +1574,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-audio"
+name = "multiview-audio"
 version = "0.1.0"
 dependencies = [
  "approx",
- "mosaic-core",
- "mosaic-ffmpeg",
+ "multiview-core",
+ "multiview-ffmpeg",
  "proptest",
  "serde",
  "tempfile",
@@ -1588,26 +1588,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-cli"
+name = "multiview-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "ffmpeg-next",
- "mosaic-audio",
- "mosaic-compositor",
- "mosaic-config",
- "mosaic-control",
- "mosaic-core",
- "mosaic-engine",
- "mosaic-ffmpeg",
- "mosaic-framestore",
- "mosaic-hal",
- "mosaic-input",
- "mosaic-output",
- "mosaic-overlay",
- "mosaic-preview",
- "mosaic-telemetry",
+ "multiview-audio",
+ "multiview-compositor",
+ "multiview-config",
+ "multiview-control",
+ "multiview-core",
+ "multiview-engine",
+ "multiview-ffmpeg",
+ "multiview-framestore",
+ "multiview-hal",
+ "multiview-input",
+ "multiview-output",
+ "multiview-overlay",
+ "multiview-preview",
+ "multiview-telemetry",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -1617,14 +1617,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-compositor"
+name = "multiview-compositor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
  "criterion",
  "etagere",
- "mosaic-core",
+ "multiview-core",
  "naga",
  "pollster",
  "proptest",
@@ -1636,10 +1636,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-config"
+name = "multiview-config"
 version = "0.1.0"
 dependencies = [
- "mosaic-core",
+ "multiview-core",
  "proptest",
  "serde",
  "serde_json",
@@ -1648,7 +1648,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-control"
+name = "multiview-control"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -1658,11 +1658,11 @@ dependencies = [
  "hmac",
  "http-body-util",
  "lettre",
- "mosaic-config",
- "mosaic-core",
- "mosaic-engine",
- "mosaic-events",
- "mosaic-telemetry",
+ "multiview-config",
+ "multiview-core",
+ "multiview-engine",
+ "multiview-events",
+ "multiview-telemetry",
  "proptest",
  "serde",
  "serde_json",
@@ -1681,7 +1681,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-core"
+name = "multiview-core"
 version = "0.1.0"
 dependencies = [
  "proptest",
@@ -1691,21 +1691,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-engine"
+name = "multiview-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "mosaic-audio",
- "mosaic-compositor",
- "mosaic-config",
- "mosaic-core",
- "mosaic-events",
- "mosaic-framestore",
- "mosaic-hal",
- "mosaic-input",
- "mosaic-output",
- "mosaic-overlay",
- "mosaic-telemetry",
+ "multiview-audio",
+ "multiview-compositor",
+ "multiview-config",
+ "multiview-core",
+ "multiview-events",
+ "multiview-framestore",
+ "multiview-hal",
+ "multiview-input",
+ "multiview-output",
+ "multiview-overlay",
+ "multiview-telemetry",
  "proptest",
  "serde",
  "serde_json",
@@ -1715,10 +1715,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-events"
+name = "multiview-events"
 version = "0.1.0"
 dependencies = [
- "mosaic-core",
+ "multiview-core",
  "proptest",
  "serde",
  "serde_json",
@@ -1726,11 +1726,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-ffmpeg"
+name = "multiview-ffmpeg"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
- "mosaic-core",
+ "multiview-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -1739,21 +1739,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-framestore"
+name = "multiview-framestore"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "mosaic-core",
+ "multiview-core",
  "proptest",
  "proptest-state-machine",
  "thiserror 1.0.69",
 ]
 
 [[package]]
-name = "mosaic-hal"
+name = "multiview-hal"
 version = "0.1.0"
 dependencies = [
- "mosaic-core",
+ "multiview-core",
  "nvml-wrapper",
  "proptest",
  "thiserror 1.0.69",
@@ -1761,13 +1761,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-input"
+name = "multiview-input"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "mosaic-core",
- "mosaic-ffmpeg",
- "mosaic-framestore",
+ "multiview-core",
+ "multiview-ffmpeg",
+ "multiview-framestore",
  "proptest",
  "tempfile",
  "thiserror 1.0.69",
@@ -1776,13 +1776,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-output"
+name = "multiview-output"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
- "mosaic-core",
- "mosaic-ffmpeg",
- "mosaic-input",
+ "multiview-core",
+ "multiview-ffmpeg",
+ "multiview-input",
  "proptest",
  "tempfile",
  "thiserror 1.0.69",
@@ -1791,10 +1791,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-overlay"
+name = "multiview-overlay"
 version = "0.1.0"
 dependencies = [
- "mosaic-core",
+ "multiview-core",
  "proptest",
  "serde",
  "serde_json",
@@ -1803,14 +1803,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-preview"
+name = "multiview-preview"
 version = "0.1.0"
 dependencies = [
  "hmac",
  "jpeg-encoder",
- "mosaic-core",
- "mosaic-engine",
- "mosaic-events",
+ "multiview-core",
+ "multiview-engine",
+ "multiview-events",
  "sha2",
  "thiserror 1.0.69",
  "tokio",
@@ -1819,10 +1819,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosaic-telemetry"
+name = "multiview-telemetry"
 version = "0.1.0"
 dependencies = [
- "mosaic-core",
+ "multiview-core",
  "proptest",
  "serde",
  "serde_json",
@@ -3890,7 +3890,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "mosaic-control",
+ "multiview-control",
  "serde_json",
  "utoipa",
 ]

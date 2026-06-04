@@ -1,7 +1,7 @@
 # Changelog
 
-All notable changes to **Mosaic** — an efficient, hardware-accelerated, Rust live video
-mosaic generator — are documented in this file.
+All notable changes to **Multiview** — an efficient, hardware-accelerated, Rust live video
+multiview generator — are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -73,28 +73,28 @@ The verification-hardened deep briefs that back the implementation
 
 #### Crate workspace skeleton
 - Cargo workspace skeleton enumerating the canonical [crate map][cratemap]. All crates are
-  prefixed `mosaic-` and live under `crates/`; hardware/FFI/GPU code sits behind
+  prefixed `multiview-` and live under `crates/`; hardware/FFI/GPU code sits behind
   **off-by-default** Cargo features so the default `cargo check` builds the pure-Rust,
   LGPL-clean trait/type layer:
 
   | Crate | Responsibility |
   |-------|----------------|
-  | `mosaic-core` | Shared types & traits (`Frame`, `PixelFormat`, `ColorInfo`, `MediaTime`, stage traits). No FFI. |
-  | `mosaic-hal` | Hardware capability detection, backend registry, negotiation + cost model/planner. |
-  | `mosaic-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, hwframe lifecycle). |
-  | `mosaic-compositor` | Custom GPU compositor (scale + place + color convert + linear-light blend + overlay). |
-  | `mosaic-framestore` | Per-tile last-good-frame stores + tile state machine. |
-  | `mosaic-audio` | Per-input audio decode/resample/mix/route + EBU R128 metering. |
-  | `mosaic-overlay` | Overlay layers, text rendering, subtitle ingest/render. |
-  | `mosaic-input` | Ingest sources, input pacer, jitter buffers, timestamp normalization, reconnect. |
-  | `mosaic-output` | Output sinks/servers; encode-once-mux-many fan-out. |
-  | `mosaic-engine` | Protected output core: output clock, compositor drive, supervisor, hot-reconfig. |
-  | `mosaic-config` | Config & template schema, validation, config-as-code import/export. |
-  | `mosaic-events` | Shared realtime event types + versioned envelope. |
-  | `mosaic-control` | axum REST + WebSocket + SSE API, OpenAPI, auth, SQLite, embedded SPA. |
-  | `mosaic-preview` | Preview taps, preview encoder pool, WHEP/MJPEG/snapshot endpoints. |
-  | `mosaic-telemetry` | `tracing` + Prometheus metrics + health (`/livez`, `/readyz`). |
-  | `mosaic-cli` | Binary **`mosaic`**: wires engine + control plane; run/validate subcommands. |
+  | `multiview-core` | Shared types & traits (`Frame`, `PixelFormat`, `ColorInfo`, `MediaTime`, stage traits). No FFI. |
+  | `multiview-hal` | Hardware capability detection, backend registry, negotiation + cost model/planner. |
+  | `multiview-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, hwframe lifecycle). |
+  | `multiview-compositor` | Custom GPU compositor (scale + place + color convert + linear-light blend + overlay). |
+  | `multiview-framestore` | Per-tile last-good-frame stores + tile state machine. |
+  | `multiview-audio` | Per-input audio decode/resample/mix/route + EBU R128 metering. |
+  | `multiview-overlay` | Overlay layers, text rendering, subtitle ingest/render. |
+  | `multiview-input` | Ingest sources, input pacer, jitter buffers, timestamp normalization, reconnect. |
+  | `multiview-output` | Output sinks/servers; encode-once-mux-many fan-out. |
+  | `multiview-engine` | Protected output core: output clock, compositor drive, supervisor, hot-reconfig. |
+  | `multiview-config` | Config & template schema, validation, config-as-code import/export. |
+  | `multiview-events` | Shared realtime event types + versioned envelope. |
+  | `multiview-control` | axum REST + WebSocket + SSE API, OpenAPI, auth, SQLite, embedded SPA. |
+  | `multiview-preview` | Preview taps, preview encoder pool, WHEP/MJPEG/snapshot endpoints. |
+  | `multiview-telemetry` | `tracing` + Prometheus metrics + health (`/livez`, `/readyz`). |
+  | `multiview-cli` | Binary **`multiview`**: wires engine + control plane; run/validate subcommands. |
   | `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint). |
 
   **Dependency direction:** `core` ← everything; `engine` depends on the media crates;
@@ -111,7 +111,7 @@ The verification-hardened deep briefs that back the implementation
 
 ## Versioning policy
 
-Mosaic follows **[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)**
+Multiview follows **[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)**
 (`MAJOR.MINOR.PATCH`):
 
 - **MAJOR** — incompatible API changes (Rust public API across crates, and the
@@ -132,7 +132,7 @@ Additional rules for this project:
 
 ---
 
-[Unreleased]: https://github.com/aperim/mosaic/compare/HEAD
+[Unreleased]: https://github.com/aperim/multiview/compare/HEAD
 
 <!-- Architecture & docs -->
 [conventions]: docs/architecture/conventions.md

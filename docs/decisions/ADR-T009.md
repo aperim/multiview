@@ -8,7 +8,7 @@
 
 ## Context
 
-`TileStore` (`crates/mosaic-framestore/src/tile.rs`) keeps a bounded
+`TileStore` (`crates/multiview-framestore/src/tile.rs`) keeps a bounded
 (`RING_CAPACITY = 256`) **media-time ring** of recently-published frames behind an
 `ArcSwap<Vec<RingEntry<T>>>`. The ring backs latch-on-tick sampling: `read_at(now)`
 / `state_at(now)` `partition_point`-binary-search the ring for the entry whose

@@ -1,10 +1,10 @@
 # Observability
 
-How to see what Mosaic is doing: structured **tracing/logging**, **Prometheus metrics**
+How to see what Multiview is doing: structured **tracing/logging**, **Prometheus metrics**
 (per-tile FPS/drops/bitrate, encode time, GPU/VRAM, output gaps/jitter), **health endpoints**
 (`/livez`, `/readyz`), and how all of it relates to the realtime **event stream**.
 
-Observability in Mosaic is owned by the [`mosaic-telemetry`](../architecture/conventions.md#3-canonical-crate-map)
+Observability in Multiview is owned by the [`multiview-telemetry`](../architecture/conventions.md#3-canonical-crate-map)
 crate (`tracing` + Prometheus metrics + health). It is built on the same first-class
 [output-validity probe](../decisions/ADR-R009.md) that arbitrates the project's central
 [bulletproof-output invariant](../architecture/conventions.md#5-canonical-technical-invariants):
@@ -29,7 +29,7 @@ flowchart LR
     AUD["Audio meter DSP threads"]
   end
 
-  subgraph Tele["mosaic-telemetry"]
+  subgraph Tele["multiview-telemetry"]
     REG["Prometheus registry\n(metrics-rs / prometheus)"]
     TR["tracing subscriber\n(JSON + span events)"]
     HLT["Health: /livez /readyz"]
@@ -62,8 +62,8 @@ historical* view; the realtime stream is the *live, per-resource, operator-facin
 ## 2. Tracing / structured logging
 
 Per [conventions §9](../architecture/conventions.md#9-naming--style), all logging uses
-[`tracing`](https://docs.rs/tracing). The subscriber is configured in `mosaic-telemetry` and wired
-once in the `mosaic-cli` binary.
+[`tracing`](https://docs.rs/tracing). The subscriber is configured in `multiview-telemetry` and wired
+once in the `multiview-cli` binary.
 
 - **Format:** structured JSON by default (`tracing-subscriber` JSON layer) for machine ingestion;
   a human-friendly pretty formatter is selectable for local dev. Output goes to stdout (12-factor;
@@ -93,7 +93,7 @@ view in the UI subscribes only while open.
 
 ## 3. Prometheus metrics
 
-`mosaic-telemetry` exposes a Prometheus text endpoint at **`GET /metrics`** (served by the same axum
+`multiview-telemetry` exposes a Prometheus text endpoint at **`GET /metrics`** (served by the same axum
 router as the API). Engine code updates metrics through **atomic counters/histograms** — the publish
 path never blocks the output clock.
 
@@ -110,64 +110,64 @@ These come straight from the always-on output-validity probe and **are** the num
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `mosaic_output_frame_interval_seconds` | histogram | `output` | Inter-frame interval at the mux; custom buckets around nominal. |
-| `mosaic_output_gaps_total` | counter | `output` | Intervals > N× nominal — **target: never increments**. |
-| `mosaic_output_pts_monotonic` | gauge (0/1) | `output` | 1 while output PTS is strictly monotonic. |
-| `mosaic_output_jitter_seconds` | histogram | `output` | Deviation of emit time from the ideal tick deadline. |
-| `mosaic_output_pts_wallclock_drift_seconds` | gauge | `output` | Output media clock vs wall clock — a slow diverging clock is a latent falter ([ADR-T006](../decisions/ADR-T006.md)). |
-| `mosaic_output_ts_priority1_errors_total` | counter | `output` | TR 101 290 priority-1 errors (TS/SRT). Target: 0. |
+| `multiview_output_frame_interval_seconds` | histogram | `output` | Inter-frame interval at the mux; custom buckets around nominal. |
+| `multiview_output_gaps_total` | counter | `output` | Intervals > N× nominal — **target: never increments**. |
+| `multiview_output_pts_monotonic` | gauge (0/1) | `output` | 1 while output PTS is strictly monotonic. |
+| `multiview_output_jitter_seconds` | histogram | `output` | Deviation of emit time from the ideal tick deadline. |
+| `multiview_output_pts_wallclock_drift_seconds` | gauge | `output` | Output media clock vs wall clock — a slow diverging clock is a latent falter ([ADR-T006](../decisions/ADR-T006.md)). |
+| `multiview_output_ts_priority1_errors_total` | counter | `output` | TR 101 290 priority-1 errors (TS/SRT). Target: 0. |
 
 ### 3.2 Per-tile
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `mosaic_tile_fps` | gauge | `tile`, `input` | Measured composited tile frame rate. |
-| `mosaic_tile_state` | gauge (enum) | `tile`, `state` | 1 for the current `LIVE`/`STALE`/`RECONNECTING`/`NO_SIGNAL` state ([ADR-R001](../decisions/ADR-R001.md)). |
-| `mosaic_tile_frames_dropped_total` | counter | `tile` | Frames dropped at the tile frame store (stale-update drops). |
-| `mosaic_tile_last_good_age_seconds` | gauge | `tile` | Age of the last-good frame the compositor is holding. |
-| `mosaic_tile_state_transitions_total` | counter | `tile`, `from`, `to` | State-machine ladder transitions (flapping detector). |
+| `multiview_tile_fps` | gauge | `tile`, `input` | Measured composited tile frame rate. |
+| `multiview_tile_state` | gauge (enum) | `tile`, `state` | 1 for the current `LIVE`/`STALE`/`RECONNECTING`/`NO_SIGNAL` state ([ADR-R001](../decisions/ADR-R001.md)). |
+| `multiview_tile_frames_dropped_total` | counter | `tile` | Frames dropped at the tile frame store (stale-update drops). |
+| `multiview_tile_last_good_age_seconds` | gauge | `tile` | Age of the last-good frame the compositor is holding. |
+| `multiview_tile_state_transitions_total` | counter | `tile`, `from`, `to` | State-machine ladder transitions (flapping detector). |
 
 ### 3.3 Per-input
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `mosaic_input_connection_state` | gauge (enum) | `input`, `state` | connected / reconnecting / connecting / disconnected. |
-| `mosaic_input_reconnects_total` | counter | `input` | Supervised reconnect attempts ([ADR-R003](../decisions/ADR-R003.md)). |
-| `mosaic_input_circuit_breaker_state` | gauge (enum) | `input` | `failsafe` breaker Closed/Open/Half-Open. |
-| `mosaic_input_jitter_buffer_seconds` | gauge | `input` | Jitter-buffer fill depth ([ADR-T008](../decisions/ADR-T008.md)). |
-| `mosaic_input_decode_errors_total` | counter | `input` | Decode/read errors (one bad input never stalls the mosaic — [ADR-T007](../decisions/ADR-T007.md)). |
+| `multiview_input_connection_state` | gauge (enum) | `input`, `state` | connected / reconnecting / connecting / disconnected. |
+| `multiview_input_reconnects_total` | counter | `input` | Supervised reconnect attempts ([ADR-R003](../decisions/ADR-R003.md)). |
+| `multiview_input_circuit_breaker_state` | gauge (enum) | `input` | `failsafe` breaker Closed/Open/Half-Open. |
+| `multiview_input_jitter_buffer_seconds` | gauge | `input` | Jitter-buffer fill depth ([ADR-T008](../decisions/ADR-T008.md)). |
+| `multiview_input_decode_errors_total` | counter | `input` | Decode/read errors (one bad input never stalls the multiview — [ADR-T007](../decisions/ADR-T007.md)). |
 
 ### 3.4 Encode, output bitrate, consumers
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `mosaic_encode_duration_seconds` | histogram | `output`, `backend`, `codec` | Per-frame encode time (canvas encode, composite-once per [ADR-E003](../decisions/ADR-E003.md)). |
-| `mosaic_output_bitrate_bps` | gauge | `output` | Measured output bitrate. |
-| `mosaic_output_clients` | gauge | `output` | Connected consumers (churn never touches the pipeline). |
-| `mosaic_encoder_recycles_total` | counter | `output` | Proactive encoder-process recycles behind the hot standby ([ADR-R002](../decisions/ADR-R002.md)). |
-| `mosaic_encoder_hot_standby_switches_total` | counter | `output` | Make-before-break encoder failovers. |
+| `multiview_encode_duration_seconds` | histogram | `output`, `backend`, `codec` | Per-frame encode time (canvas encode, composite-once per [ADR-E003](../decisions/ADR-E003.md)). |
+| `multiview_output_bitrate_bps` | gauge | `output` | Measured output bitrate. |
+| `multiview_output_clients` | gauge | `output` | Connected consumers (churn never touches the pipeline). |
+| `multiview_encoder_recycles_total` | counter | `output` | Proactive encoder-process recycles behind the hot standby ([ADR-R002](../decisions/ADR-R002.md)). |
+| `multiview_encoder_hot_standby_switches_total` | counter | `output` | Make-before-break encoder failovers. |
 
 ### 3.5 GPU / VRAM, queues & degradation
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `mosaic_gpu_utilization_ratio` | gauge | `device`, `engine` | Per-engine GPU util (NVML on NVIDIA; corroborate with measured fps — util% alone is unreliable, [ADR-E007](../decisions/ADR-E007.md)). |
-| `mosaic_gpu_vram_bytes` | gauge | `device` | VRAM used/total. |
-| `mosaic_gpu_encoder_sessions` | gauge | `device` | NVENC sessions vs the **probed** per-system cap (never hard-coded — [ADR-E007](../decisions/ADR-E007.md)). |
-| `mosaic_gpu_device_lost_total` | counter | `device` | Device-loss / TDR events triggering idempotent `rebuild()` ([ADR-R001](../decisions/ADR-R001.md)). |
-| `mosaic_queue_depth` | gauge | `stage` | Depth of a bounded drop-oldest stage queue (should stay shallow; growth = backpressure smell). |
-| `mosaic_queue_dropped_total` | counter | `stage` | Drops on bounded queues — by design they **drop, never grow** ([invariant 9](../architecture/conventions.md#5-canonical-technical-invariants)). |
-| `mosaic_degradation_step` | gauge | — | Current rung on the cheapest-impact-first degradation ladder ([ADR-E007](../decisions/ADR-E007.md)). |
-| `mosaic_supervision_restarts_total` | counter | `worker` | Supervised restarts; watch for meltdown-limit approach ([ADR-R003](../decisions/ADR-R003.md)). |
+| `multiview_gpu_utilization_ratio` | gauge | `device`, `engine` | Per-engine GPU util (NVML on NVIDIA; corroborate with measured fps — util% alone is unreliable, [ADR-E007](../decisions/ADR-E007.md)). |
+| `multiview_gpu_vram_bytes` | gauge | `device` | VRAM used/total. |
+| `multiview_gpu_encoder_sessions` | gauge | `device` | NVENC sessions vs the **probed** per-system cap (never hard-coded — [ADR-E007](../decisions/ADR-E007.md)). |
+| `multiview_gpu_device_lost_total` | counter | `device` | Device-loss / TDR events triggering idempotent `rebuild()` ([ADR-R001](../decisions/ADR-R001.md)). |
+| `multiview_queue_depth` | gauge | `stage` | Depth of a bounded drop-oldest stage queue (should stay shallow; growth = backpressure smell). |
+| `multiview_queue_dropped_total` | counter | `stage` | Drops on bounded queues — by design they **drop, never grow** ([invariant 9](../architecture/conventions.md#5-canonical-technical-invariants)). |
+| `multiview_degradation_step` | gauge | — | Current rung on the cheapest-impact-first degradation ladder ([ADR-E007](../decisions/ADR-E007.md)). |
+| `multiview_supervision_restarts_total` | counter | `worker` | Supervised restarts; watch for meltdown-limit approach ([ADR-R003](../decisions/ADR-R003.md)). |
 
 ### 3.6 Realtime-layer self-metrics (label discipline)
 
 The realtime fan-out exposes **aggregate** health so a slow client is visible without ever
 labelling by connection id ([ADR-RT004](../decisions/ADR-RT004.md), [realtime brief §12](../research/realtime-api.md)):
 
-`mosaic_realtime_active_connections`, `mosaic_realtime_dropped_meters_total`,
-`mosaic_realtime_lagged_events_total`, `mosaic_realtime_mpsc_full_disconnects_total`,
-`mosaic_realtime_resyncs_total`.
+`multiview_realtime_active_connections`, `multiview_realtime_dropped_meters_total`,
+`multiview_realtime_lagged_events_total`, `multiview_realtime_mpsc_full_disconnects_total`,
+`multiview_realtime_resyncs_total`.
 
 > **Cardinality rule:** never label by connection id, client id, source URI, or any unbounded value.
 > Labels are bounded sets: `tile`, `input`, `output`, `device`, `backend`, `codec`, `state`,
@@ -187,7 +187,7 @@ surfaced as gauges for alerting. Metering **never** runs on the media/compositor
 
 ## 4. Health endpoints
 
-Two liveness/readiness probes, served by `mosaic-telemetry` and consumed by the orchestrator
+Two liveness/readiness probes, served by `multiview-telemetry` and consumed by the orchestrator
 (Kubernetes, Compose healthchecks, systemd, load balancers). Both are read from an engine-owned
 `watch` channel (`system.health`: `{livez, readyz, startup}`), so a probe is a non-blocking
 `borrow()` — it can never stall the engine.
@@ -224,16 +224,16 @@ channels** and both are subject to the same non-blocking, best-effort isolation
 
 | Domain | Prometheus metric(s) | Realtime event `t` (topic) |
 |---|---|---|
-| Output validity / SLO | `mosaic_output_gaps_total`, `_jitter_seconds`, `_pts_monotonic` | `output.validity` (`outputs`) |
-| Output status / bitrate / clients | `mosaic_output_bitrate_bps`, `_clients` | `output.status`, `output.bitrate`, `output.clients` (`outputs`) |
-| Per-tile FPS | `mosaic_tile_fps` | `tile.fps` (`tiles`, conflated) |
-| Per-tile state | `mosaic_tile_state`, `_state_transitions_total` | `tile.state` (`tiles`) |
-| Input connection / supervision | `mosaic_input_connection_state`, `_reconnects_total`, `_circuit_breaker_state` | `input.connection`, `input.supervision` (`inputs`) |
-| GPU / device loss / recycle | `mosaic_gpu_*`, `mosaic_encoder_recycles_total` | `system.gpu` (`system`) |
-| Degradation ladder | `mosaic_degradation_step` | `system.degradation` (`system`) |
+| Output validity / SLO | `multiview_output_gaps_total`, `_jitter_seconds`, `_pts_monotonic` | `output.validity` (`outputs`) |
+| Output status / bitrate / clients | `multiview_output_bitrate_bps`, `_clients` | `output.status`, `output.bitrate`, `output.clients` (`outputs`) |
+| Per-tile FPS | `multiview_tile_fps` | `tile.fps` (`tiles`, conflated) |
+| Per-tile state | `multiview_tile_state`, `_state_transitions_total` | `tile.state` (`tiles`) |
+| Input connection / supervision | `multiview_input_connection_state`, `_reconnects_total`, `_circuit_breaker_state` | `input.connection`, `input.supervision` (`inputs`) |
+| GPU / device loss / recycle | `multiview_gpu_*`, `multiview_encoder_recycles_total` | `system.gpu` (`system`) |
+| Degradation ladder | `multiview_degradation_step` | `system.degradation` (`system`) |
 | Health | `/livez`, `/readyz` (probes) | `system.health` (`system`) |
 | Audio loudness | (slow compliance gauges, optional) | `audio.meter`, `audio.loudness` (`audio.meters`/`audio.loudness`) |
-| Realtime fan-out health | `mosaic_realtime_*` | (aggregate only; surfaced via `alert.*`) |
+| Realtime fan-out health | `multiview_realtime_*` | (aggregate only; surfaced via `alert.*`) |
 
 ### 5.2 Cadence & policy differences
 
@@ -252,13 +252,13 @@ channels** and both are subject to the same non-blocking, best-effort isolation
 
 | Condition | Metric expression (sketch) | Severity |
 |---|---|---|
-| Output gap | `increase(mosaic_output_gaps_total[1m]) > 0` | critical |
-| Clock drift | `abs(mosaic_output_pts_wallclock_drift_seconds) > 0.5` | warning |
-| GPU device loss | `increase(mosaic_gpu_device_lost_total[5m]) > 0` | critical |
-| Supervision meltdown risk | high `rate(mosaic_supervision_restarts_total[10m])` | warning |
-| Encoder session exhaustion | `mosaic_gpu_encoder_sessions / <probed cap> > 0.9` | warning |
-| Sustained degradation | `mosaic_degradation_step > 0 for 5m` | warning |
-| Realtime client thrash | high `rate(mosaic_realtime_mpsc_full_disconnects_total[5m])` | info |
+| Output gap | `increase(multiview_output_gaps_total[1m]) > 0` | critical |
+| Clock drift | `abs(multiview_output_pts_wallclock_drift_seconds) > 0.5` | warning |
+| GPU device loss | `increase(multiview_gpu_device_lost_total[5m]) > 0` | critical |
+| Supervision meltdown risk | high `rate(multiview_supervision_restarts_total[10m])` | warning |
+| Encoder session exhaustion | `multiview_gpu_encoder_sessions / <probed cap> > 0.9` | warning |
+| Sustained degradation | `multiview_degradation_step > 0 for 5m` | warning |
+| Realtime client thrash | high `rate(multiview_realtime_mpsc_full_disconnects_total[5m])` | info |
 
 ---
 
@@ -272,7 +272,7 @@ Observability is verified by the resilience suite, not assumed:
   deliberately-stalled metrics/event consumer and asserts **zero** effect on the engine tick and the
   output-validity SLO, plus bounded memory — the automated proof that observation cannot harm output.
 - Soak runs sample RSS/FD/GPU-mem and especially **output-PTS-vs-wallclock drift**
-  (`mosaic_output_pts_wallclock_drift_seconds`); a slowly diverging clock is treated as a latent
+  (`multiview_output_pts_wallclock_drift_seconds`); a slowly diverging clock is treated as a latent
   falter ([resilience brief §9.3](../research/resilience-and-av.md)).
 
 ---

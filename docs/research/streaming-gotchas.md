@@ -2,9 +2,9 @@
 
 ---
 
-# Streaming Robustness Runbook: Timing, Frame-Rate, Codec & HLS Failure Modes for a Live Video Mosaic
+# Streaming Robustness Runbook: Timing, Frame-Rate, Codec & HLS Failure Modes for a Live Video Multiview
 
-**Audience:** engineers building the Rust + FFmpeg/libav live mosaic. This is the authoritative "streaming gotchas & mitigations" runbook. The user has been burned by these in production; treat every mitigation here as load-bearing.
+**Audience:** engineers building the Rust + FFmpeg/libav live multiview. This is the authoritative "streaming gotchas & mitigations" runbook. The user has been burned by these in production; treat every mitigation here as load-bearing.
 
 > **See also:** [timing-architecture.md](timing-architecture.md) unifies this runbook's timing material into a five-layer model (monotonic pacing · optional PTP/ST 2059 reference-lock · per-input frame-sync · wall-clock time-of-day · timecode) and answers how/whether to tie the output to timed sources without breaking invariant #1. This runbook is the failure-mode detail behind Layer C (per-input frame-sync) and Layers A/D. [input-timing-and-sync.md](input-timing-and-sync.md) deepens §0–§2 here into the definitive **input-side** design (best-effort PTS acquisition → normalise → wall-clock pacer → sample-at-tick) and diagnoses the *ultra-fast-then-freeze* file/VOD bug ([ADR-0021](../decisions/ADR-0021.md)).
 
@@ -49,7 +49,7 @@ if media_time <= last_media_time_i: media_time = last_media_time_i + 1   // mono
 frame_store[i].put(media_time, frame)         // single-slot overwrite (or small ring)
 ```
 
-**Output clock (one thread, drives the whole mosaic):**
+**Output clock (one thread, drives the whole multiview):**
 ```
 start = master_now()                                  // monotonic Instant
 for N in 0.. :
@@ -184,7 +184,7 @@ bounded catch-up: if latency-to-edge grows, advance releases at ≤ ~1.25× unti
 | **Root cause** | Independent clocks, no active correction; making an input the master. |
 
 **Mitigation:**
-- **Master clock = system CLOCK_MONOTONIC driving the output pacer.** Never an input clock or audio hardware clock (an input hiccup/wrap/jump would stall or speed up the whole mosaic). This is GStreamer's single-pipeline-clock model and NDI's wall-clock recommendation. (If exactly one PTP-locked authoritative feed exists, a hybrid "slave master to that input, free-run the rest" is an option; for multi-machine sync use an NTP/PTP-disciplined clock.)
+- **Master clock = system CLOCK_MONOTONIC driving the output pacer.** Never an input clock or audio hardware clock (an input hiccup/wrap/jump would stall or speed up the whole multiview). This is GStreamer's single-pipeline-clock model and NDI's wall-clock recommendation. (If exactly one PTP-locked authoritative feed exists, a hybrid "slave master to that input, free-run the rest" is an option; for multi-machine sync use an NTP/PTP-disciplined clock.)
 - **Per-source drift control loop (PI + dead-band + EMA):** low-pass the buffer-level/PTS error (GStreamer `audiobasesink` 31/32 EMA), dead-band ~40 ms (GStreamer `drift-tolerance`), accumulate many samples before acting (SRT TSBPD ~1000-sample window; coarse base-shift + fine continuous correction). The loop output is the per-source ppm correction.
 - **Video:** correct by whole-frame select/drop/duplicate at the compositor (NDI Framesync "most appropriate recent frame"). Free, artifact-light.
 - **Audio:** **never** drop/dup blocks audibly — apply **continuous soft resampling** by the measured ppm (software word-clock). Two paths:
@@ -204,7 +204,7 @@ bounded catch-up: if latency-to-edge grows, advance releases at ≤ ~1.25× unti
 | **Symptom** | Stall, green/garbage frames at join, combing, washed-out tiles, dark HDR tiles, decoder abort. |
 | **Root cause** | Treating inputs as trusted; aborting on a bad packet; reconfiguring the OUTPUT encoder for input changes. |
 
-**Mitigation — per-input isolated `DecoderWorker` that conceals-and-continues and NEVER aborts the mosaic:**
+**Mitigation — per-input isolated `DecoderWorker` that conceals-and-continues and NEVER aborts the multiview:**
 - **Error policy:** `err_recognition` WITHOUT `AV_EF_EXPLODE` (optionally + `AV_EF_IGNORE_ERR`), set `error_concealment` (guess_mvs|deblock|favor_inter), do **not** set `AV_CODEC_FLAG_OUTPUT_CORRUPT`, set a moderate `discard_damaged_percentage`. Gate compositing on **both** `frame.flags & AV_FRAME_FLAG_CORRUPT == 0` **and** `frame.decode_error_flags == 0` (a frame can return with concealment active and the CORRUPT bit unset — check `FF_DECODE_ERROR_*`), plus format sanity (w/h>0, pix_fmt matches, `buf[0]` present).
 - **Wait-for-IDR is free:** the default (do NOT set `AV_CODEC_FLAG2_SHOW_ALL`) suppresses frames before the first keyframe. But it is a heuristic, not a guarantee (raw bitstream / `AV_CODEC_FLAG2_CHUNKS` / recovery-point-SEI streams can emit early/partial frames; SEI recovery frames stay CORRUPT until recovered). Gate on the corrupt/error check, not suppression alone. For GDR/intra-refresh streams with **no IDR**, gate on the CORRUPT flag *clearing*, not on an IDR.
 - **No-EXPLODE ≠ never-fails.** Severe corruption, mid-stream profile/level escalation, `ENOMEM`/`EINVAL`/`AVERROR_EXTERNAL`, or a HW fault still return hard errors or *no frames* (perpetual EAGAIN). Keep a per-input **error counter + no-output watchdog**; on threshold/reference-loss: drain (NULL) → `avcodec_flush_buffers()` → request upstream IDR / reconnect → **hold last-good frame** (GstVideoDecoder pattern: `max-errors`, `request_sync_point`, `needs_format`).

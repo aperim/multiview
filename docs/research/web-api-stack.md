@@ -4,7 +4,7 @@
 
 # Management Layer — Locked Stack Brief (Web App + API)
 
-**Scope:** Technology-stack decisions ONLY for the management web app + HTTP API of the Rust live video mosaic engine. The REST resource model, realtime/WebSocket protocol, and preview subsystem are designed in **separate authoritative briefs** — referenced here at overview level only.
+**Scope:** Technology-stack decisions ONLY for the management web app + HTTP API of the Rust live video multiview engine. The REST resource model, realtime/WebSocket protocol, and preview subsystem are designed in **separate authoritative briefs** — referenced here at overview level only.
 
 **Verdict:** All load-bearing claims confirmed by verification. The single product (engine + API + SPA) ships as **one tokio-based Rust binary**.
 
@@ -64,14 +64,14 @@ Vite build embedded at compile time + SPA fallback handler → index.html for cl
 ## Realtime & Preview (overview only — see dedicated briefs)
 
 - **Status/state push:** **SSE** (axum `Sse` + `KeepAlive`, fed by `tokio::broadcast`), over HTTP/2; WebSocket only for high-rate client→server control. *Detail deferred to the realtime-protocol brief.*
-- **Live mosaic preview:** **WebRTC/WHEP** for sub-second (gst-plugins-rs `whepserversink` shipped in 0.14 / GStreamer 1.28; works on Linux/NVIDIA `nvh264enc` + macOS `vtenc_h264_hw`), with **MJPEG/periodic-JPEG** zero-JS fallback that always ships (works where UDP/TURN is blocked). A low-fps confidence preview MAY ride the JSON API as base64 JPEG; only smooth sub-second motion needs the media egress. *Detail deferred to the preview-subsystem brief.*
+- **Live multiview preview:** **WebRTC/WHEP** for sub-second (gst-plugins-rs `whepserversink` shipped in 0.14 / GStreamer 1.28; works on Linux/NVIDIA `nvh264enc` + macOS `vtenc_h264_hw`), with **MJPEG/periodic-JPEG** zero-JS fallback that always ships (works where UDP/TURN is blocked). A low-fps confidence preview MAY ride the JSON API as base64 JPEG; only smooth sub-second motion needs the media egress. *Detail deferred to the preview-subsystem brief.*
 
 ---
 
 ## Key Screens
 
 1. **Dashboard / Health** — per-tile FPS/bitrate/up-down, alerts (SSE-driven TanStack Query cache).
-2. **Live Mosaic Preview** — WebRTC `<video>`, per-tile crops from the single mosaic frame.
+2. **Live Multiview Preview** — WebRTC `<video>`, per-tile crops from the single multiview frame.
 3. **Layout/Template Editor** — react-konva canvas, snap, resize/rotate, z-order, palette drag.
 4. **Sources** — add/edit/test RTSP/HLS/TS/SRT/NDI (write-only credentials).
 5. **Outputs/Publishers** — RTSP/HLS/NDI/RTMP/SRT config.

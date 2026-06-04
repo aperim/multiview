@@ -1,16 +1,16 @@
-> **Research brief — Broadcast multiviewer capabilities.** A standards-based survey of established broadcast-multiviewer capabilities, mapped to Mosaic. All capabilities are anchored in open industry standards/protocols (SMPTE, EBU, ITU, AES, IEC, IETF, AMWA NMOS, SCTE, ETSI). See the roadmap in [../../ROADMAP.md](../../ROADMAP.md) and [../../FEATURES.md](../../FEATURES.md); decisions ADR-MV* in [../decisions](../decisions/).
+> **Research brief — Broadcast multiviewer capabilities.** A standards-based survey of established broadcast-multiviewer capabilities, mapped to Multiview. All capabilities are anchored in open industry standards/protocols (SMPTE, EBU, ITU, AES, IEC, IETF, AMWA NMOS, SCTE, ETSI). See the roadmap in [../../ROADMAP.md](../../ROADMAP.md) and [../../FEATURES.md](../../FEATURES.md); decisions ADR-MV* in [../decisions](../decisions/).
 
 ---
 
 # Broadcast Multiviewer Capability Survey — Research Brief
 
-> A standards-anchored, vendor-neutral survey of the established, near-universal capabilities of a professional broadcast multiviewer, mapped to Mosaic (a software, IP/streaming live mosaic generator). Every capability is expressed generically and anchored in an open standard. Products are not named, compared, or excluded; only open standards/protocols are referenced.
+> A standards-anchored, vendor-neutral survey of the established, near-universal capabilities of a professional broadcast multiviewer, mapped to Multiview (a software, IP/streaming live multiview generator). Every capability is expressed generically and anchored in an open standard. Products are not named, compared, or excluded; only open standards/protocols are referenced.
 
 ## Scope & framing
 
-Mosaic already renders the mosaic, layout, overlays, audio (EBU R128), captions, colour, resilience state and the REST/WebSocket + preview control surface. The professional-multiviewer **delta** is the broadcast **monitoring/alarm engine + control plane** layered on top: content-aware fault probes with northbound notification, dynamic UMD/tally over an open label/tally protocol with external tally-bus integration, loudness logging + richer metering, salvo/scheduled automation, IP-facility discovery/connection control, and multi-head output.
+Multiview already renders the multiview, layout, overlays, audio (EBU R128), captions, colour, resilience state and the REST/WebSocket + preview control surface. The professional-multiviewer **delta** is the broadcast **monitoring/alarm engine + control plane** layered on top: content-aware fault probes with northbound notification, dynamic UMD/tally over an open label/tally protocol with external tally-bus integration, loudness logging + richer metering, salvo/scheduled automation, IP-facility discovery/connection control, and multi-head output.
 
-Mosaic is software/IP. Baseband signal handling, genlock and physical display heads are reached only via an external IP gateway, so this brief targets the IP/streaming and protocol layers. The capabilities below are **table-stakes industry-wide and/or anchored in open standards** (SMPTE, EBU, ITU/ITU-T, AES, IEC, IETF/RFC, AMWA NMOS, SCTE, ETSI, and the openly-published control protocols TSL UMD, Ember+, SW-P-08).
+Multiview is software/IP. Baseband signal handling, genlock and physical display heads are reached only via an external IP gateway, so this brief targets the IP/streaming and protocol layers. The capabilities below are **table-stakes industry-wide and/or anchored in open standards** (SMPTE, EBU, ITU/ITU-T, AES, IEC, IETF/RFC, AMWA NMOS, SCTE, ETSI, and the openly-published control protocols TSL UMD, Ember+, SW-P-08).
 
 ## Taxonomy by category (with standards)
 
@@ -26,11 +26,11 @@ Mosaic is software/IP. Baseband signal handling, genlock and physical display he
 
 **6. Inputs.** Native IP uncompressed **SMPTE ST 2110-20/-30/-40** (+ **-21** shaping, **-31** AES3); lightly-compressed **ST 2110-22** (codec-agnostic, JPEG XS common, **VSF TR-08**, **ISO/IEC 21122**); legacy **ST 2022-6**; **ST 2022-7** hitless dual-path; **PTP/ST 2059-2** timing; **NMOS IS-04/05/07/08**. Compressed MPEG-TS over UDP/RTP/SRT (**ISO/IEC 13818-1**, **RTP RFC 3550**, H.264/HEVC, full PSI/SI parsing, **VSF TR-01** J2K). OTT/contribution **SRT**, **RTMP**, **WebRTC (W3C/IETF)**, **HLS (RFC 8216)/LL-HLS**, **MPEG-DASH (ISO/IEC 23009-1)**, **RTSP**. ANC/VANC extraction (**ST 2110-40 / ST 2038 / ST 291**) for captions, AFD, timecode, SCTE. Per-input HDR/WCG (**ITU-R BT.2100** PQ/HLG, **BT.2020**, S-Log3) tone-mapped onto one wall (**ITU-R BT.2446**).
 
-**7. Outputs, scaling, redundancy.** Multi-head **mosaic-as-a-stream** (the converged IP-multiviewer model — Mosaic's native strength), adding **ST 2110-20/-22** + **ST 2022-7** hitless + RIST/WebRTC; UHD canvas + per-tile HDR/SDR conversion; documented density (inputs × PiPs × heads) and a low-latency profile; HA via hot-standby/N+1, dual-NIC, heartbeat/failover.
+**7. Outputs, scaling, redundancy.** Multi-head **multiview-as-a-stream** (the converged IP-multiviewer model — Multiview's native strength), adding **ST 2110-20/-22** + **ST 2022-7** hitless + RIST/WebRTC; UHD canvas + per-tile HDR/SDR conversion; documented density (inputs × PiPs × heads) and a low-latency profile; HA via hot-standby/N+1, dual-NIC, heartbeat/failover.
 
 **8. Control & operations.** Salvos (atomic multi-tile recall with arm/take); time/event/**SCTE-104/35**/**BXF (SMPTE 2021)**-scheduled layout automation; soft/hardware control panels + browser/mobile remote; **NMOS IS-12/MS-05** device control + the receiver-monitoring status model; **NMOS IS-10 (OAuth 2.0 RFC 6749 / JWT RFC 7519)** security; **Ember+**, **SW-P-08**, **** router control + route-follow; RBAC multi-user + audit log; config-as-code templates + scripting/webhook hooks.
 
-## Mosaic: have vs. gap
+## Multiview: have vs. gap
 
 **Already designed (enhance only):** layout presets / grid + absolute / fit / borders / z-order / transitions / hot-swap; overlays (label, clock, timecode, image/logo, tally_border, box, meter, alert_card, subtitle, lower_third); discrete + program audio + EBU R128; captions burn-in/passthrough; 4-axis colour + HDR/SDR tone-map + CICP tagging; per-tile LIVE/STALE/RECONNECTING/NO_SIGNAL state + slate cards; REST `/api/v1` + WebSocket + preview.
 

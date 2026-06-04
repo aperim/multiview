@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Mosaic dev container image.
+# Multiview dev container image.
 #
 # Base: Microsoft Rust dev container on Debian TRIXIE. Trixie is load-bearing:
 #   * bookworm ships FFmpeg 5.1 (libav* too old for modern rsmpeg/FFI: needs 6.x/7.x)

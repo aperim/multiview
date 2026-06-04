@@ -15,7 +15,7 @@ Express NVIDIA GPU access declaratively with `hostRequirements.gpu: "optional"` 
 
 ## Alternatives considered
 
-(a) `runArgs:["--gpus","all"]` — rejected: breaks macOS/GPU-less startup. (b) `gpu: true` — rejected: makes a GPU REQUIRED, fails cross-platform. (c) docker-compose with deploy.resources reservations — rejected: spec issue reports a malformed GPU override for compose-based dev containers, and Mosaic needs no sidecar services. (d) Unconditional `--device /dev/dri` committed — rejected: fails where the device is absent.
+(a) `runArgs:["--gpus","all"]` — rejected: breaks macOS/GPU-less startup. (b) `gpu: true` — rejected: makes a GPU REQUIRED, fails cross-platform. (c) docker-compose with deploy.resources reservations — rejected: spec issue reports a malformed GPU override for compose-based dev containers, and Multiview needs no sidecar services. (d) Unconditional `--device /dev/dri` committed — rejected: fails where the device is absent.
 
 ## Consequences
 

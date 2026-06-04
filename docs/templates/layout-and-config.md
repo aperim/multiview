@@ -1,6 +1,6 @@
 # Layout & Configuration
 
-How Mosaic describes **what to render**: the layered template model (Canvas → Layout → Cells →
+How Multiview describes **what to render**: the layered template model (Canvas → Layout → Cells →
 Overlays), the source-binding and hot-swap model, transitions, the named presets, and the
 **config-as-code** schema used for both human authoring (TOML) and the wire/API (JSON).
 
@@ -10,8 +10,8 @@ Overlays), the source-binding and hot-swap model, transitions, the named presets
 > API resource + UI control) is in
 > [`../research/management-capability-matrix.md`](../research/management-capability-matrix.md).
 
-**Crate:** schema, validation, and import/export live in **`mosaic-config`** (serde + `schemars`
-JSON Schema + `garde` semantic checks). The layout/template *types* are part of **`mosaic-core`**.
+**Crate:** schema, validation, and import/export live in **`multiview-config`** (serde + `schemars`
+JSON Schema + `garde` semantic checks). The layout/template *types* are part of **`multiview-core`**.
 See conventions: [`../architecture/conventions.md`](../architecture/conventions.md).
 
 ---
@@ -243,7 +243,7 @@ POST /api/v1/layouts/{id}/cells/{cellId}/source:swap
 | Unbind | `DELETE .../cells/{cellId}/source` | Hot (reverts to placeholder) |
 | NDI bind-by-name + fallback | `PUT .../cells/{cellId}/source {kind:"ndi",name,fallback}` | Hot (offline card until resolved) |
 
-Unresolved/lost sources never blank the mosaic: the tile rides
+Unresolved/lost sources never blank the multiview: the tile rides
 **LIVE → STALE → RECONNECTING → NO_SIGNAL** and renders last-good-frame, then the configured
 placeholder/slate card. This is a load-bearing engine invariant —
 see [`../research/core-engine.md`](../research/core-engine.md) and
@@ -392,10 +392,10 @@ width_px = 6; color = "#FF0000"; binding = "tally://cell_big"
 
 # --- Outputs (encode-once; see output reference) ---
 [[outputs]]
-kind = "rtsp_server"; mount = "/mosaic"; codec = "h264"; latency_profile = "low_latency"
+kind = "rtsp_server"; mount = "/multiview"; codec = "h264"; latency_profile = "low_latency"
 
 [[outputs]]
-kind = "ll_hls"; path = "/hls/mosaic"; codec = "h264"
+kind = "ll_hls"; path = "/hls/multiview"; codec = "h264"
 part_target_ms = 250; segment_ms = 2000; gop_ms = 2000
 ```
 
@@ -408,7 +408,7 @@ including the HDR canvas variant (`color.profile = "hdr-pq-bt2020"`, `pixel_form
 
 ## 9. Config-as-code (import / export)
 
-Mosaic is config-as-code first: the entire engine state (sources + layouts + outputs + policy) is a
+Multiview is config-as-code first: the entire engine state (sources + layouts + outputs + policy) is a
 single declarative document that can be exported, version-controlled, diffed, and re-applied. TOML
 is for human authoring; JSON is the canonical over-the-wire form. Layered loading uses `figment`
 (TOML + JSON + env overrides). See [ADR-0010](../decisions/ADR-0010.md) and
@@ -416,7 +416,7 @@ is for human authoring; JSON is the canonical over-the-wire form. Layered loadin
 
 ```mermaid
 flowchart LR
-    TOML["mosaic.toml / JSON<br/>(authoring)"] -->|import| VALIDATE
+    TOML["multiview.toml / JSON<br/>(authoring)"] -->|import| VALIDATE
     VALIDATE["Validate<br/>JSON Schema (schemars) + garde semantics"] --> DIFF
     DIFF["Diff vs live<br/>classifies Class-1 / reset-lite / Class-2"] --> APPLY
     APPLY["Apply (atomic)"] --> LIVE["Live engine"]
@@ -434,7 +434,7 @@ flowchart LR
 | Export | `GET /api/v1/config:export?secrets=ref\|redact` | **Never plaintext secrets** (`${secret:ref}` / `op://…`). |
 | Import | `POST /api/v1/config:import` | Schema migration applied on import. |
 
-**Validation invariants enforced by `mosaic-config`:**
+**Validation invariants enforced by `multiview-config`:**
 
 - `fps` is a rational string (`"60000/1001"`), never a float.
 - Absolute `rect` components are in `0..1`; required grid cells don't overlap; `z` is sane.

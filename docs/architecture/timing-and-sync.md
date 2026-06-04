@@ -1,6 +1,6 @@
 # Timing & Synchronization Model
 
-> **Runbook scope.** This is the single, authoritative description of how Mosaic keeps time: the
+> **Runbook scope.** This is the single, authoritative description of how Multiview keeps time: the
 > monotonic output clock, per-input PTS normalization and rebasing, the
 > `input-PTS → normalized-time → output-frame-index` algorithm, NTSC `1001` handling, HLS ingest
 > pacing, and long-run clock-drift correction (video frame-select + audio soft resampling). It is
@@ -33,9 +33,9 @@ at every tick of one fixed-cadence internal monotonic clock, the output stage em
 valid, correctly-timestamped frame (+ matching audio), forever, independent of any input. Output
 PTS = `f(tick)`.
 
-Ownership lives in `mosaic-engine` (the output clock and compositor drive), with normalization in
-`mosaic-input` and the per-tile stores in `mosaic-framestore`. `MediaTime` is defined in
-`mosaic-core`.
+Ownership lives in `multiview-engine` (the output clock and compositor drive), with normalization in
+`multiview-input` and the per-tile stores in `multiview-framestore`. `MediaTime` is defined in
+`multiview-core`.
 
 ---
 
@@ -58,16 +58,16 @@ internal media_time  ──►  per-tile FRAME STORE (latest-frame slot / small 
 
 | Stage | Crate | Responsibility |
 |-------|-------|----------------|
-| **[1] Normalize** | `mosaic-input` | Unwrap 33-bit TS / 32-bit RTP wrap (delta-based), genpts fallback, monotonic guard, rescale to ns. |
-| **[2] Rebase** | `mosaic-input` | Offset onto the master timeline; re-anchor on discontinuity. |
-| **Frame store** | `mosaic-framestore` | Single-slot last-good cell (overwrite, newest wins) keyed by `media_time`. |
-| **[3] Output clock** | `mosaic-engine` | Fixed-cadence ticker; samples each tile; re-stamps all output PTS/DTS from the counter. |
+| **[1] Normalize** | `multiview-input` | Unwrap 33-bit TS / 32-bit RTP wrap (delta-based), genpts fallback, monotonic guard, rescale to ns. |
+| **[2] Rebase** | `multiview-input` | Offset onto the master timeline; re-anchor on discontinuity. |
+| **Frame store** | `multiview-framestore` | Single-slot last-good cell (overwrite, newest wins) keyed by `media_time`. |
+| **[3] Output clock** | `multiview-engine` | Fixed-cadence ticker; samples each tile; re-stamps all output PTS/DTS from the counter. |
 
 ### Dataflow diagram
 
 ```mermaid
 flowchart LR
-  subgraph IN["Per-input pipeline x N (mosaic-input)"]
+  subgraph IN["Per-input pipeline x N (multiview-input)"]
     direction TB
     DEMUX["Demux<br/>RTSP/HLS/TS/SRT/NDI"] --> PACE["Input pacer<br/>HLS: PTS→wallclock<br/>jitter buffer"]
     PACE --> DEC["Decoder worker<br/>conceal+continue"]
@@ -77,7 +77,7 @@ flowchart LR
     CONV --> SLOT[("Per-tile frame store<br/>latest-frame slot")]
   end
 
-  CLK[["Output clock (mosaic-engine)<br/>CLOCK_MONOTONIC<br/>fixed rational cadence"]] -->|tick N| COMP
+  CLK[["Output clock (multiview-engine)<br/>CLOCK_MONOTONIC<br/>fixed rational cadence"]] -->|tick N| COMP
   SLOT -->|sample nearest≤t| COMP["GPU compositor"]
   COMP --> ENC["Encoder<br/>CFR • closed GOP<br/>forced keyframes"]
   ENC --> MUX{"Output muxers"}
@@ -86,7 +86,7 @@ flowchart LR
   MUX --> SRTOUT["SRT"]
   MUX --> NDIOUT["NDI"]
 
-  subgraph AUDIO["Per-input audio (mosaic-audio)"]
+  subgraph AUDIO["Per-input audio (multiview-audio)"]
     ARS["Resample → 48k fltp<br/>soft drift compensation"] --> MIX["Mixer on master running-time"]
   end
   CLK -.master running-time.-> MIX
@@ -131,7 +131,7 @@ Rules that make this load-bearing (see [ADR-T003](../decisions/ADR-T003.md)):
   reset the per-input parser/decoder if needed and `avcodec_flush_buffers()`.
 - **Monotonic guard** is the final safety net so the store key never goes backward.
 
-### 3.2 The output clock (one thread, drives the whole mosaic)
+### 3.2 The output clock (one thread, drives the whole multiview)
 
 ```text
 start = master_now()                                   // monotonic Instant
@@ -211,7 +211,7 @@ keyint = 60); see §6.
 | **Root cause** | Segment-granular HTTP delivery + a consumer reading as fast as the network allows. |
 
 **Mitigation — a custom PTS-to-wall-clock pacer between demux and compositor** (in
-`mosaic-input`; see [ADR-T004](../decisions/ADR-T004.md)):
+`multiview-input`; see [ADR-T004](../decisions/ADR-T004.md)):
 
 ```text
 on first frame: anchor_wall = now(); pts0 = frame.pts
@@ -296,7 +296,7 @@ audio-hardware clock. The per-source drift control loop (see [ADR-T006](../decis
 ## 8. A/V sync & per-input jitter buffers
 
 See [ADR-T008](../decisions/ADR-T008.md). Audio runs on the **master running-time** (same monotonic
-source as video) in `mosaic-audio`.
+source as video) in `multiview-audio`.
 
 - **Per-input adaptive jitter buffer:** reorder by RTP seqnum, de-dup, drop too-late, bound memory.
   Size from RFC 3550 interarrival jitter `J` (`target ≈ 3–4·J + margin`). For audio, adopt WebRTC
@@ -352,7 +352,7 @@ The only timestamps the encoder/muxer ever see are clean and **counter-derived**
 ## 11. Acceptance gates (runbook)
 
 The timing model is verified, not asserted. The always-on output-validity probe
-(`mosaic-telemetry`) and the chaos suite enforce:
+(`multiview-telemetry`) and the chaos suite enforce:
 
 - **Zero output gaps** (no frame-interval > N× nominal) and **strictly monotonic** output PTS, with
   custom Prometheus buckets around the nominal frame interval.

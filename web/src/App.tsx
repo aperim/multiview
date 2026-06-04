@@ -1,4 +1,4 @@
-// The Mosaic management SPA root: providers + router.
+// The Multiview management SPA root: providers + router.
 //
 // Provider order: Query (server state) wraps everything so realtime/REST hooks
 // share one cache; Theme + I18n wrap the routed UI; the Toaster mounts once.

@@ -21,7 +21,7 @@ import type {
   UseQueryResult,
 } from '@tanstack/react-query';
 
-import type { MosaicApiClient } from './client';
+import type { MultiviewApiClient } from './client';
 import {
   deleteLayout,
   LayoutApiError,
@@ -62,7 +62,7 @@ export function readEtags(queryClient: QueryClient): EtagMap {
  * the OpenAPI schema, so a drift between the Rust API and this client is a
  * compile error.
  */
-export function useLayouts(client: MosaicApiClient): UseQueryResult<Layout[], ApiError> {
+export function useLayouts(client: MultiviewApiClient): UseQueryResult<Layout[], ApiError> {
   return useQuery<Layout[], ApiError>({
     queryKey: queryKeys.layouts,
     queryFn: async (): Promise<Layout[]> => {

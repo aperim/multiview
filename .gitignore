@@ -3,10 +3,10 @@
 **/*.rs.bk
 *.pdb
 
-# Cargo — Cargo.lock IS committed (this workspace ships the `mosaic` binary)
+# Cargo — Cargo.lock IS committed (this workspace ships the `multiview` binary)
 
 # Build working dir (transient research/build artifacts — not part of the product)
-/.mosaic-build/
+/.multiview-build/
 
 # Web / Node
 web/node_modules/

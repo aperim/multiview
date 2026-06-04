@@ -1,8 +1,8 @@
-> **Engineering guardrails standard — non-negotiable.** Engineering *process & quality gates* for AI agents working on Mosaic. Summarized in [`../../AGENTS.md`](../../AGENTS.md) and [`../../CLAUDE.md`](../../CLAUDE.md); extends [`../architecture/conventions.md`](../architecture/conventions.md) (canonical naming/structure). Derived from a verification-hardened research workflow (2026-06-02). The config blocks here are the target for implementation; the strict lint set is intentionally NOT yet wired into the live `Cargo.toml` while crate bodies are stubs.
+> **Engineering guardrails standard — non-negotiable.** Engineering *process & quality gates* for AI agents working on Multiview. Summarized in [`../../AGENTS.md`](../../AGENTS.md) and [`../../CLAUDE.md`](../../CLAUDE.md); extends [`../architecture/conventions.md`](../architecture/conventions.md) (canonical naming/structure). Derived from a verification-hardened research workflow (2026-06-02). The config blocks here are the target for implementation; the strict lint set is intentionally NOT yet wired into the live `Cargo.toml` while crate bodies are stubs.
 
 ---
 
-# Mosaic Engineering Guardrails for AI Agents (Non-Negotiable)
+# Multiview Engineering Guardrails for AI Agents (Non-Negotiable)
 
 > **Status:** Proposed · **Date:** 2026-06-02 · **Applies to:** every change authored by an AI coding agent (Claude Code, OpenAI Codex, Gemini, etc.) in this repo.
 > This document is the enforceable standard. It extends — and never contradicts — [`docs/architecture/conventions.md`](../architecture/conventions.md) (the canonical naming/structure/invariants source of truth) and is summarized in `AGENTS.md`/`CLAUDE.md`. Where the Rust code and conventions.md differ from anything here on *naming/structure*, those win; this doc governs *engineering process and quality gates*.
@@ -28,7 +28,7 @@ Lint groups **must** carry `priority = -1` (or lower) because cargo emits lints 
 | `exit`, `mem_forget`, `dbg_macro`, `print_stdout`, `print_stderr`, `str_to_string` | deny | No process exit, leaks, stray debug/IO; use `tracing` |
 | `pedantic` (group) | warn, `priority = -1` | Granular safety (cast lints, etc.), selectively `allow` the few noisy ones |
 | `missing_errors_doc`, `missing_panics_doc`, `must_use_candidate` | warn | Force documenting failure modes |
-| `unsafe_code` (rust) | forbid | No `unsafe` in safe crates. **Exception:** FFI crates (`mosaic-ffmpeg`, vendor backends) override to `unsafe_code = "deny"` locally with a justified `// SAFETY:` comment per block |
+| `unsafe_code` (rust) | forbid | No `unsafe` in safe crates. **Exception:** FFI crates (`multiview-ffmpeg`, vendor backends) override to `unsafe_code = "deny"` locally with a justified `// SAFETY:` comment per block |
 
 **Verification notes (carry into config):**
 - The whole `restriction` group must **not** be enabled wholesale — it contains contradictory lints. Cherry-pick the individual lints above.
@@ -150,7 +150,7 @@ Code authored primarily by one vendor/model **MUST** be reviewed by a **differen
 Attach the cross-vendor review output to the PR. **AI review is never the merge gate** — a human is the named final approver (branch protection: required deterministic checks + ≥1 human approval).
 
 ### C.2 Reviewer brief (scope to avoid manufactured findings)
-> Report **only** defects in correctness, security, spec/requirements conformance, and the Mosaic typing & TDD guardrails. Do **not** report style, naming, or speculative defense-in-depth. Ignore lockfiles/generated/minified files. If you find nothing, name the highest-residual-risk area and why it's acceptable.
+> Report **only** defects in correctness, security, spec/requirements conformance, and the Multiview typing & TDD guardrails. Do **not** report style, naming, or speculative defense-in-depth. Ignore lockfiles/generated/minified files. If you find nothing, name the highest-residual-risk area and why it's acceptable.
 
 **Checklist (hand to the reviewer):**
 - [ ] No `any`/`unwrap`/`expect`/`panic`/`dyn Any`/`@ts-ignore`/non-null `!`; matches exhaustive; newtypes used.

@@ -1,6 +1,6 @@
 # Example & Test Streams
 
-A curated catalog of live/VOD sources for **developing, demoing, and testing** Mosaic. These
+A curated catalog of live/VOD sources for **developing, demoing, and testing** Multiview. These
 double as a deliberately diverse **gotcha test matrix** — between them they exercise mismatched
 frame rates (25 / 29.92 / 29.97 / 30 / 50 / 60 fps), multiple codecs (H.264, HEVC), tagged vs
 untagged color, an oddball mixed-primaries tag, three audio sample rates (22.05 / 44.1 / 48 kHz),
@@ -111,7 +111,7 @@ and is bandwidth-heavy by design. To test NDI in/out:
 - Install **NDI Tools** (free) and run **Test Pattern** (a sender) and **Studio Monitor** / **Video Monitor**
   (a receiver) on the same LAN.
 - Or use the NDI SDK example senders/receivers.
-- Mosaic's NDI support is **feature-gated and runtime-optional** (proprietary SDK) — see the NDI docs.
+- Multiview's NDI support is **feature-gated and runtime-optional** (proprietary SDK) — see the NDI docs.
 
 ---
 
@@ -137,7 +137,7 @@ Coverage achieved: **fps** {25, 29.92, 29.97, 30, 50, 60} · **codecs** {H.264, 
 
 ## Synthetic & reproducible sources
 
-For CI and for reproducing a specific failure mode **on demand and offline**. Mosaic should ship
+For CI and for reproducing a specific failure mode **on demand and offline**. Multiview should ship
 test fixtures built on these. (`testsrc2` = moving test pattern with timecode; `smptebars` = color
 bars; `sine` = audio tone.)
 
@@ -198,7 +198,7 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
 
 When ingesting live HLS, a player/ingester that downloads several buffered segments at once will
 play them **too fast** unless paced to wall-clock by PTS. To reproduce: point the ingest at a VOD
-HLS (e.g. Mux BBB) and observe it racing ahead with no pacer; then enable Mosaic's input pacer and
+HLS (e.g. Mux BBB) and observe it racing ahead with no pacer; then enable Multiview's input pacer and
 confirm it locks to real-time. (See the streaming-gotchas runbook for the pacing design.)
 
 ---

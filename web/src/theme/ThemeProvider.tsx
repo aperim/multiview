@@ -25,7 +25,7 @@ export interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-const THEME_STORAGE_KEY = "mosaic.theme";
+const THEME_STORAGE_KEY = "multiview.theme";
 
 function readStored(): ThemePreference {
   try {

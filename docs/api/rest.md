@@ -1,7 +1,7 @@
-# Mosaic — REST API
+# Multiview — REST API
 
-The Mosaic control plane is a single [axum](../decisions/ADR-W001.md) HTTP service inside the
-`mosaic` binary. It exposes a **versioned, resource-oriented REST API** for all CRUD and command
+The Multiview control plane is a single [axum](../decisions/ADR-W001.md) HTTP service inside the
+`multiview` binary. It exposes a **versioned, resource-oriented REST API** for all CRUD and command
 operations, an [OpenAPI 3.1](../decisions/ADR-W002.md) contract, and interactive docs. Realtime
 state (snapshots, deltas, meters, the *result* of async operations) flows over a separate
 WebSocket/SSE channel documented in [realtime.md](./realtime.md).
@@ -166,7 +166,7 @@ Content-Type: application/problem+json
 ```
 ```json
 {
-  "type": "https://mosaic.dev/problems/validation",
+  "type": "https://multiview.dev/problems/validation",
   "title": "Validation failed",
   "status": 422,
   "detail": "One or more fields are invalid.",

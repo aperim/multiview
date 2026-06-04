@@ -1,6 +1,6 @@
-# Mosaic — Canonical Conventions (Source of Truth)
+# Multiview — Canonical Conventions (Source of Truth)
 
-This document pins the **canonical** naming, structure, and invariants for the Mosaic project.
+This document pins the **canonical** naming, structure, and invariants for the Multiview project.
 The deep design briefs in [`../research`](../research/) may use slightly varying names (they were
 written in parallel); **where they differ, THIS document wins**, and the Rust code is the ultimate
 source of truth. All other docs, the agent-instruction files, and the workspace must conform to this.
@@ -9,9 +9,9 @@ source of truth. All other docs, the agent-instruction files, and the workspace 
 
 ## 1. Project identity
 
-- **Name:** Mosaic — an efficient, hardware-accelerated, Rust live video mosaic generator.
-- **Binary / daemon:** `mosaic`
-- **Tagline:** Ingest many live sources → composite a templated mosaic on the GPU → serve robustly. Built to run great on **commodity hardware**, with **bulletproof continuous output**.
+- **Name:** Multiview — an efficient, hardware-accelerated, Rust live video multiview generator.
+- **Binary / daemon:** `multiview`
+- **Tagline:** Ingest many live sources → composite a templated multiview on the GPU → serve robustly. Built to run great on **commodity hardware**, with **bulletproof continuous output**.
 - **Edition / toolchain:** Rust edition **2021**, pinned via `rust-toolchain.toml` (stable). MSRV documented in the README.
 - **License:** Dual **MIT OR Apache-2.0** (project code). See §7 for the FFmpeg/NDI/codec licensing model.
 - **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and macOS (Apple Silicon + Intel, native). **No Windows.**
@@ -21,48 +21,48 @@ source of truth. All other docs, the agent-instruction files, and the workspace 
 ## 2. Repository layout
 
 ```
-mosaic/
+multiview/
 ├── Cargo.toml                # workspace
 ├── rust-toolchain.toml
 ├── rustfmt.toml  .editorconfig  deny.toml  clippy.toml
 ├── LICENSE-MIT  LICENSE-APACHE  README.md  CLAUDE.md  AGENTS.md  CONTRIBUTING.md  SECURITY.md
 ├── crates/                   # all Rust crates (see §3)
-│   └── mosaic-*/ ...
+│   └── multiview-*/ ...
 ├── web/                      # the management SPA (React + TS + Vite)
 ├── docs/                     # architecture, decisions (ADRs), research briefs, reference, ops
-├── examples/                 # example mosaic configs + layout templates
+├── examples/                 # example multiview configs + layout templates
 ├── deploy/                   # Dockerfile, compose, container assets
 ├── xtask/                    # dev automation (cargo xtask ...)
 └── .github/workflows/        # CI
 ```
 
-> The build also uses a transient `.mosaic-build/` working dir (git-ignored) — not part of the product.
+> The build also uses a transient `.multiview-build/` working dir (git-ignored) — not part of the product.
 
 ---
 
 ## 3. Canonical crate map
 
-All crates are prefixed `mosaic-` and live under `crates/`. Hardware/FFI/GPU code is **behind
+All crates are prefixed `multiview-` and live under `crates/`. Hardware/FFI/GPU code is **behind
 off-by-default Cargo features** so the default `cargo check` builds the pure-Rust trait/type layer.
 
 | Crate | Responsibility | Notable optional features |
 |-------|----------------|---------------------------|
-| `mosaic-core` | Shared types & traits: `Frame`, `PixelFormat` (NV12 canonical), `ColorInfo` (the 4 axes), clock/`MediaTime`, layout/template model, error taxonomy, the stage traits (`Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`, `Backend`). No FFI. | — |
-| `mosaic-hal` | Hardware capability detection, backend registry, per-stage **negotiation** + **cost model/planner** (admission + degradation inputs). | `cuda`, `vaapi`, `qsv`, `videotoolbox` (probing) |
-| `mosaic-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, `AVHWFramesContext` lifecycle, hwframe transfer/map). | `ffmpeg` (links libav), `gpl-codecs` |
-| `mosaic-compositor` | The **custom GPU compositor**: scale + place + per-tile color convert (range/matrix/linearize) + linear-light blend + overlay compositing. wgpu baseline; vendor fast paths. | `wgpu` (default backend), `cuda`, `metal`, `vaapi` |
-| `mosaic-framestore` | Per-tile **last-good-frame** stores (lock-free triple-buffer) + the tile **state machine** (LIVE/STALE/RECONNECTING/NO_SIGNAL). | — |
-| `mosaic-audio` | Per-input audio decode/resample/mix/route (program bus + discrete tracks) + **EBU R128** metering. | `ffmpeg` |
-| `mosaic-overlay` | Overlay layers + text rendering + **subtitle** ingest/render (libass) and passthrough. | `libass` |
-| `mosaic-input` | Ingest sources (rtsp/hls/ts/srt/rtmp/ndi/file/test), the **input pacer**, jitter buffers, **timestamp normalization**, supervised reconnect. | `ffmpeg`, `ndi` |
-| `mosaic-output` | Output sinks/servers: RTSP server, HLS/LL-HLS packager, NDI out, RTMP/SRT push; **encode-once-mux-many** fan-out. | `ffmpeg`, `ndi` |
-| `mosaic-engine` | The **protected output core**: the fixed-cadence output clock, compositor drive, supervisor/actors, **hot-reconfiguration**, admission/degradation control loop. | — |
-| `mosaic-config` | Config & template schema (serde), validation, **config-as-code** import/export. | — |
-| `mosaic-events` | Shared realtime **event types + versioned envelope** (used by engine, control, clients). | — |
-| `mosaic-control` | The **axum** REST + WebSocket + SSE API: OpenAPI (utoipa+Scalar), auth, SQLite (sqlx), the **command-bus shell**, embedded SPA serving. | `openapi` (default), `embed-web` |
-| `mosaic-preview` | Preview **taps** (input/program/output), the preview **encoder pool**, WHEP/MJPEG/snapshot endpoints. Strictly isolated from the program path. | `webrtc` |
-| `mosaic-telemetry` | `tracing` + Prometheus metrics + health (`/livez`,`/readyz`). | — |
-| `mosaic-cli` | Binary **`mosaic`**: wires the engine + control plane; config load; run/validate subcommands. | aggregates feature flags |
+| `multiview-core` | Shared types & traits: `Frame`, `PixelFormat` (NV12 canonical), `ColorInfo` (the 4 axes), clock/`MediaTime`, layout/template model, error taxonomy, the stage traits (`Source`, `Sink`, `Decoder`, `Encoder`, `Compositor`, `Backend`). No FFI. | — |
+| `multiview-hal` | Hardware capability detection, backend registry, per-stage **negotiation** + **cost model/planner** (admission + degradation inputs). | `cuda`, `vaapi`, `qsv`, `videotoolbox` (probing) |
+| `multiview-ffmpeg` | Safe RAII wrappers over libav* (demux/decode/encode, `AVHWFramesContext` lifecycle, hwframe transfer/map). | `ffmpeg` (links libav), `gpl-codecs` |
+| `multiview-compositor` | The **custom GPU compositor**: scale + place + per-tile color convert (range/matrix/linearize) + linear-light blend + overlay compositing. wgpu baseline; vendor fast paths. | `wgpu` (default backend), `cuda`, `metal`, `vaapi` |
+| `multiview-framestore` | Per-tile **last-good-frame** stores (lock-free triple-buffer) + the tile **state machine** (LIVE/STALE/RECONNECTING/NO_SIGNAL). | — |
+| `multiview-audio` | Per-input audio decode/resample/mix/route (program bus + discrete tracks) + **EBU R128** metering. | `ffmpeg` |
+| `multiview-overlay` | Overlay layers + text rendering + **subtitle** ingest/render (libass) and passthrough. | `libass` |
+| `multiview-input` | Ingest sources (rtsp/hls/ts/srt/rtmp/ndi/file/test), the **input pacer**, jitter buffers, **timestamp normalization**, supervised reconnect. | `ffmpeg`, `ndi` |
+| `multiview-output` | Output sinks/servers: RTSP server, HLS/LL-HLS packager, NDI out, RTMP/SRT push; **encode-once-mux-many** fan-out. | `ffmpeg`, `ndi` |
+| `multiview-engine` | The **protected output core**: the fixed-cadence output clock, compositor drive, supervisor/actors, **hot-reconfiguration**, admission/degradation control loop. | — |
+| `multiview-config` | Config & template schema (serde), validation, **config-as-code** import/export. | — |
+| `multiview-events` | Shared realtime **event types + versioned envelope** (used by engine, control, clients). | — |
+| `multiview-control` | The **axum** REST + WebSocket + SSE API: OpenAPI (utoipa+Scalar), auth, SQLite (sqlx), the **command-bus shell**, embedded SPA serving. | `openapi` (default), `embed-web` |
+| `multiview-preview` | Preview **taps** (input/program/output), the preview **encoder pool**, WHEP/MJPEG/snapshot endpoints. Strictly isolated from the program path. | `webrtc` |
+| `multiview-telemetry` | `tracing` + Prometheus metrics + health (`/livez`,`/readyz`). | — |
+| `multiview-cli` | Binary **`multiview`**: wires the engine + control plane; config load; run/validate subcommands. | aggregates feature flags |
 | `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint, etc.). | — |
 
 **Dependency direction:** `core` ← everything; leaf crates depend on `core` (+ `hal`, `ffmpeg`,
@@ -82,7 +82,7 @@ Default features build a **pure-Rust, LGPL-clean, no-native-deps** check (CI gre
 - **NDI:** `ndi` (proprietary SDK; **off by default**, runtime-loaded; see §7).
 - **Subtitles:** `libass`.
 - **Web/API:** `openapi` (default), `embed-web` (embed the SPA), `webrtc` (WHEP preview).
-- **Umbrella presets (in `mosaic-cli`):** `nvidia` = cuda+ffmpeg+wgpu; `apple` = videotoolbox+metal+ffmpeg; `linux-vaapi` = vaapi+qsv+ffmpeg+wgpu; `full` = everything non-GPL.
+- **Umbrella presets (in `multiview-cli`):** `nvidia` = cuda+ffmpeg+wgpu; `apple` = videotoolbox+metal+ffmpeg; `linux-vaapi` = vaapi+qsv+ffmpeg+wgpu; `full` = everything non-GPL.
 
 ---
 
@@ -133,13 +133,13 @@ These are load-bearing; every doc and implementation must respect them (see the 
 - **Layout editor:** **react-konva** (free-form canvas: drag/resize/rotate/z-order) + **dnd-kit** (accessible palette drag & reorderable lists).
 - **API client:** generated from the OpenAPI spec (`openapi-typescript` + `openapi-fetch`).
 - **A11y & i18n:** target **WCAG 2.2 AA** (full keyboard + focus management via Radix; status never by color alone; an accessible non-canvas editing path for the layout editor) and internationalize the UI (Lingui + ECMAScript `Intl`, RTL). Light/dark via Tailwind tokens. See [web/accessibility.md](../web/accessibility.md) and [web/internationalization.md](../web/internationalization.md).
-- **Build:** embedded into the `mosaic` binary via `rust-embed` (single deployable); dev via Vite proxy.
+- **Build:** embedded into the `multiview` binary via `rust-embed` (single deployable); dev via Vite proxy.
 
 ---
 
 ## 9. Naming & style
 
-- Crates: `mosaic-<area>` (kebab); the library target is `mosaic_<area>` (snake, automatic).
+- Crates: `multiview-<area>` (kebab); the library target is `multiview_<area>` (snake, automatic).
 - Public types: `UpperCamel`; functions/fields: `snake_case`; features: `kebab-case`.
 - Errors: per-crate `Error` enum via `thiserror`; app boundaries may use `anyhow`.
 - Async: `tokio`. Logging/tracing: `tracing`. Serialization: `serde`.

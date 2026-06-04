@@ -1,6 +1,6 @@
-# Mosaic — Native Caption / Subtitle Ingest
+# Multiview — Native Caption / Subtitle Ingest
 
-Mosaic ingests captions **from the source stream itself** — every way they arrive — and treats them
+Multiview ingests captions **from the source stream itself** — every way they arrive — and treats them
 like an audio track: a **`CaptionTrack`** discovered during demux, decoded **in the same demux pass**
 (no second open, no sidecar staging for stream captions), normalised onto the one internal nanosecond
 timeline, **sampled** into a per-tile last-good **cue store**, and burned in by the existing overlay
@@ -40,7 +40,7 @@ CaptionCue =
 ```
 
 - **Text cue** — markup-stripped display lines (top→bottom). This is the existing
-  `mosaic_overlay::subtitle::Cue { start, end, lines }`, which this design **reuses and extends** with
+  `multiview_overlay::subtitle::Cue { start, end, lines }`, which this design **reuses and extends** with
   an optional `region` (anchor + alignment) so 608/708 roll-up/pop-on placement survives where the
   source carried it. Teletext, CEA-608/708, WebVTT, SRT, ASS (text path), and mov_text all land here.
 - **Bitmap cue** — a premultiplied-RGBA image plus its placement `rect` relative to the source frame.
@@ -82,7 +82,7 @@ discovery reports "expected/declared" and the live cue store reports "actually s
 ## 3. The six input forms → which libav decoder handles each
 
 This FFmpeg 7.1 build links **libzvbi + libass + dvbsub** and exposes every decoder needed. The
-caption decode lives in **`mosaic-ffmpeg`** behind the `ffmpeg` feature (the decoders are already
+caption decode lives in **`multiview-ffmpeg`** behind the `ffmpeg` feature (the decoders are already
 linked — **no new `cargo deny`-relevant dependency**), wrapped in safe RAII like the rest of the libav
 surface.
 
@@ -106,7 +106,7 @@ rendition (still one extra demux for the *track*, not a re-open of the program).
 ## 4. In-pipeline decode in the same demux
 
 The per-source decode thread ([io/inputs.md §1](inputs.md#1-per-source-pipeline),
-`mosaic-cli/src/pipeline.rs`) already pulls packets and decodes video. Caption decode rides alongside
+`multiview-cli/src/pipeline.rs`) already pulls packets and decodes video. Caption decode rides alongside
 it on that same thread's demux, so there is **one `av_read_frame` loop per source**:
 
 ```text
@@ -142,7 +142,7 @@ re-anchor on discontinuity, then add the source's rebase offset so a cue's `[sta
 the *same* timeline as the frame it belongs to. **Never** float fps; carry ns / exact rationals.
 
 The cue store is the caption analogue of the per-tile **last-good-frame store**
-([mosaic-framestore](../research/resilience-and-av.md)), with the cases captions actually present:
+([multiview-framestore](../research/resilience-and-av.md)), with the cases captions actually present:
 
 | Case | Behaviour |
 |------|-----------|
@@ -202,12 +202,12 @@ producing cues, and a tile with no resolvable caption source simply shows none.
 
 | Concern | Crate / module | Feature |
 |---------|----------------|---------|
-| Caption **decode** (FFI: libzvbi/dvbsub/cc_dec/webvtt/mov_text/ass wrappers) | `mosaic-ffmpeg` (owns all raw libav FFI; `unsafe = deny` + `// SAFETY:`) | `ffmpeg` |
-| `CaptionCue` / `CaptionTrack` **types** | `mosaic-core` (or reuse/extend `mosaic-overlay::subtitle::Cue`) — pure, no FFI | — (always built) |
-| **Discovery** (PMT walk, HLS SUBTITLES-group resolve, A53 sniff) + per-tile **cue store** + selector wiring | `mosaic-input` (`unsafe = forbid`) | `ffmpeg` for stream forms; sidecar/parse is pure |
-| **Burn-in** (active cue → text runs / bitmap quad) | `mosaic-overlay` renderer → `mosaic-compositor` overlay sub-pass (existing) | `overlay` (+ `libass` for styled ASS) |
-| Sidecar **parse** (SRT/VTT) | `mosaic-overlay::subtitle::CueTrack` (already committed, pure) | — |
-| Caption-presence **alarm** | `mosaic-overlay::caption_probe` (already committed, pure) | — |
+| Caption **decode** (FFI: libzvbi/dvbsub/cc_dec/webvtt/mov_text/ass wrappers) | `multiview-ffmpeg` (owns all raw libav FFI; `unsafe = deny` + `// SAFETY:`) | `ffmpeg` |
+| `CaptionCue` / `CaptionTrack` **types** | `multiview-core` (or reuse/extend `multiview-overlay::subtitle::Cue`) — pure, no FFI | — (always built) |
+| **Discovery** (PMT walk, HLS SUBTITLES-group resolve, A53 sniff) + per-tile **cue store** + selector wiring | `multiview-input` (`unsafe = forbid`) | `ffmpeg` for stream forms; sidecar/parse is pure |
+| **Burn-in** (active cue → text runs / bitmap quad) | `multiview-overlay` renderer → `multiview-compositor` overlay sub-pass (existing) | `overlay` (+ `libass` for styled ASS) |
+| Sidecar **parse** (SRT/VTT) | `multiview-overlay::subtitle::CueTrack` (already committed, pure) | — |
+| Caption-presence **alarm** | `multiview-overlay::caption_probe` (already committed, pure) | — |
 
 Efficiency rules (consistent with [conventions invariants 6, 9](../architecture/conventions.md)):
 
@@ -247,7 +247,7 @@ deterministic and never depend on a live broadcast caption being present:
   data recovers them on the right field.
 - **HLS WebVTT** — generate a master playlist with a `SUBTITLES` group + WebVTT segments and assert the
   group resolves and the cues decode.
-- **Sidecar SRT/VTT** — the existing pure parser tests (`mosaic-overlay/tests/subtitle.rs`).
+- **Sidecar SRT/VTT** — the existing pure parser tests (`multiview-overlay/tests/subtitle.rs`).
 - **Pure state machine** — property/golden tests for cue-store expiry, no-cue gaps, wrong-page (empty),
   intermittency, and timeline rebasing, driven by an injected `MediaTime` (no FFmpeg, no clock).
 

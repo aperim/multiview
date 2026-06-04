@@ -11,7 +11,7 @@ Derived from the management-capability, preview, and realtime design briefs. Use
 - [ ] INPUT: A single focused source can be expanded to a low-latency WebRTC/WHEP view (sub-250ms), one focus at a time per operator
 - [ ] INPUT: Off-air cue decode is low-res + thumbnail-rate + I-frames-only (a fraction of a full pipeline)
 - [ ] INPUT: Off-air cue endpoints are auth'd, scheme-allowlisted, and rate-limited (SSRF/DoS guard)
-- [ ] PROGRAM: Can preview the composed mosaic (program) via a downscaled canvas tap that does NOT load the encode path
+- [ ] PROGRAM: Can preview the composed multiview (program) via a downscaled canvas tap that does NOT load the encode path
 - [ ] PROGRAM: Program preview is explicitly labeled as a PRE-ENCODE canvas tap (not the encoded output) with its canvas color tags shown
 - [ ] PROGRAM: Default program view is the cheap WS-JPEG path; WHEP focus is on-demand only
 - [ ] OUTPUT: Can preview EACH individual output/rendition separately (RTSP/LL-HLS/RTMP/SRT/NDI)
@@ -53,7 +53,7 @@ Derived from the management-capability, preview, and realtime design briefs. Use
 - [ ] WS carries a full SNAPSHOT on connect then DELTAS (snapshot ⊕ ordered deltas = current truth)
 - [ ] Snapshot is built from engine watch channels (borrow), non-blocking, with a race-free snapshot→first-delta boundary (borrow_and_update + changed / subscribe-before-snapshot)
 - [ ] Versioned message envelope {v,t,topic,id,seq,ts,corr,data} used for ALL frames both directions, including control frames on topic "$control"
-- [ ] Envelope versioning policy documented: additive=minor (ignore unknown t/fields), breaking=major; hello.server_v advertises majors; mosaic.v1 subprotocol makes wire major explicit
+- [ ] Envelope versioning policy documented: additive=minor (ignore unknown t/fields), breaking=major; hello.server_v advertises majors; multiview.v1 subprotocol makes wire major explicit
 - [ ] Event taxonomy table present: event type | topic | trigger | payload | rate, covering tiles/inputs/outputs/audio.meters/audio.loudness/alerts/layout/config/logs/jobs/system/capabilities/preview
 - [ ] Per-tile state-machine transitions LIVE/STALE/RECONNECTING/NO_SIGNAL carried as tile.state deltas (aligned with resilience-av §1.3)
 - [ ] Input events carried: connected/disconnected/reconnecting/connecting, format-change, supervision (backoff/circuit-breaker), error

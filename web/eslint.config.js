@@ -1,5 +1,5 @@
 // @ts-check
-// Mosaic management SPA — ESLint flat config (ESLint 9 + typescript-eslint 8).
+// Multiview management SPA — ESLint flat config (ESLint 9 + typescript-eslint 8).
 // Enforces the "absolute typing" pillar of docs/development/agent-guardrails.md:
 //   bans `any` (no-explicit-any + no-unsafe-*), @ts-ignore/@ts-nocheck, and non-null `!`.
 // strictTypeChecked is NOT semver-stable: pin typescript-eslint and review the

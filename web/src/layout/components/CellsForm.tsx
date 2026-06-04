@@ -376,7 +376,7 @@ export function CellsForm(props: CellsFormProps): JSX.Element {
   if (cells.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
-        <Trans>No cells yet. Add one to start composing the mosaic.</Trans>
+        <Trans>No cells yet. Add one to start composing the multiview.</Trans>
       </p>
     );
   }

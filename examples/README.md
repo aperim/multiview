@@ -1,6 +1,6 @@
 # Example configurations
 
-Ready-to-adapt Mosaic configs. They conform to the schema documented in
+Ready-to-adapt Multiview configs. They conform to the schema documented in
 [`../docs/templates/layout-and-config.md`](../docs/templates/layout-and-config.md) (canvas →
 layout → cells → overlays → outputs, config-as-code). `fps` is **always** a rational string
 (never a float); the canvas working color space is the single source of truth for the pipeline.
@@ -27,6 +27,6 @@ sources or the synthetic recipes in the example-streams doc.
 
 ```sh
 # (once implemented) validate, then run:
-mosaic validate examples/public-streams-2x2.toml
-mosaic run      examples/public-streams-2x2.toml
+multiview validate examples/public-streams-2x2.toml
+multiview run      examples/public-streams-2x2.toml
 ```

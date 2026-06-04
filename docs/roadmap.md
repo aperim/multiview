@@ -1,10 +1,10 @@
-# Mosaic — Implementation Roadmap
+# Multiview — Implementation Roadmap
 
 > Top-level summary + status table: [`../ROADMAP.md`](../ROADMAP.md). Per-feature capability/status
 > matrix: [`../FEATURES.md`](../FEATURES.md). This page is the detailed per-milestone plan.
 
-This is the **phased delivery plan** for Mosaic, the efficient, hardware-accelerated Rust live
-video mosaic engine. It sequences the work from an empty workspace to a hardened, production-grade
+This is the **phased delivery plan** for Multiview, the efficient, hardware-accelerated Rust live
+video multiview engine. It sequences the work from an empty workspace to a hardened, production-grade
 product, with **crisp, testable exit criteria** at every milestone.
 
 > **Status today: greenfield.** Only the scaffold and these docs exist. No engine code is written
@@ -50,15 +50,15 @@ flowchart LR
 
 | Milestone | Crates first exercised (canonical names from [conventions §3](architecture/conventions.md#3-canonical-crate-map)) |
 |---|---|
-| M0 | workspace, `xtask`, `mosaic-core`, `mosaic-config`, `mosaic-events`, `mosaic-cli` |
-| M1 | `mosaic-ffmpeg`, `mosaic-input`, `mosaic-compositor` (software), `mosaic-output` (file/RTSP) |
-| M2 | `mosaic-hal`, `mosaic-compositor` (GPU backends), `mosaic-ffmpeg` (hwaccel) |
-| M3 | `mosaic-engine`, `mosaic-framestore`, `mosaic-telemetry` (validity probe) |
-| M4 | `mosaic-input` (full), `mosaic-output` (full), `mosaic-audio` |
-| M5 | `mosaic-overlay`, `mosaic-compositor` (color pipeline + linear-light blend) |
-| M6 | `mosaic-control` |
-| M7 | `web/`, `mosaic-preview`, `mosaic-control` (realtime + embed) |
-| M8 | `mosaic-hal` (cost model), `mosaic-engine` (admission/degradation), `mosaic-telemetry` (GPU stats) |
+| M0 | workspace, `xtask`, `multiview-core`, `multiview-config`, `multiview-events`, `multiview-cli` |
+| M1 | `multiview-ffmpeg`, `multiview-input`, `multiview-compositor` (software), `multiview-output` (file/RTSP) |
+| M2 | `multiview-hal`, `multiview-compositor` (GPU backends), `multiview-ffmpeg` (hwaccel) |
+| M3 | `multiview-engine`, `multiview-framestore`, `multiview-telemetry` (validity probe) |
+| M4 | `multiview-input` (full), `multiview-output` (full), `multiview-audio` |
+| M5 | `multiview-overlay`, `multiview-compositor` (color pipeline + linear-light blend) |
+| M6 | `multiview-control` |
+| M7 | `web/`, `multiview-preview`, `multiview-control` (realtime + embed) |
+| M8 | `multiview-hal` (cost model), `multiview-engine` (admission/degradation), `multiview-telemetry` (GPU stats) |
 | M9 | all — chaos/soak harness, license CI, build-profile matrix |
 
 ---
@@ -71,34 +71,34 @@ with the trait/type layer in place so every later crate has a contract to implem
 - Cargo workspace (`resolver = "2"` — mandatory so a Linux-only dep can't leak into a macOS build),
  `rust-toolchain.toml` (stable, edition 2021), `rustfmt.toml`, `clippy.toml`, `.editorconfig`,
  `deny.toml`, dual `LICENSE-MIT`/`LICENSE-APACHE`.
-- `mosaic-core`: the shared types & **stage traits** — `Frame`, `PixelFormat` (NV12 canonical),
+- `multiview-core`: the shared types & **stage traits** — `Frame`, `PixelFormat` (NV12 canonical),
  `ColorInfo` (the 4 axes), clock/`MediaTime`, the layout/template model, error taxonomy, and
  `Source`/`Sink`/`Decoder`/`Encoder`/`Compositor`/`Backend`. **No FFI.**
-- `mosaic-config` schema (serde, adjacently-tagged enums, `schemars` JSON Schema) and
- `mosaic-events` (versioned envelope) stubs.
-- `mosaic-cli` skeleton with `run`/`validate` subcommands (no-op engine).
+- `multiview-config` schema (serde, adjacently-tagged enums, `schemars` JSON Schema) and
+ `multiview-events` (versioned envelope) stubs.
+- `multiview-cli` skeleton with `run`/`validate` subcommands (no-op engine).
 - CI: `cargo check`/`clippy -D warnings`/`fmt --check`/`test` on the **default features** (pure-Rust,
  no native deps); `cargo-deny` license + advisory gate; `#![warn(missing_docs)]` on libs.
 
 **Exit criteria**
 - [ ] `cargo check`, `clippy -D warnings`, `fmt --check`, `cargo test`, `cargo deny check` all green on a GPU-free runner with default features.
-- [ ] `mosaic validate examples/*.toml` round-trips config ↔ JSON Schema.
+- [ ] `multiview validate examples/*.toml` round-trips config ↔ JSON Schema.
 - [ ] Every crate in [conventions §3](architecture/conventions.md#3-canonical-crate-map) exists as at least a documented stub; dependency direction has no cycles.
 
 ---
 
 ## M1 — Single source: decode → compose (software) → output
 
-**Goal:** the first end-to-end mosaic, entirely in software, runnable in GPU-free CI. This proves the
+**Goal:** the first end-to-end multiview, entirely in software, runnable in GPU-free CI. This proves the
 trait contracts and gives golden-frame tests a deterministic target.
 
-- `mosaic-ffmpeg`: safe RAII wrappers over libav for demux/decode/encode (software), AVERROR →
+- `multiview-ffmpeg`: safe RAII wrappers over libav for demux/decode/encode (software), AVERROR →
  `thiserror`, `AVFrame` clone-by-ref. (See [ADR-0002](decisions/ADR-0002.md) — rsmpeg binding.)
-- `mosaic-input`: one source (file + `test` pattern), bounded drop-oldest queue.
-- `mosaic-compositor`: **software/CPU** backend honoring the one contract —
+- `multiview-input`: one source (file + `test` pattern), bounded drop-oldest queue.
+- `multiview-compositor`: **software/CPU** backend honoring the one contract —
  *NV12 tiles at display size → one composite pass → NV12 canvas*. Fixed 2×2 layout from config;
  fit/cover/crop math as (src-rect, dst-rect) pairs.
-- `mosaic-output`: file mux **and** a basic RTSP serve path (single output, software-encoded H.264).
+- `multiview-output`: file mux **and** a basic RTSP serve path (single output, software-encoded H.264).
 - Golden-frame tests (`framemd5`/`framehash`) against the deterministic CPU compositor on a pinned
  arch (the only place exact-match is valid — GPU output uses SSIM/PSNR later).
 
@@ -106,7 +106,7 @@ trait contracts and gives golden-frame tests a deterministic target.
 - [ ] `test`-pattern (or file) → 2×2 → H.264 file output runs to completion in GPU-free CI.
 - [ ] RTSP-out plays in a real player (ffplay/VLC) from the software encoder.
 - [ ] Golden-frame test passes deterministically; NV12 is held throughout (no per-tile RGBA materialized — [invariant 5](architecture/conventions.md#5-canonical-technical-invariants)).
-- [ ] Decode/compose/output are wired through the `mosaic-core` traits only (no backend-specific types leak into the core API).
+- [ ] Decode/compose/output are wired through the `multiview-core` traits only (no backend-specific types leak into the core API).
 
 ---
 
@@ -115,16 +115,16 @@ trait contracts and gives golden-frame tests a deterministic target.
 **Goal:** real hardware acceleration on the first vendor island, behind the per-stage HAL, with the
 software path preserved as the universal fallback. Establishes the **zero-copy island** discipline.
 
-- `mosaic-hal`: capability detection (L1 FFmpeg / L2 vendor / L3 sandboxed probe), backend registry,
+- `multiview-hal`: capability detection (L1 FFmpeg / L2 vendor / L3 sandboxed probe), backend registry,
  device correlation by **PCI bus id / UUID / IOKit id**, and the scored per-stage planner that
  **penalizes cross-vendor seams** and prefers single-device end-to-end. (See
  [ADR-0003](decisions/ADR-0003.md), [ADR-0004](decisions/ADR-0004.md), and the
  [pipeline doc](architecture/pipeline.md).)
-- `mosaic-compositor` GPU backends behind features: **`wgpu`** (default, portable) plus vendor fast
+- `multiview-compositor` GPU backends behind features: **`wgpu`** (default, portable) plus vendor fast
  paths — **`cuda`** (NVDEC→custom CUDA kernel→NVENC, one shared CUDA context) and **`metal`**
  (VideoToolbox→IOSurface/`CVMetalTextureCache`→Metal→VideoToolbox). (See
  [ADR-0005](decisions/ADR-0005.md).)
-- `mosaic-ffmpeg` hwaccel lifecycle: generic `get_format` path (not `*_cuvid` wrappers),
+- `multiview-ffmpeg` hwaccel lifecycle: generic `get_format` path (not `*_cuvid` wrappers),
  `AVHWFramesContext` (re)build on mid-stream geometry/`sw_format` change, software fallback always
  available.
 - **"Stayed-on-GPU" assertion**: a test that counts host↔device copies so a silent CPU/host fallback
@@ -141,15 +141,15 @@ software path preserved as the universal fallback. Establishes the **zero-copy i
 
 ## M3 — Multi-source + bulletproof output clock + framestore + resilience
 
-**Goal:** the **protected output core**. This is the milestone where Mosaic earns "bulletproof
+**Goal:** the **protected output core**. This is the milestone where Multiview earns "bulletproof
 continuous output." From here on, the output-validity SLO probe gates every PR.
 
-- `mosaic-engine`: the **fixed-cadence output clock** (locally-generated monotonic media clock,
+- `multiview-engine`: the **fixed-cadence output clock** (locally-generated monotonic media clock,
  loosely disciplined to wall-clock; PTS = `f(tick)`), compositor drive, supervisor/actors, and the
  control-inversion that makes inputs *sampled, never pacing*
  ([invariant 1](architecture/conventions.md#5-canonical-technical-invariants),
  [ADR-R001](decisions/ADR-R001.md), [ADR-T001](decisions/ADR-T001.md)).
-- `mosaic-framestore`: per-tile **last-good-frame** stores (lock-free triple-buffer / arc-swap) +
+- `multiview-framestore`: per-tile **last-good-frame** stores (lock-free triple-buffer / arc-swap) +
  the tile **state machine** LIVE→STALE→RECONNECTING→NO_SIGNAL with atlas-resident slate cards
  ([ADR-0013](decisions/ADR-0013.md), [resilience doc](architecture/resilience.md)).
 - Multi-source ingest with per-source supervisors, bounded drop-oldest queues, and the
@@ -162,11 +162,11 @@ continuous output." From here on, the output-validity SLO probe gates every PR.
  macOS; supervision tree, backoff (`backon`, not the unmaintained `backoff`), circuit breakers,
  watchdog heartbeats; GPU device-loss → idempotent `rebuild` ([ADR-R002](decisions/ADR-R002.md),
  [ADR-R003](decisions/ADR-R003.md), [ADR-R004](decisions/ADR-R004.md)).
-- `mosaic-telemetry`: the **always-on output-validity probe** (SLOs: zero output gaps, strictly
+- `multiview-telemetry`: the **always-on output-validity probe** (SLOs: zero output gaps, strictly
  monotonic PTS, frame-interval jitter bound) + `/livez`/`/readyz` ([ADR-R009](decisions/ADR-R009.md)).
 
 **Exit criteria**
-- [ ] **One dead/hung input never freezes the mosaic** — failed tile rides the state-machine ladder; all other tiles unaffected.
+- [ ] **One dead/hung input never freezes the multiview** — failed tile rides the state-machine ladder; all other tiles unaffected.
 - [ ] Output emits exactly one valid, correctly-timestamped frame per tick **forever**, independent of input state; **zero output gaps** and strictly monotonic PTS under input chaos (probe-enforced).
 - [ ] Survives PTS 33-bit wrap, HLS-style discontinuity, and source add/remove with **no output reset**.
 - [ ] GPU device-loss injection (`device.destroy`) → slate during `rebuild` → recovery with **no output gap**.
@@ -178,10 +178,10 @@ continuous output." From here on, the output-validity SLO probe gates every PR.
 
 **Goal:** breadth of ingest and egress, plus discrete per-input audio. Encode-once-mux-many fan-out.
 
-- `mosaic-input` breadth: RTSP (FFmpeg + optional `retina`), HLS (with the custom **PTS-to-wall-clock
+- `multiview-input` breadth: RTSP (FFmpeg + optional `retina`), HLS (with the custom **PTS-to-wall-clock
  pacer** — not `-re` — [ADR-T004](decisions/ADR-T004.md)), MPEG-TS, SRT (latency in **µs**), RTMP;
  mandatory `AVIOInterruptCB` + **outer DNS watchdog** (AVIO timeout does not bound `getaddrinfo`).
-- `mosaic-output` breadth: in-process `gst-rtsp-server` serving **pre-encoded** NALs (no re-encode;
+- `multiview-output` breadth: in-process `gst-rtsp-server` serving **pre-encoded** NALs (no re-encode;
  MediaMTX optional sidecar — [ADR-0006](decisions/ADR-0006.md)); **custom CMAF segmenter +
  Apple LL-HLS** (FFmpeg's `hls` muxer cannot emit it) with blocking-reload HTTP server, reusing the
  `hls-playlist` tag layer ([ADR-0007](decisions/ADR-0007.md), [ADR-T005](decisions/ADR-T005.md));
@@ -189,7 +189,7 @@ continuous output." From here on, the output-validity SLO probe gates every PR.
 - **NDI** (feature `ndi`, off by default): `grafton-ndi` in/out + a `NDIlib_v6_load` dynamic-load
  backend so the default build needs no SDK; per-source FrameSync; attribution obligations recorded
  ([ADR-0008](decisions/ADR-0008.md), [licensing §7](architecture/conventions.md#7-licensing-model-build-profiles)).
-- `mosaic-audio`: per-input decode → resample to program clock (`async=1` + `first_pts`) →
+- `multiview-audio`: per-input decode → resample to program clock (`async=1` + `first_pts`) →
  `anullsrc` silence-fill on dropout → fan to (a) **clean discrete track** and (b) the **program bus**
  (`amix` → `loudnorm` EBU R128). The **verified per-output capability matrix** gates routing
  (TS = N tracks; HLS = select-one-of-N; NDI = channels-not-tracks; RTMP = endpoint-negotiated)
@@ -209,7 +209,7 @@ continuous output." From here on, the output-validity SLO probe gates every PR.
 **Goal:** broadcast-grade picture — correct color end-to-end, plus overlays and subtitles, all
 rendered off the hot path and decoupled from input health.
 
-- `mosaic-compositor` **color pipeline**, in the exact, never-reordered order from
+- `multiview-compositor` **color pipeline**, in the exact, never-reordered order from
  [invariant 8](architecture/conventions.md#5-canonical-technical-invariants): detect 4 axes
  (untagged-default policy matching players, not swscale) → range-expand → YUV→RGB matrix → linearize
  → primaries-convert in linear → scale + **premultiplied-alpha blend in linear** → OETF →
@@ -217,12 +217,12 @@ rendered off the hot path and decoupled from input health.
  [color doc](architecture/color.md) and [ADR-C001](decisions/ADR-C001.md)…[ADR-C006](decisions/ADR-C006.md).)
 - HDR canvas opt-in (PQ/HLG BT.2020, P010) with per-tile BT.2390 EETF tone-map anchored at 203 nits
  ([ADR-C005](decisions/ADR-C005.md)).
-- `mosaic-overlay`: serializable **layer stack** (text/clock/timecode/image/logo/tally/box/meter/
+- `multiview-overlay`: serializable **layer stack** (text/clock/timecode/image/logo/tally/box/meter/
  alert-card/subtitle/lower-third); `cosmic-text`+`glyphon` for text, `Vello`/SDF for vector;
  premultiplied-alpha discipline; **dirty-region uploads**; must-never-fail elements (SIGNAL LOST,
  meters, ticking clock) atlas-resident at startup; rendered purely from local state
  ([ADR-R008](decisions/ADR-R008.md)).
-- **Subtitles** (`mosaic-overlay`, feature `libass`): ingest 608/708 (side data), DVB-sub, teletext,
+- **Subtitles** (`multiview-overlay`, feature `libass`): ingest 608/708 (side data), DVB-sub, teletext,
  WebVTT/SRT/ASS/mov_text → normalize to ASS → **libass burn-in off the hot path** (the libavfilter
  `subtitles` filter is synchronous and must never sit in the live path); plus format-aware discrete
  passthrough per the subtitle capability matrix ([ADR-R007](decisions/ADR-R007.md)).
@@ -242,7 +242,7 @@ rendered off the hot path and decoupled from input health.
 reachable under `/api/v1`, documented by an OpenAPI 3.1 spec, with the engine **physically incapable
 of being back-pressured** by the control plane.
 
-- `mosaic-control` (axum 0.8): REST CRUD + `apply` over sources / layouts / outputs / renditions /
+- `multiview-control` (axum 0.8): REST CRUD + `apply` over sources / layouts / outputs / renditions /
  program / system, rooted at `/api/v1`. (See [management-capability-matrix](research/management-capability-matrix.md),
  [ADR-M001](decisions/ADR-M001.md), [ADR-W001](decisions/ADR-W001.md).)
 - **OpenAPI 3.1** via **utoipa + utoipa-axum**; **Scalar** try-it-out at `/docs`, spec at
@@ -280,14 +280,14 @@ product a human actually operates.
  **react-konva + dnd-kit** free-form layout editor (overlap, z-order, rotate, sub-pixel placement);
  client generated from the OpenAPI spec (`openapi-typescript` + `openapi-fetch`)
  ([conventions §8](architecture/conventions.md#8-frontend-conventions),
- [ADR-W003](decisions/ADR-W003.md), [ADR-W004](decisions/ADR-W004.md)). Embedded into the `mosaic`
+ [ADR-W003](decisions/ADR-W003.md), [ADR-W004](decisions/ADR-W004.md)). Embedded into the `multiview`
  binary via `rust-embed` (`embed-web` feature) for a single deployable
  ([ADR-W007](decisions/ADR-W007.md)).
 - **Realtime** ([conventions §6](architecture/conventions.md#6-api--realtime-conventions)):
  WebSocket primary at `/api/v1/ws` (versioned envelope, snapshot+delta, resume via `seq`,
  per-topic conflation), SSE fallback at `/api/v1/events`, documented with AsyncAPI at `/docs/events`;
  audio meters sampled/conflated at ~10–30 Hz ([ADR-RT001](decisions/ADR-RT001.md)…[ADR-RT006](decisions/ADR-RT006.md)).
-- `mosaic-preview`: read-only **taps** (input/program/output), preview encoder pool, **WHEP**
+- `multiview-preview`: read-only **taps** (input/program/output), preview encoder pool, **WHEP**
  (sub-second focus) + **MJPEG/JPEG** (cheap grid + universal fallback) + snapshot; access gated by
  short-lived signed tokens; auto-stop with no subscribers; **strictly isolated from the program path**
  ([ADR-P001](decisions/ADR-P001.md)…[ADR-P005](decisions/ADR-P005.md),
@@ -296,7 +296,7 @@ product a human actually operates.
  Settings/Auth, embedded API Docs.
 
 **Exit criteria**
-- [ ] One `mosaic` binary serves the embedded SPA, API, docs, realtime, and preview on one port.
+- [ ] One `multiview` binary serves the embedded SPA, API, docs, realtime, and preview on one port.
 - [ ] Operators can build/switch layouts (Preview→Program with Cut/Crossfade), manage sources/outputs, and route audio entirely from the UI; capability-aware controls grey out impossible selections.
 - [ ] WS snapshot-then-delta with `seq`-resume works across reconnect; SSE fallback works where WS is blocked; meters stream at 10–30 Hz without back-pressuring the engine.
 - [ ] WHEP sub-second preview works on Linux/NVIDIA + macOS; MJPEG fallback always ships and works where UDP/TURN is blocked; preview auto-stops when idle and never touches the program path.
@@ -309,7 +309,7 @@ product a human actually operates.
 
 ## M8 — Efficiency, adaptive control & density
 
-**Goal:** make an N-tile mosaic run *well* on **commodity hardware** — entry GPUs, Intel/AMD iGPUs,
+**Goal:** make an N-tile multiview run *well* on **commodity hardware** — entry GPUs, Intel/AMD iGPUs,
 base Apple Silicon, low-RAM boxes — and degrade gracefully under pressure without ever breaking
 output. (Source: [efficiency brief](research/efficiency.md).)
 
@@ -320,15 +320,15 @@ output. (Source: [efficiency brief](research/efficiency.md).)
 - Memory discipline ([ADR-E005](decisions/ADR-E005.md)): reference-counted **pooled** frame handles
  (recycle-on-drop), bounded depth-1–3 drop-oldest queues, one shared GPU/CUDA context, minimally
  sized decode pools, `mimalloc` global allocator.
-- **Cost model & planner** in `mosaic-hal`: a capability+cost registry per (stage × backend × codec)
+- **Cost model & planner** in `multiview-hal`: a capability+cost registry per (stage × backend × codec)
  and an empirically-calibrated cost table ([ADR-E008](decisions/ADR-E008.md)).
-- **Resource-adaptive degradation** in `mosaic-engine` ([invariant 9](architecture/conventions.md#5-canonical-technical-invariants),
+- **Resource-adaptive degradation** in `multiview-engine` ([invariant 9](architecture/conventions.md#5-canonical-technical-invariants),
  [ADR-E007](decisions/ADR-E007.md)): the closed control loop (sense → estimate → plan → apply, with
  hysteresis + cooldown) sheds load tile-by-tile in the documented **cheapest-impact-first ladder**
  **before** the program output is touched; admission control with hard constraints (NVENC session
  budget probed at runtime, never hardcoded — currently 12/system on consumer GeForce).
 - Sensors: Linux PSI/cgroup/thermal/NVML, macOS `thermalState`/IOReport — behind a fallible `Sensor`
- trait. GPU stats in `mosaic-telemetry` behind a `GpuStats` trait (NVML / macmon), util% always
+ trait. GPU stats in `multiview-telemetry` behind a `GpuStats` trait (NVML / macmon), util% always
  corroborated with measured fps.
 - Opt-in dirty-region recompositing + frame-rate harmonization for static feeds
  ([ADR-E006](decisions/ADR-E006.md)).
@@ -436,7 +436,7 @@ Established, standards-based multiviewer capabilities layered on the core produc
 
 **Focus:** Professional IP-facility tier: native SMPTE ST 2110-20/-30/-40 ingest+egress, ST 2110-22 (JPEG XS), ST 2022-6, ST 2022-7 hitless dual-path (in+out), PTP/ST 2059-2 timing + per-input frame-sync; AMWA NMOS IS-04/05 (each tile a routable receiver) + IS-08 audio mapping + IS-12/MS-05 control + IS-10 OAuth2/JWT; router/switcher control + route-follow via SW-P-08 and Ember+ + name-following labels; multi-head output (independent per-head layout/resolution) + optional video-wall spanning with bezel compensation; optional confidence scopes and coded-audio metadata read; SDI/HDMI reached only via a documented external IP gateway.
 
-**Exit criteria:** Mosaic ingests and emits ST 2110-20/-30/-40 locked to PTP, with ST 2022-7 hitless across two NICs proven under path-loss injection; registers/discovers via NMOS IS-04/05 and is patchable by an external controller; control APIs securable via IS-10; tile labels follow SW-P-08/Ember+ route changes; the engine renders multiple independent heads each with its own layout/resolution; the gateway integration pattern is documented.
+**Exit criteria:** Multiview ingests and emits ST 2110-20/-30/-40 locked to PTP, with ST 2022-7 hitless across two NICs proven under path-loss injection; registers/discovers via NMOS IS-04/05 and is patchable by an external controller; control APIs securable via IS-10; tile labels follow SW-P-08/Ember+ route changes; the engine renders multiple independent heads each with its own layout/resolution; the gateway integration pattern is documented.
 
 ### Additions to existing milestones
 

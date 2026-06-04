@@ -1,9 +1,9 @@
 // Realtime envelope types (docs/api/realtime.md §2).
 //
-// TODO(api-schema): these wire types are defined in the `mosaic-events` crate
+// TODO(api-schema): these wire types are defined in the `multiview-events` crate
 // and surface in the AsyncAPI document (`/asyncapi.json`), NOT yet in the
 // OpenAPI schema this app generates its client from (`src/api/schema.ts`). Until
-// `mosaic-events` types are exported into a generated TS module, this is a
+// `multiview-events` types are exported into a generated TS module, this is a
 // hand-modelled view of the documented contract — deliberately marked so it is
 // replaced by codegen, never silently trusted. Parsing is defensive: unknown
 // `t` values and unknown envelope majors are tolerated, never thrown on.

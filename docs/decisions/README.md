@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -17,7 +17,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs tot
 - [ADR-0011](ADR-0011.md) — Cross-platform targets: Linux containers (NVIDIA + VAAPI) and macOS native universal2
 - [ADR-0012](ADR-0012.md) — LGPL-clean default build; GPL/nonfree/NDI strictly opt-in; project dual MIT OR Apache-2.0
 - [ADR-0013](ADR-0013.md) — Deadline-driven compositor with per-tile FrameSync and continuous drift correction
-- [ADR-0014](ADR-0014.md) — Encode the mosaic once per output; size density to physical NVENC chips
+- [ADR-0014](ADR-0014.md) — Encode the multiview once per output; size density to physical NVENC chips
 - [ADR-0015](ADR-0015.md) — YouTube live ingest via an external runtime-discovered resolver (yt-dlp) *(Proposed)*
 - [ADR-0016](ADR-0016.md) — Efficient overlay rendering: GPU glyph-atlas text + libass subtitles + cached/dirty-region compositing *(Proposed)*
 - [ADR-0019](ADR-0019.md) — Native multi-form caption ingest: unified cue model decoded in-demux into a per-tile sampled cue store *(Proposed)*
@@ -70,7 +70,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs tot
 - [ADR-T004](ADR-T004.md) — HLS ingest pacing: custom PTS-to-wall-clock pacer, not -re
 - [ADR-T005](ADR-T005.md) — HLS/LL-HLS output: wall-clock-paced, GOP-aligned segments; custom origin for true LL-HLS
 - [ADR-T006](ADR-T006.md) — Long-run clock drift: monotonic master + PI/dead-band loop + adaptive audio resampling
-- [ADR-T007](ADR-T007.md) — Codec edge-case & decode/encode policy: one bad input never stalls the mosaic
+- [ADR-T007](ADR-T007.md) — Codec edge-case & decode/encode policy: one bad input never stalls the multiview
 - [ADR-T008](ADR-T008.md) — A/V sync & per-input jitter-buffer model
 - [ADR-T009](ADR-T009.md) — Per-tile media-time ring uses O(capacity) copy-on-write publish, not an in-place O(1) ring
 - [ADR-0020](ADR-0020.md) — Layered timing: monotonic pacing + optional reference-lock + per-input frame-sync *(Proposed)*

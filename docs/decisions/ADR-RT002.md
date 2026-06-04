@@ -7,7 +7,7 @@
 
 ## Decision
 
-Every message both directions uses one versioned envelope {v,t,topic,id,seq,ts,corr,data}; control frames reuse it on topic "$control". Implement as a Rust serde internally-tagged enum (#[serde(tag="t",content="data")]) in a shared mosaic-events crate deriving serde + schemars, rendered as a JSON-Schema oneOf with a const discriminator. Additive changes bump minor (clients ignore unknown t/fields); breaking changes bump v major; hello.server_v advertises supported majors and the negotiated subprotocol mosaic.v1 makes the wire major explicit. High-rate meters MAY use a binary body under subprotocol mosaic.bin.v1 with the same envelope shape.
+Every message both directions uses one versioned envelope {v,t,topic,id,seq,ts,corr,data}; control frames reuse it on topic "$control". Implement as a Rust serde internally-tagged enum (#[serde(tag="t",content="data")]) in a shared multiview-events crate deriving serde + schemars, rendered as a JSON-Schema oneOf with a const discriminator. Additive changes bump minor (clients ignore unknown t/fields); breaking changes bump v major; hello.server_v advertises supported majors and the negotiated subprotocol multiview.v1 makes the wire major explicit. High-rate meters MAY use a binary body under subprotocol multiview.bin.v1 with the same envelope shape.
 
 ## Rationale
 
@@ -19,4 +19,4 @@ Per-message-type bespoke frames (N parse paths, hard to version/route); protobuf
 
 ## Consequences
 
-All producers must populate envelope metadata consistently. The binary meter fast-path means the documented JSON schema describes a decoded shape while the wire is binary — must be documented explicitly (contentType) or clients misparse. A shared mosaic-events crate becomes a hard dependency of engine, REST, WS, and codegen.
+All producers must populate envelope metadata consistently. The binary meter fast-path means the documented JSON schema describes a decoded shape while the wire is binary — must be documented explicitly (contentType) or clients misparse. A shared multiview-events crate becomes a hard dependency of engine, REST, WS, and codegen.

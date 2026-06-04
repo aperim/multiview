@@ -154,7 +154,7 @@ export function LayoutsPage(): JSX.Element {
         title={<Trans>Layouts</Trans>}
         description={
           <Trans>
-            Mosaic layouts. The accessible editor offers a form-based path
+            Multiview layouts. The accessible editor offers a form-based path
             equivalent to the drag-and-drop canvas.
           </Trans>
         }

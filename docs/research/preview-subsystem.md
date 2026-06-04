@@ -2,29 +2,29 @@
 
 ---
 
-# Mosaic Preview Subsystem — Authoritative Brief
+# Multiview Preview Subsystem — Authoritative Brief
 
 **Status:** Proposed (preview-subsystem lead merge of INPUT / PROGRAM / OUTPUT scope designs)
 **Date:** 2026-06-02
-**Owning crates:** `mosaic-control` (axum REST+WS surface), `mosaic-framestore` (read-only frame taps + per-tile state machine), `mosaic-compositor` (program canvas downscale tap), `mosaic-serve` (per-output packet fan-out tap + reuse of CMAF/LL-HLS segmenter), `mosaic-io`/`mosaic-input` (process-isolated cue decoders), `mosaic-encoder` (preview-encoder pool, session-budgeted), `mosaic-planner` (admission + degradation ladder), `mosaic-hal` (capability+cost registry). New leaf crate: **`mosaic-preview`**.
+**Owning crates:** `multiview-control` (axum REST+WS surface), `multiview-framestore` (read-only frame taps + per-tile state machine), `multiview-compositor` (program canvas downscale tap), `multiview-serve` (per-output packet fan-out tap + reuse of CMAF/LL-HLS segmenter), `multiview-io`/`multiview-input` (process-isolated cue decoders), `multiview-encoder` (preview-encoder pool, session-budgeted), `multiview-planner` (admission + degradation ladder), `multiview-hal` (capability+cost registry). New leaf crate: **`multiview-preview`**.
 
 ---
 
 ## 1. The Preview Model & The Three Scopes
 
-Mosaic preview is a **strictly best-effort, read-only side-channel** layered onto the existing data plane. It NEVER inserts itself on the protected output path. There is exactly ONE governing rule: **preview reads frames/packets that already exist (or spins up a deliberately-throttled cue decoder for sources that have none), and is paid for ONLY while someone is watching.**
+Multiview preview is a **strictly best-effort, read-only side-channel** layered onto the existing data plane. It NEVER inserts itself on the protected output path. There is exactly ONE governing rule: **preview reads frames/packets that already exist (or spins up a deliberately-throttled cue decoder for sources that have none), and is paid for ONLY while someone is watching.**
 
 Three scopes, each with a distinct tap point on the existing pipeline:
 
 1. **INPUT preview** — view any individual source live.
-   - (a) **On-air inputs** already bound to a tile and decoded for the program: preview registers as an extra non-blocking *reader* of that tile's existing `mosaic-framestore` last-good-frame slot. **No second decode.** This is the single biggest efficiency win and the core isolation guarantee.
+   - (a) **On-air inputs** already bound to a tile and decoded for the program: preview registers as an extra non-blocking *reader* of that tile's existing `multiview-framestore` last-good-frame slot. **No second decode.** This is the single biggest efficiency win and the core isolation guarantee.
    - (b) **Off-air sources** not yet in the layout that must be *cued/confirmed before binding*: a lightweight, process-isolated **cue decoder** (thumbnail-rate, low-res) is spun up on demand. This cue worker IS the existing "new input pre-warmed off-air" mechanism (resilience-av §1.4 source-add), so a subsequent bind is an atomic scene-graph swap with zero connect/decode latency. One mechanism serves both "let me look at it" and "now put it on air instantly."
 
-2. **PROGRAM preview** — the composed mosaic as produced by `mosaic-compositor`, before the encode path. A single extra GPU downscale blit appended to the compositor's existing render submission writes a small (~480p, 1/4 area) copy into a dedicated preview ring. Explicitly a **pre-encode canvas tap** — labeled as such.
+2. **PROGRAM preview** — the composed multiview as produced by `multiview-compositor`, before the encode path. A single extra GPU downscale blit appended to the compositor's existing render submission writes a small (~480p, 1/4 area) copy into a dedicated preview ring. Explicitly a **pre-encode canvas tap** — labeled as such.
 
-3. **OUTPUT preview** — what each individual output/rendition (RTSP, LL-HLS, RTMP, SRT, NDI) actually looks like. The default is a **tap of the REAL encoded packet stream** at the existing `mosaic-serve` encode-once-mux-many fan-out point, decoded back for the operator (a confidence/return-feed monitor). This is the only way to reveal color-tag, scaling, GOP, and encode-artifact differences between renditions. Every preview surface is labeled `REAL ENCODED OUTPUT (tap: <protocol>)` or `PRE-ENCODE CANVAS APPROX` — never silently mixed.
+3. **OUTPUT preview** — what each individual output/rendition (RTSP, LL-HLS, RTMP, SRT, NDI) actually looks like. The default is a **tap of the REAL encoded packet stream** at the existing `multiview-serve` encode-once-mux-many fan-out point, decoded back for the operator (a confidence/return-feed monitor). This is the only way to reveal color-tag, scaling, GOP, and encode-artifact differences between renditions. Every preview surface is labeled `REAL ENCODED OUTPUT (tap: <protocol>)` or `PRE-ENCODE CANVAS APPROX` — never silently mixed.
 
-Per-tile / per-source / per-output **health & metrics are NEVER burned into preview pixels.** They ride the existing `mosaic-control` WebSocket (the same one specified for tile FPS / tally / metering in resilience-av §4) as compact JSON/binary at 10–25 Hz and are rendered client-side as DOM/canvas overlays. This keeps status accurate even when the pixel image is frozen, and keeps the video transport pure pixels.
+Per-tile / per-source / per-output **health & metrics are NEVER burned into preview pixels.** They ride the existing `multiview-control` WebSocket (the same one specified for tile FPS / tally / metering in resilience-av §4) as compact JSON/binary at 10–25 Hz and are rendered client-side as DOM/canvas overlays. This keeps status accurate even when the pixel image is frozen, and keeps the video transport pure pixels.
 
 ---
 
@@ -39,7 +39,7 @@ Per-tile / per-source / per-output **health & metrics are NEVER burned into prev
 | **Own task tier** | Preview lives in the supervised **Tier A (control-plane analog)** task tier (resilience-av §2.1), NEVER the protected Output/Clock Core. Preview can panic / OOM / stall and the invariant "one valid frame per output tick, forever" holds. |
 | **Off-air cue = Tier B isolated worker** | Cue decoders run in the SAME process-isolated, SIGKILL-able Tier B input-worker model as program inputs (AVIOInterruptCB + per-protocol timeouts + outer DNS watchdog + circuit breaker + supervised backoff), but flagged low-priority. A malformed/hostile off-air URL can hang or segfault its worker without touching the program core. |
 | **Conditional tap (zero cost idle)** | The program downscale blit is *skipped entirely* when subscriber count is 0; per-output taps are not registered when nobody watches. The fan-out runs exactly as in production with one consumer fewer. |
-| **Admission-controlled, shed first** | All preview decode/encode is admitted against the SAME `mosaic-planner` per-engine budget (NVDEC MP/s, NVENC sessions, VRAM, cgroup CPU) at LOWEST priority. The degradation ladder sheds preview BEFORE any program lever moves (see §3). Program output encoder sessions are reserved FIRST; preview allocates only from leftover budget. |
+| **Admission-controlled, shed first** | All preview decode/encode is admitted against the SAME `multiview-planner` per-engine budget (NVDEC MP/s, NVENC sessions, VRAM, cgroup CPU) at LOWEST priority. The degradation ladder sheds preview BEFORE any program lever moves (see §3). Program output encoder sessions are reserved FIRST; preview allocates only from leftover budget. |
 | **GPU device-loss independence** | Preview tap surfaces + preview encoder are recreated *lazily and independently AFTER* the output core's idempotent `rebuild()` completes. Preview being down during a TDR/Xid rebuild is acceptable; output slate continuity is not. |
 
 **CI / chaos assertion:** stall and SIGKILL preview consumers under soak and assert the program output is byte-for-byte unaffected and shows **zero added frame-interval jitter and zero zero-gap-SLO violations** (resilience-av §6 freezedetect/jitter harness). A "no preview back-pressure" test is a hard gate.
@@ -50,7 +50,7 @@ Per-tile / per-source / per-output **health & metrics are NEVER burned into prev
 
 Cost must be **~zero when nobody is watching** and CHEAP on commodity hardware (Intel iGPU, AMD APU, entry NVIDIA dGPU, base Apple silicon, CPU-only).
 
-- **REUSE, DON'T RE-DECODE / RE-ENCODE.** On-air input preview reads the existing `mosaic-framestore` slot (no second decode). Program preview reads the already-composited canvas (no second composite). Output preview taps the already-encoded packet stream (no second encode of the canvas). For HLS/LL-HLS outputs, output preview *replays the already-published segments* — zero extra work. A second full encode/decode/composite purely for preview is explicitly forbidden.
+- **REUSE, DON'T RE-DECODE / RE-ENCODE.** On-air input preview reads the existing `multiview-framestore` slot (no second decode). Program preview reads the already-composited canvas (no second composite). Output preview taps the already-encoded packet stream (no second encode of the canvas). For HLS/LL-HLS outputs, output preview *replays the already-published segments* — zero extra work. A second full encode/decode/composite purely for preview is explicitly forbidden.
 - **SHARED LOW-RES TAP per source/output, fan-out many.** At most ONE preview tap per source/output produces ONE small NV12 thumbnail (~320×180 input grid / ~480–720p program/output), shared by ALL viewers of that entity. N viewers cost the same as one. Downscale once, fan out to JPEG / WHEP / LL-HLS.
 - **DECODE-AT-DISPLAY-RESOLUTION for cue & output taps** using the registry's per-backend decode-scale tier (efficiency §2.1): NVDEC `cuvid -resize` (free on the ASIC), VideoToolbox reduced-res / `scale_vt`, VAAPI/QSV SFC/VPP. Budget by decoded MP/s, not stream count. Request a lower source substream / smaller ABR variant where the protocol offers one.
 - **THUMBNAIL-RATE + FRAME-SKIP.** Cue decoders and output thumbnails run at 1–5 fps with `skip_frame=nokey` (I-frames only). A 2 s-GOP rendition then yields ~0.5 fps of decode work — exactly enough for a thumbnail. Only a FOCUSED source is briefly promoted to higher frame rate.
@@ -70,10 +70,10 @@ Cost must be **~zero when nobody is watching** and CHEAP on commodity hardware (
 |---|---|---|---|---|
 | **Input** | Grid / multiviewer | MJPEG-over-HTTP (`multipart/x-mixed-replace`) or single-shot JPEG GET, 1–5 fps, ~320×180 | 0.2–1 s refresh | Very low — 1 HW downsample + small JPEG/frame; ~25–75 KB/s per tile @5fps; encode-once-serve-many |
 | **Input** | Focus (expand 1 source) | **WebRTC / WHEP** | sub-250 ms | Moderate, on-demand — 1 low-latency H.264 preview encode session (budgeted, sheddable first); 1 per operator |
-| **Input** | Focus fallback (UDP/STUN blocked) | LL-HLS (reuse `mosaic-serve` CMAF) | ~2–5 s | Low-moderate — same 1 preview encode session, packetized to CMAF |
+| **Input** | Focus fallback (UDP/STUN blocked) | LL-HLS (reuse `multiview-serve` CMAF) | ~2–5 s | Low-moderate — same 1 preview encode session, packetized to CMAF |
 | **Program** | Grid / at-a-glance (DEFAULT) | Multiplexed binary JPEG over ONE WebSocket, 1–5 fps | 0.5–2 s | Very low — 1 CPU JPEG (turbojpeg/zune-jpeg) of the downscaled tap; NO GPU encode session |
 | **Program** | Focus (verify motion/latency/A-V) | **WebRTC / WHEP** | 200–800 ms | Moderate — 1 low-res HW preview encode session (after program's reserved sessions); auto-stop on last-leave |
-| **Program** | At-scale / many distributed viewers | LL-HLS (reuse `mosaic-serve` CMAF) | ~2–5 s | One shared encode session, encode-once-segment-many; per-viewer ≈ static file serving |
+| **Program** | At-scale / many distributed viewers | LL-HLS (reuse `multiview-serve` CMAF) | ~2–5 s | One shared encode session, encode-once-segment-many; per-viewer ≈ static file serving |
 | **Output** | Grid thumbnail (DEFAULT) | Periodic JPEG snapshot (poll/push, ETag), 1–5 s, of REAL decoded rendition | 1–5 s refresh | Lowest — viewport-driven; 1 decode tick (`skip_frame=nokey`) + downscale + 1 JPEG per interval |
 | **Output** | Focus (single rendition) | **WebRTC / WHEP** (in-process webrtc-rs or MediaMTX sidecar) | 150–500 ms | Highest per-stream — tap decode (reduced-res) + small re-encode + peer conn; 1 focus at a time, shared across viewers of that output |
 | **Output** | Motion view w/o WebRTC | MJPEG-over-HTTP | 0.3–1.5 s | Medium — 1 JPEG per delivered frame from the tapped+downscaled decode |
@@ -84,7 +84,7 @@ Cost must be **~zero when nobody is watching** and CHEAP on commodity hardware (
 
 ---
 
-## 5. API Endpoints (all served by `mosaic-control` / axum)
+## 5. API Endpoints (all served by `multiview-control` / axum)
 
 All preview + cue endpoints are **authenticated/authorized**; cue source schemes are allowlisted/validated (SSRF/DoS guard) and rate-limited.
 
@@ -96,7 +96,7 @@ All preview + cue endpoints are **authenticated/authorized**; cue source schemes
 | GET | `/api/inputs/{id}/preview/mjpeg` | MJPEG stream of low-res thumbnails at `?fps=` (clamped, default 2–5). Primary input-grid transport; holding the conn = a refcounted subscriber |
 | POST | `/api/inputs/{id}/preview/whep` | WHEP focus: SDP offer in, SDP answer out, SRTP media. Starts/attaches preview encode session; promotes off-air cue decoder to higher fps. `503` if focus cap hit |
 | DELETE | `/api/inputs/{id}/preview/whep/{session}` | WHEP teardown (+ standard WHEP resource URL); frees encoder immediately |
-| GET | `/api/inputs/{id}/preview/llhls/index.m3u8` | LL-HLS focus fallback (CMAF parts under same prefix); reuses `mosaic-serve` segmenter; auto-stop on unpolled |
+| GET | `/api/inputs/{id}/preview/llhls/index.m3u8` | LL-HLS focus fallback (CMAF parts under same prefix); reuses `multiview-serve` segmenter; auto-stop on unpolled |
 | POST | `/api/inputs/cue` | Cue/pre-warm an off-air source (body: kind/url/transport). Spins up isolated cue decoder + capability probe; returns a source id usable with all preview endpoints. This warmed worker makes a later bind instant |
 | DELETE | `/api/inputs/cue/{id}` | Drop a cued source (SIGKILL its worker). Also automatic after last-unsubscribe + linger, unless bound |
 | POST | `/api/inputs/{id}/bind` | Take a cued/previewed off-air source to air (Preview→Program). Atomic scene-graph swap at a frame boundary (Cut/Crossfade) — reuses seamless live-reconfig (Class 1) |
@@ -156,16 +156,16 @@ All preview + cue endpoints are **authenticated/authorized**; cue source schemes
 ```mermaid
 flowchart LR
     subgraph Program["PROTECTED DATA PLANE (output core — never back-pressured)"]
-        SRC["Live sources\nRTSP/HLS/TS/SRT/NDI"] --> DEC["Per-source decode\n(mosaic-io, Tier B)"]
-        DEC --> FS["Per-tile last-good-frame store\n(mosaic-framestore, lock-free triple-buffer)"]
-        FS --> COMP["Compositor\n(mosaic-compositor, Rgba16Float canvas)"]
+        SRC["Live sources\nRTSP/HLS/TS/SRT/NDI"] --> DEC["Per-source decode\n(multiview-io, Tier B)"]
+        DEC --> FS["Per-tile last-good-frame store\n(multiview-framestore, lock-free triple-buffer)"]
+        FS --> COMP["Compositor\n(multiview-compositor, Rgba16Float canvas)"]
         COMP --> RB["RGBA->NV12 readback ring\n(encoder-owned)"]
-        RB --> ENC["Encode once per rendition\n(mosaic-encoder)"]
-        ENC --> TEE["Packet fan-out / tee\n(mosaic-serve, encode-once-mux-many)"]
+        RB --> ENC["Encode once per rendition\n(multiview-encoder)"]
+        ENC --> TEE["Packet fan-out / tee\n(multiview-serve, encode-once-mux-many)"]
         TEE --> OUTS["Real outputs\nRTSP / LL-HLS / RTMP / SRT / NDI"]
     end
 
-    subgraph Preview["BEST-EFFORT PREVIEW (Tier A, mosaic-preview)"]
+    subgraph Preview["BEST-EFFORT PREVIEW (Tier A, multiview-preview)"]
         CUE["Off-air CUE decoder\n(Tier B, isolated, thumb-rate low-res)\n= pre-warm worker"]
         ITAP["Input tap\n(downsample blit, on-device)"]
         PTAP["Program downscale tap\n(extra GPU blit, own ring)"]
@@ -173,7 +173,7 @@ flowchart LR
         PENC["Preview-encoder pool\n(session-budgeted, sheddable first)"]
         JPEG["CPU JPEG\n(turbojpeg/zune-jpeg)"]
         WHEP["WHEP / WebRTC\n(webrtc-rs / MediaMTX)"]
-        LLHLS["LL-HLS\n(reuse mosaic-serve CMAF)"]
+        LLHLS["LL-HLS\n(reuse multiview-serve CMAF)"]
     end
 
     FS -. read-only latest-frame .-> ITAP
@@ -191,14 +191,14 @@ flowchart LR
     PENC --> WHEP
     PENC --> LLHLS
 
-    JPEG --> CTRL["mosaic-control (axum)\nsnapshot / MJPEG / WS-JPEG"]
+    JPEG --> CTRL["multiview-control (axum)\nsnapshot / MJPEG / WS-JPEG"]
     WHEP --> CTRL
     LLHLS --> CTRL
     CTRL --> UI["Web UI multiviewer\n(client-rendered status overlays)"]
 
     STATUS["Status/meters\n(lock-free meter rings, numeric)"] -. 10-25 Hz, never pixels .-> CTRL
 
-    PLAN["mosaic-planner\nadmission + degradation ladder"] -. shed preview FIRST .-> Preview
+    PLAN["multiview-planner\nadmission + degradation ladder"] -. shed preview FIRST .-> Preview
     PLAN -. reserve sessions FIRST .-> ENC
 ```
 
@@ -208,11 +208,11 @@ flowchart LR
 
 ## 8. Integration with the Management Capability Matrix
 
-Preview is a first-class citizen of the existing `mosaic-hal` **capability+cost registry** and `mosaic-planner` loop — it does not invent a parallel resource model:
+Preview is a first-class citizen of the existing `multiview-hal` **capability+cost registry** and `multiview-planner` loop — it does not invent a parallel resource model:
 
 - **Capability advertisement.** `GET /api/inputs/preview/capabilities`, `GET /api/v1/preview/program`, and the per-output `available preview transports` field are computed from the registry + build features, mirroring the existing capability-aware validator pattern. WHEP appears only if the WebRTC feature + TURN are configured; LL-HLS/JPEG are always available; the UI greys out unavailable modes. This is the same "report what this build/host can do" discipline used for codecs/backends.
 - **Shared budgets.** Preview decode is budgeted in decoded MP/s against the same per-NVDEC/media-engine ceiling as ingest; preview encode sessions count against the same per-system NVENC cap (probed at runtime via `nvmlDeviceGetEncoderSessions` — never hard-coded; 12/system Nov-2025, GTX 1630 = 3) / VideoToolbox engine count (base Apple = 1 encode). **Real-output sessions are reserved FIRST**; the planner returns `503 "preview unavailable under load"` rather than displacing a real output.
 - **First on the degradation ladder.** The existing cheapest-impact-first ladder (efficiency §3.3) is extended with preview as the topmost (cheapest-to-shed) rung: shed focus WHEP → grid fps → grid resolution → off-air cue decoders → suspend preview entirely — ALL before any program tile/output lever moves. Every preview adaptation is logged like any other (operator trust).
 - **Color/verification reuse.** Output preview reads the resolved color tuple and the post-encode ffprobe verification result from the **same gate the color runbook already mandates** (bitstream VUI/SEI + fMP4 `colr`), honoring the `frame > codec ctx > container > policy` precedence. Verification re-runs after every encode (re)init / remux / parallel-output cutover; a stale verification renders amber, not green.
 - **Live-reconfig awareness.** The UI surfaces Class 1 (seamless, e.g. cue→bind) vs Class 2 (parallel-output migration, e.g. editing a pinned resolution/codec/pixfmt/GOP) distinctions; during a Class 2 cutover the verification view previews BOTH the existing and the candidate output so the operator confirms the new rendition before migrating consumers — never an in-place mutation of a live output.
-- **Sidecar reuse.** The optional MediaMTX sidecar already accepted for RTSP/multi-protocol output fan-out doubles as the preferred WHEP terminator for v1 (offloads ICE/DTLS/SRTP), with in-process webrtc-rs/str0m as the lean-binary alternative; LL-HLS preview reuses the custom `mosaic-serve` CMAF segmenter + blocking-reload HTTP server with no new segmenter.
+- **Sidecar reuse.** The optional MediaMTX sidecar already accepted for RTSP/multi-protocol output fan-out doubles as the preferred WHEP terminator for v1 (offloads ICE/DTLS/SRTP), with in-process webrtc-rs/str0m as the lean-binary alternative; LL-HLS preview reuses the custom `multiview-serve` CMAF segmenter + blocking-reload HTTP server with no new segmenter.

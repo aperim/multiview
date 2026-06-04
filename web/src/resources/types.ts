@@ -5,8 +5,8 @@
 // The control plane will expose Sources, Outputs, and Overlays as first-class
 // REST resources, but those operations are NOT in the generated OpenAPI schema
 // yet (only `GET /api/v1/layouts` is). These interfaces are deliberately-marked
-// view-models that mirror the documented `mosaic-config` shapes
-// (crates/mosaic-config/src/schema.rs: `Source`, `Overlay`, output sinks). They
+// view-models that mirror the documented `multiview-config` shapes
+// (crates/multiview-config/src/schema.rs: `Source`, `Overlay`, output sinks). They
 // are NOT fake `as` casts of an untyped body — they are honest placeholders the
 // read views render until the API ships.
 //
@@ -14,7 +14,7 @@
 // operations, derive these from `components['schemas'][…]` and replace the stub
 // queries in `./queries.ts` with the typed client calls.
 
-/** The transport kinds Mosaic can ingest (config `[[sources]]` `kind`). */
+/** The transport kinds Multiview can ingest (config `[[sources]]` `kind`). */
 export type SourceKind =
   | 'rtsp'
   | 'hls'

@@ -1,10 +1,10 @@
-# Mosaic — Preview Subsystem
+# Multiview — Preview Subsystem
 
 The preview subsystem lets operators *see* what the engine is doing — every input, the composed
 program, and every real encoded output — from a web browser. It is a **strictly best-effort,
 read-only side-channel** layered onto the existing data plane. It is implemented in the
-**`mosaic-preview`** crate (preview taps, the preview encoder pool, WHEP/MJPEG/snapshot endpoints;
-feature `webrtc`) and surfaced through **`mosaic-control`** (axum REST + WebSocket).
+**`multiview-preview`** crate (preview taps, the preview encoder pool, WHEP/MJPEG/snapshot endpoints;
+feature `webrtc`) and surfaced through **`multiview-control`** (axum REST + WebSocket).
 
 > **The one rule that governs everything:** *preview reads frames/packets that already exist (or
 > spins up a deliberately-throttled cue decoder for sources that have none), and is paid for ONLY
@@ -28,9 +28,9 @@ or re-encoded just for preview** unless it genuinely has to be (see §4).
 
 | Scope | What you see | Tap point | Re-work? |
 |-------|--------------|-----------|----------|
-| **Input** | Any individual source, live | `mosaic-framestore` last-good-frame slot (on-air) **or** an isolated cue decoder (off-air) | None for on-air; a cheap thumb-rate decode for off-air |
-| **Program** | The composed mosaic *before* the encode path | One extra GPU downscale blit appended to the compositor's render submission, into its own ring | One small downscale blit only |
-| **Output** | What each individual output/rendition actually looks like | A tap of the **real encoded packet stream** at the `mosaic-output` encode-once-mux-many fan-out, decoded back | None (decode of existing packets) |
+| **Input** | Any individual source, live | `multiview-framestore` last-good-frame slot (on-air) **or** an isolated cue decoder (off-air) | None for on-air; a cheap thumb-rate decode for off-air |
+| **Program** | The composed multiview *before* the encode path | One extra GPU downscale blit appended to the compositor's render submission, into its own ring | One small downscale blit only |
+| **Output** | What each individual output/rendition actually looks like | A tap of the **real encoded packet stream** at the `multiview-output` encode-once-mux-many fan-out, decoded back | None (decode of existing packets) |
 
 ### 1.1 Input scope — on-air vs off-air (the cue)
 
@@ -53,7 +53,7 @@ canvas tap** and labelled as such in the UI — it is *not* the encoded output.
 
 ### 1.3 Output scope
 
-The default is a tap of the **real encoded packet stream** at the `mosaic-output` fan-out, decoded
+The default is a tap of the **real encoded packet stream** at the `multiview-output` fan-out, decoded
 back for the operator (a confidence / return-feed monitor). This is the only way to reveal
 color-tag, scaling, GOP cadence, and encode-artifact differences between renditions. Every output
 preview surface carries a non-negotiable on-video fidelity label:
@@ -217,10 +217,10 @@ The two governing rules:
 |-------|------|-----------|---------|------|
 | **Input** | Grid / multiviewer | MJPEG-over-HTTP or single-shot JPEG, 1–5 fps, ~320×180 | 0.2–1 s | Very low — 1 HW downsample + small JPEG/frame; encode-once-serve-many |
 | **Input** | Focus (expand 1 source) | **WebRTC / WHEP** (H.264) | sub-250 ms | Moderate, on-demand — 1 low-latency preview encode session; 1 per operator |
-| **Input** | Focus fallback (UDP/STUN blocked) | LL-HLS (reuse `mosaic-output` CMAF) | ~2–5 s | Low-moderate — same 1 preview encode session, packetized |
+| **Input** | Focus fallback (UDP/STUN blocked) | LL-HLS (reuse `multiview-output` CMAF) | ~2–5 s | Low-moderate — same 1 preview encode session, packetized |
 | **Program** | Grid / at-a-glance (**default**) | Multiplexed binary JPEG over ONE WebSocket, 1–5 fps | 0.5–2 s | Very low — 1 CPU JPEG of the downscaled tap; **no GPU encode session** |
 | **Program** | Focus (verify motion/latency/A-V) | **WebRTC / WHEP** (H.264) | 200–800 ms | Moderate — 1 low-res HW encode (after program's reserved sessions); auto-stop |
-| **Program** | At-scale / many viewers | LL-HLS (reuse `mosaic-output` CMAF) | ~2–5 s | One shared encode session, encode-once-segment-many |
+| **Program** | At-scale / many viewers | LL-HLS (reuse `multiview-output` CMAF) | ~2–5 s | One shared encode session, encode-once-segment-many |
 | **Output** | Grid thumbnail (**default**) | Periodic JPEG snapshot (ETag), 1–5 s, of REAL decoded rendition | 1–5 s | Lowest — 1 decode tick (`skip_frame=nokey`) + downscale + 1 JPEG |
 | **Output** | Focus (single rendition) | **WebRTC / WHEP** (H.264) | 150–500 ms | Highest per-stream — reduced-res tap decode + small re-encode; 1 focus at a time, shared |
 | **Output** | Motion view w/o WebRTC | MJPEG-over-HTTP | 0.3–1.5 s | Medium — 1 JPEG per delivered frame from the tapped decode |
@@ -239,16 +239,16 @@ silicon (1 encode engine) prefer JPEG and restrict/queue WHEP. See [ADR-P002](..
 ```mermaid
 flowchart LR
     subgraph Program["PROTECTED DATA PLANE (output core — never back-pressured)"]
-        SRC["Live sources<br/>RTSP/HLS/TS/SRT/NDI"] --> DEC["Per-source decode<br/>(mosaic-input, Tier B)"]
-        DEC --> FS["Per-tile last-good-frame store<br/>(mosaic-framestore, lock-free)"]
-        FS --> COMP["Compositor<br/>(mosaic-compositor)"]
+        SRC["Live sources<br/>RTSP/HLS/TS/SRT/NDI"] --> DEC["Per-source decode<br/>(multiview-input, Tier B)"]
+        DEC --> FS["Per-tile last-good-frame store<br/>(multiview-framestore, lock-free)"]
+        FS --> COMP["Compositor<br/>(multiview-compositor)"]
         COMP --> RB["NV12 readback ring<br/>(encoder-owned)"]
-        RB --> ENC["Encode once per rendition<br/>(mosaic-output)"]
+        RB --> ENC["Encode once per rendition<br/>(multiview-output)"]
         ENC --> TEE["Packet fan-out / tee<br/>(encode-once-mux-many)"]
         TEE --> OUTS["Real outputs<br/>RTSP / LL-HLS / RTMP / SRT / NDI"]
     end
 
-    subgraph Preview["BEST-EFFORT PREVIEW (Tier A, mosaic-preview)"]
+    subgraph Preview["BEST-EFFORT PREVIEW (Tier A, multiview-preview)"]
         CUE["Off-air CUE decoder<br/>(Tier B, isolated) = pre-warm worker"]
         ITAP["Input tap (downsample blit)"]
         PTAP["Program downscale tap (own ring)"]
@@ -256,7 +256,7 @@ flowchart LR
         PENC["Preview-encoder pool<br/>(session-budgeted, sheddable first)"]
         JPEG["CPU JPEG (turbojpeg/zune-jpeg)"]
         WHEP["WHEP / WebRTC (webrtc-rs / MediaMTX)"]
-        LLHLS["LL-HLS (reuse mosaic-output CMAF)"]
+        LLHLS["LL-HLS (reuse multiview-output CMAF)"]
     end
 
     FS -. read-only latest-frame .-> ITAP
@@ -274,14 +274,14 @@ flowchart LR
     PENC --> WHEP
     PENC --> LLHLS
 
-    JPEG --> CTRL["mosaic-control (axum)<br/>snapshot / MJPEG / WS-JPEG"]
+    JPEG --> CTRL["multiview-control (axum)<br/>snapshot / MJPEG / WS-JPEG"]
     WHEP --> CTRL
     LLHLS --> CTRL
     CTRL --> UI["Web UI multiviewer<br/>(client-rendered status overlays)"]
 
     STATUS["Status/meters (lock-free rings, numeric)"] -. 10-25 Hz, never pixels .-> CTRL
 
-    PLAN["mosaic-planner<br/>admission + degradation ladder"] -. shed preview FIRST .-> Preview
+    PLAN["multiview-planner<br/>admission + degradation ladder"] -. shed preview FIRST .-> Preview
     PLAN -. reserve sessions FIRST .-> ENC
 ```
 
@@ -290,7 +290,7 @@ drop-oldest** — none can stall a solid (protected) edge.
 
 ---
 
-## 7. API surface (served by `mosaic-control`)
+## 7. API surface (served by `multiview-control`)
 
 All preview + cue endpoints are **authenticated/authorized** ([conventions §6](../architecture/conventions.md));
 cue source schemes are allowlisted/validated (SSRF/DoS guard) and rate-limited; preview access is
@@ -305,7 +305,7 @@ gated by short-lived signed tokens. Full endpoint catalog in the
 | **Status (shared)** | `WS /api/v1/ws` (and `/api/v1/status/stream.ws`; SSE at `/api/v1/events`) carries all preview status as additional message types — no new socket |
 
 Capability advertisement (`…/preview/capabilities`, the program descriptor, the per-output
-`available preview transports` field) is computed from the `mosaic-hal` registry + build features:
+`available preview transports` field) is computed from the `multiview-hal` registry + build features:
 WHEP appears only if the `webrtc` feature + TURN are configured; LL-HLS/JPEG are always available;
 the UI greys out unavailable modes.
 
@@ -346,14 +346,14 @@ the UI greys out unavailable modes.
 
 | Concern | Crate | Feature |
 |---------|-------|---------|
-| Preview taps, encoder pool, WHEP/MJPEG/snapshot endpoints | **`mosaic-preview`** | `webrtc` (WHEP) |
-| Read-only input taps + per-tile state machine | `mosaic-framestore` | — |
-| Program downscale tap | `mosaic-compositor` | — |
-| Per-output packet tap + LL-HLS/CMAF reuse | `mosaic-output` | `ffmpeg` |
-| Process-isolated cue decoders | `mosaic-input` | `ffmpeg`, `ndi` |
-| Admission + degradation (shed preview first) | `mosaic-engine` / planner | — |
-| Capability + cost registry | `mosaic-hal` | backend probes |
-| REST + WS surface, auth, signed tokens, embedded SPA | `mosaic-control` | `openapi`, `embed-web` |
+| Preview taps, encoder pool, WHEP/MJPEG/snapshot endpoints | **`multiview-preview`** | `webrtc` (WHEP) |
+| Read-only input taps + per-tile state machine | `multiview-framestore` | — |
+| Program downscale tap | `multiview-compositor` | — |
+| Per-output packet tap + LL-HLS/CMAF reuse | `multiview-output` | `ffmpeg` |
+| Process-isolated cue decoders | `multiview-input` | `ffmpeg`, `ndi` |
+| Admission + degradation (shed preview first) | `multiview-engine` / planner | — |
+| Capability + cost registry | `multiview-hal` | backend probes |
+| REST + WS surface, auth, signed tokens, embedded SPA | `multiview-control` | `openapi`, `embed-web` |
 
 > Per [conventions §3/§4](../architecture/conventions.md), the `webrtc` feature is off in the
 > default LGPL-clean build; JPEG and LL-HLS preview transports are always available, WHEP only when

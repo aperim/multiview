@@ -116,7 +116,7 @@ export class RealtimeConnection {
 
     socket.onmessage = (event: MessageEvent<unknown>): void => {
       if (typeof event.data !== "string") {
-        // Binary meter frames (subprotocol mosaic.bin.v1) are not negotiated
+        // Binary meter frames (subprotocol multiview.bin.v1) are not negotiated
         // here; ignore non-text frames defensively.
         return;
       }

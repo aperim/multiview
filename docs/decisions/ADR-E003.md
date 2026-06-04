@@ -11,7 +11,7 @@ Composite all tiles into the output canvas and encode exactly once per rendition
 
 ## Rationale
 
-Encode is the most expensive and most capacity-capped stage; hardware encoders cost ~1/15th CPU and ~1/17th power of x264 at near-identical live quality and are largely preset-invariant. A mosaic is decode-heavy/encode-light, which fits consumer hardware and the NVENC session cap. Verification CONFIRMED the hardware-vs-software quality/efficiency tradeoff and the VideoToolbox ~200 kbps default-without--b:v/-q:v trap.
+Encode is the most expensive and most capacity-capped stage; hardware encoders cost ~1/15th CPU and ~1/17th power of x264 at near-identical live quality and are largely preset-invariant. A multiview is decode-heavy/encode-light, which fits consumer hardware and the NVENC session cap. Verification CONFIRMED the hardware-vs-software quality/efficiency tradeoff and the VideoToolbox ~200 kbps default-without--b:v/-q:v trap.
 
 ## Alternatives considered
 

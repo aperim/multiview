@@ -4,7 +4,7 @@
 
 # Input Timing & Frame-Sync: best-effort PTS normalisation + wall-clock pacer + sample-at-tick
 
-**Audience:** engineers building `mosaic-input` (the PTS normaliser, jitter buffer, and pacer), `mosaic-ffmpeg` (`StreamVideoDecoder`, `best_effort_timestamp`/genpts), `mosaic-framestore` (last-good store + tile state machine), and `mosaic-cli`/`mosaic-engine` (the ingest loop that wires them). This is the single place that answers, for the **input side**: *given a frame fresh out of `avcodec_receive_frame`, what is its true presentation time, how do we pace it to wall-clock, and which buffered frame does the output sample at tick `N`?*
+**Audience:** engineers building `multiview-input` (the PTS normaliser, jitter buffer, and pacer), `multiview-ffmpeg` (`StreamVideoDecoder`, `best_effort_timestamp`/genpts), `multiview-framestore` (last-good store + tile state machine), and `multiview-cli`/`multiview-engine` (the ingest loop that wires them). This is the single place that answers, for the **input side**: *given a frame fresh out of `avcodec_receive_frame`, what is its true presentation time, how do we pace it to wall-clock, and which buffered frame does the output sample at tick `N`?*
 
 **Scope.** The OUTPUT side is solid and out of scope: a fixed-cadence monotonic clock emits one frame per tick, `out_pts = f(tick)`, never paced by an input (invariant #1; [ADR-T001](../decisions/ADR-T001.md)). This brief is **everything upstream of the per-tile store**: per-frame timestamp acquisition → normalise → pace → publish; and the **sampling rule** the output applies at each tick (Layer C of [timing-architecture.md](timing-architecture.md); invariant #2). It is the failure-mode and design detail behind the [streaming-gotchas.md](streaming-gotchas.md) §0 three-stage pipeline.
 
@@ -14,10 +14,10 @@
 
 **Observed symptom.** A file/VOD source tile (e.g. `/tmp/bbb_clip.mp4`, the DVB-T captures, an HLS VOD-as-live) plays **ultra-fast** — racing ~10 s of content into ~1 s of output — and then **freezes**.
 
-**Root cause (from reading the running pipeline, 2026-06-03).** Mosaic has **two divergent input-PTS paths**, and the bulletproof one is **not wired into the running ingest loop**:
+**Root cause (from reading the running pipeline, 2026-06-03).** Multiview has **two divergent input-PTS paths**, and the bulletproof one is **not wired into the running ingest loop**:
 
-- **(a) The correct, documented path — currently UNUSED by file/VOD ingest.** `mosaic-input/src/normalize.rs::PtsNormalizer` (delta-unwrap → genpts-from-declared-cadence → discontinuity re-anchor → monotonic guard → rebase to a master-anchored ns timeline) plus `mosaic-input/src/pacer.rs::Pacer` (clock-injected, anchor-first-PTS-to-now, bounded `5/4` = 1.25× catch-up). These match [ADR-T003](../decisions/ADR-T003.md)/[ADR-T004](../decisions/ADR-T004.md) and are unit/property testable without sleeping.
-- **(b) The actual ingest loop — what runs today.** `mosaic-cli/src/pipeline.rs::open_and_stream` feeds `decoded.meta.pts` (from `StreamVideoDecoder`) into an ad-hoc `PtsWallClock` that anchors `base_instant`/`base_pts` on the **first decoded frame** and sleeps until `now - base_instant >= pts - base_pts`.
+- **(a) The correct, documented path — currently UNUSED by file/VOD ingest.** `multiview-input/src/normalize.rs::PtsNormalizer` (delta-unwrap → genpts-from-declared-cadence → discontinuity re-anchor → monotonic guard → rebase to a master-anchored ns timeline) plus `multiview-input/src/pacer.rs::Pacer` (clock-injected, anchor-first-PTS-to-now, bounded `5/4` = 1.25× catch-up). These match [ADR-T003](../decisions/ADR-T003.md)/[ADR-T004](../decisions/ADR-T004.md) and are unit/property testable without sleeping.
+- **(b) The actual ingest loop — what runs today.** `multiview-cli/src/pipeline.rs::open_and_stream` feeds `decoded.meta.pts` (from `StreamVideoDecoder`) into an ad-hoc `PtsWallClock` that anchors `base_instant`/`base_pts` on the **first decoded frame** and sleeps until `now - base_instant >= pts - base_pts`.
 
 The failure is a property of path (b) the moment the per-frame PTS stream has *any* defect:
 
@@ -38,7 +38,7 @@ A bare decoded `frame->pts` is frequently `AV_NOPTS_VALUE` or unreliable after d
 
 > **VERIFIED** (FFmpeg `AVFrame` doxygen, ffmpeg.org/doxygen/trunk, fetched 2026-06-03): `best_effort_timestamp` = *"frame timestamp estimated using various heuristics, in stream time base"*; `pts` = *"Presentation timestamp in time_base units (time when frame should be shown to user)"*; `pkt_dts` = *"DTS copied from the AVPacket that triggered returning this frame…"*.
 
-So `best_effort_timestamp` is the reordered container PTS when PTS looks at least as reliable as DTS, else DTS — exactly the field a pacer must read. In `ffmpeg-next`, `Frame::timestamp()` returns `best_effort_timestamp` (mapping `AV_NOPTS_VALUE → None`). Mosaic's `StreamVideoDecoder` line 132 already does `decoded.timestamp().or_else(|| decoded.pts())` — that **ordering is correct**; keep it.
+So `best_effort_timestamp` is the reordered container PTS when PTS looks at least as reliable as DTS, else DTS — exactly the field a pacer must read. In `ffmpeg-next`, `Frame::timestamp()` returns `best_effort_timestamp` (mapping `AV_NOPTS_VALUE → None`). Multiview's `StreamVideoDecoder` line 132 already does `decoded.timestamp().or_else(|| decoded.pts())` — that **ordering is correct**; keep it.
 
 ### 1.2 `avcodec_receive_frame` returns frames in presentation (display) order
 
@@ -60,7 +60,7 @@ When `best_effort_timestamp` (and `pts`) are both `AV_NOPTS_VALUE`, synthesise a
 
 ### 1.6 Exact-rational rescale to ns
 
-Carry internal time as i64 ns via `mosaic_core::time::rescale` (exact rational, never float fps — float drifts ~3.6 s/hour for 29.97). TS time_base is exactly `1/90000`; NTSC rates are exact rationals (`30000/1001`, `60000/1001`; `r_frame_rate=30000/1001` confirmed on `net_news.ts`). For sentinel-bearing libav values use the equivalent of `AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX` semantics so `INT64_MIN/MAX` pass through unchanged.
+Carry internal time as i64 ns via `multiview_core::time::rescale` (exact rational, never float fps — float drifts ~3.6 s/hour for 29.97). TS time_base is exactly `1/90000`; NTSC rates are exact rationals (`30000/1001`, `60000/1001`; `r_frame_rate=30000/1001` confirmed on `net_news.ts`). For sentinel-bearing libav values use the equivalent of `AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX` semantics so `INT64_MIN/MAX` pass through unchanged.
 
 **The acquisition chain (per input, per frame), as it must be wired:**
 ```text
@@ -80,7 +80,7 @@ best_effort_timestamp  ──(or pts; else None)──►  PtsNormalizer.normali
 
 The pacer answers *when* a normalised frame is released into the per-tile store, so that on connect/reconnect a backlog of already-published segments (HLS) or a fast file read does not flood the tile (invariant #4). It is **not** the output clock — it gates the *input* side; the output still samples at its own monotonic tick.
 
-### 2.1 The rule (`mosaic-input/src/pacer.rs::Pacer`, already correct)
+### 2.1 The rule (`multiview-input/src/pacer.rs::Pacer`, already correct)
 
 ```text
 on first frame (or re-anchor): anchor = (now_ns, pts_ns);  Release::Now
@@ -101,7 +101,7 @@ else:                          deadline = anchor_wall + (pts − pts0)
 | `-re` | **Never.** See below. | **Never.** |
 | Catch-up | After a stall, bounded 1.25× toward target pre-roll. | Bounded 1.25×; on a true timeline break, re-anchor (drop-to-live), never flush a backlog at full speed. |
 
-> **VERIFIED** (FFmpeg `master` `doc/ffmpeg.texi`, fetched 2026-06-03): `-re (input)` *"Read input at native frame rate. This is equivalent to setting `-readrate 1`."* `-readrate` is *"Mainly used to simulate a capture device or live input stream (e.g. when reading from a file)"* and *"Should not be used with a low value when input is an actual capture device or live stream as it may cause packet loss."* This is a **CLI-only fftools** behaviour and the wrong tool regardless: Mosaic owns its own libav-linked PTS→wall-clock pacer (invariant #4; [ADR-T004](../decisions/ADR-T004.md)). After a stall, `-re`'s wall-anchored budget refills via an **unthrottled burst** — the opposite of a fix.
+> **VERIFIED** (FFmpeg `master` `doc/ffmpeg.texi`, fetched 2026-06-03): `-re (input)` *"Read input at native frame rate. This is equivalent to setting `-readrate 1`."* `-readrate` is *"Mainly used to simulate a capture device or live input stream (e.g. when reading from a file)"* and *"Should not be used with a low value when input is an actual capture device or live stream as it may cause packet loss."* This is a **CLI-only fftools** behaviour and the wrong tool regardless: Multiview owns its own libav-linked PTS→wall-clock pacer (invariant #4; [ADR-T004](../decisions/ADR-T004.md)). After a stall, `-re`'s wall-anchored budget refills via an **unthrottled burst** — the opposite of a fix.
 
 ### 2.3 Why the pacer's anchor must use *normalised* PTS
 

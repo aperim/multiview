@@ -54,7 +54,7 @@ describe('LayoutEditor', () => {
     expect(onSave).toHaveBeenCalledTimes(1);
     const payload = onSave.mock.calls[0]?.[0];
     expect(payload?.name).toBe('Studio');
-    // The opaque body matches the mosaic-config absolute-layout shape.
+    // The opaque body matches the multiview-config absolute-layout shape.
     expect(payload?.body).toMatchObject({
       schema_version: 1,
       layout: { kind: 'absolute' },

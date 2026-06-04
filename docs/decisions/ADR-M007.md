@@ -19,4 +19,4 @@ Hardcode capabilities per known GPU (rejected: caps and session caps are moving 
 
 ## Consequences
 
-macOS telemetry is coarse (ProcessInfo.thermalState only, no per-VT-session stats), so the adaptive UI on Mac presents lower-confidence thermal-driven degradation and relies on measured encode-ms. The NVENC cap is host-wide across all processes, so the budget calculator must warn it is shared, not exclusive to Mosaic. Recalibration/L3 probes briefly load the box and need a 'may impact live output on a loaded host' confirm.
+macOS telemetry is coarse (ProcessInfo.thermalState only, no per-VT-session stats), so the adaptive UI on Mac presents lower-confidence thermal-driven degradation and relies on measured encode-ms. The NVENC cap is host-wide across all processes, so the budget calculator must warn it is shared, not exclusive to Multiview. Recalibration/L3 probes briefly load the box and need a 'may impact live output on a loaded host' confirm.

@@ -1,14 +1,14 @@
 # Proof gallery — verification artifacts
 
 These are committed, durable copies of the key verification frames captured while
-building Mosaic out (the full set + MP4 clips live in the git-ignored
+building Multiview out (the full set + MP4 clips live in the git-ignored
 `demo-output/` working dir; this folder is the curated, reviewable subset). Every
 image below was produced by **running the real software pipeline**
-(`mosaic run --features ffmpeg,overlay <config>`) and extracting actual output
+(`multiview run --features ffmpeg,overlay <config>`) and extracting actual output
 frames — not mock-ups.
 
-To regenerate the full set locally: `cargo build -p mosaic-cli --features ffmpeg,overlay`
-then run the configs under `/tmp/refdemo/` (or `.mosaic-build/render-gallery.sh`)
+To regenerate the full set locally: `cargo build -p multiview-cli --features ffmpeg,overlay`
+then run the configs under `/tmp/refdemo/` (or `.multiview-build/render-gallery.sh`)
 and extract frames from the produced `program.ts`.
 
 | File | What it proves |
@@ -52,7 +52,7 @@ ffmpeg -i program.ts -vf "tblend=all_mode=difference,signalstats,\
 
 Verified results (RELEASE build, this dev container, CPU-only software path):
 
-| Check (overlays OFF) | Rendered (mosaic) | Ground truth (ffmpeg direct) |
+| Check (overlays OFF) | Rendered (multiview) | Ground truth (ffmpeg direct) |
 |---|---|---|
 | Single high-motion tile (Red Bull HLS 30) | **199 / 249** frames in motion, render real-time (10.4 s / 10 s) | 197 / 249 |
 | 3-tile mixed-fps (29.97 + 25 + 30) | **191 / 249** in motion, render real-time (10.8 s / 10 s), frame-0 luma **87** (real content, not the cold slate ≈ 16) | — |
@@ -89,6 +89,6 @@ content-aware:
 - `cargo deny check`: advisories / bans / licenses / sources ok.
 
 Each feature above also has a deterministic, failing-before/passing-after test in
-its crate (e.g. `mosaic-framestore::sample_by_media_time` for the timing fix,
-`mosaic-compositor::overlay_subpass` image-blit tests for the bitmap burn-in,
-`mosaic-cli::overlays` per-tile burn-in/fault/clock tests).
+its crate (e.g. `multiview-framestore::sample_by_media_time` for the timing fix,
+`multiview-compositor::overlay_subpass` image-blit tests for the bitmap burn-in,
+`multiview-cli::overlays` per-tile burn-in/fault/clock tests).

@@ -1,7 +1,7 @@
 # web/ — agent notes (the SPA)
 
-The Mosaic management UI: **React 19 + TypeScript + Vite**. Built and embedded into
-`mosaic-control` via rust-embed (`cargo xtask build-web`).
+The Multiview management UI: **React 19 + TypeScript + Vite**. Built and embedded into
+`multiview-control` via rust-embed (`cargo xtask build-web`).
 
 Stack (conventions §8 — canonical):
 - **shadcn/ui** (Radix + Tailwind v4); **TanStack Query / Table**.
@@ -11,7 +11,7 @@ Stack (conventions §8 — canonical):
   (`cargo xtask gen-openapi`).
 - Accessibility: **WCAG 2.1 AA**.
 
-The API it consumes (from `mosaic-control`): base `/api/v1`; long-running ops → `202` + operation
+The API it consumes (from `multiview-control`): base `/api/v1`; long-running ops → `202` + operation
 id with the result on the realtime stream; RFC 9457 errors; `ETag`/`If-Match`; WebSocket at
 `/api/v1/ws`, SSE at `/api/v1/events`. The UI is best-effort and must tolerate dropped/conflated
 realtime events (engine isolation, inv #10).

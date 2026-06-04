@@ -1,6 +1,6 @@
 # Audio, Subtitles & Overlays
 
-How Mosaic handles the *secondary essences* that ride alongside the composited
+How Multiview handles the *secondary essences* that ride alongside the composited
 video canvas: **audio** (discrete per-input tracks + a program bus + EBU R128
 metering), **subtitles/captions** (ingest, burn-in, and discrete passthrough),
 and **overlays** (labels, clocks, logos, meters, alert cards composited on the
@@ -26,11 +26,11 @@ Crate responsibilities are defined in the canonical
 
 | Concern | Crate | Optional features |
 |---|---|---|
-| Per-input audio decode/resample/mix/route, program bus, EBU R128 metering | `mosaic-audio` | `ffmpeg` |
-| Subtitle ingest/render (libass burn-in) + overlay layers + text rendering | `mosaic-overlay` | `libass` |
-| GPU compositing of overlays/cards into the canvas | `mosaic-compositor` | `wgpu` (default), `metal`, `cuda` |
-| Per-output discrete-track muxing & capability matrix | `mosaic-output` | `ffmpeg`, `ndi` |
-| The output/program clock that paces audio sample emission | `mosaic-engine` | — |
+| Per-input audio decode/resample/mix/route, program bus, EBU R128 metering | `multiview-audio` | `ffmpeg` |
+| Subtitle ingest/render (libass burn-in) + overlay layers + text rendering | `multiview-overlay` | `libass` |
+| GPU compositing of overlays/cards into the canvas | `multiview-compositor` | `wgpu` (default), `metal`, `cuda` |
+| Per-output discrete-track muxing & capability matrix | `multiview-output` | `ffmpeg`, `ndi` |
+| The output/program clock that paces audio sample emission | `multiview-engine` | — |
 
 The audio program clock is the **same monotonic source** as the video output
 clock (see the [unified timing model](../architecture/conventions.md), invariant 3).
@@ -219,7 +219,7 @@ Everything is normalized to **ASS internally** and rasterized with **libass**
 
 ### 3.4 608/708 survival through re-render
 
-Because the mosaic is fully re-rendered, in-bitstream captions are preserved by
+Because the multiview is fully re-rendered, in-bitstream captions are preserved by
 **attaching `AV_FRAME_DATA_A53_CC` side data to the output canvas frames**;
 libx264/x265 / NVENC / QSV / VAAPI / VideoToolbox then emit it as SEI (via
 `ff_alloc_a53_sei`). This also drives HLS `CLOSED-CAPTIONS` signalling for free.

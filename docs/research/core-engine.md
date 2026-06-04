@@ -2,9 +2,9 @@
 
 ---
 
-# MOSAIC — Architecture Brief
+# MULTIVIEW — Architecture Brief
 
-**Project:** Mosaic — an efficient, hardware-accelerated, Rust-based live video mosaic generator
+**Project:** Multiview — an efficient, hardware-accelerated, Rust-based live video multiview generator
 **Status:** Authoritative architecture brief (source of truth for downstream docs/agent instructions)
 **Platforms:** Linux (containerized, NVIDIA + Intel/AMD VAAPI) and macOS (native, Apple Silicon + Intel)
 **Date:** 2026-06-02
@@ -13,7 +13,7 @@
 
 ## 1. Executive Summary
 
-Mosaic ingests multiple live video sources (RTSP, HLS/M3U, MPEG-TS, NDI, plus SRT/RTMP), composites them into a templated mosaic (2x2, 3x3, 1-large+5-small, PiP, custom), and serves the result over RTSP, HLS/LL-HLS, NDI, and push (RTMP/SRT). The engine is a **hybrid**: it uses FFmpeg/libav for demux/decode/encode where libav is strongest, and **custom Rust + GPU-native code** for compositing and the serving/output side.
+Multiview ingests multiple live video sources (RTSP, HLS/M3U, MPEG-TS, NDI, plus SRT/RTMP), composites them into a templated multiview (2x2, 3x3, 1-large+5-small, PiP, custom), and serves the result over RTSP, HLS/LL-HLS, NDI, and push (RTMP/SRT). The engine is a **hybrid**: it uses FFmpeg/libav for demux/decode/encode where libav is strongest, and **custom Rust + GPU-native code** for compositing and the serving/output side.
 
 The design rests on a small number of decisive, verification-hardened conclusions:
 
@@ -29,17 +29,17 @@ The design rests on a small number of decisive, verification-hardened conclusion
 
 6. **RTSP serving:** primary path is in-process **`gst-rtsp-server`** (via `gstreamer-rtsp-server`) fed pre-encoded NAL units through `appsrc → h264parse → rtph264pay` (no re-encode), with **MediaMTX as an optional sidecar** for unified multi-protocol fan-out. **LL-HLS must be custom-built** (FFmpeg's `hls` muxer cannot emit Apple LL-HLS); we reuse a Rust playlist crate for the tag layer and own the CMAF segmenter + blocking-reload HTTP server.
 
-7. **Compositor cadence is deadline-driven, never wait-for-all-inputs** (mirroring `GstAggregator`). One stalled source must never freeze the mosaic. Independent sources drift; continuous video drop/repeat + adaptive audio resample is mandatory.
+7. **Compositor cadence is deadline-driven, never wait-for-all-inputs** (mirroring `GstAggregator`). One stalled source must never freeze the multiview. Independent sources drift; continuous video drop/repeat + adaptive audio resample is mandatory.
 
-The mosaic's own controllable latency budget is ~50–250 ms; the output protocol dominates end-to-end latency (RTSP/SRT sub-second to a few seconds; LL-HLS ~2–5 s; classic HLS 6–30 s).
+The multiview's own controllable latency budget is ~50–250 ms; the output protocol dominates end-to-end latency (RTSP/SRT sub-second to a few seconds; LL-HLS ~2–5 s; classic HLS 6–30 s).
 
 ---
 
 ## 2. Goals & Non-Goals
 
 ### Goals
-- Lowest practical glass-to-glass latency for live mosaics.
-- Highest input density / throughput per GPU; decode-heavy, encode-light (encode the composed mosaic **once** per output, not per tile).
+- Lowest practical glass-to-glass latency for live multiviews.
+- Highest input density / throughput per GPU; decode-heavy, encode-light (encode the composed multiview **once** per output, not per tile).
 - Full hardware acceleration of decode + composite + encode, **modular** with per-stage backend auto-negotiation.
 - Zero-copy on-GPU end-to-end **where the hardware allows** (single-vendor islands).
 - First-class NDI input and output, respecting NDI licensing.
@@ -52,15 +52,15 @@ The mosaic's own controllable latency budget is ~50–250 ms; the output protoco
 - Sub-second WebRTC output in v1 (WebRTC is the only sub-second protocol; deferred, architecture leaves room).
 - Cross-vendor on-GPU zero-copy (proven not to exist on desktop — explicitly out of scope).
 - Per-tile re-encode/ABR-per-tile (session-cap and bandwidth hostile).
-- A general-purpose NLE/switcher feature set (Mosaic is a headless, scriptable compositor/router).
+- A general-purpose NLE/switcher feature set (Multiview is a headless, scriptable compositor/router).
 - Statically baking the proprietary NDI SDK into a permissive repo (license-prohibited).
 
 ---
 
 ## 3. Glossary
 
-- **Tile / Cell:** one source rendered into a sub-rectangle of the mosaic canvas.
-- **Canvas:** the output frame the mosaic is composed onto (size/fps/pixel format/background).
+- **Tile / Cell:** one source rendered into a sub-rectangle of the multiview canvas.
+- **Canvas:** the output frame the multiview is composed onto (size/fps/pixel format/background).
 - **Layout / Template:** declarative description of where tiles go (grid/asymmetric/PiP).
 - **HAL:** Hardware Abstraction Layer — backend-agnostic traits per pipeline stage.
 - **Backend:** a concrete per-vendor implementation of a stage (e.g. NVENC encoder, VAAPI decoder, Metal compositor).
@@ -79,7 +79,7 @@ The mosaic's own controllable latency budget is ~50–250 ms; the output protoco
 
 ## 4. High-Level Architecture
 
-Mosaic is a layered Rust workspace: an unsafe `-sys`/FFI tier, a safe RAII wrapper over libav, a backend-agnostic HAL/core, vendor backend impls behind feature flags, and leaf crates for ingest, compositing, serving, config, control, and telemetry. A **control/IO plane** (Tokio async) handles networking and the control API; a **data plane** (dedicated threads) runs the codec/composite hot path.
+Multiview is a layered Rust workspace: an unsafe `-sys`/FFI tier, a safe RAII wrapper over libav, a backend-agnostic HAL/core, vendor backend impls behind feature flags, and leaf crates for ingest, compositing, serving, config, control, and telemetry. A **control/IO plane** (Tokio async) handles networking and the control API; a **data plane** (dedicated threads) runs the codec/composite hot path.
 
 ```mermaid
 flowchart TB
@@ -274,7 +274,7 @@ This section states clearly which paths are **truly zero-copy** vs **require a c
 ### 8.3 Encode subsystem
 - `Encoder` trait, negotiated independently of decoder. Priority: Linux/NVIDIA → NVENC; Linux/Intel → QSV(oneVPL)→VAAPI; Linux/AMD → VAAPI; macOS → VideoToolbox; everywhere → x264 (and SVT-AV1 for software AV1).
 - **One canonical low-latency profile across all backends:** CBR, B-frames=0 (IPPP), lookahead=0, single-pass, small VBV (~bitrate/fps), periodic forced-IDR or intra-refresh, zero reorder delay. NVENC: `tune=ll/ull`, `-rc cbr`, `-bf 0`, `-rc-lookahead 0`, `-multipass disabled`, `enableFillerDataInsertion=1`. x264: `-tune zerolatency`. VideoToolbox: `EnableLowLatencyRateControl` + `RealTime` (H.264 low-latency mode is H.264-only and incompatible with explicit CBR — choose one; HEVC low-latency on macOS unconfirmed → plan H.264 for the mac low-latency path). Optional opt-in "quality/VOD" profile re-enables B-frames + lookahead.
-- **Density is bounded by physical NVENC chips, not the session-count headline.** Most GeForce SKUs have a **single** NVENC; top consumer cards have 2 (RTX 5090 = 3). A single stream cannot exceed one NVENC's throughput without SFE (HEVC/AV1, Ada+). Encode the mosaic **once** per output; schedule encode jobs against active NVENC count; the per-system concurrent-session cap is **12** (since Nov 2025; was 8) on consumer GeForce, unlimited on datacenter/Quadro — detect at runtime, treat as a hard constraint.
+- **Density is bounded by physical NVENC chips, not the session-count headline.** Most GeForce SKUs have a **single** NVENC; top consumer cards have 2 (RTX 5090 = 3). A single stream cannot exceed one NVENC's throughput without SFE (HEVC/AV1, Ada+). Encode the multiview **once** per output; schedule encode jobs against active NVENC count; the per-system concurrent-session cap is **12** (since Nov 2025; was 8) on consumer GeForce, unlimited on datacenter/Quadro — detect at runtime, treat as a hard constraint.
 - H.264 is the mandatory interop baseline (RTSP/RTMP/SRT). HEVC/AV1 are runtime-feature-detected upgrades for HLS/LL-HLS-capable players.
 
 ---
@@ -295,7 +295,7 @@ This section states clearly which paths are **truly zero-copy** vs **require a c
 - **RTSP server (primary):** in-process `gst-rtsp-server` via the `gstreamer-rtsp-server` crate. Serve **pre-encoded** NAL units through `appsrc ! h264parse ! rtph264pay name=pay0` (h265parse/rtph265pay for HEVC) — **no GStreamer re-encode**. `appsrc` set `is-live=true`, `format=TIME`, correct PTS/duration; payloader named `pay0` (audio `pay1`); `config-interval=-1` for late joiners; `factory.set_shared(true)` so one encode fans out. h264parse handles avc↔byte-stream/au↔nal/SPS-PPS fixups (lightweight parsing, **not** decode/re-encode). Caveat: this pulls the GStreamer/GLib C stack and a GLib main loop (run on its own thread, bridged to Tokio). For a lean static binary, prefer the MediaMTX sidecar or a native-Rust RTSP path.
 - **RTSP server (optional sidecar): MediaMTX** — single Go binary fanning one published source to RTSP/HLS/SRT/WebRTC/RTMP. Publish via libav RTSP/RTP or SRT. No in-process Go embedding API; it is a network-publish sidecar (one extra hop).
 - **HLS + LL-HLS (custom Rust):** **CMAF-first** — encode once into fragmented MP4 via libav movenc (`-movflags cmaf+frag_custom+empty_moov+delay_moov`) and derive HLS, LL-HLS, and (optionally) DASH from one in-memory segment/part store. **FFmpeg's `hls` muxer cannot emit Apple LL-HLS** (`-lhls` is the legacy `EXT-X-PREFETCH` DASH variant). Reuse the **`hls-playlist`** crate for the tag layer (EXT-X-PART, PART-INF, SERVER-CONTROL with CAN-BLOCK-RELOAD + PART-HOLD-BACK, PRELOAD-HINT, RENDITION-REPORT, SKIP); **build in-house**: the CMAF segmenter (sub-second parts aligned to IDR/keyframe boundaries) and the LL-HLS HTTP server (axum/hyper) with blocking playlist reload (`_HLS_msn`/`_HLS_part` held requests), preload-hint byte-range responses, and chunked-transfer push of in-progress parts. Model on gohlslib (reference). Target ~2 s segments, ~200–300 ms parts, 2 s GOP, PART-HOLD-BACK = 3× PART-TARGET, HTTP/2. Keep a standard (longer-segment) HLS rendition for compatibility/DVR.
-- **NDI out:** single Sender publishing the composited mosaic (host-memory copy from GPU canvas). `color_format_fastest` (UYVY/UYVA) for latency or `_best` (P216/PA16, HDR) for quality. NDI Advanced SDK (compressed HX H.264/HEVC) is a **separate paid** path, feature-gated.
+- **NDI out:** single Sender publishing the composited multiview (host-memory copy from GPU canvas). `color_format_fastest` (UYVY/UYVA) for latency or `_best` (P216/PA16, HDR) for quality. NDI Advanced SDK (compressed HX H.264/HEVC) is a **separate paid** path, feature-gated.
 - **RTMP/SRT push:** native `rml_rtmp` (FLV/H.264+AAC) and `srt-tokio` (MPEG-TS, caller, encryption, streamid), with **libav `rtmp://`/`srt://` output as the default-reliable fallback** (interop with arbitrary endpoints). SRT `srt-tokio` interop with reference libsrt must be validated per destination.
 
 ---
@@ -314,10 +314,10 @@ This section states clearly which paths are **truly zero-copy** vs **require a c
 
 - **One master output clock** (`CLOCK_MONOTONIC_RAW` on Linux / `mach_continuous_time` on macOS, or the output device clock) and a **fixed rational output cadence** (e.g. 60000/1001) to avoid rounding drift. Sources are paced to it, never locked to it.
 - **Per-tile FrameSync/TBC** (NDI framesync / broadcast TBC model): converts push to pull, exposes "give me the frame valid at running_time T", absorbs jitter (small per-tile buffer; RTP jitterbuffer default 200 ms is far too high — tune to 30–100 ms LAN), and absorbs **inevitable crystal drift** (e.g. 48000 vs 48001 Hz) via continuous video drop/repeat and adaptive high-order audio resampling. There is **no genlock/PTP** over arbitrary RTSP/HLS/RTMP; RTCP SR / TS PCR / NDI timestamps let you *measure* drift but do not phase-lock oscillators. Align-once-at-startup **will** glitch within minutes — continuous correction is mandatory.
-- **Deadline-driven compositor:** at each output deadline, sample each tile's newest frame with running_time ≤ T; hold-last-frame for stalled/jittery tiles, drop intermediates for over-rate tiles, switch to placeholder/last-good-with-overlay after a configurable stale timeout. **Never wait-for-all-inputs** (one dead RTSP camera would freeze the whole mosaic). This mirrors `GstAggregator` `get_next_time()` + timeout; note the framework's *default* is wait-for-all, so the deadline path must be deliberately engineered as the primary mode.
+- **Deadline-driven compositor:** at each output deadline, sample each tile's newest frame with running_time ≤ T; hold-last-frame for stalled/jittery tiles, drop intermediates for over-rate tiles, switch to placeholder/last-good-with-overlay after a configurable stale timeout. **Never wait-for-all-inputs** (one dead RTSP camera would freeze the whole multiview). This mirrors `GstAggregator` `get_next_time()` + timeout; note the framework's *default* is wait-for-all, so the deadline path must be deliberately engineered as the primary mode.
 - **Audio:** carry each source's audio through the same PTS rebasing as its video; mix/select and adaptively resample to the master clock (libswr/aresample async). Keep AV skew within ±1–2 output frames (human tolerance ~ −45 ms audio-late to +125 ms audio-early; never let audio get ahead of video).
-- **Latency budget (mosaic-controllable):** per-tile jitter 30–100 ms (LAN) + HW decode ~1 frame + composite 1–2 frames (~17–40 ms) + low-latency encode → **~50–250 ms**. The **output protocol dominates** glass-to-glass: RTSP/SRT/RTMP sub-second to a few seconds; LL-HLS ~2–5 s; classic HLS 6–30 s. Sub-second requires WebRTC (out of v1 scope).
-- A high-latency/flaky tile is treated as **leaky** (drop/hold), contributing via MIN not MAX, so the worst source never inflates or stalls the mosaic (GStreamer latency math: global latency = MAX(min) and is infeasible if it exceeds MIN(max)).
+- **Latency budget (multiview-controllable):** per-tile jitter 30–100 ms (LAN) + HW decode ~1 frame + composite 1–2 frames (~17–40 ms) + low-latency encode → **~50–250 ms**. The **output protocol dominates** glass-to-glass: RTSP/SRT/RTMP sub-second to a few seconds; LL-HLS ~2–5 s; classic HLS 6–30 s. Sub-second requires WebRTC (out of v1 scope).
+- A high-latency/flaky tile is treated as **leaky** (drop/hold), contributing via MIN not MAX, so the worst source never inflates or stalls the multiview (GStreamer latency math: global latency = MAX(min) and is infeasible if it exceeds MIN(max)).
 - Timing buffers are **orthogonal to memory placement**: zero-copy GPU compositing still needs per-tile last-frame caches and deadline sampling.
 
 ---
@@ -350,7 +350,7 @@ Layered model: **Canvas → Layout → Cells → Overlays**, flattened by a reso
 ### Example config (TOML)
 
 ```toml
-# mosaic.toml
+# multiview.toml
 schema_version = 1
 
 [canvas]
@@ -427,13 +427,13 @@ format = "%H:%M:%S"
 
 [[outputs]]
 kind = "rtsp"
-mount = "/mosaic"
+mount = "/multiview"
 codec = "h264"
 profile = "low_latency"
 
 [[outputs]]
 kind = "ll_hls"
-path = "/hls/mosaic"
+path = "/hls/multiview"
 codec = "h264"
 part_target_ms = 250
 segment_ms = 2000
@@ -441,7 +441,7 @@ gop_ms = 2000
 
 [[outputs]]
 kind = "ndi"
-name = "MOSAIC OUT"
+name = "MULTIVIEW OUT"
 color = "fastest"
 ```
 
@@ -472,16 +472,16 @@ Cargo workspace, `resolver = "2"` (mandatory so a Linux-only test/build dep can'
 
 | Crate | Responsibility | Key features |
 |---|---|---|
-| `mosaic-sys` | All unsafe FFI; owns `rsmpeg`/`rusty_ffmpeg` raw access, NDI dlopen, CUDA/Metal/Vulkan interop primitives | `cuda`, `metal`, `vulkan`, `ndi` |
-| `mosaic-ffmpeg` | Safe RAII wrappers over libav (contexts `Send`+`!Sync`, `AVFrame` clone-by-ref, AVERROR→`thiserror`) | — |
-| `mosaic-core` (HAL) | Backend-agnostic stage traits, frame handle, pipeline graph, format/color types, negotiation planner. **No libav in public API.** | — |
-| `mosaic-compositor` | `Compositor` trait + CudaCompositor / MetalCompositor / VulkanCompositor(libplacebo/ash/wgpu); resolver DrawQuad→draw | `cuda`, `metal`, `vulkan`, `wgpu`, `cpu` |
-| `mosaic-io` | Ingest (RTSP/HLS/TS/SRT/NDI) + per-source FrameSync/supervisor | `ndi`, `srt`, `retina` |
-| `mosaic-server` | Output: RTSP (gst-rtsp-server), HLS/LL-HLS (custom CMAF + axum), NDI out, RTMP/SRT push | `gst-rtsp`, `ndi`, `ll-hls` |
-| `mosaic-config` | serde schema, JSON Schema (schemars), figment loading, validation | — |
-| `mosaic-control` | REST + WS control API (axum) | — |
-| `mosaic-telemetry` | tracing/OTEL, Prometheus, GpuStats trait + NVML/macmon impls, health | `nvml`, `macmon` |
-| `mosaic-cli` (bin) | Daemon/CLI; anyhow at this layer | rolls up platform feature sets |
+| `multiview-sys` | All unsafe FFI; owns `rsmpeg`/`rusty_ffmpeg` raw access, NDI dlopen, CUDA/Metal/Vulkan interop primitives | `cuda`, `metal`, `vulkan`, `ndi` |
+| `multiview-ffmpeg` | Safe RAII wrappers over libav (contexts `Send`+`!Sync`, `AVFrame` clone-by-ref, AVERROR→`thiserror`) | — |
+| `multiview-core` (HAL) | Backend-agnostic stage traits, frame handle, pipeline graph, format/color types, negotiation planner. **No libav in public API.** | — |
+| `multiview-compositor` | `Compositor` trait + CudaCompositor / MetalCompositor / VulkanCompositor(libplacebo/ash/wgpu); resolver DrawQuad→draw | `cuda`, `metal`, `vulkan`, `wgpu`, `cpu` |
+| `multiview-io` | Ingest (RTSP/HLS/TS/SRT/NDI) + per-source FrameSync/supervisor | `ndi`, `srt`, `retina` |
+| `multiview-server` | Output: RTSP (gst-rtsp-server), HLS/LL-HLS (custom CMAF + axum), NDI out, RTMP/SRT push | `gst-rtsp`, `ndi`, `ll-hls` |
+| `multiview-config` | serde schema, JSON Schema (schemars), figment loading, validation | — |
+| `multiview-control` | REST + WS control API (axum) | — |
+| `multiview-telemetry` | tracing/OTEL, Prometheus, GpuStats trait + NVML/macmon impls, health | `nvml`, `macmon` |
+| `multiview-cli` (bin) | Daemon/CLI; anyhow at this layer | rolls up platform feature sets |
 | `xtask` | Build orchestration: fetch/compile LGPL FFmpeg with HW flags, fetch NDI SDK, codegen, container/macOS packaging | — |
 
 **License-escalating features (additive, off by default, never alter public API):** `cuda`, `vaapi`, `qsv`, `videotoolbox`, `ndi`, `ndi-advanced`, `gpl-codecs`, `nonfree`. `cargo-deny` (deny.toml) gates licenses/advisories/bans/sources in CI; the effective license is reported **per built artifact**.
@@ -534,11 +534,11 @@ Rules: keep the default LGPL-clean; do scaling/compositing in-house (`scale_cuda
 
 ## 20. Phased Implementation Roadmap
 
-- **M0 — Skeleton & HAL contracts.** Workspace, `resolver=2`, `mosaic-sys`/`mosaic-ffmpeg` with libav demux/decode/encode (software), HAL stage traits, frame handle, config schema + JSON Schema, CPU compositor, single RTSP-in → 2x2 → RTSP-out (software). *Exit:* end-to-end software mosaic runs in GPU-free CI; golden-frame tests pass.
+- **M0 — Skeleton & HAL contracts.** Workspace, `resolver=2`, `multiview-sys`/`multiview-ffmpeg` with libav demux/decode/encode (software), HAL stage traits, frame handle, config schema + JSON Schema, CPU compositor, single RTSP-in → 2x2 → RTSP-out (software). *Exit:* end-to-end software multiview runs in GPU-free CI; golden-frame tests pass.
 - **M1 — NVIDIA zero-copy island.** NVDEC hwaccel decode (cuda), custom CUDA compositor (fused convert+scale+place), NVENC encode, single shared CUDA context; "stayed-on-GPU" assertion. *Exit:* NVDEC→CUDA→NVENC zero-copy validated on real GPU; no host round-trip; latency within budget.
-- **M2 — Apple zero-copy island.** VideoToolbox decode, Metal compute compositor via IOSurface/CVMetalTextureCache, VideoToolbox encode; universal2 build, signing/notarization. *Exit:* native macOS mosaic, zero-copy VT→Metal→VT verified on Apple Silicon + Intel Mac.
+- **M2 — Apple zero-copy island.** VideoToolbox decode, Metal compute compositor via IOSurface/CVMetalTextureCache, VideoToolbox encode; universal2 build, signing/notarization. *Exit:* native macOS multiview, zero-copy VT→Metal→VT verified on Apple Silicon + Intel Mac.
 - **M3 — Negotiation + capability detection.** L1/L2/L3 detection, device correlation by PCI/UUID, scored planner, software fallback, NVENC session budgeting. *Exit:* mixed-host auto-selects best per-stage backends; cross-vendor boundary inserts costed copy; graceful CPU fallback.
-- **M4 — Ingest breadth.** RTSP (FFmpeg + retina), HLS, MPEG-TS, SRT with reconnect/interrupt-callback/DNS-watchdog, per-source FrameSync, PTS rebasing, deadline-driven compositor. *Exit:* one dead source never freezes mosaic; multi-source drift held; survives PTS wrap/discontinuity.
+- **M4 — Ingest breadth.** RTSP (FFmpeg + retina), HLS, MPEG-TS, SRT with reconnect/interrupt-callback/DNS-watchdog, per-source FrameSync, PTS rebasing, deadline-driven compositor. *Exit:* one dead source never freezes multiview; multi-source drift held; survives PTS wrap/discontinuity.
 - **M5 — Serving breadth.** gst-rtsp-server in-process serving (+ MediaMTX sidecar option), custom CMAF segmenter + LL-HLS playlists + blocking-reload HTTP server, RTMP/SRT push. *Exit:* RTSP/LL-HLS/RTMP/SRT outputs validated against real players; LL-HLS passes mediastreamvalidator; latency targets met.
 - **M6 — NDI first-class.** grafton-ndi in/out behind feature + dynamic-load backend, FrameSync per NDI source, attribution/About-box, optional Advanced SDK profile. *Exit:* NDI in/out interop verified; license obligations in UI/docs; runtime-optional build without SDK works.
 - **M7 — Linux Intel/AMD + portable compositor.** VAAPI/QSV decode+encode, Vulkan/libplacebo (or wgpu) compositor via dma-buf, container `generic` variant. *Exit:* full pipeline on Intel/AMD; dma-buf zero-copy validated per driver with copy fallback.
@@ -551,7 +551,7 @@ Rules: keep the default LGPL-clean; do scaling/compositing in-house (`scale_cuda
 ### Load-bearing constraints (mitigations baked into the architecture)
 - **No cross-vendor on-GPU zero-copy on desktop** (confirmed). Mitigation: zero-copy islands per vendor; explicit costed copy at boundaries; planner prefers single-device pipelines.
 - **CUDA→wgpu has no stable zero-copy import; NV12 unsupported on wgpu Metal** (confirmed). Mitigation: CUDA-native compositor on NVIDIA, native Metal on Apple; wgpu/libplacebo only as the portable tier; pin wgpu and isolate any HAL interop behind the backend trait with a CPU-upload fallback.
-- **NVENC density = physical NVENC chips, not the 12-session cap; most GeForce have 1 NVENC** (confirmed). Mitigation: encode mosaic once; schedule against active NVENC count; CPU fallback for overflow; detect SKU per deployment.
+- **NVENC density = physical NVENC chips, not the 12-session cap; most GeForce have 1 NVENC** (confirmed). Mitigation: encode multiview once; schedule against active NVENC count; CPU fallback for overflow; detect SKU per deployment.
 - **FFmpeg has no CUDA stack filter; xstack has no fit/crop; GStreamer base compositor has no cover/crop** (confirmed). Mitigation: custom GPU compositor owns all layout/scaling/fit/crop.
 - **FFmpeg `hls` muxer cannot emit Apple LL-HLS** (confirmed). Mitigation: custom CMAF segmenter + `hls-playlist` crate + custom blocking-reload HTTP server.
 - **`grafton-ndi` links the NDI dylib at build time; NDI SDK is proprietary** (confirmed). Mitigation: feature-gate + `NDIlib_v6_load()` dynamic-load backend; never vendor SDK source; mandatory attribution.

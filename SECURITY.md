@@ -1,12 +1,12 @@
 # Security Policy
 
-Mosaic is a live GPU video mosaic engine that ingests many networked sources and
+Multiview is a live GPU video multiview engine that ingests many networked sources and
 serves robust continuous output. Because it handles **source credentials**, exposes a
 **management API**, and links **third-party media libraries**, security is treated as a
 first-class concern. This document explains how to report vulnerabilities and the
 security model of the management surface.
 
-> Mosaic project code is dual-licensed **MIT OR Apache-2.0**. See the licensing notes in
+> Multiview project code is dual-licensed **MIT OR Apache-2.0**. See the licensing notes in
 > [`docs/architecture/conventions.md`](docs/architecture/conventions.md) §7 for the
 > FFmpeg/NDI/codec build-profile model summarised below.
 
@@ -16,13 +16,13 @@ security model of the management surface.
 
 **Please do not open public GitHub issues for security vulnerabilities.**
 
-Report privately via GitHub's **[Security Advisories](https://github.com/aperim/mosaic/security/advisories/new)**
+Report privately via GitHub's **[Security Advisories](https://github.com/aperim/multiview/security/advisories/new)**
 ("Report a vulnerability") on this repository. This keeps the details embargoed until a
 fix is available.
 
 When reporting, include where you can:
 
-- Affected component (e.g. `mosaic-control` API, `mosaic-input` ingest, preview endpoints).
+- Affected component (e.g. `multiview-control` API, `multiview-input` ingest, preview endpoints).
 - Affected version / commit and build feature flags (`ndi`, `gpl-codecs`, `webrtc`, …).
 - Reproduction steps or a proof-of-concept, and the observed vs. expected behaviour.
 - Impact assessment (auth bypass, RCE, credential disclosure, DoS of the output, …).
@@ -51,11 +51,11 @@ Until a `1.0` release, only the **latest release / `main`** receives security fi
 flowchart LR
   U["Operator / Admin (browser)"] -->|cookie session + CSRF| API
   M["Machine client / SDK"] -->|API key (Bearer)| API
-  subgraph BIN["Single mosaic binary (tokio)"]
-    API["mosaic-control<br/>axum · auth · RBAC · per-object authz"]
+  subgraph BIN["Single multiview binary (tokio)"]
+    API["multiview-control<br/>axum · auth · RBAC · per-object authz"]
     API <-->|sqlx| DB[("SQLite WAL<br/>hashed keys · encrypted creds")]
-    API --> ENG["mosaic-engine<br/>(isolated, no client back-pressure)"]
-    ENG --> PRV["mosaic-preview<br/>token-gated taps"]
+    API --> ENG["multiview-engine<br/>(isolated, no client back-pressure)"]
+    ENG --> PRV["multiview-preview<br/>token-gated taps"]
   end
   API -.->|source URLs may carry creds| SRC["RTSP / SRT / RTMP / NDI sources"]
   V["Preview viewer"] -->|short-lived signed token over WSS/HTTPS| PRV
@@ -69,7 +69,7 @@ client cannot stall or crash the protected output path.
 
 ## Management API Security Model
 
-The management API is the `mosaic-control` crate (axum 0.8 + tower-http), served from the
+The management API is the `multiview-control` crate (axum 0.8 + tower-http), served from the
 same single binary as the engine. See the deep brief at
 [`docs/research/web-api-stack.md`](docs/research/web-api-stack.md) and the decision record
 [`docs/decisions/ADR-W005.md`](docs/decisions/ADR-W005.md) for the auth design.
@@ -118,7 +118,7 @@ same single binary as the engine. See the deep brief at
 
 ### Preview token gating
 
-Live preview is **isolated from the program path** (`mosaic-preview`) and is **not**
+Live preview is **isolated from the program path** (`multiview-preview`) and is **not**
 open by virtue of an API session alone:
 
 - Preview access (WHEP sub-second and MJPEG/JPEG fallback) is gated by **short-lived,
@@ -132,7 +132,7 @@ See the preview deep brief at
 
 ## Secrets Handling
 
-Source and output endpoints frequently embed credentials (RTSP/SRT/RTMP/NDI). Mosaic
+Source and output endpoints frequently embed credentials (RTSP/SRT/RTMP/NDI). Multiview
 treats these as sensitive throughout:
 
 - Credentials are wrapped in **`secrecy::SecretString`** (zeroized on drop, redacted in
@@ -152,14 +152,14 @@ A source URL such as `rtsp://user:pass@host/stream` carries the username and pas
 - Such URLs are sensitive even though they look like ordinary configuration.
 - Avoid pasting full source URLs into bug reports, screenshots, logs, or chat. Redact the
   userinfo component (`user:pass@`) before sharing.
-- Mosaic masks these in API responses and redacts them in logs, but **anything you copy
+- Multiview masks these in API responses and redacts them in logs, but **anything you copy
   manually is your responsibility.**
 
 ---
 
 ## Supply Chain: FFmpeg, NDI, and Codecs
 
-Mosaic builds in **off-by-default native/FFI features** so the default `cargo check` is a
+Multiview builds in **off-by-default native/FFI features** so the default `cargo check` is a
 pure-Rust, LGPL-clean, no-native-deps build (conventions §3–§4, §7).
 
 - **FFmpeg / libav\*** (`ffmpeg` feature): linked **LGPL** in the default profile. No

@@ -1,6 +1,6 @@
 # Features
 
-The full capability matrix for Mosaic: every planned feature, its current status, the milestone it
+The full capability matrix for Multiview: every planned feature, its current status, the milestone it
 lands in ([ROADMAP.md](ROADMAP.md)), and the design doc that specifies it. This is the living
 support matrix — update a row's status as it is implemented.
 
@@ -11,17 +11,17 @@ support matrix — update a row's status as it is implemented.
 > set (fmt/clippy `-D warnings`/test/deny/inclusive-language), and there are ~500 tests (unit +
 > property + integration). What has landed beyond the M0 scaffold:
 >
-> - **`mosaic-core`** — shared types/traits expanded (`Frame`, NV12 `PixelFormat`, 4-axis `ColorInfo`,
+> - **`multiview-core`** — shared types/traits expanded (`Frame`, NV12 `PixelFormat`, 4-axis `ColorInfo`,
 >   `MediaTime`/clock, layout model, error taxonomy, stage traits).
 > - **The 10 leaf crates** (`hal`, `framestore`, `audio`, `overlay`, `input`, `output`, `config`,
 >   `events`, `telemetry`, plus the color modules of `compositor`) — built with real unit/property
 >   tests against the documented contracts.
-> - **`mosaic-engine`** — the protected output core: fixed-cadence output clock, compositor drive
+> - **`multiview-engine`** — the protected output core: fixed-cadence output clock, compositor drive
 >   loop, `EngineRuntime`, engine→outside isolation (arc-swap latest-state + bounded drop-oldest
 >   broadcast), actor supervisor, and the degradation control loop. **Invariants #1 (output-clock)
 >   and #10 (isolation) are exercised by tests** in this crate.
-> - **Layer C** — `mosaic-control` (axum REST/WS/SSE API, OpenAPI, SQLite, command bus, auth),
->   `mosaic-preview` (isolated taps), and `mosaic-cli` (`validate` + `run --headless`); `cargo xtask
+> - **Layer C** — `multiview-control` (axum REST/WS/SSE API, OpenAPI, SQLite, command bus, auth),
+>   `multiview-preview` (isolated taps), and `multiview-cli` (`validate` + `run --headless`); `cargo xtask
 >   gen-openapi` emits the OpenAPI document.
 > - **Web SPA** (`web/`) — design system, react-konva + dnd-kit layout editor, realtime client,
 >   i18n + accessibility scaffolding.
@@ -138,7 +138,7 @@ support matrix — update a row's status as it is implemented.
 
 ## Broadcast multiviewer (proposed — established, standards-based capabilities)
 
-Standards-based broadcast-multiviewer capabilities mapped to Mosaic — see [research/broadcast-multiviewer-features.md](docs/research/broadcast-multiviewer-features.md) and milestones **M10–M12** in [ROADMAP.md](ROADMAP.md). Every capability is anchored in an open industry standard/protocol. Legend: 📋 planned · ✅ already designed (enhance).
+Standards-based broadcast-multiviewer capabilities mapped to Multiview — see [research/broadcast-multiviewer-features.md](docs/research/broadcast-multiviewer-features.md) and milestones **M10–M12** in [ROADMAP.md](ROADMAP.md). Every capability is anchored in an open industry standard/protocol. Legend: 📋 planned · ✅ already designed (enhance).
 
 ### Layouts & display modes
 
@@ -348,7 +348,7 @@ Standards-based broadcast-multiviewer capabilities mapped to Mosaic — see [res
 
 | Capability | Status | Relevance | Target | Standard |
 |---|---|---|---|---|
-| Mosaic-as-a-stream output (ST 2110/-22, RIST, WebRTC additions) | ✅ have (enhance) | core | M12 | SMPTE ST 2110-20/-22, ST 2022-6; SRT, RIST, RTP/UDP, HLS/LL-HLS, NDI, WebRTC; MPEG-TS |
+| Multiview-as-a-stream output (ST 2110/-22, RIST, WebRTC additions) | ✅ have (enhance) | core | M12 | SMPTE ST 2110-20/-22, ST 2022-6; SRT, RIST, RTP/UDP, HLS/LL-HLS, NDI, WebRTC; MPEG-TS |
 
 ### Outputs & resilience
 

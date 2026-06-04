@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a problem with Mosaic
+description: Report a problem with Multiview
 labels: [bug]
 body:
   - type: markdown
@@ -18,7 +18,7 @@ body:
       label: Steps to reproduce
       description: Include the config/template and source URLs (redact secrets) if relevant.
       placeholder: |
-        1. mosaic run examples/2x2.toml
+        1. multiview run examples/2x2.toml
         2. ...
     validations:
       required: true

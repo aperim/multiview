@@ -1,6 +1,6 @@
-# Mosaic — Management Web App
+# Multiview — Management Web App
 
-> The design of the **management SPA** that fully and completely operates the Mosaic engine: its
+> The design of the **management SPA** that fully and completely operates the Multiview engine: its
 > stack, screens, the canvas layout editor, the typed-client-from-OpenAPI flow, and the UX,
 > accessibility, and theming principles that make it a polished broadcast control surface.
 >
@@ -8,15 +8,15 @@
 > canonical crate names, API paths, feature flags, invariants, and licensing. Where any doc
 > disagrees with conventions, conventions wins; the Rust code is the ultimate authority.
 
-The SPA lives at `web/` and is embedded into the single `mosaic` binary via `rust-embed`
-([ADR-W007](../decisions/ADR-W007.md)). It talks only to the [`mosaic-control`](../architecture/conventions.md)
+The SPA lives at `web/` and is embedded into the single `multiview` binary via `rust-embed`
+([ADR-W007](../decisions/ADR-W007.md)). It talks only to the [`multiview-control`](../architecture/conventions.md)
 HTTP/realtime API on the **same origin** — there is no second service to deploy.
 
 ---
 
 ## 1. What the app is for
 
-Mosaic is a GPU compositor that ingests many live sources, composites a templated mosaic, and serves
+Multiview is a GPU compositor that ingests many live sources, composites a templated multiview, and serves
 it over RTSP / HLS / NDI / RTMP / SRT with **bulletproof continuous output**. The management app is
 the human surface over the whole control plane: every parameter the engine exposes is reachable
 through a `/api/v1` resource and surfaced in a named screen + control. The authoritative proof of
@@ -56,9 +56,9 @@ for the full rejection of SvelteKit / Leptos / Dioxus and react-grid-layout.
 flowchart LR
   B["Browser SPA<br/>React 19 + Vite (embedded)"] -->|REST · OpenAPI 3.1| API
   B -->|snapshot+delta status| RT["WS /api/v1/ws · SSE /api/v1/events"]
-  B -->|WHEP / MJPEG preview| EG["mosaic-preview egress"]
+  B -->|WHEP / MJPEG preview| EG["multiview-preview egress"]
   B -->|Scalar try-it-out same-origin| API
-  subgraph BIN["Single mosaic binary (tokio)"]
+  subgraph BIN["Single multiview binary (tokio)"]
     API["axum 0.8 + utoipa<br/>auth · RBAC · validation"]
     RT
     EG
@@ -86,7 +86,7 @@ pipeline stalled at a glance.
 | — | **API Docs** | embedded **Scalar** try-it-out, same-origin | [ADR-W002](../decisions/ADR-W002.md) |
 
 > Realtime status (WebSocket primary at `/api/v1/ws`, SSE fallback at `/api/v1/events`) and the live
-> mosaic preview (WHEP + MJPEG) are designed in the
+> multiview preview (WHEP + MJPEG) are designed in the
 > [realtime-api](../research/realtime-api.md) and [preview-subsystem](../research/preview-subsystem.md)
 > briefs; the app consumes them but does not redefine them here.
 
@@ -100,7 +100,7 @@ The operator's "is everything alive?" view. Per-tile FPS / bitrate / up-down, th
 SLO** (zero-gap / PTS continuity / TR 101 290), active alerts, and the **adaptation panel** showing
 the live degradation-ladder position + active lever + the *"why"* sensor reading. Audio meters
 (EBU R128, true-peak) render from a conflated **10–25 Hz** numeric stream — never the raw audio rate.
-A **live mosaic preview** uses WHEP `<video>` for sub-second motion with a graceful MJPEG fallback
+A **live multiview preview** uses WHEP `<video>` for sub-second motion with a graceful MJPEG fallback
 that always ships (works where UDP/TURN is blocked). All cards are SSE/WS-driven into the TanStack
 Query cache — read-only, drop-oldest, never blocking.
 
@@ -126,7 +126,7 @@ Add / edit / test ingest of `rtsp | hls | ts | srt | rtmp | ndi | file | test`. 
 
 ### 4.3 Layout / Template Editor (react-konva + dnd-kit)
 
-The flagship, highest-polish surface and the reason React was chosen. Mosaic is a free-form GPU
+The flagship, highest-polish surface and the reason React was chosen. Multiview is a free-form GPU
 compositor (overlap, z-order, rotation, sub-pixel placement) — **not** a strict grid — so the editor
 uses **react-konva** for the canvas and **dnd-kit** for accessible drag ([ADR-W004](../decisions/ADR-W004.md)).
 
@@ -157,7 +157,7 @@ flowchart TB
 - **Cue-then-take is the only path to live:** edit a draft, send to **Preview (PVW)**, then **Take**
   (Cut or Auto-crossfade) atomically to **Program (PGM)**. Drafts never touch the live output.
 - **Editor-only chrome:** snap / guides / safe-areas are persisted in `editor_prefs` and are
-  **never rendered** into the mosaic.
+  **never rendered** into the multiview.
 - **Problems panel:** field-level validation (garde + schemars) surfaced inline, plus a Take-bar
   **dry-run/diff** that flags `reset_required` before apply.
 
@@ -262,7 +262,7 @@ in the UI: viewer hides mutating controls; operator hides Users / Tokens / Secre
 - **Theming** via Tailwind v4 OKLCH design tokens with a `.dark` override — light and dark are both
   first-class and visually coherent.
 - **Color-pipeline accessibility caveat:** the editor's own UI chrome respects theme tokens, but the
-  *mosaic preview* shows true engine output (HDR/SDR, wide gamut). The Color tabs surface provenance
+  *multiview preview* shows true engine output (HDR/SDR, wide gamut). The Color tabs surface provenance
   and warnings precisely so operators are never misled by a tone-mapped browser approximation.
 
 ---
@@ -299,11 +299,11 @@ flowchart LR
 
 ## 8. Build & deploy
 
-Vite builds the SPA; the output is embedded into the `mosaic` binary at compile time via
+Vite builds the SPA; the output is embedded into the `multiview` binary at compile time via
 **rust-embed**, with an SPA-fallback handler serving `index.html` for client routes
 ([ADR-W007](../decisions/ADR-W007.md)). One process, one port, sub-1 MB bundle. The Vite build is
 wired into the cargo build (the `embed-web` feature) so embedded assets never go stale; dev uses a
-Vite proxy to a locally running `mosaic`. `tower-http`'s `ServeDir` cannot serve embedded files —
+Vite proxy to a locally running `multiview`. `tower-http`'s `ServeDir` cannot serve embedded files —
 rust-embed is required.
 
 ---

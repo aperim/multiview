@@ -48,7 +48,7 @@ echo -n "bat    : "; bat --version 2>/dev/null || echo "not found"
 # Capability summary — what hardware/secret paths are actually available here.
 # ---------------------------------------------------------------------------
 echo ""
-echo "================ Mosaic dev container capability summary ================"
+echo "================ Multiview dev container capability summary ================"
 
 # NVIDIA NVDEC/NVENC
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then

@@ -121,7 +121,7 @@ export function LayoutEditorPage(): JSX.Element {
         title={isNew ? <Trans>New layout</Trans> : <Trans>Edit layout</Trans>}
         description={
           <Trans>
-            Compose the output mosaic. The Canvas tab is drag-and-drop; the Cells
+            Compose the output multiview. The Canvas tab is drag-and-drop; the Cells
             tab is the fully keyboard-operable equivalent.
           </Trans>
         }

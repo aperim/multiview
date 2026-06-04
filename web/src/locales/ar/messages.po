@@ -44,7 +44,7 @@ msgid "Configure output servers and renditions."
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:61
-msgid "Configured mosaic layouts."
+msgid "Configured multiview layouts."
 msgstr ""
 
 #: src/components/ConnectionStatus.tsx:29
@@ -116,11 +116,11 @@ msgid "Manage overlay layers and subtitles."
 msgstr ""
 
 #: src/app/Sidebar.tsx:22
-msgid "Mosaic"
-msgstr "موزاييك"
+msgid "Multiview"
+msgstr ""
 
 #: src/pages/LayoutsPage.tsx:83
-msgid "Mosaic layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
+msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:37

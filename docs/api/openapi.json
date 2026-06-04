@@ -1,10 +1,10 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Mosaic Control API",
-    "description": "REST + WebSocket + SSE management API for the Mosaic engine.",
+    "title": "Multiview Control API",
+    "description": "REST + WebSocket + SSE management API for the Multiview engine.",
     "contact": {
-      "name": "The Mosaic Authors"
+      "name": "The Multiview Authors"
     },
     "license": {
       "name": "MIT OR Apache-2.0",
@@ -80,7 +80,7 @@
       },
       "Layout": {
         "type": "object",
-        "description": "A persisted layout resource.\n\nThe `body` is the opaque, validated layout document the editor produces; the\ncontrol plane stores and version-stamps it without interpreting its\ninternals here. (Engine-side validation against `mosaic-config` happens\nbefore a layout is applied.)",
+        "description": "A persisted layout resource.\n\nThe `body` is the opaque, validated layout document the editor produces; the\ncontrol plane stores and version-stamps it without interpreting its\ninternals here. (Engine-side validation against `multiview-config` happens\nbefore a layout is applied.)",
         "required": [
           "id",
           "name",

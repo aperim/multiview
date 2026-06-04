@@ -7,7 +7,7 @@
 
 ## Decision
 
-Per scope, default to the cheapest transport for grids and reserve WebRTC/WHEP for a single on-demand focus. INPUT grid: MJPEG-over-HTTP / single-shot JPEG at 1-5 fps, ~320x180, encode-once-serve-many. PROGRAM grid/at-a-glance (default): multiplexed binary JPEG over ONE WebSocket (sidestepping the browser ~6-conns/host cap), 1-5 fps, CPU JPEG (turbojpeg/zune-jpeg), no GPU encode session. OUTPUT grid: periodic JPEG snapshots (1-5 s, ETag) of the REAL decoded rendition, viewport-driven. FOCUS (all scopes): one WebRTC/WHEP session at a time per operator, sub-second, using a session-budgeted preview encoder; opening a second focus demotes the first to JPEG. FALLBACK where WebRTC cannot establish (UDP/STUN/TURN blocked): LL-HLS reusing the mosaic-serve CMAF segmenter; for HLS-family outputs, replay the output's own published playlist at zero extra cost. WHEP is feature-gated and advertised via the capabilities endpoints. On base Apple silicon (1 encode engine) prefer JPEG and restrict/queue WHEP.
+Per scope, default to the cheapest transport for grids and reserve WebRTC/WHEP for a single on-demand focus. INPUT grid: MJPEG-over-HTTP / single-shot JPEG at 1-5 fps, ~320x180, encode-once-serve-many. PROGRAM grid/at-a-glance (default): multiplexed binary JPEG over ONE WebSocket (sidestepping the browser ~6-conns/host cap), 1-5 fps, CPU JPEG (turbojpeg/zune-jpeg), no GPU encode session. OUTPUT grid: periodic JPEG snapshots (1-5 s, ETag) of the REAL decoded rendition, viewport-driven. FOCUS (all scopes): one WebRTC/WHEP session at a time per operator, sub-second, using a session-budgeted preview encoder; opening a second focus demotes the first to JPEG. FALLBACK where WebRTC cannot establish (UDP/STUN/TURN blocked): LL-HLS reusing the multiview-serve CMAF segmenter; for HLS-family outputs, replay the output's own published playlist at zero extra cost. WHEP is feature-gated and advertised via the capabilities endpoints. On base Apple silicon (1 encode engine) prefer JPEG and restrict/queue WHEP.
 
 ## Rationale
 
@@ -19,4 +19,4 @@ Per-tile WebRTC for the whole grid (rejected: exhausts browser conns + encoder s
 
 ## Consequences
 
-Three transport stacks to build/maintain (JPEG, WHEP, LL-HLS) plus the WS multiplexer, but LL-HLS reuses mosaic-serve and WHEP can reuse the MediaMTX sidecar. The UI must implement transparent transport fallback (WHEP -> LL-HLS -> JPEG) and surface a small fallback note. Focus is capped at one per operator, which is the intended ergonomic anyway.
+Three transport stacks to build/maintain (JPEG, WHEP, LL-HLS) plus the WS multiplexer, but LL-HLS reuses multiview-serve and WHEP can reuse the MediaMTX sidecar. The UI must implement transparent transport fallback (WHEP -> LL-HLS -> JPEG) and surface a small fallback note. Focus is capped at one per operator, which is the intended ergonomic anyway.
