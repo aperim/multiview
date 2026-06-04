@@ -285,21 +285,50 @@ impl FileSink {
         muxer.write_header().map_err(ff)?;
         // Composite/decode once, encode once, mux every packet to the single
         // container stream (invariant #7).
-        let stats = drive_to_single_muxer(
+        let driven = drive_to_single_muxer(
             &mut encoder,
             &mut muxer,
             stream_index,
             self.config.format,
             source,
-        )?;
-        muxer.finish().map_err(ff)?;
-        Ok(stats)
+        );
+        // Finalize-on-error: always write the trailer (best-effort) before
+        // returning, so even a mid-run source/encoder error leaves a structurally
+        // valid container (e.g. an MP4 with its moov atom) rather than a file a
+        // player cannot open. `Muxer::finish` is idempotent.
+        finalize_or_propagate(&mut muxer, driven)
     }
 
     /// The path this sink writes to.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Finalize a single-stream muxer after its drive loop, preserving error
+/// priority. On success the trailer is written and a finish failure is surfaced;
+/// on a drive failure the trailer is still written **best-effort** (so the
+/// container is structurally valid) but the original drive error is the one
+/// returned — a finish failure on an already-failing run is intentionally
+/// dropped (the muxer is finalized as far as libav could manage).
+///
+/// `Muxer::finish` is idempotent, so calling it here is safe even though the
+/// success path already finalized in earlier revisions.
+fn finalize_or_propagate(muxer: &mut Muxer, driven: Result<EncodeStats>) -> Result<EncodeStats> {
+    match driven {
+        Ok(stats) => {
+            muxer.finish().map_err(ff)?;
+            Ok(stats)
+        }
+        Err(err) => {
+            // Best-effort finalize; the drive error wins. Match (not `let _ =`)
+            // to make the deliberate drop explicit rather than a silent discard.
+            match muxer.finish() {
+                Ok(()) | Err(_) => {}
+            }
+            Err(err)
+        }
     }
 }
 
@@ -397,37 +426,16 @@ impl SegmentSink {
         let time_base = encoder.time_base();
         let frame_ns = rescale(1, time_base, Rational::new(1, NANOS_PER_SEC));
 
-        let mut state = SegmentState::new(&self.config, &self.dir, &self.prefix, time_base);
+        let mut state = SegmentState::new(&self.config, &self.dir, &self.prefix, time_base)?;
         let mut converter = FrameConverter::new(self.config.format);
-        let mut tick: i64 = 0;
-        while let Some(frame) = source.next_frame()? {
-            let prepared = converter.prepare(frame.frame, tick)?;
-            encoder.send_frame(&prepared).map_err(ff)?;
-            while let Some(packet) = encoder.receive_packet().map_err(ff)? {
-                let is_key = packet.is_key();
-                let pts = pts_from_packet(packet.pts(), state.stats.packets, time_base);
-                // Start a fresh segment on each keyframe, then write the packet
-                // into the current segment. The packet type stays inferred —
-                // `receive_packet`'s output flows straight into `write_packet`.
-                if is_key {
-                    state.start_segment(pts)?;
-                }
-                let (muxer, index) = state.current_muxer()?;
-                muxer.write_packet(index, packet).map_err(ff)?;
-                state.record(is_key, pts);
-            }
-            tick = tick.saturating_add(1);
-        }
-        encoder.send_eof().map_err(ff)?;
-        while let Some(packet) = encoder.receive_packet().map_err(ff)? {
-            let is_key = packet.is_key();
-            let pts = pts_from_packet(packet.pts(), state.stats.packets, time_base);
-            if is_key {
-                state.start_segment(pts)?;
-            }
-            let (muxer, index) = state.current_muxer()?;
-            muxer.write_packet(index, packet).map_err(ff)?;
-            state.record(is_key, pts);
+
+        // Drive the encode/segment loop, capturing any mid-run failure so the
+        // currently-open segment can be finalized best-effort before the error
+        // propagates (finalize-on-error). On the error path we do not build the
+        // playlist; we only ensure the open segment's container is closed.
+        if let Err(err) = state.drive(&mut encoder, &mut converter, source) {
+            state.finalize_open_segment_best_effort();
+            return Err(err);
         }
 
         let mut playlist = MediaPlaylist::new(SegmentType::MpegTs);
@@ -554,24 +562,30 @@ impl PushSink {
             .add_stream(encoder.as_codec_context(), time_base)
             .map_err(ff)?;
         muxer.write_header().map_err(ff)?;
-        let stats = drive_to_single_muxer(
+        let driven = drive_to_single_muxer(
             &mut encoder,
             &mut muxer,
             stream_index,
             self.config.format,
             source,
-        )?;
-        muxer.finish().map_err(ff)?;
-        Ok(stats)
+        );
+        // Finalize-on-error (see `FileSink::run`): always write the trailer
+        // best-effort so a mid-run failure still leaves the transport's container
+        // properly closed. `Muxer::finish` is idempotent.
+        finalize_or_propagate(&mut muxer, driven)
     }
 }
 
 /// Per-run segmentation state: the open segment, completed segments, and stats.
 struct SegmentState<'a> {
-    config: &'a EncodeConfig,
     dir: &'a Path,
     prefix: &'a str,
     time_base: Rational,
+    /// The **single** seed encoder for the whole run. Each new segment muxer
+    /// copies its codec parameters from this one opened encoder; the codec is
+    /// fixed across the encode (invariant #7), so the seed is built once here —
+    /// never once per segment.
+    seed: VideoEncoder,
     current: Option<OpenSegment>,
     /// Completed `(path, duration_seconds)` in order.
     done: Vec<(PathBuf, f64)>,
@@ -590,17 +604,82 @@ struct OpenSegment {
 }
 
 impl<'a> SegmentState<'a> {
-    fn new(config: &'a EncodeConfig, dir: &'a Path, prefix: &'a str, time_base: Rational) -> Self {
-        Self {
-            config,
+    /// Build the per-run segmentation state, opening the **single** seed encoder
+    /// here (invariant #7: one fixed codec for the whole run).
+    fn new(
+        config: &'a EncodeConfig,
+        dir: &'a Path,
+        prefix: &'a str,
+        time_base: Rational,
+    ) -> Result<Self> {
+        let seed = VideoEncoder::new(&config.target()).map_err(ff)?;
+        note_seed_encoder_built();
+        Ok(Self {
             dir,
             prefix,
             time_base,
+            seed,
             current: None,
             done: Vec::new(),
             last_pts: MediaTime::ZERO,
             stats: EncodeStats::default(),
+        })
+    }
+
+    /// Run the encode/segment drive loop: pull frames from `source`, convert and
+    /// re-stamp each (invariants #1/#3), encode once, and split the packet stream
+    /// into GOP-aligned segments. On a mid-run error the caller finalizes the
+    /// open segment best-effort before propagating.
+    fn drive<S: VideoFrameSource>(
+        &mut self,
+        encoder: &mut VideoEncoder,
+        converter: &mut FrameConverter,
+        source: &mut S,
+    ) -> Result<()> {
+        let mut tick: i64 = 0;
+        while let Some(frame) = source.next_frame()? {
+            let prepared = converter.prepare(frame.frame, tick)?;
+            encoder.send_frame(&prepared).map_err(ff)?;
+            self.drain_packets(encoder)?;
+            tick = tick.saturating_add(1);
         }
+        encoder.send_eof().map_err(ff)?;
+        self.drain_packets(encoder)
+    }
+
+    /// Drain all currently-available encoded packets from `encoder`, starting a
+    /// fresh segment on each keyframe and writing each packet into the current
+    /// segment. The packet type stays inferred — `receive_packet`'s output flows
+    /// straight into `write_packet`.
+    fn drain_packets(&mut self, encoder: &mut VideoEncoder) -> Result<()> {
+        while let Some(packet) = encoder.receive_packet().map_err(ff)? {
+            let is_key = packet.is_key();
+            let pts = pts_from_packet(packet.pts(), self.stats.packets, self.time_base);
+            if is_key {
+                self.start_segment(pts)?;
+            }
+            let (muxer, index) = self.current_muxer()?;
+            muxer.write_packet(index, packet).map_err(ff)?;
+            self.record(is_key, pts);
+        }
+        Ok(())
+    }
+
+    /// Best-effort finalize of the currently-open segment on the error path: the
+    /// open segment muxer's trailer is written (so its container is structurally
+    /// closed) and the segment dropped. Any finish failure is intentionally
+    /// swallowed — the original drive error is the one that propagates. Idempotent
+    /// (`close_current` no-ops once `current` is taken).
+    fn finalize_open_segment_best_effort(&mut self) {
+        let Some(mut segment) = self.current.take() else {
+            return;
+        };
+        // Deliberate drop of the finish result: the run is already failing, so
+        // the drive error wins; we only want the bytes flushed / trailer written.
+        match segment.muxer.finish() {
+            Ok(()) | Err(_) => {}
+        }
+        note_segment_finalized();
     }
 
     /// Close the current segment (if any) and open a new MPEG-TS segment muxer
@@ -610,15 +689,14 @@ impl<'a> SegmentState<'a> {
         self.close_current(start_pts)?;
         let index = self.done.len();
         let path = self.dir.join(format!("{}{index}.ts", self.prefix));
-        // A throwaway encoder context only seeds the muxer stream's codec
-        // parameters; the actual packets all come from the single shared
-        // encoder in the drive loop (one *encode* — invariant #7), while each
-        // segment file is its own self-contained MPEG-TS container.
-        let seed = VideoEncoder::new(&self.config.target()).map_err(ff)?;
-        note_seed_encoder_built();
+        // The run's single seed encoder only seeds the muxer stream's codec
+        // parameters; the actual packets all come from the shared encoder in the
+        // drive loop (one *encode* — invariant #7), while each segment file is
+        // its own self-contained MPEG-TS container. The seed is reused for every
+        // segment — never rebuilt per segment.
         let mut muxer = Muxer::create_as(&path, "mpegts").map_err(ff)?;
         let stream_index = muxer
-            .add_stream(seed.as_codec_context(), self.time_base)
+            .add_stream(self.seed.as_codec_context(), self.time_base)
             .map_err(ff)?;
         muxer.write_header().map_err(ff)?;
         self.current = Some(OpenSegment {
@@ -729,6 +807,16 @@ mod tests {
     //! Unit tests using the real `ffmpeg` encode/decode path. The seed-encoder
     //! seam ([`SEED_ENCODER_BUILDS`]) is private, so this lives in-crate where it
     //! can be read directly (an integration test could not observe it).
+    // Test helpers here use the test-only ergonomics the repo allows in tests
+    // (the clippy.toml `allow-*-in-tests` options do not reach helper fns inside
+    // a `#[cfg(test)]` module, so the relaxation is stated explicitly — matching
+    // the `#![allow(...)]` header every `tests/*.rs` file carries).
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
     use std::path::Path;
     use std::process::Command;
     use std::sync::atomic::Ordering;
@@ -738,8 +826,7 @@ mod tests {
     use mosaic_ffmpeg::{DecodedVideoFrame, StreamVideoDecoder};
 
     use super::{
-        EncodeConfig, Result, SegmentSink, VideoFrameSource, SEED_ENCODER_BUILDS,
-        SEGMENT_FINALIZES,
+        EncodeConfig, Result, SegmentSink, VideoFrameSource, SEED_ENCODER_BUILDS, SEGMENT_FINALIZES,
     };
     use crate::error::Error;
 
@@ -799,8 +886,7 @@ mod tests {
             let stream_index = stream.index();
             let params = stream.parameters();
             let time_base = mosaic_ffmpeg::from_ff_rational(stream.time_base());
-            let decoder =
-                StreamVideoDecoder::new(params, time_base).expect("build stream decoder");
+            let decoder = StreamVideoDecoder::new(params, time_base).expect("build stream decoder");
             Self {
                 input,
                 decoder,
@@ -890,7 +976,9 @@ mod tests {
         // 3 seconds @ 30 fps, 1-second GOP => up to 3 GOP-aligned segments.
         generate_clip(&src, 3, 30);
 
-        let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         SEGMENT_FINALIZES.store(0, Ordering::Relaxed);
         let sink = SegmentSink::new(config(30, 30), dir.path(), "seg");
         // Yield ~2.5 GOPs so at least one full segment plus a partial one are
@@ -932,7 +1020,9 @@ mod tests {
         // 3 seconds @ 30 fps, 1-second GOP => 3 GOP-aligned segments.
         generate_clip(&src, 3, 30);
 
-        let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         SEED_ENCODER_BUILDS.store(0, Ordering::Relaxed);
         let sink = SegmentSink::new(config(30, 30), dir.path(), "seg");
         let mut source = DecodeSource::open(&src);
@@ -951,7 +1041,8 @@ mod tests {
         // (invariant #7: the codec is fixed across the encode).
         let builds = SEED_ENCODER_BUILDS.load(Ordering::Relaxed);
         assert_eq!(
-            builds, 1,
+            builds,
+            1,
             "expected exactly one seed encoder for the whole run, got {builds} \
              across {} segments",
             result.segments.len()
