@@ -269,6 +269,21 @@ impl<T> TileStore<T> {
         Some(now.saturating_sub(MediaTime::from_nanos(last_ns)))
     }
 
+    /// Whether at least one frame has ever been published into this tile.
+    ///
+    /// A cheap, lock-free, wait-free read of the last-frame atomic — no ring
+    /// snapshot, no allocation. `false` until the first
+    /// [`publish`](TileStore::publish)/[`publish_arc`](TileStore::publish_arc),
+    /// `true` forever after (the store is newest-wins, never cleared back to
+    /// empty). The startup *prime-wait* uses this to tell a tile that has decoded
+    /// its first frame from one that is still cold, so the output clock can hold
+    /// its very first tick until inputs are primed-or-timed-out (without ever
+    /// blocking on a dead source — the caller bounds the wait).
+    #[must_use]
+    pub fn is_primed(&self) -> bool {
+        self.last_frame_at_ns.load(Ordering::Acquire) != NEVER_PUBLISHED
+    }
+
     /// The tile's [`SourceState`] as of `now`.
     ///
     /// Pure function of `now`, the last-frame instant, and the thresholds. A

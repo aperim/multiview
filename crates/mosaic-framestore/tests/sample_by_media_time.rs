@@ -101,6 +101,26 @@ fn read_at_before_first_frame_uses_earliest() {
 }
 
 #[test]
+fn is_primed_flips_false_to_true_on_first_publish() {
+    // The startup prime-wait uses `is_primed` to tell a tile that has decoded its
+    // first frame from one still cold. A fresh store has published nothing, so it
+    // is NOT primed; the very first publish flips it primed, forever.
+    let s = store();
+    assert!(
+        !s.is_primed(),
+        "a store with no published frame must read NOT primed (cold tile)"
+    );
+    s.publish(42_u32, MediaTime::from_nanos(0));
+    assert!(
+        s.is_primed(),
+        "the first published frame must mark the tile primed"
+    );
+    // Newest-wins publishes keep it primed (it never reverts to cold).
+    s.publish(43_u32, MediaTime::from_nanos(40_000_000));
+    assert!(s.is_primed(), "a primed store stays primed");
+}
+
+#[test]
 fn ring_is_bounded_drop_oldest() {
     // The ring is bounded: publishing far more than its capacity drops the
     // OLDEST entries (newest wins for memory), so sampling an old instant falls

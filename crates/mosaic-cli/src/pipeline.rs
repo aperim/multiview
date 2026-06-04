@@ -596,7 +596,6 @@ impl RealPipeline {
         .map_err(|e| PipelineError::Engine(e.to_string()))?;
 
         let ts: Arc<dyn TimeSource> = time;
-        let mut runtime = EngineRuntime::new(clock, drive, ts, pacer);
         let publisher: EnginePublisher<TickState, TickState> = EnginePublisher::new(EVENT_CAPACITY);
 
         // Start streaming ingest BEFORE the clock loop: one decode thread per
@@ -615,6 +614,17 @@ impl RealPipeline {
         #[cfg(not(feature = "overlay"))]
         let caption_plans: Vec<crate::captions::CaptionPlan> = Vec::new();
         let supervisor = IngestSupervisor::start(plans, caption_plans);
+
+        // Prime the first frame per tile BEFORE constructing the runtime (whose
+        // `new` seeds tick 0 to "now") and therefore before the output clock's
+        // first tick (#40 startup-hold fix). See [`Self::prime_bound_tiles`] for
+        // the bounded-wait rationale and the invariant-#1/#2 guarantees.
+        self.prime_bound_tiles(ts.as_ref());
+
+        // Build the runtime now (post-prime): `EngineRuntime::new` reads the seed
+        // from `ts` here, so tick 0 is due at this instant — the prime delay sits
+        // before the epoch and is never paid back as a burst.
+        let mut runtime = EngineRuntime::new(clock, drive, ts, pacer);
 
         // Collected composited canvases (Arc to avoid copies), in tick order,
         // each paired with the per-source lifecycle states sampled that tick (so
@@ -728,6 +738,61 @@ impl RealPipeline {
             outputs: output_lines,
             faltered,
         })
+    }
+
+    /// Bounded **prime-wait** before the output clock's first tick (#40): hold
+    /// the very first tick until every cell-bound source's [`TileStore`] has
+    /// published one frame — so tick 0 samples real content, not the cold
+    /// last-good / slate placeholder (the ~0.75 s "held first frame" startup
+    /// transient). Called after the ingest threads are spawned and *before*
+    /// [`EngineRuntime::new`] seeds tick 0, so the prime delay sits before the
+    /// epoch and is never paid back as a catch-up burst.
+    ///
+    /// CRITICAL invariant #1/#2: the wait is hard-capped at [`PRIME_WAIT_BUDGET`]
+    /// measured by `clock` (the same monotonic source the engine uses), so a
+    /// source that never produces — the deliberately-missing source, a
+    /// dead/wedged live input — can NOT block startup. Once the budget elapses
+    /// the caller proceeds anyway and that tile rides its `NO_SIGNAL` / last-good
+    /// placeholder (already produced by [`TileStore::read_at`]). It only delays
+    /// the first tick; the cadence and per-tick logic are unchanged and no input
+    /// ever paces the output. Bound sources only: an unbound source (no cell) is
+    /// never sampled, so it must not be waited on.
+    fn prime_bound_tiles(&self, clock: &dyn TimeSource) {
+        let bound_ids: std::collections::HashSet<&str> = self
+            .layout
+            .cells
+            .iter()
+            .filter_map(|c| c.source.as_deref())
+            .collect();
+        let prime_stores: Vec<&Arc<TileStore<Nv12Image>>> = self
+            .stores
+            .iter()
+            .filter(|(id, _)| bound_ids.contains(id.as_str()))
+            .map(|(_, store)| store)
+            .collect();
+        let prime = wait_for_prime(
+            &prime_stores,
+            PRIME_WAIT_BUDGET,
+            PRIME_WAIT_POLL,
+            clock,
+            std::thread::sleep,
+        );
+        if prime.all_primed {
+            tracing::debug!(
+                primed = prime.primed,
+                total = prime.total,
+                waited_ms = prime.waited.as_millis(),
+                "all tiles primed before first output tick"
+            );
+        } else {
+            tracing::warn!(
+                primed = prime.primed,
+                total = prime.total,
+                waited_ms = prime.waited.as_millis(),
+                "prime-wait budget elapsed with unprimed tile(s); starting clock anyway \
+                 (they ride NO_SIGNAL/last-good — invariant #1)"
+            );
+        }
     }
 
     /// The loudness (dBFS) to show for source `id` at output tick `i`. Reads that
@@ -1472,6 +1537,105 @@ impl Drop for IngestSupervisor {
     }
 }
 
+/// The outcome of the startup prime-wait: did every store prime, and how long
+/// the wait actually took. Returned for diagnostics/logging and asserted by the
+/// deterministic prime tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrimeOutcome {
+    /// How many of `total` stores were primed when the wait returned.
+    primed: usize,
+    /// The total number of bound stores waited on.
+    total: usize,
+    /// The wall-time the wait actually spent (clock-measured).
+    waited: Duration,
+    /// `true` if the wait returned because every store primed; `false` if it
+    /// returned because [`PRIME_WAIT_BUDGET`] elapsed first (a dead/slow source).
+    all_primed: bool,
+}
+
+/// Wait — **bounded** — for every store in `stores` to publish its first frame,
+/// so the output clock's very first tick samples primed tiles instead of the
+/// cold last-good placeholder (the #40 startup-hold fix).
+///
+/// The wait is the heart of why this is safe for invariant #1/#2: it polls
+/// `is_primed` every `poll` and returns the instant all stores are primed, but
+/// it is hard-capped at `budget` measured by the injected `clock`. A source that
+/// never produces a frame (the deliberately-missing source, a dead/wedged live
+/// input) therefore can NOT block startup — once `budget` elapses the wait
+/// returns with `all_primed = false` and the caller starts the clock anyway; the
+/// unprimed tiles ride their `NO_SIGNAL` / last-good placeholder, which
+/// [`TileStore::read_at`] already produces. It never paces the engine and never
+/// touches the cadence — it only delays the first tick by at most `budget`.
+///
+/// `clock` + `sleep` are injected so the whole wait is deterministically
+/// testable with no real sleeping: a test passes a [`ManualTimeSource`] and a
+/// `sleep` closure that advances it, so the budget/poll behaviour is exercised
+/// without wall-clock flakiness. Production passes a real monotonic clock and
+/// `std::thread::sleep`.
+fn wait_for_prime<S>(
+    stores: &[&Arc<TileStore<Nv12Image>>],
+    budget: Duration,
+    poll: Duration,
+    clock: &dyn TimeSource,
+    mut sleep: S,
+) -> PrimeOutcome
+where
+    S: FnMut(Duration),
+{
+    let total = stores.len();
+    let count_primed = |stores: &[&Arc<TileStore<Nv12Image>>]| -> usize {
+        stores.iter().filter(|s| s.is_primed()).count()
+    };
+
+    let start = clock.now_nanos();
+    let budget_ns = i64::try_from(budget.as_nanos()).unwrap_or(i64::MAX);
+
+    // No bound stores ⇒ nothing to prime; do not delay the clock at all.
+    if total == 0 {
+        return PrimeOutcome {
+            primed: 0,
+            total: 0,
+            waited: Duration::ZERO,
+            all_primed: true,
+        };
+    }
+
+    loop {
+        let primed = count_primed(stores);
+        let elapsed_ns = clock.now_nanos().saturating_sub(start).max(0);
+        if primed == total {
+            // Every input primed: start the clock immediately (typically well
+            // inside the budget).
+            return PrimeOutcome {
+                primed,
+                total,
+                waited: duration_from_nanos(elapsed_ns),
+                all_primed: true,
+            };
+        }
+        if elapsed_ns >= budget_ns {
+            // Budget spent: a source has not primed and we must NOT wait on it
+            // (invariant #1). Start the clock; its tile rides its placeholder.
+            return PrimeOutcome {
+                primed,
+                total,
+                waited: duration_from_nanos(elapsed_ns),
+                all_primed: false,
+            };
+        }
+        // Sleep at most the remaining budget so the last poll lands on the cap.
+        let remaining = budget_ns.saturating_sub(elapsed_ns);
+        let nap = poll.min(duration_from_nanos(remaining));
+        sleep(nap);
+    }
+}
+
+/// Build a [`Duration`] from a non-negative nanosecond count, saturating a
+/// negative input to zero (the guardrails deny `as` casts; this stays lossless).
+fn duration_from_nanos(nanos: i64) -> Duration {
+    Duration::from_nanos(u64::try_from(nanos.max(0)).unwrap_or(u64::MAX))
+}
+
 /// The pixel size of the cell that binds `source_id`, if any.
 fn cell_pixel_size(layout: &Layout, source_id: &str) -> Option<(u32, u32)> {
     let cell = layout
@@ -2141,6 +2305,23 @@ fn generate_test_clip(id: &str) -> Result<GeneratedClip, String> {
     }
     Ok(GeneratedClip(clip, dir))
 }
+
+/// The total budget the startup **prime-wait** ([`wait_for_prime`]) spends
+/// waiting for every bound source's [`TileStore`] to publish its first frame
+/// before the output clock's very first tick. Sized to cover normal decode +
+/// scale latency (open container, decode the first GOP, scale to the tile) on
+/// commodity hardware. CRITICAL (invariant #1/#2): this is a **hard upper
+/// bound** — a source that never produces (a dead/missing/wedged input) can NOT
+/// extend it; once it elapses the clock starts anyway and the unprimed tiles
+/// ride their `NO_SIGNAL` / last-good placeholder ([`TileStore::read_at`] already
+/// handles that). The prime-wait only ever *delays the first tick*; it never
+/// changes the cadence, the per-tick logic, or makes a tile pace the output.
+const PRIME_WAIT_BUDGET: Duration = Duration::from_millis(1_500);
+
+/// How often [`wait_for_prime`] re-checks whether every store is primed. Short
+/// so the clock starts promptly once the last input primes (typically well
+/// before [`PRIME_WAIT_BUDGET`]); a few ms keeps the poll cheap.
+const PRIME_WAIT_POLL: Duration = Duration::from_millis(5);
 
 /// Reconnect backoff for a live source whose `open_and_stream` returned (EOF or
 /// error). Capped so a flapping source retries promptly but does not hot-loop.
@@ -2847,5 +3028,132 @@ mod fault_detector_tests {
             Some(TileFault::Black),
             "black must outrank silence when both conditions hold"
         );
+    }
+}
+
+/// Deterministic tests for the startup **prime-wait** ([`wait_for_prime`]): the
+/// #40 fix that holds the very first output tick until every bound tile has
+/// published its first frame — but only for a bounded budget, so a dead source
+/// can never block startup (invariant #1/#2). The wait's clock + sleep are
+/// injected, so these exercise the budget/poll behaviour with NO real sleeping.
+#[cfg(test)]
+mod prime_wait_tests {
+    use std::cell::Cell as StdCell;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mosaic_compositor::pipeline::{CanvasColor, Nv12Image};
+    use mosaic_core::time::MediaTime;
+    use mosaic_engine::ManualTimeSource;
+    use mosaic_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    use super::{wait_for_prime, PRIME_WAIT_POLL};
+
+    /// A tiny NV12 frame to publish so a store reads primed.
+    fn frame() -> Nv12Image {
+        let tag = CanvasColor::default().output_tag();
+        Nv12Image::solid(2, 2, 16, 128, 128, tag).expect("solid nv12")
+    }
+
+    /// A fresh (cold, unprimed) tile store.
+    fn store(id: &str) -> Arc<TileStore<Nv12Image>> {
+        Arc::new(TileStore::new(
+            id.to_owned(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ))
+    }
+
+    #[test]
+    fn proceeds_immediately_when_all_stores_are_primed() {
+        // Every store has already published a frame: the wait must return at once
+        // (waited == 0), report all_primed, and never sleep.
+        let a = store("a");
+        let b = store("b");
+        a.publish(frame(), MediaTime::from_nanos(0));
+        b.publish(frame(), MediaTime::from_nanos(0));
+        let stores = [&a, &b];
+
+        let clock = ManualTimeSource::new();
+        let slept = StdCell::new(false);
+        let budget = Duration::from_millis(1_500);
+        let outcome = wait_for_prime(&stores, budget, PRIME_WAIT_POLL, &clock, |_| {
+            slept.set(true);
+        });
+
+        assert!(outcome.all_primed, "all-primed must report all_primed");
+        assert_eq!(outcome.primed, 2);
+        assert_eq!(outcome.total, 2);
+        assert_eq!(
+            outcome.waited,
+            Duration::ZERO,
+            "an already-primed set must not delay the first tick"
+        );
+        assert!(
+            !slept.get(),
+            "must not sleep when everything is already primed"
+        );
+    }
+
+    #[test]
+    fn proceeds_after_timeout_when_a_store_never_primes() {
+        // One store primes; the other NEVER does (the deliberately-missing /
+        // dead-source case). The wait MUST NOT hang: once the budget elapses it
+        // returns all_primed == false so the caller starts the clock anyway. The
+        // injected sleep advances the manual clock by exactly the requested nap,
+        // so the budget is reached deterministically with zero real sleeping.
+        let a = store("a");
+        let dead = store("dead");
+        a.publish(frame(), MediaTime::from_nanos(0));
+        // `dead` is intentionally never published into.
+        let stores = [&a, &dead];
+
+        let clock = ManualTimeSource::new();
+        let naps = StdCell::new(0_u32);
+        let budget = Duration::from_millis(1_500);
+        let outcome = wait_for_prime(&stores, budget, PRIME_WAIT_POLL, &clock, |nap| {
+            // Drive the SAME clock the wait measures against, so the budget is
+            // actually reached — this is what proves the loop terminates.
+            clock.advance(nap);
+            naps.set(naps.get().saturating_add(1));
+        });
+
+        assert!(
+            !outcome.all_primed,
+            "a never-priming source must NOT keep all_primed true (no infinite wait)"
+        );
+        assert_eq!(outcome.primed, 1, "only the live source primed");
+        assert_eq!(outcome.total, 2);
+        assert!(
+            outcome.waited >= budget,
+            "the wait must spend (at least) the full budget before giving up, got {:?}",
+            outcome.waited
+        );
+        // It must have actually polled/slept a bounded number of times to get
+        // there (budget / poll), proving it neither span hot nor hung.
+        assert!(naps.get() > 0, "must have polled at least once");
+        let max_naps = (budget.as_nanos() / PRIME_WAIT_POLL.as_nanos()).max(1) + 2;
+        assert!(
+            u128::from(naps.get()) <= max_naps,
+            "poll count {} must be bounded by ~budget/poll ({max_naps})",
+            naps.get()
+        );
+    }
+
+    #[test]
+    fn no_bound_stores_does_not_delay_the_clock() {
+        // A run with no cell-bound source (degenerate) must not wait at all.
+        let stores: [&Arc<TileStore<Nv12Image>>; 0] = [];
+        let clock = ManualTimeSource::new();
+        let outcome = wait_for_prime(
+            &stores,
+            Duration::from_millis(1_500),
+            PRIME_WAIT_POLL,
+            &clock,
+            |_| panic!("must never sleep with no stores"),
+        );
+        assert!(outcome.all_primed);
+        assert_eq!(outcome.total, 0);
+        assert_eq!(outcome.waited, Duration::ZERO);
     }
 }
