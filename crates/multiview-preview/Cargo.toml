@@ -34,7 +34,7 @@ jpeg-encoder = { version = "=0.6.0", default-features = false, features = ["std"
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 # Decoder used ONLY in tests to prove the bytes we emit are a real, decodable JPEG
 # of the expected geometry and colour — never linked into the shipped crate.
-zune-jpeg = { version = "0.4", default-features = false }
+zune-jpeg = { version = "0.5", default-features = false }
 
 [features]
 "default" = []
