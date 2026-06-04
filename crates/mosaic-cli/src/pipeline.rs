@@ -2746,12 +2746,6 @@ fn ingest_plan_for(
     })
 }
 
-/// Wire a source's native caption paths at build time: the HLS `WebVTT` rendition
-/// (a second isolated demux thread) and/or the in-container DVB-sub route (#36
-/// Phase 2, decoded on this source's own video-ingest thread). Registers any cue
-/// store (for the baker to sample) + reader plan, and stashes the dvbsub route on
-/// `plan`. Best-effort: a source whose captions cannot be resolved simply shows
-/// none — this never fails the build (invariants #1/#10).
 /// Resolve every source's HLS `WebVTT` caption plan concurrently (#48) and index
 /// them by source id for the build loop's cheap per-source lookup. The N
 /// network-bound master-fetches overlap off the serial build path. Only under
@@ -2766,6 +2760,13 @@ fn prefetch_caption_plans(
         .collect()
 }
 
+/// Wire a source's native caption paths at build time: the HLS `WebVTT` rendition
+/// (its concurrently-resolved plan, looked up from `prefetched`) and/or the
+/// in-container DVB-sub route (#36 Phase 2, decoded on this source's own
+/// video-ingest thread). Registers any cue store (for the baker to sample) +
+/// reader plan, and stashes the dvbsub route on `plan`. Best-effort: a source
+/// whose captions cannot be resolved simply shows none — this never fails the
+/// build (invariants #1/#10).
 #[cfg(feature = "overlay")]
 fn wire_source_captions(
     source: &Source,

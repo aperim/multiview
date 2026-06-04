@@ -261,7 +261,8 @@ fn resolve_caption_plans_with(
 
 /// Map every item in `items` through `f` on its OWN scoped thread (all at once,
 /// no serial blocking and no concurrency cap), collecting the `Some` results in
-/// arbitrary order. `f` must be `Sync` (it is shared across the threads) and its
+/// input order (the threads run concurrently but are joined in spawn order).
+/// `f` must be `Sync` (it is shared across the threads) and its
 /// output `Send`; empty input does no work. This is the concurrency primitive
 /// behind [`resolve_caption_plans`]: N independent, blocking, network-bound
 /// fetches overlap instead of serialising. A panicking closure is logged and its
