@@ -90,8 +90,8 @@ a protocol-specific options block. Canonical set:
   (mandatory). **Gotcha:** the interrupt callback and `timeout` do **not** bound synchronous DNS
   (`getaddrinfo`) — `timeouts.dns_watchdog_ms` drives a mandatory outer DNS watchdog
   ([ADR-R003](../decisions/ADR-R003.md)).
-- **Test source:** Frigate `webcam` (HEVC 1080p50, BT.709 limited, TCP) — see
-  [example-streams §3](../reference/example-streams.md).
+- **Test source:** an example RTSP camera (HEVC 1080p50, BT.709 limited, TCP) — see
+  [example-streams §RTSP](../reference/example-streams.md).
 
 ### 2.2 HLS
 
@@ -103,8 +103,8 @@ a protocol-specific options block. Canonical set:
   (`EXT-X-ENDLIST` / `EXT-X-PLAYLIST-TYPE`); treat ambiguous as live.
 - **Anti-burst pacing** (`hls.pace_to_wallclock`): the single most important HLS knob — see
   [§3](#3-the-input-pacer).
-- **Test sources:** ABC News (25 fps, untagged), CNN slate (29.97 fps, BT.709 limited),
-  Mux Big Buck Bunny (VOD-as-live, 44.1 kHz), Apple BipBop (fMP4/CMAF + WebVTT) —
+- **Test sources:** a synthetic 25 fps untagged feed, a synthetic 29.97 fps BT.709-limited
+  feed, Big Buck Bunny (public VOD-as-live, 44.1 kHz), Apple BipBop (fMP4/CMAF + WebVTT) —
   [example-streams](../reference/example-streams.md).
 
 ### 2.3 MPEG-TS (`ts`)
@@ -317,8 +317,9 @@ The per-source override sets **per-tile compositor kernel uniforms**; the actual
 YUV→RGB / linearise / convert happens in the compositor in the fixed colour-pipeline order, and
 frames stay NV12 until then ([conventions invariants 5, 8](../architecture/conventions.md)). Range is
 handled explicitly in-shader exactly once ([ADR-C004](../decisions/ADR-C004.md)). Untagged inputs
-(ABC News, Mux BBB) and odd mixed tags (Apple BipBop `smpte170m`/`bt709`) are the canonical test
-cases — see [example-streams](../reference/example-streams.md). Full colour design lives in the
+(a synthetic untagged feed, Big Buck Bunny) and odd mixed tags (Apple BipBop `smpte170m`/`bt709`)
+are the canonical test cases — see [example-streams](../reference/example-streams.md). Full colour
+design lives in the
 [Colour Management brief](../research/color-management.md).
 
 ---

@@ -79,10 +79,11 @@ output validity (§5). Backend parity against real GPU backends is a separate, p
 
 ## 3. Synthetic & test sources
 
-CI **must not** depend on third-party live streams — they are geo-restricted, rate-limited,
-copyrighted, and removed without notice (see the warning in
-[`example-streams.md`](../reference/example-streams.md)). The public streams (ABC News, CNN slate,
-Frigate cam, Mux BBB, Apple BipBop, Red Bull) are a **dev/demo gotcha matrix** only.
+CI **must not** depend on third-party live streams — they are rate-limited, copyrighted, and
+removed without notice (see the warning in
+[`example-streams.md`](../reference/example-streams.md)). The public/sample streams (the synthetic
+stand-ins, an example RTSP camera, Big Buck Bunny, Apple BipBop, Tears of Steel) are a **dev/demo
+gotcha matrix** only.
 
 For reproducible tests we generate sources with **lavfi** (`testsrc2`, `smptebars`, `sine`) and
 re-serve them through **MediaMTX** for protocol coverage. Both are documented with copy-paste recipes

@@ -13,8 +13,8 @@ and extract frames from the produced `program.ts`.
 
 | File | What it proves |
 |------|----------------|
-| `01-multiview-3x3-diverse-sources.png` | 9-tile multiview of **diverse real sources** (CNN HLS 29.97, ABC/SBS/10/9 DVB-T mpeg2 25, Red Bull HLS 30, Tears-of-Steel 24, Big Buck Bunny 24, synthetic) — all compositing together with per-tile labels + meters at the correct speed. |
-| `02-multiview-2x2.png` | 2×2 multiview (CNN / ABC TV / synthetic tone / **a deliberately-missing source showing NO SIGNAL**) — per-tile label, LIVE/NO-SIGNAL state flag, and audio meter. |
+| `01-multiview-3x3-diverse-sources.png` | 9-tile multiview of **diverse sources** (synthetic HLS 29.97, several synthetic DVB-T-style mpeg2 25, synthetic HLS 30, Tears-of-Steel 24, Big Buck Bunny 24, synthetic) — all compositing together with per-tile labels + meters at the correct speed. |
+| `02-multiview-2x2.png` | 2×2 multiview (two synthetic feeds / synthetic tone / **a deliberately-missing source showing NO SIGNAL**) — per-tile label, LIVE/NO-SIGNAL state flag, and audio meter. |
 | `03-timing-source-TC-1to1-at-2s.png` | The **timing fix**: a burned-timecode source tile reads `00:00:02.000` at output-time 2 s — i.e. source plays at exactly 1:1 with the output clock (the "ultra-fast-then-freeze" bug is gone). |
 | `04-captions-live-hls-webvtt.png` | **Native HLS WebVTT captions decoded live** from the Apple bipbop stream — the real cue `English subtitle 1 -Unforced- (00:00:01.000)` burned into the tile (no sidecar file). |
 | `05-captions-dvbsub-in-cue.png` / `06-captions-dvbsub-before-cue.png` | **Native DVB-sub (bitmap) captions** decoded from a broadcast MPEG-TS: the bitmap band is burned into the tile *during* its cue window (frame at t=2 s) and **absent before it** (t=0.4 s) — proving time-gated decode→burn-in. |
@@ -54,9 +54,9 @@ Verified results (RELEASE build, this dev container, CPU-only software path):
 
 | Check (overlays OFF) | Rendered (multiview) | Ground truth (ffmpeg direct) |
 |---|---|---|
-| Single high-motion tile (Red Bull HLS 30) | **199 / 249** frames in motion, render real-time (10.4 s / 10 s) | 197 / 249 |
+| Single high-motion tile (synthetic HLS 30) | **199 / 249** frames in motion, render real-time (10.4 s / 10 s) | 197 / 249 |
 | 3-tile mixed-fps (29.97 + 25 + 30) | **191 / 249** in motion, render real-time (10.8 s / 10 s), frame-0 luma **87** (real content, not the cold slate ≈ 16) | — |
-| 9-tile 720p (the 3×3 layout) | render **real-time (11.2 s / 10 s)**; centre tile faithfully tracks its source (`bcast_b`: static intro → motion later, **first-3s 2/75 → last-3s 75/75**, matching the source's own **0/75 → 36/75**) | source 36/209 |
+| 9-tile 720p (the 3×3 layout) | render **real-time (11.2 s / 10 s)**; centre tile faithfully tracks its source (`tile_center`: static intro → motion later, **first-3s 2/75 → last-3s 75/75**, matching the source's own **0/75 → 36/75**) | source 36/209 |
 
 Two real latent defects were found by this method and fixed (see
 [ADR-0022](../decisions/ADR-0022.md) and the [ADR-0021 correction](../decisions/ADR-0021.md#correction-2026-06-04--the-verified-11-by-eye-above-was-overlay-masked)):

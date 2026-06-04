@@ -1,13 +1,18 @@
-# examples/public-streams-2x2.toml — a 2x2 of REAL public streams.
+# examples/public-streams-2x2.toml — a 2x2 of synthetic + license-clean public samples.
 #
 # Deliberately heterogeneous to exercise the engine's normalization:
-#   - ABC News  : HLS, H.264, 25 fps (PAL),     UNTAGGED color  (AU geo)
-#   - CNN slate : HLS, H.264, 29.97 fps (NTSC),  BT.709 limited  (US geo)
-#   - Frigate   : RTSP, HEVC, 50 fps,            BT.709 limited
-#   - Mux BBB   : HLS, H.264, 60 fps,            untagged, 44.1 kHz audio
+#   - Synthetic untagged : built-in `test` source standing in for a 25 fps PAL,
+#                          UNTAGGED-color feed (the untagged-defaulting trap).
+#   - Synthetic BT.709   : built-in `test` source standing in for a 29.97 fps NTSC,
+#                          BT.709-limited feed.
+#   - RTSP camera        : RTSP, HEVC 50p, BT.709 limited — an EXAMPLE host
+#                          (rtsp://camera.example.net, RFC-2606 example domain).
+#   - Public BBB         : HLS, H.264 60p, untagged, 44.1 kHz audio — Big Buck Bunny
+#                          (a Blender open movie; license-clean public sample).
 #
-# Several streams are geo-restricted and may be unavailable. See
-# docs/reference/example-streams.md for details + offline synthetic alternatives.
+# The synthetic tiles need no network. The RTSP host is an example placeholder; swap
+# it for your own camera. See docs/reference/example-streams.md for the full gotcha
+# matrix and offline synthetic recipes that reproduce each colour/fps failure mode.
 schema_version = 1
 
 [canvas]
@@ -25,13 +30,12 @@ kind = "grid"
 columns = ["1fr", "1fr"]
 rows = ["1fr", "1fr"]
 gap = 8
-areas = ["abc cnn", "cam bbb"]
+areas = ["pal ntsc", "cam bbb"]
 
 [[sources]]
-id = "in_abc"
-display_name = "ABC News (AU)"
-kind = "hls"
-url = "https://samples.example.net/abc-news.m3u8"
+id = "in_pal"
+display_name = "Synthetic untagged (25p stand-in)"
+kind = "test"               # built-in synthetic pattern; no network needed
 [sources.color_override]
 # Untagged source: let detection apply the player-style default policy.
 primaries = "auto"
@@ -40,37 +44,36 @@ matrix = "auto"
 range = "auto"
 
 [[sources]]
-id = "in_cnn"
-display_name = "CNN slate (US)"
-kind = "hls"
-url = "https://news.example.net/hls/live/586495/cnngo/cnn_slate/VIDEO_0_3564000.m3u8"
+id = "in_ntsc"
+display_name = "Synthetic BT.709 limited (29.97p stand-in)"
+kind = "test"
 
 [[sources]]
 id = "in_cam"
-display_name = "Frigate webcam (HEVC 50p)"
+display_name = "RTSP camera (HEVC 50p, example host)"
 kind = "rtsp"
-url = "rtsp://gpu-test-box.example.net:8554/webcam"
+url = "rtsp://camera.example.net:8554/stream"
 [sources.rtsp]
 transport = "tcp"
 
 [[sources]]
 id = "in_bbb"
-display_name = "Big Buck Bunny (Mux)"
+display_name = "Big Buck Bunny (public sample)"
 kind = "hls"
 url = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
 
 [[cells]]
-id = "cell_abc"
-area = "abc"
+id = "cell_pal"
+area = "pal"
 fit = "contain"
 [cells.source]
-input_id = "in_abc"
+input_id = "in_pal"
 [[cells]]
-id = "cell_cnn"
-area = "cnn"
+id = "cell_ntsc"
+area = "ntsc"
 fit = "contain"
 [cells.source]
-input_id = "in_cnn"
+input_id = "in_ntsc"
 [[cells]]
 id = "cell_cam"
 area = "cam"

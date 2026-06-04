@@ -561,11 +561,11 @@ Pinned (→Class-2): `kind`, `video.codec/profile/level`, `pixel_format/bit_dept
 ### 3.7 Source TOML (config-as-code, mirrors multiview.toml)
 ```toml
 [[sources]]
-id = "gpu-test-box-syd2"
-display_name = "Frigate Sydney 2"
+id = "camera-1"
+display_name = "RTSP Camera 1"
 enabled = true
 kind = "rtsp"
-url = "rtsp://gpu-test-box.example.net:8554/webcam"
+url = "rtsp://camera.example.net:8554/stream"
 
 [sources.rtsp]
 transport = "tcp"

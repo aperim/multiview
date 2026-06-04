@@ -1,61 +1,62 @@
 # Example & Test Streams
 
-A curated catalog of live/VOD sources for **developing, demoing, and testing** Multiview. These
-double as a deliberately diverse **gotcha test matrix** — between them they exercise mismatched
-frame rates (25 / 29.92 / 29.97 / 30 / 50 / 60 fps), multiple codecs (H.264, HEVC), tagged vs
-untagged color, an oddball mixed-primaries tag, three audio sample rates (22.05 / 44.1 / 48 kHz),
-WebVTT subtitles, multivariant playlists, and both live and VOD.
+A curated catalog of synthetic and license-clean public sources for **developing, demoing, and
+testing** Multiview. These double as a deliberately diverse **gotcha test matrix** — between them
+they exercise mismatched frame rates (25 / 29.92 / 29.97 / 30 / 50 / 60 fps), multiple codecs
+(H.264, HEVC), tagged vs untagged color, an oddball mixed-primaries tag, three audio sample rates
+(22.05 / 44.1 / 48 kHz), WebVTT subtitles, multivariant playlists, and both live and VOD.
 
 > [!IMPORTANT]
-> **These third-party streams are for testing/development only.** They are operated by others,
-> may be **geo-restricted** (several are AU/US-only), rate-limited, or **removed without notice**,
-> and the broadcast ones (ABC, CNN, Red Bull) are **copyrighted**. Do not bundle, restream, or
-> redistribute their content. For reproducible CI use the **[synthetic sources](#synthetic--reproducible-sources)**
-> instead — they require no network and let you reproduce each failure mode deterministically.
+> **The third-party public streams below are for testing/development only.** They are operated by
+> others, may be rate-limited or **removed without notice**, and remain copyrighted by their
+> owners — do not bundle, restream, or redistribute their content. The **[synthetic sources](#synthetic--reproducible-sources)**
+> require no network and let you reproduce each failure mode deterministically, so prefer them for
+> CI and for anything reproducible. The open-movie samples (Big Buck Bunny, Tears of Steel) are
+> Blender Foundation Creative-Commons works and are fine to use.
 >
-> All metadata below was captured with `ffprobe` (FFmpeg 8.1.1) on 2026-06-02. Stream properties
-> can change at any time; re-verify with the [probe command](#re-verifying-a-stream).
+> Stream properties can change at any time; re-verify with the [probe command](#re-verifying-a-stream).
 
 ---
 
-## Project-provided streams
+## A diverse demo set
 
-These three were supplied as the canonical demo set. They make a great 3-up (or 2×2 with a fourth
-synthetic tile) because they differ on almost every axis.
+A good demo set differs on almost every axis (codec, fps, color tagging, audio rate) so the engine's
+normalization is exercised end-to-end. The pattern below — two synthetic tiles, one example RTSP
+camera, and one public open-movie sample — makes a self-contained 2×2 (it is what
+[`examples/public-streams-2x2.toml`](../../examples/public-streams-2x2.toml) ships) and degrades
+gracefully to a synthetic-only set with no network.
 
-### 1. ABC News (Australia) — HLS, live
+### 1. Synthetic untagged feed (25 fps PAL stand-in) — `test` / lavfi
 
-- **URL:** `https://samples.example.net/abc-news.m3u8`
-- **Protocol:** HLS (multivariant / master playlist), live
-- **Video:** H.264 **Main**, `yuv420p`, **25 fps (PAL)** — renditions **1024×576**, **640×360**, **512×288**
+- **Source:** the built-in `test` source, or a lavfi `testsrc2` pushed into a local server (see the
+  [synthetic recipes](#synthetic--reproducible-sources)).
+- **Video:** H.264-class, `yuv420p`, **25 fps (PAL)** — renditions e.g. **1024×576**, **640×360**
 - **Audio:** AAC-LC, **48 kHz**, stereo
-- **Extras:** **WebVTT subtitles**, timed-ID3 metadata
+- **Extras:** optional **WebVTT subtitles** when produced via a packager
 - **Color:** **untagged** (no primaries/transfer/matrix/range signalled) → the *untagged-input* trap
-- **Source:** Matt Huisman's free-to-air AU/NZ project (`i.example.net`). Likely **AU geo-restricted**.
 - **Exercises:** multivariant rendition selection · 25 fps → output-cadence resampling · untagged
   color defaulting · subtitle ingest (WebVTT) · ABR ladder.
 
-### 2. CNN "slate" — HLS, live
+### 2. Synthetic BT.709-limited feed (29.97 fps NTSC stand-in) — `test` / lavfi
 
-- **URL:** `https://news.example.net/hls/live/586495/cnngo/cnn_slate/VIDEO_0_3564000.m3u8`
-- **Protocol:** HLS (single media/variant playlist), live
-- **Video:** H.264 **Main**, `yuv420p`, **1280×720**, **29.97 fps (30000/1001)**
-- **Audio:** AAC-LC, **48 kHz**, stereo · timed-ID3
+- **Source:** the built-in `test` source, or a lavfi `smptebars` at `rate=30000/1001` tagged BT.709.
+- **Video:** H.264-class, `yuv420p`, **1280×720**, **29.97 fps (30000/1001)**
+- **Audio:** AAC-LC, **48 kHz**, stereo
 - **Color:** **fully tagged** — primaries `bt709`, transfer `bt709`, matrix `bt709`, range **`tv`** (limited)
-- **Notes:** a "slate" is standby/placeholder content, so it tends to be **always available** and visually
-  stable — handy as a steady reference tile. May be **US geo-restricted**. The given URL is a *variant*
-  (media) playlist, not a master.
+- **Notes:** a steady, always-available reference tile — useful as a stable baseline against the
+  PAL/60 sources.
 - **Exercises:** fractional NTSC **29.97 fps** vs the PAL/60 sources · correctly-tagged **BT.709 limited**
   baseline · single-variant ingest.
 
-### 3. Frigate `webcam` — RTSP, live
+### 3. Example RTSP camera (HEVC 1080p50) — RTSP, live
 
-- **URL:** `rtsp://gpu-test-box.example.net:8554/webcam`
-- **Protocol:** RTSP (use **TCP** transport), live; served by Frigate/go2rtc
+- **URL (example placeholder):** `rtsp://camera.example.net:8554/stream` (RFC-2606 example domain — swap
+  for your own camera or a [local MediaMTX](#local-rtsp--srt--mpeg-ts-loopback-mediamtx) loopback)
+- **Protocol:** RTSP (use **TCP** transport), live; e.g. served by an NVR / go2rtc
 - **Video:** **HEVC (H.265) Main**, `yuv420p`, **1920×1080**, **50 fps**
 - **Color:** primaries `bt709`, transfer `bt709`, matrix `bt709`, range **`tv`** (limited)
-- **Notes:** operator-owned NVR camera. RTSP has **no built-in jitter buffer**; reachability depends
-  on the network/VPN. Prefer `rtsp_transport=tcp` for reliability over the public internet.
+- **Notes:** RTSP has **no built-in jitter buffer**; reachability depends on the network/VPN. Prefer
+  `rtsp_transport=tcp` for reliability over the public internet.
 - **Exercises:** **HEVC** decode path · **50 fps** high-cadence source · 1080p tile downscale-on-decode
   (efficiency) · RTSP reconnect/supervision · TCP-vs-UDP transport.
 
@@ -72,20 +73,24 @@ synthetic tile) because they differ on almost every axis.
 | **Apple BipBop (fMP4/CMAF)** | `https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8` | H.264 High, up to 1920×1080 | **60** | AAC 48 kHz | untagged | **fMP4/CMAF** segments + **WebVTT** subs → exercises the fMP4 ingest path and subtitle rendition selection. |
 | **Akamai player samples** | `https://players.akamai.com/hls/` | BBB / Sintel / Tears of Steel | mixed | — | mixed | Page lists several stable VOD test streams (incl. 4K). Grab the `.m3u8` from the page. |
 
-### HLS — Live
+### HLS — Live (or live-like)
+
+There is no need to depend on any specific broadcast feed. For an "always-on, multivariant, 30 fps,
+untagged" live tile, run a synthetic source through a local packager (see the
+[synthetic recipes](#synthetic--reproducible-sources)) or point the ingest at a VOD sample in
+VOD-as-live mode. If you want a genuinely-public live HLS endpoint, the community catalogs below list
+many — pick any that is license-clean for your use.
 
 | Name | URL | Video | FPS | Color | Notes |
 |------|-----|-------|-----|-------|-------|
-| **ABC News (AU)** | `https://samples.example.net/abc-news.m3u8` | H.264 Main, ABR to 576p | 25 | untagged | See [above](#1-abc-news-australia--hls-live). AU geo. |
-| **CNN slate (US)** | `…/cnngo/cnn_slate/VIDEO_0_3564000.m3u8` | H.264 Main 720p | 29.97 | BT.709 limited | See [above](#2-cnn-slate--hls-live). US geo. |
-| **Red Bull TV** | `https://live.example.net/hls/live/590964/BoRB-AT/master.m3u8` | H.264, ABR | 30 | untagged | Genuine 24/7 live, generally geo-open. Multivariant + timed-ID3. |
-| **iptv-org** | `https://github.com/iptv-org/iptv` | — | — | — | Huge community M3U catalog of free FAST channels (thousands). Quality/uptime varies wildly — great for stress/fuzz testing ingest robustness. |
+| **Synthetic live (local)** | `http://127.0.0.1:8888/test/index.m3u8` | H.264 Main, ABR to 576p | 25 / 30 | untagged or tagged | Produced by pushing a lavfi source into a [local MediaMTX](#local-rtsp--srt--mpeg-ts-loopback-mediamtx) / packager. Reproducible, multivariant, no third party. |
+| **iptv-org** | `https://github.com/iptv-org/iptv` | — | — | — | Huge community M3U catalog of free FAST channels (thousands). Quality/uptime varies wildly — great for stress/fuzz testing ingest robustness. Check each channel's license/terms before use. |
 
 ### RTSP
 
 | Name | URL | Notes |
 |------|-----|-------|
-| **Frigate webcam** | `rtsp://gpu-test-box.example.net:8554/webcam` | Project camera, HEVC 1080p50. See [above](#3-gpu-test-box-webcam--rtsp-live). |
+| **Example camera (placeholder)** | `rtsp://camera.example.net:8554/stream` | RFC-2606 example domain — stands in for an HEVC 1080p50 NVR camera. See [above](#3-example-rtsp-camera-hevc-1080p50--rtsp-live). Swap for your own camera. |
 | **Wowza RTSP test** | `https://www.wowza.com/developer/rtsp-stream-test` | Looping test clip. The actual `rtsp://…` URL is **per-session/dynamic** — copy it from that page at test time. |
 | **rtsp.stream** | `https://rtsp.stream/` | Free public RTSP test service (sign up for a key; provides stable looping `rtsp://…` URLs). |
 | **Local MediaMTX (recommended)** | `rtsp://127.0.0.1:8554/test` | Most reliable for CI/dev — run your own. See [synthetic sources](#local-rtsp--srt--mpeg-ts-loopback-mediamtx). |
@@ -121,13 +126,13 @@ What each source lets you test. Aim to keep at least one stream per column in th
 
 | Stream | Codec | FPS | Color tags | Range | Audio Hz | Subs | Live | Multivariant |
 |--------|-------|-----|-----------|-------|----------|------|------|--------------|
-| ABC News | H.264 | **25** | untagged | — | 48k | **WebVTT** | ✅ | ✅ |
-| CNN slate | H.264 | **29.97** | BT.709 | tv | 48k | — | ✅ | — |
-| Frigate cam | **HEVC** | **50** | BT.709 | tv | — | — | ✅ | — |
+| Synthetic untagged 25p | H.264 | **25** | untagged | — | 48k | **WebVTT** | ✅ | ✅ |
+| Synthetic BT.709 29.97p | H.264 | **29.97** | BT.709 | tv | 48k | — | ✅ | — |
+| Example RTSP cam | **HEVC** | **50** | BT.709 | tv | — | — | ✅ | — |
 | Mux BBB | H.264 | **60** | untagged | — | **44.1k** | — | — | ✅ |
 | Apple BipBop TS | H.264 | **≈29.92** | **smpte170m/bt709 mix** | tv | **22.05k** | — | — | ✅ |
 | Apple BipBop fMP4 | H.264 | **60** | untagged | — | 48k | **WebVTT** | — | ✅ |
-| Red Bull TV | H.264 | 30 | untagged | — | 48k | — | ✅ | ✅ |
+| Synthetic live 30p | H.264 | 30 | untagged | — | 48k | — | ✅ | ✅ |
 
 Coverage achieved: **fps** {25, 29.92, 29.97, 30, 50, 60} · **codecs** {H.264, HEVC} · **color**
 {untagged, BT.709-limited, BT.601-primaries-with-709-transfer} · **audio** {22.05k, 44.1k, 48k} ·
@@ -144,13 +149,13 @@ bars; `sine` = audio tone.)
 ### Generate sources with *exact* frame rate + color tags
 
 ```bash
-# 25 fps PAL, UNTAGGED color (mimics ABC News) — tests untagged defaulting
+# 25 fps PAL, UNTAGGED color (the untagged-defaulting trap) — tests untagged defaulting
 ffmpeg -re -f lavfi -i "testsrc2=size=1024x576:rate=25" \
        -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
        -c:v libx264 -profile:v main -pix_fmt yuv420p -g 50 \
        -c:a aac -ar 48000 -f mpegts "udp://127.0.0.1:1234?pkt_size=1316"
 
-# 29.97 fps, correctly tagged BT.709 LIMITED (mimics CNN slate)
+# 29.97 fps, correctly tagged BT.709 LIMITED (a steady reference tile)
 ffmpeg -re -f lavfi -i "smptebars=size=1280x720:rate=30000/1001" \
        -vf "format=yuv420p,scale=out_range=tv" \
        -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv \
@@ -168,7 +173,7 @@ ffmpeg -re -f lavfi -i "smptebars=size=1280x720:rate=25" \
        -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range pc \
        -c:v libx264 -f mpegts "udp://127.0.0.1:1237?pkt_size=1316"
 
-# 50 fps HEVC 1080p (mimics the Frigate cam) — tests the HEVC path + downscale-on-decode
+# 50 fps HEVC 1080p (the example RTSP camera stand-in) — tests the HEVC path + downscale-on-decode
 ffmpeg -re -f lavfi -i "testsrc2=size=1920x1080:rate=50" \
        -c:v libx265 -pix_fmt yuv420p -f mpegts "udp://127.0.0.1:1238?pkt_size=1316"
 ```
