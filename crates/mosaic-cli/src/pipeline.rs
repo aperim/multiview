@@ -918,10 +918,8 @@ impl RealPipeline {
         .map_err(|e| PipelineError::Engine(e.to_string()));
 
         // The clock has stopped (bounded budget reached, or `stop` raised): tear
-        // ingest down deterministically (signal + join). `state_of` (which owns
-        // the hot sender) is dropped when `runtime` is dropped below, closing the
-        // hot queue → the consumer drains, fans the remainder, drops the per-sink
-        // senders → each sink sees end-of-program and finalises → join all.
+        // ingest down deterministically (signal + join), then close the egress and
+        // finalise. The hot queue is already closed by this point — see below.
         supervisor.shutdown();
         // The engine loop consumed the `state_of` closure (the ONLY owner of the
         // hot sender) when `run_for`/`run` returned above, so the hot queue is
