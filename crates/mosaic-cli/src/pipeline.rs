@@ -61,8 +61,9 @@
 //!   `gpl-codecs`. No FFI lives here — the crate stays `unsafe_code = forbid`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,68 @@ use mosaic_output::sink::{EncodeConfig, FileSink, SegmentSink, VideoFrameSource}
 /// The pipeline has no realtime consumers wired here, but the publisher still
 /// needs a positive ring (invariant #10).
 const EVENT_CAPACITY: usize = 64;
+
+/// Bounded capacity of the hot-loop → bake-consumer streaming queue under the
+/// **offline** ([`SendPolicy::BlockForExact`]) policy. A full queue
+/// back-pressures the *renderer* (legitimate — offline is not a live clock), so
+/// every tick is encoded exactly once (ADR-0025). Sized to keep a few NV12
+/// canvases in flight (memory is `O(cap)`, not `O(ticks)`).
+const OFFLINE_QUEUE_CAP: usize = 8;
+
+/// Bounded capacity of the hot-loop → bake-consumer streaming queue under the
+/// **live** ([`SendPolicy::DropOnOverload`]) policy. Kept small so a wedged
+/// encoder is detected and shed promptly; the hot loop `try_send`s and drops on
+/// `Full` so the output clock can never stall (inv #1/#10).
+const LIVE_QUEUE_CAP: usize = 4;
+
+/// Bounded capacity of each consumer → sink fan-out queue. The consumer drives
+/// these with a blocking `send` (it is off the hot path, so blocking there is
+/// allowed — it can only back-pressure the *consumer*, never the engine), so a
+/// slow sink paces the consumer rather than dropping a baked frame.
+const SINK_QUEUE_CAP: usize = 4;
+
+/// How the hot-loop projection hands each composited tick to the bake consumer
+/// over the bounded streaming queue (ADR-0025). The choice is the single
+/// load-bearing split between the offline render and the live daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendPolicy {
+    /// **Offline** (`run_for`, `--ticks N`): a blocking `send`. A full queue
+    /// back-pressures the renderer until the consumer drains, so every tick is
+    /// baked + encoded exactly once and a file is never silently truncated.
+    /// Pacing the *offline* renderer to encode speed is legitimate (it is not a
+    /// live output clock), so this does not risk invariant #1/#10.
+    BlockForExact,
+    /// **Live** (`run_until`, Ctrl-C daemon): a non-blocking `try_send`. On a
+    /// full queue the incoming frame is dropped and counted — the hot loop never
+    /// blocks, so the output clock keeps ticking (inv #1) and a slow consumer can
+    /// never back-pressure the engine (inv #10). Overload is visible (`dropped`),
+    /// never hidden.
+    DropOnOverload,
+}
+
+impl SendPolicy {
+    /// The bounded streaming-queue capacity this policy runs with.
+    const fn queue_cap(self) -> usize {
+        match self {
+            Self::BlockForExact => OFFLINE_QUEUE_CAP,
+            Self::DropOnOverload => LIVE_QUEUE_CAP,
+        }
+    }
+}
+
+/// The egress plan for one [`RealPipeline::drive_streaming`] call: the send
+/// policy, the per-sink runners, and an optional hot-loop tick observer (test
+/// only). Bundled so the streaming core keeps a small argument list.
+struct StreamPlan {
+    /// How the hot loop hands ticks to the consumer (block vs drop-on-overload).
+    policy: SendPolicy,
+    /// One runner per output sink, each driving its sink to completion off-hot.
+    runners: Vec<SinkRunner>,
+    /// Incremented once per emitted tick on the hot loop when present, so a test
+    /// can prove a frame was encoded while the engine was still ticking. `None`
+    /// on the production paths.
+    hot_tick_observer: Option<Arc<AtomicU64>>,
+}
 
 /// Errors building or running the real libav\* pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -152,7 +215,16 @@ pub struct PipelineReport {
     pub encoder: String,
     /// Per-output artifacts written, one line each (path + encoded packet count).
     pub outputs: Vec<String>,
-    /// Whether the output ever faltered (`frames != ticks`). Must be `false`.
+    /// How many composited frames were **dropped** before reaching the
+    /// bake/encode consumer because the bounded streaming queue was full under
+    /// the live (`run_until`) drop-on-overload policy (ADR-0025). Offline runs
+    /// (`run_for`, block-for-exact) back-pressure the renderer instead of
+    /// dropping, so this is `0` for them — an offline file is never silently
+    /// truncated.
+    pub dropped: u64,
+    /// Whether the output ever faltered. Defined honestly as `dropped > 0`
+    /// (ADR-0025): a live run that shed frames under encoder overload faltered;
+    /// an offline render (which cannot drop) only ever reports `false`.
     pub faltered: bool,
 }
 
@@ -165,8 +237,13 @@ impl PipelineReport {
         } else {
             "never faltered"
         };
+        let dropped = if self.dropped > 0 {
+            format!("; dropped {} under encoder overload", self.dropped)
+        } else {
+            String::new()
+        };
         let mut lines = vec![format!(
-            "run (ffmpeg): {} frame(s) at {}/{} fps on {}x{}; encoder {}; output {}",
+            "run (ffmpeg): {} frame(s) at {}/{} fps on {}x{}; encoder {}; output {}{}",
             self.frames,
             self.cadence.num,
             self.cadence.den,
@@ -174,6 +251,7 @@ impl PipelineReport {
             self.canvas_height,
             self.encoder,
             verdict,
+            dropped,
         )];
         for out in &self.outputs {
             lines.push(format!("  - {out}"));
@@ -558,10 +636,18 @@ impl RealPipeline {
     /// sink fails. Input exhaustion is **not** an error: a source past its last
     /// frame holds its last-good frame, so the output keeps emitting on cadence.
     pub async fn run_for(&mut self, max_ticks: u64) -> Result<PipelineReport, PipelineError> {
-        let time = Arc::new(MonotonicTimeSource::new());
+        let time: Arc<dyn TimeSource> = Arc::new(MonotonicTimeSource::new());
         let stop = StopSignal::new();
-        self.drive(time, RealtimePacer, &stop, Some(max_ticks))
-            .await
+        // Offline render: block-for-exact so every tick is encoded (exact N).
+        let plan = StreamPlan {
+            policy: SendPolicy::BlockForExact,
+            runners: self.build_sink_runners(),
+            hot_tick_observer: None,
+        };
+        let out = self
+            .drive_streaming(time, RealtimePacer, &stop, Some(max_ticks), plan)
+            .await?;
+        Ok(out.report)
     }
 
     /// Run the engine **until `stop`** under the realtime pacer (the binary wires
@@ -571,19 +657,124 @@ impl RealPipeline {
     ///
     /// See [`RealPipeline::run_for`].
     pub async fn run_until(&mut self, stop: &StopSignal) -> Result<PipelineReport, PipelineError> {
-        let time = Arc::new(MonotonicTimeSource::new());
-        self.drive(time, RealtimePacer, stop, None).await
+        let time: Arc<dyn TimeSource> = Arc::new(MonotonicTimeSource::new());
+        // Live daemon: drop-on-overload so a wedged encoder can never stall the
+        // output clock (inv #1) or back-pressure the engine (inv #10).
+        let plan = StreamPlan {
+            policy: SendPolicy::DropOnOverload,
+            runners: self.build_sink_runners(),
+            hot_tick_observer: None,
+        };
+        let out = self
+            .drive_streaming(time, RealtimePacer, stop, None, plan)
+            .await?;
+        Ok(out.report)
     }
 
-    /// Drive the engine's protected output core for the bounded run, collecting
-    /// one composited canvas per tick, then encode + mux all outputs.
-    async fn drive<P: Pacer>(
+    /// Build one [`SinkRunner`] per configured runnable output. Each runner
+    /// drives the **existing, tested** `mosaic_output` sink's `run()` verbatim
+    /// over a [`StreamingFrameSource`] that pulls baked NV12 canvases off that
+    /// sink's bounded fan-out channel — so a sink encodes the program as it is
+    /// produced (ADR-0025) rather than after the whole run. Taking the outputs by
+    /// value here moves them out of `self`, so a second `drive_streaming` call
+    /// simply has no sinks (the run produces no further artifacts) rather than
+    /// double-running a sink.
+    fn build_sink_runners(&mut self) -> Vec<SinkRunner> {
+        let outputs = std::mem::take(&mut self.outputs);
+        outputs
+            .into_iter()
+            .map(|output| -> SinkRunner {
+                Box::new(move |rx: Receiver<Arc<Nv12Image>>| run_one_output(output, rx))
+            })
+            .collect()
+    }
+
+    /// **Test seam** (ADR-0025): drive the streaming bake→encode→fan-out path
+    /// with an injected time source + pacer and **fake** sink runners, returning
+    /// the report plus the streaming observability (peak queue occupancy, cap).
+    ///
+    /// This exposes the exact same machinery `run_for`/`run_until` use — the
+    /// bounded hot-loop → consumer queue under `policy`, the single off-hot-path
+    /// bake consumer, and the per-sink fan-out — but lets a test inject a slow /
+    /// blocked / counting sink and a [`ManualTimeSource`](mosaic_engine::ManualTimeSource)
+    /// so the concurrency contract (bounded memory, no stall, exact-N offline,
+    /// streaming-not-batch) is asserted without a real encoder or `ffprobe`.
+    ///
+    /// `hot_tick_observer`, if supplied, is incremented once per emitted tick on
+    /// the hot loop, so a fake sink can read it to prove a frame was encoded
+    /// while the engine was still ticking (streaming, not batch).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PipelineError`] if the clock/engine reject the canvas, the
+    /// bake fails, or a sink runner returns an error.
+    pub async fn drive_streaming_for_test<P: Pacer>(
         &mut self,
-        time: Arc<MonotonicTimeSource>,
+        params: StreamTestParams<P>,
+        stop: &StopSignal,
+    ) -> Result<StreamTestResult, PipelineError> {
+        let StreamTestParams {
+            time,
+            pacer,
+            max_ticks,
+            policy,
+            runners,
+            hot_tick_observer,
+        } = params;
+        let runners: Vec<SinkRunner> = runners
+            .into_iter()
+            .map(|r| -> SinkRunner {
+                Box::new(move |rx| {
+                    let outcome = r(rx);
+                    Ok(SinkRunOutcome {
+                        line: format!("test sink: {} frame(s)", outcome.frames),
+                        playlist: None,
+                        frames: outcome.frames,
+                    })
+                })
+            })
+            .collect();
+        let capacity = policy.queue_cap();
+        let plan = StreamPlan {
+            policy,
+            runners,
+            hot_tick_observer,
+        };
+        let out = self
+            .drive_streaming(time, pacer, stop, max_ticks, plan)
+            .await?;
+        Ok(StreamTestResult {
+            report: out.report,
+            peak_occupancy: out.peak_occupancy,
+            capacity,
+            sink_frames: out.sink_frames,
+        })
+    }
+
+    /// The streaming core shared by `run_for`/`run_until`/the test seam: spawn the
+    /// per-sink fan-out threads + the single bake consumer, drive the engine's
+    /// protected output core (one composited canvas per tick), stream each tick
+    /// to the consumer over a bounded queue (per `policy`), and on teardown drain
+    /// + finalise every sink. Memory is `O(queue)` for any run length (ADR-0025).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PipelineError`] if the clock/engine reject the canvas, the
+    /// bake consumer fails, or a sink runner returns an error.
+    #[allow(clippy::too_many_lines)]
+    async fn drive_streaming<P: Pacer>(
+        &mut self,
+        time: Arc<dyn TimeSource>,
         pacer: P,
         stop: &StopSignal,
         max_ticks: Option<u64>,
-    ) -> Result<PipelineReport, PipelineError> {
+        plan: StreamPlan,
+    ) -> Result<DriveStreamOutcome, PipelineError> {
+        let StreamPlan {
+            policy,
+            runners,
+            hot_tick_observer,
+        } = plan;
         let clock =
             OutputClock::new(self.cadence).map_err(|e| PipelineError::Clock(e.to_string()))?;
         let drive = CompositorDrive::new(
@@ -604,8 +795,8 @@ impl RealPipeline {
         // (the engine only ever *samples* the lock-free stores — invariant #10)
         // and it is torn down (stop + join) when this scope ends, so a bounded
         // run reliably stops the clock AND the ingest (invariant #1). Taking the
-        // plans by value means a second `drive` call simply ingests nothing
-        // (the stores hold their last frames / slate) rather than double-spawning.
+        // plans by value means a second call simply ingests nothing (the stores
+        // hold their last frames / slate) rather than double-spawning.
         let plans = std::mem::take(&mut self.ingest_plans);
         // Native caption readers exist only under `overlay` (they feed the
         // per-tile burn-in renderer); without it there are none.
@@ -621,69 +812,90 @@ impl RealPipeline {
         // the bounded-wait rationale and the invariant-#1/#2 guarantees.
         self.prime_bound_tiles(ts.as_ref());
 
+        // Spawn the per-sink fan-out threads + the single bake consumer thread
+        // BEFORE the engine loop, so a frame produced this tick is baked +
+        // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
+        // The consumer owns a Send `BakeContext` and builds its own (non-Send)
+        // overlay baker from it; the bake math is identical to the old post-loop
+        // path, only the call site moved off the hot loop.
+        let bake_ctx = self.bake_context();
+        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy);
+
         // Build the runtime now (post-prime): `EngineRuntime::new` reads the seed
         // from `ts` here, so tick 0 is due at this instant — the prime delay sits
         // before the epoch and is never paid back as a burst.
         let mut runtime = EngineRuntime::new(clock, drive, ts, pacer);
 
-        // Collected composited canvases (Arc to avoid copies), in tick order,
-        // each paired with the per-source lifecycle states sampled that tick (so
-        // the off-hot-path per-tile overlay flag reflects the real tile state).
-        let collected: Arc<Mutex<Vec<CollectedTick>>> = Arc::new(Mutex::new(Vec::new()));
+        // The hot-loop drop counter (live drop-on-overload) and the queue
+        // high-watermark probe. Both are wait-free atomics shared with the
+        // consumer; neither can back-pressure the engine (inv #10).
+        let dropped = Arc::new(AtomicU64::new(0));
+        let in_flight = Arc::clone(&egress.in_flight);
+        let peak_occupancy = Arc::clone(&egress.peak_occupancy);
 
-        // The projection runs once per tick on the hot loop. It snapshots the
-        // composited canvas + per-source states into the collection — cheap,
-        // panic-free, and never blocks the engine (the collection lock is held
-        // only for a push; invariant #10 is not at risk because this is a bounded
-        // offline collection, not a realtime consumer that could back-pressure a
-        // live engine). Frame *advancement* is no longer done here: the ingest
-        // threads publish into the stores asynchronously, and the drive loop
-        // SAMPLES the latest-good frame per tick (inputs sampled, never pacing —
-        // invariant #1).
-        let collect = Arc::clone(&collected);
-        // Snapshot the per-source active caption lines AT THIS TICK by sampling
-        // each source's cue store at the frame's pts, on the hot loop alongside
-        // the canvas. This is the correct point to sample a bounded drop-oldest
-        // store: the off-hot-path bake runs only after the whole run, by which
-        // time early cues would have been evicted from the small live window — so
-        // we capture the cue active right now and stash it with this tick. The
-        // sample is a pure lock-free read; it never paces or stalls the engine
-        // (invariants #1/#10). Only under `overlay` (the burn-in renderer).
-        #[cfg(feature = "overlay")]
-        let caption_stores = self.caption_stores.clone();
+        let hot_dropped = Arc::clone(&dropped);
         // The per-tile content-fault detector: shares (by `Arc`) the SAME
         // lock-free per-source last-good stores the engine samples, plus the
-        // build-time per-source meter timeline (for silence). Each tick it
-        // SAMPLES each tile's last-good luma + meter and folds black/freeze/
-        // silence through per-source dwell/hysteresis. Sampling-only and
-        // non-blocking: it can neither pace the output (inv #1) nor back-pressure
-        // the engine (inv #10). Only built under `overlay` (the badge renderer).
+        // build-time per-source meter timeline (for silence). Sampling-only and
+        // non-blocking. Only built under `overlay` (the badge renderer).
+        #[cfg(feature = "overlay")]
+        let caption_stores = self.caption_stores.clone();
         #[cfg(feature = "overlay")]
         let mut fault_detector = FaultDetector::new(
             self.stores.clone(),
             self.meter_db_timelines.clone(),
             self.cadence,
         );
+        // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
+        // state (kept here on the hot loop — the bounded cue store holds only a
+        // small live window, so it must be sampled now, not after the run), clones
+        // the canvas into one `Arc` (no more than today), builds a `StreamItem`,
+        // and hands it to the bake consumer over the bounded queue per `policy`:
+        // blocking send offline (exact-N back-pressure on the renderer), wait-free
+        // `try_send` + drop-and-count live (the engine never blocks — inv #1/#10).
         let state_of = move |frame: &CompositedFrame| -> TickState {
             #[cfg(feature = "overlay")]
             let captions = sample_caption_stores(&caption_stores, frame.pts());
             #[cfg(feature = "overlay")]
             let caption_bitmaps = sample_caption_bitmaps(&caption_stores, frame.pts());
-            // Sample + classify each tile's content fault for THIS tick (a pure
-            // lock-free read of the stores; fail-safe to no-fault on any error).
             #[cfg(feature = "overlay")]
             let faults = fault_detector.sample(frame.pts(), frame.tick.index, &frame.source_states);
-            if let Ok(mut sink) = collect.lock() {
-                sink.push(CollectedTick {
-                    canvas: Arc::new(frame.canvas.clone()),
-                    source_states: frame.source_states.clone(),
-                    #[cfg(feature = "overlay")]
-                    captions,
-                    #[cfg(feature = "overlay")]
-                    caption_bitmaps,
-                    #[cfg(feature = "overlay")]
-                    faults,
-                });
+            if let Some(obs) = hot_tick_observer.as_ref() {
+                obs.fetch_add(1, Ordering::Release);
+            }
+            let item = StreamItem {
+                canvas: Arc::new(frame.canvas.clone()),
+                tick_index: frame.tick.index,
+                #[cfg(feature = "overlay")]
+                source_states: frame.source_states.clone(),
+                #[cfg(feature = "overlay")]
+                captions,
+                #[cfg(feature = "overlay")]
+                caption_bitmaps,
+                #[cfg(feature = "overlay")]
+                faults,
+            };
+            match policy {
+                SendPolicy::BlockForExact => {
+                    // A blocking send back-pressures the OFFLINE renderer (not a
+                    // live clock) until the consumer drains — exact-N, never drops.
+                    // Disconnect only happens if the consumer died; nothing to do.
+                    if hot_tx.send(item).is_ok() {
+                        bump_occupancy(&in_flight, &peak_occupancy);
+                    }
+                }
+                SendPolicy::DropOnOverload => match hot_tx.try_send(item) {
+                    Ok(()) => bump_occupancy(&in_flight, &peak_occupancy),
+                    Err(TrySendError::Full(_)) => {
+                        // Shed and COUNT — never block (inv #1/#10).
+                        hot_dropped.fetch_add(1, Ordering::Release);
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        // The consumer ended (it cannot, mid-run, in normal
+                        // operation); count as a drop and keep ticking.
+                        hot_dropped.fetch_add(1, Ordering::Release);
+                    }
+                },
             }
             TickState {
                 tick: frame.tick.index,
@@ -706,37 +918,42 @@ impl RealPipeline {
         .map_err(|e| PipelineError::Engine(e.to_string()));
 
         // The clock has stopped (bounded budget reached, or `stop` raised): tear
-        // ingest down deterministically (signal + join) before reading the
-        // collected frames. `drop(supervisor)` would also do this, but doing it
-        // explicitly keeps the teardown ordering legible and lets a join error
-        // surface in the log rather than being swallowed in a destructor.
+        // ingest down deterministically (signal + join). `state_of` (which owns
+        // the hot sender) is dropped when `runtime` is dropped below, closing the
+        // hot queue → the consumer drains, fans the remainder, drops the per-sink
+        // senders → each sink sees end-of-program and finalises → join all.
         supervisor.shutdown();
+        // The engine loop consumed the `state_of` closure (the ONLY owner of the
+        // hot sender) when `run_for`/`run` returned above, so the hot queue is
+        // already closed → the bake consumer's `recv()` has seen end-of-input,
+        // drains the queue, fans the remainder, and drops the per-sink senders →
+        // each sink sees its channel close and finalises (writes its trailer).
+        // Dropping the runtime here only releases the engine's own resources.
+        drop(runtime);
 
         let outcome = outcome?;
 
-        let ticks = match collected.lock() {
-            Ok(g) => g.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        let collected_count = u64::try_from(ticks.len()).unwrap_or(u64::MAX);
-        let faltered = collected_count != outcome.ticks;
+        // Join the bake consumer + sink threads, folding their outcome. This is
+        // where the trailers are written (the sinks' own `run()` finalisation).
+        let egress_out = egress.join()?;
 
-        // Bake configured per-tile overlays into the collected program OFF the hot
-        // path (the protected output core has already emitted these frames). When
-        // the `overlay` feature is off this is a no-op identity returning the bare
-        // canvases.
-        let frames = self.bake_overlays(ticks)?;
-
-        let output_lines = self.encode_outputs(&frames)?;
-
-        Ok(PipelineReport {
+        let dropped_count = dropped.load(Ordering::Acquire);
+        let report = PipelineReport {
             frames: outcome.ticks,
             cadence: self.cadence,
             canvas_width: self.layout.canvas.width,
             canvas_height: self.layout.canvas.height,
             encoder: self.encoder.name.clone(),
-            outputs: output_lines,
-            faltered,
+            outputs: egress_out.lines,
+            // Honest falter (ADR-0025): a live run that shed frames faltered;
+            // offline never drops, so it never falters here.
+            dropped: dropped_count,
+            faltered: dropped_count > 0,
+        };
+        Ok(DriveStreamOutcome {
+            report,
+            peak_occupancy: egress_out.peak_occupancy,
+            sink_frames: egress_out.sink_frames,
         })
     }
 
@@ -795,45 +1012,6 @@ impl RealPipeline {
         }
     }
 
-    /// The loudness (dBFS) to show for source `id` at output tick `i`. Reads that
-    /// source's own per-tick timeline derived at build time; falls back to the
-    /// meter floor ([`mosaic_audio::Ballistics::FLOOR_DB`]) when the source has no
-    /// decodable audio, so a silent / audio-free tile shows an empty bar rather
-    /// than a fabricated constant.
-    #[cfg(feature = "overlay")]
-    fn meter_db_for(&self, id: &str, i: usize) -> f64 {
-        match self.meter_db_timelines.get(id) {
-            Some(timeline) => timeline
-                .get(i)
-                .copied()
-                .or_else(|| timeline.last().copied())
-                .unwrap_or(mosaic_audio::Ballistics::FLOOR_DB),
-            None => mosaic_audio::Ballistics::FLOOR_DB,
-        }
-    }
-
-    /// The legacy `--subtitles` **sidecar** caption lines active for source `id`
-    /// at output instant `pts`, if `id` is the sidecar's target source
-    /// ([`Self::sidecar_target`]).
-    ///
-    /// The sidecar track is fully in memory (no eviction), so it is sampled here
-    /// in the off-hot-path bake rather than per-tick. Native HLS `WebVTT` cues
-    /// are sampled per-tick on the hot loop instead (the cue store is a small
-    /// live window), and merged ahead of this so both families share ONE per-tile
-    /// burn-in path. A pure read; it never paces or stalls anything (#1/#10).
-    #[cfg(feature = "overlay")]
-    fn sidecar_caption_lines(&self, id: &str, pts: MediaTime) -> Option<Vec<String>> {
-        if self.sidecar_target.as_deref() != Some(id) {
-            return None;
-        }
-        let cue = self.subtitles.as_ref().and_then(|t| t.active_cue(pts))?;
-        if cue.lines.is_empty() {
-            None
-        } else {
-            Some(cue.lines.clone())
-        }
-    }
-
     /// Build the per-tile [`TileSpec`](crate::overlays::TileSpec) list from the
     /// solved layout's cells: one entry per source-bound cell, carrying the cell's
     /// pixel rectangle and the source's display label.
@@ -862,157 +1040,200 @@ impl RealPipeline {
         specs
     }
 
-    /// Bake the configured **per-tile** overlays into each collected program
-    /// frame, off the hot path. With the `overlay` feature compiled in this
-    /// rasterizes, for each layout cell, an input label + the source's own dB
-    /// meter + a state/fault flag (plus the program clock + subtitle cue) and
-    /// blends them into the NV12 frame via the compositor sub-pass; without it the
-    /// bare canvases pass through unchanged.
+    /// Extract the **`Send`** bake context the off-hot-path consumer thread owns
+    /// (ADR-0025). The consumer builds its own (non-`Send`) [`OverlayBaker`] from
+    /// this on its thread; only the plain owned data (tile specs, per-source meter
+    /// timelines, sidecar track + target, analog clock, canvas color, cadence)
+    /// crosses the thread boundary — the bake math is unchanged, only its call
+    /// site moves off the hot loop. With the `overlay` feature off the context is
+    /// just the canvas color + cadence (the bake is an identity pass-through).
+    #[cfg(feature = "overlay")]
+    fn bake_context(&self) -> BakeContext {
+        BakeContext {
+            tile_specs: self.tile_specs(),
+            meter_db_timelines: self.meter_db_timelines.clone(),
+            subtitles: self.subtitles.clone(),
+            sidecar_target: self.sidecar_target.clone(),
+            analog_clock: self.analog_clock,
+            canvas_color: self.canvas_color,
+            cadence: self.cadence,
+        }
+    }
+
+    /// The `Send` bake context with the `overlay` feature off: only the data the
+    /// identity bake needs to pass the canvas through and stamp its media time.
+    #[cfg(not(feature = "overlay"))]
+    #[allow(clippy::unused_self)]
+    fn bake_context(&self) -> BakeContext {
+        BakeContext {}
+    }
+}
+
+/// The `Send` per-frame bake context the streaming consumer thread owns
+/// (ADR-0025). It carries exactly the owned data the off-hot-path bake reads;
+/// the consumer builds its own non-`Send` [`OverlayBaker`] from it once and
+/// rasterises one frame per received [`StreamItem`], keeping the bake math
+/// identical to the old post-loop batch path.
+struct BakeContext {
+    /// The per-tile overlay placements (cell rect + label per source-bound cell).
+    #[cfg(feature = "overlay")]
+    tile_specs: Vec<crate::overlays::TileSpec>,
+    /// Build-time per-source per-tick loudness timelines (dBFS) for the meters.
+    #[cfg(feature = "overlay")]
+    meter_db_timelines: std::collections::HashMap<String, Vec<f64>>,
+    /// The optional legacy `--subtitles` sidecar track (burned into its target).
+    #[cfg(feature = "overlay")]
+    subtitles: Option<mosaic_overlay::subtitle::CueTrack>,
+    /// The source id the sidecar burns into (the first source-bound cell).
+    #[cfg(feature = "overlay")]
+    sidecar_target: Option<String>,
+    /// An optional analog clock face placement.
+    #[cfg(feature = "overlay")]
+    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    /// The fixed canvas color (for the overlay blend + output tag).
+    #[cfg(feature = "overlay")]
+    canvas_color: CanvasColor,
+    /// The fixed output cadence (for the per-frame media time).
+    #[cfg(feature = "overlay")]
+    cadence: Rational,
+}
+
+impl BakeContext {
+    /// The loudness (dBFS) to show for source `id` at output tick `i` (mirrors
+    /// the old `RealPipeline::meter_db_for`): that source's own per-tick build-time
+    /// timeline, falling back to the meter floor for an audio-free source.
+    #[cfg(feature = "overlay")]
+    fn meter_db_for(&self, id: &str, i: usize) -> f64 {
+        match self.meter_db_timelines.get(id) {
+            Some(timeline) => timeline
+                .get(i)
+                .copied()
+                .or_else(|| timeline.last().copied())
+                .unwrap_or(mosaic_audio::Ballistics::FLOOR_DB),
+            None => mosaic_audio::Ballistics::FLOOR_DB,
+        }
+    }
+
+    /// The legacy `--subtitles` sidecar lines active for source `id` at `pts` if
+    /// `id` is the sidecar target (mirrors the old `sidecar_caption_lines`).
+    #[cfg(feature = "overlay")]
+    fn sidecar_caption_lines(&self, id: &str, pts: MediaTime) -> Option<Vec<String>> {
+        if self.sidecar_target.as_deref() != Some(id) {
+            return None;
+        }
+        let cue = self.subtitles.as_ref().and_then(|t| t.active_cue(pts))?;
+        if cue.lines.is_empty() {
+            None
+        } else {
+            Some(cue.lines.clone())
+        }
+    }
+}
+
+/// The non-`Send` overlay rasteriser the consumer thread builds once from a
+/// [`BakeContext`] and reuses to bake each frame. With the `overlay` feature off
+/// this is a zero-field identity baker (the canvas passes through unchanged).
+#[cfg(feature = "overlay")]
+struct StreamBaker {
+    baker: crate::overlays::OverlayBaker,
+    canvas_color: CanvasColor,
+    cadence: Rational,
+    meter: BakeContext,
+}
+
+#[cfg(not(feature = "overlay"))]
+struct StreamBaker;
+
+#[cfg(feature = "overlay")]
+impl StreamBaker {
+    /// Build the rasteriser from the owned context, on the consumer thread.
     ///
     /// # Errors
-    ///
-    /// Returns [`PipelineError::Engine`] if the overlay baker or sub-pass rejects
-    /// the canvas (font load / unresolved color).
-    // reason: the `not(feature)` sibling consumes `ticks` by value (identity
-    // pass-through), so both arms share one by-value signature for the caller.
-    #[cfg(feature = "overlay")]
-    #[allow(clippy::needless_pass_by_value)]
-    fn bake_overlays(
-        &self,
-        ticks: Vec<CollectedTick>,
-    ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
-        use mosaic_compositor::overlay::apply_overlays_to_nv12;
-
+    /// Returns [`PipelineError::Engine`] if the bundled fonts fail to load.
+    fn new(ctx: BakeContext) -> Result<Self, PipelineError> {
         // Drive the on-screen clock from the REAL OS clock (CLOCK_REALTIME via
         // std; the host disciplines it via NTP). The displayed time-of-day is
-        // sampled live at each bake (anti-drift) — it is a pure display concern
-        // and never touches the engine's output cadence (invariant #1).
+        // sampled live at each bake (anti-drift) — a pure display concern wholly
+        // independent of the engine's output cadence (invariant #1).
         let mut baker = crate::overlays::OverlayBaker::new(
-            self.tile_specs(),
+            ctx.tile_specs.clone(),
             crate::wallclock::WallClockSource::system(),
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
-        // Wire a configured analog clock face (the digital label stays on too).
-        if let Some(spec) = self.analog_clock {
+        if let Some(spec) = ctx.analog_clock {
             baker = baker.with_analog_clock(spec);
         }
-
-        let mut out_frames = Vec::with_capacity(ticks.len());
-        for (i, tick) in ticks.iter().enumerate() {
-            let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
-            // Compose the per-tile dynamics for this output tick: each tile's OWN
-            // decoded-audio loudness (its tile meter) + the real per-source
-            // lifecycle state sampled by the engine that tick (its fault flag). A
-            // source with no decodable audio rides the meter floor; a source not
-            // present in the sampled states defaults to NO_SIGNAL inside the baker
-            // (a missing source never stalls — invariant #1). The baker's per-tile
-            // conflators thin the meter to ~30 Hz so the tap stays cheap and
-            // cannot couple to the engine (invariant #10).
-            let mut dynamics = std::collections::HashMap::new();
-            // Per-source active caption lines at this output instant, sampled from
-            // each source's cue store (native HLS WebVTT) plus the legacy sidecar
-            // routed onto its target source — ONE per-tile burn-in path. Sampling
-            // is a pure lock-free read; it never paces or stalls anything (#1/#10).
-            // Native cues were sampled per-tick into `tick.captions` (the cue
-            // store is a small live window); the in-memory sidecar track has no
-            // eviction, so it is sampled here at `pts`. Native wins on overlap.
-            let mut captions: std::collections::HashMap<String, Vec<String>> =
-                tick.captions.clone();
-            for spec in baker.tiles() {
-                let state = tick
-                    .source_states
-                    .get(&spec.source_id)
-                    .copied()
-                    .unwrap_or(mosaic_core::traits::SourceState::NoSignal);
-                // The content fault sampled + dwelled on the hot loop this tick;
-                // a source absent from the map is healthy (no badge).
-                let fault = tick
-                    .faults
-                    .get(&spec.source_id)
-                    .copied()
-                    .unwrap_or(crate::overlays::TileFault::None);
-                dynamics.insert(
-                    spec.source_id.clone(),
-                    crate::overlays::TileDynamics {
-                        meter_db: self.meter_db_for(&spec.source_id, i),
-                        state,
-                        fault,
-                    },
-                );
-                if !captions.contains_key(&spec.source_id) {
-                    if let Some(lines) = self.sidecar_caption_lines(&spec.source_id, pts) {
-                        captions.insert(spec.source_id.clone(), lines);
-                    }
-                }
-            }
-            let list = baker
-                .draw_list(pts, &dynamics, &captions, &tick.caption_bitmaps)
-                .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
-            let overlaid = apply_overlays_to_nv12(&tick.canvas, &list, self.canvas_color)
-                .map_err(|e| PipelineError::Engine(format!("overlay blend: {e}")))?;
-            out_frames.push(Arc::new(overlaid));
-        }
-        Ok(out_frames)
+        Ok(Self {
+            baker,
+            canvas_color: ctx.canvas_color,
+            cadence: ctx.cadence,
+            meter: ctx,
+        })
     }
 
-    /// Overlays disabled at compile time: hand back the bare collected canvases.
-    #[cfg(not(feature = "overlay"))]
-    // reason: both arms share one `(&self, …) -> Result<…>` signature so the
-    // caller stays feature-agnostic; this identity stub simply needs neither
-    // `self` nor a fallible return.
+    /// Bake one streamed tick's overlays into its canvas, returning the overlaid
+    /// `Arc<Nv12Image>` — the SAME math as the old post-loop `bake_overlays`, run
+    /// once per received item off the hot loop.
+    ///
+    /// # Errors
+    /// Returns [`PipelineError::Engine`] if the baker/sub-pass rejects the canvas.
+    fn bake(&mut self, item: &StreamItem) -> Result<Arc<Nv12Image>, PipelineError> {
+        use mosaic_compositor::overlay::apply_overlays_to_nv12;
+
+        let i = usize::try_from(item.tick_index).unwrap_or(usize::MAX);
+        let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
+        let mut dynamics = std::collections::HashMap::new();
+        // Native cues were sampled per-tick into `item.captions` (the cue store is
+        // a small live window); the in-memory sidecar track has no eviction, so it
+        // is sampled here at `pts`. Native wins on overlap.
+        let mut captions: std::collections::HashMap<String, Vec<String>> = item.captions.clone();
+        for spec in self.baker.tiles() {
+            let state = item
+                .source_states
+                .get(&spec.source_id)
+                .copied()
+                .unwrap_or(mosaic_core::traits::SourceState::NoSignal);
+            let fault = item
+                .faults
+                .get(&spec.source_id)
+                .copied()
+                .unwrap_or(crate::overlays::TileFault::None);
+            dynamics.insert(
+                spec.source_id.clone(),
+                crate::overlays::TileDynamics {
+                    meter_db: self.meter.meter_db_for(&spec.source_id, i),
+                    state,
+                    fault,
+                },
+            );
+            if !captions.contains_key(&spec.source_id) {
+                if let Some(lines) = self.meter.sidecar_caption_lines(&spec.source_id, pts) {
+                    captions.insert(spec.source_id.clone(), lines);
+                }
+            }
+        }
+        let list = self
+            .baker
+            .draw_list(pts, &dynamics, &captions, &item.caption_bitmaps)
+            .map_err(|e| PipelineError::Engine(format!("overlay draw: {e}")))?;
+        let overlaid = apply_overlays_to_nv12(&item.canvas, &list, self.canvas_color)
+            .map_err(|e| PipelineError::Engine(format!("overlay blend: {e}")))?;
+        Ok(Arc::new(overlaid))
+    }
+}
+
+#[cfg(not(feature = "overlay"))]
+impl StreamBaker {
+    /// Overlays disabled at compile time: a zero-cost identity baker.
+    #[allow(clippy::unnecessary_wraps)]
+    fn new(_ctx: BakeContext) -> Result<Self, PipelineError> {
+        Ok(Self)
+    }
+
+    /// Hand back the bare canvas unchanged (no overlay sub-pass compiled in).
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
-    fn bake_overlays(
-        &self,
-        ticks: Vec<CollectedTick>,
-    ) -> Result<Vec<Arc<Nv12Image>>, PipelineError> {
-        Ok(ticks.into_iter().map(|t| t.canvas).collect())
-    }
-
-    /// Encode the collected composited canvases once and fan them out to every
-    /// configured sink (file + HLS), returning one human line per output.
-    fn encode_outputs(&self, frames: &[Arc<Nv12Image>]) -> Result<Vec<String>, PipelineError> {
-        let mut lines = Vec::with_capacity(self.outputs.len());
-        for output in &self.outputs {
-            match output {
-                RunnableOutput::File(sink) => {
-                    let mut source = CanvasFrameSource::new(frames);
-                    let stats = sink.run(&mut source).map_err(|e| PipelineError::Output {
-                        kind: "file",
-                        reason: e.to_string(),
-                    })?;
-                    lines.push(format!(
-                        "file {}: {} packet(s), {} keyframe(s)",
-                        sink.path().display(),
-                        stats.packets,
-                        stats.keyframes
-                    ));
-                }
-                RunnableOutput::Hls {
-                    sink,
-                    playlist_path,
-                } => {
-                    let mut source = CanvasFrameSource::new(frames);
-                    let result = sink.run(&mut source).map_err(|e| PipelineError::Output {
-                        kind: "hls",
-                        reason: e.to_string(),
-                    })?;
-                    let playlist_text = result.playlist.render();
-                    std::fs::write(playlist_path, playlist_text.as_bytes()).map_err(|e| {
-                        PipelineError::Output {
-                            kind: "hls",
-                            reason: format!("writing playlist {}: {e}", playlist_path.display()),
-                        }
-                    })?;
-                    lines.push(format!(
-                        "hls {} + {} segment(s) ({} packet(s))",
-                        playlist_path.display(),
-                        result.segments.len(),
-                        result.stats.packets
-                    ));
-                }
-            }
-        }
-        Ok(lines)
+    fn bake(&mut self, item: &StreamItem) -> Result<Arc<Nv12Image>, PipelineError> {
+        Ok(Arc::clone(&item.canvas))
     }
 }
 
@@ -1024,43 +1245,378 @@ struct TickState {
     pts: MediaTime,
 }
 
-/// One collected output tick held for off-hot-path overlay baking: the bare
-/// composited canvas plus the per-source lifecycle states sampled that tick (so
-/// the per-tile fault flag reflects the real tile state, not a guess).
-#[derive(Debug, Clone)]
-struct CollectedTick {
+/// One streamed output tick handed off the hot loop to the bake consumer over
+/// the bounded queue (ADR-0025): the composited canvas (one cheap `Arc` clone —
+/// no more than the old collector) plus the per-source state SAMPLED on the hot
+/// loop this tick (captions/faults must be sampled now, before the small live
+/// cue window evicts them). The bake *render* runs on the consumer thread.
+struct StreamItem {
     /// The composited canvas the protected output core emitted this tick.
     canvas: Arc<Nv12Image>,
-    /// Per-source lifecycle state sampled this tick (`source_id -> state`); a
-    /// cell with no bound source is omitted (and a source absent here is treated
-    /// as `NO_SIGNAL` by the baker).
-    // reason: only the `overlay`-on baker reads this (it drives the per-tile
-    // fault flag); with overlays compiled out there is no flag to render, so the
-    // field is legitimately unread in that build. The collector still samples it
-    // unconditionally to keep one `CollectedTick` shape across features.
+    /// The engine's tick index for this frame (drives the per-frame media time
+    /// and the per-source meter timeline lookup in the consumer's bake).
+    // reason: only the `overlay`-on baker reads this (per-frame pts + meter index);
+    // with overlays compiled out the bake is an identity pass-through that needs
+    // only the canvas, so the field is legitimately unread in that build. It is
+    // still set unconditionally to keep one `StreamItem` shape across features.
     #[cfg_attr(not(feature = "overlay"), allow(dead_code))]
+    tick_index: u64,
+    /// Per-source lifecycle state sampled this tick (`source_id -> state`); a
+    /// source absent here is treated as `NO_SIGNAL` by the baker.
+    #[cfg(feature = "overlay")]
     source_states: std::collections::HashMap<String, mosaic_core::traits::SourceState>,
     /// Per-source active caption lines sampled from the cue stores at THIS tick's
-    /// pts (`source_id -> on-screen lines`). Captured on the hot loop because the
+    /// pts (`source_id -> on-screen lines`). Sampled on the hot loop because the
     /// bounded drop-oldest cue store only holds a small live window — sampling it
-    /// once after the whole run would miss cues evicted meanwhile. A source with
-    /// no active cue this tick is absent.
+    /// later would miss cues evicted meanwhile. A source with no active cue is
+    /// absent.
     #[cfg(feature = "overlay")]
     captions: std::collections::HashMap<String, Vec<String>>,
-    /// Per-source active **bitmap** caption cue sampled from the cue stores at
-    /// THIS tick's pts (`source_id -> CueBitmap`). Same hot-loop sampling
-    /// rationale as `captions` (the bounded store holds a small live window); a
-    /// pure lock-free read (#1/#10). A source with no active bitmap cue is absent.
+    /// Per-source active **bitmap** caption cue sampled at THIS tick's pts. Same
+    /// hot-loop sampling rationale as `captions`. A source with no active bitmap
+    /// cue is absent.
     #[cfg(feature = "overlay")]
     caption_bitmaps: std::collections::HashMap<String, mosaic_ffmpeg::caption::CueBitmap>,
     /// Per-source content fault sampled this tick (`source_id -> fault`), folded
-    /// through dwell/hysteresis by the [`FaultDetector`]. Captured on the hot
-    /// loop because freeze needs the *previous* sampled frame and the dwell needs
-    /// every tick in order — sampling once after the run would lose both. A
-    /// healthy source maps to [`crate::overlays::TileFault::None`] (or is absent,
-    /// which the baker treats as `None`).
+    /// through dwell/hysteresis by the [`FaultDetector`] on the hot loop (freeze
+    /// needs the previous sampled frame + the dwell needs every tick in order). A
+    /// healthy source maps to [`crate::overlays::TileFault::None`] (or is absent).
     #[cfg(feature = "overlay")]
     faults: std::collections::HashMap<String, crate::overlays::TileFault>,
+}
+
+/// The human report line + optional playlist text one sink runner produced, plus
+/// the number of frames it consumed (for the test seam's observability).
+struct SinkRunOutcome {
+    /// The human-facing report line for this output (path + packet/segment counts).
+    line: String,
+    /// For an HLS sink, the rendered media playlist text + its on-disk path to
+    /// write after the encode completes. `None` for a file/push sink.
+    playlist: Option<(PathBuf, String)>,
+    /// How many baked frames this sink consumed (for tests).
+    frames: usize,
+}
+
+/// A boxed closure that drives ONE output sink to completion over its bounded
+/// fan-out channel, run on its own thread by the [`StreamEgress`]. Production
+/// builds one per [`RunnableOutput`] (calling the existing `sink.run()` over a
+/// [`StreamingFrameSource`]); the test seam injects fakes.
+type SinkRunner =
+    Box<dyn FnOnce(Receiver<Arc<Nv12Image>>) -> Result<SinkRunOutcome, PipelineError> + Send>;
+
+/// What one **test** fake sink reports after consuming its fan-out channel:
+/// the number of baked frames it received (ADR-0025 test seam).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestSinkOutcome {
+    /// How many baked frames the fake sink received before end-of-program.
+    pub frames: usize,
+}
+
+/// A boxed fake-sink closure the [`RealPipeline::drive_streaming_for_test`] seam
+/// injects: it consumes the fan-out [`Receiver`] (each baked `Arc<Nv12Image>`)
+/// and returns a [`TestSinkOutcome`]. It runs on its own off-hot-path thread,
+/// exactly like a production sink, so a test can block/slow/count it to assert
+/// the streaming concurrency contract.
+pub type TestSinkRunner = Box<dyn FnOnce(Receiver<Arc<Nv12Image>>) -> TestSinkOutcome + Send>;
+
+/// The outcome of [`RealPipeline::drive_streaming`]: the report plus streaming
+/// observability folded from the egress threads.
+struct DriveStreamOutcome {
+    report: PipelineReport,
+    peak_occupancy: usize,
+    sink_frames: Vec<usize>,
+}
+
+/// The injected parameters for the ADR-0025 streaming test seam
+/// ([`RealPipeline::drive_streaming_for_test`]): the time source + pacer, the
+/// tick budget, the send policy, the fake sink runners, and an optional hot-loop
+/// tick observer. Bundled into one struct so the seam keeps a small argument
+/// list and the test reads as a record of named knobs.
+pub struct StreamTestParams<P> {
+    /// The injected time source (typically a
+    /// [`ManualTimeSource`](mosaic_engine::ManualTimeSource)).
+    pub time: Arc<dyn TimeSource>,
+    /// The injected pacer (typically a
+    /// [`CooperativePacer`](mosaic_engine::CooperativePacer)).
+    pub pacer: P,
+    /// The tick budget (`Some(N)` for a bounded run, `None` to run until `stop`).
+    pub max_ticks: Option<u64>,
+    /// The send policy (offline block-for-exact vs live drop-on-overload).
+    pub policy: SendPolicy,
+    /// One fake sink runner per output, run on its own off-hot-path thread.
+    pub runners: Vec<TestSinkRunner>,
+    /// Optional hot-loop tick observer (incremented once per emitted tick).
+    pub hot_tick_observer: Option<Arc<AtomicU64>>,
+}
+
+/// The observable result of the ADR-0025 streaming test seam.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct StreamTestResult {
+    /// The pipeline report (frames, dropped, faltered, …).
+    pub report: PipelineReport,
+    /// The peak number of frames ever in flight in the hot-loop → consumer queue
+    /// (the high-watermark), proving memory is bounded by the cap.
+    pub peak_occupancy: usize,
+    /// The bounded streaming-queue capacity the run used (per [`SendPolicy`]).
+    pub capacity: usize,
+    /// Per-sink frame counts (in runner order) the fake sinks reported.
+    pub sink_frames: Vec<usize>,
+}
+
+/// Increment the in-flight occupancy and update the high-watermark. Wait-free
+/// atomics shared with the consumer; this is the only bookkeeping the hot loop
+/// does on a successful send and it can never back-pressure the engine (inv #10).
+fn bump_occupancy(in_flight: &AtomicI64, peak: &AtomicUsize) {
+    let now = in_flight.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+    if now > 0 {
+        let now_usize = usize::try_from(now).unwrap_or(usize::MAX);
+        // Monotonic max via compare-and-set; a benign race only ever raises it.
+        let mut observed = peak.load(Ordering::Acquire);
+        while now_usize > observed {
+            match peak.compare_exchange_weak(
+                observed,
+                now_usize,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(prev) => observed = prev,
+            }
+        }
+    }
+}
+
+/// The single off-hot-path egress: one bake-consumer thread (owns the
+/// [`StreamBaker`] built from the [`BakeContext`]) + one thread per sink. The
+/// consumer receives [`StreamItem`]s over the bounded hot queue, bakes each into
+/// an `Arc<Nv12Image>`, and fans it (blocking send — off the hot path, so it can
+/// only pace the consumer, never the engine) to each sink's bounded channel.
+struct StreamEgress {
+    consumer: JoinHandle<Result<(), PipelineError>>,
+    sinks: Vec<JoinHandle<Result<SinkRunOutcome, PipelineError>>>,
+    /// Frames currently queued in the hot-loop → consumer channel (bumped by the
+    /// hot loop on send, decremented by the consumer on recv).
+    in_flight: Arc<AtomicI64>,
+    /// The high-watermark of `in_flight` (the proof of bounded memory).
+    peak_occupancy: Arc<AtomicUsize>,
+}
+
+/// The folded outcome of joining the egress threads: the report lines (in sink
+/// order), the peak queue occupancy, and the per-sink frame counts.
+struct EgressOutcome {
+    lines: Vec<String>,
+    peak_occupancy: usize,
+    sink_frames: Vec<usize>,
+}
+
+impl StreamEgress {
+    /// Spawn the per-sink threads + the single bake consumer, returning the egress
+    /// handle and the **hot** sender the engine's projection sends `StreamItem`s
+    /// on. Dropping that sender (when the engine loop ends) closes the hot queue
+    /// → the consumer drains, fans the remainder, drops the sink senders → each
+    /// sink sees end-of-program and finalises → [`StreamEgress::join`] folds stats.
+    fn spawn(
+        ctx: BakeContext,
+        runners: Vec<SinkRunner>,
+        policy: SendPolicy,
+    ) -> (Self, SyncSender<StreamItem>) {
+        let in_flight = Arc::new(AtomicI64::new(0));
+        let peak_occupancy = Arc::new(AtomicUsize::new(0));
+
+        // One bounded fan-out channel + thread per sink. The sink thread drives the
+        // existing tested `sink.run()` verbatim over a `StreamingFrameSource` (or a
+        // test fake) — encoding the program as it is produced.
+        let mut sink_txs: Vec<SyncSender<Arc<Nv12Image>>> = Vec::with_capacity(runners.len());
+        let mut sinks = Vec::with_capacity(runners.len());
+        for (i, runner) in runners.into_iter().enumerate() {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<Nv12Image>>(SINK_QUEUE_CAP);
+            sink_txs.push(tx);
+            let builder = std::thread::Builder::new().name(format!("mosaic-sink-{i}"));
+            match builder.spawn(move || runner(rx)) {
+                Ok(handle) => sinks.push(handle),
+                Err(e) => {
+                    // A sink thread that cannot spawn is a real failure (we cannot
+                    // produce its artifact); drop its sender so nothing wedges, and
+                    // record a thread that immediately returns the spawn error.
+                    sink_txs.pop();
+                    let reason = e.to_string();
+                    sinks.push(spawn_failed_sink(reason));
+                }
+            }
+        }
+
+        let (hot_tx, hot_rx) = std::sync::mpsc::sync_channel::<StreamItem>(policy.queue_cap());
+        let consumer_in_flight = Arc::clone(&in_flight);
+        let builder = std::thread::Builder::new().name("mosaic-bake-consumer".to_owned());
+        let consumer = builder
+            .spawn(move || consumer_main(ctx, &hot_rx, sink_txs, &consumer_in_flight))
+            .unwrap_or_else(|_| {
+                // Spawning the consumer failed: fall back to a thread that does
+                // nothing. The `hot_rx`/`sink_txs` moved into the failed closure
+                // drop, closing the channels so the hot loop sees Disconnected and
+                // each sink sees end-of-program — nothing wedges.
+                std::thread::spawn(|| Ok(()))
+            });
+
+        (
+            Self {
+                consumer,
+                sinks,
+                in_flight,
+                peak_occupancy,
+            },
+            hot_tx,
+        )
+    }
+
+    /// Join the bake consumer + every sink thread, folding their outcomes. Joins
+    /// the consumer FIRST (it drops the sink senders on the way out, so each sink
+    /// then sees end-of-program and finalises), then each sink. A panicked thread
+    /// surfaces as an engine error rather than being swallowed.
+    ///
+    /// # Errors
+    /// Returns a [`PipelineError`] if the consumer or any sink errored/panicked.
+    fn join(self) -> Result<EgressOutcome, PipelineError> {
+        self.consumer
+            .join()
+            .map_err(|_| PipelineError::Engine("bake consumer thread panicked".to_owned()))??;
+        let mut lines = Vec::with_capacity(self.sinks.len());
+        let mut frames = Vec::with_capacity(self.sinks.len());
+        for handle in self.sinks {
+            let outcome = handle.join().map_err(|_| PipelineError::Output {
+                kind: "sink",
+                reason: "sink thread panicked".to_owned(),
+            })??;
+            // Write the HLS playlist (if any) once the segment encode completed.
+            if let Some((path, text)) = outcome.playlist {
+                std::fs::write(&path, text.as_bytes()).map_err(|e| PipelineError::Output {
+                    kind: "hls",
+                    reason: format!("writing playlist {}: {e}", path.display()),
+                })?;
+            }
+            lines.push(outcome.line);
+            frames.push(outcome.frames);
+        }
+        Ok(EgressOutcome {
+            lines,
+            peak_occupancy: self.peak_occupancy.load(Ordering::Acquire),
+            sink_frames: frames,
+        })
+    }
+}
+
+/// Spawn a thread that immediately returns the given sink-spawn failure, so a
+/// failed spawn surfaces as a real error at join rather than being silent.
+fn spawn_failed_sink(reason: String) -> JoinHandle<Result<SinkRunOutcome, PipelineError>> {
+    std::thread::spawn(move || {
+        Err(PipelineError::Output {
+            kind: "sink",
+            reason: format!("could not spawn sink thread: {reason}"),
+        })
+    })
+}
+
+/// The single bake-consumer thread body (ADR-0025): build the [`StreamBaker`]
+/// from the owned [`BakeContext`], then loop receiving [`StreamItem`]s, baking
+/// each into an `Arc<Nv12Image>` and fanning it to every sink's bounded channel
+/// (blocking send — off the hot path). On end-of-program (the hot sender drops)
+/// the loop ends and the sink senders drop, so each sink sees its channel close
+/// and finalises (writes its trailer).
+///
+/// A bake error stops the consumer (the sink senders still drop on return, so the
+/// sinks finalise what they have); a sink whose receiver has hung up is simply
+/// skipped for the rest of the run.
+///
+/// # Errors
+/// Returns [`PipelineError::Engine`] if building the baker or baking a frame fails.
+fn consumer_main(
+    ctx: BakeContext,
+    hot_rx: &Receiver<StreamItem>,
+    sink_txs: Vec<SyncSender<Arc<Nv12Image>>>,
+    in_flight: &AtomicI64,
+) -> Result<(), PipelineError> {
+    let mut baker = StreamBaker::new(ctx)?;
+    // Track which sinks are still live (their receiver has not hung up) so a sink
+    // that ended early does not wedge or repeatedly error the consumer.
+    let mut live: Vec<bool> = vec![true; sink_txs.len()];
+    // `recv()` returns `Err` only when the hot sender drops = end-of-program
+    // (clean stop / EOF), which ends the loop.
+    while let Ok(item) = hot_rx.recv() {
+        // One frame left the queue.
+        in_flight.fetch_sub(1, Ordering::AcqRel);
+        let overlaid = baker.bake(&item)?;
+        for (i, tx) in sink_txs.iter().enumerate() {
+            if !live.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            // Blocking send: this paces the CONSUMER to the slowest sink, never the
+            // engine (the engine already handed this frame off). A hung-up receiver
+            // (the sink ended) marks the sink dead for the rest of the run.
+            if tx.send(Arc::clone(&overlaid)).is_err() {
+                if let Some(flag) = live.get_mut(i) {
+                    *flag = false;
+                }
+            }
+        }
+    }
+    // Drop the sink senders so each sink sees end-of-program and finalises.
+    drop(sink_txs);
+    Ok(())
+}
+
+/// Drive one runnable output to completion over its bounded fan-out channel,
+/// reusing the existing, tested `mosaic_output` sink `run()` VERBATIM over a
+/// [`StreamingFrameSource`] (ADR-0025). The HLS playlist text is returned for the
+/// egress to write once the encode completes (so the on-disk playlist is written
+/// off the sink thread, keeping the sink path identical to the batch one).
+///
+/// # Errors
+/// Returns [`PipelineError::Output`] if the sink's encode/mux fails.
+fn run_one_output(
+    output: RunnableOutput,
+    rx: Receiver<Arc<Nv12Image>>,
+) -> Result<SinkRunOutcome, PipelineError> {
+    match output {
+        RunnableOutput::File(sink) => {
+            let mut source = StreamingFrameSource::new(rx);
+            let stats = sink.run(&mut source).map_err(|e| PipelineError::Output {
+                kind: "file",
+                reason: e.to_string(),
+            })?;
+            Ok(SinkRunOutcome {
+                line: format!(
+                    "file {}: {} packet(s), {} keyframe(s)",
+                    sink.path().display(),
+                    stats.packets,
+                    stats.keyframes
+                ),
+                playlist: None,
+                frames: source.delivered,
+            })
+        }
+        RunnableOutput::Hls {
+            sink,
+            playlist_path,
+        } => {
+            let mut source = StreamingFrameSource::new(rx);
+            let result = sink.run(&mut source).map_err(|e| PipelineError::Output {
+                kind: "hls",
+                reason: e.to_string(),
+            })?;
+            let playlist_text = result.playlist.render();
+            Ok(SinkRunOutcome {
+                line: format!(
+                    "hls {} + {} segment(s) ({} packet(s))",
+                    playlist_path.display(),
+                    result.segments.len(),
+                    result.stats.packets
+                ),
+                playlist: Some((playlist_path, playlist_text)),
+                frames: source.delivered,
+            })
+        }
+    }
 }
 
 /// Sample every per-source caption cue store at `pts`, returning the active
@@ -1996,28 +2552,35 @@ fn hls_paths(path: &Path) -> (PathBuf, String, PathBuf) {
     }
 }
 
-/// A [`VideoFrameSource`] over the collected composited canvases: it bridges each
-/// `Nv12Image` into a libav NV12 [`Video`] frame for the output sinks. The
-/// frame's PTS is left for the sink to re-stamp from the tick counter (the sinks
-/// overwrite it; invariant #3).
-struct CanvasFrameSource<'a> {
-    frames: &'a [Arc<Nv12Image>],
-    next: usize,
+/// A [`VideoFrameSource`] over the bake consumer's per-sink fan-out channel
+/// (ADR-0025): it pulls each baked `Arc<Nv12Image>` off the bounded receiver and
+/// bridges it into a libav NV12 [`Video`] frame for the existing, tested output
+/// sink `run()`. `recv()` blocking on a frame is the sink's own pull (off the hot
+/// path — it can never back-pressure the engine, only the off-hot-path consumer);
+/// a closed channel (`recv() == Err`) is end-of-program → `Ok(None)`, so the sink
+/// writes its trailer exactly as in the old batch path. The frame's PTS is left
+/// for the sink to re-stamp from the tick counter (invariant #3).
+struct StreamingFrameSource {
+    rx: Receiver<Arc<Nv12Image>>,
+    /// How many frames this source delivered (for the per-sink report count).
+    delivered: usize,
 }
 
-impl<'a> CanvasFrameSource<'a> {
-    fn new(frames: &'a [Arc<Nv12Image>]) -> Self {
-        Self { frames, next: 0 }
+impl StreamingFrameSource {
+    fn new(rx: Receiver<Arc<Nv12Image>>) -> Self {
+        Self { rx, delivered: 0 }
     }
 }
 
-impl VideoFrameSource for CanvasFrameSource<'_> {
+impl VideoFrameSource for StreamingFrameSource {
     fn next_frame(&mut self) -> mosaic_output::Result<Option<DecodedVideoFrame>> {
-        let Some(image) = self.frames.get(self.next) else {
+        // Block until the consumer fans the next baked frame, or the channel
+        // closes (end-of-program). This is the sink's pull, off the hot path.
+        let Ok(image) = self.rx.recv() else {
             return Ok(None);
         };
-        self.next = self.next.saturating_add(1);
-        let frame = nv12_to_video(image)
+        self.delivered = self.delivered.saturating_add(1);
+        let frame = nv12_to_video(&image)
             .map_err(|e| mosaic_output::Error::Output(format!("canvas bridge: {e}")))?;
         let meta = FrameMeta {
             pts: MediaTime::ZERO,

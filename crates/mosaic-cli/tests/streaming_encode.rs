@@ -24,9 +24,9 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 
-use mosaic_cli::pipeline::{RealPipeline, SendPolicy, TestSinkOutcome};
+use mosaic_cli::pipeline::{RealPipeline, SendPolicy, StreamTestParams, TestSinkOutcome};
 use mosaic_compositor::pipeline::Nv12Image;
 use mosaic_config::MosaicConfig;
 use mosaic_engine::{CooperativePacer, ManualTimeSource, StopSignal, TimeSource};
@@ -104,10 +104,8 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
 
     let mut pipeline = build_pipeline();
 
-    // A fake sink that BLOCKS forever on its first received frame (a wedged
-    // encoder/muxer). It must never be able to stall the engine.
-    let gate = Arc::new(Barrier::new(2));
-    let _gate_for_assert = Arc::clone(&gate);
+    // A fake sink that consumes very SLOWLY (a wedged-ish encoder/muxer): it must
+    // never be able to stall the engine — the hot loop sheds frames instead.
     let received = Arc::new(AtomicUsize::new(0));
     let received_in_sink = Arc::clone(&received);
     let blocked_runner = move |rx: Receiver<Arc<Nv12Image>>| -> TestSinkOutcome {
@@ -133,16 +131,19 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
     let driver_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     spawn_clock_driver(Arc::clone(&clock), Arc::clone(&driver_stop));
 
-    let ts: Arc<dyn TimeSource> = Arc::clone(&clock) as Arc<dyn TimeSource>;
+    let clock_concrete: Arc<ManualTimeSource> = Arc::clone(&clock);
+    let ts: Arc<dyn TimeSource> = clock_concrete;
     let result = pipeline
         .drive_streaming_for_test(
-            ts,
-            CooperativePacer,
+            StreamTestParams {
+                time: ts,
+                pacer: CooperativePacer,
+                max_ticks: Some(TICKS),
+                policy: SendPolicy::DropOnOverload,
+                runners: vec![Box::new(blocked_runner)],
+                hot_tick_observer: None,
+            },
             &stop,
-            Some(TICKS),
-            SendPolicy::DropOnOverload,
-            vec![Box::new(blocked_runner)],
-            None,
         )
         .await
         .expect("drive streaming");
@@ -209,16 +210,19 @@ async fn offline_block_for_exact_delivers_all_n_frames() {
     let driver_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     spawn_clock_driver(Arc::clone(&clock), Arc::clone(&driver_stop));
 
-    let ts: Arc<dyn TimeSource> = Arc::clone(&clock) as Arc<dyn TimeSource>;
+    let clock_concrete: Arc<ManualTimeSource> = Arc::clone(&clock);
+    let ts: Arc<dyn TimeSource> = clock_concrete;
     let result = pipeline
         .drive_streaming_for_test(
-            ts,
-            CooperativePacer,
+            StreamTestParams {
+                time: ts,
+                pacer: CooperativePacer,
+                max_ticks: Some(TICKS),
+                policy: SendPolicy::BlockForExact,
+                runners: vec![Box::new(slow_runner)],
+                hot_tick_observer: None,
+            },
             &stop,
-            Some(TICKS),
-            SendPolicy::BlockForExact,
-            vec![Box::new(slow_runner)],
-            None,
         )
         .await
         .expect("drive streaming");
@@ -278,16 +282,19 @@ async fn frame_zero_is_encoded_while_engine_still_ticking() {
     let driver_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     spawn_clock_driver(Arc::clone(&clock), Arc::clone(&driver_stop));
 
-    let ts: Arc<dyn TimeSource> = Arc::clone(&clock) as Arc<dyn TimeSource>;
+    let clock_concrete: Arc<ManualTimeSource> = Arc::clone(&clock);
+    let ts: Arc<dyn TimeSource> = clock_concrete;
     let result = pipeline
         .drive_streaming_for_test(
-            ts,
-            CooperativePacer,
+            StreamTestParams {
+                time: ts,
+                pacer: CooperativePacer,
+                max_ticks: Some(TICKS),
+                policy: SendPolicy::BlockForExact,
+                runners: vec![Box::new(runner)],
+                hot_tick_observer: Some(Arc::clone(&hot_tick)),
+            },
             &stop,
-            Some(TICKS),
-            SendPolicy::BlockForExact,
-            vec![Box::new(runner)],
-            Some(Arc::clone(&hot_tick)),
         )
         .await
         .expect("drive streaming");
@@ -346,16 +353,19 @@ async fn clean_stop_closes_sinks_for_finalisation() {
         stop_for_thread.stop();
     });
 
-    let ts: Arc<dyn TimeSource> = Arc::clone(&clock) as Arc<dyn TimeSource>;
+    let clock_concrete: Arc<ManualTimeSource> = Arc::clone(&clock);
+    let ts: Arc<dyn TimeSource> = clock_concrete;
     let result = pipeline
         .drive_streaming_for_test(
-            ts,
-            CooperativePacer,
+            StreamTestParams {
+                time: ts,
+                pacer: CooperativePacer,
+                max_ticks: Some(MAX),
+                policy: SendPolicy::DropOnOverload,
+                runners: vec![Box::new(runner)],
+                hot_tick_observer: None,
+            },
             &stop,
-            Some(MAX),
-            SendPolicy::DropOnOverload,
-            vec![Box::new(runner)],
-            None,
         )
         .await
         .expect("drive streaming");
