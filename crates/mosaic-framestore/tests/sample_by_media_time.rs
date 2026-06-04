@@ -16,6 +16,7 @@
 //! advance 1:1 with output time regardless of how fast frames were produced.
 
 use mosaic_core::time::MediaTime;
+use mosaic_core::traits::SourceState;
 use mosaic_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 
 /// Helper: a store that holds frames forever (so selection, not the failure
@@ -118,6 +119,98 @@ fn is_primed_flips_false_to_true_on_first_publish() {
     // Newest-wins publishes keep it primed (it never reverts to cold).
     s.publish(43_u32, MediaTime::from_nanos(40_000_000));
     assert!(s.is_primed(), "a primed store stays primed");
+}
+
+#[test]
+fn state_at_classifies_on_the_latched_frame_not_the_newest() {
+    // FRESHNESS DIVERGENCE regression (mosaic-framestore + mosaic-engine).
+    //
+    // An ahead-decoding VOD source decodes far past the output clock: it has
+    // already published a FUTURE-stamped frame into the ring (its newest frame's
+    // source-media stamp sits well ahead of `now`), while the picture the output
+    // clock is actually latched onto is an old frame.
+    //
+    // `state()` classifies on `elapsed_since_frame` — the lag of the NEWEST
+    // published frame. With a future stamp `>= now`, that lag saturates to 0, so
+    // `state()` reports LIVE even though the LATCHED picture has frozen and aged.
+    // `state_at(now)` must instead classify on the LATCHED frame's lag
+    // (`now - selected.at`, the exact rule `read_at` uses), so a tile whose shown
+    // picture has aged past `nosignal` reports NO_SIGNAL.
+    let s = store();
+    // Frame@0, then the producer raced ahead and published a frame stamped 100s
+    // (a long source gap / ahead-decode). The output clock is at 20s: it latches
+    // frame@0 (20s stale), but the newest stamp (100s) is >= now.
+    s.publish(10_u32, MediaTime::from_nanos(0));
+    s.publish(20_u32, MediaTime::from_nanos(100_000_000_000));
+
+    let twenty_sec = MediaTime::from_nanos(20_000_000_000);
+    // The producer-liveness view: the newest frame is "fresh" (future stamp) ->
+    // LIVE. This is what the buggy `sample_states` used, and it is misleading.
+    assert_eq!(
+        s.state(twenty_sec),
+        SourceState::Live,
+        "state() classifies on the newest (future-stamped) frame -> LIVE"
+    );
+    // The correct latched-picture view: the frame on screen is frame@0, 20s old
+    // -> past the 10s nosignal threshold -> NO_SIGNAL.
+    assert_eq!(
+        s.state_at(twenty_sec),
+        SourceState::NoSignal,
+        "state_at() classifies on the latched (shown) frame -> NO_SIGNAL"
+    );
+    // state_at MUST agree exactly with read_at's own ladder (shared logic).
+    assert_eq!(
+        s.state_at(twenty_sec),
+        s.read_at(twenty_sec).state(),
+        "state_at and read_at must classify on the identical latched lag"
+    );
+
+    // A second instant where the latched frame IS current keeps reporting LIVE:
+    // at output 0.0s the latched frame is frame@0 (lag 0).
+    assert_eq!(
+        s.state_at(MediaTime::ZERO),
+        SourceState::Live,
+        "at output 0.0s the latched frame is current -> LIVE"
+    );
+}
+
+#[test]
+fn state_at_ages_a_finite_clip_that_output_runs_past() {
+    // The ascending-clip case the engine sees most: a finite VOD published at
+    // i*40ms for i in 0..=250 (0..10.0s). Once the output clock runs past the
+    // clip's last frame, the latched picture freezes on frame@10.0s and ages.
+    let s = store();
+    for i in 0..=250_i64 {
+        let at = MediaTime::from_nanos(i.saturating_mul(40_000_000));
+        s.publish(u32::try_from(i).unwrap(), at);
+    }
+    // At 1.0s the latched frame is frame@1.0s (lag 0) -> LIVE.
+    assert_eq!(
+        s.state_at(MediaTime::from_nanos(1_000_000_000)),
+        SourceState::Live,
+        "output 1.0s latches a current frame -> LIVE"
+    );
+    // At 20.0s the latched frame is the last (10.0s), 10s behind -> NO_SIGNAL,
+    // matching read_at exactly.
+    let twenty_sec = MediaTime::from_nanos(20_000_000_000);
+    assert_eq!(
+        s.state_at(twenty_sec),
+        SourceState::NoSignal,
+        "output 20.0s, last frame 10s behind -> NO_SIGNAL"
+    );
+    assert_eq!(s.state_at(twenty_sec), s.read_at(twenty_sec).state());
+}
+
+#[test]
+fn state_at_on_an_empty_store_is_no_signal() {
+    // A store that has never been published reports NO_SIGNAL for any instant
+    // (mirrors `state()` and `read_at` on an empty ring).
+    let s = store();
+    assert_eq!(s.state_at(MediaTime::ZERO), SourceState::NoSignal);
+    assert_eq!(
+        s.state_at(MediaTime::from_nanos(5_000_000_000)),
+        SourceState::NoSignal
+    );
 }
 
 #[test]

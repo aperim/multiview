@@ -264,6 +264,57 @@ fn fresh_frame_is_composited_live() {
 }
 
 #[test]
+fn sample_states_uses_the_latched_frame_age_not_producer_liveness() {
+    // FRESHNESS DIVERGENCE regression (mosaic-engine side): `sample_states` must
+    // classify each tile on the LATCHED (shown) frame's age — exactly what the
+    // compositor draws via `read_at` — not on the newest published frame.
+    //
+    // Scenario: cam-a is an ahead-decoding source. It has published frame@0 and
+    // then raced ahead to a future-stamped frame (100s). At output time 20s the
+    // tile is latched on frame@0 (20s stale -> NO_SIGNAL), yet the producer's
+    // newest frame is future-stamped (so a producer-liveness `state()` would
+    // wrongly report LIVE). The sampled state MUST be NO_SIGNAL and MUST equal
+    // what `compose` reports for the same tick.
+    let (w, h) = (640, 480);
+    let store_a = Arc::new(TileStore::<Nv12Image>::with_defaults("cam-a"));
+    let store_b = Arc::new(TileStore::<Nv12Image>::with_defaults("cam-b"));
+    store_a.publish(solid(w / 2, h, 200), MediaTime::ZERO);
+    store_a.publish(solid(w / 2, h, 200), MediaTime::from_nanos(100_000_000_000));
+    // cam-b is a healthy live source tracking output time.
+    store_b.publish(solid(w / 2, h, 50), MediaTime::from_nanos(20_000_000_000));
+    let mut stores = HashMap::new();
+    stores.insert("cam-a".to_owned(), store_a);
+    stores.insert("cam-b".to_owned(), store_b);
+    let drive = make_drive(two_cell_layout(w, h), stores, w, h);
+
+    let now = MediaTime::from_nanos(20_000_000_000);
+    let states = drive.sample_states(now);
+    assert_eq!(
+        states.get("cam-a"),
+        Some(&SourceState::NoSignal),
+        "cam-a's latched picture is 20s old -> NO_SIGNAL (not producer-liveness LIVE)"
+    );
+    assert_eq!(
+        states.get("cam-b"),
+        Some(&SourceState::Live),
+        "cam-b tracks output time -> LIVE"
+    );
+
+    // sample_states must agree with what compose() actually draws this tick.
+    let tick = Tick { index: 1200, pts: now };
+    let composed = drive.compose(tick).unwrap();
+    assert_eq!(
+        composed.source_states.get("cam-a"),
+        states.get("cam-a"),
+        "sample_states and compose must report the same latched-frame state"
+    );
+    assert_eq!(
+        composed.source_states.get("cam-b"),
+        states.get("cam-b"),
+    );
+}
+
+#[test]
 fn hot_swapping_layout_takes_effect_between_ticks() {
     let (w, h) = (640, 480);
     let store_a = Arc::new(TileStore::<Nv12Image>::with_defaults("cam-a"));
