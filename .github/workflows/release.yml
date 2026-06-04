@@ -53,7 +53,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.3 # v6.0.3
+        uses: actions/checkout@v6 # v6.0.3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.96.0 # 1.96.0 (stable, pinned)
