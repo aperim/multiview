@@ -3043,14 +3043,16 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
             // frame forever); a stop was requested. Either way, this thread ends.
             return;
         }
-        // Live source: wait a capped-exponential, jittered backoff (checking
-        // `stop` in slices so teardown stays prompt), then reconnect. The backoff
-        // is computed from the count of consecutive fast failures BEFORE updating
-        // it, so the first reconnect is quick and only persistent failures escalate.
+        // Live source: update the escalation from THIS connection's health FIRST
+        // — a connection that streamed for at least INGEST_RECONNECT_HEALTHY resets
+        // to attempt 0 so it reconnects promptly even after an earlier bad patch; a
+        // fast failure escalates the index — THEN wait the resulting
+        // capped-exponential, jittered backoff (checking `stop` in slices so
+        // teardown stays prompt) and reconnect.
+        attempt = next_reconnect_attempt(attempt, ran_for);
         let nap = reconnect_backoff(attempt, jitter.next_unit());
         tracing::debug!(source = %plan.id, attempt, ?nap, "reconnecting live source after backoff");
         sleep_interruptible(nap, stop);
-        attempt = next_reconnect_attempt(attempt, ran_for);
     }
 }
 
