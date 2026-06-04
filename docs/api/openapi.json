@@ -13,6 +13,229 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/alarms": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "`GET /api/v1/alarms` — list active/historical alarms (role: read).",
+        "operationId": "list_alarms",
+        "parameters": [
+          {
+            "name": "severity",
+            "in": "query",
+            "description": "Keep only alarms at or above this X.733 severity (e.g. `major`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "description": "Keep only active (`true`) or only cleared/historical (`false`) alarms.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "Keep only alarms whose scope kind matches (e.g. `tile`, `probe`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching alarms, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AlarmRecordDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alarms/{id}/ack": {
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "`POST /api/v1/alarms/{id}/ack` — acknowledge an alarm (role: write; If-Match).",
+        "operationId": "ack_alarm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Alarm id to acknowledge.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The acknowledged alarm.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmRecordDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to acknowledge.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No alarm with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "If-Match precondition required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "`GET /api/v1/audit` — list audit entries newest-first (role: read).",
+        "description": "An optional `?object_id=` filters to a single object's history.",
+        "operationId": "list_audit",
+        "parameters": [
+          {
+            "name": "object_id",
+            "in": "query",
+            "description": "Restrict the listing to a single object id.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit entries, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEntry"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/layouts": {
       "get": {
         "tags": [
@@ -56,6 +279,912 @@
           }
         }
       }
+    },
+    "/api/v1/salvos": {
+      "get": {
+        "tags": [
+          "salvos"
+        ],
+        "summary": "`GET /api/v1/salvos` — list salvo definitions (role: read).",
+        "operationId": "list_salvos",
+        "responses": {
+          "200": {
+            "description": "All salvo definitions, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SalvoDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/salvos/{id}": {
+      "put": {
+        "tags": [
+          "salvos"
+        ],
+        "summary": "`PUT /api/v1/salvos/{id}` — create-or-replace a salvo definition.",
+        "description": "On create returns `201`; on replace enforces `If-Match` (→ `412`) and returns\n`200`. The submitted body is validated by [`Salvo::validate`] first; the path\n`id` is authoritative (the body's `id` is overwritten to match it).",
+        "operationId": "put_salvo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Salvo id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SalvoDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced salvo.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalvoDoc"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created salvo.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalvoDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The salvo failed validation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/salvos/{id}/arm": {
+      "post": {
+        "tags": [
+          "salvos"
+        ],
+        "summary": "`POST /api/v1/salvos/{id}/arm` — arm (stage) the salvo (role: write; 202).",
+        "operationId": "arm_salvo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Salvo id to arm.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "head",
+            "in": "query",
+            "description": "The output head this recall targets, if scoped to one head.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Arm accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to arm.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No salvo with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/salvos/{id}/cancel": {
+      "post": {
+        "tags": [
+          "salvos"
+        ],
+        "summary": "`POST /api/v1/salvos/{id}/cancel` — cancel an armed salvo (role: write; 202).",
+        "operationId": "cancel_salvo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Salvo id to cancel.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "head",
+            "in": "query",
+            "description": "The output head this recall targets, if scoped to one head.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancel accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to cancel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No salvo with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/salvos/{id}/take": {
+      "post": {
+        "tags": [
+          "salvos"
+        ],
+        "summary": "`POST /api/v1/salvos/{id}/take` — take (apply) the salvo (role: write; 202).",
+        "operationId": "take_salvo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Salvo id to take.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "head",
+            "in": "query",
+            "description": "The output head this recall targets, if scoped to one head.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Take accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to take.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No salvo with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tally": {
+      "get": {
+        "tags": [
+          "tally"
+        ],
+        "summary": "`GET /api/v1/tally` — list resolved tally state (role: read).",
+        "operationId": "list_tally",
+        "responses": {
+          "200": {
+            "description": "Resolved tally state per target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TallyEntryDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tally/override": {
+      "put": {
+        "tags": [
+          "tally"
+        ],
+        "summary": "`PUT /api/v1/tally/override` — force a target's lamp (role: write; 202).",
+        "description": "Submits a `SetTallyOverride` command to the engine and records the request in\nthe control-plane override registry. The engine *applies* the override; this\nendpoint reports `202` (the resolved state arrives later on the realtime\nstream as a `tally.state` event).",
+        "operationId": "set_override",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OverrideRequestDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Override accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "tally"
+        ],
+        "summary": "`DELETE /api/v1/tally/override` — clear a target's override (role: write; 202).",
+        "operationId": "clear_override",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClearOverrideRequestDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Clear accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tally/profiles": {
+      "get": {
+        "tags": [
+          "tally"
+        ],
+        "summary": "`GET /api/v1/tally/profiles` — list tally profiles (role: read).",
+        "operationId": "list_profiles",
+        "responses": {
+          "200": {
+            "description": "All tally profiles, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TallyProfileDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tally/profiles/{id}": {
+      "put": {
+        "tags": [
+          "tally"
+        ],
+        "summary": "`PUT /api/v1/tally/profiles/{id}` — create-or-replace a tally profile.",
+        "description": "On create returns `201`; on replace enforces `If-Match` (→ `412`) and returns\n`200`. The body is validated by [`TallyProfile::validate`] first; the path\n`id` is authoritative.",
+        "operationId": "put_profile",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tally profile id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TallyProfileDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TallyProfileDoc"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TallyProfileDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The profile failed validation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
+      "patch": {
+        "tags": [
+          "nmos"
+        ],
+        "summary": "`PATCH /x-nmos/connection/v1.1/single/receivers/{id}/staged` — stage (and,\nfor an immediate activation, apply) a connection on a receiver (role: write).",
+        "operationId": "patch_staged",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "NMOS receiver id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The resulting connection state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No receiver with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/x-nmos/node/v1.3/devices": {
+      "get": {
+        "tags": [
+          "nmos"
+        ],
+        "summary": "`GET /x-nmos/node/v1.3/devices` — the device resources (role: read).",
+        "operationId": "list_devices",
+        "responses": {
+          "200": {
+            "description": "All NMOS devices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Device"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/x-nmos/node/v1.3/receivers": {
+      "get": {
+        "tags": [
+          "nmos"
+        ],
+        "summary": "`GET /x-nmos/node/v1.3/receivers` — the receiver resources (role: read).",
+        "operationId": "list_receivers",
+        "responses": {
+          "200": {
+            "description": "All NMOS receivers (ingress).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Receiver"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/x-nmos/node/v1.3/self": {
+      "get": {
+        "tags": [
+          "nmos"
+        ],
+        "summary": "`GET /x-nmos/node/v1.3/self` — the node resource (role: read).",
+        "operationId": "get_self",
+        "responses": {
+          "200": {
+            "description": "The Multiview NMOS node resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No node resource configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/x-nmos/node/v1.3/senders": {
+      "get": {
+        "tags": [
+          "nmos"
+        ],
+        "summary": "`GET /x-nmos/node/v1.3/senders` — the sender resources (role: read).",
+        "operationId": "list_senders",
+        "responses": {
+          "200": {
+            "description": "All NMOS senders (egress).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Sender"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -75,6 +1204,688 @@
           "operation_id": {
             "type": "string",
             "description": "The operation id correlating this command's eventual outcome on the\nrealtime stream."
+          }
+        }
+      },
+      "AckStateDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Not yet acknowledged by an operator.",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "Unacked"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Acknowledged: who acknowledged it and when (media-time nanoseconds).",
+            "required": [
+              "who",
+              "when",
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "Acked"
+                ]
+              },
+              "when": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the acknowledgement happened, media-time nanoseconds."
+              },
+              "who": {
+                "type": "string",
+                "description": "Operator/user identifier that acknowledged the alarm."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_core::alarm::AckState`].\n\nSerde-equivalent: internally tagged on `state`, `PascalCase` variant tags; the\nacknowledged variant carries `who` and `when` (nanoseconds)."
+      },
+      "Activation": {
+        "type": "object",
+        "description": "An IS-05 **activation** block: when a staged change takes effect.",
+        "properties": {
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ActivationMode",
+                "description": "The activation mode, or [`None`] to stage without activating."
+              }
+            ]
+          },
+          "requested_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The requested activation time (TAI `<seconds>:<nanoseconds>`), for a\nscheduled mode."
+          }
+        }
+      },
+      "ActivationMode": {
+        "type": "string",
+        "description": "The activation mode of an IS-05 connection change.",
+        "enum": [
+          "activate_immediate",
+          "activate_scheduled_absolute",
+          "activate_scheduled_relative"
+        ]
+      },
+      "AlarmKindDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_core::alarm::AlarmKind`] (probe/fault taxonomy).\n\nSerde-equivalent: a unit enum rendered as its `PascalCase` variant name.",
+        "enum": [
+          "Black",
+          "Freeze",
+          "Silence",
+          "OverLevel",
+          "Clip",
+          "PhaseInvert",
+          "LoudnessViolation",
+          "CaptionLoss",
+          "FormatMismatch",
+          "SignalLoss"
+        ]
+      },
+      "AlarmRecordDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_core::alarm::AlarmRecord`].\n\nSerde-equivalent field-for-field. `id` is the alarm id string;\n`raised_at`/`dwell` are media-time nanoseconds.",
+        "required": [
+          "id",
+          "kind",
+          "severity",
+          "scope",
+          "raised_at",
+          "dwell",
+          "latched",
+          "ack"
+        ],
+        "properties": {
+          "ack": {
+            "$ref": "#/components/schemas/AckStateDoc",
+            "description": "Operator acknowledgement state."
+          },
+          "dwell": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long the condition has persisted, media-time nanoseconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identity of this alarm instance."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AlarmKindDoc",
+            "description": "The probe/fault class that raised it."
+          },
+          "latched": {
+            "type": "boolean",
+            "description": "Whether the alarm is latched."
+          },
+          "raised_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the alarm was first raised, media-time nanoseconds."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/AlarmScopeDoc",
+            "description": "What the alarm applies to."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/PerceivedSeverityDoc",
+            "description": "Current perceived severity (X.733)."
+          }
+        }
+      },
+      "AlarmScopeDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A single named probe.",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Probe identifier."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "probe"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A multiview tile, by zero-based index.",
+            "required": [
+              "index",
+              "kind"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Zero-based tile index.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tile"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A named virtual/Boolean alarm group.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "group"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "Group name."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The whole system.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "system"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_core::alarm::AlarmScope`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
+      },
+      "AuditAction": {
+        "type": "string",
+        "description": "The kind of mutation an audit entry records.",
+        "enum": [
+          "create",
+          "update",
+          "delete",
+          "command",
+          "rollback"
+        ]
+      },
+      "AuditEntry": {
+        "type": "object",
+        "description": "One immutable audit-log entry: who did what to which object, and when.",
+        "required": [
+          "actor",
+          "action",
+          "object_kind",
+          "object_id",
+          "at_nanos"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/AuditAction",
+            "description": "The kind of mutation — part of the **what**."
+          },
+          "actor": {
+            "type": "string",
+            "description": "The authenticated principal that performed the mutation (its key id /\nJWT subject) — the **who**."
+          },
+          "at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the mutation was recorded —\nthe **when**."
+          },
+          "detail": {
+            "description": "An optional structured detail (e.g. the new resource body, or command\nparameters). Never contains secrets."
+          },
+          "object_id": {
+            "type": "string",
+            "description": "The addressed object id — the rest of the **what**."
+          },
+          "object_kind": {
+            "type": "string",
+            "description": "The resource collection the object belongs to (e.g. `layout`)."
+          }
+        }
+      },
+      "BitColorDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::BitColor`].",
+        "required": [
+          "bit",
+          "color"
+        ],
+        "properties": {
+          "bit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The zero-based bit position in the incoming tally word.",
+            "minimum": 0
+          },
+          "color": {
+            "$ref": "#/components/schemas/TallyColorDoc",
+            "description": "The lamp colour asserted when the bit is set."
+          }
+        }
+      },
+      "BusSourceDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The program / on-air bus.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "program"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The preview / next bus.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "preview"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An auxiliary bus, by zero-based index.",
+            "required": [
+              "index",
+              "kind"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Zero-based aux bus index.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "aux"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An isolated (ISO) record bus, by zero-based index.",
+            "required": [
+              "index",
+              "kind"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Zero-based ISO bus index.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "iso"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_core::tally::BusSource`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
+      },
+      "ChannelMap": {
+        "type": "object",
+        "description": "An IS-08 **map**: each named output channel → its [`ChannelSource`].\n\nA `BTreeMap` so the serialised map and any listing is deterministically\nordered (stable diagnostics + golden tests).",
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The set of known input ids this map may reference."
+          },
+          "map": {
+            "type": "object",
+            "description": "The output-channel → source assignments.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ChannelSource"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ChannelSource": {
+        "type": "object",
+        "description": "One output channel's source: an input id + the zero-based channel within it,\nor `None`/silence when the channel is unrouted.",
+        "properties": {
+          "channel_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The zero-based channel index within that input (ignored when silent).",
+            "minimum": 0
+          },
+          "input": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The input the channel is fed from, or [`None`] for silence."
+          }
+        }
+      },
+      "ClearOverrideRequestDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`crate::routes::tally::ClearOverrideRequest`].",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/TallyTargetDoc",
+            "description": "The tally target whose override is cleared."
+          }
+        }
+      },
+      "CommitRequest": {
+        "type": "object",
+        "description": "The body of a `PUT /config/{target}` commit.",
+        "required": [
+          "document"
+        ],
+        "properties": {
+          "document": {
+            "description": "The document to commit as the next revision."
+          },
+          "message": {
+            "type": "string",
+            "description": "A short commit message."
+          }
+        }
+      },
+      "ConfigRevision": {
+        "type": "object",
+        "description": "One immutable revision of a target's config/layout document.",
+        "required": [
+          "target",
+          "revision",
+          "document",
+          "author",
+          "message"
+        ],
+        "properties": {
+          "author": {
+            "type": "string",
+            "description": "The principal that committed this revision (its key id / subject)."
+          },
+          "document": {
+            "description": "The committed document (opaque canonical JSON)."
+          },
+          "message": {
+            "type": "string",
+            "description": "A short human commit message (e.g. `\"expand to 9 cells\"`)."
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RevisionId",
+            "description": "This revision's monotonic id."
+          },
+          "target": {
+            "type": "string",
+            "description": "The stable target key this revision belongs to (e.g. `layout:wall`)."
+          }
+        }
+      },
+      "ConnectionRequest": {
+        "type": "object",
+        "description": "An IS-05 connection request `PATCH`ed to a `/staged` endpoint.",
+        "required": [
+          "activation"
+        ],
+        "properties": {
+          "activation": {
+            "$ref": "#/components/schemas/Activation",
+            "description": "The activation directive."
+          },
+          "master_enable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the sender/receiver is enabled once active."
+          },
+          "sender_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a receiver: the sender id to subscribe to (the connection target)."
+          },
+          "transport_file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a receiver: the SDP transport file describing the sender's stream."
+          },
+          "transport_params": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransportParams"
+            },
+            "description": "One transport-param block per leg (1 for single-path, 2 for ST 2022-7)."
+          }
+        }
+      },
+      "ConnectionState": {
+        "type": "object",
+        "description": "The IS-05 connection state of one endpoint: its current active params and any\npending staged change.",
+        "properties": {
+          "active": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransportParams"
+            },
+            "description": "The currently-active transport params (empty until first activated)."
+          },
+          "master_enable": {
+            "type": "boolean",
+            "description": "Whether the endpoint is master-enabled."
+          },
+          "staged": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ConnectionRequest",
+                "description": "A staged-but-not-yet-active change, if one is pending."
+              }
+            ]
+          }
+        }
+      },
+      "Device": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ResourceCore",
+            "description": "The common IS-04 fields."
+          },
+          {
+            "type": "object",
+            "required": [
+              "node_id",
+              "type"
+            ],
+            "properties": {
+              "node_id": {
+                "type": "string",
+                "description": "The id of the node hosting this device."
+              },
+              "receivers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The receiver ids this device exposes."
+              },
+              "senders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The sender ids this device exposes."
+              },
+              "type": {
+                "type": "string",
+                "description": "The device type URN (e.g. `urn:x-nmos:device:generic`)."
+              }
+            }
+          }
+        ],
+        "description": "An IS-04 **Device**: a logical grouping of senders/receivers on a node."
+      },
+      "DocumentDiff": {
+        "type": "object",
+        "description": "The added / removed / changed top-level keys between two documents.\n\nA pragmatic, UI-facing structural diff over JSON objects: it reports which\ntop-level keys were added, removed, or whose value changed. Non-object\ndocuments (or a type change at the root) are reported as a single synthetic\n`<root>` change so the diff is always total.",
+        "required": [
+          "added",
+          "removed",
+          "changed"
+        ],
+        "properties": {
+          "added": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keys present in the new document but not the old (sorted)."
+          },
+          "changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keys present in both whose value differs (sorted)."
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Keys present in the old document but not the new (sorted)."
+          }
+        }
+      },
+      "IndexCellDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::IndexCell`].",
+        "required": [
+          "index",
+          "cell"
+        ],
+        "properties": {
+          "cell": {
+            "type": "string",
+            "description": "The cell id the index resolves to."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The zero-based source/display index in the tally protocol.",
+            "minimum": 0
+          }
+        }
+      },
+      "Is10Claims": {
+        "type": "object",
+        "description": "An IS-10 JWT **claims set** (the decoded token body).\n\nCarries the registered claims IS-10 mandates plus the NMOS `x-nmos-api`\nclaim. Times are Unix seconds (the JWT `NumericDate`).",
+        "required": [
+          "iss",
+          "sub",
+          "aud",
+          "exp"
+        ],
+        "properties": {
+          "aud": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audience (the resource server this token is for) — `aud`.\n\nIS-10 allows a single audience or a list; a single value is modelled as a\none-element list on decode by the caller."
+          },
+          "exp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry, Unix seconds — `exp`."
+          },
+          "iat": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Issued-at, Unix seconds — `iat`."
+          },
+          "iss": {
+            "type": "string",
+            "description": "The issuer (the authorization server) — `iss`."
+          },
+          "sub": {
+            "type": "string",
+            "description": "The subject (the authenticated user/client) — `sub`."
+          },
+          "x-nmos-api": {
+            "$ref": "#/components/schemas/NmosApiClaim",
+            "description": "The NMOS per-API access grant — `x-nmos-api`."
           }
         }
       },
@@ -117,9 +1928,101 @@
           }
         }
       },
+      "MediaFormat": {
+        "type": "string",
+        "description": "The media format of a sender/receiver (the IS-04 `format` URN family).",
+        "enum": [
+          "video",
+          "audio",
+          "data"
+        ]
+      },
+      "NmosAccess": {
+        "type": "string",
+        "description": "The NMOS access level granted for one API (the `x-nmos-api` value vocabulary).",
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
+      "NmosApiClaim": {
+        "type": "object",
+        "description": "The NMOS-private `x-nmos-api` claim: per-API access grants.",
+        "properties": {
+          "access": {
+            "type": "object",
+            "description": "Per-API access map, e.g. `{\"connection\": \"write\", \"query\": \"read\"}`.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NmosAccess"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string",
+            "description": "The token-format version (e.g. `\"1.0\"`)."
+          }
+        }
+      },
+      "Node": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ResourceCore",
+            "description": "The common IS-04 fields."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hostname": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The hostname the node advertises."
+              },
+              "href": {
+                "type": "string",
+                "description": "The HTTP(S) hrefs the node is reachable at (its API base URLs)."
+              }
+            }
+          }
+        ],
+        "description": "An IS-04 **Node**: the top-level host (a running Multiview instance)."
+      },
       "OperationId": {
         "type": "string",
         "description": "A correlation id for an asynchronously-applied control command.\n\nReturned to the client in a `202 Accepted` response and echoed by the engine\non the realtime stream (`corr`) when the command's outcome is known."
+      },
+      "OverrideRequestDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`crate::routes::tally::OverrideRequest`].",
+        "required": [
+          "target",
+          "color"
+        ],
+        "properties": {
+          "color": {
+            "$ref": "#/components/schemas/TallyColorDoc",
+            "description": "The lamp colour to force."
+          },
+          "target": {
+            "$ref": "#/components/schemas/TallyTargetDoc",
+            "description": "The tally target the override applies to."
+          }
+        }
+      },
+      "PerceivedSeverityDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_core::alarm::PerceivedSeverity`] (X.733).\n\nSerde-equivalent: a unit enum rendered as its `PascalCase` variant name.",
+        "enum": [
+          "Cleared",
+          "Indeterminate",
+          "Warning",
+          "Minor",
+          "Major",
+          "Critical"
+        ]
       },
       "Problem": {
         "type": "object",
@@ -160,14 +2063,248 @@
           }
         }
       },
+      "Receiver": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ResourceCore",
+            "description": "The common IS-04 fields."
+          },
+          {
+            "type": "object",
+            "required": [
+              "device_id",
+              "format",
+              "transport"
+            ],
+            "properties": {
+              "device_id": {
+                "type": "string",
+                "description": "The id of the device this receiver belongs to."
+              },
+              "format": {
+                "$ref": "#/components/schemas/MediaFormat",
+                "description": "The media format this receiver consumes."
+              },
+              "subscribed_sender": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The id of the sender this receiver is subscribed to, if connected."
+              },
+              "transport": {
+                "type": "string",
+                "description": "The transport URN."
+              }
+            }
+          }
+        ],
+        "description": "An IS-04 **Receiver**: an ingress flow (a Multiview input)."
+      },
+      "Registration": {
+        "type": "object",
+        "description": "An IS-04 **registration request**: the `{type, data}` body posted to a\nRegistry's `POST /x-nmos/registration/v1.3/resource`.\n\nThe `data` is the resource JSON for the declared `type`. Modelled internally\ntagged on `type` (never `untagged`) so it round-trips robustly. The payload\nis the raw resource JSON value so this one type carries any resource kind.",
+        "required": [
+          "type",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The resource document (its IS-04 JSON)."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ResourceType",
+            "description": "The kind of resource being registered."
+          }
+        }
+      },
+      "ResourceCore": {
+        "type": "object",
+        "description": "The IS-04 fields common to every resource.\n\nFlattened into each resource type with `#[serde(flatten)]` so the wire JSON\nis a flat object (as IS-04 defines), not a nested `core` object.",
+        "required": [
+          "id",
+          "version",
+          "label"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "A longer human-readable description."
+          },
+          "id": {
+            "type": "string",
+            "description": "The resource UUID (a stable identifier, opaque string here)."
+          },
+          "label": {
+            "type": "string",
+            "description": "A human-readable label."
+          },
+          "tags": {
+            "type": "object",
+            "description": "Free-form tags (each key maps to a list of string values, per IS-04).",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string",
+            "description": "The TAI version `<seconds>:<nanoseconds>` ordering updates to this\nresource (a newer version supersedes an older one)."
+          }
+        }
+      },
+      "ResourceType": {
+        "type": "string",
+        "description": "The IS-04 resource type discriminator used by the registration protocol.",
+        "enum": [
+          "node",
+          "device",
+          "sender",
+          "receiver"
+        ]
+      },
+      "RevisionId": {
+        "type": "integer",
+        "format": "int64",
+        "description": "A monotonic, per-target revision number (starts at 1).",
+        "minimum": 0
+      },
       "Role": {
         "type": "string",
-        "description": "A coarse role governing which actions a principal may perform.\n\nOrdered by privilege: `Viewer < Operator < Admin`. [`Role::can`] expresses\nthe action gate.",
+        "description": "A coarse role governing which actions a principal may perform.\n\nOrdered by privilege: `ReadOnly < Viewer < Operator < Admin`. [`Role::can`]\nexpresses the action gate.\n\n`ReadOnly` and `Viewer` are both read-only at the action gate; they differ in\nintent and ordering: `ReadOnly` is the floor (e.g. an audit/compliance role\nthat should never appear in a write-capable context), while `Viewer` is the\nconventional observer. Keeping them distinct lets deployments and the\nclaims→role mapping express least privilege precisely without changing the\nwrite gate.",
         "enum": [
+          "read_only",
           "viewer",
           "operator",
           "admin"
         ]
+      },
+      "RollbackRequest": {
+        "type": "object",
+        "description": "The body of a `POST /config/{target}/rollback`.",
+        "required": [
+          "to"
+        ],
+        "properties": {
+          "to": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The revision id to restore (a new revision is appended).",
+            "minimum": 0
+          }
+        }
+      },
+      "SalvoDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::Salvo`].\n\nSerde-equivalent field-for-field; the optional fields skip when empty/absent\nexactly as the config type does.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-friendly display name."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable salvo id (unique within the document)."
+          },
+          "layout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Recall a named layout (preset or head layout name)."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceRecallDoc"
+            },
+            "description": "Source rebindings."
+          },
+          "tally": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TallyRecallDoc"
+            },
+            "description": "Forced tally states."
+          },
+          "umd": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UmdRecallDoc"
+            },
+            "description": "UMD label changes."
+          }
+        }
+      },
+      "Sender": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ResourceCore",
+            "description": "The common IS-04 fields."
+          },
+          {
+            "type": "object",
+            "required": [
+              "device_id",
+              "transport"
+            ],
+            "properties": {
+              "device_id": {
+                "type": "string",
+                "description": "The id of the device this sender belongs to."
+              },
+              "flow_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The id of the flow this sender originates (opaque here)."
+              },
+              "manifest_href": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The URL the sender's transport file (SDP) is served at."
+              },
+              "transport": {
+                "type": "string",
+                "description": "The transport URN (e.g. `urn:x-nmos:transport:rtp.mcast`)."
+              }
+            }
+          }
+        ],
+        "description": "An IS-04 **Sender**: an egress flow (a Multiview program/preview output)."
+      },
+      "SourceRecallDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::SourceRecall`].",
+        "required": [
+          "cell",
+          "input_id"
+        ],
+        "properties": {
+          "cell": {
+            "type": "string",
+            "description": "The cell id whose source binding changes."
+          },
+          "input_id": {
+            "type": "string",
+            "description": "The managed source id to bind into the cell."
+          }
+        }
       },
       "SwapRequest": {
         "type": "object",
@@ -186,6 +2323,205 @@
             "description": "The tile/cell id whose source binding changes."
           }
         }
+      },
+      "TallyColorDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_core::tally::TallyColor`] (the TSL UMD palette).\n\nSerde-equivalent: a unit enum rendered as its `PascalCase` variant name.",
+        "enum": [
+          "Off",
+          "Red",
+          "Green",
+          "Amber"
+        ]
+      },
+      "TallyEntryDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`crate::tally_state::TallyEntry`].",
+        "required": [
+          "target",
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/TallyStateDoc",
+            "description": "The resolved tally lamp state."
+          },
+          "target": {
+            "$ref": "#/components/schemas/TallyTargetDoc",
+            "description": "What the tally state applies to."
+          }
+        }
+      },
+      "TallyProfileDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::TallyProfile`].",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "bit_colors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BitColorDoc"
+            },
+            "description": "Bit→colour rules."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable profile id (unique within the document)."
+          },
+          "index_cells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexCellDoc"
+            },
+            "description": "Protocol-index→cell address map."
+          }
+        }
+      },
+      "TallyRecallDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::TallyRecall`].",
+        "required": [
+          "cell",
+          "color"
+        ],
+        "properties": {
+          "cell": {
+            "type": "string",
+            "description": "The cell id whose tally is forced."
+          },
+          "color": {
+            "$ref": "#/components/schemas/TallyColorDoc",
+            "description": "The lamp colour to assert."
+          }
+        }
+      },
+      "TallyStateDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_core::tally::TallyState`].\n\nSerde-equivalent: `brightness` is the bare 2-bit level (`0..=3`) because the\ncore `Brightness` is a newtype that serialises as its inner number.",
+        "required": [
+          "color",
+          "brightness",
+          "source"
+        ],
+        "properties": {
+          "brightness": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The lamp brightness level (`0..=3`).",
+            "minimum": 0
+          },
+          "color": {
+            "$ref": "#/components/schemas/TallyColorDoc",
+            "description": "The lamp colour."
+          },
+          "source": {
+            "$ref": "#/components/schemas/BusSourceDoc",
+            "description": "Which bus this state came from."
+          }
+        }
+      },
+      "TallyTargetDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A multiview tile, by zero-based index.",
+            "required": [
+              "index",
+              "kind"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Zero-based tile index.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tile"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A named UMD/tally element.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "element"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "Element name."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_events::TallyTarget`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
+      },
+      "TransportParams": {
+        "type": "object",
+        "description": "One leg's RTP transport parameters (IS-05 supports up to two legs for\nST 2022-7 redundancy; this models one).",
+        "properties": {
+          "destination_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The destination multicast group address."
+          },
+          "destination_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The destination UDP port.",
+            "minimum": 0
+          },
+          "rtp_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether RTP reception is enabled on this leg."
+          },
+          "source_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source IP for an `IGMPv3` source-specific-multicast filter."
+          }
+        }
+      },
+      "UmdRecallDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::UmdRecall`].",
+        "required": [
+          "cell",
+          "text"
+        ],
+        "properties": {
+          "cell": {
+            "type": "string",
+            "description": "The cell id whose UMD label changes."
+          },
+          "text": {
+            "type": "string",
+            "description": "The label text to display."
+          }
+        }
       }
     }
   },
@@ -197,6 +2533,30 @@
     {
       "name": "commands",
       "description": "Operational commands (start/stop/swap)"
+    },
+    {
+      "name": "alarms",
+      "description": "Monitoring alarms: list + acknowledge"
+    },
+    {
+      "name": "salvos",
+      "description": "Salvo definitions + arm/take/cancel"
+    },
+    {
+      "name": "tally",
+      "description": "Tally state, profiles, and manual override"
+    },
+    {
+      "name": "audit",
+      "description": "Read-only change audit log (who/what/when)"
+    },
+    {
+      "name": "config",
+      "description": "Config/layout versioning: revisions, diff, rollback"
+    },
+    {
+      "name": "nmos",
+      "description": "AMWA NMOS Node API: IS-04 resources + IS-05 connection"
     },
     {
       "name": "realtime",
