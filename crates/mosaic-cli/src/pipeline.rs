@@ -2893,9 +2893,30 @@ const PRIME_WAIT_BUDGET: Duration = Duration::from_millis(1_500);
 /// before [`PRIME_WAIT_BUDGET`]); a few ms keeps the poll cheap.
 const PRIME_WAIT_POLL: Duration = Duration::from_millis(5);
 
-/// Reconnect backoff for a live source whose `open_and_stream` returned (EOF or
-/// error). Capped so a flapping source retries promptly but does not hot-loop.
-const INGEST_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+/// Generic libav I/O timeout (`rw_timeout`, **microseconds**) applied to network
+/// (URL) ingest opens so a dead/stalled live source fails the open — or a
+/// subsequent blocking read — instead of hanging a decode thread forever. Local
+/// file opens get no timeout (a slow disk must not spuriously abort a finite
+/// source mid-decode).
+const INGEST_RW_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Base reconnect backoff for a live source whose `open_and_stream` returned (EOF
+/// or error). The first reconnect waits in `[BASE/2, BASE]` (equal jitter).
+const INGEST_RECONNECT_BASE: Duration = Duration::from_millis(500);
+
+/// Ceiling on the reconnect backoff: a source that keeps failing retries at most
+/// this often (in `[CAP/2, CAP]`), so a hard-down source never hot-loops.
+const INGEST_RECONNECT_CAP: Duration = Duration::from_secs(30);
+
+/// Largest backoff attempt index used by [`reconnect_backoff`]. `BASE << this`
+/// (500 ms × 64 = 32 s) already exceeds [`INGEST_RECONNECT_CAP`], so clamping the
+/// attempt here keeps the `1u32 << attempt` shift from ever overflowing.
+const INGEST_RECONNECT_MAX_ATTEMPT: u32 = 6;
+
+/// A connection that streamed for at least this long is treated as "healthy": its
+/// next drop reconnects from attempt 0 (a long-lived source that finally blips
+/// recovers promptly), instead of carrying a stale escalated backoff.
+const INGEST_RECONNECT_HEALTHY: Duration = Duration::from_secs(30);
 
 /// How long [`IngestSupervisor::join_all`] waits for an ingest thread to observe
 /// the stop flag and exit before detaching it. Generous enough that a thread in
@@ -2904,37 +2925,132 @@ const INGEST_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// stalls the bounded run's teardown.
 const INGEST_JOIN_GRACE: Duration = Duration::from_secs(2);
 
+/// A small deterministic per-source PRNG for reconnect jitter. Seeded from the
+/// source id so different sources de-correlate (no thundering herd) while the
+/// sequence stays reproducible — which is what keeps [`reconnect_backoff`]
+/// testable with no real randomness. A SplitMix64-style step; not cryptographic.
+struct JitterRng(u64);
+
+impl JitterRng {
+    /// Seed from a stable hash of the source id (each source gets its own jitter
+    /// phase). The seed is forced odd so the step never degenerates to a constant.
+    fn seeded(id: &str) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut hasher);
+        Self(hasher.finish() | 1)
+    }
+
+    /// Advance the state and return the next jitter unit in `[0.0, 1.0]`.
+    fn next_unit(&mut self) -> f64 {
+        // SplitMix64 step (deterministic, well-distributed across the id space).
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // Map the top 32 bits into [0, 1] without a lossy `as` cast.
+        let top = u32::try_from(self.0 >> 32).unwrap_or(u32::MAX);
+        f64::from(top) / f64::from(u32::MAX)
+    }
+}
+
+/// Capped-exponential reconnect backoff with **equal jitter**. The window doubles
+/// per `attempt` (`BASE`, `2·BASE`, …), saturating at [`INGEST_RECONNECT_CAP`].
+/// Equal jitter then splits the window into a fixed half plus a jittered half in
+/// `[0, half]`, so the wait lands in `[window/2, window]` — never zero (no hot
+/// reconnect loop) and de-correlated across sources/attempts (no thundering herd).
+/// `jitter_fraction` comes from [`JitterRng::next_unit`]; a non-finite or
+/// out-of-range value is clamped into `[0, 1]`.
+fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
+    let shift = attempt.min(INGEST_RECONNECT_MAX_ATTEMPT);
+    // `shift <= 6`, so the shift is always `Some`; `unwrap_or` is just belt-and-
+    // braces against a future constant change.
+    let mult = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
+    let window = INGEST_RECONNECT_BASE
+        .checked_mul(mult)
+        .unwrap_or(INGEST_RECONNECT_CAP)
+        .min(INGEST_RECONNECT_CAP);
+    let frac = if jitter_fraction.is_finite() {
+        jitter_fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let half = window / 2;
+    half.saturating_add(half.mul_f64(frac))
+}
+
+/// The reconnect attempt index for the NEXT backoff, given the previous index and
+/// how long the just-ended connection streamed. A connection that lasted at least
+/// [`INGEST_RECONNECT_HEALTHY`] resets the escalation to 0 (it was healthy and
+/// merely blipped); anything shorter is a fast failure that escalates the index by
+/// one, capped at [`INGEST_RECONNECT_MAX_ATTEMPT`].
+fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
+    if ran_for >= INGEST_RECONNECT_HEALTHY {
+        0
+    } else {
+        prev.saturating_add(1).min(INGEST_RECONNECT_MAX_ATTEMPT)
+    }
+}
+
+/// Build the libav open options for a source. Network (URL) sources get
+/// [`INGEST_RW_TIMEOUT`] as `rw_timeout` (microseconds) so a dead live source
+/// cannot hang the decode thread on open or a blocking read; local files get an
+/// empty dictionary (a slow disk must not abort a finite source mid-decode).
+fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static> {
+    let mut opts = ffmpeg::Dictionary::new();
+    if matches!(location, SourceLocation::Url(_)) {
+        // `rw_timeout` is expressed in microseconds; libav copies the strings.
+        opts.set("rw_timeout", &INGEST_RW_TIMEOUT.as_micros().to_string());
+    }
+    opts
+}
+
 /// The per-source streaming-ingest loop, run on a dedicated thread (BUG-2 fix).
 ///
 /// Opens the source, decodes its best video stream to NV12 scaled to the tile
 /// size, and **publishes each frame into the store as it is decoded** — paced to
 /// wall-clock by the frame's PTS (invariant #4; `-re` is never used). Returns
 /// when the `stop` flag is raised (a bounded/`stop`ped run tearing ingest down)
-/// or — for a finite source — when the stream ends. A `live` source reconnects
-/// after [`INGEST_RECONNECT_BACKOFF`] on EOF/error, so a transient HLS/RTSP drop
-/// recovers; the tile holds its last-good frame meanwhile (invariant #2). The
-/// loop only ever *writes* the lock-free store, so it can neither pace nor stall
-/// the output clock (invariant #1) nor back-pressure the engine (invariant #10).
+/// or — for a finite source — when the stream ends. A `live` source reconnects on
+/// EOF/error after a [`reconnect_backoff`] wait (capped-exponential + per-source
+/// jitter): consecutive fast failures escalate the wait up to
+/// [`INGEST_RECONNECT_CAP`], while a connection that streamed for at least
+/// [`INGEST_RECONNECT_HEALTHY`] resets the escalation, so a transient HLS/RTSP
+/// drop recovers promptly and a hard-down source never hot-loops. The tile holds
+/// its last-good frame meanwhile (invariant #2). The loop only ever *writes* the
+/// lock-free store, so it can neither pace nor stall the output clock
+/// (invariant #1) nor back-pressure the engine (invariant #10).
 fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
     let tag = CanvasColor::default().output_tag();
+    let mut attempt: u32 = 0;
+    let mut jitter = JitterRng::seeded(&plan.id);
     loop {
         if stop.load(Ordering::Acquire) {
             return;
         }
+        let started = Instant::now();
         match open_and_stream(plan, tag, stop) {
             Ok(()) => {}
             Err(reason) => {
                 tracing::warn!(source = %plan.id, %reason, "ingest stream ended/errored");
             }
         }
+        // How long THIS connection streamed (before any backoff) — feeds the
+        // healthy-reset decision below.
+        let ran_for = started.elapsed();
         if !plan.live || stop.load(Ordering::Acquire) {
             // A finite source has played out (its tile now holds its last-good
             // frame forever); a stop was requested. Either way, this thread ends.
             return;
         }
-        // Live source: brief backoff, then reconnect (checking `stop` in slices
-        // so teardown stays prompt).
-        sleep_interruptible(INGEST_RECONNECT_BACKOFF, stop);
+        // Live source: wait a capped-exponential, jittered backoff (checking
+        // `stop` in slices so teardown stays prompt), then reconnect. The backoff
+        // is computed from the count of consecutive fast failures BEFORE updating
+        // it, so the first reconnect is quick and only persistent failures escalate.
+        let nap = reconnect_backoff(attempt, jitter.next_unit());
+        tracing::debug!(source = %plan.id, attempt, ?nap, "reconnecting live source after backoff");
+        sleep_interruptible(nap, stop);
+        attempt = next_reconnect_attempt(attempt, ran_for);
     }
 }
 
@@ -2954,9 +3070,16 @@ fn open_and_stream(
 ) -> Result<(), String> {
     mosaic_ffmpeg::ensure_initialized().map_err(|e| e.to_string())?;
 
+    // Network sources open with an `rw_timeout` so a dead live source fails fast
+    // instead of hanging this decode thread on open or a blocking read (#45).
+    let opts = ingest_open_options(&plan.location);
     let mut input = match &plan.location {
-        SourceLocation::Path(p) => ffmpeg::format::input(p).map_err(|e| e.to_string())?,
-        SourceLocation::Url(u) => ffmpeg::format::input(&u.as_str()).map_err(|e| e.to_string())?,
+        SourceLocation::Path(p) => {
+            ffmpeg::format::input_with_dictionary(p, opts).map_err(|e| e.to_string())?
+        }
+        SourceLocation::Url(u) => {
+            ffmpeg::format::input_with_dictionary(&u.as_str(), opts).map_err(|e| e.to_string())?
+        }
     };
 
     let (stream_index, params, time_base, declared_fps) = {
@@ -3774,7 +3897,11 @@ mod reconnect_tests {
         assert_eq!(reconnect_backoff(0, f64::NAN), floor);
         assert_eq!(reconnect_backoff(0, f64::INFINITY), floor);
         assert_eq!(reconnect_backoff(0, -1.0), floor, "negative clamps to 0");
-        assert_eq!(reconnect_backoff(0, 5.0), INGEST_RECONNECT_BASE, "clamps to 1");
+        assert_eq!(
+            reconnect_backoff(0, 5.0),
+            INGEST_RECONNECT_BASE,
+            "clamps to 1"
+        );
     }
 
     #[test]
@@ -3783,15 +3910,29 @@ mod reconnect_tests {
         let mut a2 = JitterRng::seeded("source-a");
         let seq_a: Vec<f64> = (0..8).map(|_| a.next_unit()).collect();
         let seq_a2: Vec<f64> = (0..8).map(|_| a2.next_unit()).collect();
-        assert_eq!(seq_a, seq_a2, "same seed ⇒ identical sequence (so it is testable)");
+        // The PRNG is deterministic, so the sequences are bit-identical — compare
+        // raw bits (exact, not an epsilon) to make that the assertion.
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(
+            bits(&seq_a),
+            bits(&seq_a2),
+            "same seed ⇒ identical sequence (so it is testable)"
+        );
         for &u in &seq_a {
             assert!((0.0..=1.0).contains(&u), "jitter unit {u} out of [0,1]");
         }
         // Two different sources must not reconnect in lockstep (decorrelation).
         let mut b = JitterRng::seeded("source-b");
-        assert_ne!(b.next_unit(), seq_a[0], "different sources must not lockstep");
+        assert_ne!(
+            b.next_unit().to_bits(),
+            seq_a[0].to_bits(),
+            "different sources must not lockstep"
+        );
         // The sequence actually varies (not a stuck constant).
-        assert!(seq_a.windows(2).any(|w| w[0] != w[1]), "jitter must vary across draws");
+        assert!(
+            seq_a.windows(2).any(|w| w[0].to_bits() != w[1].to_bits()),
+            "jitter must vary across draws"
+        );
     }
 
     #[test]
@@ -3813,7 +3954,10 @@ mod reconnect_tests {
         );
         // Just under healthy still counts as a fast failure (keeps escalating).
         assert_eq!(
-            next_reconnect_attempt(2, INGEST_RECONNECT_HEALTHY - Duration::from_millis(1)),
+            next_reconnect_attempt(
+                2,
+                INGEST_RECONNECT_HEALTHY.saturating_sub(Duration::from_millis(1))
+            ),
             3,
         );
     }
