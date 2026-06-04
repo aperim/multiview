@@ -1,0 +1,107 @@
+# deploy/config/multiview.toml — quick-start compose config.
+#
+# A 2x2 canvas. ALL sources are synthetic or come from the bundled `testsrc`
+# companion container (which publishes an ffmpeg `testsrc2` + `sine` feed over
+# RTSP). No real/private feeds — adapt freely.
+#
+# Mounted into the container at /etc/multiview/multiview.toml (read-only); the
+# HLS output is written under /var/lib/multiview/hls (a named volume).
+schema_version = 1
+
+[canvas]
+width = 1280
+height = 720
+fps = "30/1"               # exact rational string — never a float fps
+pixel_format = "nv12"
+background = "#101014"
+
+[canvas.color]
+profile = "sdr-bt709-limited"   # all tiles normalized to this working space
+
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr", "1fr"]
+gap = 8
+areas = ["live test", "test2 test3"]
+
+# Tile 1: the companion `testsrc` container's RTSP feed (synthetic testsrc2+sine).
+[[sources]]
+id = "in_live"
+display_name = "RTSP testsrc (companion)"
+kind = "rtsp"
+url = "rtsp://testsrc:8554/test"
+[sources.rtsp]
+transport = "tcp"
+
+# Tiles 2-4: the built-in synthetic test pattern — always available, no network.
+[[sources]]
+id = "in_test"
+display_name = "Built-in test pattern A"
+kind = "test"
+
+[[sources]]
+id = "in_test2"
+display_name = "Built-in test pattern B"
+kind = "test"
+
+[[sources]]
+id = "in_test3"
+display_name = "Built-in test pattern C"
+kind = "test"
+
+[[cells]]
+id = "cell_live"
+area = "live"
+fit = "contain"
+[cells.source]
+input_id = "in_live"
+
+[[cells]]
+id = "cell_test"
+area = "test"
+fit = "contain"
+[cells.source]
+input_id = "in_test"
+
+[[cells]]
+id = "cell_test2"
+area = "test2"
+fit = "contain"
+[cells.source]
+input_id = "in_test2"
+
+[[cells]]
+id = "cell_test3"
+area = "test3"
+fit = "contain"
+[cells.source]
+input_id = "in_test3"
+
+[[overlays]]
+id = "ov_clock"
+kind = "clock"
+target = "canvas"
+anchor = "bottom_right"
+offset = { x = -20, y = -16 }
+z = 100
+format = "%H:%M:%S"
+source = "wall"            # the always-ticking clock doubles as a falter sentinel
+
+# Write HLS (index.m3u8 + seg*.ts) under the mounted /var/lib/multiview/hls
+# directory; the `hls` sidecar in deploy/compose.yaml serves it over HTTP.
+#
+# Codec: the default LGPL-clean image encodes **mpeg2video** (plays in VLC /
+# ffplay). For browser-friendly **H.264** HLS, use the GPL image
+# (`ghcr.io/aperim/multiview:<tag>-gpl`) and set `codec = "h264"` — note H.264/
+# H.265 make the build GPL (see the README "GPL build" note).
+[[outputs]]
+kind = "hls"
+path = "/var/lib/multiview/hls/multiview.m3u8"
+codec = "mpeg2video"
+segment_ms = 2000
+
+# NOTE: live RTSP / NDI / RTMP output *servers* and the web UI / control API are
+# on the roadmap — the current binary composites + encodes + writes HLS/file
+# output to disk (it does not yet bind a network listener). See the README
+# "Roadmap". Add an `[[outputs]] kind = "rtsp_server"` once the servers are wired.

@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1
+#
+# Multiview NVIDIA runtime image (NVDEC/NVENC/CUDA, LGPL-clean default build).
+#
+# Multi-stage:
+#   * builder  — Debian trixie + Rust, libav* -dev headers, builds `multiview`
+#                with `--features ffmpeg,nvidia` (CUDA decode/encode + wgpu).
+#   * runtime  — nvidia/cuda:12.6.3-runtime-ubuntu24.04 with the FFmpeg 7.x
+#                runtime sonames + the binary, run as a non-root user.
+#
+# IMPORTANT host prerequisite: this image does NOT contain the NVIDIA kernel
+# driver. The host must have the driver + the NVIDIA Container Toolkit (CDI);
+# the toolkit injects the host driver libraries (libcuda, NVENC/NVDEC) at run
+# time. See deploy/compose.gpu-nvidia.yaml.
+#
+# Builder is Debian trixie (FFmpeg 7.1 dev headers, libavcodec.so.61). The
+# runtime is the CUDA 12.6 runtime image on Ubuntu 24.04. Ubuntu 24.04 apt ships
+# FFmpeg 6.1, so the matching FFmpeg 7.x runtime sonames are installed from a
+# maintained PPA (ubuntuhandbook1/ffmpeg7) — pinned by the libav*61 family and
+# verified with `ldconfig`/`pkg-config` at build time.
+#
+# Base-image pinning: pin both bases by digest for a reproducible release, e.g.
+#   FROM rust:1-trixie@sha256:<digest> AS builder
+#   FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04@sha256:<digest> AS runtime
+
+# -----------------------------------------------------------------------------
+# Stage 1: builder (Debian trixie => FFmpeg 7.x dev headers)
+# -----------------------------------------------------------------------------
+FROM rust:1-trixie AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG CARGO_FEATURES=ffmpeg,nvidia
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      pkg-config clang llvm-dev libclang-dev nasm \
+      libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
+      libavdevice-dev libswscale-dev libswresample-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked -p multiview-cli --features "${CARGO_FEATURES}" \
+ && cp /build/target/release/multiview /usr/local/bin/multiview \
+ && /usr/local/bin/multiview --version
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime (CUDA 12.6 runtime on Ubuntu 24.04 + FFmpeg 7.x sonames)
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Ubuntu 24.04 apt ships FFmpeg 6.1; pull the FFmpeg 7.x runtime sonames
+# (libav*61) from the maintained ubuntuhandbook1/ffmpeg7 PPA, then assert the
+# soname major is 61 (FFmpeg 7.x) so a silent regression to 6.x fails the build.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates software-properties-common gnupg \
+ && add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg7 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libavcodec61 libavformat61 libavutil59 libavfilter10 \
+      libavdevice61 libswscale8 libswresample5 \
+ && ldconfig -p | grep -q 'libavcodec.so.61' \
+ && apt-get purge -y software-properties-common gnupg \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+# Make CUDA expose the video (NVENC/NVDEC) capability in addition to compute.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+ENV NVIDIA_VISIBLE_DEVICES=all
+
+RUN groupadd --gid 10001 multiview \
+ && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin multiview \
+ && mkdir -p /etc/multiview /var/lib/multiview/hls \
+ && chown -R 10001:10001 /etc/multiview /var/lib/multiview
+
+COPY --from=builder /usr/local/bin/multiview /usr/local/bin/multiview
+
+USER 10001:10001
+WORKDIR /var/lib/multiview
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/multiview"]
+CMD ["run", "/etc/multiview/multiview.toml"]

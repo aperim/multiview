@@ -1,0 +1,101 @@
+# deploy/compose.yaml — Multiview quick-start (software / LGPL-clean image).
+#
+# Brings up three services:
+#   * testsrc   — a MediaMTX RTSP server that, on init, runs ffmpeg to publish a
+#                 SYNTHETIC `testsrc2` video + `sine` audio feed at
+#                 rtsp://testsrc:8554/test. No real/private feeds.
+#   * multiview — the Multiview engine: ingests that feed + 3 built-in test
+#                 patterns into a 2x2 canvas, encodes once, and writes HLS to a
+#                 named volume.
+#   * hls       — a tiny nginx that serves the HLS volume over HTTP so you can
+#                 open the stream in a player.
+#
+# Bring it up:   docker compose -f deploy/compose.yaml up -d
+# Then open:     http://localhost:8888/multiview.m3u8   (in VLC / ffplay)
+# Tear it down:  docker compose -f deploy/compose.yaml down -v
+#
+# GPU overlays (compose merges left-to-right; the GPU files swap the image +
+# add device access):
+#   docker compose -f deploy/compose.yaml -f deploy/compose.gpu-nvidia.yaml up -d
+#   docker compose -f deploy/compose.yaml -f deploy/compose.gpu-vaapi.yaml  up -d
+#
+# NOTE: the current binary composites + encodes + **writes HLS/file output to
+# disk** — it does not yet bind a network listener, so there are no web-UI/
+# control-API (:8080) or live RTSP-server (:8554) ports here. Those are on the
+# roadmap (the axum control plane + the embedded SPA are built; wiring the
+# listener into `run` is next — see the README "Roadmap"). View the multiview by
+# pointing a player at the HLS the `hls` sidecar serves.
+
+services:
+  testsrc:
+    # MediaMTX with a bundled ffmpeg; `runOnInit` publishes a synthetic feed.
+    image: bluenviron/mediamtx:1.19.0-ffmpeg
+    restart: unless-stopped
+    environment:
+      MTX_PROTOCOLS: tcp
+      # Publish a synthetic 1280x720@30 testsrc2 + sine feed to the `test` path.
+      MTX_PATHS_TEST_RUNONINIT: >-
+        ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30
+        -f lavfi -i sine=frequency=1000:sample_rate=48000
+        -pix_fmt yuv420p -c:v libx264 -preset veryfast -tune zerolatency -g 60
+        -c:a aac -f rtsp rtsp://localhost:8554/test
+      MTX_PATHS_TEST_RUNONINITRESTART: "yes"
+    ports:
+      # Exposed for host inspection (e.g. ffplay rtsp://localhost:8554/test).
+      - "8554:8554"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 8554 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  multiview:
+    image: ghcr.io/aperim/multiview:latest
+    restart: unless-stopped
+    depends_on:
+      testsrc:
+        condition: service_started
+    command: ["run", "/etc/multiview/multiview.toml"]
+    volumes:
+      # The quick-start config (read-only) and the HLS output (named volume).
+      - ./config/multiview.toml:/etc/multiview/multiview.toml:ro
+      - multiview-hls:/var/lib/multiview/hls
+    healthcheck:
+      # Real liveness: the HLS playlist must have been written in the last 30s
+      # (the segmenter rewrites it every segment), proving the output clock is
+      # still producing. Uses only coreutils (stat/date/test), present in the
+      # debian-slim runtime. start_period covers ingest + prime + first segment.
+      test:
+        - "CMD"
+        - "sh"
+        - "-c"
+        - "f=/var/lib/multiview/hls/multiview.m3u8; test -f \"$$f\" && [ $$(( $$(date +%s) - $$(stat -c %Y \"$$f\") )) -lt 30 ]"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
+        reservations:
+          cpus: "1.0"
+          memory: 1g
+
+  hls:
+    # Serve the HLS output volume over HTTP. Open http://localhost:8888/multiview.m3u8
+    # in VLC/ffplay. (The default LGPL image encodes mpeg2video — use VLC; for
+    # browser/H.264 playback use the `-gpl` image, see the README.)
+    image: nginx:1-alpine
+    restart: unless-stopped
+    depends_on:
+      - multiview
+    volumes:
+      - multiview-hls:/usr/share/nginx/html:ro
+    ports:
+      - "8888:80"
+
+volumes:
+  multiview-hls:
