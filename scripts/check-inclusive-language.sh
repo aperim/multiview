@@ -18,6 +18,7 @@ matches="$(grep -rInE -i "$pattern" . \
   --exclude-dir=node_modules \
   --exclude-dir=dist \
   --exclude-dir=.mosaic-build \
+  --exclude-dir=.claude \
   --exclude='check-inclusive-language.sh' || true)"
 
 if [ -n "$matches" ]; then

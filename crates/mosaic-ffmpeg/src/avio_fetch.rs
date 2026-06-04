@@ -9,11 +9,11 @@
 //!
 //! `ffmpeg_next` exposes no safe wrapper for `avio_open2`/`avio_read`, so the one
 //! `unsafe fn` here drives the raw FFI: it opens the context (read-only, with a
-//! protocol whitelist + read timeout), reads to EOF into a **bounded** buffer,
+//! protocol allowlist + read timeout), reads to EOF into a **bounded** buffer,
 //! and closes the context on **every** return path. The crate is `unsafe = deny`;
 //! every block carries a `// SAFETY:` note. Security: the URL scheme is validated
 //! in Rust against `allowed_protocols` *before* opening (a hard guarantee), and
-//! the same whitelist is handed to libav as defence-in-depth — so a stray
+//! the same allowlist is handed to libav as defence-in-depth — so a stray
 //! `file:`/`concat:`/`subfile:` URL can never be opened.
 
 // reason: avio_open2/avio_read/avio_closep/av_dict_set have no safe ffmpeg_next
@@ -83,7 +83,7 @@ fn c_string(s: &str, url: &str) -> Result<CString> {
     CString::new(s).map_err(|_| fetch_err(url, format_args!("{s:?} has an interior NUL")))
 }
 
-/// Open `url` read-only with the whitelist + timeout options, read to EOF into a
+/// Open `url` read-only with the allowlist + timeout options, read to EOF into a
 /// bounded buffer, and close the context on every path.
 #[allow(clippy::too_many_arguments)]
 unsafe fn fetch_inner(
@@ -200,8 +200,8 @@ mod tests {
     }
 
     #[test]
-    fn a_scheme_outside_the_whitelist_is_refused_before_opening() {
-        // `file:` is not in an http-only whitelist -> refused in Rust, never opened
+    fn a_scheme_outside_the_allowlist_is_refused_before_opening() {
+        // `file:` is not in an http-only allowlist -> refused in Rust, never opened
         // (libav *can* open `file:`, so an Ok would mean the guard was bypassed).
         let result = fetch_url_text("file:/etc/hostname", 1024, "http,https");
         match result {
