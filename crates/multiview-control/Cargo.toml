@@ -47,7 +47,7 @@ utoipa-scalar = { version = "0.3.0", features = ["axum"], optional = true }
 
 # SQLite persistence: OFF by default. SQLite's bundled license is NOT in the
 # cargo-deny allowlist, so sqlx/sqlite must never appear in the default build.
-sqlx = { version = "0.8.6", default-features = false, features = [
+sqlx = { version = "0.9.0", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
     "macros",
