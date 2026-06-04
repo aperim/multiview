@@ -146,7 +146,7 @@ jobs:
 
       - name: Import signing certificate
         if: runner.os == 'macOS' && steps.signing.outputs.enabled == 'true'
-        uses: apple-actions/import-codesign-certs@v3 # v3
+        uses: apple-actions/import-codesign-certs@v7 # v3
         with:
           p12-file-base64: ${{ secrets.MACOS_CERTIFICATE }}
           p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
