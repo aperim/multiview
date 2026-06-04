@@ -115,6 +115,54 @@ impl Muxer {
         Ok(index)
     }
 
+    /// Register a stream from a `Send` codec-parameters snapshot, recording the
+    /// encoder time-base used to rescale that stream's packets. Returns the new
+    /// stream index.
+    ///
+    /// This is the encode-once-mux-many (invariant #7, ADR-0026) sibling of
+    /// [`Muxer::add_stream`]: a mux-only sink runs on its own thread with no
+    /// encoder instance, so it builds its stream from a
+    /// [`StreamCodecParameters`](crate::packet::StreamCodecParameters) carried
+    /// across the thread boundary. Functionally identical to `add_stream` — both
+    /// copy the same codec parameters onto a fresh stream — but keyed off the
+    /// thread-movable snapshot rather than the live encoder context.
+    ///
+    /// Must be called for every stream **before** [`Muxer::write_header`].
+    ///
+    /// # Errors
+    /// * [`FfmpegError::Mux`] — the container is sealed or libav refused the
+    ///   stream.
+    /// * [`FfmpegError::Rational`] — the encoder time-base does not fit.
+    pub fn add_stream_from_parameters(
+        &mut self,
+        parameters: &crate::packet::StreamCodecParameters,
+        encoder_time_base: Rational,
+    ) -> Result<usize> {
+        if self.header_written {
+            return Err(FfmpegError::Mux(ffmpeg::Error::InvalidData));
+        }
+        let tb = to_ff_rational(encoder_time_base)?;
+        let index = {
+            // A new stream with no codec attached, then copy the codec
+            // parameters in (`avcodec_parameters_copy`) — the safe ffmpeg-next
+            // path, equivalent to `add_stream_with`'s
+            // `avcodec_parameters_from_context` but seeded from the snapshot.
+            let mut stream = self
+                .output
+                .add_stream(None::<ffmpeg::Codec>)
+                .map_err(FfmpegError::Mux)?;
+            stream.set_parameters(parameters.as_parameters().clone());
+            stream.set_time_base(tb);
+            stream.index()
+        };
+        self.streams.push(StreamInfo {
+            index,
+            encoder_time_base,
+            stream_time_base: encoder_time_base,
+        });
+        Ok(index)
+    }
+
     /// Write the container header. Call once, after all streams are added.
     ///
     /// # Errors

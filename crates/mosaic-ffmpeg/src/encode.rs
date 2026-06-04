@@ -107,6 +107,16 @@ impl VideoEncoder {
         self.encoder.as_ref()
     }
 
+    /// Snapshot the encoder's codec parameters into an owned, owner-less
+    /// `AVCodecParameters` (`avcodec_parameters_from_context`). Used to build a
+    /// [`StreamCodecParameters`](crate::packet::StreamCodecParameters) that
+    /// crosses threads to a mux-only sink without the encoder instance
+    /// (encode-once-mux-many, invariant #7).
+    #[must_use]
+    pub(crate) fn codec_parameters(&self) -> codec::Parameters {
+        codec::Parameters::from(&self.encoder)
+    }
+
     /// Send one frame, whose PTS the caller has already set from the tick
     /// counter (encoder time-base). Drain packets with [`Self::receive_packet`].
     ///
@@ -213,6 +223,14 @@ impl AudioEncoder {
     #[must_use]
     pub fn as_codec_context(&self) -> &codec::Context {
         self.encoder.as_ref()
+    }
+
+    /// Snapshot the encoder's codec parameters into an owned, owner-less
+    /// `AVCodecParameters`. See
+    /// [`VideoEncoder::codec_parameters`](crate::encode::VideoEncoder::codec_parameters).
+    #[must_use]
+    pub(crate) fn codec_parameters(&self) -> codec::Parameters {
+        codec::Parameters::from(&self.encoder)
     }
 
     /// Send one audio frame (PTS already set by the caller).

@@ -130,6 +130,13 @@ pub mod hwframe;
 #[cfg(feature = "ffmpeg")]
 pub mod mux;
 
+/// Thread-movable encoded packet ([`packet::EncodedPacket`]) + `Send`
+/// codec-parameter snapshot ([`packet::StreamCodecParameters`]) for the
+/// encode-once-mux-many fan-out (invariant #7, ADR-0026). Behind the `ffmpeg`
+/// feature.
+#[cfg(feature = "ffmpeg")]
+pub mod packet;
+
 #[cfg(feature = "ffmpeg")]
 pub mod resample;
 
@@ -174,6 +181,9 @@ pub use hwframe::{HwDeviceContext, HwDeviceKind, HwFramesContext, HwFramesSpec};
 
 #[cfg(feature = "ffmpeg")]
 pub use mux::Muxer;
+
+#[cfg(feature = "ffmpeg")]
+pub use packet::{EncodedPacket, StreamCodecParameters};
 
 #[cfg(feature = "ffmpeg")]
 pub use resample::{ResampleSpec, Resampler};
