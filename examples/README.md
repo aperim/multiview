@@ -11,19 +11,19 @@ layout → cells → overlays → outputs, config-as-code). `fps` is **always** 
 | [`3x3.toml`](3x3.toml) | 3×3 grid | 9 × built-in `test` | Density demo. |
 | [`1plus5.toml`](1plus5.toml) | 1 large + 5 small | 6 × built-in `test` | Asymmetric grid via `grid-template-areas`. |
 | [`pip.toml`](pip.toml) | Picture-in-picture | 2 × built-in `test` | Absolute normalized rect overlap. |
-| [`public-streams-2x2.toml`](public-streams-2x2.toml) | 2×2 grid | Real public streams | Mixed fps/codec/**color** torture test — see below. |
+| [`public-streams-2x2.toml`](public-streams-2x2.toml) | 2×2 grid | Mixed source kinds | Synthetic + a sample clip + an example RTSP camera; fps/codec/**color** heterogeneity test — see below. |
 
 The `test` source is the built-in synthetic pattern, so the grid/PiP examples run with no external
 dependencies. Replace a source's `kind`/`url` to point at real `rtsp`/`hls`/`ts`/`srt`/`ndi` inputs.
 
-## `public-streams-2x2.toml` — the real-world mix
+## `public-streams-2x2.toml` — the heterogeneity test
 
-Uses the project demo streams from
-[`../docs/reference/example-streams.md`](../docs/reference/example-streams.md). Between them they
-span **25 / 29.97 / 50 / 60 fps**, **H.264 + HEVC**, and **untagged vs BT.709 vs BT.601-mixed**
-color — exactly the heterogeneity the engine must normalize onto one canvas. Several streams are
-**geo-restricted** (AU/US) and may be unavailable; for reproducible/offline runs prefer the `test`
-sources or the synthetic recipes in the example-streams doc.
+A deliberately mixed-source grid: built-in `test` synthetic patterns, a public sample clip, and a
+placeholder example RTSP camera (`rtsp://camera.example.net:8554/stream`). Between them the tiles
+span different **fps**, **codecs**, and **color tagging** (untagged vs BT.709) — exactly the
+heterogeneity the engine must normalize onto one canvas. Swap the example camera URL for your own
+`rtsp`/`hls`/`ts`/`srt`/`ndi` source; for fully reproducible/offline runs use the `test` sources or
+the synthetic recipes in [`../docs/reference/example-streams.md`](../docs/reference/example-streams.md).
 
 ```sh
 # (once implemented) validate, then run:
