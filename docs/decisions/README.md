@@ -51,6 +51,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs tot
 - [ADR-0022](ADR-0022.md) — Real-time software compositor: parallelize + LUT the per-pixel colour pipeline; content-aware smoothness gate *(Accepted)*
 - [ADR-0023](ADR-0023.md) — Region-limited overlay bake: per-primitive dirty rects + exact passthrough, end the full-canvas colour round-trip (inv #5) *(Accepted)*
 - [ADR-0025](ADR-0025.md) — Streaming encode: bound memory + continuous output on run-until (off-hot-path bake consumer + bounded queue, offline-block/live-drop) *(Accepted)*
+- [ADR-0026](ADR-0026.md) — Encode-once-mux-many: hoist the single encoder into the bake consumer, fan encoded packets to mux-only sinks (folds in bounded teardown) *(Proposed)*
 
 ## Color
 
