@@ -1,6 +1,6 @@
 //! Row-sized band accumulator: the serial / low-core composite path must size
 //! its premultiplied-linear accumulator to the **covered row range** of the band
-//! (O(band_rows × width)), not the full frame — inv #5 (NV12-throughout) says
+//! (`O(band_rows × width)`), not the full frame — inv #5 (NV12-throughout) says
 //! never materialise a full-frame RGBA scratch.
 //!
 //! Two things are pinned here:
@@ -194,16 +194,18 @@ proptest! {
 
     /// `covered_row_span` is always even-aligned, inside the band, and covers
     /// every band row that any tile touches (and nothing more than the
-    /// even-rounded union).
+    /// even-rounded union). `band_rows` is even, matching the function's
+    /// precondition (every production caller passes an even-height band).
     #[test]
     fn prop_covered_row_span_is_sound(
-        band_rows in 1_usize..120,
+        band_pairs in 1_usize..60,
         py_start in 0_u32..200,
         placements in proptest::collection::vec(
             (0_u32..240, 2_u32..40),
             0..=6,
         ),
     ) {
+        let band_rows = band_pairs * 2; // even, per the precondition
         let images: Vec<Nv12Image> = placements
             .iter()
             .enumerate()

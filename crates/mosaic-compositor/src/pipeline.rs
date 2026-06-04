@@ -692,15 +692,17 @@ fn composite_band_reference(
 ///    touched, leaving the precomputed background constant for the rest.
 ///
 /// Invariant #5 (NV12-throughout): the output stays NV12 and no per-*tile* RGBA
-/// is materialised. The tile-driven fold does, however, hold a per-pixel
-/// premultiplied-linear accumulator for the band it is processing — bounded to
-/// one band on the parallel path, but equal to the whole frame on the
-/// single-threaded path (`composite_band` over one full-canvas band). That is a
-/// bounded, transient, CPU-reference-only buffer (the GPU pipeline inv #5 targets
-/// never allocates it); a follow-up row-sizes the accumulator to one scanline to
-/// keep it sub-frame on the serial/low-core path too. Invariant #8 (fixed colour
-/// order) is unchanged: the same front-half/`over`/back-half order runs; only the
-/// *iteration* changed.
+/// is materialised. The tile-driven fold does hold a per-pixel
+/// premultiplied-linear accumulator, but it is sized to the band's **covered row
+/// range** ([`covered_row_span`]) — the even-row-aligned union of the rows any
+/// tile touches — not the full band. So even on the single-threaded path (one
+/// full-canvas band) the scratch is `O(covered_rows × width)`: a canvas with a
+/// few small tiles never allocates a full-frame buffer, and an all-background band
+/// allocates none at all. Rows outside the span keep the precomputed background
+/// constant the fill already wrote. The covered span is even-row-aligned so a
+/// 2×2 chroma block never straddles its boundary (NV12 chroma is 2×2
+/// subsampled). Invariant #8 (fixed colour order) is unchanged: the same
+/// front-half/`over`/back-half order runs; only the *iteration* changed.
 #[allow(clippy::too_many_arguments)]
 // reason: this is the internal band kernel; the arguments are the band slices
 // plus the shared composite parameters. Grouping them into a struct would not
@@ -721,7 +723,6 @@ fn composite_band(
     if band_rows == 0 || w == 0 {
         return Ok(());
     }
-    let band_pixels = band_rows.saturating_mul(w);
 
     // 1. Background-encoded constant, computed ONCE (critic finding #3).
     let bg_premul = background.premultiplied();
@@ -740,17 +741,30 @@ fn composite_band(
     };
     fill_band_solid(band_y, band_uv, w, band_rows, bg_yuv);
 
-    // 2. Per-pixel premultiplied accumulator, all background, plus a coverage
-    //    bitmap of which pixels at least one tile touched. Fold each tile's
-    //    rect ∩ band in slice order (back-to-front).
-    let mut acc = vec![bg_premul; band_pixels];
-    let mut covered = vec![false; band_pixels];
+    // 2. Size the premultiplied accumulator to the band's COVERED row range
+    //    (even-row-aligned union of every tile's rows ∩ band), not the full
+    //    band — inv #5: the scratch is O(covered_rows × width), never the whole
+    //    frame. Rows outside the span keep the background constant the fill
+    //    wrote, so an all-background band allocates no accumulator at all.
+    let Some((span_start, span_end)) = covered_row_span(band_rows, py_start, tiles) else {
+        return Ok(()); // no tile touches this band: it is all background
+    };
+    let span_rows = span_end.saturating_sub(span_start);
+    let span_pixels = span_rows.saturating_mul(w);
+
+    // 3. Per-pixel premultiplied accumulator over the covered span (all
+    //    background), plus a coverage bitmap of which pixels at least one tile
+    //    touched. Fold each tile's rect ∩ span in slice order (back-to-front);
+    //    `span_start` rebases band-local rows into accumulator rows.
+    let mut acc = vec![bg_premul; span_pixels];
+    let mut covered = vec![false; span_pixels];
     for tile in tiles {
         fold_tile_into_band(
             &mut acc,
             &mut covered,
             w,
-            band_rows,
+            span_start,
+            span_rows,
             py_start,
             tile,
             canvas,
@@ -758,15 +772,83 @@ fn composite_band(
         )?;
     }
 
-    // 3. Re-encode through the back half ONLY the pixels a tile touched; the
+    // 4. Re-encode through the back half ONLY the pixels a tile touched; the
     //    rest already hold the precomputed background constant.
-    encode_covered_pixels(band_y, band_uv, w, band_rows, &acc, &covered, canvas, luts)
+    encode_covered_pixels(
+        band_y, band_uv, w, span_start, span_rows, &acc, &covered, canvas, luts,
+    )
 }
 
-/// Fold one tile's `rect ∩ band` into the band-local premultiplied accumulator
-/// `acc` (back-to-front `over`), marking `covered` for each touched pixel. Only
-/// the pixels inside the tile's clipped destination rect are visited — the
-/// tile-driven inner loop (vs. the reference's per-pixel-all-tiles scan).
+/// The band-local **covered row range** `[start, end)` (half-open) of the rows
+/// any tile in `tiles` touches within a band of `band_rows` rows whose global
+/// top row is `py_start` — the extent the [`composite_band`] accumulator is
+/// sized to. Returns [`None`] when no tile overlaps the band (the whole band is
+/// background, so no accumulator is allocated).
+///
+/// The range is **even-row-aligned** (`start` floored to even, `end` ceiled to
+/// even) and clamped to `[0, band_rows]`. Even alignment is load-bearing: NV12
+/// chroma is 2×2 subsampled, so a 2×2 block must lie wholly inside or wholly
+/// outside the accumulator (the back-half chroma write keys off the block's
+/// bottom-right pixel — see [`encode_covered_pixels`]).
+///
+/// **Precondition:** `band_rows` is even. Every production caller honours this —
+/// the band split keeps each band an even number of luma rows and the serial
+/// path passes the validated-even `canvas_h` — so ceiling `end` to even never
+/// truncates a touched row. (The `.min(band_rows)` clamp is defensive: for an
+/// out-of-contract odd `band_rows` the returned `end` may be the odd
+/// `band_rows`, which is the only safe in-bounds value.)
+#[doc(hidden)]
+#[must_use]
+pub fn covered_row_span(
+    band_rows: usize,
+    py_start: u32,
+    tiles: &[Tile<'_>],
+) -> Option<(usize, usize)> {
+    if band_rows == 0 {
+        return None;
+    }
+    let band_top = i64::from(py_start);
+    let band_bottom = band_top.saturating_add(i64::try_from(band_rows).unwrap_or(0)); // exclusive
+
+    let mut min_local: Option<usize> = None;
+    let mut max_local_excl: usize = 0;
+    for tile in tiles {
+        let ty0 = i64::from(tile.dst_y);
+        let ty1 = ty0.saturating_add(i64::from(tile.image.height()));
+        // The tile's global row range ∩ the band.
+        let lo = ty0.max(band_top);
+        let hi = ty1.min(band_bottom);
+        if lo >= hi {
+            continue; // disjoint from this band (or zero-height)
+        }
+        // Band-local, in-range by construction (both clamped to the band).
+        let (Ok(local_lo), Ok(local_hi)) = (
+            usize::try_from(lo - band_top),
+            usize::try_from(hi - band_top),
+        ) else {
+            continue;
+        };
+        min_local = Some(min_local.map_or(local_lo, |m| m.min(local_lo)));
+        max_local_excl = max_local_excl.max(local_hi);
+    }
+
+    let start_raw = min_local?;
+    // Floor start to even, ceil end to even, clamp to the band.
+    let start = start_raw & !1;
+    let end = max_local_excl.saturating_add(1) & !1; // ceil to even
+    let end = end.min(band_rows);
+    if start >= end {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Fold one tile's `rect ∩ accumulator-span` into the premultiplied accumulator
+/// `acc` (back-to-front `over`), marking `covered` for each touched pixel. The
+/// accumulator covers `span_rows` band-local rows starting at band-local row
+/// `span_start`; `py_start` is the band's global top row. Only the pixels inside
+/// the tile's clipped destination rect are visited — the tile-driven inner loop
+/// (vs. the reference's per-pixel-all-tiles scan).
 #[allow(clippy::too_many_arguments)]
 // reason: the band accumulator + coverage, the band geometry, and the tile +
 // shared composite parameters; a struct would not shrink the surface.
@@ -774,14 +856,17 @@ fn fold_tile_into_band(
     acc: &mut [PremulRgba],
     covered: &mut [bool],
     w: usize,
-    band_rows: usize,
+    span_start: usize,
+    span_rows: usize,
     py_start: u32,
     tile: &Tile<'_>,
     canvas: CanvasColor,
     luts: Option<&LutSet>,
 ) -> Result<()> {
+    // Global top/bottom (exclusive) of the accumulator's covered span.
     let band_top = i64::from(py_start);
-    let band_bottom = band_top.saturating_add(i64::try_from(band_rows).unwrap_or(0)); // exclusive
+    let span_top = band_top.saturating_add(i64::try_from(span_start).unwrap_or(0));
+    let span_bottom = span_top.saturating_add(i64::try_from(span_rows).unwrap_or(0)); // exclusive
     let w_i64 = i64::try_from(w).unwrap_or(i64::MAX);
 
     let dst_x = i64::from(tile.dst_x);
@@ -792,23 +877,23 @@ fn fold_tile_into_band(
     // Global x range covered: [dst_x, dst_x + tile_w) ∩ [0, w).
     let gx0 = dst_x.max(0);
     let gx1 = dst_x.saturating_add(tile_w).min(w_i64);
-    // Global y range covered: [dst_y, dst_y + tile_h) ∩ [band_top, band_bottom).
-    let gy0 = dst_y.max(band_top);
-    let gy1 = dst_y.saturating_add(tile_h).min(band_bottom);
+    // Global y range covered: [dst_y, dst_y + tile_h) ∩ [span_top, span_bottom).
+    let gy0 = dst_y.max(span_top);
+    let gy1 = dst_y.saturating_add(tile_h).min(span_bottom);
     if gx0 >= gx1 || gy0 >= gy1 {
-        return Ok(()); // disjoint from this band (or fully off-canvas)
+        return Ok(()); // disjoint from the accumulator span (or fully off-canvas)
     }
     let opacity = tile.opacity.clamp(0.0, 1.0);
 
     let mut gy = gy0;
     while gy < gy1 {
-        // Tile-local + band-local rows. Both ranges are derived from the same
-        // clip, so the conversions below are in-range by construction.
-        let (Ok(py_local), Ok(src_y)) = (usize::try_from(gy - band_top), u32::try_from(gy - dst_y))
+        // Accumulator-local + tile-local rows. Both ranges are derived from the
+        // same clip, so the conversions below are in-range by construction.
+        let (Ok(acc_row), Ok(src_y)) = (usize::try_from(gy - span_top), u32::try_from(gy - dst_y))
         else {
             break;
         };
-        let row_base = py_local.saturating_mul(w);
+        let row_base = acc_row.saturating_mul(w);
         let mut gx = gx0;
         while gx < gx1 {
             // Bands split only rows, so the band-local column == global x.
@@ -846,7 +931,9 @@ fn fold_tile_into_band(
 
 /// Encode the back half (`canvas_linear_to_output_yuv`) for ONLY the band pixels
 /// a tile touched, writing into the band Y/UV planes (uncovered pixels keep the
-/// precomputed background constant the fill wrote).
+/// precomputed background constant the fill wrote). The accumulator covers
+/// `span_rows` band-local rows starting at band-local row `span_start`; each
+/// accumulator row `r` maps to band-local row `span_start + r`.
 ///
 /// Y is per-pixel independent: write the encoded luma of every covered pixel.
 /// Chroma is 4:2:0, and the reference's `write_pixel` writes the same UV slot
@@ -856,7 +943,8 @@ fn fold_tile_into_band(
 /// when its bottom-right pixel is covered (an uncovered bottom-right pixel would
 /// re-emit the background chroma the fill already wrote — identical). This keeps
 /// chroma byte-identical to the reference's last-writer-wins without re-encoding
-/// uncovered pixels.
+/// uncovered pixels. `span_start` is even, so a band-local row's block parity
+/// equals its accumulator row's parity and no 2×2 block straddles the span.
 #[allow(clippy::too_many_arguments)]
 // reason: the band slices + geometry + accumulator/coverage + shared composite
 // parameters; a struct would not shrink the surface.
@@ -864,18 +952,20 @@ fn encode_covered_pixels(
     band_y: &mut [u8],
     band_uv: &mut [u8],
     w: usize,
-    band_rows: usize,
+    span_start: usize,
+    span_rows: usize,
     acc: &[PremulRgba],
     covered: &[bool],
     canvas: CanvasColor,
     luts: Option<&LutSet>,
 ) -> Result<()> {
-    for row in 0..band_rows {
-        let row_base = row.saturating_mul(w);
-        let Ok(row_u32) = u32::try_from(row) else {
+    for acc_row in 0..span_rows {
+        let row_base = acc_row.saturating_mul(w);
+        // Band-local row this accumulator row writes to.
+        let Ok(row_u32) = u32::try_from(span_start.saturating_add(acc_row)) else {
             break;
         };
-        let row_is_block_bottom = row % 2 == 1;
+        let row_is_block_bottom = (span_start.saturating_add(acc_row)) % 2 == 1;
         for col in 0..w {
             let idx = row_base + col;
             let Some(true) = covered.get(idx).copied() else {
