@@ -1,0 +1,245 @@
+msgid ""
+msgstr ""
+"POT-Creation-Date: 2026-06-02 23:39+0000\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: @lingui/cli\n"
+"Language: en\n"
+
+#: src/pages/LayoutsPage.tsx:137
+msgid "Accessible editing path: planned (Cells form + Inspector)"
+msgstr "Accessible editing path: planned (Cells form + Inspector)"
+
+#: src/pages/SettingsPage.tsx:71
+msgid "Accessible toasts announce via a live region."
+msgstr "Accessible toasts announce via a live region."
+
+#: src/pages/SimplePages.tsx:12
+msgid "Add and manage live ingest sources."
+msgstr "Add and manage live ingest sources."
+
+#: src/pages/LayoutsPage.tsx:104
+msgid "All configured layouts."
+msgstr "All configured layouts."
+
+#: src/pages/SettingsPage.tsx:34
+msgid "Appearance"
+msgstr "Appearance"
+
+#: src/pages/SettingsPage.tsx:27
+msgid "Appearance and language preferences."
+msgstr "Appearance and language preferences."
+
+#: src/pages/NotFoundPage.tsx:19
+msgid "Back to dashboard"
+msgstr "Back to dashboard"
+
+#: src/pages/SettingsPage.tsx:37
+msgid "Choose light, dark, or follow the system."
+msgstr "Choose light, dark, or follow the system."
+
+#: src/pages/SimplePages.tsx:22
+msgid "Configure output servers and renditions."
+msgstr "Configure output servers and renditions."
+
+#: src/pages/DashboardPage.tsx:61
+msgid "Configured multiview layouts."
+msgstr "Configured multiview layouts."
+
+#: src/components/ConnectionStatus.tsx:29
+msgid "Connected"
+msgstr "Connected"
+
+#: src/components/ConnectionStatus.tsx:35
+msgid "Connecting"
+msgstr "Connecting"
+
+#: src/pages/LayoutsPage.tsx:96
+msgid "Could not load layouts:"
+msgstr "Could not load layouts:"
+
+#: src/app/navigation.tsx:27
+#: src/pages/DashboardPage.tsx:50
+msgid "Dashboard"
+msgstr "Dashboard"
+
+#: src/components/ConnectionStatus.tsx:47
+msgid "Disconnected"
+msgstr "Disconnected"
+
+#: src/pages/DashboardPage.tsx:119
+msgid "Frame rate"
+msgstr "Frame rate"
+
+#: src/pages/LayoutsPage.tsx:47
+msgid "Identifier"
+msgstr "Identifier"
+
+#: src/components/LocaleSwitcher.tsx:35
+#: src/pages/SettingsPage.tsx:51
+msgid "Language"
+msgstr "Language"
+
+#: src/app/navigation.tsx:28
+#: src/pages/DashboardPage.tsx:58
+#: src/pages/LayoutsPage.tsx:81
+msgid "Layouts"
+msgstr "Layouts"
+
+#: src/components/TileStateBadge.tsx:29
+msgid "Live"
+msgstr "Live"
+
+#: src/pages/DashboardPage.tsx:51
+msgid "Live engine status at a glance."
+msgstr "Live engine status at a glance."
+
+#: src/pages/DashboardPage.tsx:87
+msgid "Live tiles from the engine stream."
+msgstr "Live tiles from the engine stream."
+
+#: src/pages/LayoutsPage.tsx:92
+msgid "Loading layouts…"
+msgstr "Loading layouts…"
+
+#: src/pages/DashboardPage.tsx:67
+msgid "Loading…"
+msgstr "Loading…"
+
+#: src/pages/SettingsPage.tsx:59
+msgid "Locale"
+msgstr "Locale"
+
+#: src/pages/SimplePages.tsx:32
+msgid "Manage overlay layers and subtitles."
+msgstr "Manage overlay layers and subtitles."
+
+#: src/app/Sidebar.tsx:22
+msgid "Multiview"
+msgstr "Multiview"
+
+#: src/pages/LayoutsPage.tsx:83
+msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
+msgstr "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
+
+#: src/pages/LayoutsPage.tsx:37
+msgid "Name"
+msgstr "Name"
+
+#: src/app/AppLayout.tsx:66
+msgid "Navigation"
+msgstr "Navigation"
+
+#: src/pages/DashboardPage.tsx:123
+msgid "No frame-rate sample."
+msgstr "No frame-rate sample."
+
+#: src/pages/LayoutsPage.tsx:100
+msgid "No layouts are defined yet."
+msgstr "No layouts are defined yet."
+
+#: src/pages/DashboardPage.tsx:102
+msgid "No live tiles yet. They appear once the engine streams a snapshot."
+msgstr "No live tiles yet. They appear once the engine streams a snapshot."
+
+#: src/components/TileStateBadge.tsx:47
+msgid "No signal"
+msgstr "No signal"
+
+#: src/pages/SettingsPage.tsx:68
+msgid "Notifications"
+msgstr "Notifications"
+
+#: src/app/AppLayout.tsx:60
+msgid "Open navigation"
+msgstr "Open navigation"
+
+#: src/app/navigation.tsx:30
+#: src/pages/SimplePages.tsx:21
+msgid "Outputs"
+msgstr "Outputs"
+
+#: src/app/navigation.tsx:31
+#: src/pages/SimplePages.tsx:31
+msgid "Overlays"
+msgstr "Overlays"
+
+#: src/pages/NotFoundPage.tsx:14
+msgid "Page not found"
+msgstr "Page not found"
+
+#: src/app/Sidebar.tsx:20
+msgid "Primary"
+msgstr "Primary"
+
+#: src/components/ConnectionStatus.tsx:41
+#: src/components/TileStateBadge.tsx:41
+msgid "Reconnecting"
+msgstr "Reconnecting"
+
+#: src/app/navigation.tsx:32
+#: src/pages/SettingsPage.tsx:26
+msgid "Settings"
+msgstr "Settings"
+
+#: src/pages/SettingsPage.tsx:84
+msgid "Show a test notification"
+msgstr "Show a test notification"
+
+#: src/app/AppLayout.tsx:43
+msgid "Skip to content"
+msgstr "Skip to content"
+
+#: src/app/navigation.tsx:29
+#: src/pages/SimplePages.tsx:11
+msgid "Sources"
+msgstr "Sources"
+
+#: src/components/TileStateBadge.tsx:35
+msgid "Stale"
+msgstr "Stale"
+
+#: src/pages/SettingsPage.tsx:54
+msgid "Switch the interface language and text direction."
+msgstr "Switch the interface language and text direction."
+
+#: src/pages/SettingsPage.tsx:79
+msgid "Test notification"
+msgstr "Test notification"
+
+#: src/pages/NotFoundPage.tsx:15
+msgid "The requested screen does not exist."
+msgstr "The requested screen does not exist."
+
+#: src/pages/SettingsPage.tsx:42
+msgid "Theme"
+msgstr "Theme"
+
+#: src/components/ThemeToggle.tsx:23
+msgid "Theme: dark. Switch to system."
+msgstr "Theme: dark. Switch to system."
+
+#: src/components/ThemeToggle.tsx:21
+msgid "Theme: light. Switch to dark."
+msgstr "Theme: light. Switch to dark."
+
+#: src/components/ThemeToggle.tsx:24
+msgid "Theme: system. Switch to light."
+msgstr "Theme: system. Switch to light."
+
+#: src/pages/PlaceholderPage.tsx:27
+msgid "This screen is part of an upcoming milestone."
+msgstr "This screen is part of an upcoming milestone."
+
+#: src/pages/SettingsPage.tsx:80
+msgid "This toast is announced to assistive technology."
+msgstr "This toast is announced to assistive technology."
+
+#: src/pages/DashboardPage.tsx:98
+msgid "Tile status"
+msgstr "Tile status"
+
+#: src/pages/DashboardPage.tsx:84
+msgid "Tiles"
+msgstr "Tiles"

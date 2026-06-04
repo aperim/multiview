@@ -1,0 +1,54 @@
+# cargo-deny configuration — license + advisory gating for the default build.
+# Run locally: cargo deny check    (see CONTRIBUTING.md)
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# RUSTSEC-IDs ignored here MUST carry a justification (no silent suppression).
+ignore = [
+  # RUSTSEC-2024-0436: `paste` is unmaintained (informational advisory, not a
+  # vulnerability). It is a compile-time-only proc-macro with no runtime attack
+  # surface, pulled in transitively only by `utoipa-axum` (the OpenAPI/axum
+  # bindings used by multiview-control). RustSec reports "No safe upgrade is
+  # available" and there is no `utoipa-axum` release that drops it, so this is
+  # unavoidable until the upstream migrates (e.g. to `pastey`). Scoped to this
+  # single advisory id; revisit when `utoipa-axum` updates.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro `paste`, transitive via utoipa-axum; no safe upgrade upstream" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# The default build must stay permissive/LGPL-clean. The `gpl-codecs` feature
+# (x264/x265) intentionally makes a build GPL — that is opt-in and NOT covered
+# by this allowlist; see docs/architecture/conventions.md §7.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+# Deny real `version = "*"` wildcards on registry crates, but exempt
+# intra-workspace `path` dependencies: the `multiview-*` crates depend on each
+# other by path and carry no version requirement (which cargo-deny otherwise
+# reports as a wildcard). This narrowly excludes path deps only — a `"*"`
+# version requirement on a crates.io dependency is still denied.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

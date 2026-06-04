@@ -1,0 +1,162 @@
+name: docker
+
+# Build the multi-arch container image and publish to GHCR.
+#
+# Strategy (native runners, NO QEMU): build linux/amd64 on ubuntu-24.04 and
+# linux/arm64 on ubuntu-24.04-arm in parallel, each pushing by DIGEST only; a
+# final `merge` job assembles the multi-arch manifest with
+# `docker buildx imagetools create`, then attests provenance + signs (keyless
+# cosign) the manifest digest.
+#
+# On pull_request we BUILD ONLY (no login, no push) so forks/PRs can't publish.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  # No per-PR image build: the CI workflow validates PR code, and building the
+  # multi-arch image on every PR (incl. Dependabot's) floods the runners. The
+  # image is built on push to main + release tags.
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }} # aperim/multiview
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      # Each arch publishes its digest to an output the merge job collects.
+      digest-amd64: ${{ steps.export.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export.outputs.digest-arm64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3 # v6.0.3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.1.0 # v4.1.0
+
+      # Login + push only when NOT a pull_request (forks must not publish).
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4.2.0 # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7.2.0 # v7.2.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          # On PR: load nothing, just build. On push: push by digest only.
+          push: ${{ github.event_name != 'pull_request' }}
+          provenance: mode=max
+          sbom: true
+          # Per-arch GHA cache scope so amd64/arm64 don't clobber each other.
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_NAME) || 'type=cacheonly' }}
+
+      - name: Export digest
+        id: export
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "digest-${{ matrix.arch }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  merge:
+    name: merge manifest + attest + sign
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.1.0 # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.2.0 # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v6.1.0 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+            type=edge,branch=main
+
+      - name: Create multi-arch manifest
+        id: manifest
+        env:
+          AMD64_DIGEST: ${{ needs.build.outputs.digest-amd64 }}
+          ARM64_DIGEST: ${{ needs.build.outputs.digest-arm64 }}
+        run: |
+          set -euo pipefail
+          REF="${REGISTRY}/${IMAGE_NAME}"
+          # Build the -t flags from the metadata-action tag list.
+          TAGS=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && TAGS+=("-t" "$tag")
+          done <<< '${{ steps.meta.outputs.tags }}'
+          docker buildx imagetools create "${TAGS[@]}" \
+            "${REF}@${AMD64_DIGEST}" \
+            "${REF}@${ARM64_DIGEST}"
+          # Resolve the canonical multi-arch manifest digest for attest + sign.
+          DIGEST="$(docker buildx imagetools inspect "${REF}:${{ steps.meta.outputs.version }}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4.1.0 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2 # v4.1.2
+
+      - name: Keyless sign the manifest
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"

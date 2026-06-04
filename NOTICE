@@ -1,0 +1,33 @@
+Multiview — third-party asset attribution
+=======================================
+
+The Multiview source code is licensed under MIT OR Apache-2.0 (see LICENSE-MIT and
+LICENSE-APACHE). The bundled font assets below are NOT covered by those licenses;
+they are redistributed under the SIL Open Font License, Version 1.1 (OFL 1.1),
+which is compatible with the project license. The full OFL 1.1 text for each font
+ships alongside the font file.
+
+----------------------------------------------------------------------------------
+Bundled fonts (embedded into multiview-compositor via rust-embed under the off-by-
+default `overlay` feature; see crates/multiview-compositor/assets/fonts/)
+----------------------------------------------------------------------------------
+
+JetBrains Mono
+  - File:    crates/multiview-compositor/assets/fonts/JetBrainsMono-Regular.ttf
+  - License: SIL Open Font License, Version 1.1
+             crates/multiview-compositor/assets/fonts/JetBrainsMono-OFL.txt
+  - Copyright 2020 The JetBrains Mono Project Authors
+             (https://github.com/JetBrains/JetBrainsMono)
+  - Use:     monospaced digits / timecode (deterministic column alignment).
+
+Noto Sans
+  - File:    crates/multiview-compositor/assets/fonts/NotoSans-Regular.ttf
+  - License: SIL Open Font License, Version 1.1
+             crates/multiview-compositor/assets/fonts/NotoSans-OFL.txt
+  - Copyright 2022 The Noto Project Authors
+             (https://github.com/notofonts/latin-greek-cyrillic)
+  - Use:     proportional Latin labels.
+
+These fonts guarantee deterministic glyph metrics and the failure-path glyphs
+(e.g. the SIGNAL LOST card) with no host-font dependency. See ADR-0016
+(docs/decisions/ADR-0016.md §7) and docs/media/overlay-rendering.md §7.

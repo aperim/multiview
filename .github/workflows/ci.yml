@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: check + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default features are pure-Rust (no FFmpeg/GPU), so CI needs no native libs.
+      - name: cargo check
+        run: cargo check --workspace
+      - name: cargo test
+        # Skip the compositor per-tick perf BUDGET test on shared CI runners: it
+        # asserts a wall-clock ceiling only meaningful on consistent hardware
+        # (ADR-E009 — perf gates run on dedicated runners). The tile-driven
+        # SCALING correctness is covered unconditionally by
+        # tile_driven_scales_with_coverage_not_tile_count.
+        run: cargo test --workspace -- --skip tile_driven_meets_budget
+
+  deny:
+    name: cargo-deny (licenses + advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Run cargo-deny on the runner — the action's musl Docker image cannot
+      # honour rust-toolchain.toml's pinned toolchain. Default features only:
+      # this is the LGPL-clean build; --all-features would pull the opt-in
+      # gpl-codecs (GPL) and fail the license allowlist by design.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  inclusive-language:
+    name: inclusive language
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-inclusive-language.sh
+
+  web:
+    name: web build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install
+        working-directory: web
+        run: npm install
+      - name: build
+        working-directory: web
+        run: npm run build
