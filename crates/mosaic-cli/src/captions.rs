@@ -219,35 +219,61 @@ pub fn webvtt_language(
 /// must never fail the pipeline build of a live source).
 #[must_use]
 pub fn caption_plan_for(source: &mosaic_config::Source) -> Option<CaptionPlan> {
+    caption_plan_for_with(source, &LibavFetcher)
+}
+
+/// [`caption_plan_for`] with an injectable [`PlaylistFetcher`] — the
+/// fetch→parse→pick→resolve seam, exercised offline in tests without the network.
+#[must_use]
+pub fn caption_plan_for_with(
+    source: &mosaic_config::Source,
+    fetcher: &dyn PlaylistFetcher,
+) -> Option<CaptionPlan> {
     let selector = source.captions.as_ref()?;
     let language = webvtt_language(&source.kind, selector)?;
     let master_url = hls_url(&source.kind)?;
+    resolve_caption_plan(&source.id, master_url, language.as_deref(), fetcher)
+}
 
-    let text = match fetch_text(master_url) {
+/// Fetch + parse the master at `master_url`, pick the `language` subtitle
+/// rendition, and resolve its URL into a [`CaptionPlan`].
+///
+/// Best-effort: a fetch/parse failure or a master with no usable subtitle
+/// rendition logs and returns `None` (the source simply shows no captions — it
+/// must never fail the pipeline build of a live source). The injected `fetcher`
+/// is responsible for being robust (the [`LibavFetcher`] retries transient
+/// network errors); a *persistent* failure still yields `None`.
+fn resolve_caption_plan(
+    id: &str,
+    master_url: &str,
+    language: Option<&str>,
+    fetcher: &dyn PlaylistFetcher,
+) -> Option<CaptionPlan> {
+    let text = match fetcher.fetch(master_url) {
         Ok(text) => text,
         Err(reason) => {
-            tracing::warn!(source = %source.id, %reason, "could not fetch HLS master for captions");
+            tracing::warn!(source = %id, %reason, "could not fetch HLS master for captions");
             return None;
         }
     };
     let master = match MasterPlaylist::parse(&text) {
         Ok(master) => master,
         Err(err) => {
-            tracing::warn!(source = %source.id, error = %err, "HLS master parse failed; no captions");
+            tracing::warn!(source = %id, error = %err, "HLS master parse failed; no captions");
             return None;
         }
     };
-    let rendition = master.pick_subtitle(language.as_deref())?;
+    let rendition = master.pick_subtitle(language)?;
     let uri = rendition.uri.as_deref()?;
     let rendition_url = resolve_rendition_uri(master_url, uri);
     tracing::info!(
-        source = %source.id,
+        source = %id,
         language = ?rendition.language,
         %rendition_url,
         "native HLS WebVTT caption rendition resolved"
     );
     Some(CaptionPlan {
-        id: source.id.clone(),
+        id: id.to_owned(),
         rendition_url,
         store: Arc::new(CueStore::new()),
     })
@@ -261,43 +287,94 @@ fn hls_url(kind: &mosaic_config::SourceKind) -> Option<&str> {
     }
 }
 
-/// Fetch the text of a (small) playlist URL.
-///
-/// For an `http(s)` master this shells out to the `curl` CLI — the same
-/// shell-out-to-a-system-tool pattern the pipeline already uses to stage `test`
-/// clips with the `ffmpeg` CLI — keeping the caption fetch dependency-free (no
-/// HTTP crate, no new `cargo deny` surface). A bare local path is read from disk.
-///
-/// Bounded: a fetched body over [`MAX_PLAYLIST_BYTES`] is rejected so a
-/// misbehaving server cannot grow memory unboundedly. A real master/rendition
-/// playlist is a few KB.
-fn fetch_text(url: &str) -> Result<String, String> {
-    if has_scheme(url) {
-        let output = std::process::Command::new("curl")
-            .args([
-                "-fsSL",
-                "--max-time",
-                "30",
-                "--max-filesize",
-                &MAX_PLAYLIST_BYTES.to_string(),
-                url,
-            ])
-            .output()
-            .map_err(|e| format!("spawning curl: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "curl failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+/// Fetches a (small) playlist URL into text. Injected into the caption planner so
+/// the fetch→parse→pick seam can be exercised offline with canned bytes.
+pub trait PlaylistFetcher {
+    /// Fetch the text of `url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(reason)` describing the failure (a disallowed scheme, a
+    /// network/I/O error, an oversize body, …).
+    fn fetch(&self, url: &str) -> Result<String, String>;
+}
+
+/// URL schemes the caption fetch may reach — handed to libav as its
+/// `protocol_whitelist` and validated in `mosaic-ffmpeg` *before* opening, so a
+/// stray `file:`/`concat:` master URL can never be read.
+const ALLOWED_PROTOCOLS: &str = "http,https,tls,tcp";
+/// Bounded master-fetch attempts. The old single-shot `curl` had no retry, so one
+/// transient blip silently disabled captions for the entire run.
+const FETCH_ATTEMPTS: u32 = 3;
+/// Backoff between fetch attempts.
+const FETCH_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+/// Total wall-clock budget across all attempts for one source's master fetch. A
+/// *fast* transient failure retries up to [`FETCH_ATTEMPTS`]; a *hung* connection
+/// (eating ~one `rw_timeout`) stops after the first attempt rather than stacking
+/// ~3× timeouts onto the serial pipeline build (per the #42 review).
+const FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The production [`PlaylistFetcher`]: reads an `http(s)` URL **in-process** over
+/// libav I/O ([`mosaic_ffmpeg::fetch_url_text`] — bounded, scheme-whitelisted,
+/// timed, and retried), or a bare local path from disk. No `curl` shell-out and
+/// no extra HTTP dependency (the libav stack is already linked).
+pub struct LibavFetcher;
+
+impl PlaylistFetcher for LibavFetcher {
+    fn fetch(&self, url: &str) -> Result<String, String> {
+        if has_scheme(url) {
+            fetch_with_retry(
+                || {
+                    mosaic_ffmpeg::fetch_url_text(url, MAX_PLAYLIST_BYTES, ALLOWED_PROTOCOLS)
+                        .map_err(|e| e.to_string())
+                },
+                FETCH_ATTEMPTS,
+                FETCH_BACKOFF,
+                FETCH_BUDGET,
+            )
+        } else {
+            // A bare local path (no scheme): read it from disk.
+            std::fs::read_to_string(url).map_err(|e| e.to_string())
         }
-        if output.stdout.len() > MAX_PLAYLIST_BYTES {
-            return Err("playlist exceeds the byte budget".to_owned());
-        }
-        return String::from_utf8(output.stdout).map_err(|e| e.to_string());
     }
-    // A bare local path (no scheme): read it from disk.
-    std::fs::read_to_string(url).map_err(|e| e.to_string())
+}
+
+/// Run `attempt` up to `attempts` times, sleeping `backoff` between tries, and
+/// return the first success or the last error. A bounded retry turns a single
+/// transient network blip from "captions silently disabled for the whole run"
+/// into a recoverable hiccup — the actual defect behind the empty caption band.
+fn fetch_with_retry(
+    mut attempt: impl FnMut() -> Result<String, String>,
+    attempts: u32,
+    backoff: std::time::Duration,
+    budget: std::time::Duration,
+) -> Result<String, String> {
+    let n = attempts.max(1);
+    let start = std::time::Instant::now();
+    let mut last = String::from("no fetch attempt was made");
+    for i in 1..=n {
+        match attempt() {
+            Ok(text) => return Ok(text),
+            Err(reason) => {
+                tracing::debug!(attempt = i, max = n, %reason, "caption master fetch attempt failed");
+                last = reason;
+                if i >= n {
+                    break;
+                }
+                // Stop early if the total wall-clock budget is spent, so a hung
+                // connection (one slow timeout) can't stack ~3× timeouts onto the
+                // serial pipeline build; a fast transient failure still retries.
+                if start.elapsed() >= budget {
+                    tracing::debug!("caption master fetch budget spent; not retrying");
+                    break;
+                }
+                if !backoff.is_zero() {
+                    std::thread::sleep(backoff);
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Upper bound on a fetched playlist's size (a real master/rendition is a few KB).
@@ -577,5 +654,124 @@ mod tests {
             path: "/x.ts".to_owned(),
         };
         assert_eq!(webvtt_language(&file, &CaptionSelector::Auto), None);
+    }
+
+    /// A [`PlaylistFetcher`] returning a fixed canned result — drives the
+    /// fetch→parse→pick→resolve seam offline, no network, no FFI.
+    struct CannedFetcher(Result<String, String>);
+    impl PlaylistFetcher for CannedFetcher {
+        fn fetch(&self, _url: &str) -> Result<String, String> {
+            self.0.clone()
+        }
+    }
+
+    const MASTER_WITH_SUBS: &str = concat!(
+        "#EXTM3U\n",
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",",
+        "LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,",
+        "URI=\"subtitles/eng/prog_index.m3u8\"\n",
+        "#EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES=\"subs\"\n",
+        "video/prog_index.m3u8\n",
+    );
+
+    #[test]
+    fn resolves_the_subtitle_rendition_from_a_fetched_master() {
+        let fetcher = CannedFetcher(Ok(MASTER_WITH_SUBS.to_owned()));
+        let plan = resolve_caption_plan(
+            "cam",
+            "https://h.test/live/master.m3u8",
+            Some("en"),
+            &fetcher,
+        )
+        .expect("a master with an English SUBTITLES rendition resolves a plan");
+        assert_eq!(plan.id, "cam");
+        assert!(
+            plan.rendition_url
+                .ends_with("subtitles/eng/prog_index.m3u8"),
+            "rendition_url = {}",
+            plan.rendition_url
+        );
+    }
+
+    #[test]
+    fn a_persistent_fetch_failure_yields_no_plan_not_a_panic() {
+        // Best-effort contract: a *persistent* fetch failure still yields None and
+        // never panics or fails the live source's build (this behaviour is
+        // intentionally preserved). The actual empty-band regression — a
+        // *transient* blip disabling captions for the run — is fixed by the retry
+        // and guarded by `fetch_with_retry_recovers_after_transient_failures`.
+        let fetcher = CannedFetcher(Err("connection refused".to_owned()));
+        let plan = resolve_caption_plan(
+            "cam",
+            "https://h.test/live/master.m3u8",
+            Some("en"),
+            &fetcher,
+        );
+        assert!(
+            plan.is_none(),
+            "a persistent fetch failure must yield no plan"
+        );
+    }
+
+    #[test]
+    fn fetch_with_retry_recovers_after_transient_failures() {
+        use std::cell::Cell;
+        let calls = Cell::new(0_u32);
+        let result = fetch_with_retry(
+            || {
+                let n = calls.get() + 1;
+                calls.set(n);
+                if n < 3 {
+                    Err(format!("blip {n}"))
+                } else {
+                    Ok("recovered".to_owned())
+                }
+            },
+            3,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3600),
+        );
+        assert_eq!(result.as_deref(), Ok("recovered"));
+        assert_eq!(calls.get(), 3, "must retry until success");
+    }
+
+    #[test]
+    fn fetch_with_retry_gives_up_after_the_bound_with_the_last_error() {
+        use std::cell::Cell;
+        let calls = Cell::new(0_u32);
+        let result = fetch_with_retry(
+            || {
+                calls.set(calls.get() + 1);
+                Err(format!("fail {}", calls.get()))
+            },
+            3,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3600),
+        );
+        assert_eq!(result, Err("fail 3".to_owned()));
+        assert_eq!(calls.get(), 3, "must stop at the attempt bound");
+    }
+
+    #[test]
+    fn fetch_with_retry_stops_early_when_the_time_budget_is_spent() {
+        use std::cell::Cell;
+        // A zero budget models a hung attempt that ate the whole budget: no retry
+        // follows, so a dead/hung master can't stack timeouts onto the build.
+        let calls = Cell::new(0_u32);
+        let result = fetch_with_retry(
+            || {
+                calls.set(calls.get() + 1);
+                Err("hung".to_owned())
+            },
+            5,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            calls.get(),
+            1,
+            "a spent budget must stop after the first attempt"
+        );
     }
 }

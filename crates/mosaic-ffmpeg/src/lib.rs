@@ -84,6 +84,9 @@ pub use codec::{can_encode, candidate_encoders, VideoCodec};
 #[cfg(feature = "ffmpeg")]
 pub use codec::select_encoder;
 
+#[cfg(feature = "ffmpeg")]
+pub use avio_fetch::fetch_url_text;
+
 pub use error::{FfmpegError, Result};
 
 pub use jpegxs::{
@@ -95,6 +98,11 @@ pub use jpegxs::{is_available as jpegxs_is_available, probe as jpegxs_probe};
 
 #[cfg(feature = "ffmpeg")]
 pub mod audio_file;
+
+/// In-process fetch of a small text resource (an HLS caption playlist) over
+/// libav I/O, replacing a `curl` shell-out. Behind the `ffmpeg` feature.
+#[cfg(feature = "ffmpeg")]
+pub mod avio_fetch;
 
 /// Safe RAII caption decoders over the linked libav subtitle decoders, emitting
 /// the unified [`caption::CaptionCue`] model. Behind the `ffmpeg` feature.

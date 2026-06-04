@@ -31,6 +31,18 @@ pub enum FfmpegError {
         source: ffmpeg_next::Error,
     },
 
+    /// A small text resource (an HLS caption master/rendition playlist) could
+    /// not be fetched over libav I/O — a disallowed scheme, an open/read error,
+    /// an oversize body, or a non-UTF-8 body.
+    #[cfg(feature = "ffmpeg")]
+    #[error("failed to fetch {url}: {reason}")]
+    Fetch {
+        /// The URL that failed to fetch.
+        url: String,
+        /// Why it failed (libav error string, blocked protocol, oversize, …).
+        reason: String,
+    },
+
     /// The container has no stream of the requested media type.
     #[error("no {0} stream found in input")]
     StreamNotFound(&'static str),

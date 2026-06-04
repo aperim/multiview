@@ -21,6 +21,7 @@ These ADRs capture the load-bearing decisions for the Mosaic engine. 99 ADRs tot
 - [ADR-0015](ADR-0015.md) — YouTube live ingest via an external runtime-discovered resolver (yt-dlp) *(Proposed)*
 - [ADR-0016](ADR-0016.md) — Efficient overlay rendering: GPU glyph-atlas text + libass subtitles + cached/dirty-region compositing *(Proposed)*
 - [ADR-0019](ADR-0019.md) — Native multi-form caption ingest: unified cue model decoded in-demux into a per-tile sampled cue store *(Proposed)*
+- [ADR-0024](ADR-0024.md) — Native caption master-fetch over libav avio (no `curl`, no HTTP dep) + bounded retry; fetcher seam for offline tests *(Accepted)*
 
 ## Resilience & A/V
 
