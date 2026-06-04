@@ -48,6 +48,45 @@ use crate::hls::{MediaPlaylist, Segment, SegmentType};
 /// Nanoseconds in one second (the internal timeline unit, invariant #3).
 const NANOS_PER_SEC: i64 = 1_000_000_000;
 
+/// Test-only seam: counts how many *seed* encoders the segment sink builds
+/// across a run. The seed encoder exists solely to copy codec parameters onto a
+/// freshly-opened segment muxer; under encode-once-mux-many (invariant #7) the
+/// codec is fixed for the whole run, so this must be built **once** regardless
+/// of how many segments are produced. The unit tests assert exactly one build
+/// per run; production code only ever increments it.
+#[cfg(test)]
+static SEED_ENCODER_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record that one seed encoder was built (test-only instrumentation).
+#[cfg(test)]
+fn note_seed_encoder_built() {
+    SEED_ENCODER_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// No-op in non-test builds: the seed-encoder counter is test-only.
+#[cfg(not(test))]
+const fn note_seed_encoder_built() {}
+
+/// Test-only seam: counts how many segment muxers the segment sink *finalizes*
+/// (writes the trailer for) across a run. The finalize-on-error fix must finish
+/// the currently-open segment before propagating a mid-run error, so on the
+/// error path this must equal the number of segments that were opened — not one
+/// fewer (the bug left the last open segment un-finalized). MPEG-TS has no
+/// load-bearing trailer, so this counter is the faithful structural signal the
+/// fix is observable through.
+#[cfg(test)]
+static SEGMENT_FINALIZES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record that one segment muxer was finalized (test-only instrumentation).
+#[cfg(test)]
+fn note_segment_finalized() {
+    SEGMENT_FINALIZES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// No-op in non-test builds: the segment-finalize counter is test-only.
+#[cfg(not(test))]
+const fn note_segment_finalized() {}
+
 /// A source of composited frames to encode.
 ///
 /// The engine implements this over the compositor's program output; tests
@@ -576,6 +615,7 @@ impl<'a> SegmentState<'a> {
         // encoder in the drive loop (one *encode* — invariant #7), while each
         // segment file is its own self-contained MPEG-TS container.
         let seed = VideoEncoder::new(&self.config.target()).map_err(ff)?;
+        note_seed_encoder_built();
         let mut muxer = Muxer::create_as(&path, "mpegts").map_err(ff)?;
         let stream_index = muxer
             .add_stream(seed.as_codec_context(), self.time_base)
@@ -620,6 +660,7 @@ impl<'a> SegmentState<'a> {
             return Ok(());
         };
         segment.muxer.finish().map_err(ff)?;
+        note_segment_finalized();
         let span_ns = end_pts
             .as_nanos()
             .saturating_sub(segment.start_pts.as_nanos());
@@ -681,4 +722,239 @@ fn seconds_from_ns(ns: i64) -> f64 {
     let whole_f = f64::from(i32::try_from(whole.min(i64::from(i32::MAX))).unwrap_or(i32::MAX));
     let frac_f = f64::from(i32::try_from(frac).unwrap_or(0)) / 1_000_000_000.0;
     whole_f + frac_f
+}
+
+#[cfg(all(test, feature = "ffmpeg"))]
+mod tests {
+    //! Unit tests using the real `ffmpeg` encode/decode path. The seed-encoder
+    //! seam ([`SEED_ENCODER_BUILDS`]) is private, so this lives in-crate where it
+    //! can be read directly (an integration test could not observe it).
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::Ordering;
+
+    use ffmpeg_next as ffmpeg;
+    use mosaic_core::time::Rational;
+    use mosaic_ffmpeg::{DecodedVideoFrame, StreamVideoDecoder};
+
+    use super::{
+        EncodeConfig, Result, SegmentSink, VideoFrameSource, SEED_ENCODER_BUILDS,
+        SEGMENT_FINALIZES,
+    };
+    use crate::error::Error;
+
+    const WIDTH: u32 = 160;
+    const HEIGHT: u32 = 120;
+
+    /// Serializes the counter-based tests: the seed/finalize counters are
+    /// process-global statics, and both tests exercise both counters (opening
+    /// segments increments finalizes; each segment build increments seed
+    /// builds), so they must not interleave or they pollute each other's reads.
+    static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn generate_clip(path: &Path, seconds: u32, fps: u32) {
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=size={WIDTH}x{HEIGHT}:rate={fps}:duration={seconds}"),
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "mpeg2video",
+                "-g",
+                &fps.to_string(),
+                "-keyint_min",
+                &fps.to_string(),
+                "-sc_threshold",
+                "0",
+                "-f",
+                "mpegts",
+            ])
+            .arg(path)
+            .status()
+            .expect("spawn ffmpeg CLI");
+        assert!(status.success(), "ffmpeg CLI failed to generate the clip");
+    }
+
+    struct DecodeSource {
+        input: ffmpeg::format::context::Input,
+        decoder: StreamVideoDecoder,
+        stream_index: usize,
+        drained: bool,
+    }
+
+    impl DecodeSource {
+        fn open(path: &Path) -> Self {
+            let input = ffmpeg::format::input(&path).expect("open input container");
+            let stream = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .expect("input has a video stream");
+            let stream_index = stream.index();
+            let params = stream.parameters();
+            let time_base = mosaic_ffmpeg::from_ff_rational(stream.time_base());
+            let decoder =
+                StreamVideoDecoder::new(params, time_base).expect("build stream decoder");
+            Self {
+                input,
+                decoder,
+                stream_index,
+                drained: false,
+            }
+        }
+    }
+
+    impl VideoFrameSource for DecodeSource {
+        fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>> {
+            loop {
+                if let Some(frame) = self
+                    .decoder
+                    .receive_frame()
+                    .map_err(|e| Error::Output(e.to_string()))?
+                {
+                    return Ok(Some(frame));
+                }
+                if self.drained {
+                    return Ok(None);
+                }
+                let mut packet = ffmpeg::codec::packet::Packet::empty();
+                match packet.read(&mut self.input) {
+                    Ok(()) => {
+                        if packet.stream() == self.stream_index {
+                            self.decoder
+                                .send_packet(&packet)
+                                .map_err(|e| Error::Output(e.to_string()))?;
+                        }
+                    }
+                    Err(ffmpeg::Error::Eof) => {
+                        self.decoder
+                            .send_eof()
+                            .map_err(|e| Error::Output(e.to_string()))?;
+                        self.drained = true;
+                    }
+                    Err(other) => return Err(Error::Output(other.to_string())),
+                }
+            }
+        }
+    }
+
+    /// A source that yields `before_err` frames, then errors — modelling a
+    /// mid-run input failure (`?` returns) with a segment muxer still open.
+    struct FailAfter {
+        inner: DecodeSource,
+        remaining: usize,
+    }
+
+    impl VideoFrameSource for FailAfter {
+        fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>> {
+            if self.remaining == 0 {
+                return Err(Error::Output("injected mid-run source failure".to_owned()));
+            }
+            self.remaining -= 1;
+            self.inner.next_frame()
+        }
+    }
+
+    fn config(fps: u32, gop: u32) -> EncodeConfig {
+        let mut cfg = EncodeConfig::mpeg2(WIDTH, HEIGHT);
+        cfg.cadence = Rational::new(i64::from(fps), 1);
+        cfg.gop = gop;
+        cfg
+    }
+
+    /// Count the `seg*.ts` segment files written into `dir` (one per opened
+    /// segment, since [`SegmentSink`] writes each segment muxer's header on open).
+    fn opened_segment_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension().and_then(std::ffi::OsStr::to_str) == Some("ts")
+                    && p.file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|n| n.starts_with("seg"))
+            })
+            .count()
+    }
+
+    #[test]
+    fn segment_sink_finalizes_open_segment_when_source_errors_mid_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.ts");
+        // 3 seconds @ 30 fps, 1-second GOP => up to 3 GOP-aligned segments.
+        generate_clip(&src, 3, 30);
+
+        let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SEGMENT_FINALIZES.store(0, Ordering::Relaxed);
+        let sink = SegmentSink::new(config(30, 30), dir.path(), "seg");
+        // Yield ~2.5 GOPs so at least one full segment plus a partial one are
+        // open, then fail mid-run.
+        let mut source = FailAfter {
+            inner: DecodeSource::open(&src),
+            remaining: 75,
+        };
+        let err = sink
+            .run(&mut source)
+            .expect_err("run must surface the source error");
+        assert!(
+            matches!(err, Error::Output(_)),
+            "the injected source error must propagate, got {err:?}"
+        );
+
+        // Every segment that was opened (header written, file on disk) must have
+        // been finalized before the error propagated — including the one that was
+        // still open when the source failed. The bug finished only the segments
+        // closed at a later keyframe, leaving the open one un-finalized.
+        let opened = opened_segment_count(dir.path());
+        assert!(
+            opened >= 2,
+            "test needs >= 2 opened segments to be meaningful, got {opened}"
+        );
+        let finalized = SEGMENT_FINALIZES.load(Ordering::Relaxed);
+        assert_eq!(
+            finalized,
+            u64::try_from(opened).expect("opened count fits u64"),
+            "every opened segment must be finalized on the error path: \
+             opened {opened}, finalized {finalized}"
+        );
+    }
+
+    #[test]
+    fn segment_sink_builds_exactly_one_seed_encoder_for_many_segments() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.ts");
+        // 3 seconds @ 30 fps, 1-second GOP => 3 GOP-aligned segments.
+        generate_clip(&src, 3, 30);
+
+        let _guard = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SEED_ENCODER_BUILDS.store(0, Ordering::Relaxed);
+        let sink = SegmentSink::new(config(30, 30), dir.path(), "seg");
+        let mut source = DecodeSource::open(&src);
+        let result = sink.run(&mut source).expect("segment sink run");
+
+        // Sanity: the run actually produced multiple segments (otherwise a
+        // per-segment seed and a one-time seed would be indistinguishable).
+        assert!(
+            result.segments.len() >= 2,
+            "test needs >= 2 segments to be meaningful, got {}",
+            result.segments.len()
+        );
+
+        // The seed encoder (codec-parameter source for each new segment muxer)
+        // must be built exactly ONCE for the whole run — never once per segment
+        // (invariant #7: the codec is fixed across the encode).
+        let builds = SEED_ENCODER_BUILDS.load(Ordering::Relaxed);
+        assert_eq!(
+            builds, 1,
+            "expected exactly one seed encoder for the whole run, got {builds} \
+             across {} segments",
+            result.segments.len()
+        );
+    }
 }
