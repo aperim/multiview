@@ -39,3 +39,6 @@ dist/
 
 # Demo/multiview screenshots for manual inspection (not part of the product)
 /demo-output/
+
+# Coding-agent local working directory (sessions, scratch) — never part of the product
+/.claude/
