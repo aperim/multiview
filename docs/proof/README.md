@@ -23,26 +23,64 @@ and extract frames from the produced `program.ts`.
 | `10-wallclock-real-time-of-day.png` | **Wall-clock time-of-day read from the OS clock** (`17:xx:xx` = the actual render instant) with a `SYS locked` timing-reference badge, on a legible backing chip. |
 | `web-01-dashboard-dark.png` … `web-08-mobile.png` | The **React management web UI**: dashboard (dark + light), layouts list, drag-and-drop layout editor (+ form), sources, outputs, settings, and a mobile view. Captured from the built SPA via headless Chromium. |
 
-## Frame rate / smoothness — important note on the `seq_*` strips
+## Frame rate / smoothness — how this is **actually** verified (corrected)
 
-The `seq_*.png` frame strips in the (git-ignored) `demo-output/` working dir were
-extracted with `ffmpeg -vf fps=2` — **one frame every 0.5 s**. They prove a tile
-is *advancing* (not frozen), but flipping through them looks like 2 fps because
-that's the sampling rate of the strip, **not** the rendered output. Don't judge
-smoothness from those.
+> **Correction (2026-06-04).** Earlier revisions of this note claimed smoothness
+> from `mpdecimate` ("250 unique frames out of 250") and from frame strips/
+> screenshots. **Both methods are unreliable and the claim was withdrawn.**
+> `mpdecimate` on a lossy MPEG-2/H.264 encode is fooled by quantization noise
+> (every frame differs by a few LSB even if the *picture* is held), and any
+> screenshot/hash comparison of frames carrying **animated overlays** (the clock,
+> the audio meters) shows "advancing" even when the underlying video is frozen —
+> the moving meter changes the hash. The `seq_*.png` strips in the git-ignored
+> `demo-output/` dir are also a trap: they were sampled at `ffmpeg -vf fps=2`
+> (one frame per 0.5 s), so flipping through them *looks* like 2 fps regardless of
+> the real output rate. **Do not judge smoothness from strips, hashes, or
+> `mpdecimate`.**
 
-The rendered output is genuine **25 fps**, verified objectively: rendering the
-burned-timecode diag source (whose digits change every single frame, so a held
-or duplicate frame is impossible to hide) and running `mpdecimate` over the
-result yields **250 unique frames out of 250** for a 10 s clip — i.e. no
-duplicate/held frames, smooth 25 fps. (A few-fps judder would show as ~25 unique
-frames; it does not.)
+The output rate is a genuine, constant **25 fps** (250 frames / 10 s, `avg_frame_rate=25/1`,
+no dropped/duplicated packets) — but *cadence* is not *smooth picture*. Picture
+smoothness is verified the only reliable way: **content-aware, with overlays OFF,
+against a ground-truth ffmpeg encode of the same source.** The gauge is the count
+of frames whose inter-frame luma delta clears a motion floor:
+
+```
+ffmpeg -i program.ts -vf "tblend=all_mode=difference,signalstats,\
+  metadata=print:key=lavfi.signalstats.YAVG:file=motion.txt" -f null -
+# count frames with YAVG > 2  ==  frames that genuinely changed
+```
+
+Verified results (RELEASE build, this dev container, CPU-only software path):
+
+| Check (overlays OFF) | Rendered (mosaic) | Ground truth (ffmpeg direct) |
+|---|---|---|
+| Single high-motion tile (Red Bull HLS 30) | **199 / 249** frames in motion, render real-time (10.4 s / 10 s) | 197 / 249 |
+| 3-tile mixed-fps (29.97 + 25 + 30) | **191 / 249** in motion, render real-time (10.8 s / 10 s), frame-0 luma **87** (real content, not the cold slate ≈ 16) | — |
+| 9-tile 720p (the 3×3 layout) | render **real-time (11.2 s / 10 s)**; centre tile faithfully tracks its source (`bcast_b`: static intro → motion later, **first-3s 2/75 → last-3s 75/75**, matching the source's own **0/75 → 36/75**) | source 36/209 |
+
+Two real latent defects were found by this method and fixed (see
+[ADR-0022](../decisions/ADR-0022.md) and the [ADR-0021 correction](../decisions/ADR-0021.md#correction-2026-06-04--the-verified-11-by-eye-above-was-overlay-masked)):
+
+1. **Compositor real-time headroom** — the single-threaded software compositor was
+   far slower than real time (≈ 0.9 s/tick in a debug build); under sustained load
+   the output clock would sample **evicted** media-times from the 256-frame ring →
+   frozen tiles (an invariant-#1 risk). Fixed by byte-identical row-band
+   parallelism + an SSIM-gated colour-transfer LUT → **≈ 11 ms/tick @ 1080p × 9**,
+   comfortably real-time (`benches/composite_realtime.rs` asserts ≤ 40 ms).
+2. **Startup cold-slate** — the first ≈ 0.75 s held a cold NV12 slate before tiles
+   primed. Fixed by a bounded first-frame prime (dead sources can't block startup);
+   frame-0 luma now ≈ 90+ (real content), not ≈ 16.
+
+The committed clips below are re-rendered from the **release** build and re-verified
+content-aware:
 
 - `11-consecutive-frames-40ms-apart.png` — 8 **consecutive** output frames (40 ms
-  apart, 280 ms total) of the 5+1 layout; each frame differs from the last (slow
-  news content, so the per-frame change is small but real).
-- `12-multiview-1plus5-25fps.mp4` / `13-multiview-3x3-25fps.mp4` — the actual
-  **25 fps playback** clips. Watch these for true motion, not the `seq_*` strips.
+  apart, 280 ms total) of the 5+1 layout tiled into one strip; each frame differs
+  from the last. This is real consecutive motion, **not** the `seq_*` 0.5 s samples.
+- `12-multiview-1plus5-25fps.mp4` / `13-multiview-3x3-25fps.mp4` /
+  `14-multiview-2x2-25fps.mp4` — the actual **25 fps playback** clips. Watch these
+  for true motion. (Overlays animate in these by design — to judge *picture*
+  smoothness use the overlays-off content-aware numbers above, not these clips.)
 
 ## Independent verification (re-run fresh, not asserted)
 
