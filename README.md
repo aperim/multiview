@@ -19,9 +19,13 @@ built to run great on **commodity hardware** with **bulletproof, never-falters o
 ## What it does
 
 Multiview is a headless, scriptable compositor/router. It samples many independent live inputs into
-a fixed, templated canvas, encodes that canvas **once per rendition**, and fans the same stream out
-to many transports — RTSP, HLS/LL-HLS, NDI, RTMP, SRT — all managed over a web UI and an
-OpenAPI-described HTTP API.
+a fixed, templated canvas and encodes that canvas **once per rendition** — the encode-once-mux-many
+design then fans the same stream to many transports (RTSP, HLS/LL-HLS, NDI, RTMP, SRT).
+
+> **Status (early stage).** Today the engine ingests → composites → encodes → writes **HLS/file
+> output**, driven by declarative config (TOML). The additional live output *servers* (RTSP/NDI/
+> RTMP/SRT), the **web UI**, and the **OpenAPI-described control API** are built as libraries and on
+> the near-term [roadmap](ROADMAP.md) — they are not yet wired into the daemon. See "Roadmap".
 
 The two non-negotiable theses:
 
@@ -114,17 +118,18 @@ flags, and invariants.
 
 The fastest way to see Multiview running. It brings up the engine plus a small companion
 container that publishes a **synthetic** `testsrc2` + `sine` RTSP feed (no real or private
-sources), composites a 2×2 canvas, and writes HLS.
+sources), composites a 2×2 canvas, encodes it, and serves the result as HLS.
 
 ```bash
 git clone https://github.com/aperim/multiview.git
 cd multiview
 
-# Pulls ghcr.io/aperim/multiview:latest + a MediaMTX testsrc companion.
+# Pulls ghcr.io/aperim/multiview:latest + a MediaMTX testsrc companion + an
+# nginx that serves the HLS output.
 docker compose -f deploy/compose.yaml up -d
 
-# HLS output lands in the `multiview-hls` named volume; the control/web UI is
-# served on http://localhost:8080 once the binary wires the control plane.
+# Then open the multiview in a player (VLC / ffplay):
+#   vlc http://localhost:8888/multiview.m3u8
 docker compose -f deploy/compose.yaml logs -f multiview
 ```
 
@@ -134,9 +139,11 @@ patterns. Edit it and re-run `up -d` to point a tile at your own source. Tear do
 `docker compose -f deploy/compose.yaml down -v`.
 
 > [!NOTE]
-> The web UI (`:8080`) and RTSP output (`:8554`) ports are wired in the compose file as the target
-> serving surface. The current scaffold drives the pipeline and writes HLS files; binding the
-> control/serving listeners is in progress (see [`ROADMAP.md`](ROADMAP.md)).
+> The default LGPL-clean image encodes **mpeg2video** — open the HLS in **VLC**/ffplay. For
+> browser-friendly **H.264**, use the `-gpl` image and set `codec = "h264"` (H.264/H.265 make the
+> build GPL). A **web UI + control API** (the embedded SPA and axum control plane are built) and
+> live **RTSP/NDI/RTMP output servers** are on the [roadmap](ROADMAP.md) — today the engine
+> composites, encodes, and writes HLS/file output to disk (no network listener yet).
 
 ### GPU one-liners
 

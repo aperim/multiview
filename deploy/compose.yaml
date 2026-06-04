@@ -1,13 +1,17 @@
 # deploy/compose.yaml — Multiview quick-start (software / LGPL-clean image).
 #
-# Brings up two services:
+# Brings up three services:
 #   * testsrc   — a MediaMTX RTSP server that, on init, runs ffmpeg to publish a
 #                 SYNTHETIC `testsrc2` video + `sine` audio feed at
 #                 rtsp://testsrc:8554/test. No real/private feeds.
-#   * multiview — the Multiview engine, ingesting that feed + 3 built-in test
-#                 patterns into a 2x2 canvas and writing HLS to a named volume.
+#   * multiview — the Multiview engine: ingests that feed + 3 built-in test
+#                 patterns into a 2x2 canvas, encodes once, and writes HLS to a
+#                 named volume.
+#   * hls       — a tiny nginx that serves the HLS volume over HTTP so you can
+#                 open the stream in a player.
 #
 # Bring it up:   docker compose -f deploy/compose.yaml up -d
+# Then open:     http://localhost:8888/multiview.m3u8   (in VLC / ffplay)
 # Tear it down:  docker compose -f deploy/compose.yaml down -v
 #
 # GPU overlays (compose merges left-to-right; the GPU files swap the image +
@@ -15,11 +19,12 @@
 #   docker compose -f deploy/compose.yaml -f deploy/compose.gpu-nvidia.yaml up -d
 #   docker compose -f deploy/compose.yaml -f deploy/compose.gpu-vaapi.yaml  up -d
 #
-# NOTE on ports: the Multiview control/serving HTTP surface (web UI + OpenAPI +
-# /api/v1 + health) is intended to bind :8080, and the RTSP output server :8554,
-# once the binary wires those listeners (the current scaffold drives the
-# pipeline + writes HLS files but does not yet bind a listener). The mappings
-# below are the documented target so the file is ready when serving lands.
+# NOTE: the current binary composites + encodes + **writes HLS/file output to
+# disk** — it does not yet bind a network listener, so there are no web-UI/
+# control-API (:8080) or live RTSP-server (:8554) ports here. Those are on the
+# roadmap (the axum control plane + the embedded SPA are built; wiring the
+# listener into `run` is next — see the README "Roadmap"). View the multiview by
+# pointing a player at the HLS the `hls` sidecar serves.
 
 services:
   testsrc:
@@ -39,7 +44,6 @@ services:
       # Exposed for host inspection (e.g. ffplay rtsp://localhost:8554/test).
       - "8554:8554"
     healthcheck:
-      # MediaMTX serves its API/metrics on :9997; a TCP connect proves liveness.
       test: ["CMD", "sh", "-c", "nc -z localhost 8554 || exit 1"]
       interval: 10s
       timeout: 3s
@@ -57,21 +61,20 @@ services:
       # The quick-start config (read-only) and the HLS output (named volume).
       - ./config/multiview.toml:/etc/multiview/multiview.toml:ro
       - multiview-hls:/var/lib/multiview/hls
-    ports:
-      # Control / web UI / OpenAPI / health (target: binds once serving lands).
-      - "8080:8080"
-      # RTSP output server (target).
-      - "8554"
     healthcheck:
-      # Readiness probe at /readyz (served by the control plane once wired).
-      # `start_period` + `start_interval` give a fast-but-tolerant warm-up:
-      # frequent probes during startup, then the normal interval.
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/readyz || exit 1"]
-      interval: 30s
+      # Real liveness: the HLS playlist must have been written in the last 30s
+      # (the segmenter rewrites it every segment), proving the output clock is
+      # still producing. Uses only coreutils (stat/date/test), present in the
+      # debian-slim runtime. start_period covers ingest + prime + first segment.
+      test:
+        - "CMD"
+        - "sh"
+        - "-c"
+        - "f=/var/lib/multiview/hls/multiview.m3u8; test -f \"$$f\" && [ $$(( $$(date +%s) - $$(stat -c %Y \"$$f\") )) -lt 30 ]"
+      interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
-      start_interval: 3s
+      start_period: 40s
     deploy:
       resources:
         limits:
@@ -80,6 +83,19 @@ services:
         reservations:
           cpus: "1.0"
           memory: 1g
+
+  hls:
+    # Serve the HLS output volume over HTTP. Open http://localhost:8888/multiview.m3u8
+    # in VLC/ffplay. (The default LGPL image encodes mpeg2video — use VLC; for
+    # browser/H.264 playback use the `-gpl` image, see the README.)
+    image: nginx:1-alpine
+    restart: unless-stopped
+    depends_on:
+      - multiview
+    volumes:
+      - multiview-hls:/usr/share/nginx/html:ro
+    ports:
+      - "8888:80"
 
 volumes:
   multiview-hls:

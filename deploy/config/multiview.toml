@@ -88,22 +88,20 @@ z = 100
 format = "%H:%M:%S"
 source = "wall"            # the always-ticking clock doubles as a falter sentinel
 
-# Encode once, fan out to many transports (invariant #7).
+# Write HLS (index.m3u8 + seg*.ts) under the mounted /var/lib/multiview/hls
+# directory; the `hls` sidecar in deploy/compose.yaml serves it over HTTP.
 #
-# HLS writes index.m3u8 + seg*.ts under the mounted /var/lib/multiview/hls
-# directory. Serve that directory with any static HTTP server, or read the files
-# directly from the named volume.
+# Codec: the default LGPL-clean image encodes **mpeg2video** (plays in VLC /
+# ffplay). For browser-friendly **H.264** HLS, use the GPL image
+# (`ghcr.io/aperim/multiview:<tag>-gpl`) and set `codec = "h264"` — note H.264/
+# H.265 make the build GPL (see the README "GPL build" note).
 [[outputs]]
 kind = "hls"
 path = "/var/lib/multiview/hls/multiview.m3u8"
-codec = "h264"
+codec = "mpeg2video"
 segment_ms = 2000
 
-# An RTSP server mount (encode-once fan-out). The RTSP listener port is not yet
-# bound by the scaffold binary; documented here for when the output server is
-# wired (see compose `ports`).
-[[outputs]]
-kind = "rtsp_server"
-mount = "/multiview"
-codec = "h264"
-latency_profile = "low_latency"
+# NOTE: live RTSP / NDI / RTMP output *servers* and the web UI / control API are
+# on the roadmap — the current binary composites + encodes + writes HLS/file
+# output to disk (it does not yet bind a network listener). See the README
+# "Roadmap". Add an `[[outputs]] kind = "rtsp_server"` once the servers are wired.
