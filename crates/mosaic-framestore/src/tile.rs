@@ -40,6 +40,28 @@ fn select_nearest_not_after<T>(ring: &[RingEntry<T>], now: MediaTime) -> Option<
     }
 }
 
+/// The latched read of a ring at `now`: the entry nearest-but-not-after `now`
+/// (see [`select_nearest_not_after`]) paired with the failure-ladder state of
+/// that **latched** entry — its lag behind output time (`now - entry.at`)
+/// classified against `thresholds`.
+///
+/// This is the single source of truth shared by
+/// [`read_at`](TileStore::read_at) and [`state_at`](TileStore::state_at) so the
+/// two can never drift: a tile's reported state always describes the frame the
+/// compositor actually draws, not the producer's newest decode.
+fn latch_and_classify<T>(
+    ring: &[RingEntry<T>],
+    now: MediaTime,
+    thresholds: TileThresholds,
+) -> Option<(&RingEntry<T>, SourceState)> {
+    let selected = select_nearest_not_after(ring, now)?;
+    // The latched frame's lag behind output time drives the failure ladder: a
+    // frame at-or-after `now` is fresh (lag 0); a frame falling behind (the
+    // producer stalled / the clip ended) ages exactly as the ladder expects.
+    let lag = now.saturating_sub(selected.at);
+    Some((selected, classify(lag, thresholds)))
+}
+
 /// One retained frame in the media-time ring: the source-relative media instant
 /// it represents, paired with the frame. Ordered by `at` (publishes are
 /// monotonic in media time on the normal path; an out-of-order or backwards
@@ -284,16 +306,50 @@ impl<T> TileStore<T> {
         self.last_frame_at_ns.load(Ordering::Acquire) != NEVER_PUBLISHED
     }
 
-    /// The tile's [`SourceState`] as of `now`.
+    /// The tile's **producer-liveness** [`SourceState`] as of `now`.
     ///
-    /// Pure function of `now`, the last-frame instant, and the thresholds. A
-    /// tile that has never received a frame is [`SourceState::NoSignal`].
+    /// Pure function of `now`, the *newest* published frame's instant, and the
+    /// thresholds. A tile that has never received a frame is
+    /// [`SourceState::NoSignal`].
+    ///
+    /// This measures how long since the producer *last published*, regardless of
+    /// which frame the output clock is latched onto. It is the right signal for
+    /// **input/decoder health** (is the source still delivering?), but it is
+    /// **not** the state of the picture on screen: a producer decoding ahead can
+    /// publish a frame whose source-media stamp sits in the future relative to
+    /// `now`, which makes this report [`SourceState::Live`] while the *latched*
+    /// frame the compositor actually draws has aged to `NO_SIGNAL`. For the
+    /// state of the drawn picture — the one the compositor and telemetry should
+    /// surface — use [`state_at`](TileStore::state_at) / [`read_at`](TileStore::read_at).
     #[must_use]
     pub fn state(&self, now: MediaTime) -> SourceState {
         match self.elapsed_since_frame(now) {
             Some(elapsed) => classify(elapsed, self.thresholds),
             None => SourceState::NoSignal,
         }
+    }
+
+    /// The tile's [`SourceState`] for the frame the output clock is **latched
+    /// onto** at output media time `now` (streaming-gotchas §1).
+    ///
+    /// Classifies on the *latched* frame's lag behind output time
+    /// (`now - latched.at`), the identical rule [`read_at`](TileStore::read_at)
+    /// applies to the frame it returns — they share one helper so the reported
+    /// state always describes the picture actually drawn. A tile that has never
+    /// received a frame (empty ring) is [`SourceState::NoSignal`].
+    ///
+    /// Prefer this over [`state`](TileStore::state) for telemetry and the
+    /// degradation signal: an ahead-decoding source whose newest frame is
+    /// future-stamped reports `LIVE` from [`state`](TileStore::state) (producer
+    /// liveness) even as its on-screen picture freezes and ages — `state_at`
+    /// follows the on-screen picture, so a frozen/exhausted source correctly
+    /// rides `LIVE` → `STALE` → `NO_SIGNAL` as output time runs past its last
+    /// frame.
+    #[must_use]
+    pub fn state_at(&self, now: MediaTime) -> SourceState {
+        let ring = self.ring.load();
+        latch_and_classify(&ring, now, self.thresholds)
+            .map_or(SourceState::NoSignal, |(_, state)| state)
     }
 
     /// Read the tile on an output tick at instant `now`.
@@ -358,14 +414,9 @@ impl<T> TileStore<T> {
     #[must_use]
     pub fn read_at(&self, now: MediaTime) -> TileRead<T> {
         let ring = self.ring.load();
-        let Some(selected) = select_nearest_not_after(&ring, now) else {
+        let Some((selected, state)) = latch_and_classify(&ring, now, self.thresholds) else {
             return TileRead::NoSignal;
         };
-        // The latched frame's lag behind output time drives the failure ladder:
-        // a frame at-or-after `now` is fresh (lag 0); a frame falling behind (the
-        // producer stalled / the clip ended) ages exactly as the ladder expects.
-        let lag = now.saturating_sub(selected.at);
-        let state = classify(lag, self.thresholds);
         let frame = Arc::clone(&selected.frame);
         match state {
             SourceState::Live => TileRead::Fresh { frame },

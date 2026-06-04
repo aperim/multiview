@@ -301,17 +301,17 @@ fn sample_states_uses_the_latched_frame_age_not_producer_liveness() {
     );
 
     // sample_states must agree with what compose() actually draws this tick.
-    let tick = Tick { index: 1200, pts: now };
+    let tick = Tick {
+        index: 1200,
+        pts: now,
+    };
     let composed = drive.compose(tick).unwrap();
     assert_eq!(
         composed.source_states.get("cam-a"),
         states.get("cam-a"),
         "sample_states and compose must report the same latched-frame state"
     );
-    assert_eq!(
-        composed.source_states.get("cam-b"),
-        states.get("cam-b"),
-    );
+    assert_eq!(composed.source_states.get("cam-b"), states.get("cam-b"),);
 }
 
 #[test]

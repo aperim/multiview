@@ -143,13 +143,23 @@ impl<T> CompositorDrive<T> {
     ///
     /// Pure read of the lock-free stores; used for telemetry and the
     /// degradation signal independently of producing a frame.
+    ///
+    /// Classifies each tile on the **latched** frame — the one the compositor
+    /// actually draws at `now` via
+    /// [`read_at`](mosaic_framestore::TileStore::read_at) — by calling
+    /// [`state_at`](mosaic_framestore::TileStore::state_at), **not**
+    /// producer-liveness [`state`](mosaic_framestore::TileStore::state). The two
+    /// diverge for an ahead-decoding source: a future-stamped newest frame makes
+    /// `state` report `LIVE` while the on-screen picture has frozen and aged, so
+    /// telemetry/degradation must follow the drawn picture (`state_at`) to match
+    /// what [`compose`](CompositorDrive::compose) renders this tick.
     #[must_use]
     pub fn sample_states(&self, now: MediaTime) -> HashMap<String, SourceState> {
         let mut states = HashMap::new();
         for cell in &self.layout.cells {
             if let Some(source) = &cell.source {
                 if let Some(store) = self.stores.get(source) {
-                    states.insert(source.clone(), store.state(now));
+                    states.insert(source.clone(), store.state_at(now));
                 }
             }
         }
