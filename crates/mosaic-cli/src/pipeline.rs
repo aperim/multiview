@@ -3727,3 +3727,110 @@ mod prime_wait_tests {
         assert_eq!(outcome.waited, Duration::ZERO);
     }
 }
+
+/// Tests for the live-ingest reconnect policy (#45): a capped-exponential backoff
+/// with equal jitter, a deterministic per-source jitter source, the healthy-reset
+/// attempt counter, and the `rw_timeout` ingest-open options. The backoff/jitter/
+/// attempt logic is pure, so these run with zero real sleeping and no network.
+#[cfg(test)]
+mod reconnect_tests {
+    use std::time::Duration;
+
+    use super::{
+        ingest_open_options, next_reconnect_attempt, reconnect_backoff, JitterRng, SourceLocation,
+        INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
+        INGEST_RECONNECT_MAX_ATTEMPT, INGEST_RW_TIMEOUT,
+    };
+
+    #[test]
+    fn backoff_uses_equal_jitter_within_the_capped_window() {
+        // attempt 0 ⇒ window = BASE; equal jitter splits it in half: a fixed
+        // half plus a jittered half in [0, half] ⇒ result in [BASE/2, BASE].
+        assert_eq!(reconnect_backoff(0, 0.0), INGEST_RECONNECT_BASE / 2);
+        assert_eq!(reconnect_backoff(0, 1.0), INGEST_RECONNECT_BASE);
+        let half = INGEST_RECONNECT_BASE / 2;
+        assert_eq!(reconnect_backoff(0, 0.5), half + half.mul_f64(0.5));
+        // Never zero — no hot reconnect loop even at the lowest jitter.
+        assert!(reconnect_backoff(0, 0.0) > Duration::ZERO);
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_then_saturates_at_the_cap() {
+        let a0 = reconnect_backoff(0, 0.0);
+        let a1 = reconnect_backoff(1, 0.0);
+        let a2 = reconnect_backoff(2, 0.0);
+        assert_eq!(a1, a0 * 2, "each attempt doubles the floor");
+        assert_eq!(a2, a1 * 2);
+        // A huge attempt index saturates at the cap (floor = CAP/2, ceil = CAP)
+        // and NEVER overflows / panics.
+        assert_eq!(reconnect_backoff(1000, 0.0), INGEST_RECONNECT_CAP / 2);
+        assert_eq!(reconnect_backoff(1000, 1.0), INGEST_RECONNECT_CAP);
+        assert_eq!(reconnect_backoff(u32::MAX, 1.0), INGEST_RECONNECT_CAP);
+    }
+
+    #[test]
+    fn backoff_treats_non_finite_or_out_of_range_jitter_as_zero_clamped() {
+        let floor = INGEST_RECONNECT_BASE / 2;
+        assert_eq!(reconnect_backoff(0, f64::NAN), floor);
+        assert_eq!(reconnect_backoff(0, f64::INFINITY), floor);
+        assert_eq!(reconnect_backoff(0, -1.0), floor, "negative clamps to 0");
+        assert_eq!(reconnect_backoff(0, 5.0), INGEST_RECONNECT_BASE, "clamps to 1");
+    }
+
+    #[test]
+    fn jitter_rng_is_deterministic_per_seed_decorrelated_and_in_unit_range() {
+        let mut a = JitterRng::seeded("source-a");
+        let mut a2 = JitterRng::seeded("source-a");
+        let seq_a: Vec<f64> = (0..8).map(|_| a.next_unit()).collect();
+        let seq_a2: Vec<f64> = (0..8).map(|_| a2.next_unit()).collect();
+        assert_eq!(seq_a, seq_a2, "same seed ⇒ identical sequence (so it is testable)");
+        for &u in &seq_a {
+            assert!((0.0..=1.0).contains(&u), "jitter unit {u} out of [0,1]");
+        }
+        // Two different sources must not reconnect in lockstep (decorrelation).
+        let mut b = JitterRng::seeded("source-b");
+        assert_ne!(b.next_unit(), seq_a[0], "different sources must not lockstep");
+        // The sequence actually varies (not a stuck constant).
+        assert!(seq_a.windows(2).any(|w| w[0] != w[1]), "jitter must vary across draws");
+    }
+
+    #[test]
+    fn next_attempt_grows_capped_on_fast_failure_and_resets_when_healthy() {
+        let fast = Duration::from_millis(10);
+        assert_eq!(next_reconnect_attempt(0, fast), 1);
+        assert_eq!(next_reconnect_attempt(3, fast), 4);
+        assert_eq!(
+            next_reconnect_attempt(INGEST_RECONNECT_MAX_ATTEMPT, fast),
+            INGEST_RECONNECT_MAX_ATTEMPT,
+            "attempt index is capped so the shift can never overflow",
+        );
+        // A connection that streamed for >= the healthy threshold resets to 0,
+        // so a long-lived source that finally blips reconnects promptly.
+        assert_eq!(next_reconnect_attempt(5, INGEST_RECONNECT_HEALTHY), 0);
+        assert_eq!(
+            next_reconnect_attempt(6, INGEST_RECONNECT_HEALTHY + Duration::from_secs(1)),
+            0,
+        );
+        // Just under healthy still counts as a fast failure (keeps escalating).
+        assert_eq!(
+            next_reconnect_attempt(2, INGEST_RECONNECT_HEALTHY - Duration::from_millis(1)),
+            3,
+        );
+    }
+
+    #[test]
+    fn open_options_set_rw_timeout_for_network_sources_only() {
+        // A network (URL) source gets rw_timeout (microseconds) so a dead live
+        // source fails the open / a blocking read instead of hanging forever.
+        let url = SourceLocation::Url("rtsp://example.invalid/stream".to_owned());
+        let opts = ingest_open_options(&url);
+        let want = INGEST_RW_TIMEOUT.as_micros().to_string();
+        assert_eq!(opts.get("rw_timeout"), Some(want.as_str()));
+
+        // A local file gets NO timeout — a slow disk must not abort a finite
+        // source mid-decode.
+        let path = SourceLocation::Path(std::path::PathBuf::from("/tmp/clip.mp4"));
+        let opts = ingest_open_options(&path);
+        assert_eq!(opts.get("rw_timeout"), None);
+    }
+}
