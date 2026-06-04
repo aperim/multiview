@@ -35,7 +35,7 @@ uuid = { version = "1.23.2", features = ["v4"] }
 # per the web-api-stack brief) and HS256 JWT signature verification. RustCrypto
 # crates, all MIT/Apache-2.0. `base64` (MIT/Apache-2.0, pure Rust) decodes the
 # base64url JWT segments — no native deps, stays in the CI-green default build.
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 hmac = "0.12.1"
 subtle = "2.6.1"
 base64 = "0.22.1"

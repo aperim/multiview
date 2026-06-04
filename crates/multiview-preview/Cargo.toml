@@ -21,7 +21,7 @@ tokio = { workspace = true }
 # HMAC-SHA256 for short-lived signed preview access tokens. RustCrypto, pinned;
 # hmac/sha2/digest/crypto-common are MIT OR Apache-2.0 (cargo-deny allowlisted).
 hmac = "0.12.1"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 # Pure-Rust baseline JPEG encoder for the default (GPU-free) preview build. Pinned
 # EXACTLY to 0.6.0: that single release is licensed `MIT OR Apache-2.0` (cargo-deny
 # allowlisted) and, with the `simd` feature OFF (we never enable it), the crate is
