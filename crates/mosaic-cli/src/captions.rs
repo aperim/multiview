@@ -774,4 +774,113 @@ mod tests {
             "a spent budget must stop after the first attempt"
         );
     }
+
+    #[test]
+    fn par_filter_map_runs_every_closure_concurrently_and_drops_none() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
+
+        let n = 4usize;
+        // A barrier of `n` parties only releases once all `n` closures are in
+        // flight at the same instant — so `par_filter_map` returning at all proves
+        // it ran them concurrently (one thread per item, no serial blocking). The
+        // peak counter records that concurrency for the assertion.
+        let barrier = Barrier::new(n);
+        let peak = AtomicUsize::new(0);
+        let in_flight = AtomicUsize::new(0);
+        let items: Vec<usize> = (0..n).collect();
+
+        let mut out = par_filter_map(&items, |&i| {
+            let now = in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+            peak.fetch_max(now, Ordering::AcqRel);
+            barrier.wait();
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+            (i % 2 == 0).then_some(i * 10)
+        });
+        out.sort_unstable();
+
+        assert_eq!(
+            peak.load(Ordering::Acquire),
+            n,
+            "every closure must run concurrently (one thread per item)"
+        );
+        assert_eq!(out, vec![0, 20], "odd items map to None and are dropped");
+    }
+
+    #[test]
+    fn par_filter_map_on_empty_input_is_empty() {
+        let out = par_filter_map::<u8, u8, _>(&[], |_| Some(1));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resolve_caption_plans_with_resolves_every_captioned_hls_source() {
+        // Two HLS sources with captions resolve a plan each; a third HLS source
+        // with captions explicitly OFF resolves none (proving the filter on the
+        // real Source path). The fetches run concurrently (par_filter_map), off
+        // the serial build path (#48).
+        let toml = r##"
+schema_version = 1
+[canvas]
+width = 640
+height = 360
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "cam_a"
+kind = "hls"
+url = "https://h.test/a/master.m3u8"
+[sources.captions]
+mode = "auto"
+[[sources]]
+id = "cam_b"
+kind = "hls"
+url = "https://h.test/b/master.m3u8"
+[sources.captions]
+mode = "auto"
+[[sources]]
+id = "cam_off"
+kind = "hls"
+url = "https://h.test/off/master.m3u8"
+[sources.captions]
+mode = "off"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "cam_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "cam_b"
+"##;
+        let config = mosaic_config::MosaicConfig::load_from_toml(toml).expect("parse config");
+        let fetcher = CannedFetcher(Ok(MASTER_WITH_SUBS.to_owned()));
+        let mut plans = resolve_caption_plans_with(&config.sources, &fetcher);
+        plans.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let ids: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["cam_a", "cam_b"],
+            "both captioned HLS sources resolve; the OFF source does not"
+        );
+        for plan in &plans {
+            assert!(
+                plan.rendition_url
+                    .ends_with("subtitles/eng/prog_index.m3u8"),
+                "rendition_url = {}",
+                plan.rendition_url
+            );
+        }
+    }
 }
