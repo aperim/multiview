@@ -26,7 +26,7 @@ tracing = { workspace = true }
 # 7.x line to match the FFmpeg 7.1 / libavcodec 61 in the dev/CI image. WTFPL
 # (public-domain-equivalent, permissive) — acceptable for an opt-in feature; the
 # default `cargo deny check` runs with all-features=false so it never sees this.
-ffmpeg-next = { version = "7.1", optional = true }
+ffmpeg-next = { version = "8.1", optional = true }
 
 [features]
 "default" = []
