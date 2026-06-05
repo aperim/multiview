@@ -1,8 +1,11 @@
-// Settings — appearance + language controls and a demonstration of the
-// accessible toast notifications.
+// Settings — appearance + language controls, the API access token, and a
+// demonstration of the accessible toast notifications.
+import { useState } from "react";
 import type { JSX } from "react";
 import { Trans, useLingui } from "@lingui/react/macro";
+import { useQueryClient } from "@tanstack/react-query";
 
+import { getStoredToken, setStoredToken } from "../api/token";
 import { LocaleSwitcher } from "../components/LocaleSwitcher";
 import { PageHeader } from "../components/PageHeader";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -14,12 +17,29 @@ import {
   CardHeader,
   CardTitle,
 } from "../components/ui/card";
+import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { toast } from "../components/ui/use-toast";
 
 /** The settings page. */
 export function SettingsPage(): JSX.Element {
   const { t } = useLingui();
+  const queryClient = useQueryClient();
+  const [token, setToken] = useState<string>(() => getStoredToken() ?? "");
+
+  const saveToken = (): void => {
+    setStoredToken(token);
+    // Re-run every query so the pages re-fetch with the new credential.
+    void queryClient.invalidateQueries();
+    toast({
+      title: token === "" ? t`API token cleared` : t`API token saved`,
+      description:
+        token === ""
+          ? t`Requests will be unauthenticated.`
+          : t`The UI will authenticate with this token.`,
+    });
+  };
+
   return (
     <>
       <PageHeader
@@ -59,6 +79,55 @@ export function SettingsPage(): JSX.Element {
               <Trans>Locale</Trans>
             </Label>
             <LocaleSwitcher />
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>
+              <Trans>API access</Trans>
+            </CardTitle>
+            <CardDescription>
+              <Trans>
+                Paste the control-plane bearer token. Set it from the
+                MULTIVIEW_CONTROL_TOKEN environment variable, or copy the
+                bootstrap token the server logs once at startup. Stored in this
+                browser only and sent as a Bearer token to the same-origin API.
+              </Trans>
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="flex flex-1 flex-col gap-1.5">
+              <Label htmlFor="api-token">
+                <Trans>API token</Trans>
+              </Label>
+              <Input
+                id="api-token"
+                type="password"
+                autoComplete="off"
+                placeholder={t`admin.xxxxxxxx-xxxx-…`}
+                value={token}
+                onChange={(event): void => {
+                  setToken(event.target.value);
+                }}
+              />
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={saveToken}>
+                <Trans>Save</Trans>
+              </Button>
+              <Button
+                variant="outline"
+                onClick={(): void => {
+                  setToken("");
+                  setStoredToken("");
+                  void queryClient.invalidateQueries();
+                  toast({ title: t`API token cleared` });
+                }}
+              >
+                <Trans>Clear</Trans>
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

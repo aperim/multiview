@@ -9,6 +9,7 @@
 import createClient from 'openapi-fetch';
 
 import type { paths } from './schema';
+import { getStoredToken } from './token';
 
 /** Options for constructing a {@link MultiviewApiClient}. */
 export interface ApiClientOptions {
@@ -35,8 +36,11 @@ export type MultiviewApiClient = ReturnType<typeof createClient<paths>>;
  */
 export function createApiClient(options: ApiClientOptions = {}): MultiviewApiClient {
   const headers: Record<string, string> = {};
-  if (options.token !== undefined && options.token !== '') {
-    headers.Authorization = `Bearer ${options.token}`;
+  // An explicit token wins; otherwise fall back to the operator's stored token
+  // so every page authenticates without threading the token through each call.
+  const token = options.token ?? getStoredToken();
+  if (token !== undefined && token !== '') {
+    headers.Authorization = `Bearer ${token}`;
   }
   return createClient<paths>({
     baseUrl: options.baseUrl ?? '',
