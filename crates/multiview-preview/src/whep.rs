@@ -14,18 +14,30 @@
 //! * emit a minimal, well-formed **SDP answer** advertising the chosen payload
 //!   type as the server's send-only preview media.
 //!
-//! The **actual ICE / DTLS / SRTP transport** (the native `webrtc`/`str0m`
-//! stack, or a `MediaMTX` sidecar) is a *separately*-gated TODO: this scaffold
-//! pulls **no** native dependency, so even the `webrtc`-feature build stays pure
-//! Rust, green, and deny-clean until the transport lands. See the brief's
+//! The ICE / DTLS / SRTP **transport seam** lives in the [`transport`]
+//! submodule: the [`transport::WhepTransport`] trait, the session lifecycle
+//! state machine, the transport-supplied SDP answer attributes
+//! ([`transport::TransportAnswer`], folded in by [`WhepSession::build_answer`]),
+//! and the bounded drop-oldest [`transport::SampleFeed`]. That seam is
+//! socket-free and pulls **no** native dependency, so even the `webrtc`-feature
+//! build stays pure Rust, green, and deny-clean. A *native* (`str0m`) or
+//! `MediaMTX`-sidecar implementation of the seam — the part that needs real
+//! UDP/STUN + DTLS certificates — lands behind a *further* gate. See the brief's
 //! "Sidecar reuse" note.
 //!
 //! ## Isolation (invariant #10)
 //!
 //! A focus session is still strictly a *preview* consumer: it reads engine taps
 //! lossily and is admission-controlled + sheddable-first. Nothing here touches
-//! or awaits the protected output path; this module is pure SDP/codec logic.
+//! or awaits the protected output path; the negotiation half is pure SDP/codec
+//! logic and the transport seam only ever drains a drop-oldest sample feed.
+use std::fmt::Write as _;
+
 use crate::token::AccessScope;
+
+pub mod transport;
+
+use transport::{SessionState, TransportAnswer};
 
 /// A preview-encode video codec selected from a WHEP offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,6 +85,17 @@ pub enum WhepError {
         /// The access scope actually presented.
         held: AccessScope,
     },
+
+    /// A transport drove the session lifecycle into an illegal state
+    /// (e.g. backwards, or out of the terminal [`SessionState::Closed`] state).
+    /// Surfaced to the operator; it never reflects or affects the engine.
+    #[error("illegal WHEP session transition: {from:?} -> {to:?}")]
+    IllegalTransition {
+        /// The state the session was in.
+        from: SessionState,
+        /// The illegal state requested.
+        to: SessionState,
+    },
 }
 
 /// One offered video codec: its dynamic payload type and encoding name.
@@ -114,12 +137,34 @@ impl WhepSession {
         }
         let offered = parse_video_codecs(offer)?;
         let chosen = select_codec(&offered).ok_or(WhepError::NoSupportedCodec)?;
-        let answer = build_answer_sdp(chosen);
+        // The codec-only answer still carries 0.0.0.0 placeholders for the ICE
+        // and DTLS lines; a transport fills those in via `build_answer`.
+        let answer = build_answer_sdp(chosen, None);
         Ok(Self {
             codec: chosen.codec,
             payload_type: chosen.payload_type,
             answer,
         })
+    }
+
+    /// Assemble the final SDP answer, folding in the transport-supplied ICE/DTLS
+    /// attributes from `transport`.
+    ///
+    /// [`Self::negotiate`] does the pure codec selection and leaves the
+    /// connection/ICE/DTLS lines as placeholders; once a
+    /// [`transport::WhepTransport`] has accepted the offer it returns a
+    /// [`TransportAnswer`] whose real ICE ufrag/pwd, DTLS fingerprint, `a=setup`
+    /// role, and gathered candidates this method writes into the answer the WHEP
+    /// `201 Created` body returns.
+    #[must_use]
+    pub fn build_answer(&self, transport: &TransportAnswer) -> String {
+        build_answer_sdp(
+            OfferedCodec {
+                payload_type: self.payload_type,
+                codec: self.codec,
+            },
+            Some(transport),
+        )
     }
 
     /// The codec selected for the preview encode session.
@@ -206,19 +251,57 @@ fn select_codec(offered: &[OfferedCodec]) -> Option<OfferedCodec> {
 
 /// Build a minimal, well-formed **send-only** SDP answer advertising the chosen
 /// codec/payload type as the server's preview media.
-fn build_answer_sdp(chosen: OfferedCodec) -> String {
+///
+/// When `transport` is `None` the answer is the codec-only scaffold whose
+/// connection/ICE/DTLS lines are `0.0.0.0` / absent placeholders (what
+/// [`WhepSession::negotiate`] returns before a transport is wired). When
+/// `transport` is `Some`, the transport-supplied ICE ufrag/pwd, DTLS
+/// fingerprint, `a=setup` role, and gathered `a=candidate` lines replace those
+/// placeholders, yielding the answer the WHEP `201 Created` body returns.
+fn build_answer_sdp(chosen: OfferedCodec, transport: Option<&TransportAnswer>) -> String {
     let pt = chosen.payload_type;
     let name = chosen.codec.rtpmap_name();
-    // Send-only: the preview server transmits, the client receives. A real
-    // transport fills in ICE ufrag/pwd, DTLS fingerprint, and the bundle/mid
-    // attributes; this scaffold yields the codec-negotiation skeleton.
+    // The connection + ICE/DTLS block: a `0.0.0.0` placeholder when no transport
+    // is wired yet, or the transport-supplied ICE ufrag/pwd, DTLS fingerprint,
+    // `a=setup` role, and gathered candidate lines once it is.
+    let transport_block = match transport {
+        // Codec-only scaffold: no transport yet, placeholders remain.
+        None => "c=IN IP4 0.0.0.0\r\n".to_owned(),
+        // Transport-supplied connection + ICE/DTLS lines. The `c=` host stays
+        // `0.0.0.0`; the actual reachable addresses ride the candidate lines.
+        Some(t) => {
+            // Fold the candidate lines with `write!` (infallible into a
+            // `String`) rather than `format!`-into-`collect`, which clippy's
+            // `format_collect`/`format_push_string` lints both reject.
+            let candidates = t.candidates.iter().fold(String::new(), |mut acc, cand| {
+                // Writing into a `String` cannot fail; the `Result` is ignored
+                // deliberately (there is no fallible sink here).
+                let _ = write!(acc, "a=candidate:{cand}\r\n");
+                acc
+            });
+            format!(
+                "c=IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:{ufrag}\r\n\
+a=ice-pwd:{pwd}\r\n\
+a=fingerprint:{algo} {fp}\r\n\
+a=setup:{setup}\r\n\
+{candidates}",
+                ufrag = t.ice_ufrag,
+                pwd = t.ice_pwd,
+                algo = t.fingerprint.algorithm,
+                fp = t.fingerprint.value,
+                setup = t.setup.as_str(),
+            )
+        }
+    };
+    // Send-only: the preview server transmits, the client receives.
     format!(
         "v=0\r\n\
 o=multiview-preview 0 0 IN IP4 0.0.0.0\r\n\
 s=multiview-preview\r\n\
 t=0 0\r\n\
 m=video 9 UDP/TLS/RTP/SAVPF {pt}\r\n\
-c=IN IP4 0.0.0.0\r\n\
+{transport_block}\
 a=rtpmap:{pt} {name}/90000\r\n\
 a=sendonly\r\n"
     )

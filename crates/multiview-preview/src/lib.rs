@@ -35,11 +35,17 @@
 //!
 //! ## Feature flags
 //!
-//! * `webrtc` (off by default) — gates the `whep` WHEP/WebRTC *focus* scaffold:
-//!   the SDP offer/answer + preview-encoder-selection logic. The actual native
-//!   ICE/DTLS/SRTP transport is a further-gated TODO, so even this feature build
-//!   stays pure Rust. The default build is the MJPEG/snapshot model plus signed
-//!   tokens, with no native or GPU dependency.
+//! * `webrtc` (off by default) — gates the `whep` WHEP/WebRTC *focus* surface:
+//!   the SDP offer/answer + preview-encoder-selection logic, **plus** the
+//!   [`whep::transport`] seam — the [`whep::transport::WhepTransport`] trait, the
+//!   session lifecycle state machine, the transport-supplied SDP answer
+//!   attributes, and the bounded **drop-oldest** [`whep::transport::SampleFeed`]
+//!   the preview encoder pushes through (invariant #10). The seam is socket-free
+//!   and pulls **no** native dependency, so this feature build stays pure Rust;
+//!   a native (str0m) ICE/DTLS/SRTP implementation of the seam lands behind a
+//!   *further* gate (it needs UDP/STUN + DTLS certificates). The default build
+//!   is the MJPEG/snapshot model plus signed tokens, with no native or GPU
+//!   dependency.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

@@ -38,11 +38,15 @@ zune-jpeg = { version = "0.4", default-features = false }
 
 [features]
 "default" = []
-# Off-by-default: WHEP/WebRTC focus transport pulls native ICE/DTLS/SRTP stacks.
-# The default build is pure-Rust (MJPEG/snapshot model + tokens only). Enabling it
-# turns on the WHEP offer/answer scaffold + preview-encoder selection; the actual
-# ICE/DTLS/SRTP transport remains a separately-gated TODO (no native dep is pulled
-# yet, so the gated build stays green and deny-clean).
+# Off-by-default: the WHEP/WebRTC focus surface. The default build is pure-Rust
+# (MJPEG/snapshot model + tokens only). Enabling `webrtc` turns on the WHEP
+# offer/answer + preview-encoder selection AND the transport *seam*
+# (`whep::transport`): the `WhepTransport` trait, the session lifecycle state
+# machine, the transport-supplied SDP answer attributes, and the bounded
+# drop-oldest sample feed. The seam is socket-free and pulls NO native dep, so
+# the gated build stays green and deny-clean; a native (str0m) ICE/DTLS/SRTP
+# implementation of the seam lands behind a *further* gate (it needs UDP/STUN +
+# DTLS certificates).
 "webrtc" = []
 
 [lints]

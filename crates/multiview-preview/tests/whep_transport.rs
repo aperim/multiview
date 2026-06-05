@@ -155,7 +155,10 @@ fn negotiate_then_accept_yields_non_placeholder_answer() {
     let answer = session.build_answer(&ta);
 
     // Codec negotiation is preserved.
-    assert!(answer.contains("a=rtpmap:96 H264/90000"), "answer: {answer}");
+    assert!(
+        answer.contains("a=rtpmap:96 H264/90000"),
+        "answer: {answer}"
+    );
     assert!(answer.contains("a=sendonly"), "server sends preview");
     // Transport-supplied attributes are present and non-placeholder.
     assert!(answer.contains("a=ice-ufrag:Fk9aZ"), "ufrag: {answer}");
@@ -172,11 +175,23 @@ fn negotiate_then_accept_yields_non_placeholder_answer() {
         answer.contains("a=candidate:1 1 UDP 2122260223 192.0.2.1 50000 typ host"),
         "candidate: {answer}"
     );
-    // The placeholder connection line is gone.
+    // The transport-folded answer is strictly richer than the codec-only
+    // scaffold `negotiate` produces: the placeholder answer has no ICE/DTLS
+    // attributes at all, so it can never establish a session.
+    let placeholder = session.answer_sdp();
     assert!(
-        !answer.contains("c=IN IP4 0.0.0.0"),
-        "no placeholder c-line: {answer}"
+        !placeholder.contains("a=ice-ufrag"),
+        "scaffold: {placeholder}"
     );
+    assert!(
+        !placeholder.contains("a=fingerprint"),
+        "scaffold: {placeholder}"
+    );
+    assert!(
+        !placeholder.contains("a=candidate"),
+        "scaffold: {placeholder}"
+    );
+    assert_ne!(answer, placeholder, "transport answer != placeholder");
 }
 
 #[test]
@@ -208,7 +223,7 @@ fn sample_feed_drops_oldest_never_blocks() {
     // and returns a bool). This is the structural no-back-pressure guarantee.
     let (sink, feed) = sample_feed(2);
     let sample = |ts: u32| EncodedSample {
-        data: Arc::from([ts as u8].as_slice()),
+        data: Arc::from(ts.to_le_bytes().as_slice()),
         rtp_timestamp: ts,
         keyframe: ts == 0,
     };
@@ -240,12 +255,14 @@ fn transport_holds_only_the_media_feed_not_the_engine() {
     transport.accept(OFFER, PreviewCodec::H264, &media).unwrap();
 
     // Producer pushes; this must never block even though no egress task drains.
+    // Depth-3 ring, only 2 samples: no eviction, so the lag flag is false.
     for ts in 0..2 {
-        media.sink.push(EncodedSample {
+        let lagging = media.sink.push(EncodedSample {
             data: Arc::from([ts].as_slice()),
             rtp_timestamp: u32::from(ts),
             keyframe: ts == 0,
         });
+        assert!(!lagging, "depth-3 ring with 2 samples never evicts");
     }
     assert_eq!(
         transport.held_feed_buffered(),
