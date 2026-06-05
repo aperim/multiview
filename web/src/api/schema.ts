@@ -75,6 +75,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/outputs` — list all outputs (role: read). */
+        get: operations["list_outputs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/overlays": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/overlays` — list all overlays (role: read). */
+        get: operations["list_overlays"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/salvos": {
         parameters: {
             query?: never;
@@ -159,6 +193,23 @@ export interface paths {
         put?: never;
         /** `POST /api/v1/salvos/{id}/take` — take (apply) the salvo (role: write; 202). */
         post: operations["take_salvo"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/sources` — list all sources (role: read). */
+        get: operations["list_sources"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -781,6 +832,18 @@ export interface components {
             type: components["schemas"]["ResourceType"];
         };
         /**
+         * @description A persisted management resource: a stable `id`, a display `name`, and the
+         *     opaque `body` document (the config-as-code shape as canonical JSON).
+         */
+        Resource: {
+            /** @description The opaque resource document, as canonical JSON. */
+            body: unknown;
+            /** @description Stable resource id. */
+            id: string;
+            /** @description Human-friendly name. */
+            name: string;
+        };
+        /**
          * @description The IS-04 fields common to every resource.
          *
          *     Flattened into each resource type with `#[serde(flatten)]` so the wire JSON
@@ -802,6 +865,16 @@ export interface components {
              *     resource (a newer version supersedes an older one).
              */
             version: string;
+        };
+        /**
+         * @description The fields a create/update accepts (the id is supplied separately on create
+         *     and immutable on update).
+         */
+        ResourceInput: {
+            /** @description The opaque resource document. */
+            body: unknown;
+            /** @description Human-friendly name. */
+            name: string;
         };
         /**
          * @description The IS-04 resource type discriminator used by the registration protocol.
@@ -1172,6 +1245,82 @@ export interface operations {
             };
         };
     };
+    list_outputs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All outputs, id-sorted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_overlays: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All overlays, id-sorted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_salvos: {
         parameters: {
             query?: never;
@@ -1459,6 +1608,44 @@ export interface operations {
             };
             /** @description Engine command bus at capacity; shed. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_sources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All sources, id-sorted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
