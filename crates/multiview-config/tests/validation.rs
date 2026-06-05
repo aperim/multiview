@@ -138,6 +138,42 @@ fn float_fps_is_rejected_at_parse_time() {
 }
 
 #[test]
+fn absent_control_section_is_none_and_valid() {
+    let cfg = MultiviewConfig::load_from_toml(BASE).unwrap();
+    cfg.validate().expect("base document should validate");
+    assert!(
+        cfg.control.is_none(),
+        "no [control] section ⇒ None (today's headless behaviour)"
+    );
+}
+
+#[test]
+fn control_listener_valid_addr_is_accepted() {
+    let with_control = format!("{BASE}\n[control]\nlisten = \"127.0.0.1:8080\"\n");
+    let cfg = MultiviewConfig::load_from_toml(&with_control).unwrap();
+    cfg.validate()
+        .expect("a parseable control.listen should validate");
+    assert_eq!(
+        cfg.control.as_ref().map(|c| c.listen.as_str()),
+        Some("127.0.0.1:8080"),
+        "the control listener address should round-trip from TOML"
+    );
+}
+
+#[test]
+fn control_listener_unparseable_addr_is_rejected() {
+    let bad = format!("{BASE}\n[control]\nlisten = \"not-a-socket-addr\"\n");
+    let cfg = MultiviewConfig::load_from_toml(&bad).unwrap();
+    let err = cfg
+        .validate()
+        .expect_err("an unparseable control.listen must fail validation");
+    assert!(
+        err.to_string().contains("control.listen"),
+        "error should name control.listen, got: {err}"
+    );
+}
+
+#[test]
 fn malformed_fps_string_is_rejected() {
     let bad = BASE.replace(r#"fps = "30000/1001""#, r#"fps = "not-a-ratio""#);
     assert!(

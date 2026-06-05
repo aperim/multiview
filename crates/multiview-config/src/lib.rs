@@ -53,6 +53,24 @@ pub use schema::{
 pub use tally::{BitColor, IndexCell, TallyProfile};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
+/// The management control-plane listener.
+///
+/// When present, `multiview run` serves the REST + WebSocket + SSE API, the
+/// OpenAPI/Scalar docs (`/docs`), and — when the control plane is built with its
+/// `embed-web` feature — the web UI, all on [`listen`](ControlConfig::listen)
+/// alongside the engine. Absent ⇒ today's headless behaviour (the daemon binds
+/// no listener). The control plane is isolation-safe (invariant #10): it reads
+/// the engine's wait-free state slot and drop-oldest event broadcast and submits
+/// to the non-blocking command bus, so it can never back-pressure the engine.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct ControlConfig {
+    /// The socket address to bind, e.g. `"127.0.0.1:8080"` or `"0.0.0.0:8080"`.
+    /// Validated as a parseable [`std::net::SocketAddr`] by
+    /// [`MultiviewConfig::validate`].
+    pub listen: String,
+}
+
 /// A complete Multiview configuration document (config-as-code).
 ///
 /// This is the whole-engine declarative state: canvas, layout strategy,
@@ -92,6 +110,10 @@ pub struct MultiviewConfig {
     /// Multi-head video walls.
     #[serde(default)]
     pub walls: Vec<WallConfig>,
+    /// The management control-plane listener. When present, `multiview run`
+    /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlConfig>,
 }
 
 impl MultiviewConfig {
@@ -169,6 +191,7 @@ impl MultiviewConfig {
         self.validate_tally_profiles()?;
         self.validate_salvos()?;
         self.validate_walls()?;
+        self.validate_control()?;
 
         // Solving + the core structural check covers geometry (rects in 0..1,
         // positive extent, valid cadence) and grid wiring (areas resolve).
@@ -178,6 +201,24 @@ impl MultiviewConfig {
             other => ConfigError::Validation(other.to_string()),
         })?;
 
+        Ok(())
+    }
+
+    /// Validate the optional control-plane listener: its `listen` must parse as a
+    /// [`std::net::SocketAddr`], so a typo fails at config-validation time rather
+    /// than when `multiview run` tries to bind the socket.
+    fn validate_control(&self) -> Result<(), ConfigError> {
+        if let Some(control) = &self.control {
+            control
+                .listen
+                .parse::<std::net::SocketAddr>()
+                .map_err(|e| {
+                    ConfigError::Validation(format!(
+                        "control.listen {:?} is not a valid socket address: {e}",
+                        control.listen
+                    ))
+                })?;
+        }
         Ok(())
     }
 
