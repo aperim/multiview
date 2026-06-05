@@ -10,7 +10,9 @@
     clippy::indexing_slicing
 )]
 
-use multiview_core::traits::{Backend, BackendKind, Sink, Source, SourceState};
+use multiview_core::traits::{
+    Backend, BackendKind, Compositor, Decoder, Encoder, Sink, Source, SourceState,
+};
 
 struct FakeBackend {
     name: String,
@@ -124,4 +126,33 @@ fn backend_kind_variants_distinct() {
 #[test]
 fn backend_kind_software_is_default() {
     assert_eq!(BackendKind::default(), BackendKind::Software);
+}
+
+#[test]
+fn stage_traits_surface_is_kind_only() {
+    // The Decoder/Encoder/Compositor stage traits expose exactly `kind()`. The
+    // scaffold `describe_*` metadata methods were removed (the GPU path supplies
+    // geometry per `composite` call and nothing called them) — so a fake stage
+    // compiles implementing only `kind()`, with no `describe_*` to satisfy.
+    struct FakeDecoder;
+    impl Decoder for FakeDecoder {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Software
+        }
+    }
+    struct FakeEncoder;
+    impl Encoder for FakeEncoder {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Software
+        }
+    }
+    struct FakeCompositor;
+    impl Compositor for FakeCompositor {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Software
+        }
+    }
+    assert_eq!(FakeDecoder.kind(), BackendKind::Software);
+    assert_eq!(FakeEncoder.kind(), BackendKind::Software);
+    assert_eq!(FakeCompositor.kind(), BackendKind::Software);
 }

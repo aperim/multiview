@@ -163,7 +163,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 - [ ] **GPU-1** `L` — Hoist the single encoder into the bake consumer; fan packets to mux-only sinks  ·  _deps: —_
 - [ ] **GPU-2** `M` — Converge the SOFTWARE engine onto `synth::generator_loop` so a clock source animates  ·  _deps: —_
-- [ ] **GPU-3** `S` — GPU `describe_*` metadata trait methods: wire or remove  ·  _deps: —_
+- [x] **GPU-3** `S` — GPU `describe_*` metadata trait methods: wire or remove  ·  _deps: —_
 - [ ] **GPU-4** `L` — Overlay IMAGE-primitive GPU texture upload (the wgpu shader branch)  ·  _deps: GPU-3_
 - [ ] **GPU-5** `XL` — Multi-GPU PLACEMENT decision engine: closed-loop controller + config + telemetry  ·  _deps: —_
 - [ ] **GPU-6** `XL` — Hardware backend real decode/encode/composite PATHS (cuda/vaapi/qsv/metal)  ·  _deps: GPU-1, GPU-3_

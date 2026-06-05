@@ -19,7 +19,6 @@ use std::num::NonZeroU64;
 
 use bytemuck::Zeroable;
 use multiview_core::traits::{BackendKind, Compositor};
-use multiview_core::Result as CoreResult;
 use wgpu::util::DeviceExt;
 
 use crate::blend::LinearRgba;
@@ -520,15 +519,6 @@ struct ReadbackBuffer {
 impl Compositor for GpuCompositor {
     fn kind(&self) -> BackendKind {
         BackendKind::Wgpu
-    }
-
-    fn describe_output(&self) -> CoreResult<multiview_core::frame::FrameMeta> {
-        // The render-time geometry/color is supplied per `composite` call; this
-        // metadata hook is not used by the GPU path yet, so defer to the trait's
-        // NotImplemented default semantics via the core error.
-        Err(multiview_core::Error::NotImplemented(
-            "GpuCompositor::describe_output",
-        ))
     }
 }
 

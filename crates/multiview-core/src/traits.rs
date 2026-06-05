@@ -5,8 +5,6 @@
 //! `Box<dyn Trait>` values without naming any native/backend type. Native
 //! surfaces (CUDA pointers, `IOSurface`, wgpu textures) never appear here — the
 //! feature-gated crates carry those.
-use crate::error::{Error, Result};
-use crate::frame::FrameMeta;
 
 /// The concrete kind of a backend implementing a pipeline stage.
 ///
@@ -94,56 +92,20 @@ pub trait Sink {
 /// A decode stage: turns coded packets into frames on the internal timeline.
 ///
 /// Backend-specific frame storage is owned by the implementing crate; only the
-/// pure-Rust [`FrameMeta`] is described here.
+/// pure-Rust [`crate::frame::FrameMeta`] crosses this boundary.
 pub trait Decoder {
     /// The backend kind providing this decoder.
     fn kind(&self) -> BackendKind;
-
-    /// Describe the metadata of the next decoded frame, if one is ready.
-    ///
-    /// The scaffold returns [`Error::NotImplemented`]; real backends pull from
-    /// libav.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Decode`] (or [`Error::NotImplemented`] in this scaffold)
-    /// when no frame can be produced.
-    fn describe_next(&self) -> Result<FrameMeta> {
-        Err(Error::NotImplemented("Decoder::describe_next"))
-    }
 }
 
 /// An encode stage: turns composited canvas frames into coded packets.
 pub trait Encoder {
     /// The backend kind providing this encoder.
     fn kind(&self) -> BackendKind;
-
-    /// Describe the metadata of the canvas frame this encoder expects as input.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Encode`] (or [`Error::NotImplemented`] in this scaffold)
-    /// when the encoder cannot describe its input.
-    fn describe_input(&self) -> Result<FrameMeta> {
-        Err(Error::NotImplemented("Encoder::describe_input"))
-    }
 }
 
 /// Composites tiles into the output canvas.
 pub trait Compositor {
     /// The backend kind providing this compositor.
     fn kind(&self) -> BackendKind;
-
-    /// Describe the next composited output frame's metadata.
-    ///
-    /// The scaffold returns [`Error::NotImplemented`]; real backends render on
-    /// the GPU.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Compositor`] (or [`Error::NotImplemented`] in this
-    /// scaffold) if the backend cannot describe the next output frame.
-    fn describe_output(&self) -> Result<FrameMeta> {
-        Err(Error::NotImplemented("Compositor::describe_output"))
-    }
 }
