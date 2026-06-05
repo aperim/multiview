@@ -54,7 +54,13 @@ pub mod overlays;
 #[cfg(feature = "overlay")]
 pub mod wallclock;
 
-/// The **real** libav\* end-to-end `multiview run` pipeline (ingest → composite →
+/// In-process **synthetic video sources** (ADR-0027): colour bars, a solid
+/// colour, and a full-frame clock — rendered to NV12 and published into a
+/// `TileStore` like any decoded feed. `bars`/`solid` build everywhere; the clock
+/// renderer needs the `overlay` feature.
+pub mod synth;
+
+/// The full libav\* end-to-end `multiview run` pipeline (ingest → composite →
 /// encode-once → fan out to file/HLS sinks). Behind the off-by-default `ffmpeg`
 /// feature so the baseline build stays pure-Rust; software H.264/H.265 needs
 /// `gpl-codecs` on top.
