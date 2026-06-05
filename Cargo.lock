@@ -2061,6 +2061,7 @@ dependencies = [
  "multiview-overlay",
  "multiview-telemetry",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

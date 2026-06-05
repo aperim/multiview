@@ -31,17 +31,21 @@ fn cfg() -> ReferenceConfig {
 
 /// Run an output clock for `n` ticks, optionally feeding a reference tracker a
 /// pathological sample on each tick, and collect the PTS of every tick.
-fn run(n: u64, feed_tracker: bool) -> Vec<MediaTime> {
+fn run(n: i64, feed_tracker: bool) -> Vec<MediaTime> {
     let mut clock = OutputClock::new(Rational::FPS_59_94).expect("valid cadence");
     let mut tracker = ReferenceTracker::new(cfg());
-    let mut out = Vec::with_capacity(n as usize);
+    let mut out = Vec::new();
     for i in 0..n {
         if feed_tracker {
             // Deliberately pathological: huge alternating offsets, a delay spike,
             // and a fake "monotonic" timestamp that jumps around. None of this
             // may influence how many frames the clock emits or when.
-            let off = if i % 2 == 0 { 9_000_000_000 } else { -9_000_000_000 };
-            let now = (i as i64).saturating_mul(7) - 3;
+            let off = if i % 2 == 0 {
+                9_000_000_000
+            } else {
+                -9_000_000_000
+            };
+            let now = i.saturating_mul(7) - 3;
             let _ = tracker.observe(PtpSample::new(off, 50_000_000), now);
             tracker.tick(now);
         }
@@ -58,7 +62,7 @@ fn run(n: u64, feed_tracker: bool) -> Vec<MediaTime> {
 
 #[test]
 fn tracker_activity_does_not_change_the_tick_stream() {
-    const TICKS: u64 = 100_000;
+    const TICKS: i64 = 100_000;
     let baseline = run(TICKS, false);
     let with_ptp = run(TICKS, true);
     assert_eq!(
@@ -79,9 +83,9 @@ fn absent_samples_leave_the_clock_untouched() {
     let mut clock_a = OutputClock::new(Rational::FPS_59_94).expect("valid cadence");
     let mut clock_b = OutputClock::new(Rational::FPS_59_94).expect("valid cadence");
     let mut tracker = ReferenceTracker::new(cfg());
-    for i in 0..10_000u64 {
+    for i in 0..10_000i64 {
         // Tracker only ever sees the passage of time, never a sample.
-        tracker.tick(i as i64 * 16_683_350);
+        tracker.tick(i.saturating_mul(16_683_350));
         assert_eq!(clock_a.tick().pts, clock_b.tick().pts);
     }
     // No sample ever arrived: the reference never leaves Freerun.
