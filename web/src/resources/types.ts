@@ -33,10 +33,15 @@ export interface ResourceInput {
   readonly body: Record<string, unknown>;
 }
 
-/** The transport kinds Multiview can ingest (config `[[sources]]` `kind`). */
+/**
+ * The transport kinds Multiview can ingest (config `SourceKind`, internally
+ * tagged by `kind`). These tags are the literal config wire kinds (snake_case),
+ * so they double as the `kind` field written into the body.
+ */
 export type SourceKind =
   | 'rtsp'
   | 'hls'
+  | 'ts'
   | 'srt'
   | 'rtmp'
   | 'ndi'
@@ -47,6 +52,7 @@ export type SourceKind =
 export const SOURCE_KINDS: readonly SourceKind[] = [
   'rtsp',
   'hls',
+  'ts',
   'srt',
   'rtmp',
   'ndi',
@@ -62,11 +68,15 @@ export interface SourceView {
   readonly name: string;
   /** Transport kind. */
   readonly kind: SourceKind;
-  /** The configured URL/locator (redacted of credentials for display). */
-  readonly url: string | undefined;
+  /**
+   * The configured locator for display — the kind's key field: `url` for the
+   * network kinds, the source `name` for NDI, the `path` for file. Absent for
+   * the parameter-free `test` kind.
+   */
+  readonly locator: string | undefined;
 }
 
-/** The output transport kinds (config `[[outputs]]`). */
+/** The output transport display kinds (config `Output`, folded for display). */
 export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt';
 
 /** All output kinds, for building selectors. */
@@ -87,8 +97,13 @@ export interface OutputView {
   readonly name: string;
   /** Output transport kind. */
   readonly kind: OutputKind;
-  /** Whether the sink is currently enabled. */
-  readonly enabled: boolean;
+  /**
+   * The kind's key field for display: the RTSP `mount`, the HLS/LL-HLS `path`,
+   * the RTMP/SRT `url`, or the NDI source `name`.
+   */
+  readonly target: string | undefined;
+  /** The video codec (absent for NDI, which carries no codec). */
+  readonly codec: string | undefined;
 }
 
 /** The overlay kinds (config `[[overlays]]` `kind`). */
@@ -111,6 +126,8 @@ export interface OverlayView {
   readonly name: string;
   /** Overlay kind. */
   readonly kind: OverlayKind;
+  /** Attachment target (`canvas` or a cell id). */
+  readonly target: string;
   /** Stacking order over the program. */
   readonly z: number;
 }

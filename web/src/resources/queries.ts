@@ -202,8 +202,11 @@ export function useSaveResource(
 }
 
 /**
- * Delete a resource of the given kind, sending the stored ETag as `If-Match`
- * when known. The list is invalidated on settle.
+ * Delete a resource of the given kind. The control plane requires `If-Match` on
+ * delete (`428` without it, `412` when stale), and the list response carries no
+ * per-item ETags — so, mirroring {@link useSaveResource}, the stored ETag is
+ * read first and, when uncached, fetched via GET before the conditional DELETE.
+ * The list is invalidated on settle.
  */
 export function useDeleteResource(
   kind: ResourceKind,
@@ -212,8 +215,14 @@ export function useDeleteResource(
   const queryClient = useQueryClient();
   return useMutation<undefined, ApiError, string>({
     mutationFn: async (id): Promise<undefined> => {
-      const etag = readResourceEtags(queryClient, kind)[id];
       try {
+        let etag = readResourceEtags(queryClient, kind)[id];
+        if (etag === undefined) {
+          // No cached ETag: fetch the current one so the DELETE carries an
+          // `If-Match` (the backend rejects an unconditional delete with 428).
+          const current = await getResource(kind, id, requestOptions(context));
+          etag = current.etag;
+        }
         await deleteResource(kind, id, {
           ...requestOptions(context),
           ...(etag !== undefined ? { etag } : {}),

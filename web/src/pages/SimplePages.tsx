@@ -9,11 +9,14 @@
 import { useId, useState } from 'react';
 import type { JSX } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
-import { Check, CircleSlash, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Pencil, Plus, Trash2 } from 'lucide-react';
 import type { ColumnDef } from '@tanstack/react-table';
 
 import {
   getResource,
+  outputHasCodec,
+  outputTargetKey,
+  sourceLocatorKey,
   toOutputView,
   toOverlayView,
   toSourceView,
@@ -69,20 +72,26 @@ interface SourceFormState {
   readonly id: string;
   readonly name: string;
   readonly kind: SourceKind;
-  readonly url: string;
+  /** The kind's locator (url/name/path); unused for the `test` kind. */
+  readonly locator: string;
 }
 
 interface OutputFormState {
   readonly id: string;
   readonly name: string;
   readonly kind: OutputKind;
-  readonly enabled: boolean;
+  /** The kind's target (mount/path/url/name). */
+  readonly target: string;
+  /** The video codec (unused for NDI). */
+  readonly codec: string;
 }
 
 interface OverlayFormState {
   readonly id: string;
   readonly name: string;
   readonly kind: OverlayKind;
+  /** Attachment target (`canvas` or a cell id). */
+  readonly target: string;
   readonly z: number;
 }
 
@@ -197,8 +206,11 @@ interface CrudPageProps<View, Form> {
   readonly emptyForm: () => Form;
   /** Project a server record onto the editable form (for edit prefill). */
   readonly formFromRecord: (record: { id: string; name: string; body: Record<string, unknown> }) => Form;
-  /** Validate the form; return an error key string or `undefined` when valid. */
-  readonly validate: (form: Form, creating: boolean) => 'id' | 'name' | undefined;
+  /**
+   * Validate the form; return a localized error message to display, or
+   * `undefined` when the form is complete and safe to submit.
+   */
+  readonly validate: (form: Form, creating: boolean) => string | undefined;
   /** Build the save vars (id + payload) from a valid form. */
   readonly toSaveVars: (form: Form, creating: boolean) => SaveResourceVars;
   /** The id of a view row (for delete + edit addressing). */
@@ -224,7 +236,7 @@ function CrudPage<View, Form>(props: CrudPageProps<View, Form>): JSX.Element {
   const [form, setForm] = useState<Form | null>(null);
   const [creating, setCreating] = useState(true);
   const [pendingDelete, setPendingDelete] = useState<View | null>(null);
-  const [fieldError, setFieldError] = useState<'id' | 'name' | undefined>(undefined);
+  const [fieldError, setFieldError] = useState<string | undefined>(undefined);
 
   const idFieldId = useId();
   const nameFieldId = useId();
@@ -363,11 +375,7 @@ function CrudPage<View, Form>(props: CrudPageProps<View, Form>): JSX.Element {
               })}
               {fieldError !== undefined ? (
                 <p role="alert" className="text-sm text-destructive">
-                  {fieldError === 'id' ? (
-                    <Trans>An identifier is required.</Trans>
-                  ) : (
-                    <Trans>A name is required.</Trans>
-                  )}
+                  {fieldError}
                 </p>
               ) : null}
               <DialogFooter>
@@ -492,15 +500,33 @@ function RowActions<View>({
 
 // --- Sources ----------------------------------------------------------------
 
-/** Whether a source kind carries a URL/locator. */
-function sourceHasUrl(kind: SourceKind): boolean {
-  return kind !== 'test' && kind !== 'ndi' && kind !== 'file';
-}
-
 /** Sources management (ingest). */
 export function SourcesPage(): JSX.Element {
   const { t } = useLingui();
   const sources = useSources();
+
+  // The label + placeholder for a source kind's single locator field. `test`
+  // has no locator (handled by the `renderFields` guard below).
+  const locatorLabel = (kind: SourceKind): string => {
+    switch (kind) {
+      case 'ndi':
+        return t`NDI source name`;
+      case 'file':
+        return t`File path`;
+      default:
+        return t`Locator URL`;
+    }
+  };
+  const locatorPlaceholder = (kind: SourceKind): string => {
+    switch (kind) {
+      case 'ndi':
+        return t`STUDIO (CAM 1)`;
+      case 'file':
+        return t`/media/clip.mp4`;
+      default:
+        return 'rtsp://host/stream';
+    }
+  };
 
   const columns = (
     onEdit: (row: SourceView) => void,
@@ -517,11 +543,11 @@ export function SourcesPage(): JSX.Element {
       cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.kind} />,
     },
     {
-      accessorKey: 'url',
+      accessorKey: 'locator',
       header: t`Locator`,
       cell: (ctx): JSX.Element => (
         <code className="text-xs text-muted-foreground" lang="" dir="auto">
-          {ctx.row.original.url ?? '—'}
+          {ctx.row.original.locator ?? '—'}
         </code>
       ),
     },
@@ -561,24 +587,34 @@ export function SourcesPage(): JSX.Element {
       columns={columns}
       rowId={(row): string => row.id}
       rowName={(row): string => row.name}
-      emptyForm={(): SourceFormState => ({ id: '', name: '', kind: 'rtsp', url: '' })}
+      emptyForm={(): SourceFormState => ({ id: '', name: '', kind: 'rtsp', locator: '' })}
       formFromRecord={(record): SourceFormState => {
         const view = toSourceView(record);
-        return { id: view.id, name: view.name, kind: view.kind, url: view.url ?? '' };
+        return {
+          id: view.id,
+          name: view.name,
+          kind: view.kind,
+          locator: view.locator ?? '',
+        };
       }}
-      validate={(form, creating): 'id' | 'name' | undefined => {
+      validate={(form, creating): string | undefined => {
         if (creating && form.id.trim() === '') {
-          return 'id';
+          return t`An identifier is required.`;
         }
         if (form.name.trim() === '') {
-          return 'name';
+          return t`A name is required.`;
+        }
+        // Every kind except `test` needs its locator (url/name/path).
+        if (sourceLocatorKey(form.kind) !== undefined && form.locator.trim() === '') {
+          return t`A locator is required for this source kind.`;
         }
         return undefined;
       }}
       toSaveVars={(form, creating): SaveResourceVars => {
         const body: Record<string, unknown> = { kind: form.kind };
-        if (sourceHasUrl(form.kind) && form.url.trim() !== '') {
-          body.url = form.url.trim();
+        const locatorKey = sourceLocatorKey(form.kind);
+        if (locatorKey !== undefined) {
+          body[locatorKey] = form.locator.trim();
         }
         return {
           id: creating ? form.id.trim() : form.id,
@@ -619,14 +655,15 @@ export function SourcesPage(): JSX.Element {
               }}
             />
           </div>
-          {sourceHasUrl(form.kind) ? (
+          {sourceLocatorKey(form.kind) !== undefined ? (
             <TextField
-              id={`${ids.id}-url`}
-              label={t`Locator URL`}
-              value={form.url}
-              placeholder="rtsp://host/stream"
+              id={`${ids.id}-locator`}
+              label={locatorLabel(form.kind)}
+              value={form.locator}
+              required
+              placeholder={locatorPlaceholder(form.kind)}
               onChange={(next): void => {
-                setForm({ ...form, url: next });
+                setForm({ ...form, locator: next });
               }}
             />
           ) : null}
@@ -643,6 +680,32 @@ export function OutputsPage(): JSX.Element {
   const { t } = useLingui();
   const outputs = useOutputs();
 
+  // The label + placeholder for an output kind's single target field.
+  const targetLabel = (kind: OutputKind): string => {
+    switch (outputTargetKey(kind)) {
+      case 'mount':
+        return t`Mount point`;
+      case 'path':
+        return t`Output path`;
+      case 'name':
+        return t`NDI source name`;
+      default:
+        return t`Destination URL`;
+    }
+  };
+  const targetPlaceholder = (kind: OutputKind): string => {
+    switch (outputTargetKey(kind)) {
+      case 'mount':
+        return '/multiview';
+      case 'path':
+        return '/var/www/hls';
+      case 'name':
+        return t`Multiview Program`;
+      default:
+        return 'rtmp://host/app/key';
+    }
+  };
+
   const columns = (
     onEdit: (row: OutputView) => void,
     onDelete: (row: OutputView) => void,
@@ -658,20 +721,22 @@ export function OutputsPage(): JSX.Element {
       cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.kind} />,
     },
     {
-      accessorKey: 'enabled',
-      header: t`State`,
-      cell: (ctx): JSX.Element =>
-        ctx.row.original.enabled ? (
-          <span className="inline-flex items-center gap-1 text-sm">
-            <Check className="size-4" aria-hidden="true" />
-            <Trans>Enabled</Trans>
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
-            <CircleSlash className="size-4" aria-hidden="true" />
-            <Trans>Disabled</Trans>
-          </span>
-        ),
+      accessorKey: 'target',
+      header: t`Destination`,
+      cell: (ctx): JSX.Element => (
+        <code className="text-xs text-muted-foreground" lang="" dir="auto">
+          {ctx.row.original.target ?? '—'}
+        </code>
+      ),
+    },
+    {
+      accessorKey: 'codec',
+      header: t`Codec`,
+      cell: (ctx): JSX.Element => (
+        <span className="text-sm text-muted-foreground">
+          {ctx.row.original.codec ?? '—'}
+        </span>
+      ),
     },
     {
       id: 'actions',
@@ -709,28 +774,50 @@ export function OutputsPage(): JSX.Element {
       columns={columns}
       rowId={(row): string => row.id}
       rowName={(row): string => row.name}
-      emptyForm={(): OutputFormState => ({ id: '', name: '', kind: 'rtsp', enabled: true })}
+      emptyForm={(): OutputFormState => ({
+        id: '',
+        name: '',
+        kind: 'rtsp',
+        target: '',
+        codec: 'h264',
+      })}
       formFromRecord={(record): OutputFormState => {
         const view = toOutputView(record);
-        return { id: view.id, name: view.name, kind: view.kind, enabled: view.enabled };
+        return {
+          id: view.id,
+          name: view.name,
+          kind: view.kind,
+          target: view.target ?? '',
+          codec: view.codec ?? 'h264',
+        };
       }}
-      validate={(form, creating): 'id' | 'name' | undefined => {
+      validate={(form, creating): string | undefined => {
         if (creating && form.id.trim() === '') {
-          return 'id';
+          return t`An identifier is required.`;
         }
         if (form.name.trim() === '') {
-          return 'name';
+          return t`A name is required.`;
+        }
+        if (form.target.trim() === '') {
+          return t`A destination is required for this output kind.`;
+        }
+        if (outputHasCodec(form.kind) && form.codec.trim() === '') {
+          return t`A codec is required for this output kind.`;
         }
         return undefined;
       }}
-      toSaveVars={(form, creating): SaveResourceVars => ({
-        id: creating ? form.id.trim() : form.id,
-        create: creating,
-        input: {
-          name: form.name.trim(),
-          body: { kind: outputWireKind(form.kind), enabled: form.enabled },
-        },
-      })}
+      toSaveVars={(form, creating): SaveResourceVars => {
+        const body: Record<string, unknown> = { kind: outputWireKind(form.kind) };
+        body[outputTargetKey(form.kind)] = form.target.trim();
+        if (outputHasCodec(form.kind)) {
+          body.codec = form.codec.trim();
+        }
+        return {
+          id: creating ? form.id.trim() : form.id,
+          create: creating,
+          input: { name: form.name.trim(), body },
+        };
+      }}
       renderFields={(form, setForm, creating, ids): JSX.Element => (
         <>
           <TextField
@@ -764,18 +851,28 @@ export function OutputsPage(): JSX.Element {
               }}
             />
           </div>
-          <div className="flex items-center gap-2">
-            <input
-              id={`${ids.id}-enabled`}
-              type="checkbox"
-              className="size-4 rounded border-input"
-              checked={form.enabled}
-              onChange={(event): void => {
-                setForm({ ...form, enabled: event.target.checked });
+          <TextField
+            id={`${ids.id}-target`}
+            label={targetLabel(form.kind)}
+            value={form.target}
+            required
+            placeholder={targetPlaceholder(form.kind)}
+            onChange={(next): void => {
+              setForm({ ...form, target: next });
+            }}
+          />
+          {outputHasCodec(form.kind) ? (
+            <TextField
+              id={`${ids.id}-codec`}
+              label={t`Codec`}
+              value={form.codec}
+              required
+              placeholder="h264"
+              onChange={(next): void => {
+                setForm({ ...form, codec: next });
               }}
             />
-            <Label htmlFor={`${ids.id}-enabled`}>{t`Enabled`}</Label>
-          </div>
+          ) : null}
         </>
       )}
     />
@@ -802,6 +899,15 @@ export function OverlaysPage(): JSX.Element {
       accessorKey: 'kind',
       header: t`Kind`,
       cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.kind} />,
+    },
+    {
+      accessorKey: 'target',
+      header: t`Target`,
+      cell: (ctx): JSX.Element => (
+        <code className="text-xs text-muted-foreground" lang="" dir="auto">
+          {ctx.row.original.target}
+        </code>
+      ),
     },
     {
       accessorKey: 'z',
@@ -846,24 +952,42 @@ export function OverlaysPage(): JSX.Element {
       columns={columns}
       rowId={(row): string => row.id}
       rowName={(row): string => row.name}
-      emptyForm={(): OverlayFormState => ({ id: '', name: '', kind: 'clock', z: 0 })}
+      emptyForm={(): OverlayFormState => ({
+        id: '',
+        name: '',
+        kind: 'clock',
+        target: 'canvas',
+        z: 0,
+      })}
       formFromRecord={(record): OverlayFormState => {
         const view = toOverlayView(record);
-        return { id: view.id, name: view.name, kind: view.kind, z: view.z };
+        return {
+          id: view.id,
+          name: view.name,
+          kind: view.kind,
+          target: view.target,
+          z: view.z,
+        };
       }}
-      validate={(form, creating): 'id' | 'name' | undefined => {
+      validate={(form, creating): string | undefined => {
         if (creating && form.id.trim() === '') {
-          return 'id';
+          return t`An identifier is required.`;
         }
         if (form.name.trim() === '') {
-          return 'name';
+          return t`A name is required.`;
+        }
+        if (form.target.trim() === '') {
+          return t`A target is required.`;
         }
         return undefined;
       }}
       toSaveVars={(form, creating): SaveResourceVars => ({
         id: creating ? form.id.trim() : form.id,
         create: creating,
-        input: { name: form.name.trim(), body: { kind: form.kind, z: form.z } },
+        input: {
+          name: form.name.trim(),
+          body: { kind: form.kind, target: form.target.trim(), z: form.z, params: {} },
+        },
       })}
       renderFields={(form, setForm, creating, ids): JSX.Element => (
         <>
@@ -898,6 +1022,16 @@ export function OverlaysPage(): JSX.Element {
               }}
             />
           </div>
+          <TextField
+            id={`${ids.id}-target`}
+            label={t`Target`}
+            value={form.target}
+            required
+            placeholder={t`canvas or a cell id`}
+            onChange={(next): void => {
+              setForm({ ...form, target: next });
+            }}
+          />
           <TextField
             id={`${ids.id}-z`}
             label={t`Stacking order`}

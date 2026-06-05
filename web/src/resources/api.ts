@@ -9,7 +9,8 @@
 // `../api/schema.ts`, so — exactly as `../api/layouts.ts` does for the layout
 // write ops — the calls go through `fetch` with EXPLICITLY-TYPED request/response
 // shapes and typed field guards. The opaque `body` is read with `stringField`/
-// `numberField`/`boolField`, never an `as`-cast of an untyped value.
+// `numberField`, never an `as`-cast of an untyped value.
+import { getStoredToken } from '../api/token';
 import type {
   OutputKind,
   OutputView,
@@ -64,12 +65,6 @@ export function numberField(body: Record<string, unknown>, key: string): number 
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-/** Read a boolean field from an opaque body, or `undefined` otherwise. */
-export function boolField(body: Record<string, unknown>, key: string): boolean | undefined {
-  const value = body[key];
-  return typeof value === 'boolean' ? value : undefined;
-}
-
 function isProblem(value: unknown): value is { title: string; status: number } {
   return (
     isRecord(value) &&
@@ -105,8 +100,11 @@ function headersFor(options: ResourceRequestOptions, withJsonBody: boolean): Hea
   if (withJsonBody) {
     headers.set('Content-Type', 'application/json');
   }
-  if (options.token !== undefined && options.token !== '') {
-    headers.set('Authorization', `Bearer ${options.token}`);
+  // An explicit token wins; otherwise fall back to the operator's stored token
+  // so every resource call authenticates, exactly like `createApiClient`.
+  const token = options.token ?? getStoredToken();
+  if (token !== undefined && token !== '') {
+    headers.set('Authorization', `Bearer ${token}`);
   }
   if (options.etag !== undefined && options.etag !== '') {
     headers.set('If-Match', options.etag);
@@ -216,9 +214,44 @@ export async function deleteResource(
 // --- body → view-model projections -----------------------------------------
 
 function asSourceKind(value: string | undefined): SourceKind {
-  // `ts` (MPEG-TS) is modelled under the generic `rtsp`-style URL inputs; map
-  // any unrecognized/absent kind to `test`, the parameter-free built-in.
+  // The config wire tags (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`ndi`/`file`/`test`)
+  // match these literals; an unrecognized/absent kind folds to the
+  // parameter-free `test` built-in.
   return SOURCE_KINDS.find((k) => k === value) ?? 'test';
+}
+
+/** The body key that carries a source kind's locator (url/name/path), if any. */
+export function sourceLocatorKey(kind: SourceKind): 'url' | 'name' | 'path' | undefined {
+  switch (kind) {
+    case 'ndi':
+      return 'name';
+    case 'file':
+      return 'path';
+    case 'test':
+      return undefined;
+    default:
+      return 'url';
+  }
+}
+
+/** The body key that carries an output kind's target (mount/path/url/name). */
+export function outputTargetKey(kind: OutputKind): 'mount' | 'path' | 'url' | 'name' {
+  switch (kind) {
+    case 'rtsp':
+      return 'mount';
+    case 'hls':
+    case 'll-hls':
+      return 'path';
+    case 'ndi':
+      return 'name';
+    default:
+      return 'url';
+  }
+}
+
+/** Whether an output kind carries a video codec (every kind except NDI). */
+export function outputHasCodec(kind: OutputKind): boolean {
+  return kind !== 'ndi';
 }
 
 function asOutputKind(value: string | undefined): OutputKind {
@@ -240,22 +273,25 @@ function asOverlayKind(value: string | undefined): OverlayKind {
 
 /** Project a source record's opaque body into the {@link SourceView}. */
 export function toSourceView(record: ResourceRecord): SourceView {
+  const kind = asSourceKind(stringField(record.body, 'kind'));
+  const locatorKey = sourceLocatorKey(kind);
   return {
     id: record.id,
     name: record.name,
-    kind: asSourceKind(stringField(record.body, 'kind')),
-    url: stringField(record.body, 'url'),
+    kind,
+    locator: locatorKey !== undefined ? stringField(record.body, locatorKey) : undefined,
   };
 }
 
 /** Project an output record's opaque body into the {@link OutputView}. */
 export function toOutputView(record: ResourceRecord): OutputView {
+  const kind = asOutputKind(stringField(record.body, 'kind'));
   return {
     id: record.id,
     name: record.name,
-    kind: asOutputKind(stringField(record.body, 'kind')),
-    // Absent `enabled` defaults to enabled, matching the engine's behaviour.
-    enabled: boolField(record.body, 'enabled') ?? true,
+    kind,
+    target: stringField(record.body, outputTargetKey(kind)),
+    codec: outputHasCodec(kind) ? stringField(record.body, 'codec') : undefined,
   };
 }
 
@@ -265,6 +301,7 @@ export function toOverlayView(record: ResourceRecord): OverlayView {
     id: record.id,
     name: record.name,
     kind: asOverlayKind(stringField(record.body, 'kind')),
+    target: stringField(record.body, 'target') ?? 'canvas',
     z: numberField(record.body, 'z') ?? 0,
   };
 }

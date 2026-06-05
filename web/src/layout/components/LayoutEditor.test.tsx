@@ -13,7 +13,7 @@ import type { SourceView } from '../../resources/types';
 import { renderWithProviders } from '../../test/render';
 
 const SOURCES: readonly SourceView[] = [
-  { id: 'cam-1', name: 'Camera One', kind: 'rtsp', url: 'rtsp://cam-1' },
+  { id: 'cam-1', name: 'Camera One', kind: 'rtsp', locator: 'rtsp://cam-1' },
 ];
 
 function namedLayout(): LayoutModel {
