@@ -6,7 +6,7 @@
 //!
 //! Everything here is driven by injected packets/events — there is **no real
 //! network, ICE, DTLS, or SRTP**. The real socket/ICE path is gated and
-//! `#[ignore]`d (it needs a peer); see `webrtc_ingest_live`.
+//! `#[ignore]`d (it needs a peer); see `live_webrtc_session_receives_rtp`.
 #![cfg(feature = "webrtc")]
 #![allow(
     clippy::unwrap_used,
@@ -15,13 +15,13 @@
     clippy::indexing_slicing
 )]
 
+use multiview_core::time::MediaTime;
+use multiview_framestore::TileStore;
 use multiview_input::source::{IngestConfig, IngestPump, StoredFrame};
 use multiview_input::webrtc::transport::{
     H264Depacketizer, MediaEngine, RtpFrame, SessionState, WebRtcProducer, WebRtcSession,
 };
 use multiview_input::webrtc::{Codec, SessionDescription};
-use multiview_core::time::MediaTime;
-use multiview_framestore::TileStore;
 
 /// A scripted media engine: yields a fixed list of injected RTP frames in order,
 /// then signals clean end-of-stream. No sockets, no crypto — exactly the seam the
@@ -55,7 +55,7 @@ fn single_nal(seq: u16, timestamp: u32, marker: bool, nal: &[u8]) -> RtpFrame {
     }
 }
 
-/// A minimal H.264 IDR-slice NAL (nal_unit_type 5 => keyframe) and a non-IDR
+/// A minimal H.264 IDR-slice NAL (`nal_unit_type` 5 => keyframe) and a non-IDR
 /// slice NAL (type 1 => delta). The depacketizer keys keyframe-gating on the type.
 const IDR_NAL: &[u8] = &[0x65, 0x88, 0x84, 0x00];
 const NON_IDR_NAL: &[u8] = &[0x41, 0x9a, 0x00, 0x00];
@@ -203,4 +203,34 @@ fn producer_drops_pre_keyframe_garbage_without_stalling() {
     // Only the keyframe (and anything after) is published — the two pre-keyframe
     // deltas were dropped.
     assert_eq!(published, 1);
+}
+
+/// Live ICE/DTLS/SRTP path — **gated, requires a real peer + application-layer
+/// media engine**.
+///
+/// `multiview-input` deliberately links **no** native WebRTC library: the real
+/// ICE/DTLS/SRTP engine is supplied at the application layer (a sans-IO driver
+/// behind the binary's `webrtc` wiring), so there is nothing to drive a real
+/// socket from inside this crate's test. This test is therefore `#[ignore]`d and
+/// only runs when an operator points it at a real peer via
+/// `MULTIVIEW_WEBRTC_PEER`. Absent that, it skips honestly (it never asserts a
+/// fake pass) — the injected-engine tests above carry the depacketize/lifecycle
+/// correctness load.
+#[test]
+#[ignore = "needs a real WebRTC peer + application-layer ICE/DTLS/SRTP engine (set MULTIVIEW_WEBRTC_PEER)"]
+fn live_webrtc_session_receives_rtp() {
+    let Ok(peer) = std::env::var("MULTIVIEW_WEBRTC_PEER") else {
+        // No peer configured: skip rather than fake a pass. The real engine lives
+        // at the application layer and is not part of this crate.
+        eprintln!(
+            "skipping live webrtc test: set MULTIVIEW_WEBRTC_PEER to a reachable \
+             WHIP/WebRTC ingest endpoint and supply an application-layer MediaEngine"
+        );
+        return;
+    };
+    panic!(
+        "live webrtc ingest against {peer} requires an application-layer \
+         ICE/DTLS/SRTP MediaEngine implementation, which is not linked into \
+         multiview-input (pure/LGPL-clean by design)"
+    );
 }
