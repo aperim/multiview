@@ -16,7 +16,13 @@ import {
   parseTileStateDelta,
   parseTilesSnapshot,
 } from "./envelope";
-import type { Envelope, TileSnapshotEntry, TileState } from "./envelope";
+import type { Envelope, TileSnapshotEntry } from "./envelope";
+// `LifecycleState` (LIVE/STALE/RECONNECTING/NO_SIGNAL) comes from the generated
+// AsyncAPI schema types — the canonical source of truth for tile lifecycle values
+// (resilience invariant #2). `envelope.ts` re-exports it as `TileState` for
+// backward compat, but we import under the generated name here to make the
+// dependency on the spec explicit.
+import type { LifecycleState } from "./generated-types";
 
 /** The TanStack Query key the live tile map is mirrored into. */
 export const TILES_QUERY_KEY = ["realtime", "tiles"] as const;
@@ -24,7 +30,8 @@ export const TILES_QUERY_KEY = ["realtime", "tiles"] as const;
 /** A resolved tile as held in the cache (snapshot ⊕ deltas). */
 export interface LiveTile {
   readonly id: string;
-  readonly state: TileState;
+  // Typed using the generated `LifecycleState` from the AsyncAPI spec.
+  readonly state: LifecycleState;
   readonly input?: string;
   readonly fps?: number;
   readonly since_ts?: number;
@@ -58,7 +65,7 @@ function resolveWsUrl(): string {
 function tileFromEntry(entry: TileSnapshotEntry): LiveTile {
   const tile: {
     id: string;
-    state: TileState;
+    state: LifecycleState;
     input?: string;
     fps?: number;
     since_ts?: number;
@@ -108,7 +115,7 @@ function applyTileStateDelta(client: QueryClient, envelope: Envelope): void {
       const existing = base[id];
       const merged: {
         id: string;
-        state: TileState;
+        state: LifecycleState;
         input?: string;
         fps?: number;
         since_ts?: number;

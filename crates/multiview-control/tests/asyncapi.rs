@@ -1,4 +1,4 @@
-//! Tests that the AsyncAPI 3.0 document is served at `/asyncapi.json` and that
+//! Tests that the `AsyncAPI` 3.0 document is served at `/asyncapi.json` and that
 //! the channels + messages the realtime brief requires are present.
 //!
 //! The route mirrors `openapi_router()` (ADR-W002): the generated document lives
@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use support::{body_json, harness, send};
 
 /// The document is served at the root-level `/asyncapi.json` (no `/api/v1`
-/// prefix — AsyncAPI lives alongside, not inside, the REST namespace).
+/// prefix — `AsyncAPI` lives alongside, not inside, the REST namespace).
 #[tokio::test]
 async fn asyncapi_json_is_served_with_200() {
     let h = harness();
@@ -43,7 +43,7 @@ async fn asyncapi_json_is_served_with_200() {
     );
 }
 
-/// The document declares AsyncAPI 3.0 and contains the two canonical channels
+/// The document declares `AsyncAPI` 3.0 and contains the two canonical channels
 /// (`ws` and `sse`) plus top-level messages including `Envelope`.
 #[tokio::test]
 async fn asyncapi_json_contains_channels_and_messages() {

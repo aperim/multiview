@@ -1,12 +1,26 @@
 // Realtime envelope types (docs/api/realtime.md §2).
 //
-// TODO(api-schema): these wire types are defined in the `multiview-events` crate
-// and surface in the AsyncAPI document (`/asyncapi.json`), NOT yet in the
-// OpenAPI schema this app generates its client from (`src/api/schema.ts`). Until
-// `multiview-events` types are exported into a generated TS module, this is a
-// hand-modelled view of the documented contract — deliberately marked so it is
-// replaced by codegen, never silently trusted. Parsing is defensive: unknown
-// `t` values and unknown envelope majors are tolerated, never thrown on.
+// Static type definitions for event payloads that have a direct equivalent in
+// the AsyncAPI 3.0 spec are imported from `generated-types.ts` (produced by
+// `npm run generate:events` from `docs/api/asyncapi.json`). Hand-modelled types
+// are kept only where the generated schema does not cover the shape exactly:
+//   - `Envelope` itself (hand-owned per ADR-RT006 — the transport layer must be
+//     able to tolerate unknown `t` values and unknown majors defensively).
+//   - `TileSnapshotEntry`/`TilesSnapshotData` — a frame-level composite type
+//     (the `$snapshot` frame structure) not modelled as a standalone message in
+//     the AsyncAPI spec, which only documents per-tick delta event payloads.
+//   - `TileStateDeltaData` — extends the generated `TileState` payload with the
+//     `showing` and `since_ts` fields used internally by the snapshot/delta
+//     reconciliation logic; kept hand-modelled to preserve forward-compatibility
+//     as those fields are wired (they are silently dropped by parseTileStateDelta
+//     when absent, per §2 defensive parsing).
+// Parsing is defensive: unknown `t` values and unknown envelope majors are
+// tolerated, never thrown on.
+
+// The LifecycleState type (LIVE/STALE/RECONNECTING/NO_SIGNAL) is generated from
+// the AsyncAPI spec. Re-exported as `TileState` for backward compatibility with
+// callers that import the lifecycle state under the shorter name from this module.
+export type { LifecycleState as TileState } from "./generated-types";
 
 /** The envelope schema major this client speaks. Reject unknown majors. */
 export const ENVELOPE_MAJOR = 1;
@@ -69,19 +83,21 @@ export function parseEnvelope(raw: string): Envelope | undefined {
   return isEnvelope(parsed) ? parsed : undefined;
 }
 
-// --- Narrowed payloads we surface today (extend as topics are wired). -------
+// Internal alias: `LifecycleState` from generated-types is the same four-value
+// union this module re-exports as `TileState`. Import it under the generated
+// name for use in the hand-owned composite types below so the relationship is
+// explicit (tsc will enforce they are structurally identical).
+import type { LifecycleState } from "./generated-types";
 
-/** The tile lifecycle state machine (resilience invariant #2). */
-export type TileState =
-  | "LIVE"
-  | "STALE"
-  | "RECONNECTING"
-  | "NO_SIGNAL";
+// --- Narrowed payloads we surface today (extend as topics are wired). -------
 
 /** A tile row as carried in a `tiles` `$snapshot`. */
 export interface TileSnapshotEntry {
   readonly id: string;
-  readonly state: TileState;
+  // `state` is typed as `LifecycleState` from the generated spec — the four
+  // values (LIVE/STALE/RECONNECTING/NO_SIGNAL) are the canonical tile lifecycle
+  // states from the AsyncAPI schema (resilience invariant #2).
+  readonly state: LifecycleState;
   readonly input?: string;
   readonly fps?: number;
   readonly since_ts?: number;
@@ -94,10 +110,17 @@ export interface TilesSnapshotData {
   readonly tiles: readonly TileSnapshotEntry[];
 }
 
-/** The `data` of a `tile.state` delta. */
+/** The `data` of a `tile.state` delta.
+ *
+ * Extends the generated `TileState` payload (which has `from`, `to`, `trigger`,
+ * and optionally `input`) with the internal `showing` and `since_ts` fields
+ * used by the snapshot/delta reconciliation logic in `useEngineEvents.ts`. The
+ * extra fields are silently absent when not carried by the wire frame, per §2
+ * defensive parsing.
+ */
 export interface TileStateDeltaData {
-  readonly from: TileState;
-  readonly to: TileState;
+  readonly from: LifecycleState;
+  readonly to: LifecycleState;
   readonly input?: string;
   readonly trigger?: string;
   readonly showing?: string;
@@ -108,7 +131,11 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
 }
 
-function isTileState(value: unknown): value is TileState {
+// Runtime guard: validates a raw unknown value is one of the four canonical
+// LifecycleState values from the generated AsyncAPI spec. The four literals are
+// pinned here so a divergence between the spec and runtime is immediately
+// visible — if the spec adds a fifth state, this guard needs updating too.
+function isTileState(value: unknown): value is LifecycleState {
   return (
     value === "LIVE" ||
     value === "STALE" ||
@@ -129,7 +156,7 @@ function parseTileEntry(value: unknown): TileSnapshotEntry | undefined {
   }
   const entry: {
     id: string;
-    state: TileState;
+    state: LifecycleState;
     input?: string;
     fps?: number;
     since_ts?: number;
@@ -190,8 +217,8 @@ export function parseTileStateDelta(
     return undefined;
   }
   const delta: {
-    from: TileState;
-    to: TileState;
+    from: LifecycleState;
+    to: LifecycleState;
     input?: string;
     trigger?: string;
     showing?: string;
