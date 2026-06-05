@@ -106,13 +106,13 @@ fn a_published_heartbeat_round_trips_to_a_peer() {
     };
     sender.publish_heartbeat(hb).expect("publish");
 
-    let mut received = None;
-    let got = pump_until(Duration::from_secs(2), || {
-        received = receiver.poll_heartbeat();
-        received.is_some()
+    let mut got_hb = None;
+    let arrived = pump_until(Duration::from_secs(2), || {
+        got_hb = receiver.poll_heartbeat();
+        got_hb.is_some()
     });
-    assert!(got, "a heartbeat must arrive over loopback");
-    assert_eq!(received, Some(hb), "the heartbeat must round-trip exactly");
+    assert!(arrived, "a heartbeat must arrive over loopback");
+    assert_eq!(got_hb, Some(hb), "the heartbeat must round-trip exactly");
 }
 
 #[test]
@@ -155,7 +155,10 @@ fn standby_promotes_when_the_active_stops_beating_over_loopback() {
         assert!(!promoted_now, "no promotion while the active is alive");
         standby_runner.cluster_active_alive(at(1_000_000_000))
     });
-    assert!(observed, "the standby must actually receive the active's beat");
+    assert!(
+        observed,
+        "the standby must actually receive the active's beat"
+    );
     assert_eq!(standby_runner.machine().role(), NodeRole::Standby);
     assert!(!standby_runner.machine().has_promoted());
 

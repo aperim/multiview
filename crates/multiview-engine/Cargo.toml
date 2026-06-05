@@ -25,6 +25,10 @@ multiview-config = { workspace = true }
 multiview-events = { workspace = true }
 multiview-telemetry = { workspace = true }
 serde = { workspace = true }
+# JSON wire encoding for the HA cluster transport (snapshots/deltas/heartbeats
+# across nodes). Optional + activated only by the off-by-default `cluster`
+# feature — the default pure-Rust build does not link it.
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
@@ -49,7 +53,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync
 # the replication model (`ha::repl`) — is always compiled and fully tested; this
 # feature only adds the thin `ha::transport` wire wrapper around them. HA never
 # paces or back-pressures the active node's output clock — see the `ha` docs.
-"cluster" = []
+"cluster" = ["dep:serde_json"]
 
 [lints]
 workspace = true

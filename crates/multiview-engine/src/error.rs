@@ -42,6 +42,15 @@ pub enum Error {
     /// A canvas geometry was rejected by the compositor (e.g. odd dimensions).
     #[error("compositor rejected canvas geometry: {0}")]
     Canvas(String),
+
+    /// A permanent HA cluster-transport fault while *submitting* a heartbeat or
+    /// replication message for publication (a malformed-encoding or a hard
+    /// socket fault — never a transient drop, which is silent and best-effort).
+    /// Gated to the off-by-default `cluster` feature; the default build's error
+    /// taxonomy is unchanged.
+    #[cfg(feature = "cluster")]
+    #[error("HA cluster transport: {0}")]
+    Cluster(String),
 }
 
 impl Error {
