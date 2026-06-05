@@ -124,6 +124,12 @@ default = ["software"]
 # Software-only reference path (always available).
 software = []
 
+# Embed + serve the built web UI from `multiview run` (same-origin with the API).
+# Pure Rust (rust-embed); requires the web build (`npm --prefix web run build`)
+# to have produced `web/dist` first. GPU-free and LGPL-clean, so a software
+# build can serve the full management UI: `run --features web,overlay`.
+web = ["multiview-control/embed-web"]
+
 # Overlay rasterization: bakes the configured overlays (clock/labels, dB
 # meters, safe-area graticules, tally borders, burned-in SRT/VTT subtitles) into
 # the composited program before encode, via multiview-compositor's pure-Rust

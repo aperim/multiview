@@ -60,6 +60,9 @@ pub mod tally_ingest;
 pub mod tally_state;
 pub mod versioning;
 
+#[cfg(feature = "embed-web")]
+pub mod spa;
+
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
@@ -141,6 +144,11 @@ pub fn router(state: AppState) -> Router {
 
     #[cfg(feature = "openapi")]
     let app = app.merge(openapi::openapi_router());
+
+    // The embedded web UI is the fallback: it runs only for requests no route
+    // above matched, so it never shadows `/api/v1`, `/x-nmos`, or the docs.
+    #[cfg(feature = "embed-web")]
+    let app = app.fallback(spa::spa_fallback);
 
     app.with_state(state)
 }

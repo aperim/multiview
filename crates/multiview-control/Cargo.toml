@@ -47,6 +47,18 @@ utoipa = { version = "5.5.0", features = ["axum_extras", "uuid"], optional = tru
 utoipa-axum = { version = "0.2.0", optional = true }
 utoipa-scalar = { version = "0.3.0", features = ["axum"], optional = true }
 
+# Embedded web UI (behind the off-by-default `embed-web` feature). `rust-embed`
+# inlines the built SPA (`web/dist`, staged by the web build) into the binary so
+# the management UI ships self-contained; `debug-embed` embeds in EVERY profile
+# (so debug builds + tests exercise the real bytes, not a disk read), matching
+# the font-embedding precedent in multiview-compositor. `mime_guess` derives the
+# Content-Type per asset. Both MIT, pure Rust, in the cargo-deny allowlist.
+rust-embed = { version = "8", default-features = false, features = [
+    "debug-embed",
+    "include-exclude",
+], optional = true }
+mime_guess = { version = "2", optional = true }
+
 # SQLite persistence: OFF by default. SQLite's bundled license is NOT in the
 # cargo-deny allowlist, so sqlx/sqlite must never appear in the default build.
 sqlx = { version = "0.8.6", default-features = false, features = [
@@ -80,7 +92,7 @@ proptest = "1.11.0"
 [features]
 "default" = ["openapi"]
 "openapi" = ["dep:utoipa", "dep:utoipa-axum", "dep:utoipa-scalar"]
-"embed-web" = []
+"embed-web" = ["dep:rust-embed", "dep:mime_guess"]
 # Off-by-default SQLite-backed repository. NOT part of the CI-green default
 # build (SQLite license is outside the deny.toml allowlist).
 "sqlite" = ["dep:sqlx"]
