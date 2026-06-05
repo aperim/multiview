@@ -247,6 +247,35 @@ fn bytes_ratio(used: u64, total: u64) -> f32 {
     f64_to_f32_saturating(frac)
 }
 
+/// `numerator / denominator` as an `f32` fraction clamped to `0.0..=1.0`, via
+/// the same lossless `u64 -> f64` widening as [`bytes_ratio`] (no `as` casts).
+///
+/// Used to turn a busy-ns delta over a wall-ns interval into a busy fraction
+/// (the DRM fdinfo media-engine term). `denominator` is assumed `> 0` by the
+/// caller; a `0` numerator yields `0.0`.
+#[cfg(any(feature = "vaapi", feature = "qsv"))]
+fn busy_ratio(numerator: u64, denominator: u64) -> f32 {
+    if denominator == 0 {
+        return 0.0;
+    }
+    let numerator = u64_to_f64(numerator);
+    let denominator = u64_to_f64(denominator);
+    let frac = (numerator / denominator).clamp(0.0, 1.0);
+    f64_to_f32_saturating(frac)
+}
+
+/// Convert a `0..=100` integer percentage to a clamped `0.0..=1.0` busy
+/// fraction, via the lossless `u16 -> f32` path (no `as` casts).
+///
+/// Shared by the sysfs `gpu_busy_percent` parser; mirrors the NVML
+/// `percent_to_frac` helper but takes the already-`u32` sysfs value.
+#[cfg(any(feature = "vaapi", feature = "qsv"))]
+fn percent_to_busy_frac(percent: u32) -> f32 {
+    let clamped = percent.min(100);
+    let hundredths = u16::try_from(clamped).map_or(100.0_f32, f32::from);
+    hundredths / 100.0_f32
+}
+
 /// Lossless `u64 -> f64` widening for byte counts (`< 2^53`), avoiding `as`.
 fn u64_to_f64(value: u64) -> f64 {
     u32::try_from(value).map_or_else(
@@ -594,42 +623,388 @@ mod nvml {
 }
 
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
-pub use self::linux_sysfs::SysfsLoadProbe;
+pub use self::linux_sysfs::{parse_fdinfo_merged_media_frac, FdinfoSample, SysfsLoadProbe};
 
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
 mod linux_sysfs {
-    use super::{DeviceId, LoadProbe, LoadSample};
+    use super::{percent_to_busy_frac, DeviceId, DeviceLoad, LoadProbe, LoadSample, Vendor};
+    use std::path::{Path, PathBuf};
 
-    /// Intel/AMD Linux live-load probe (compile-only scaffold).
+    /// The canonical Linux DRM sysfs root the probe walks (`/sys/class/drm`),
+    /// where each physical GPU appears as a `cardN/device/` directory exposing
+    /// the `vendor`/`device` PCI ids, `gpu_busy_percent`, and the
+    /// `mem_info_vram_{total,used}` byte counters (ADR-0017; amdgpu sysfs [A1]).
+    #[cfg(target_os = "linux")]
+    const DRM_ROOT: &str = "/sys/class/drm";
+
+    /// PCI vendor id for NVIDIA silicon (`/sys/.../device/vendor` = `0x10de`).
+    const PCI_VENDOR_NVIDIA: u16 = 0x10de;
+    /// PCI vendor id for AMD silicon (`0x1002`).
+    const PCI_VENDOR_AMD: u16 = 0x1002;
+    /// PCI vendor id for Intel silicon (`0x8086`).
+    const PCI_VENDOR_INTEL: u16 = 0x8086;
+
+    /// The Linux Intel/AMD live-load probe over the DRM sysfs tree (ADR-0017).
     ///
-    /// The full implementation reads `amdgpu` sysfs `gpu_busy_percent`, the
-    /// i915 PMU, and DRM fdinfo per ADR-0017; this scaffold compiles under the
-    /// `vaapi`/`qsv` features and reports [`LoadSample::Unavailable`] until that
-    /// landing — graceful absence where the sensors are not yet wired, never a
-    /// panic and never a fabricated metric.
-    #[derive(Debug, Clone, Copy, Default)]
-    #[non_exhaustive]
-    pub struct SysfsLoadProbe;
+    /// Construction binds a [`DrmRoot`] (real `/sys/class/drm` in production, a
+    /// synthetic temp tree in tests). Enumeration classifies each `cardN` by its
+    /// PCI vendor id and keys it by the **stable PCI bus id** (never the
+    /// enumeration index, [gpu-monitoring §2.1]); sampling reads the SMU-aggregate
+    /// `gpu_busy_percent` and the `mem_info_vram_*` byte counters via plain
+    /// `std::fs` (no native lib, no `unsafe`). Per-engine encoder/decoder
+    /// utilisation is **not** read from sysfs here — on AMD it is per-process
+    /// fdinfo only (merged from VCN4) and on Intel it is the i915 PMU — so those
+    /// stay `None` (honest unknown, never a fabricated zero); see
+    /// [`parse_fdinfo_merged_media_frac`] for the testable fdinfo-difference core
+    /// that a follow-up wires to live `/proc/<pid>/fdinfo`.
+    ///
+    /// Every read that fails (file absent, off-Linux, garbled) degrades to an
+    /// unknown field or an empty enumeration — never a panic and never a block.
+    #[derive(Debug, Clone)]
+    pub struct SysfsLoadProbe {
+        root: DrmRoot,
+    }
+
+    impl Default for SysfsLoadProbe {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 
     impl SysfsLoadProbe {
-        /// Construct the sysfs probe scaffold.
+        /// Construct the probe bound to the real `/sys/class/drm` root.
+        ///
+        /// The DRM sysfs tree is Linux-only, so off-Linux the probe binds to a
+        /// path that does not exist; enumeration then yields nothing (graceful
+        /// absence, never a panic) while the parsing core stays available for
+        /// tests on any OS.
         #[must_use]
-        pub const fn new() -> Self {
-            Self
+        pub fn new() -> Self {
+            // Bind the real root only on Linux; elsewhere there is no DRM sysfs,
+            // so a non-existent path makes enumeration return empty.
+            #[cfg(target_os = "linux")]
+            let root = DrmRoot::at(Path::new(DRM_ROOT));
+            #[cfg(not(target_os = "linux"))]
+            let root = DrmRoot::at(Path::new("/nonexistent/multiview/no-drm-off-linux"));
+            root.into_probe()
         }
     }
 
     impl LoadProbe for SysfsLoadProbe {
         fn devices(&self) -> Vec<DeviceId> {
-            // Scaffold: no devices enumerated until the sysfs/PMU walk lands.
-            Vec::new()
+            self.root
+                .classify_cards()
+                .into_iter()
+                .map(|dirs| dirs.device_id())
+                .collect()
         }
 
-        fn sample(&self, _device: &DeviceId) -> LoadSample {
-            LoadSample::Unavailable {
-                reason: "Linux sysfs/i915 PMU load probe not yet implemented",
+        fn sample(&self, device: &DeviceId) -> LoadSample {
+            // Re-resolve the device dir by stable id (identity is the PCI bus id,
+            // not the cardN index, which can reorder). If it has gone, report
+            // Unavailable rather than mislabel another card.
+            match self
+                .root
+                .classify_cards()
+                .into_iter()
+                .find(|dirs| &dirs.device_id() == device)
+            {
+                Some(dirs) => match read_device_load_from(&dirs) {
+                    Some(load) => LoadSample::Ready(load),
+                    None => LoadSample::Unavailable {
+                        reason: "DRM device directory vanished during sample",
+                    },
+                },
+                None => LoadSample::Unavailable {
+                    reason: "DRM device no longer present",
+                },
             }
         }
+    }
+
+    /// A bound DRM sysfs root (`/sys/class/drm`, or a test tree) the probe walks.
+    ///
+    /// Holding the root as data (rather than the hard-coded path) is what lets
+    /// the `cardN` walk and the per-file reads run against a synthetic temp tree
+    /// in unit tests with no real GPU — the live `/sys` read is the same code on
+    /// the production root.
+    #[derive(Debug, Clone)]
+    pub(crate) struct DrmRoot {
+        path: PathBuf,
+    }
+
+    impl DrmRoot {
+        /// Bind a DRM root at `path`.
+        #[must_use]
+        pub(crate) fn at(path: &Path) -> Self {
+            Self {
+                path: path.to_path_buf(),
+            }
+        }
+
+        /// Consume the root into a [`SysfsLoadProbe`] over it.
+        #[must_use]
+        pub(crate) fn into_probe(self) -> SysfsLoadProbe {
+            SysfsLoadProbe { root: self }
+        }
+
+        /// Classify every `cardN` directory under the root as a GPU device,
+        /// skipping render-only nodes and non-GPU cards.
+        ///
+        /// A missing/unreadable root yields an empty vector (the off-Linux /
+        /// no-DRM fallback), never a panic.
+        fn classify_cards(&self) -> Vec<DeviceDirs> {
+            let Ok(entries) = std::fs::read_dir(&self.path) else {
+                return Vec::new();
+            };
+            let mut cards: Vec<DeviceDirs> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_str()?;
+                    // Only `cardN` nodes carry the device metrics; `renderD*` and
+                    // `controlD*` are skipped.
+                    if !is_card_node(name) {
+                        return None;
+                    }
+                    DeviceDirs::for_card(&self.path, name)
+                })
+                .collect();
+            // Deterministic order so the `index` tie-breaker is stable per boot.
+            cards.sort_by(|a, b| a.card.cmp(&b.card));
+            cards
+        }
+    }
+
+    /// Whether a DRM node name is a `cardN` primary node (not `renderD*`).
+    ///
+    /// Matches `card` followed by at least one ASCII digit and nothing else, so
+    /// `card0`/`card12` match but `cardstuff` and `renderD128` do not.
+    fn is_card_node(name: &str) -> bool {
+        let Some(rest) = name.strip_prefix("card") else {
+            return false;
+        };
+        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+    }
+
+    /// The resolved sysfs locations + identity for one classified GPU card.
+    ///
+    /// Built by [`DeviceDirs::for_card`], which reads the card's PCI `vendor` id
+    /// to classify the silicon family and its `uevent` `PCI_SLOT_NAME` for the
+    /// stable bus id. Holding the `device` dir lets [`read_device_load_from`]
+    /// read each metric file relative to it.
+    #[derive(Debug, Clone)]
+    pub(crate) struct DeviceDirs {
+        card: String,
+        device_dir: PathBuf,
+        vendor: Vendor,
+        stable_id: String,
+        index: u32,
+    }
+
+    impl DeviceDirs {
+        /// Classify `cardN` under `root`, returning `None` when the card is not a
+        /// recognised GPU silicon family (or its `vendor` file is unreadable).
+        ///
+        /// The stable id is the PCI bus id from `device/uevent`
+        /// (`PCI_SLOT_NAME=`); if that is absent the card name is used as a
+        /// last-resort id so the device is still distinct (it is never the
+        /// load-bearing pin key in that degraded case, but enumeration stays
+        /// non-panicking).
+        #[must_use]
+        pub(crate) fn for_card(root: &Path, card: &str) -> Option<Self> {
+            let device_dir = root.join(card).join("device");
+            let vendor_raw = std::fs::read_to_string(device_dir.join("vendor")).ok()?;
+            let vendor = classify_pci_vendor(&vendor_raw)?;
+            let stable_id = std::fs::read_to_string(device_dir.join("uevent"))
+                .ok()
+                .and_then(|u| parse_pci_slot_name(&u))
+                .unwrap_or_else(|| card.to_owned());
+            let index = parse_card_index(card).unwrap_or(0);
+            Some(Self {
+                card: card.to_owned(),
+                device_dir,
+                vendor,
+                stable_id,
+                index,
+            })
+        }
+
+        /// The stable [`DeviceId`] for this card: vendor + the PCI bus id (the
+        /// placement + pin key), with the `cardN` index as the tie-breaker.
+        #[must_use]
+        pub(crate) fn device_id(&self) -> DeviceId {
+            DeviceId::new(self.vendor, self.stable_id.clone(), self.index)
+        }
+    }
+
+    /// Read a [`DeviceLoad`] from a classified card's sysfs files.
+    ///
+    /// Each metric is read independently: `gpu_busy_percent` -> `gpu_busy_frac`,
+    /// `mem_info_vram_total`/`_used` -> VRAM bytes. A file that is absent or
+    /// garbled leaves that field `None` (honest unknown). Returns `None` only if
+    /// the device directory itself has vanished between classification and read,
+    /// so a caller can surface `Unavailable`.
+    #[must_use]
+    pub(crate) fn read_device_load_from(dirs: &DeviceDirs) -> Option<DeviceLoad> {
+        if !dirs.device_dir.exists() {
+            return None;
+        }
+        let read = |name: &str| std::fs::read_to_string(dirs.device_dir.join(name)).ok();
+        let gpu_busy_frac = read("gpu_busy_percent")
+            .as_deref()
+            .and_then(parse_gpu_busy_percent);
+        let vram_total_bytes = read("mem_info_vram_total")
+            .as_deref()
+            .and_then(parse_vram_bytes);
+        let vram_used_bytes = read("mem_info_vram_used")
+            .as_deref()
+            .and_then(parse_vram_bytes);
+        Some(DeviceLoad {
+            device_id: dirs.device_id(),
+            gpu_busy_frac,
+            vram_used_bytes,
+            vram_total_bytes,
+            // Per-engine enc/dec is not in sysfs: AMD is per-process fdinfo
+            // (merged from VCN4), Intel is the i915 PMU. Honest unknown here.
+            enc_util_frac: None,
+            dec_util_frac: None,
+            // NVENC session count is NVIDIA-only.
+            nvenc_session_count: None,
+            // amdgpu/i915 do not expose a separate compute queue % in sysfs.
+            compute_busy_frac: None,
+        })
+    }
+
+    /// Classify a `/sys/.../device/vendor` string into a GPU [`Vendor`].
+    ///
+    /// The file holds the PCI vendor id as `0x`-prefixed lower-case hex with a
+    /// trailing newline (e.g. `"0x1002\n"`). Returns `None` for an unknown /
+    /// non-GPU id or unparsable text — never a wrong guess.
+    #[must_use]
+    pub(crate) fn classify_pci_vendor(raw: &str) -> Option<Vendor> {
+        let trimmed = raw.trim();
+        let hex = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))?;
+        let id = u16::from_str_radix(hex, 16).ok()?;
+        match id {
+            PCI_VENDOR_NVIDIA => Some(Vendor::Nvidia),
+            PCI_VENDOR_AMD => Some(Vendor::Amd),
+            PCI_VENDOR_INTEL => Some(Vendor::Intel),
+            _ => None,
+        }
+    }
+
+    /// Parse a `gpu_busy_percent` sysfs string (a `0..=100` integer) into a
+    /// clamped `0.0..=1.0` busy fraction. `None` on unparsable/empty text.
+    #[must_use]
+    pub(crate) fn parse_gpu_busy_percent(raw: &str) -> Option<f32> {
+        let value: u32 = raw.trim().parse().ok()?;
+        Some(percent_to_busy_frac(value))
+    }
+
+    /// Parse a `mem_info_vram_{total,used}` sysfs string (a decimal byte count)
+    /// into a `u64`. `None` on unparsable/empty text.
+    #[must_use]
+    pub(crate) fn parse_vram_bytes(raw: &str) -> Option<u64> {
+        raw.trim().parse().ok()
+    }
+
+    /// Extract the stable PCI bus id from a `device/uevent` file body.
+    ///
+    /// The kernel writes a `PCI_SLOT_NAME=<domain>:<bus>:<dev>.<func>` line
+    /// (e.g. `PCI_SLOT_NAME=0000:03:00.0`). Returns the value, or `None` if the
+    /// line is absent.
+    fn parse_pci_slot_name(uevent: &str) -> Option<String> {
+        uevent
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("PCI_SLOT_NAME="))
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    }
+
+    /// Parse the `N` from a `cardN` node name into a `u32` enumeration index
+    /// (a deterministic tie-breaker only, never identity).
+    fn parse_card_index(card: &str) -> Option<u32> {
+        card.strip_prefix("card")?.parse().ok()
+    }
+
+    /// One parsed DRM fdinfo snapshot: the per-engine nanosecond busy counters
+    /// for a single client fd (`/proc/<pid>/fdinfo/<drm_fd>`).
+    ///
+    /// DRM fdinfo reports `drm-engine-<class>:\t<ns> ns` lines whose counter is
+    /// monotonically increasing total busy-ns for that engine class. A busy
+    /// fraction is derived by differencing two snapshots a known wall interval
+    /// apart ([gpu-monitoring §2.1, A2]). This is the AMD per-process media term
+    /// (merged decode+encode from VCN4); kept as a pure, testable parser that a
+    /// follow-up wires to the live `/proc/<pid>/fdinfo` walk.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct FdinfoSample {
+        media_ns: Option<u64>,
+    }
+
+    impl FdinfoSample {
+        /// Parse the merged media-engine busy-ns from an fdinfo file body.
+        ///
+        /// Sums every `drm-engine-<class>` line whose class is a media engine
+        /// (`enc`, `dec`, or the post-VCN4 merged `media`) into one combined
+        /// figure. Always returns a sample (with `media_ns = None` when no media
+        /// engine line is present) so the difference helper can report unknown.
+        #[must_use]
+        pub fn parse(body: &str) -> Option<Self> {
+            let mut media_ns: Option<u64> = None;
+            for line in body.lines() {
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
+                let key = key.trim();
+                let Some(class) = key.strip_prefix("drm-engine-") else {
+                    continue;
+                };
+                if !is_media_engine_class(class) {
+                    continue;
+                }
+                // The value is `<ns> ns`; take the leading integer.
+                let Some(ns_text) = value.split_whitespace().next() else {
+                    continue;
+                };
+                let Ok(ns) = ns_text.parse::<u64>() else {
+                    continue;
+                };
+                media_ns = Some(media_ns.unwrap_or(0).saturating_add(ns));
+            }
+            Some(Self { media_ns })
+        }
+    }
+
+    /// Whether a `drm-engine-<class>` class name names a media (encode/decode)
+    /// engine that AMD VCN4+ merges into one figure.
+    fn is_media_engine_class(class: &str) -> bool {
+        matches!(class, "enc" | "dec" | "media")
+    }
+
+    /// Derive the merged AMD media-engine busy fraction from two fdinfo snapshots
+    /// `interval_ns` apart.
+    ///
+    /// `(later.media_ns - earlier.media_ns) / interval_ns`, clamped to
+    /// `0.0..=1.0`. Returns `None` when either snapshot lacks a media counter
+    /// (unknown, not a fabricated zero), when the interval is non-positive (a
+    /// divide guard), or when the counter went backwards (a reset — unknown this
+    /// tick). Never panics, never blocks.
+    #[must_use]
+    pub fn parse_fdinfo_merged_media_frac(
+        earlier: &FdinfoSample,
+        later: &FdinfoSample,
+        interval_ns: u64,
+    ) -> Option<f32> {
+        if interval_ns == 0 {
+            return None;
+        }
+        let earlier_ns = earlier.media_ns?;
+        let later_ns = later.media_ns?;
+        let delta = later_ns.checked_sub(earlier_ns)?;
+        Some(super::busy_ratio(delta, interval_ns))
     }
 }
 
@@ -860,8 +1235,10 @@ mod tests {
             // interval is (delta engine-ns) / (interval wall-ns). AMD VCN4+
             // merges decode+encode into one media engine figure, so we report a
             // single combined media term.
-            let first = "drm-driver:\tamdgpu\ndrm-engine-gfx:\t1000000 ns\ndrm-engine-enc:\t2000000 ns\n";
-            let second = "drm-driver:\tamdgpu\ndrm-engine-gfx:\t1500000 ns\ndrm-engine-enc:\t2500000 ns\n";
+            let first =
+                "drm-driver:\tamdgpu\ndrm-engine-gfx:\t1000000 ns\ndrm-engine-enc:\t2000000 ns\n";
+            let second =
+                "drm-driver:\tamdgpu\ndrm-engine-gfx:\t1500000 ns\ndrm-engine-enc:\t2500000 ns\n";
             let a = FdinfoSample::parse(first).expect("first parses");
             let b = FdinfoSample::parse(second).expect("second parses");
             // enc delta = 500_000 ns over a 1_000_000 ns (1 ms) wall interval =>
@@ -878,8 +1255,7 @@ mod tests {
             // A zero / non-positive interval is a guard => None, never a divide.
             assert_eq!(parse_fdinfo_merged_media_frac(&a, &b, 0), None);
             // A delta exceeding the interval clamps to 1.0 (saturated engine).
-            let frac = parse_fdinfo_merged_media_frac(&a, &b, 1_000_000)
-                .expect("known");
+            let frac = parse_fdinfo_merged_media_frac(&a, &b, 1_000_000).expect("known");
             assert_eq!(frac, 1.0);
         }
 
@@ -921,9 +1297,9 @@ mod tests {
             write_amd_card(&base, "card0").expect("fixture tree");
 
             let dirs = DeviceDirs::for_card(&base, "card0").expect("classified as a GPU");
-            assert_eq!(dirs.vendor(), Vendor::Amd);
+            assert_eq!(dirs.device_id().vendor(), Vendor::Amd);
             // Stable id is the PCI bus id, never the enumeration index.
-            assert_eq!(dirs.stable_id(), "0000:03:00.0");
+            assert_eq!(dirs.device_id().stable_id(), "0000:03:00.0");
 
             let load = read_device_load_from(&dirs).expect("a Ready load");
             assert_eq!(load.device_id.vendor(), Vendor::Amd);
@@ -965,7 +1341,7 @@ mod tests {
             .expect("uevent");
 
             let dirs = DeviceDirs::for_card(&base, "card0").expect("intel GPU");
-            assert_eq!(dirs.vendor(), Vendor::Intel);
+            assert_eq!(dirs.device_id().vendor(), Vendor::Intel);
             let load = read_device_load_from(&dirs).expect("ready, all-unknown");
             assert!(load.gpu_busy_frac.is_none());
             assert!(load.vram_total_bytes.is_none());
@@ -1022,8 +1398,7 @@ mod tests {
         fn probe_over_absent_root_is_empty_never_panics() {
             // A root that does not exist (the off-Linux / no-DRM fallback shape)
             // enumerates nothing and samples nothing — graceful, never a panic.
-            let probe =
-                DrmRoot::at(std::path::Path::new("/nonexistent/mv-eng4/drm")).into_probe();
+            let probe = DrmRoot::at(std::path::Path::new("/nonexistent/mv-eng4/drm")).into_probe();
             assert!(probe.devices().is_empty());
             assert!(probe.sample_all().is_empty());
         }
