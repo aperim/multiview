@@ -233,7 +233,10 @@ fn packing_an_image_routes_to_the_texture_branch_with_layer_and_size() {
         PrimitiveKind::Rect.as_u32(),
         "explicitly NOT the solid branch"
     );
-    assert_eq!(packed.kind_meta[1], 7, "the texture-array layer index rides meta");
+    assert_eq!(
+        packed.kind_meta[1], 7,
+        "the texture-array layer index rides meta"
+    );
     assert_eq!(packed.rect, [20, 30, 64, 48], "dest box preserved");
     // Source size rides geom.xy so the shader nearest-maps dest -> source texel.
     assert_eq!(packed.geom[0], 16.0, "source width");

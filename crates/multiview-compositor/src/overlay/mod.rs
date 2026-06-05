@@ -40,6 +40,14 @@ pub mod text;
 #[cfg(feature = "wgpu")]
 pub mod gpu_subpass;
 
+/// GPU image-primitive upload bookkeeping (feature `overlay` + `wgpu`): the
+/// content-keyed texture cache (upload-once / reuse / bounded LRU evict) and the
+/// premultiply-fade + nearest-source-texel seams the `KIND_IMAGE` branch of
+/// `overlay.wgsl` consumes. The CPU reference ([`subpass::blend_overlays`]) is
+/// the oracle; this is the matching GPU bookkeeping (GPU-free unit-tested).
+#[cfg(feature = "wgpu")]
+pub mod gpu_image;
+
 pub use meters::{goniometer, histogram, GonioDot, MeterBar, MeterScale};
 pub use subpass::{
     apply_overlays_to_nv12, blend_overlays, clock_face, meter_bar, ClockFaceStyle, HandAngles,

@@ -37,9 +37,11 @@ pub enum PrimitiveKind {
     Stroke = 2,
     /// An analytic stroked ring / annulus (a circle-band SDF) — clock bezel.
     Ring = 3,
-    /// A premultiplied-RGBA bitmap blit (DVB-sub / bitmap caption). The GPU
-    /// image-texture upload is **deferred**; the shader branch is a transparent
-    /// no-op (the CPU reference does the burn-in for the CLI bake).
+    /// A premultiplied-RGBA bitmap blit (DVB-sub / bitmap caption): the cue's
+    /// already-premultiplied bytes are uploaded once into an
+    /// [`crate::overlay::gpu_image::ImageTextureCache`] layer and sampled by the
+    /// shader's `KIND_IMAGE` branch (validated SSIM/PSNR vs the CPU reference
+    /// [`crate::overlay::subpass::blend_overlays`], never bit-exact).
     Image = 4,
 }
 
@@ -62,16 +64,21 @@ impl PrimitiveKind {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct OverlayPrimGpu {
-    /// `[kind, corner_radius, atlas_x, atlas_y]`.
+    /// `[kind, corner_radius, atlas_x, atlas_y]`. For [`PrimitiveKind::Image`]
+    /// the second slot is the texture-array layer (not a radius).
     pub kind_meta: [u32; 4],
     /// `[dest_x, dest_y, width, height]` in canvas pixels — the integer bounding
     /// box every primitive is clipped to in the shader.
     pub rect: [i32; 4],
-    /// Straight LINEAR RGBA (premultiplied in-shader by coverage).
+    /// Straight LINEAR RGBA (premultiplied in-shader by coverage). For
+    /// [`PrimitiveKind::Image`] only `.a` is used (the layer-opacity fade); the
+    /// sampled texel supplies the (already-premultiplied) color.
     pub color: [f32; 4],
     /// Sub-pixel analytic geometry, kind-dependent (`vec4` aligned):
     /// - [`PrimitiveKind::Stroke`]: `[x0, y0, x1, y1]` segment endpoints.
     /// - [`PrimitiveKind::Ring`]: `[cx, cy, mid_radius, band_half]`.
+    /// - [`PrimitiveKind::Image`]: `[src_width, src_height, 0, 0]` for the
+    ///   nearest-neighbour source-texel map.
     /// - others: unused (zero).
     pub geom: [f32; 4],
 }
@@ -173,13 +180,43 @@ impl OverlayPrimGpu {
                     geom: [*cx, *cy, mid_radius, half],
                 }
             }
-            // GPU image-texture upload is DEFERRED: pack the dest box + the layer
-            // alpha so the shader can clip to it, but the WGSL Image branch is a
-            // transparent no-op. The CPU reference (subpass::blend_image) does the
-            // real burn-in for the CLI bake; this keeps the GPU pack total and the
-            // shader naga-valid.
-            OverlayPrimitive::Image { dest, alpha, .. } => Self {
-                kind_meta: [PrimitiveKind::Image.as_u32(), 0, 0, 0],
+            // An Image cue routes to the GPU texture (KIND_IMAGE) branch. The
+            // texture-array layer is resolved by the image cache before pack, so
+            // the generic entry point packs onto layer 0; a real dispatch packs
+            // via `pack_image` with the resolved layer. The CPU reference
+            // (subpass::blend_image) is the SSIM/PSNR oracle for the GPU blit.
+            OverlayPrimitive::Image { .. } => Self::pack_image(primitive, 0),
+        }
+    }
+
+    /// Pack an [`OverlayPrimitive::Image`] onto texture-array `layer`, the slot
+    /// the [`crate::overlay::gpu_image::ImageTextureCache`] resolved its
+    /// premultiplied bitmap into (uploaded once, reused across ticks).
+    ///
+    /// The layout the shader's `KIND_IMAGE` branch reads:
+    /// - `kind_meta = [KIND_IMAGE, layer, 0, 0]` — the texture-array layer to
+    ///   `textureLoad` from;
+    /// - `rect = [dest_x, dest_y, dest_w, dest_h]` — the destination box the cue
+    ///   is nearest-neighbour scaled into and clipped to;
+    /// - `geom = [src_w, src_h, 0, 0]` — the source bitmap size, so the shader
+    ///   maps each dest pixel to the nearest source texel
+    ///   ([`crate::overlay::gpu_image::nearest_source_texel`]);
+    /// - `color = [0, 0, 0, fade]` — the layer-opacity fade (the texel itself
+    ///   supplies the already-premultiplied color; rgb is unused).
+    ///
+    /// A non-[`OverlayPrimitive::Image`] primitive is delegated to [`Self::pack`]
+    /// so the function is total (the `_ => 0` arms never fabricate an image).
+    #[must_use]
+    pub fn pack_image(primitive: &OverlayPrimitive, layer: u32) -> Self {
+        match primitive {
+            OverlayPrimitive::Image {
+                dest,
+                src_width,
+                src_height,
+                alpha,
+                ..
+            } => Self {
+                kind_meta: [PrimitiveKind::Image.as_u32(), layer, 0, 0],
                 rect: [
                     dest.x,
                     dest.y,
@@ -187,8 +224,9 @@ impl OverlayPrimGpu {
                     i32_from_u32(dest.height),
                 ],
                 color: [0.0, 0.0, 0.0, alpha.clamp(0.0, 1.0)],
-                geom: [0.0; 4],
+                geom: [u32_to_f32(*src_width), u32_to_f32(*src_height), 0.0, 0.0],
             },
+            other => Self::pack(other, 0, 0),
         }
     }
 }
@@ -344,6 +382,47 @@ impl OverlaySubpass {
         }
         out
     }
+
+    /// Pack a whole [`OverlayDrawList`], resolving glyph atlas slots via
+    /// `atlas_slot` **and** image-cue texture-array layers via `image_layer`
+    /// (returns the layer the cue's premultiplied bitmap was uploaded into;
+    /// `None` skips a not-yet-resident image, holding last-good). Caps at
+    /// [`MAX_OVERLAY_PRIMS`].
+    ///
+    /// This is the dispatch-path packer: the caller drives the
+    /// [`crate::overlay::gpu_image::ImageTextureCache`] to assign each Image cue
+    /// a layer (uploading only on a cache miss) and threads that layer here, so
+    /// the shader's `KIND_IMAGE` branch samples the right array layer.
+    #[must_use]
+    pub fn pack_list_with_images(
+        list: &OverlayDrawList,
+        mut atlas_slot: impl FnMut(usize) -> Option<(u32, u32)>,
+        mut image_layer: impl FnMut(usize) -> Option<u32>,
+    ) -> Vec<OverlayPrimGpu> {
+        let cap = usize::try_from(MAX_OVERLAY_PRIMS).unwrap_or(usize::MAX);
+        let mut out = Vec::with_capacity(list.primitives.len().min(cap));
+        for (i, primitive) in list.primitives.iter().enumerate() {
+            if out.len() >= cap {
+                break;
+            }
+            match primitive {
+                OverlayPrimitive::Glyph { .. } => {
+                    let Some((ax, ay)) = atlas_slot(i) else {
+                        continue;
+                    };
+                    out.push(OverlayPrimGpu::pack(primitive, ax, ay));
+                }
+                OverlayPrimitive::Image { .. } => {
+                    let Some(layer) = image_layer(i) else {
+                        continue;
+                    };
+                    out.push(OverlayPrimGpu::pack_image(primitive, layer));
+                }
+                _ => out.push(OverlayPrimGpu::pack(primitive, 0, 0)),
+            }
+        }
+        out
+    }
 }
 
 /// The overlay sub-pass bind-group layout (mirrors `overlay.wgsl` bindings).
@@ -398,6 +477,20 @@ fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                     access: wgpu::StorageTextureAccess::WriteOnly,
                     format: wgpu::TextureFormat::Rgba16Float,
                     view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // The image-cue texture-array: one `Rgba8Unorm` layer per resident
+            // premultiplied bitmap (DVB-sub / libass), uploaded once by the
+            // image cache and sampled by the `KIND_IMAGE` branch with
+            // `textureLoad` (non-filterable; the shader nearest-maps itself).
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
                 },
                 count: None,
             },

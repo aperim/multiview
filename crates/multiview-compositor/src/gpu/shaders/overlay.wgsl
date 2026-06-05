@@ -23,24 +23,28 @@ const KIND_GLYPH: u32 = 0u;
 const KIND_RECT: u32 = 1u;
 const KIND_STROKE: u32 = 2u;
 const KIND_RING: u32 = 3u;
-// A premultiplied-RGBA bitmap blit (DVB-sub / bitmap caption). The GPU
-// image-texture upload is DEFERRED: this branch is a transparent no-op so naga
-// still validates the module. The CPU reference (crate::overlay::subpass::
-// blend_image) performs the burn-in for the CLI bake. TODO(gpu-image): sample an
-// uploaded cue texture here and blend it premultiplied-over.
+// A premultiplied-RGBA bitmap blit (DVB-sub / bitmap caption). The cue's
+// already-premultiplied bytes are uploaded once by the image cache into one
+// layer of `images` (binding 5); this branch nearest-maps the dest pixel to a
+// source texel, samples it, applies the uniform fade, and blends it
+// premultiplied-over — matching the CPU reference crate::overlay::subpass::
+// blend_image within SSIM/PSNR (never bit-exact, GPU-tagged-runner-only).
 const KIND_IMAGE: u32 = 4u;
 
 struct OverlayPrim {
-    // x: kind. y: corner_radius (px, rects) OR half-thickness f32-bits (strokes).
+    // x: kind. y: corner_radius (px, rects) OR half-thickness f32-bits (strokes)
+    //   OR image texture-array layer (u32, images).
     // z: atlas x (texels, glyphs). w: atlas y (texels, glyphs).
     kind_meta: vec4<u32>,
     // x,y: dest top-left on canvas (px). z,w: box width,height (px).
     rect: vec4<i32>,
-    // Straight LINEAR RGBA color (premultiplied in-shader by coverage).
+    // Straight LINEAR RGBA color (premultiplied in-shader by coverage). For
+    // images, only .a is used (the layer-opacity fade); the texel supplies color.
     color: vec4<f32>,
     // Sub-pixel analytic geometry (kind-dependent):
     //   stroke: (x0, y0, x1, y1) segment endpoints.
     //   ring:   (cx, cy, mid_radius, band_half).
+    //   image:  (src_width, src_height, 0, 0) for the nearest-neighbour map.
     geom: vec4<f32>,
 };
 
@@ -57,6 +61,22 @@ struct OverlayUniforms {
 @group(0) @binding(3) var canvas_in: texture_2d<f32>;
 // The blended linear canvas the encode pass reads (write-only storage).
 @group(0) @binding(4) var canvas_out: texture_storage_2d<rgba16float, write>;
+// Image-cue texture-array: one Rgba8Unorm layer per resident PREMULTIPLIED
+// bitmap (DVB-sub / libass), uploaded once by the image cache. KIND_IMAGE
+// samples the layer in kind_meta.y at the nearest source texel.
+@group(0) @binding(5) var images: texture_2d_array<f32>;
+
+// Nearest-neighbour source texel for dest index `d` of a `dst`-wide destination
+// sampling a `src`-wide source: floor((2*d + 1) * src / (2*dst)), clamped to
+// src - 1. Mirrors crate::overlay::gpu_image::nearest_source_texel and the CPU
+// crate::overlay::subpass::nearest, so the GPU sample matches the CPU blit.
+fn nearest_texel(d: u32, dst: u32, src: u32) -> u32 {
+    if dst == 0u || src == 0u {
+        return 0u;
+    }
+    let s = ((d * 2u + 1u) * src) / (dst * 2u);
+    return min(s, src - 1u);
+}
 
 // Closed-form rounded-rect coverage, identical to the CPU reference
 // (crate::overlay::subpass::rect_coverage): 0 radius => 1.0 everywhere; corner
@@ -140,9 +160,24 @@ fn overlay_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let d = abs(radial - mid_radius);
             coverage = clamp(band_half - d + 0.5, 0.0, 1.0);
         } else if p.kind_meta.x == KIND_IMAGE {
-            // DEFERRED: GPU image-texture upload not yet wired. Contribute
-            // nothing (transparent no-op); the CPU reference does the burn-in.
-            coverage = 0.0;
+            // Premultiplied-RGBA bitmap (DVB-sub / libass): nearest-map the dest
+            // pixel to a source texel, sample the already-premultiplied texel
+            // from the cue's array layer, fade it (color.a, applied channel-wise
+            // — never premultiply again), and blend it premultiplied-over the
+            // accumulator directly. Then skip the shared coverage fold below.
+            let layer = i32(p.kind_meta.y);
+            let sw = u32(max(p.geom.x, 0.0));
+            let sh = u32(max(p.geom.y, 0.0));
+            let sx = nearest_texel(u32(col), u32(pw), sw);
+            let sy = nearest_texel(u32(row), u32(ph), sh);
+            let texel = textureLoad(images, vec2<i32>(i32(sx), i32(sy)), layer, 0);
+            let fade = clamp(p.color.a, 0.0, 1.0);
+            // texel is premultiplied; fade scales the premultiplied channels.
+            let src = vec4<f32>(texel.rgb * fade, texel.a * fade);
+            if src.a > 0.0 {
+                acc = src + acc * (1.0 - src.a);
+            }
+            continue;
         } else {
             // Analytic (rounded) rectangle — meters, markers, tally, chrome.
             let radius = f32(p.kind_meta.y);
