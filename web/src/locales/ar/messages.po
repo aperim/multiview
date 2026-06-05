@@ -117,6 +117,10 @@ msgstr ""
 msgid "A per-cell <0>qos</0> block sets a degradation <1>priority</1> and strategy, so the engine sheds the cheapest tiles first under load before touching the program output."
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:92
+msgid "A salvo id is required"
+msgstr ""
+
 #: src/pages/docs/FeaturesPage.tsx:124
 msgid "A salvo is a named, atomically-applied recall. One salvo can switch the layout, rebind sources into cells, set tally colors, and update under-monitor display text — all at once — so an operator can move a whole arrangement (say, a VTR review setup) with a single action instead of a series of separate edits."
 msgstr ""
@@ -153,15 +157,50 @@ msgstr ""
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:266
+msgid "Acknowledge"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:260
+msgid "Acknowledge alarm"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:220
+#: src/pages/AlarmsPage.tsx:246
+msgid "Acknowledged"
+msgstr ""
+
+#: src/pages/AuditPage.tsx:109
+msgid "Action"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:221
 #: src/pages/LayoutsPage.tsx:82
 #: src/pages/SimplePages.tsx:556
 #: src/pages/SimplePages.tsx:743
 #: src/pages/SimplePages.tsx:921
+#: src/pages/TallyPage.tsx:367
 msgid "Actions"
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:66
 msgid "Actions that take time return <0>202 Accepted</0> with an operation id; the final result arrives on the realtime stream, not in the HTTP response body."
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:190
+msgid "Active and cleared"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:154
+msgid "Active and historical faults the engine raised. Acknowledge an alarm to record that an operator has seen it."
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:191
+msgid "Active only"
+msgstr ""
+
+#: src/pages/AuditPage.tsx:111
+msgid "Actor"
 msgstr ""
 
 #: src/layout/components/SourcePalette.tsx:103
@@ -192,6 +231,12 @@ msgstr ""
 msgid "Advertise the canvas as an NDI source by <0>name</0>."
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:137
+msgid "Alarm acknowledged"
+msgstr ""
+
+#: src/app/navigation.tsx:41
+#: src/pages/AlarmsPage.tsx:152
 #: src/pages/docs/FeaturesPage.tsx:134
 msgid "Alarms"
 msgstr ""
@@ -200,12 +245,24 @@ msgstr ""
 msgid "Alarms are raised by content-aware fault probes attached to a tile. Probes can detect a black picture, a frozen picture, audio silence, and loudness that drifts from an EBU R128 target. Each probe has a severity and dwell timers, so a brief glitch does not trip an alarm while a sustained fault does. Severities follow the standard cleared / indeterminate / warning / minor / major / critical scale."
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:214
+msgid "Alarms matching the current filter."
+msgstr ""
+
 #: src/pages/LayoutsPage.tsx:193
 msgid "All configured layouts."
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:207
+msgid "All configured salvos."
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:61
 msgid "All endpoints live under <0>/api/v1</0>."
+msgstr ""
+
+#: src/components/TallyLampBadge.tsx:42
+msgid "Amber"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:602
@@ -220,6 +277,10 @@ msgstr ""
 
 #: src/pages/SimplePages.tsx:943
 msgid "An overlay is a layer composited over the program at a stacking order."
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:171
+msgid "Any severity"
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:24
@@ -256,6 +317,23 @@ msgstr ""
 msgid "Appearance and language preferences."
 msgstr ""
 
+#: src/pages/AuditPage.tsx:86
+msgid "Apply filter"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:257
+msgid "Arm"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:251
+msgid "Arm salvo"
+msgstr ""
+
+#: src/app/navigation.tsx:42
+#: src/pages/AuditPage.tsx:55
+msgid "Audit"
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:126
 msgid "Authentication"
 msgstr ""
@@ -280,6 +358,14 @@ msgstr ""
 msgid "Base path"
 msgstr ""
 
+#: src/pages/TallyPage.tsx:365
+msgid "Bit→colour rules"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:320
+msgid "Brightness"
+msgstr ""
+
 #: src/layout/components/CellsForm.tsx:372
 msgid "Bring forward"
 msgstr ""
@@ -288,10 +374,22 @@ msgstr ""
 msgid "Bring it up and down"
 msgstr ""
 
+#: src/pages/TallyPage.tsx:321
+msgid "Bus"
+msgstr ""
+
 #: src/pages/LayoutsPage.tsx:264
+#: src/pages/SalvosPage.tsx:281
+#: src/pages/SalvosPage.tsx:395
+#: src/pages/SalvosPage.tsx:433
 #: src/pages/SimplePages.tsx:383
 #: src/pages/SimplePages.tsx:428
+#: src/pages/TallyPage.tsx:432
 msgid "Cancel"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:275
+msgid "Cancel salvo"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:175
@@ -333,17 +431,45 @@ msgstr ""
 msgid "Cells (accessible)"
 msgstr ""
 
+#: src/pages/AuditPage.tsx:106
+msgid "Change log, newest first."
+msgstr ""
+
 #: src/pages/SettingsPage.tsx:57
 msgid "Choose light, dark, or follow the system."
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:213
+msgid "Clauses"
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:128
 msgid "Clear"
 msgstr ""
 
+#: src/pages/TallyPage.tsx:295
+msgid "Clear override"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:192
+msgid "Cleared only"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:734
 #: src/pages/SimplePages.tsx:867
 msgid "Codec"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:153
+msgid "Command accepted"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:159
+msgid "Command failed"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:214
+msgid "Commands"
 msgstr ""
 
 #: src/pages/docs/ComposePage.tsx:83
@@ -392,6 +518,10 @@ msgstr ""
 msgid "Connecting"
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:141
+msgid "Could not acknowledge alarm"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:290
 msgid "Could not create"
 msgstr ""
@@ -402,6 +532,18 @@ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:142
 msgid "Could not delete layout"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:166
+msgid "Could not delete profile"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:138
+msgid "Could not delete salvo"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:204
+msgid "Could not load alarms:"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:260
@@ -420,8 +562,24 @@ msgstr ""
 msgid "Could not load overlays:"
 msgstr ""
 
+#: src/pages/TallyPage.tsx:353
+msgid "Could not load profiles:"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:193
+msgid "Could not load salvos:"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:582
 msgid "Could not load sources:"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:307
+msgid "Could not load tally state:"
+msgstr ""
+
+#: src/pages/AuditPage.tsx:96
+msgid "Could not load the audit log:"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:290
@@ -432,12 +590,20 @@ msgstr ""
 msgid "Could not save layout"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:118
+msgid "Could not save salvo"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:386
 msgid "Create"
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:187
 msgid "Create your first layout"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:202
+msgid "Create your first salvo"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:285
@@ -452,7 +618,7 @@ msgstr ""
 msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 msgstr ""
 
-#: src/app/navigation.tsx:28
+#: src/app/navigation.tsx:33
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "لوحة القيادة"
@@ -461,10 +627,18 @@ msgstr "لوحة القيادة"
 msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:215
+msgid "Definition"
+msgstr ""
+
 #: src/pages/LayoutsPage.tsx:102
 #: src/pages/LayoutsPage.tsx:267
+#: src/pages/SalvosPage.tsx:307
+#: src/pages/SalvosPage.tsx:436
 #: src/pages/SimplePages.tsx:435
 #: src/pages/SimplePages.tsx:495
+#: src/pages/TallyPage.tsx:392
+#: src/pages/TallyPage.tsx:435
 msgid "Delete"
 msgstr ""
 
@@ -484,8 +658,24 @@ msgstr ""
 msgid "Delete overlay"
 msgstr ""
 
+#: src/pages/TallyPage.tsx:386
+msgid "Delete profile"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:301
+msgid "Delete salvo"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:415
+msgid "Delete salvo?"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:562
 msgid "Delete source"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:414
+msgid "Delete tally profile?"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:405
@@ -516,6 +706,10 @@ msgstr ""
 msgid "Disconnected"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:357
+msgid "Display name"
+msgstr ""
+
 #: src/pages/docs/ContainerPage.tsx:66
 msgid "docker run"
 msgstr ""
@@ -524,7 +718,7 @@ msgstr ""
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr ""
 
-#: src/app/navigation.tsx:33
+#: src/app/navigation.tsx:43
 msgid "Docs"
 msgstr ""
 
@@ -591,6 +785,7 @@ msgid "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:90
+#: src/pages/SalvosPage.tsx:296
 #: src/pages/SimplePages.tsx:484
 msgid "Edit"
 msgstr ""
@@ -612,15 +807,28 @@ msgstr ""
 msgid "Edit overlay"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:290
+#: src/pages/SalvosPage.tsx:328
+msgid "Edit salvo"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:561
 #: src/pages/SimplePages.tsx:577
 msgid "Edit source"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:218
+msgid "Element name"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:667
 #: src/pages/SimplePages.tsx:777
 #~ msgid "Enabled"
 #~ msgstr ""
+
+#: src/pages/TallyPage.tsx:131
+msgid "Enter a valid target"
+msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:86
 msgid "Errors"
@@ -651,12 +859,20 @@ msgstr ""
 msgid "File path"
 msgstr ""
 
+#: src/pages/AuditPage.tsx:73
+msgid "Filter by object id"
+msgstr ""
+
 #: src/layout/components/CellsForm.tsx:367
 msgid "Fit"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:160
 msgid "Fix these before saving:"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:285
+msgid "Force lamp"
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:318
@@ -687,6 +903,10 @@ msgstr ""
 msgid "GPU overlays"
 msgstr ""
 
+#: src/components/TallyLampBadge.tsx:36
+msgid "Green"
+msgstr ""
+
 #: src/pages/docs/ContainerPage.tsx:149
 msgid "Healthcheck"
 msgstr ""
@@ -704,9 +924,12 @@ msgid "Idempotency"
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:66
+#: src/pages/SalvosPage.tsx:211
+#: src/pages/SalvosPage.tsx:341
 #: src/pages/SimplePages.tsx:629
 #: src/pages/SimplePages.tsx:825
 #: src/pages/SimplePages.tsx:996
+#: src/pages/TallyPage.tsx:364
 msgid "Identifier"
 msgstr ""
 
@@ -718,6 +941,18 @@ msgstr ""
 msgid "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable — the presented token is <1>admin.<secret></1>. When that variable is unset, the server generates a token and logs it once at startup. The unauthenticated surface is just <2>/</2>, <3>/docs</3>, and <4>/api/v1/openapi.json</4>; every <5>/api/v1</5> data route requires the token."
 msgstr ""
 
+#: src/pages/TallyPage.tsx:226
+msgid "Index"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:366
+msgid "Index→cell rules"
+msgstr ""
+
+#: src/pages/MonitoringPage.tsx:165
+msgid "Inputs"
+msgstr ""
+
 #: src/pages/docs/OverviewPage.tsx:38
 msgid "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
 msgstr ""
@@ -726,6 +961,7 @@ msgstr ""
 msgid "Intel / AMD (VAAPI)"
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:218
 #: src/pages/SimplePages.tsx:542
 #: src/pages/SimplePages.tsx:648
 #: src/pages/SimplePages.tsx:900
@@ -735,6 +971,11 @@ msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:148
 msgid "Kinds: <0>test</0>, <1>rtsp</1>, <2>hls</2>, <3>ts</3>, <4>srt</4>, <5>rtmp</5>, <6>ndi</6>, <7>file</7>."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:256
+#: src/pages/TallyPage.tsx:319
+msgid "Lamp"
 msgstr ""
 
 #: src/components/LocaleSwitcher.tsx:35
@@ -754,11 +995,15 @@ msgstr ""
 msgid "Layout name"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:377
+msgid "Layout or preset name (optional)"
+msgstr ""
+
 #: src/pages/LayoutEditorPage.tsx:60
 msgid "Layout saved"
 msgstr ""
 
-#: src/app/navigation.tsx:29
+#: src/app/navigation.tsx:34
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:23
 #: src/pages/LayoutsPage.tsx:154
@@ -767,6 +1012,10 @@ msgstr "التخطيطات"
 
 #: src/pages/docs/docsNav.tsx:89
 msgid "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
+msgstr ""
+
+#: src/pages/AuditPage.tsx:79
+msgid "Leave empty for all objects"
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:362
@@ -785,8 +1034,24 @@ msgstr ""
 msgid "Live engine status at a glance."
 msgstr ""
 
+#: src/pages/MonitoringPage.tsx:157
+msgid "Live program output"
+msgstr ""
+
+#: src/pages/MonitoringPage.tsx:142
+msgid "Live program output and per-input previews, with each tile's lifecycle state from the engine stream."
+msgstr ""
+
 #: src/pages/DashboardPage.tsx:87
 msgid "Live tiles from the engine stream."
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:200
+msgid "Loading alarms…"
+msgstr ""
+
+#: src/pages/AuditPage.tsx:92
+msgid "Loading audit log…"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:203
@@ -809,8 +1074,20 @@ msgstr ""
 msgid "Loading overlays…"
 msgstr ""
 
+#: src/pages/TallyPage.tsx:349
+msgid "Loading profiles…"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:189
+msgid "Loading salvos…"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:581
 msgid "Loading sources…"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:303
+msgid "Loading tally state…"
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:67
@@ -839,6 +1116,23 @@ msgstr ""
 
 #: src/pages/SimplePages.tsx:939
 msgid "Manage overlay layers and subtitles."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:200
+msgid "Manual override"
+msgstr ""
+
+#: src/pages/AuditPage.tsx:112
+msgid "Media time"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:164
+msgid "Minimum severity"
+msgstr ""
+
+#: src/app/navigation.tsx:38
+#: src/pages/MonitoringPage.tsx:140
+msgid "Monitoring"
 msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:68
@@ -870,13 +1164,19 @@ msgid "Mutable resources carry an <0>ETag</0>. Send it back as <1>If-Match</1> o
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:57
+#: src/pages/SalvosPage.tsx:210
 #: src/pages/SimplePages.tsx:537
 #: src/pages/SimplePages.tsx:640
 #: src/pages/SimplePages.tsx:715
 #: src/pages/SimplePages.tsx:836
 #: src/pages/SimplePages.tsx:895
 #: src/pages/SimplePages.tsx:1007
+#: src/pages/TallyPage.tsx:241
 msgid "Name"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:173
+msgid "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 msgstr ""
 
 #: src/app/AppLayout.tsx:66
@@ -907,9 +1207,22 @@ msgstr ""
 msgid "New overlay"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:182
+#: src/pages/SalvosPage.tsx:328
+msgid "New salvo"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:575
 #: src/pages/SimplePages.tsx:576
 msgid "New source"
+msgstr ""
+
+#: src/pages/AlarmsPage.tsx:209
+msgid "No alarms match the current filter."
+msgstr ""
+
+#: src/pages/AuditPage.tsx:101
+msgid "No audit entries match."
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:379
@@ -922,6 +1235,10 @@ msgstr ""
 
 #: src/pages/DashboardPage.tsx:123
 msgid "No frame-rate sample."
+msgstr ""
+
+#: src/pages/MonitoringPage.tsx:169
+msgid "No inputs are available to preview."
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:182
@@ -940,6 +1257,10 @@ msgstr ""
 msgid "No overlays configured."
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:198
+msgid "No salvos are defined yet."
+msgstr ""
+
 #: src/components/TileStateBadge.tsx:47
 msgid "No signal"
 msgstr ""
@@ -952,6 +1273,18 @@ msgstr ""
 msgid "No sources configured."
 msgstr ""
 
+#: src/pages/TallyPage.tsx:357
+msgid "No tally profiles are defined."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:311
+msgid "No tally targets are reporting a lamp state."
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:240
+msgid "None"
+msgstr ""
+
 #: src/pages/SettingsPage.tsx:137
 msgid "Notifications"
 msgstr ""
@@ -960,12 +1293,25 @@ msgstr ""
 msgid "NVIDIA"
 msgstr ""
 
+#: src/pages/AuditPage.tsx:110
+msgid "Object"
+msgstr ""
+
+#: src/components/TallyLampBadge.tsx:48
+msgid "Off"
+msgstr ""
+
 #: src/app/AppLayout.tsx:60
 msgid "Open navigation"
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:50
 msgid "Open the API playground"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:154
+#: src/pages/TallyPage.tsx:142
+msgid "Operation id"
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:72
@@ -984,7 +1330,7 @@ msgstr ""
 msgid "Output path"
 msgstr ""
 
-#: src/app/navigation.tsx:31
+#: src/app/navigation.tsx:36
 #: src/pages/docs/ConfigPage.tsx:242
 #: src/pages/docs/FeaturesPage.tsx:54
 #: src/pages/SimplePages.tsx:760
@@ -995,7 +1341,7 @@ msgstr "المخرجات"
 msgid "Over the layout drop zone."
 msgstr ""
 
-#: src/app/navigation.tsx:32
+#: src/app/navigation.tsx:37
 #: src/layout/components/SourcePalette.tsx:224
 #: src/pages/docs/ConfigPage.tsx:220
 #: src/pages/docs/FeaturesPage.tsx:98
@@ -1005,6 +1351,18 @@ msgstr "الطبقات"
 
 #: src/pages/docs/FeaturesPage.tsx:100
 msgid "Overlays draw on top of the canvas or a single tile: clocks, text labels and under-monitor displays, and tally borders. A clock overlay sourced from the wall clock keeps ticking every frame, which doubles as a visible sentinel that the output is still alive."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:141
+msgid "Override accepted"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:141
+msgid "Override cleared"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:147
+msgid "Override failed"
 msgstr ""
 
 #: src/pages/docs/docsNav.tsx:36
@@ -1028,8 +1386,25 @@ msgstr ""
 msgid "Picked up {0}."
 msgstr ""
 
+#. placeholder {0}: props.id
+#: src/pages/MonitoringPage.tsx:195
+msgid "Preview of input {0}"
+msgstr ""
+
 #: src/app/Sidebar.tsx:20
 msgid "Primary"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:162
+msgid "Profile deleted"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:193
+msgid "Profiles"
+msgstr ""
+
+#: src/pages/MonitoringPage.tsx:152
+msgid "Program"
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:278
@@ -1040,9 +1415,18 @@ msgstr ""
 msgid "Realtime streams"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:212
+#: src/pages/SalvosPage.tsx:372
+msgid "Recalled layout"
+msgstr ""
+
 #: src/components/ConnectionStatus.tsx:41
 #: src/components/TileStateBadge.tsx:41
 msgid "Reconnecting"
+msgstr ""
+
+#: src/components/TallyLampBadge.tsx:30
+msgid "Red"
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:347
@@ -1059,6 +1443,18 @@ msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:96
 msgid "Requires the NVIDIA driver and the NVIDIA Container Toolkit on the host. The modern path requests devices through CDI; NVENC and NVDEC also need the <0>video</0> driver capability."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:190
+msgid "Resolved state"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:315
+msgid "Resolved tally lamp per target."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:180
+msgid "Resolved tally lamps, a manual override, and the tally profiles that map incoming protocol words to lamps."
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:58
@@ -1086,10 +1482,25 @@ msgstr ""
 msgid "Running in containers"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:113
+msgid "Salvo created"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:134
+msgid "Salvo deleted"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:113
+msgid "Salvo saved"
+msgstr ""
+
+#: src/app/navigation.tsx:40
 #: src/pages/docs/FeaturesPage.tsx:122
+#: src/pages/SalvosPage.tsx:171
 msgid "Salvos"
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:398
 #: src/pages/SettingsPage.tsx:117
 #: src/pages/SimplePages.tsx:386
 msgid "Save"
@@ -1107,6 +1518,10 @@ msgstr ""
 msgid "Saving…"
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:219
+msgid "Scope"
+msgstr ""
+
 #: src/layout/components/CellsForm.tsx:370
 msgid "Select cell"
 msgstr ""
@@ -1119,10 +1534,14 @@ msgstr ""
 msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr ""
 
-#: src/app/navigation.tsx:34
+#: src/app/navigation.tsx:44
 #: src/pages/SettingsPage.tsx:46
 msgid "Settings"
 msgstr "الإعدادات"
+
+#: src/pages/AlarmsPage.tsx:217
+msgid "Severity"
+msgstr ""
 
 #: src/pages/SettingsPage.tsx:153
 msgid "Show a test notification"
@@ -1140,7 +1559,7 @@ msgstr ""
 msgid "Source"
 msgstr ""
 
-#: src/app/navigation.tsx:30
+#: src/app/navigation.tsx:35
 #: src/layout/components/SourcePalette.tsx:203
 #: src/pages/docs/ConfigPage.tsx:135
 #: src/pages/docs/FeaturesPage.tsx:36
@@ -1164,9 +1583,9 @@ msgstr ""
 msgid "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retried request is applied at most once."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:662
-#~ msgid "State"
-#~ msgstr ""
+#: src/pages/AlarmsPage.tsx:183
+msgid "State"
+msgstr ""
 
 #: src/pages/SimplePages.tsx:523
 msgid "STUDIO (CAM 1)"
@@ -1180,8 +1599,22 @@ msgstr ""
 msgid "Switch the interface language and text direction."
 msgstr ""
 
+#: src/pages/SalvosPage.tsx:269
+msgid "Take"
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:263
+msgid "Take salvo"
+msgstr ""
+
+#: src/app/navigation.tsx:39
 #: src/pages/docs/FeaturesPage.tsx:109
+#: src/pages/TallyPage.tsx:178
 msgid "Tally"
+msgstr ""
+
+#: src/pages/TallyPage.tsx:361
+msgid "Tally profiles and their rule counts."
 msgstr ""
 
 #: src/pages/docs/FeaturesPage.tsx:111
@@ -1190,6 +1623,8 @@ msgstr ""
 
 #: src/pages/SimplePages.tsx:905
 #: src/pages/SimplePages.tsx:1027
+#: src/pages/TallyPage.tsx:205
+#: src/pages/TallyPage.tsx:318
 msgid "Target"
 msgstr ""
 
@@ -1251,6 +1686,14 @@ msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:83
 msgid "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:331
+msgid "The identifier is fixed once created. Source, tally, and UMD recall clauses already on this salvo are preserved when you save."
+msgstr ""
+
+#: src/pages/AuditPage.tsx:57
+msgid "The immutable change log: who changed what, and when, on the engine media timeline. Read-only."
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:26
@@ -1333,8 +1776,16 @@ msgstr ""
 msgid "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
 msgstr ""
 
+#: src/pages/TallyPage.tsx:417
+msgid "This permanently removes the profile's mapping rules."
+msgstr ""
+
 #: src/pages/SimplePages.tsx:408
 msgid "This permanently removes the resource. Running outputs are not affected until a new configuration is applied."
+msgstr ""
+
+#: src/pages/SalvosPage.tsx:418
+msgid "This permanently removes the salvo definition."
 msgstr ""
 
 #: src/pages/PlaceholderPage.tsx:27
@@ -1343,6 +1794,10 @@ msgstr ""
 
 #: src/pages/SettingsPage.tsx:149
 msgid "This toast is announced to assistive technology."
+msgstr ""
+
+#: src/pages/TallyPage.tsx:217
+msgid "Tile index"
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:98
@@ -1366,12 +1821,20 @@ msgstr ""
 msgid "Two image families are published. The default image is LGPL-clean and software-only; the NVIDIA image adds CUDA-based decode, encode, and compositing."
 msgstr ""
 
+#: src/pages/AlarmsPage.tsx:251
+msgid "Unacknowledged"
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:295
 msgid "Validation and import / export"
 msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:131
 msgid "Volumes"
+msgstr ""
+
+#: src/pages/MonitoringPage.tsx:122
+msgid "Waiting for a frame…"
 msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:27

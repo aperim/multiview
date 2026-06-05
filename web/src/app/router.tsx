@@ -7,6 +7,11 @@ import { DashboardPage } from "../pages/DashboardPage";
 import { LayoutsPage } from "../pages/LayoutsPage";
 import { LayoutEditorPage } from "../pages/LayoutEditorPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
+import { MonitoringPage } from "../pages/MonitoringPage";
+import { TallyPage } from "../pages/TallyPage";
+import { SalvosPage } from "../pages/SalvosPage";
+import { AlarmsPage } from "../pages/AlarmsPage";
+import { AuditPage } from "../pages/AuditPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import {
   OutputsPage,
@@ -34,6 +39,11 @@ export const router = createBrowserRouter([
       { path: "sources", element: <SourcesPage /> },
       { path: "outputs", element: <OutputsPage /> },
       { path: "overlays", element: <OverlaysPage /> },
+      { path: "monitoring", element: <MonitoringPage /> },
+      { path: "tally", element: <TallyPage /> },
+      { path: "salvos", element: <SalvosPage /> },
+      { path: "alarms", element: <AlarmsPage /> },
+      { path: "audit", element: <AuditPage /> },
       { path: "settings", element: <SettingsPage /> },
       // In-app documentation under /help. (/docs is the backend Scalar API
       // playground, so the SPA guide deliberately avoids that path.)
