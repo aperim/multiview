@@ -48,7 +48,7 @@ pub enum Command {
     /// human-readable report. Pure and side-effect-free.
     Validate(ValidateArgs),
     /// Load + validate a config, build the engine, attach built-in test-pattern
-    /// sources, and run. In `--headless` mode this drives the software output
+    /// sources, and run. In `--software` mode this drives the FFmpeg-free output
     /// clock for `--ticks` ticks (or until Ctrl-C) and reports cadence/frames.
     Run(RunArgs),
 }
@@ -70,16 +70,20 @@ pub struct RunArgs {
     #[arg(value_name = "CONFIG")]
     pub config: PathBuf,
 
-    /// Run the pure-software engine (CPU reference compositor, built-in
+    /// Run the FFmpeg-free software engine (CPU reference compositor, built-in
     /// test-pattern sources) with no GPU or `FFmpeg` dependency. This is the
-    /// software end-to-end smoke of the output-clock invariant.
+    /// software end-to-end smoke of the output-clock invariant — the same
+    /// pipeline, minus the libav decoders, so it serves the API/WebUI and the
+    /// program preview just like the full build, only without external ingest.
     ///
     /// Without this flag (and built with the `ffmpeg` feature), `run` builds the
-    /// real libav* pipeline: ingest -> per-tile framestores -> the engine drive
+    /// full libav* pipeline: ingest -> per-tile framestores -> the engine drive
     /// loop -> encode the canvas once -> fan out to the configured file/HLS
     /// outputs.
-    #[arg(long)]
-    pub headless: bool,
+    ///
+    /// `--headless` is accepted as a back-compat alias.
+    #[arg(long, alias = "headless")]
+    pub software: bool,
 
     /// Stop after this many output ticks (frames). Omit to run until Ctrl-C (or,
     /// for a bounded run, give `--duration` instead).

@@ -1,6 +1,6 @@
-//! The `multiview run` subcommand and its **headless software engine**.
+//! The `multiview run` subcommand and its **FFmpeg-free software engine**.
 //!
-//! [`HeadlessEngine`] wires the protected output core from a validated
+//! [`SoftwareEngine`] wires the protected output core from a validated
 //! [`MultiviewConfig`]:
 //!
 //! * a fixed-cadence [`OutputClock`] at the canvas cadence (exact rational);
@@ -37,7 +37,8 @@ use multiview_events::Event;
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 
 /// The per-subscriber drop-oldest depth of the engine's outbound event stream.
-/// Headless has no consumers, but the publisher still needs a positive ring.
+/// The software smoke has no consumers, but the publisher still needs a positive
+/// ring.
 const EVENT_CAPACITY: usize = 64;
 
 /// Capture the composited program frame into the live-preview slot every Nth
@@ -45,19 +46,19 @@ const EVENT_CAPACITY: usize = 64;
 /// still, cheap enough to clone on the hot loop without affecting the cadence.
 const PREVIEW_CAPTURE_EVERY: u64 = 15;
 
-/// The state snapshot the headless engine publishes each tick (invariant #10):
+/// The state snapshot the software engine publishes each tick (invariant #10):
 /// the tick index and its presentation timestamp. Best-effort; no consumer can
 /// back-pressure its publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct HeadlessState {
+pub struct SoftwareState {
     /// The tick index this snapshot was produced for.
     pub tick: u64,
     /// The presentation timestamp of the tick (`out_pts = f(tick)`).
     pub pts: MediaTime,
 }
 
-/// A summary of a headless run: how many ticks/frames were produced, the
+/// A summary of a software run: how many ticks/frames were produced, the
 /// cadence, the canvas geometry, the PTS span, and whether the output ever
 /// faltered (it must not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +100,7 @@ impl RunReport {
             "never faltered"
         };
         format!(
-            "headless run: {} frame(s) for {} tick(s) at {}/{} fps on {}x{}; {}; output {}",
+            "software run: {} frame(s) for {} tick(s) at {}/{} fps on {}x{}; {}; output {}",
             self.frames,
             self.ticks,
             cadence.num,
@@ -112,7 +113,7 @@ impl RunReport {
     }
 }
 
-/// Errors that can occur building or running the headless engine.
+/// Errors that can occur building or running the software engine.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RunError {
@@ -130,17 +131,17 @@ pub enum RunError {
     Pattern(String),
 }
 
-/// A built, ready-to-run headless software engine.
+/// A built, ready-to-run software engine.
 ///
-/// Construct one with [`HeadlessEngine::build`] from a validated config, then
-/// drive it with [`HeadlessEngine::run_for`] (deterministic, injected time) or
-/// [`HeadlessEngine::run_for_realtime`] / [`HeadlessEngine::run_until_stopped`]
+/// Construct one with [`SoftwareEngine::build`] from a validated config, then
+/// drive it with [`SoftwareEngine::run_for`] (deterministic, injected time) or
+/// [`SoftwareEngine::run_for_realtime`] / [`SoftwareEngine::run_until_stopped`]
 /// (production wall-clock pacing).
 ///
 /// The engine is consumed-shaped: each `run_*` method takes `&mut self` and is
 /// intended to be driven once; it rebuilds the compositor drive per run so the
 /// stores (and their synthetic frames) are reused intact.
-pub struct HeadlessEngine {
+pub struct SoftwareEngine {
     /// The solved layout (canvas + normalized cells), shared into the drive.
     layout: Arc<Layout>,
     /// The fixed output cadence (exact rational).
@@ -166,8 +167,8 @@ pub struct HeadlessEngine {
     program_preview: crate::preview::ProgramSlot,
 }
 
-impl HeadlessEngine {
-    /// Build a headless engine from an already-validated configuration.
+impl SoftwareEngine {
+    /// Build a software engine from an already-validated configuration.
     ///
     /// Solves the layout, creates one [`TileStore`] per source (with
     /// [`NoSignalPolicy::HoldForever`] so a once-published synthetic frame stays
@@ -299,7 +300,7 @@ impl HeadlessEngine {
             .seed_nanos()
             .saturating_add(pts_at(self.cadence, max_ticks).as_nanos());
         time_source.advance_to(headroom);
-        let publisher: EnginePublisher<HeadlessState, HeadlessState> =
+        let publisher: EnginePublisher<SoftwareState, SoftwareState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
         self.drive(
@@ -307,12 +308,12 @@ impl HeadlessEngine {
             &publisher,
             &stop,
             Some(max_ticks),
-            |f: &multiview_engine::CompositedFrame| HeadlessState {
+            |f: &multiview_engine::CompositedFrame| SoftwareState {
                 tick: f.tick.index,
                 pts: f.pts(),
             },
             |f: &multiview_engine::CompositedFrame| {
-                Some(HeadlessState {
+                Some(SoftwareState {
                     tick: f.tick.index,
                     pts: f.pts(),
                 })
@@ -328,13 +329,13 @@ impl HeadlessEngine {
     ///
     /// # Errors
     ///
-    /// See [`HeadlessEngine::run_for`].
+    /// See [`SoftwareEngine::run_for`].
     pub async fn run_for_realtime(&mut self, max_ticks: u64) -> Result<RunReport, RunError> {
         let time = Arc::new(MonotonicTimeSource::new());
         let ts: Arc<dyn TimeSource> = time;
         self.prime_stores(ts.as_ref());
         let mut runtime = self.build_runtime(ts, RealtimePacer)?;
-        let publisher: EnginePublisher<HeadlessState, HeadlessState> =
+        let publisher: EnginePublisher<SoftwareState, SoftwareState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
         self.drive(
@@ -342,12 +343,12 @@ impl HeadlessEngine {
             &publisher,
             &stop,
             Some(max_ticks),
-            |f: &multiview_engine::CompositedFrame| HeadlessState {
+            |f: &multiview_engine::CompositedFrame| SoftwareState {
                 tick: f.tick.index,
                 pts: f.pts(),
             },
             |f: &multiview_engine::CompositedFrame| {
-                Some(HeadlessState {
+                Some(SoftwareState {
                     tick: f.tick.index,
                     pts: f.pts(),
                 })
@@ -362,7 +363,7 @@ impl HeadlessEngine {
     ///
     /// # Errors
     ///
-    /// See [`HeadlessEngine::run_for`].
+    /// See [`SoftwareEngine::run_for`].
     pub async fn run_until_stopped(
         &mut self,
         stop: &StopSignal,
@@ -372,14 +373,14 @@ impl HeadlessEngine {
             .await
     }
 
-    /// Like [`HeadlessEngine::run_until_stopped`], but additionally applies
+    /// Like [`SoftwareEngine::run_until_stopped`], but additionally applies
     /// control-plane reconfiguration at each frame boundary via `control` (e.g.
     /// the command-bus drain from [`crate::control::command_drain`]). `control`
     /// runs on the output-clock loop and must be non-blocking (invariants #1+#10).
     ///
     /// # Errors
     ///
-    /// See [`HeadlessEngine::run_for`].
+    /// See [`SoftwareEngine::run_for`].
     pub async fn run_until_stopped_with_control<FC>(
         &mut self,
         stop: &StopSignal,
@@ -558,12 +559,12 @@ impl HeadlessEngine {
 }
 
 /// A [`TimeSource`] whose position can be set forward, for the deterministic
-/// (sleep-free) bounded headless run.
+/// (sleep-free) bounded software run.
 ///
 /// Implemented for [`ManualTimeSource`] ([`ManualTimeSource::set`] jumps the
 /// clock). A real monotonic source cannot be jumped, so the realtime path uses
-/// [`HeadlessEngine::run_for_realtime`] (which paces against true elapsed time)
-/// instead of [`HeadlessEngine::run_for`].
+/// [`SoftwareEngine::run_for_realtime`] (which paces against true elapsed time)
+/// instead of [`SoftwareEngine::run_for`].
 pub trait Advanceable: TimeSource {
     /// Move the source forward to at least `nanos` (never backwards).
     fn advance_to(&self, nanos: i64);

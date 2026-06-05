@@ -22,7 +22,7 @@ use anyhow::Context as _;
 use clap::Parser as _;
 use multiview_cli::cli::{Cli, Command, RunArgs, ValidateArgs};
 use multiview_cli::control;
-use multiview_cli::run::{HeadlessEngine, RunReport};
+use multiview_cli::run::{RunReport, SoftwareEngine};
 use multiview_cli::validate::validate_config;
 use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
@@ -30,6 +30,11 @@ use multiview_control::{command_bus, EngineStateSnapshot};
 use multiview_engine::{CompositorDrive, EnginePublisher, StopSignal};
 use multiview_events::Event;
 use multiview_telemetry::tracing_init::SubscriberBuilder;
+
+/// The boxed per-tick command drain the engine applies at the frame boundary
+/// (the control-plane command bus → live reconfiguration), shared by the
+/// software-engine and full-pipeline run paths.
+type ControlDrain = Box<dyn FnMut(&mut CompositorDrive<Nv12Image>)>;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -81,33 +86,34 @@ fn run_validate(args: &ValidateArgs) -> anyhow::Result<ExitCode> {
     })
 }
 
-/// The `run` subcommand: validate the config, then either drive the pure-
-/// software headless engine (`--headless`), the real libav\* pipeline (default,
-/// `ffmpeg` feature), or — with neither available — report readiness.
+/// The `run` subcommand: validate the config, then either drive the FFmpeg-free
+/// software engine (`--software`), the full libav\* pipeline (default, `ffmpeg`
+/// feature), or — with neither available — report readiness.
 async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let config = load_validated(&args.config)?;
 
-    if args.headless {
-        return run_headless(&config, &args).await;
+    if args.software {
+        return run_software(&config, &args).await;
     }
 
-    run_real(&config, &args).await
+    run_pipeline(&config, &args).await
 }
 
-/// The pure-software, FFmpeg-free headless run (software end-to-end smoke of the
-/// output-clock invariant).
-async fn run_headless(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
-    let mut engine = HeadlessEngine::build(config)?;
+/// The FFmpeg-free software run: the output-clock + CPU compositor driving the
+/// built-in test-pattern sources (the software end-to-end smoke of the
+/// output-clock invariant), serving the API/WebUI just like the full build.
+async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+    let mut engine = SoftwareEngine::build(config)?;
     let cadence = engine.cadence();
     let report = if let Some(ticks) = args.tick_budget(cadence) {
-        tracing::info!(ticks, "headless run: bounded");
+        tracing::info!(ticks, "software run: bounded");
         engine
             .run_for_realtime(ticks)
             .await
-            .context("headless bounded run")?
+            .context("software bounded run")?
     } else {
-        tracing::info!("headless run: until Ctrl-C");
-        run_until_ctrl_c(&mut engine, config).await?
+        tracing::info!("software run: until Ctrl-C");
+        run_software_until_ctrl_c(&mut engine, config).await?
     };
 
     println!("{}", report.render());
@@ -118,13 +124,13 @@ async fn run_headless(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     })
 }
 
-/// The real libav\* end-to-end pipeline (the `ffmpeg` feature): ingest →
+/// The full libav\* end-to-end pipeline (the `ffmpeg` feature): ingest →
 /// composite → encode-once → fan out to the configured file/HLS outputs.
 #[cfg(feature = "ffmpeg")]
-async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
-    use multiview_cli::pipeline::RealPipeline;
+async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+    use multiview_cli::pipeline::Pipeline;
 
-    let mut pipeline = RealPipeline::build(config).context("building the real pipeline")?;
+    let mut pipeline = Pipeline::build(config).context("building the pipeline")?;
     if let Some(subs) = &args.subtitles {
         let track = load_subtitles(subs)
             .with_context(|| format!("loading subtitles {}", subs.display()))?;
@@ -135,28 +141,18 @@ async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<Ex
     tracing::info!(
         sources = pipeline.source_count(),
         encoder = pipeline.encoder_name(),
-        "real pipeline built"
+        "pipeline built"
     );
 
     let report = if let Some(ticks) = args.tick_budget(cadence) {
-        tracing::info!(ticks, "real run: bounded");
-        pipeline.run_for(ticks).await.context("real bounded run")?
-    } else {
-        tracing::info!("real run: until Ctrl-C");
-        let stop = StopSignal::new();
-        let stop_for_signal = stop.clone();
-        let signal = tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                tracing::info!("Ctrl-C received; stopping after the current frame");
-                stop_for_signal.stop();
-            }
-        });
-        let report = pipeline
-            .run_until(&stop)
+        tracing::info!(ticks, "pipeline run: bounded");
+        pipeline
+            .run_for(ticks)
             .await
-            .context("real run until Ctrl-C")?;
-        signal.abort();
-        report
+            .context("bounded pipeline run")?
+    } else {
+        tracing::info!("pipeline run: until Ctrl-C");
+        run_pipeline_until_ctrl_c(&mut pipeline, config).await?
     };
 
     println!("{}", report.render());
@@ -167,25 +163,98 @@ async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<Ex
     })
 }
 
-/// Without the `ffmpeg` feature there is no real ingest/encode path: build the
-/// software engine, report readiness, and steer the operator to `--headless`
-/// (or a build with `--features ffmpeg`) rather than faking a running daemon.
+/// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
+/// serving the control plane, the embedded web UI, and the live program/input
+/// previews from the SAME run (when `[control]` is configured) — ingestion,
+/// processing, output, and management are one integrated process. The control
+/// plane shares the engine's outbound publisher (read-only) and the live-preview
+/// slot, and submits to the non-blocking command bus the pipeline drains at each
+/// frame boundary; none of it can back-pressure the output clock (inv #1 + #10).
+#[cfg(feature = "ffmpeg")]
+async fn run_pipeline_until_ctrl_c(
+    pipeline: &mut multiview_cli::pipeline::Pipeline,
+    config: &MultiviewConfig,
+) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
+    let stop = StopSignal::new();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let preview_slot = multiview_cli::preview::program_slot();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
+        let (commands, command_rx) = command_bus(64);
+        // The live-preview provider reads the program slot the run loop fills + the
+        // pipeline's per-source stores (the decoded input frames).
+        let provider: multiview_control::SharedPreview =
+            Arc::new(multiview_cli::preview::CliPreviewProvider::new(
+                Arc::clone(&preview_slot),
+                pipeline.preview_stores(),
+            ));
+        let (addr, handle) = control::bind_and_serve(
+            &cfg.listen,
+            Arc::clone(&publisher),
+            commands,
+            provider,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
+        tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
+        (
+            Some(handle),
+            Box::new(control::command_drain(command_rx, config.clone())),
+        )
+    } else {
+        drop(shutdown_rx);
+        (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))
+    };
+
+    let stop_for_signal = stop.clone();
+    let signal = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl-C received; stopping after the current frame");
+            stop_for_signal.stop();
+        }
+    });
+
+    let report = pipeline
+        .run_until_serving(&stop, publisher.as_ref(), &preview_slot, drain)
+        .await
+        .context("pipeline run until Ctrl-C")?;
+
+    let _ = shutdown_tx.send(());
+    if let Some(handle) = server {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "control server I/O error at shutdown"),
+            Err(e) => tracing::warn!(error = %e, "control server task join error"),
+        }
+    }
+    signal.abort();
+    Ok(report)
+}
+
+/// Without the `ffmpeg` feature this build has no libav decoders, so external
+/// ingest/encode is unavailable: build the software engine, report readiness,
+/// and steer the operator to `--software` (or a build with `--features ffmpeg`)
+/// rather than pretending a daemon is ingesting sources it cannot decode.
 #[cfg(not(feature = "ffmpeg"))]
 #[allow(clippy::unused_async)]
 // reason: this is the no-`ffmpeg` half of an `async fn` pair; the `ffmpeg`
-// counterpart awaits the real pipeline, so the signature must match for the one
-// `run_real(..).await` call site to compile under either feature set.
-async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+// counterpart awaits the full pipeline, so the signature must match for the one
+// `run_pipeline(..).await` call site to compile under either feature set.
+async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
     if args.subtitles.is_some() {
         tracing::warn!(
-            "--subtitles needs the `ffmpeg`+`overlay` features (real pipeline); ignoring"
+            "--subtitles needs the `ffmpeg`+`overlay` features (full pipeline); ignoring"
         );
     }
-    let engine = HeadlessEngine::build(config)?;
+    let engine = SoftwareEngine::build(config)?;
     println!(
         "ready: built engine for {} source(s) at {}/{} fps; \
-         this build has no `ffmpeg` feature, so a real ingest/encode run is unavailable — \
-         use `--headless` for the software output-clock smoke, or rebuild with \
+         this build has no `ffmpeg` feature, so an external ingest/encode run is unavailable — \
+         use `--software` for the output-clock smoke, or rebuild with \
          `--features ffmpeg` (add `gpl-codecs` for software H.264/H.265).",
         engine.source_count(),
         engine.cadence().num,
@@ -194,18 +263,15 @@ async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<Ex
     Ok(ExitCode::SUCCESS)
 }
 
-/// Drive the headless engine until Ctrl-C, then return the run report.
+/// Drive the software engine until Ctrl-C, then return the run report.
 ///
 /// A best-effort signal watcher raises the engine's stop flag on Ctrl-C; the
 /// engine checks it once per tick and finishes the current frame cleanly. The
 /// watcher cannot back-pressure the engine (invariant #10).
-async fn run_until_ctrl_c(
-    engine: &mut HeadlessEngine,
+async fn run_software_until_ctrl_c(
+    engine: &mut SoftwareEngine,
     config: &MultiviewConfig,
 ) -> anyhow::Result<RunReport> {
-    /// The boxed per-tick command drain the engine applies at the frame boundary.
-    type Drain = Box<dyn FnMut(&mut CompositorDrive<Nv12Image>)>;
-
     let stop = StopSignal::new();
 
     // The engine's outbound publisher, shared read-only with the control plane
@@ -216,11 +282,11 @@ async fn run_until_ctrl_c(
 
     // Bring up the control server iff `[control]` is configured, and build the
     // per-tick command drain the engine applies at the frame boundary. The drain
-    // is boxed so the run call is uniform: the real command-bus drain when the
+    // is boxed so the run call is uniform: the live command-bus drain when the
     // control plane is up, a no-op otherwise. The server serves until
     // `shutdown_rx` resolves (once the engine loop returns).
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain): (Option<_>, Drain) = if let Some(cfg) = config.control.as_ref() {
+    let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
         let (commands, command_rx) = command_bus(64);
         // The engine-backed live-preview provider (program slot + per-input
         // stores), shared read-only with the control plane (invariant #10).

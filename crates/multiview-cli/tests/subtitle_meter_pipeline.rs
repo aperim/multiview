@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use multiview_cli::pipeline::RealPipeline;
+use multiview_cli::pipeline::Pipeline;
 use multiview_config::MultiviewConfig;
 use multiview_overlay::subtitle::CueTrack;
 
@@ -243,7 +243,7 @@ async fn run_pipeline(
     let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
     config.validate().expect("config validates");
 
-    let mut pipeline = RealPipeline::build(&config).expect("build real pipeline");
+    let mut pipeline = Pipeline::build(&config).expect("build real pipeline");
     if let Some(track) = subtitles {
         pipeline = pipeline.with_subtitles(track);
     }

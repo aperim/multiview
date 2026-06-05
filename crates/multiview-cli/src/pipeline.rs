@@ -1,8 +1,9 @@
-//! The **real** libav\* end-to-end `multiview run` pipeline (the `ffmpeg` feature).
+//! The full libav\* end-to-end `multiview run` pipeline (the `ffmpeg` feature).
 //!
-//! Where [`crate::run`] is the pure-software, FFmpeg-free smoke of invariant #1,
-//! this module makes Multiview *operable*: it ingests real video, composites it on
-//! the CPU reference compositor driven by the engine's protected output core,
+//! Where [`crate::run`] is the FFmpeg-free software smoke of invariant #1, this
+//! module adds the libav decoders: it ingests video from the configured sources,
+//! composites it on the CPU reference compositor driven by the engine's protected
+//! output core,
 //! encodes the canvas **once**, and fans the encoded program out to the file and
 //! HLS output sinks declared in the config.
 //!
@@ -74,14 +75,17 @@ use ffmpeg_next::util::frame::Video;
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
 use multiview_config::{MultiviewConfig, Output, Source, SourceKind};
+use multiview_control::EngineStateSnapshot;
 use multiview_core::frame::FrameMeta;
 use multiview_core::layout::{Cell, Layout};
 use multiview_core::pixel::PixelFormat;
 use multiview_core::time::{MediaTime, Rational};
+use multiview_core::traits::SourceState;
 use multiview_engine::{
     CompositedFrame, CompositorDrive, EnginePublisher, EngineRuntime, MonotonicTimeSource,
     OutputClock, Pacer, RealtimePacer, StopSignal, TimeSource,
 };
+use multiview_events::Event;
 use multiview_ffmpeg::{DecodedVideoFrame, ScaleSpec, Scaler, StreamVideoDecoder};
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 use multiview_output::sink::{
@@ -141,7 +145,7 @@ impl SendPolicy {
     }
 }
 
-/// The egress plan for one [`RealPipeline::drive_streaming`] call: the send
+/// The egress plan for one [`Pipeline::drive_streaming`] call: the send
 /// policy, the per-sink runners, and an optional hot-loop tick observer (test
 /// only). Bundled so the streaming core keeps a small argument list.
 struct StreamPlan {
@@ -155,7 +159,7 @@ struct StreamPlan {
     hot_tick_observer: Option<Arc<AtomicU64>>,
 }
 
-/// Errors building or running the real libav\* pipeline.
+/// Errors building or running the libav\* pipeline.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PipelineError {
@@ -201,7 +205,7 @@ pub enum PipelineError {
     },
 }
 
-/// A summary of one real pipeline run.
+/// A summary of one pipeline run.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PipelineReport {
@@ -335,7 +339,7 @@ enum RunnableOutput {
     /// muxer targets a network URL. A push whose peer is unreachable is reported
     /// and dropped, never allowed to fail the program (invariants #1/#10).
     Push {
-        /// The real push sink (built on the same `EncodeConfig` as the file/HLS
+        /// The push sink (built on the same `EncodeConfig` as the file/HLS
         /// outputs, so the canvas is encoded once and the same packets are muxed).
         sink: PushSink,
         /// A short transport label (`rtmp`/`srt`) for the run report + logs.
@@ -343,8 +347,8 @@ enum RunnableOutput {
     },
 }
 
-/// A built, ready-to-run real pipeline.
-pub struct RealPipeline {
+/// A built, ready-to-run pipeline.
+pub struct Pipeline {
     /// The solved layout (canvas + normalized cells).
     layout: Arc<Layout>,
     /// The fixed output cadence (exact rational).
@@ -455,12 +459,12 @@ struct DvbSubRoute {
     store: Arc<crate::captions::CueStore>,
 }
 
-impl RealPipeline {
-    /// Build the real pipeline from an already-validated configuration.
+impl Pipeline {
+    /// Build the pipeline from an already-validated configuration.
     ///
     /// Solves the layout, resolves each declared source to a streaming
     /// [`IngestPlan`] (it does **not** decode anything here — decoding happens on
-    /// per-source threads started by [`RealPipeline::run_for`]/`run_until`, so a
+    /// per-source threads started by [`Pipeline::run_for`]/`run_until`, so a
     /// never-ending live source can never stall the build), resolves the output
     /// encoder (LGPL by default), and builds the runnable file/HLS sinks.
     ///
@@ -559,7 +563,7 @@ impl RealPipeline {
             return Err(PipelineError::NoOutput("file/HLS"));
         }
 
-        // Derive the real PER-SOURCE per-tick audio-loudness timelines off the
+        // Derive the PER-SOURCE per-tick audio-loudness timelines off the
         // build path: decode each file-backed source's OWN audio with
         // multiview-audio's ballistics DSP and snapshot the meter at each tick, so a
         // tile's vertical meter reflects that input's own audio. A live URL /
@@ -669,8 +673,21 @@ impl RealPipeline {
             runners: self.build_sink_runners(),
             hot_tick_observer: None,
         };
+        // Offline render serves no UI: a throwaway publisher/preview + no-op
+        // control hook.
+        let publisher = EnginePublisher::<EngineStateSnapshot, Event>::new(EVENT_CAPACITY);
+        let preview = crate::preview::program_slot();
         let out = self
-            .drive_streaming(time, RealtimePacer, &stop, Some(max_ticks), plan)
+            .drive_streaming(
+                time,
+                RealtimePacer,
+                &stop,
+                Some(max_ticks),
+                plan,
+                &publisher,
+                &preview,
+                |_: &mut CompositorDrive<Nv12Image>| {},
+            )
             .await?;
         Ok(out.report)
     }
@@ -680,8 +697,34 @@ impl RealPipeline {
     ///
     /// # Errors
     ///
-    /// See [`RealPipeline::run_for`].
+    /// See [`Pipeline::run_for`].
     pub async fn run_until(&mut self, stop: &StopSignal) -> Result<PipelineReport, PipelineError> {
+        let publisher = EnginePublisher::<EngineStateSnapshot, Event>::new(EVENT_CAPACITY);
+        let preview = crate::preview::program_slot();
+        self.run_until_serving(stop, &publisher, &preview, |_d| {})
+            .await
+    }
+
+    /// Like [`Pipeline::run_until`], but the engine's outbound `publisher`,
+    /// the live-preview `preview` slot, and a per-frame-boundary `control` hook
+    /// are supplied by the caller — so the **same ingest/composite/encode
+    /// pipeline also serves the control plane, the web UI, and the live previews**
+    /// (the binary shares these with `multiview_control`). `control` runs on the
+    /// output-clock loop and must be non-blocking (invariants #1 + #10).
+    ///
+    /// # Errors
+    ///
+    /// See [`Pipeline::run_for`].
+    pub async fn run_until_serving<FC>(
+        &mut self,
+        stop: &StopSignal,
+        publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+        preview: &crate::preview::ProgramSlot,
+        control: FC,
+    ) -> Result<PipelineReport, PipelineError>
+    where
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
         let time: Arc<dyn TimeSource> = Arc::new(MonotonicTimeSource::new());
         // Live daemon: drop-on-overload so a wedged encoder can never stall the
         // output clock (inv #1) or back-pressure the engine (inv #10).
@@ -691,9 +734,25 @@ impl RealPipeline {
             hot_tick_observer: None,
         };
         let out = self
-            .drive_streaming(time, RealtimePacer, stop, None, plan)
+            .drive_streaming(
+                time,
+                RealtimePacer,
+                stop,
+                None,
+                plan,
+                publisher,
+                preview,
+                control,
+            )
             .await?;
         Ok(out.report)
+    }
+
+    /// The per-source frame stores, shared with the control plane's preview
+    /// provider for the live per-input thumbnails.
+    #[must_use]
+    pub fn preview_stores(&self) -> HashMapStores {
+        self.stores.clone()
     }
 
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
@@ -765,8 +824,20 @@ impl RealPipeline {
             runners,
             hot_tick_observer,
         };
+        // The test seam serves no UI: throwaway publisher/preview + no-op control.
+        let publisher = EnginePublisher::<EngineStateSnapshot, Event>::new(EVENT_CAPACITY);
+        let preview = crate::preview::program_slot();
         let out = self
-            .drive_streaming(time, pacer, stop, max_ticks, plan)
+            .drive_streaming(
+                time,
+                pacer,
+                stop,
+                max_ticks,
+                plan,
+                &publisher,
+                &preview,
+                |_: &mut CompositorDrive<Nv12Image>| {},
+            )
             .await?;
         Ok(StreamTestResult {
             report: out.report,
@@ -786,15 +857,26 @@ impl RealPipeline {
     ///
     /// Returns a [`PipelineError`] if the clock/engine reject the canvas, the
     /// bake consumer fails, or a sink runner returns an error.
-    #[allow(clippy::too_many_lines)]
-    async fn drive_streaming<P: Pacer>(
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    // reason: the streaming core threads the engine's outbound publisher, the
+    // live-preview slot, and the control-plane command hook through to the hot
+    // loop so the SAME pipeline both ingests/encodes AND serves the UI; the
+    // arguments are each distinct and dictated by the engine's run signature.
+    async fn drive_streaming<P, FC>(
         &mut self,
         time: Arc<dyn TimeSource>,
         pacer: P,
         stop: &StopSignal,
         max_ticks: Option<u64>,
         plan: StreamPlan,
-    ) -> Result<DriveStreamOutcome, PipelineError> {
+        publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+        preview: &crate::preview::ProgramSlot,
+        control: FC,
+    ) -> Result<DriveStreamOutcome, PipelineError>
+    where
+        P: Pacer,
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
         let StreamPlan {
             policy,
             runners,
@@ -812,7 +894,10 @@ impl RealPipeline {
         .map_err(|e| PipelineError::Engine(e.to_string()))?;
 
         let ts: Arc<dyn TimeSource> = time;
-        let publisher: EnginePublisher<TickState, TickState> = EnginePublisher::new(EVENT_CAPACITY);
+        // The engine's outbound publisher is supplied by the caller so the
+        // control plane can share it (the live UI reads engine state + events);
+        // the same goes for the live-preview slot the projection fills.
+        let preview = Arc::clone(preview);
 
         // Start streaming ingest BEFORE the clock loop: one decode thread per
         // source, each publishing into its `TileStore` as frames arrive. The
@@ -878,7 +963,7 @@ impl RealPipeline {
         // and hands it to the bake consumer over the bounded queue per `policy`:
         // blocking send offline (exact-N back-pressure on the renderer), wait-free
         // `try_send` + drop-and-count live (the engine never blocks — inv #1/#10).
-        let state_of = move |frame: &CompositedFrame| -> TickState {
+        let state_of = move |frame: &CompositedFrame| -> EngineStateSnapshot {
             #[cfg(feature = "overlay")]
             let captions = sample_caption_stores(&caption_stores, frame.pts());
             #[cfg(feature = "overlay")]
@@ -888,8 +973,13 @@ impl RealPipeline {
             if let Some(obs) = hot_tick_observer.as_ref() {
                 obs.fetch_add(1, Ordering::Release);
             }
+            // The composited canvas, cloned once into an `Arc` reused for BOTH
+            // the bake/encode fan-out AND the live-preview slot (a single wait-
+            // free swap; the control plane serves the latest still off it).
+            let canvas = Arc::new(frame.canvas.clone());
+            preview.store(Some(Arc::clone(&canvas)));
             let item = StreamItem {
-                canvas: Arc::new(frame.canvas.clone()),
+                canvas: Arc::clone(&canvas),
                 tick_index: frame.tick.index,
                 #[cfg(feature = "overlay")]
                 source_states: frame.source_states.clone(),
@@ -922,25 +1012,45 @@ impl RealPipeline {
                     }
                 },
             }
-            TickState {
-                tick: frame.tick.index,
-                pts: frame.pts(),
-            }
+            crate::control::state_snapshot(
+                frame.tick.index,
+                frame.pts().as_nanos(),
+                frame.canvas.width(),
+                frame.canvas.height(),
+            )
         };
-        let event_of = |frame: &CompositedFrame| {
-            Some(TickState {
-                tick: frame.tick.index,
-                pts: frame.pts(),
-            })
+        // Sparse tile-state events: emit at most one `tile.state` change per tick
+        // (seed each tile once, then on transitions), keyed by the source id, so
+        // the monitoring UI shows live per-tile lifecycle without a per-tick flood.
+        let mut last_states: std::collections::HashMap<String, SourceState> =
+            std::collections::HashMap::new();
+        let event_of = move |frame: &CompositedFrame| -> Option<Event> {
+            for (source, &state) in &frame.source_states {
+                if last_states.get(source) != Some(&state) {
+                    let from = last_states.get(source).copied().unwrap_or(state);
+                    last_states.insert(source.clone(), state);
+                    return Some(Event::TileState(multiview_events::TileState {
+                        from: from.into(),
+                        to: state.into(),
+                        input: Some(source.clone()),
+                        trigger: "state_change".to_owned(),
+                    }));
+                }
+            }
+            None
         };
 
         let outcome = match max_ticks {
             Some(max) => {
                 runtime
-                    .run_for(&publisher, stop, max, state_of, event_of)
+                    .run_for_with_control(publisher, stop, max, state_of, event_of, control)
                     .await
             }
-            None => runtime.run(&publisher, stop, state_of, event_of).await,
+            None => {
+                runtime
+                    .run_with_control(publisher, stop, state_of, event_of, control)
+                    .await
+            }
         }
         .map_err(|e| PipelineError::Engine(e.to_string()));
 
@@ -1129,7 +1239,7 @@ struct BakeContext {
 
 impl BakeContext {
     /// The loudness (dBFS) to show for source `id` at output tick `i` (mirrors
-    /// the old `RealPipeline::meter_db_for`): that source's own per-tick build-time
+    /// the old `Pipeline::meter_db_for`): that source's own per-tick build-time
     /// timeline, falling back to the meter floor for an audio-free source.
     #[cfg(feature = "overlay")]
     fn meter_db_for(&self, id: &str, i: usize) -> f64 {
@@ -1266,14 +1376,6 @@ impl StreamBaker {
     }
 }
 
-/// The per-tick state snapshot published outward (invariant #10): the tick index
-/// and its presentation timestamp. Best-effort; no consumer can back-pressure it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TickState {
-    tick: u64,
-    pts: MediaTime,
-}
-
 /// One streamed output tick handed off the hot loop to the bake consumer over
 /// the bounded queue (ADR-0025): the composited canvas (one cheap `Arc` clone —
 /// no more than the old collector) plus the per-source state SAMPLED on the hot
@@ -1341,14 +1443,14 @@ pub struct TestSinkOutcome {
     pub frames: usize,
 }
 
-/// A boxed fake-sink closure the [`RealPipeline::drive_streaming_for_test`] seam
+/// A boxed fake-sink closure the [`Pipeline::drive_streaming_for_test`] seam
 /// injects: it consumes the fan-out [`Receiver`] (each baked `Arc<Nv12Image>`)
 /// and returns a [`TestSinkOutcome`]. It runs on its own off-hot-path thread,
 /// exactly like a production sink, so a test can block/slow/count it to assert
 /// the streaming concurrency contract.
 pub type TestSinkRunner = Box<dyn FnOnce(Receiver<Arc<Nv12Image>>) -> TestSinkOutcome + Send>;
 
-/// The outcome of [`RealPipeline::drive_streaming`]: the report plus streaming
+/// The outcome of [`Pipeline::drive_streaming`]: the report plus streaming
 /// observability folded from the egress threads.
 struct DriveStreamOutcome {
     report: PipelineReport,
@@ -1357,7 +1459,7 @@ struct DriveStreamOutcome {
 }
 
 /// The injected parameters for the ADR-0025 streaming test seam
-/// ([`RealPipeline::drive_streaming_for_test`]): the time source + pacer, the
+/// ([`Pipeline::drive_streaming_for_test`]): the time source + pacer, the
 /// tick budget, the send policy, the fake sink runners, and an optional hot-loop
 /// tick observer. Bundled into one struct so the seam keeps a small argument
 /// list and the test reads as a record of named knobs.
@@ -2347,7 +2449,7 @@ fn ticks_per_second(cadence: Rational) -> u32 {
     u32::try_from(rounded.max(1)).unwrap_or(u32::MAX)
 }
 
-/// Build the real **per-source** per-tick audio-loudness timelines (dBFS) off the
+/// Build the **per-source** per-tick audio-loudness timelines (dBFS) off the
 /// build path — one entry per **file-backed** source that decodes to audio.
 ///
 /// For each `file`/`test` source it runs that source's own decoded 48 kHz
@@ -2563,13 +2665,13 @@ fn output_codec(output: &Output) -> Option<&str> {
 
 /// Build the runnable sinks from the config outputs.
 ///
-/// HLS/LL-HLS segment to disk; **RTMP and SRT push outputs are run** via the real
+/// HLS/LL-HLS segment to disk; **RTMP and SRT push outputs are run** via the
 /// [`PushSink`] (the same encode-once-mux-many drive loop the file/HLS sinks use —
 /// invariant #7 — only the muxer targets a network URL). The RTSP *server* and NDI
 /// out are genuinely not implemented (an RTSP server is its own RTP/RTSP protocol
 /// stack; NDI is the proprietary runtime-loaded SDK), so they are honestly skipped
 /// with a log line rather than pretended-runnable — a config mixing one with a
-/// real output still produces that real output.
+/// supported output still produces that supported output.
 fn build_outputs(
     outputs: &[Output],
     cfg: &EncodeConfig,

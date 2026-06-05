@@ -1,4 +1,4 @@
-//! Streaming-encode behavioural tests for [`RealPipeline`] (ADR-0025).
+//! Streaming-encode behavioural tests for [`Pipeline`] (ADR-0025).
 //!
 //! These are sleep-free, GPU-free, FFmpeg-codec-free behavioural tests of the
 //! streaming bake→encode→fan-out path. They drive the engine over a
@@ -9,7 +9,7 @@
 //! the `ffmpeg`/`ffprobe` CLIs. The end-to-end "does it produce a playable file"
 //! coverage lives in `real_pipeline.rs`/`overlay_pipeline.rs`.
 //!
-//! Why a test seam: `RealPipeline::drive` is private; the public `run_for`/
+//! Why a test seam: `Pipeline::drive` is private; the public `run_for`/
 //! `run_until` always wire the *real* file/HLS sinks. The seam exposes the same
 //! streaming machinery with (a) an injected time source + pacer and (b)
 //! injectable fake sink runners, so the hot loop, the bounded channel policy,
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use multiview_cli::pipeline::{RealPipeline, SendPolicy, StreamTestParams, TestSinkOutcome};
+use multiview_cli::pipeline::{Pipeline, SendPolicy, StreamTestParams, TestSinkOutcome};
 use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource, StopSignal, TimeSource};
@@ -73,10 +73,10 @@ segment_ms = 1000
     .to_owned()
 }
 
-fn build_pipeline() -> RealPipeline {
+fn build_pipeline() -> Pipeline {
     let config = MultiviewConfig::load_from_toml(&config_text()).expect("parse config");
     config.validate().expect("config validates");
-    RealPipeline::build(&config).expect("build real pipeline")
+    Pipeline::build(&config).expect("build real pipeline")
 }
 
 /// Advance the [`ManualTimeSource`] far enough that the [`CooperativePacer`]

@@ -54,7 +54,7 @@ fn run_subcommand_defaults() {
     match cli.command {
         Command::Run(args) => {
             assert_eq!(args.config, PathBuf::from("examples/2x2.toml"));
-            assert!(!args.headless, "headless must default to false");
+            assert!(!args.software, "software must default to false");
             assert_eq!(args.ticks, None, "ticks must default to None (run forever)");
         }
         other @ Command::Validate(_) => panic!("expected Run, got {other:?}"),
@@ -62,20 +62,33 @@ fn run_subcommand_defaults() {
 }
 
 #[test]
-fn run_subcommand_headless_with_ticks() {
+fn run_subcommand_software_with_ticks() {
     let cli = Cli::parse_from([
         "multiview",
         "run",
         "examples/2x2.toml",
-        "--headless",
+        "--software",
         "--ticks",
         "120",
     ]);
     match cli.command {
         Command::Run(args) => {
-            assert!(args.headless);
+            assert!(args.software);
             assert_eq!(args.ticks, Some(120));
         }
+        other @ Command::Validate(_) => panic!("expected Run, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_subcommand_headless_is_a_back_compat_alias_for_software() {
+    // `--headless` is retained as a hidden alias and must map onto `software`.
+    let cli = Cli::parse_from(["multiview", "run", "examples/2x2.toml", "--headless"]);
+    match cli.command {
+        Command::Run(args) => assert!(
+            args.software,
+            "the --headless alias must set the software flag"
+        ),
         other @ Command::Validate(_) => panic!("expected Run, got {other:?}"),
     }
 }

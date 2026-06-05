@@ -81,7 +81,7 @@ needed); `engine` depends on the media crates; `control`/`preview` depend on `en
 | `multiview-control` | axum REST/WS/SSE, OpenAPI, auth, SQLite, command bus, embedded SPA. | `routes` `problem` (RFC 9457) `realtime` (WS/SSE) `auth` `command` `repository` `sqlite` `openapi` `state` `concurrency` | web-api-stack, realtime-api, management-capability-matrix; ADR-RT001..RT006, W001..W008 |
 | `multiview-preview` | Preview taps, WHEP/MJPEG, cue/pre-warm. Strictly isolated. | `tap` (registry, refcounted lazy-start) `framing` `token` | preview-subsystem; ADR-P001..P005 |
 | `multiview-telemetry` | `tracing` + Prometheus + health (`/livez`,`/readyz`). | `metrics` `health` `tracing_init` | core-engine §15, resilience-and-av; ADR-R009 |
-| `multiview-cli` | Binary `multiview`: wires engine + control, config load, run/validate. | `cli` (arg parse) `validate` `run` (`HeadlessEngine`, `run --headless`) | core-engine; conventions §7 (licensing) |
+| `multiview-cli` | Binary `multiview`: wires engine + control, config load, run/validate. | `cli` (arg parse) `validate` `run` (`SoftwareEngine`, `run --software`) | core-engine; conventions §7 (licensing) |
 | `web/` | React 19 SPA: shadcn/ui, TanStack, react-konva, dnd-kit, OpenAPI client. | `app` `pages` `components/ui` `layout/` (konva canvas + accessible `CellsForm`) `realtime/` `api` `i18n` + `locales/` (en/ar/pseudo) `theme` | web-api-stack, conventions §8; ADR-W001..W008 |
 
 ## Docs tree

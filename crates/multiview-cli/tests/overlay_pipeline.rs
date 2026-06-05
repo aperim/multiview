@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use multiview_cli::pipeline::RealPipeline;
+use multiview_cli::pipeline::Pipeline;
 use multiview_config::MultiviewConfig;
 
 /// Generate a 2-second `testsrc` clip (LGPL `mpeg2video`) for the file source.
@@ -167,7 +167,7 @@ async fn overlays_are_baked_into_the_real_pipeline_output() {
     let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
     config.validate().expect("config validates");
 
-    let mut pipeline = RealPipeline::build(&config).expect("build real pipeline");
+    let mut pipeline = Pipeline::build(&config).expect("build real pipeline");
     let report = pipeline
         .run_for(TICKS)
         .await

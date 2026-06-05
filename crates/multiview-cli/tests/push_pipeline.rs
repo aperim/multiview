@@ -31,7 +31,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use multiview_cli::pipeline::RealPipeline;
+use multiview_cli::pipeline::Pipeline;
 use multiview_config::MultiviewConfig;
 
 /// Generate a short `testsrc` clip (LGPL `mpeg2video`) for the file source.
@@ -159,8 +159,7 @@ async fn pipeline_runs_a_push_output_and_an_unreachable_peer_does_not_break_the_
     // genuinely exercising the push-wiring path, not a no-op).
     assert_eq!(config.outputs.len(), 2, "config wires HLS + an RTMP push");
 
-    let mut pipeline =
-        RealPipeline::build(&config).expect("build real pipeline with a push output");
+    let mut pipeline = Pipeline::build(&config).expect("build real pipeline with a push output");
 
     // The whole run must complete despite the unreachable push peer: invariant #1
     // (the output clock emits exactly N frames for N ticks) and #10 (a dead remote
@@ -267,7 +266,7 @@ async fn a_push_only_config_is_runnable_now_that_push_is_wired() {
     // The keystone assertion: a push-only config BUILDS. If the push were still
     // skipped, `build_outputs` would be empty and this would be `Err(NoOutput)`.
     let mut pipeline =
-        RealPipeline::build(&config).expect("a push-only config must build (push is wired)");
+        Pipeline::build(&config).expect("a push-only config must build (push is wired)");
 
     // And it RUNS to completion (the unreachable peer must not stall the clock).
     let report = pipeline

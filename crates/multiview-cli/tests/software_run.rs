@@ -1,6 +1,6 @@
-//! End-to-end software smoke of invariant #1 via the `run --headless` path.
+//! End-to-end software smoke of invariant #1 via the `run --software` path.
 //!
-//! This wires the *real* engine the CLI builds — output clock + CPU reference
+//! This wires the engine the CLI builds — output clock + CPU reference
 //! compositor + per-source framestores fed by built-in test-pattern sources —
 //! and drives it deterministically (manual time source + cooperative pacer, no
 //! real sleeps). It asserts the load-bearing property of the whole product:
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use multiview_cli::run::HeadlessEngine;
+use multiview_cli::run::SoftwareEngine;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource};
 
@@ -201,7 +201,7 @@ fn swap_source_command_drain_rebinds_the_tile_on_the_compositor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn headless_run_serves_the_control_api_while_running() {
+async fn software_run_serves_the_control_api_while_running() {
     use multiview_cli::control;
     use multiview_control::{command_bus, EngineStateSnapshot};
     use multiview_engine::{EnginePublisher, StopSignal};
@@ -209,7 +209,7 @@ async fn headless_run_serves_the_control_api_while_running() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let cfg = small_config();
-    let mut engine = HeadlessEngine::build(&cfg).expect("build headless engine");
+    let mut engine = SoftwareEngine::build(&cfg).expect("build software engine");
 
     // The engine's outbound publisher, shared (read-only) with the control plane.
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
@@ -250,7 +250,7 @@ async fn headless_run_serves_the_control_api_while_running() {
     let report = engine
         .run_until_stopped(&stop, publisher.as_ref())
         .await
-        .expect("headless serving run");
+        .expect("software serving run");
     assert!(
         !report.faltered,
         "the output clock must not falter while the API is served"
@@ -286,13 +286,13 @@ async fn headless_run_serves_the_control_api_while_running() {
 }
 
 #[tokio::test]
-async fn headless_run_emits_exactly_n_frames_for_n_ticks() {
+async fn software_run_emits_exactly_n_frames_for_n_ticks() {
     const TICKS: u64 = 90;
 
     let cfg = small_config();
     let cadence = cfg.canvas.fps.rational();
 
-    let mut engine = HeadlessEngine::build(&cfg).expect("build headless engine");
+    let mut engine = SoftwareEngine::build(&cfg).expect("build software engine");
 
     // Deterministic clock: the engine jumps the manual time source past the last
     // tick's deadline so the pacer never gates — no wall-clock sleeps.
@@ -302,7 +302,7 @@ async fn headless_run_emits_exactly_n_frames_for_n_ticks() {
     let report = engine
         .run_for(Arc::clone(&time), pacer, TICKS)
         .await
-        .expect("headless run succeeds");
+        .expect("software run succeeds");
 
     assert_eq!(
         report.frames, TICKS,
@@ -320,10 +320,10 @@ async fn headless_run_emits_exactly_n_frames_for_n_ticks() {
 }
 
 #[tokio::test]
-async fn headless_frame_pts_advances_by_exactly_one_tick_period() {
+async fn software_frame_pts_advances_by_exactly_one_tick_period() {
     let cfg = small_config();
     let cadence = cfg.canvas.fps.rational();
-    let mut engine = HeadlessEngine::build(&cfg).expect("build");
+    let mut engine = SoftwareEngine::build(&cfg).expect("build");
 
     let time = Arc::new(ManualTimeSource::new());
     let report = engine
@@ -341,12 +341,12 @@ async fn headless_frame_pts_advances_by_exactly_one_tick_period() {
 }
 
 #[tokio::test]
-async fn headless_run_survives_a_config_with_no_live_inputs() {
+async fn software_run_survives_a_config_with_no_live_inputs() {
     // The test sources normally publish frames; here we additionally prove the
     // loop produces frames even without any published frame, because a starved
     // tile yields the NoSignal slate rather than stalling.
     let cfg = small_config();
-    let mut engine = HeadlessEngine::build(&cfg).expect("build");
+    let mut engine = SoftwareEngine::build(&cfg).expect("build");
     // Do NOT pump the test sources: leave every store empty.
     engine.set_publish_test_frames(false);
 
@@ -360,12 +360,12 @@ async fn headless_run_survives_a_config_with_no_live_inputs() {
 }
 
 #[tokio::test]
-async fn headless_run_builds_and_drives_the_real_1080p_example() {
-    // Prove the shipped 1920x1080 example builds the engine and composites real
+async fn software_run_builds_and_drives_the_1080p_example() {
+    // Prove the shipped 1920x1080 example builds the engine and composites
     // frames end-to-end. Kept to two ticks because the CPU reference compositor
     // is O(pixels x tiles) and a full 1080p canvas is expensive in debug.
     let cfg = load("2x2.toml");
-    let mut engine = HeadlessEngine::build(&cfg).expect("build 1080p engine");
+    let mut engine = SoftwareEngine::build(&cfg).expect("build 1080p engine");
     assert_eq!(
         engine.source_count(),
         4,
@@ -376,7 +376,7 @@ async fn headless_run_builds_and_drives_the_real_1080p_example() {
     let report = engine
         .run_for(Arc::clone(&time), CooperativePacer, 2)
         .await
-        .expect("1080p headless run");
+        .expect("1080p software run");
     assert_eq!(report.frames, 2);
     assert_eq!(report.canvas_width, 1920);
     assert_eq!(report.canvas_height, 1080);
@@ -384,7 +384,7 @@ async fn headless_run_builds_and_drives_the_real_1080p_example() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn realtime_headless_run_paces_to_wall_clock() {
+async fn realtime_software_run_paces_to_wall_clock() {
     // With the production realtime pacer over the real monotonic clock, a small
     // bounded run produces exactly N frames and consumes roughly N tick-periods
     // of real wall-clock — proving the loop paces (against true elapsed time)
@@ -394,13 +394,13 @@ async fn realtime_headless_run_paces_to_wall_clock() {
 
     let cfg = small_config();
     let cadence = cfg.canvas.fps.rational();
-    let mut engine = HeadlessEngine::build(&cfg).expect("build");
+    let mut engine = SoftwareEngine::build(&cfg).expect("build");
 
     let start = std::time::Instant::now();
     let report = engine
         .run_for_realtime(TICKS)
         .await
-        .expect("realtime headless run");
+        .expect("realtime software run");
     let elapsed = start.elapsed();
 
     assert_eq!(

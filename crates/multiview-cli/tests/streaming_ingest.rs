@@ -2,7 +2,7 @@
 //! (the `ffmpeg` feature).
 //!
 //! The defect was that the pipeline decoded *every* frame of *every* source into
-//! a `Vec` inside `RealPipeline::build` before the output clock ever started. For
+//! a `Vec` inside `Pipeline::build` before the output clock ever started. For
 //! a finite file that merely wasted time and memory; for a **live** stream (which
 //! never emits EOF) it hung forever and `--duration`/`--ticks` never took effect.
 //!
@@ -19,7 +19,7 @@
 //!    `run_for(N)` produces exactly `N` composited frames (output independent of
 //!    input length, invariant #1) and tears ingest down so the call returns.
 //!
-//! No tautologies: assertions are against the real `RealPipeline` behavior and
+//! No tautologies: assertions are against the real `Pipeline` behavior and
 //! the on-disk artifact.
 #![cfg(feature = "ffmpeg")]
 #![allow(
@@ -33,7 +33,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use multiview_cli::pipeline::RealPipeline;
+use multiview_cli::pipeline::Pipeline;
 use multiview_config::MultiviewConfig;
 
 /// Generate a `secs`-second `720p` `testsrc` clip (LGPL `mpeg2video`, in-tree).
@@ -155,7 +155,7 @@ async fn build_does_not_predecode_the_whole_source() {
     config.validate().expect("config validates");
 
     let started = Instant::now();
-    let pipeline = RealPipeline::build(&config).expect("build real pipeline");
+    let pipeline = Pipeline::build(&config).expect("build real pipeline");
     let elapsed = started.elapsed();
 
     assert_eq!(pipeline.source_count(), 1, "config wires one source");
@@ -187,7 +187,7 @@ async fn bounded_run_completes_promptly_and_emits_exactly_n_frames() {
     let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
     config.validate().expect("config validates");
 
-    let mut pipeline = RealPipeline::build(&config).expect("build real pipeline");
+    let mut pipeline = Pipeline::build(&config).expect("build real pipeline");
 
     let started = Instant::now();
     let report = pipeline.run_for(TICKS).await.expect("bounded real run");

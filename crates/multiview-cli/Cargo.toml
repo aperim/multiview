@@ -76,10 +76,10 @@ tokio = { workspace = true, features = [
 ] }
 tempfile = "3"
 
-# The real-pipeline integration test needs the `ffmpeg` feature (a real libav*
+# The pipeline-ingest integration test needs the `ffmpeg` feature (a libav*
 # build + the `ffmpeg`/`ffprobe` CLIs at runtime).
 [[test]]
-name = "real_pipeline"
+name = "pipeline_ingest"
 required-features = ["ffmpeg"]
 
 # The streaming-encode behavioural tests (ADR-0025) drive the bounded

@@ -5,7 +5,7 @@
 //! program + a `dvbsub` cue active from 1 s; the CLI cannot transcode text →
 //! bitmap subtitle, so the fixture is built directly through libav by
 //! `multiview_ffmpeg::test_fixtures`), wires it as a single-cell `file` source
-//! with `captions = {mode="auto"}` + an HLS output, builds the [`RealPipeline`],
+//! with `captions = {mode="auto"}` + an HLS output, builds the [`Pipeline`],
 //! drives a bounded run, and then **decodes frames from the produced
 //! `program.ts`** and asserts the caption band is **bright (non-background)
 //! inside the cue window** and **background before it** — i.e. the DVB-sub
@@ -23,7 +23,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use multiview_cli::pipeline::RealPipeline;
+use multiview_cli::pipeline::Pipeline;
 use multiview_config::MultiviewConfig;
 
 /// A single-cell config over the DVB-sub fixture with `captions = auto` and an
@@ -126,7 +126,7 @@ async fn dvbsub_cue_burns_into_the_tile_during_its_window() {
     let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
     config.validate().expect("config validates");
 
-    let mut pipeline = RealPipeline::build(&config).expect("build real pipeline");
+    let mut pipeline = Pipeline::build(&config).expect("build real pipeline");
     assert_eq!(pipeline.source_count(), 1, "single source");
 
     let report = pipeline.run_for(TICKS).await.expect("bounded real run");
