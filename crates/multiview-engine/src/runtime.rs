@@ -155,6 +155,12 @@ pub struct RunOutcome {
     pub stop: RunStop,
 }
 
+/// A do-nothing per-tick control hook, used by [`EngineRuntime::run`] /
+/// [`EngineRuntime::run_for`] (the paths with no management plane attached).
+fn no_control_hook() -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    |_drive: &mut CompositorDrive<Nv12Image>| {}
+}
+
 /// The integrated engine runtime: owns the clock, the drive loop, the outbound
 /// isolation publisher, the time source, and the pacer, and runs the per-tick
 /// loop (invariant #1).
@@ -249,8 +255,16 @@ impl<P: Pacer> EngineRuntime<P> {
         FS: FnMut(&CompositedFrame) -> S,
         FE: FnMut(&CompositedFrame) -> Option<E>,
     {
-        self.run_inner(publisher, stop, None, &mut state_of, &mut event_of)
-            .await
+        let mut no_control = no_control_hook();
+        self.run_inner(
+            publisher,
+            stop,
+            None,
+            &mut state_of,
+            &mut event_of,
+            &mut no_control,
+        )
+        .await
     }
 
     /// Run the tick loop for at most `max_ticks` ticks (or until `stop`), for
@@ -271,27 +285,101 @@ impl<P: Pacer> EngineRuntime<P> {
         FS: FnMut(&CompositedFrame) -> S,
         FE: FnMut(&CompositedFrame) -> Option<E>,
     {
+        let mut no_control = no_control_hook();
         self.run_inner(
             publisher,
             stop,
             Some(max_ticks),
             &mut state_of,
             &mut event_of,
+            &mut no_control,
         )
         .await
     }
 
-    async fn run_inner<S, E, FS, FE>(
+    /// Run **forever** (until `stop`) while applying control-plane
+    /// reconfiguration at each frame boundary via `control`.
+    ///
+    /// `control` is invoked once per tick, between the clock advance and the
+    /// compose, with `&mut` access to the [`CompositorDrive`] — the seam through
+    /// which the management plane drains its non-blocking command queue and
+    /// applies hot swaps ([`CompositorDrive::set_layout`] /
+    /// [`CompositorDrive::insert_store`]). It **must not block, await, or hold a
+    /// client-fillable lock**: it runs on the output-clock loop, so a stall there
+    /// would falter program output (invariants #1 + #10). Otherwise identical to
+    /// [`EngineRuntime::run`].
+    ///
+    /// # Errors
+    ///
+    /// See [`EngineRuntime::run`].
+    pub async fn run_with_control<S, E, FS, FE, FC>(
+        &mut self,
+        publisher: &EnginePublisher<S, E>,
+        stop: &StopSignal,
+        mut state_of: FS,
+        mut event_of: FE,
+        mut control: FC,
+    ) -> crate::Result<RunOutcome>
+    where
+        FS: FnMut(&CompositedFrame) -> S,
+        FE: FnMut(&CompositedFrame) -> Option<E>,
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
+        self.run_inner(
+            publisher,
+            stop,
+            None,
+            &mut state_of,
+            &mut event_of,
+            &mut control,
+        )
+        .await
+    }
+
+    /// Bounded (`max_ticks`) counterpart of [`EngineRuntime::run_with_control`],
+    /// for deterministic integration tests of the control seam.
+    ///
+    /// # Errors
+    ///
+    /// See [`EngineRuntime::run`].
+    pub async fn run_for_with_control<S, E, FS, FE, FC>(
+        &mut self,
+        publisher: &EnginePublisher<S, E>,
+        stop: &StopSignal,
+        max_ticks: u64,
+        mut state_of: FS,
+        mut event_of: FE,
+        mut control: FC,
+    ) -> crate::Result<RunOutcome>
+    where
+        FS: FnMut(&CompositedFrame) -> S,
+        FE: FnMut(&CompositedFrame) -> Option<E>,
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
+        self.run_inner(
+            publisher,
+            stop,
+            Some(max_ticks),
+            &mut state_of,
+            &mut event_of,
+            &mut control,
+        )
+        .await
+    }
+
+    async fn run_inner<S, E, FS, FE, FC>(
         &mut self,
         publisher: &EnginePublisher<S, E>,
         stop: &StopSignal,
         max_ticks: Option<u64>,
         state_of: &mut FS,
         event_of: &mut FE,
+        control: &mut FC,
     ) -> crate::Result<RunOutcome>
     where
         FS: FnMut(&CompositedFrame) -> S,
         FE: FnMut(&CompositedFrame) -> Option<E>,
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
     {
         let mut emitted: u64 = 0;
         loop {
@@ -321,6 +409,15 @@ impl<P: Pacer> EngineRuntime<P> {
 
             // 2. Advance the clock (pure `out_pts = f(tick)`).
             let tick: Tick = self.clock.tick();
+
+            // 2.5 Apply any pending control-plane reconfiguration AT THE FRAME
+            //     BOUNDARY (between ticks), before composing this tick — so a
+            //     hot layout/source swap takes effect on the very frame it lands.
+            //     The hook MUST be non-blocking and allocation-light (it drains a
+            //     non-blocking queue and applies O(1) `set_layout`/`insert_store`);
+            //     it never awaits and never holds a lock a client can fill, so the
+            //     output clock cannot be stalled by control (invariants #1 + #10).
+            control(&mut self.drive);
 
             // 3. Sample + compose exactly one frame (lock-free, never blocks on
             //    an input).

@@ -534,6 +534,118 @@ async fn runtime_stops_promptly_on_stop_signal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_hook_runs_every_tick_and_its_layout_swap_drives_the_composed_frame() {
+    // The control seam (inv #11): a per-tick hook applies hot reconfiguration at
+    // the frame boundary. Prove BOTH that it runs once per tick AND that a
+    // `set_layout` it performs is visible to the very next compose — i.e. the
+    // rebind actually drives program output, without faltering (inv #1).
+    const TICKS: u64 = 20;
+    let (w, h) = (16, 16);
+    // Two stores: "cam-a" stays empty (NoSignal); "cam-b" is primed LIVE.
+    let mut stores = HashMap::new();
+    let store_a = Arc::new(TileStore::<Nv12Image>::with_defaults("cam-a"));
+    let store_b = Arc::new(TileStore::<Nv12Image>::with_defaults("cam-b"));
+    // Prime cam-b with a solid frame so a cell bound to it reads LIVE.
+    store_b.publish_arc(
+        Arc::new(Nv12Image::solid(w, h, 120, 128, 128, resolved_color()).unwrap()),
+        multiview_core::time::MediaTime::from_nanos(0),
+    );
+    stores.insert("cam-a".to_owned(), Arc::clone(&store_a));
+    stores.insert("cam-b".to_owned(), Arc::clone(&store_b));
+
+    let cell_bound_to = |source: &str| Cell {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+        z: 0,
+        fit: FitMode::Contain,
+        source: Some(source.to_owned()),
+        ..Cell::default()
+    };
+    let layout_with = |name: &str, source: &str| {
+        Arc::new(Layout {
+            name: name.to_owned(),
+            canvas: Canvas {
+                width: w,
+                height: h,
+                fps_num: 60,
+                fps_den: 1,
+            },
+            cells: vec![cell_bound_to(source)],
+        })
+    };
+
+    // Start bound to the EMPTY source (cam-a) → the tile is NoSignal.
+    let drive = CompositorDrive::new(
+        layout_with("initial", "cam-a"),
+        stores,
+        nosignal_card(w, h),
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+    )
+    .unwrap();
+
+    let time_source = Arc::new(ManualTimeSource::new());
+    let ts: Arc<dyn TimeSource> = time_source.clone();
+    // State projection records, per tick, whether the composed frame's bound
+    // source is the LIVE cam-b (proving the swap drove the picture).
+    let publisher: Arc<EnginePublisher<bool, u64>> = Arc::new(EnginePublisher::new(8));
+
+    let mut runtime = EngineRuntime::new(
+        OutputClock::new(Rational::FPS_60).unwrap(),
+        drive,
+        ts,
+        CooperativePacer,
+    );
+    time_source.set(runtime.seed_nanos() + 1_000_000_000);
+
+    // Swap to cam-b at tick index 5 (a frame boundary). Count hook invocations.
+    let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let calls_in_hook = Arc::clone(&calls);
+    let swap_to_b = layout_with("reconfigured", "cam-b");
+    let stop = StopSignal::new();
+
+    let outcome = runtime
+        .run_for_with_control(
+            publisher.as_ref(),
+            &stop,
+            TICKS,
+            // state_of: did THIS frame draw the LIVE cam-b source?
+            |f: &multiview_engine::CompositedFrame| f.source_states.contains_key("cam-b"),
+            |_f| None::<u64>,
+            // control: on the 6th invocation, hot-swap the layout to cam-b.
+            move |drive: &mut CompositorDrive<Nv12Image>| {
+                let n = calls_in_hook.fetch_add(1, Ordering::AcqRel);
+                if n == 5 {
+                    drive
+                        .set_layout(Arc::clone(&swap_to_b))
+                        .expect("swap layout is valid");
+                }
+            },
+        )
+        .await
+        .expect("control run completes");
+
+    // The hook ran exactly once per tick.
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        TICKS,
+        "the control hook runs once per tick at the frame boundary"
+    );
+    // The output never faltered: exactly TICKS frames, clean completion.
+    assert_eq!(outcome.ticks, TICKS);
+    assert_eq!(outcome.stop, multiview_engine::RunStop::Completed);
+    // After the swap the composed frame draws cam-b (the rebind reached the
+    // picture). The latest published state must be `true`.
+    let drew_b = publisher.state.latest().expect("a state was published");
+    assert!(
+        *drew_b,
+        "after the control hook's set_layout, compose must draw the new source"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_of_none_publishes_no_events_while_state_advances_every_tick() {
     // The sparse-event contract: an `event_of` that returns `None` publishes
     // ZERO events, yet the wait-free state slot still refreshes every tick. (The
