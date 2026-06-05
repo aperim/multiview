@@ -6,22 +6,179 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "X-Generator: @lingui/cli\n"
 "Language: en\n"
+"Project-Id-Version: \n"
+"Report-Msgid-Bugs-To: \n"
+"PO-Revision-Date: \n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Plural-Forms: \n"
+
+#: src/pages/docs/ApiPage.tsx:52
+msgid "(opens in a new tab)"
+msgstr "(opens in a new tab)"
+
+#. placeholder {0}: editor.model.cells.length
+#. placeholder {1}: editor.model.cells.filter((c) => c.sourceId !== undefined).length
+#: src/layout/components/LayoutEditor.tsx:241
+msgid "{0} cell(s) · {1} bound to a source"
+msgstr "{0} cell(s) · {1} bound to a source"
+
+#: src/pages/docs/ContainerPage.tsx:134
+msgid "<0>/etc/multiview/multiview.toml</0> — the config file, mounted read-only."
+msgstr "<0>/etc/multiview/multiview.toml</0> — the config file, mounted read-only."
+
+#: src/pages/docs/ContainerPage.tsx:140
+msgid "<0>/var/lib/multiview/hls</0> — the HLS output directory. Back it with a named volume so a sidecar (or your host) can serve the playlist and segments."
+msgstr "<0>/var/lib/multiview/hls</0> — the HLS output directory. Back it with a named volume so a sidecar (or your host) can serve the playlist and segments."
+
+#: src/pages/docs/OverviewPage.tsx:65
+msgid "<0>Composite once, fan out many.</0> The canvas is encoded once per rendition and the same packets feed every transport, rather than re-encoding per destination."
+msgstr "<0>Composite once, fan out many.</0> The canvas is encoded once per rendition and the same packets feed every transport, rather than re-encoding per destination."
+
+#: src/pages/docs/OverviewPage.tsx:51
+msgid "<0>Continuous output.</0> One monotonic output clock produces a valid, correctly-timestamped frame every tick, independent of any input."
+msgstr "<0>Continuous output.</0> One monotonic output clock produces a valid, correctly-timestamped frame every tick, independent of any input."
+
+#: src/pages/docs/OverviewPage.tsx:72
+msgid "<0>Control never back-pressures the engine.</0> The management API, realtime streams, and preview are best-effort and physically incapable of stalling the output path."
+msgstr "<0>Control never back-pressures the engine.</0> The management API, realtime streams, and preview are best-effort and physically incapable of stalling the output path."
+
+#: src/pages/docs/ConfigPage.tsx:190
+msgid "<0>fit</0> controls scaling: <1>fill</1>, <2>contain</2>, <3>cover</3>, <4>none</4>, or <5>scale_down</5>."
+msgstr "<0>fit</0> controls scaling: <1>fill</1>, <2>contain</2>, <3>cover</3>, <4>none</4>, or <5>scale_down</5>."
+
+#: src/pages/docs/FeaturesPage.tsx:69
+msgid "<0>HLS / file output.</0> Writes a playlist and segments to disk. This is the path the quick-start uses and that works today."
+msgstr "<0>HLS / file output.</0> Writes a playlist and segments to disk. This is the path the quick-start uses and that works today."
+
+#: src/pages/docs/OverviewPage.tsx:58
+msgid "<0>Last-good-frame resilience.</0> Each tile rides a live / stale / reconnecting / no-signal state machine; a failing input cannot block the compositor."
+msgstr "<0>Last-good-frame resilience.</0> Each tile rides a live / stale / reconnecting / no-signal state machine; a failing input cannot block the compositor."
+
+#: src/pages/docs/FeaturesPage.tsx:88
+msgid "<0>Live RTSP / NDI / RTMP / SRT servers and push.</0> The network output servers are not yet wired into the run command."
+msgstr "<0>Live RTSP / NDI / RTMP / SRT servers and push.</0> The network output servers are not yet wired into the run command."
+
+#: src/pages/docs/FeaturesPage.tsx:79
+msgid "<0>Low-latency HLS.</0> Partial-segment HLS for lower glass-to-glass latency."
+msgstr "<0>Low-latency HLS.</0> Partial-segment HLS for lower glass-to-glass latency."
+
+#: src/pages/docs/ApiPage.tsx:114
+msgid "<0>Server-Sent Events</0> (fallback) at <1>/api/v1/events</1> — one-way, for environments where a WebSocket cannot be used."
+msgstr "<0>Server-Sent Events</0> (fallback) at <1>/api/v1/events</1> — one-way, for environments where a WebSocket cannot be used."
+
+#: src/pages/docs/ApiPage.tsx:108
+msgid "<0>WebSocket</0> (primary) at <1>/api/v1/ws</1> — bidirectional, used for the live UI."
+msgstr "<0>WebSocket</0> (primary) at <1>/api/v1/ws</1> — bidirectional, used for the live UI."
+
+#: src/pages/docs/ConfigPage.tsx:119
+msgid "A CSS-grid layout with <0>columns</0> and <1>rows</1> track lists (<2>fr</2> / <3>px</3> / <4>%</4>), a <5>gap</5>, and an <6>areas</6> map that names where each cell sits."
+msgstr "A CSS-grid layout with <0>columns</0> and <1>rows</1> track lists (<2>fr</2> / <3>px</3> / <4>%</4>), a <5>gap</5>, and an <6>areas</6> map that names where each cell sits."
+
+#: src/pages/docs/FeaturesPage.tsx:25
+msgid "A layout decides where every tile sits on the canvas. Use a factory preset (such as 2x2 or 1+5), a CSS-grid with named areas and fractional tracks, or absolute normalized rectangles for full control. A cell's fit mode controls how a source is scaled into its tile — contain to letterbox, cover to crop and fill, or fill to stretch."
+msgstr "A layout decides where every tile sits on the canvas. Use a factory preset (such as 2x2 or 1+5), a CSS-grid with named areas and fractional tracks, or absolute normalized rectangles for full control. A cell's fit mode controls how a source is scaled into its tile — contain to letterbox, cover to crop and fill, or fill to stretch."
+
+#: src/layout/components/validationMessages.tsx:18
+msgid "A layout name is required."
+msgstr "A layout name is required."
+
+#: src/pages/docs/ConfigPage.tsx:24
+msgid "A Multiview deployment is one declarative document. It is authored as TOML and round-trips losslessly to JSON (the API wire form)."
+msgstr "A Multiview deployment is one declarative document. It is authored as TOML and round-trips losslessly to JSON (the API wire form)."
+
+#: src/pages/docs/ConfigPage.tsx:113
+msgid "A named factory arrangement: <0>2x2</0>, <1>3x3</1>, <2>1+5</2>, or <3>pip</3>."
+msgstr "A named factory arrangement: <0>2x2</0>, <1>3x3</1>, <2>1+5</2>, or <3>pip</3>."
+
+#: src/pages/docs/ConfigPage.tsx:203
+msgid "A per-cell <0>qos</0> block sets a degradation <1>priority</1> and strategy, so the engine sheds the cheapest tiles first under load before touching the program output."
+msgstr "A per-cell <0>qos</0> block sets a degradation <1>priority</1> and strategy, so the engine sheds the cheapest tiles first under load before touching the program output."
+
+#: src/pages/docs/FeaturesPage.tsx:124
+msgid "A salvo is a named, atomically-applied recall. One salvo can switch the layout, rebind sources into cells, set tally colors, and update under-monitor display text — all at once — so an operator can move a whole arrangement (say, a VTR review setup) with a single action instead of a series of separate edits."
+msgstr "A salvo is a named, atomically-applied recall. One salvo can switch the layout, rebind sources into cells, set tally colors, and update under-monitor display text — all at once — so an operator can move a whole arrangement (say, a VTR review setup) with a single action instead of a series of separate edits."
+
+#: src/pages/docs/ComposePage.tsx:39
+msgid "A small RTSP server that, on start, runs ffmpeg to publish a synthetic test pattern with a sine-wave audio tone to <0>rtsp://testsrc:8554/test</0>."
+msgstr "A small RTSP server that, on start, runs ffmpeg to publish a synthetic test pattern with a sine-wave audio tone to <0>rtsp://testsrc:8554/test</0>."
+
+#: src/pages/docs/FeaturesPage.tsx:38
+msgid "A source is a managed input. Each one owns its ingest, decode, color handling, and reconnect behaviour, and is referenced by tiles via a stable id. Supported kinds include RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, file, and a built-in synthetic test pattern. When a source stops delivering frames, its tile holds the last good frame and moves through a clear state machine — live, stale, reconnecting, no-signal — while the engine reconnects without disturbing the rest of the wall."
+msgstr "A source is a managed input. Each one owns its ingest, decode, color handling, and reconnect behaviour, and is referenced by tiles via a stable id. Supported kinds include RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, file, and a built-in synthetic test pattern. When a source stops delivering frames, its tile holds the last good frame and moves through a clear state machine — live, stale, reconnecting, no-signal — while the engine reconnects without disturbing the rest of the wall."
+
+#: src/pages/docs/ComposePage.tsx:53
+msgid "A tiny nginx that serves the HLS volume over HTTP so you can open the stream in a player at <0>http://localhost:8888/multiview.m3u8</0>."
+msgstr "A tiny nginx that serves the HLS volume over HTTP so you can open the stream in a player at <0>http://localhost:8888/multiview.m3u8</0>."
+
+#: src/pages/LayoutsPage.tsx:226
+msgid "Accessible editing path: Cells form + Inspector in the editor"
+msgstr "Accessible editing path: Cells form + Inspector in the editor"
 
 #: src/pages/LayoutsPage.tsx:137
-msgid "Accessible editing path: planned (Cells form + Inspector)"
-msgstr "Accessible editing path: planned (Cells form + Inspector)"
+#~ msgid "Accessible editing path: planned (Cells form + Inspector)"
+#~ msgstr "Accessible editing path: planned (Cells form + Inspector)"
 
 #: src/pages/SettingsPage.tsx:71
 msgid "Accessible toasts announce via a live region."
 msgstr "Accessible toasts announce via a live region."
 
-#: src/pages/SimplePages.tsx:12
+#: src/pages/LayoutsPage.tsx:82
+msgid "Actions"
+msgstr "Actions"
+
+#: src/pages/docs/ApiPage.tsx:66
+msgid "Actions that take time return <0>202 Accepted</0> with an operation id; the final result arrives on the realtime stream, not in the HTTP response body."
+msgstr "Actions that take time return <0>202 Accepted</0> with an operation id; the final result arrives on the realtime stream, not in the HTTP response body."
+
+#: src/layout/components/SourcePalette.tsx:103
+msgid "Add"
+msgstr "Add"
+
+#: src/pages/SimplePages.tsx:62
 msgid "Add and manage live ingest sources."
 msgstr "Add and manage live ingest sources."
 
-#: src/pages/LayoutsPage.tsx:104
+#: src/layout/components/validationMessages.tsx:38
+msgid "Add at least one cell to the layout."
+msgstr "Add at least one cell to the layout."
+
+#: src/layout/components/LayoutEditor.tsx:136
+msgid "Add cell"
+msgstr "Add cell"
+
+#: src/layout/components/SourcePalette.tsx:159
+msgid "Add to layout"
+msgstr "Add to layout"
+
+#: src/pages/docs/ConfigPage.tsx:283
+msgid "Advertise the canvas as an NDI source by <0>name</0>."
+msgstr "Advertise the canvas as an NDI source by <0>name</0>."
+
+#: src/pages/docs/FeaturesPage.tsx:134
+msgid "Alarms"
+msgstr "Alarms"
+
+#: src/pages/docs/FeaturesPage.tsx:136
+msgid "Alarms are raised by content-aware fault probes attached to a tile. Probes can detect a black picture, a frozen picture, audio silence, and loudness that drifts from an EBU R128 target. Each probe has a severity and dwell timers, so a brief glitch does not trip an alarm while a sustained fault does. Severities follow the standard cleared / indeterminate / warning / minor / major / critical scale."
+msgstr "Alarms are raised by content-aware fault probes attached to a tile. Probes can detect a black picture, a frozen picture, audio silence, and loudness that drifts from an EBU R128 target. Each probe has a severity and dwell timers, so a brief glitch does not trip an alarm while a sustained fault does. Severities follow the standard cleared / indeterminate / warning / minor / major / critical scale."
+
+#: src/pages/LayoutsPage.tsx:193
 msgid "All configured layouts."
 msgstr "All configured layouts."
+
+#: src/pages/docs/ApiPage.tsx:61
+msgid "All endpoints live under <0>/api/v1</0>."
+msgstr "All endpoints live under <0>/api/v1</0>."
+
+#: src/pages/docs/ApiPage.tsx:24
+#: src/pages/docs/docsNav.tsx:76
+msgid "API & realtime"
+msgstr "API & realtime"
+
+#: src/pages/docs/ContainerPage.tsx:168
+msgid "API access token"
+msgstr "API access token"
 
 #: src/pages/SettingsPage.tsx:34
 msgid "Appearance"
@@ -31,21 +188,122 @@ msgstr "Appearance"
 msgid "Appearance and language preferences."
 msgstr "Appearance and language preferences."
 
+#: src/pages/docs/ApiPage.tsx:126
+msgid "Authentication"
+msgstr "Authentication"
+
+#: src/pages/docs/components.tsx:121
+msgid "Available"
+msgstr "Available"
+
 #: src/pages/NotFoundPage.tsx:19
 msgid "Back to dashboard"
 msgstr "Back to dashboard"
+
+#: src/pages/docs/ConfigPage.tsx:92
+msgid "Background fill as a hex color (e.g. #101014)."
+msgstr "Background fill as a hex color (e.g. #101014)."
+
+#: src/layout/components/CellsForm.tsx:331
+msgid "Backward"
+msgstr "Backward"
+
+#: src/pages/docs/ApiPage.tsx:60
+msgid "Base path"
+msgstr "Base path"
+
+#: src/pages/docs/ContainerPage.tsx:188
+msgid "Be honest about the current state: the control API and this embedded UI are built, but the binary does not yet bind a network listener when it runs — so there is no API or web-UI port to publish yet. Wiring the listener into the run command is on the roadmap. Until then, the engine is driven entirely by the config file."
+msgstr "Be honest about the current state: the control API and this embedded UI are built, but the binary does not yet bind a network listener when it runs — so there is no API or web-UI port to publish yet. Wiring the listener into the run command is on the roadmap. Until then, the engine is driven entirely by the config file."
+
+#: src/layout/components/CellsForm.tsx:372
+msgid "Bring forward"
+msgstr "Bring forward"
+
+#: src/pages/docs/ComposePage.tsx:62
+msgid "Bring it up and down"
+msgstr "Bring it up and down"
+
+#: src/pages/LayoutsPage.tsx:264
+msgid "Cancel"
+msgstr "Cancel"
+
+#: src/layout/components/LayoutEditor.tsx:175
+#: src/pages/docs/ConfigPage.tsx:64
+msgid "Canvas"
+msgstr "Canvas"
+
+#: src/pages/docs/ConfigPage.tsx:76
+msgid "Canvas height in pixels."
+msgstr "Canvas height in pixels."
+
+#: src/layout/components/validationMessages.tsx:20
+msgid "Canvas width and height must be positive whole numbers."
+msgstr "Canvas width and height must be positive whole numbers."
+
+#: src/pages/docs/ConfigPage.tsx:73
+msgid "Canvas width in pixels."
+msgstr "Canvas width in pixels."
+
+#: src/layout/components/validationMessages.tsx:30
+msgid "Cell identifiers must be unique within a layout."
+msgstr "Cell identifiers must be unique within a layout."
+
+#: src/layout/components/CellsForm.tsx:361
+msgid "Cell name"
+msgstr "Cell name"
+
+#: src/layout/components/LayoutEditor.tsx:220
+#: src/pages/docs/ConfigPage.tsx:179
+#: src/pages/LayoutsPage.tsx:75
+msgid "Cells"
+msgstr "Cells"
+
+#: src/layout/components/LayoutEditor.tsx:178
+msgid "Cells (accessible)"
+msgstr "Cells (accessible)"
 
 #: src/pages/SettingsPage.tsx:37
 msgid "Choose light, dark, or follow the system."
 msgstr "Choose light, dark, or follow the system."
 
-#: src/pages/SimplePages.tsx:22
+#: src/pages/docs/ComposePage.tsx:83
+msgid "Compose merges files left to right. The GPU overlay files swap the <0>multiview</0> image and add device access; the other services are inherited unchanged. Layer an overlay on top of the base file:"
+msgstr "Compose merges files left to right. The GPU overlay files swap the <0>multiview</0> image and add device access; the other services are inherited unchanged. Layer an overlay on top of the base file:"
+
+#: src/pages/docs/ComposePage.tsx:20
+#: src/pages/docs/docsNav.tsx:55
+msgid "Compose reference"
+msgstr "Compose reference"
+
+#: src/pages/LayoutEditorPage.tsx:123
+msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
+msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
+
+#: src/pages/docs/ConfigPage.tsx:22
+#: src/pages/docs/docsNav.tsx:66
+msgid "Config-as-code"
+msgstr "Config-as-code"
+
+#: src/pages/SimplePages.tsx:121
 msgid "Configure output servers and renditions."
 msgstr "Configure output servers and renditions."
+
+#: src/pages/SimplePages.tsx:68
+msgid "Configured ingest sources."
+msgstr "Configured ingest sources."
 
 #: src/pages/DashboardPage.tsx:61
 msgid "Configured multiview layouts."
 msgstr "Configured multiview layouts."
+
+#: src/pages/SimplePages.tsx:127
+msgid "Configured output sinks."
+msgstr "Configured output sinks."
+
+#: src/pages/SimplePages.tsx:177
+msgid "Configured overlay layers."
+msgstr "Configured overlay layers."
 
 #: src/components/ConnectionStatus.tsx:29
 msgid "Connected"
@@ -55,41 +313,290 @@ msgstr "Connected"
 msgid "Connecting"
 msgstr "Connecting"
 
-#: src/pages/LayoutsPage.tsx:96
+#: src/pages/LayoutsPage.tsx:142
+msgid "Could not delete layout"
+msgstr "Could not delete layout"
+
+#: src/pages/LayoutsPage.tsx:177
 msgid "Could not load layouts:"
 msgstr "Could not load layouts:"
 
-#: src/app/navigation.tsx:27
+#: src/pages/LayoutEditorPage.tsx:65
+msgid "Could not save layout"
+msgstr "Could not save layout"
+
+#: src/pages/LayoutsPage.tsx:187
+msgid "Create your first layout"
+msgstr "Create your first layout"
+
+#: src/pages/docs/ConfigPage.tsx:162
+msgid "Credentials are referenced, never inlined: <0>auth</0> holds a <1>secret_ref</1> pointer, not a plaintext secret."
+msgstr "Credentials are referenced, never inlined: <0>auth</0> holds a <1>secret_ref</1> pointer, not a plaintext secret."
+
+#: src/pages/docs/ContainerPage.tsx:50
+msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
+msgstr "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
+
+#: src/app/navigation.tsx:28
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "Dashboard"
+
+#: src/pages/docs/ContainerPage.tsx:43
+msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
+msgstr "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
+
+#: src/pages/LayoutsPage.tsx:102
+#: src/pages/LayoutsPage.tsx:267
+msgid "Delete"
+msgstr "Delete"
+
+#: src/pages/LayoutsPage.tsx:96
+msgid "Delete layout"
+msgstr "Delete layout"
+
+#: src/pages/LayoutsPage.tsx:241
+msgid "Delete layout?"
+msgstr "Delete layout?"
+
+#: src/pages/docs/OverviewPage.tsx:48
+msgid "Design pillars"
+msgstr "Design pillars"
+
+#: src/pages/SimplePages.tsx:109
+msgid "Disabled"
+msgstr "Disabled"
 
 #: src/components/ConnectionStatus.tsx:47
 msgid "Disconnected"
 msgstr "Disconnected"
 
+#: src/pages/docs/ContainerPage.tsx:66
+msgid "docker run"
+msgstr "docker run"
+
+#: src/pages/docs/docsNav.tsx:46
+msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
+msgstr "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
+
+#: src/app/navigation.tsx:33
+msgid "Docs"
+msgstr "Docs"
+
+#: src/pages/docs/ConfigPage.tsx:32
+msgid "Document shape"
+msgstr "Document shape"
+
+#: src/pages/docs/DocsLayout.tsx:17
+#: src/pages/docs/DocsLayout.tsx:21
+#: src/pages/docs/OverviewPage.tsx:17
+msgid "Documentation"
+msgstr "Documentation"
+
+#: src/layout/components/SourcePalette.tsx:190
+msgid "Drag cancelled."
+msgstr "Drag cancelled."
+
+#: src/layout/components/LayoutEditor.tsx:184
+msgid "Drag, resize and rotate cells on the canvas, or drop a source from the palette. The same cells are fully editable on the Cells tab without a pointer."
+msgstr "Drag, resize and rotate cells on the canvas, or drop a source from the palette. The same cells are fully editable on the Cells tab without a pointer."
+
+#: src/layout/components/SourcePalette.tsx:188
+msgid "Dropped onto the layout."
+msgstr "Dropped onto the layout."
+
+#: src/layout/components/SourcePalette.tsx:189
+msgid "Dropped outside any target; nothing changed."
+msgstr "Dropped outside any target; nothing changed."
+
+#: src/layout/components/LayoutEditor.tsx:109
+msgid "e.g. Main wall"
+msgstr "e.g. Main wall"
+
+#: src/pages/docs/ConfigPage.tsx:181
+msgid "Each <0>[[cells]]</0> entry is one tile. It is placed by a grid <1>area</1> or an absolute <2>rect</2>, and binds a source through <3>[cells.source]</3> — usually a reference to a managed source by <4>input_id</4>."
+msgstr "Each <0>[[cells]]</0> entry is one tile. It is placed by a grid <1>area</1> or an absolute <2>rect</2>, and binds a source through <3>[cells.source]</3> — usually a reference to a managed source by <4>input_id</4>."
+
+#: src/pages/docs/ConfigPage.tsx:244
+msgid "Each <0>[[outputs]]</0> entry is one sink, tagged by <1>kind</1>. The canvas is composited and encoded once, then fanned out to every output. Today, file-based HLS output works; the live network output servers are on the roadmap (see the feature guide)."
+msgstr "Each <0>[[outputs]]</0> entry is one sink, tagged by <1>kind</1>. The canvas is composited and encoded once, then fanned out to every output. Today, file-based HLS output works; the live network output servers are on the roadmap (see the feature guide)."
+
+#: src/pages/docs/ConfigPage.tsx:222
+msgid "Each <0>[[overlays]]</0> entry attaches a layer to the whole <1>canvas</1> or to a single cell. Common kinds are <2>clock</2>, <3>label</3>, and <4>tally_border</4>. Kind-specific parameters (such as a clock <5>format</5>) sit alongside the common fields and round-trip losslessly."
+msgstr "Each <0>[[overlays]]</0> entry attaches a layer to the whole <1>canvas</1> or to a single cell. Common kinds are <2>clock</2>, <3>label</3>, and <4>tally_border</4>. Kind-specific parameters (such as a clock <5>format</5>) sit alongside the common fields and round-trip losslessly."
+
+#: src/pages/docs/ConfigPage.tsx:137
+msgid "Each <0>[[sources]]</0> entry is a managed input with a stable <1>id</1>, an optional <2>display_name</2>, and a <3>kind</3> that selects the transport. The network kinds carry a <4>url</4>; NDI binds by <5>name</5>; file inputs use a <6>path</6>; <7>test</7> is a built-in synthetic pattern with no parameters."
+msgstr "Each <0>[[sources]]</0> entry is a managed input with a stable <1>id</1>, an optional <2>display_name</2>, and a <3>kind</3> that selects the transport. The network kinds carry a <4>url</4>; NDI binds by <5>name</5>; file inputs use a <6>path</6>; <7>test</7> is a built-in synthetic pattern with no parameters."
+
+#: src/pages/docs/ConfigPage.tsx:127
+msgid "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</0> field."
+msgstr "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</0> field."
+
+#: src/pages/LayoutsPage.tsx:90
+msgid "Edit"
+msgstr "Edit"
+
+#: src/pages/LayoutEditorPage.tsx:77
+#: src/pages/LayoutEditorPage.tsx:88
+#: src/pages/LayoutEditorPage.tsx:101
+#: src/pages/LayoutEditorPage.tsx:121
+msgid "Edit layout"
+msgstr "Edit layout"
+
+#: src/pages/SimplePages.tsx:104
+msgid "Enabled"
+msgstr "Enabled"
+
+#: src/pages/docs/ApiPage.tsx:86
+msgid "Errors"
+msgstr "Errors"
+
+#: src/layout/components/validationMessages.tsx:28
+msgid "Every cell needs a non-empty identifier."
+msgstr "Every cell needs a non-empty identifier."
+
+#: src/pages/docs/ConfigPage.tsx:34
+msgid "Every document starts with a <0>schema_version</0> and then declares the canvas, the layout strategy, the managed sources, the cells (tiles) that place those sources, overlays, and outputs. Optional blocks add fault probes, tally profiles, salvos, and video walls."
+msgstr "Every document starts with a <0>schema_version</0> and then declares the canvas, the layout strategy, the managed sources, the cells (tiles) that place those sources, overlays, and outputs. Optional blocks add fault probes, tally profiles, salvos, and video walls."
+
+#: src/pages/docs/ComposePage.tsx:102
+msgid "Exposed ports and roadmap"
+msgstr "Exposed ports and roadmap"
+
+#: src/pages/docs/ApiPage.tsx:87
+msgid "Failures use RFC 9457 problem documents (<0>application/problem+json</0>) with a machine-readable type and a human-readable detail."
+msgstr "Failures use RFC 9457 problem documents (<0>application/problem+json</0>) with a machine-readable type and a human-readable detail."
+
+#: src/pages/docs/docsNav.tsx:87
+#: src/pages/docs/FeaturesPage.tsx:14
+msgid "Feature guide"
+msgstr "Feature guide"
+
+#: src/layout/components/CellsForm.tsx:367
+msgid "Fit"
+msgstr "Fit"
+
+#: src/layout/components/LayoutEditor.tsx:160
+msgid "Fix these before saving:"
+msgstr "Fix these before saving:"
+
+#: src/layout/components/CellsForm.tsx:318
+msgid "Forward"
+msgstr "Forward"
+
 #: src/pages/DashboardPage.tsx:119
 msgid "Frame rate"
 msgstr "Frame rate"
 
-#: src/pages/LayoutsPage.tsx:47
+#: src/layout/components/validationMessages.tsx:23
+msgid "Frame rate must be an exact rational like 30000/1001 — not a decimal."
+msgstr "Frame rate must be an exact rational like 30000/1001 — not a decimal."
+
+#: src/pages/docs/OverviewPage.tsx:81
+msgid "Getting started"
+msgstr "Getting started"
+
+#: src/pages/docs/ContainerPage.tsx:85
+msgid "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
+msgstr "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
+
+#: src/pages/docs/ContainerPage.tsx:83
+msgid "GPU access"
+msgstr "GPU access"
+
+#: src/pages/docs/ComposePage.tsx:81
+msgid "GPU overlays"
+msgstr "GPU overlays"
+
+#: src/pages/docs/ContainerPage.tsx:149
+msgid "Healthcheck"
+msgstr "Healthcheck"
+
+#: src/layout/components/CellsForm.tsx:365
+msgid "Height (%)"
+msgstr "Height (%)"
+
+#: src/pages/docs/OverviewPage.tsx:19
+msgid "How Multiview works, how to run it, and how to drive it from config-as-code or the API."
+msgstr "How Multiview works, how to run it, and how to drive it from config-as-code or the API."
+
+#: src/pages/docs/ApiPage.tsx:80
+msgid "Idempotency"
+msgstr "Idempotency"
+
+#: src/pages/LayoutsPage.tsx:66
 msgid "Identifier"
 msgstr "Identifier"
+
+#: src/pages/docs/ContainerPage.tsx:33
+msgid "Images"
+msgstr "Images"
+
+#: src/pages/docs/ApiPage.tsx:140
+msgid "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable. Note the honest current state: the control API and this UI are built, but the run command does not yet bind a network listener, so there is no live endpoint to call yet — that wiring is on the roadmap."
+msgstr "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable. Note the honest current state: the control API and this UI are built, but the run command does not yet bind a network listener, so there is no live endpoint to call yet — that wiring is on the roadmap."
+
+#: src/pages/docs/OverviewPage.tsx:38
+msgid "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
+msgstr "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
+
+#: src/pages/docs/ContainerPage.tsx:112
+msgid "Intel / AMD (VAAPI)"
+msgstr "Intel / AMD (VAAPI)"
+
+#: src/pages/SimplePages.tsx:40
+#: src/pages/SimplePages.tsx:151
+msgid "Kind"
+msgstr "Kind"
+
+#: src/pages/docs/ConfigPage.tsx:148
+msgid "Kinds: <0>test</0>, <1>rtsp</1>, <2>hls</2>, <3>ts</3>, <4>srt</4>, <5>rtmp</5>, <6>ndi</6>, <7>file</7>."
+msgstr "Kinds: <0>test</0>, <1>rtsp</1>, <2>hls</2>, <3>ts</3>, <4>srt</4>, <5>rtmp</5>, <6>ndi</6>, <7>file</7>."
 
 #: src/components/LocaleSwitcher.tsx:35
 #: src/pages/SettingsPage.tsx:51
 msgid "Language"
 msgstr "Language"
 
-#: src/app/navigation.tsx:28
+#: src/pages/docs/ConfigPage.tsx:104
+msgid "Layout"
+msgstr "Layout"
+
+#: src/pages/LayoutsPage.tsx:138
+msgid "Layout deleted"
+msgstr "Layout deleted"
+
+#: src/layout/components/LayoutEditor.tsx:100
+msgid "Layout name"
+msgstr "Layout name"
+
+#: src/pages/LayoutEditorPage.tsx:60
+msgid "Layout saved"
+msgstr "Layout saved"
+
+#: src/app/navigation.tsx:29
 #: src/pages/DashboardPage.tsx:58
-#: src/pages/LayoutsPage.tsx:81
+#: src/pages/docs/FeaturesPage.tsx:23
+#: src/pages/LayoutsPage.tsx:154
 msgid "Layouts"
 msgstr "Layouts"
+
+#: src/pages/docs/docsNav.tsx:89
+msgid "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
+msgstr "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
+
+#: src/layout/components/CellsForm.tsx:362
+msgid "Left (%)"
+msgstr "Left (%)"
 
 #: src/components/TileStateBadge.tsx:29
 msgid "Live"
 msgstr "Live"
+
+#: src/pages/docs/ApiPage.tsx:34
+msgid "Live API playground"
+msgstr "Live API playground"
 
 #: src/pages/DashboardPage.tsx:51
 msgid "Live engine status at a glance."
@@ -99,7 +606,15 @@ msgstr "Live engine status at a glance."
 msgid "Live tiles from the engine stream."
 msgstr "Live tiles from the engine stream."
 
-#: src/pages/LayoutsPage.tsx:92
+#: src/layout/components/LayoutEditor.tsx:203
+msgid "Loading canvas…"
+msgstr "Loading canvas…"
+
+#: src/pages/LayoutEditorPage.tsx:79
+msgid "Loading layout…"
+msgstr "Loading layout…"
+
+#: src/pages/LayoutsPage.tsx:173
 msgid "Loading layouts…"
 msgstr "Loading layouts…"
 
@@ -111,19 +626,46 @@ msgstr "Loading…"
 msgid "Locale"
 msgstr "Locale"
 
-#: src/pages/SimplePages.tsx:32
+#: src/pages/SimplePages.tsx:47
+msgid "Locator"
+msgstr "Locator"
+
+#: src/pages/docs/ApiPage.tsx:65
+msgid "Long-running ops"
+msgstr "Long-running ops"
+
+#: src/pages/docs/ConfigPage.tsx:260
+msgid "Low-latency HLS, adding <0>part_target_ms</0> and <1>gop_ms</1> tuning."
+msgstr "Low-latency HLS, adding <0>part_target_ms</0> and <1>gop_ms</1> tuning."
+
+#: src/pages/SimplePages.tsx:171
 msgid "Manage overlay layers and subtitles."
 msgstr "Manage overlay layers and subtitles."
+
+#: src/pages/docs/ContainerPage.tsx:68
+msgid "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
+msgstr "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 
 #: src/app/Sidebar.tsx:22
 msgid "Multiview"
 msgstr "Multiview"
 
-#: src/pages/LayoutsPage.tsx:83
+#: src/pages/docs/OverviewPage.tsx:29
+msgid "Multiview is a hardware-accelerated live video multiview generator. It ingests many live sources, composites them into a templated grid on the GPU, and serves the combined picture as a continuous output stream. It is designed for monitoring walls and production multiviewers where the output must never stall."
+msgstr "Multiview is a hardware-accelerated live video multiview generator. It ingests many live sources, composites them into a templated grid on the GPU, and serves the combined picture as a continuous output stream. It is designed for monitoring walls and production multiviewers where the output must never stall."
+
+#: src/pages/LayoutsPage.tsx:156
 msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 msgstr "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 
-#: src/pages/LayoutsPage.tsx:37
+#: src/pages/docs/ApiPage.tsx:73
+msgid "Mutable resources carry an <0>ETag</0>. Send it back as <1>If-Match</1> on a write; a stale tag is rejected with <2>412 Precondition Failed</2> so two editors never silently clobber each other."
+msgstr "Mutable resources carry an <0>ETag</0>. Send it back as <1>If-Match</1> on a write; a stale tag is rejected with <2>412 Precondition Failed</2> so two editors never silently clobber each other."
+
+#: src/pages/LayoutsPage.tsx:57
+#: src/pages/SimplePages.tsx:31
+#: src/pages/SimplePages.tsx:83
+#: src/pages/SimplePages.tsx:142
 msgid "Name"
 msgstr "Name"
 
@@ -131,11 +673,28 @@ msgstr "Name"
 msgid "Navigation"
 msgstr "Navigation"
 
+#: src/layout/components/LayoutEditor.tsx:132
+msgid "New cell"
+msgstr "New cell"
+
+#: src/pages/LayoutEditorPage.tsx:121
+#: src/pages/LayoutsPage.tsx:165
+msgid "New layout"
+msgstr "New layout"
+
+#: src/layout/components/CellsForm.tsx:379
+msgid "No cells yet. Add one to start composing the multiview."
+msgstr "No cells yet. Add one to start composing the multiview."
+
+#: src/layout/components/SourcePalette.tsx:185
+msgid "No drop target."
+msgstr "No drop target."
+
 #: src/pages/DashboardPage.tsx:123
 msgid "No frame-rate sample."
 msgstr "No frame-rate sample."
 
-#: src/pages/LayoutsPage.tsx:100
+#: src/pages/LayoutsPage.tsx:182
 msgid "No layouts are defined yet."
 msgstr "No layouts are defined yet."
 
@@ -143,42 +702,177 @@ msgstr "No layouts are defined yet."
 msgid "No live tiles yet. They appear once the engine streams a snapshot."
 msgstr "No live tiles yet. They appear once the engine streams a snapshot."
 
+#: src/pages/SimplePages.tsx:128
+msgid "No outputs configured."
+msgstr "No outputs configured."
+
+#: src/pages/SimplePages.tsx:178
+msgid "No overlays configured."
+msgstr "No overlays configured."
+
 #: src/components/TileStateBadge.tsx:47
 msgid "No signal"
 msgstr "No signal"
+
+#: src/layout/components/CellsForm.tsx:369
+msgid "No source"
+msgstr "No source"
+
+#: src/pages/SimplePages.tsx:69
+msgid "No sources configured."
+msgstr "No sources configured."
 
 #: src/pages/SettingsPage.tsx:68
 msgid "Notifications"
 msgstr "Notifications"
 
+#: src/pages/docs/ContainerPage.tsx:93
+msgid "NVIDIA"
+msgstr "NVIDIA"
+
 #: src/app/AppLayout.tsx:60
 msgid "Open navigation"
 msgstr "Open navigation"
 
-#: src/app/navigation.tsx:30
-#: src/pages/SimplePages.tsx:21
+#: src/pages/docs/ApiPage.tsx:50
+msgid "Open the API playground"
+msgstr "Open the API playground"
+
+#: src/pages/docs/ApiPage.tsx:72
+msgid "Optimistic concurrency"
+msgstr "Optimistic concurrency"
+
+#: src/pages/docs/ConfigPage.tsx:155
+msgid "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
+msgstr "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
+
+#: src/pages/docs/ConfigPage.tsx:79
+msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
+msgstr "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
+
+#: src/app/navigation.tsx:31
+#: src/pages/docs/ConfigPage.tsx:242
+#: src/pages/docs/FeaturesPage.tsx:54
+#: src/pages/SimplePages.tsx:120
 msgid "Outputs"
 msgstr "Outputs"
 
-#: src/app/navigation.tsx:31
-#: src/pages/SimplePages.tsx:31
+#: src/layout/components/SourcePalette.tsx:185
+msgid "Over the layout drop zone."
+msgstr "Over the layout drop zone."
+
+#: src/app/navigation.tsx:32
+#: src/layout/components/SourcePalette.tsx:224
+#: src/pages/docs/ConfigPage.tsx:220
+#: src/pages/docs/FeaturesPage.tsx:98
+#: src/pages/SimplePages.tsx:170
 msgid "Overlays"
 msgstr "Overlays"
+
+#: src/pages/docs/FeaturesPage.tsx:100
+msgid "Overlays draw on top of the canvas or a single tile: clocks, text labels and under-monitor displays, and tally borders. A clock overlay sourced from the wall clock keeps ticking every frame, which doubles as a visible sentinel that the output is still alive."
+msgstr "Overlays draw on top of the canvas or a single tile: clocks, text labels and under-monitor displays, and tally borders. A clock overlay sourced from the wall clock keeps ticking every frame, which doubles as a visible sentinel that the output is still alive."
+
+#: src/pages/docs/docsNav.tsx:36
+msgid "Overview"
+msgstr "Overview"
 
 #: src/pages/NotFoundPage.tsx:14
 msgid "Page not found"
 msgstr "Page not found"
 
+#: src/pages/docs/ContainerPage.tsx:115
+msgid "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
+msgstr "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
+
+#. placeholder {0}: String(active.id)
+#: src/layout/components/SourcePalette.tsx:183
+msgid "Picked up {0}."
+msgstr "Picked up {0}."
+
 #: src/app/Sidebar.tsx:20
 msgid "Primary"
 msgstr "Primary"
+
+#: src/pages/docs/ConfigPage.tsx:278
+msgid "Push the encoded stream to a destination <0>url</0>."
+msgstr "Push the encoded stream to a destination <0>url</0>."
+
+#: src/pages/docs/ApiPage.tsx:96
+msgid "Realtime streams"
+msgstr "Realtime streams"
 
 #: src/components/ConnectionStatus.tsx:41
 #: src/components/TileStateBadge.tsx:41
 msgid "Reconnecting"
 msgstr "Reconnecting"
 
-#: src/app/navigation.tsx:32
+#: src/layout/components/CellsForm.tsx:347
+msgid "Remove"
+msgstr "Remove"
+
+#: src/layout/components/CellsForm.tsx:371
+msgid "Remove cell"
+msgstr "Remove cell"
+
+#: src/pages/docs/ContainerPage.tsx:96
+msgid "Requires the NVIDIA driver and the NVIDIA Container Toolkit on the host. The modern path requests devices through CDI; NVENC and NVDEC also need the <0>video</0> driver capability."
+msgstr "Requires the NVIDIA driver and the NVIDIA Container Toolkit on the host. The modern path requests devices through CDI; NVENC and NVDEC also need the <0>video</0> driver capability."
+
+#: src/pages/docs/ApiPage.tsx:58
+msgid "REST conventions"
+msgstr "REST conventions"
+
+#: src/pages/docs/components.tsx:125
+msgid "Roadmap"
+msgstr "Roadmap"
+
+#: src/layout/components/CellsForm.tsx:366
+msgid "Rotation (°)"
+msgstr "Rotation (°)"
+
+#: src/layout/components/validationMessages.tsx:36
+msgid "Rotation must be between 0 and 359 degrees."
+msgstr "Rotation must be between 0 and 359 degrees."
+
+#: src/pages/docs/ContainerPage.tsx:25
+msgid "Run Multiview with Docker — single container or the compose stack — with optional GPU access, persistent volumes, and healthchecks."
+msgstr "Run Multiview with Docker — single container or the compose stack — with optional GPU access, persistent volumes, and healthchecks."
+
+#: src/pages/docs/ContainerPage.tsx:23
+#: src/pages/docs/docsNav.tsx:44
+msgid "Running in containers"
+msgstr "Running in containers"
+
+#: src/pages/docs/FeaturesPage.tsx:122
+msgid "Salvos"
+msgstr "Salvos"
+
+#: src/resources/ResourceTable.tsx:96
+msgid "Sample data shown. This resource is read-only until its management API ships; the view is already typed to swap to live data with no change."
+msgstr "Sample data shown. This resource is read-only until its management API ships; the view is already typed to swap to live data with no change."
+
+#: src/layout/components/LayoutEditor.tsx:149
+msgid "Save layout"
+msgstr "Save layout"
+
+#: src/layout/components/LayoutEditor.tsx:149
+msgid "Saving…"
+msgstr "Saving…"
+
+#: src/layout/components/CellsForm.tsx:370
+msgid "Select cell"
+msgstr "Select cell"
+
+#: src/layout/components/CellsForm.tsx:373
+msgid "Send backward"
+msgstr "Send backward"
+
+#: src/pages/docs/ConfigPage.tsx:266
+msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
+msgstr "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
+
+#: src/app/navigation.tsx:34
 #: src/pages/SettingsPage.tsx:26
 msgid "Settings"
 msgstr "Settings"
@@ -191,26 +885,165 @@ msgstr "Show a test notification"
 msgid "Skip to content"
 msgstr "Skip to content"
 
-#: src/app/navigation.tsx:29
-#: src/pages/SimplePages.tsx:11
+#: src/layout/components/LayoutEditor.tsx:126
+msgid "Snap to grid"
+msgstr "Snap to grid"
+
+#: src/layout/components/CellsForm.tsx:368
+msgid "Source"
+msgstr "Source"
+
+#: src/app/navigation.tsx:30
+#: src/layout/components/SourcePalette.tsx:203
+#: src/pages/docs/ConfigPage.tsx:135
+#: src/pages/docs/FeaturesPage.tsx:36
+#: src/pages/SimplePages.tsx:61
 msgid "Sources"
 msgstr "Sources"
+
+#: src/pages/SimplePages.tsx:158
+msgid "Stacking"
+msgstr "Stacking"
 
 #: src/components/TileStateBadge.tsx:35
 msgid "Stale"
 msgstr "Stale"
 
+#: src/pages/docs/ApiPage.tsx:81
+msgid "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retried request is applied at most once."
+msgstr "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retried request is applied at most once."
+
+#: src/pages/SimplePages.tsx:99
+msgid "State"
+msgstr "State"
+
+#: src/pages/docs/ConfigPage.tsx:197
+msgid "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
+msgstr "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
+
 #: src/pages/SettingsPage.tsx:54
 msgid "Switch the interface language and text direction."
 msgstr "Switch the interface language and text direction."
+
+#: src/pages/docs/FeaturesPage.tsx:109
+msgid "Tally"
+msgstr "Tally"
+
+#: src/pages/docs/FeaturesPage.tsx:111
+msgid "Tally shows which sources are on-air. A tally profile maps the bits of an external tally bus to colors (for example red for program, green for preview) and maps bus index positions to specific tiles. A <0>tally_border</0> overlay then lights the tile's edge to match. This lets an upstream router or mixer drive the borders on the wall."
+msgstr "Tally shows which sources are on-air. A tally profile maps the bits of an external tally bus to colors (for example red for program, green for preview) and maps bus index positions to specific tiles. A <0>tally_border</0> overlay then lights the tile's edge to match. This lets an upstream router or mixer drive the borders on the wall."
 
 #: src/pages/SettingsPage.tsx:79
 msgid "Test notification"
 msgstr "Test notification"
 
+#: src/pages/LayoutEditorPage.tsx:90
+msgid "That layout no longer exists."
+msgstr "That layout no longer exists."
+
+#: src/pages/docs/ConfigPage.tsx:106
+msgid "The <0>[layout]</0> block selects how cells are placed, tagged by <1>kind</1>:"
+msgstr "The <0>[layout]</0> block selects how cells are placed, tagged by <1>kind</1>:"
+
+#: src/pages/docs/ApiPage.tsx:132
+msgid "The API authenticates each request with a bearer token in the <0>Authorization</0> header. A coarse role (admin, operator, or viewer) gates what actions a token may take, and a per-object check confines a token to the resources it owns."
+msgstr "The API authenticates each request with a bearer token in the <0>Authorization</0> header. A coarse role (admin, operator, or viewer) gates what actions a token may take, and a per-object check confines a token to the resources it owns."
+
+#: src/pages/docs/FeaturesPage.tsx:16
+msgid "The building blocks of a Multiview deployment, and what each one does."
+msgstr "The building blocks of a Multiview deployment, and what each one does."
+
+#: src/layout/components/validationMessages.tsx:32
+msgid "The cell extends outside the canvas."
+msgstr "The cell extends outside the canvas."
+
+#: src/layout/components/validationMessages.tsx:34
+msgid "The cell is too small."
+msgstr "The cell is too small."
+
+#: src/pages/docs/ContainerPage.tsx:151
+msgid "The compose stack uses a real liveness check: the HLS playlist must have been rewritten within the last 30 seconds. Because the segmenter rewrites the playlist every segment, a fresh timestamp proves the output clock is still producing frames. The check uses only coreutils, so it works on the slim runtime."
+msgstr "The compose stack uses a real liveness check: the HLS playlist must have been rewritten within the last 30 seconds. Because the segmenter rewrites the playlist every segment, a fresh timestamp proves the output clock is still producing frames. The check uses only coreutils, so it works on the slim runtime."
+
+#: src/pages/docs/FeaturesPage.tsx:59
+msgid "The composited canvas is encoded once per rendition and the same packets are fanned out to every output. Be honest about the current state of each transport:"
+msgstr "The composited canvas is encoded once per rendition and the same packets are fanned out to every output. Be honest about the current state of each transport:"
+
+#: src/pages/docs/ApiPage.tsx:36
+msgid "The control plane serves an interactive OpenAPI reference at the backend <0>/docs</0> path. It is generated from the same spec the UI client is generated from, so it always matches the running server. Open it to browse every endpoint, see schemas, and try requests."
+msgstr "The control plane serves an interactive OpenAPI reference at the backend <0>/docs</0> path. It is generated from the same spec the UI client is generated from, so it always matches the running server. Open it to browse every endpoint, see schemas, and try requests."
+
+#: src/pages/docs/ContainerPage.tsx:57
+msgid "The default image encodes <0>mpeg2video</0> (plays in VLC or ffplay). For browser-friendly H.264 or H.265 output, use the <1>-gpl</1> image variant — note that H.264 / H.265 make the build GPL."
+msgstr "The default image encodes <0>mpeg2video</0> (plays in VLC or ffplay). For browser-friendly H.264 or H.265 output, use the <1>-gpl</1> image variant — note that H.264 / H.265 make the build GPL."
+
+#: src/pages/docs/ComposePage.tsx:73
+msgid "The default image encodes <0>mpeg2video</0>, which plays in VLC and ffplay. For browser playback, switch to the GPL image and an H.264 codec (see the config section)."
+msgstr "The default image encodes <0>mpeg2video</0>, which plays in VLC and ffplay. For browser playback, switch to the GPL image and an H.264 codec (see the config section)."
+
+#: src/pages/docs/ConfigPage.tsx:297
+msgid "The document is validated as a whole: source and cell ids must be unique, every <0>input_id</0> must resolve to a declared source, every grid cell must reference an existing area, and the cadence must be a usable rational. Because TOML and JSON encode the same model, a config can be authored by hand and exported as JSON over the API, or vice versa."
+msgstr "The document is validated as a whole: source and cell ids must be unique, every <0>input_id</0> must resolve to a declared source, every grid cell must reference an existing area, and the cadence must be a usable rational. Because TOML and JSON encode the same model, a config can be authored by hand and exported as JSON over the API, or vice versa."
+
+#: src/pages/docs/ComposePage.tsx:46
+msgid "The engine. It ingests that feed plus three built-in test patterns into a 2x2 canvas, encodes once, and writes HLS to a named volume."
+msgstr "The engine. It ingests that feed plus three built-in test patterns into a 2x2 canvas, encodes once, and writes HLS to a named volume."
+
+#: src/pages/docs/OverviewPage.tsx:83
+msgid "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
+msgstr "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
+
+#: src/pages/docs/ContainerPage.tsx:174
+msgid "The management API authenticates callers with a bearer token. In a container, supply it through the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable so it is never baked into an image or written to the config file."
+msgstr "The management API authenticates callers with a bearer token. In a container, supply it through the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable so it is never baked into an image or written to the config file."
+
+#: src/pages/docs/ApiPage.tsx:26
+msgid "The management API, its conventions, the realtime event streams, and where to find the live, interactive reference."
+msgstr "The management API, its conventions, the realtime event streams, and where to find the live, interactive reference."
+
+#: src/pages/docs/ConfigPage.tsx:66
+msgid "The output canvas: geometry, cadence, working pixel format, background, and color space."
+msgstr "The output canvas: geometry, cadence, working pixel format, background, and color space."
+
+#: src/pages/docs/ComposePage.tsx:22
+msgid "The quick-start compose stack, the services it defines, the GPU overlays, and how to bring it up and down."
+msgstr "The quick-start compose stack, the services it defines, the GPU overlays, and how to bring it up and down."
+
+#: src/pages/docs/ComposePage.tsx:32
+msgid "The quick-start file at <0>deploy/compose.yaml</0> brings up three services. It is self-contained — no real or private feeds."
+msgstr "The quick-start file at <0>deploy/compose.yaml</0> brings up three services. It is self-contained — no real or private feeds."
+
 #: src/pages/NotFoundPage.tsx:15
 msgid "The requested screen does not exist."
 msgstr "The requested screen does not exist."
+
+#: src/pages/docs/docsNav.tsx:78
+msgid "The REST base, long-running operations, ETags, the WebSocket and SSE streams, and the live API playground."
+msgstr "The REST base, long-running operations, ETags, the WebSocket and SSE streams, and the live API playground."
+
+#: src/pages/docs/docsNav.tsx:57
+msgid "The services in the quick-start compose file and how to bring them up and down."
+msgstr "The services in the quick-start compose file and how to bring them up and down."
+
+#: src/pages/docs/ComposePage.tsx:104
+msgid "The stack publishes the test RTSP feed on <0>8554</0> (for host inspection) and the HLS HTTP server on <1>8888</1>. There is no control-API or web-UI port yet: the current binary composites, encodes, and writes HLS or file output to disk, but does not yet bind a network listener. The live RTSP, NDI, and RTMP output <2>servers</2> and the API listener are on the roadmap."
+msgstr "The stack publishes the test RTSP feed on <0>8554</0> (for host inspection) and the HLS HTTP server on <1>8888</1>. There is no control-API or web-UI port yet: the current binary composites, encodes, and writes HLS or file output to disk, but does not yet bind a network listener. The live RTSP, NDI, and RTMP output <2>servers</2> and the API listener are on the roadmap."
+
+#: src/pages/docs/ComposePage.tsx:30
+msgid "The three services"
+msgstr "The three services"
+
+#: src/pages/docs/docsNav.tsx:68
+msgid "The TOML schema: canvas, layout, sources, cells, overlays, and outputs."
+msgstr "The TOML schema: canvas, layout, sources, cells, overlays, and outputs."
+
+#: src/pages/docs/ApiPage.tsx:98
+msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
+msgstr "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
+
+#: src/pages/docs/ConfigPage.tsx:95
+msgid "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
+msgstr "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
 
 #: src/pages/SettingsPage.tsx:42
 msgid "Theme"
@@ -228,6 +1061,14 @@ msgstr "Theme: light. Switch to dark."
 msgid "Theme: system. Switch to light."
 msgstr "Theme: system. Switch to light."
 
+#: src/pages/LayoutEditorPage.tsx:109
+msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+msgstr "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+
+#: src/pages/LayoutsPage.tsx:244
+msgid "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
+msgstr "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
+
 #: src/pages/PlaceholderPage.tsx:27
 msgid "This screen is part of an upcoming milestone."
 msgstr "This screen is part of an upcoming milestone."
@@ -243,3 +1084,56 @@ msgstr "Tile status"
 #: src/pages/DashboardPage.tsx:84
 msgid "Tiles"
 msgstr "Tiles"
+
+#: src/layout/components/CellsForm.tsx:363
+msgid "Top (%)"
+msgstr "Top (%)"
+
+#: src/pages/SimplePages.tsx:92
+msgid "Transport"
+msgstr "Transport"
+
+#: src/pages/docs/ContainerPage.tsx:35
+msgid "Two image families are published. The default image is LGPL-clean and software-only; the NVIDIA image adds CUDA-based decode, encode, and compositing."
+msgstr "Two image families are published. The default image is LGPL-clean and software-only; the NVIDIA image adds CUDA-based decode, encode, and compositing."
+
+#: src/pages/docs/ConfigPage.tsx:295
+msgid "Validation and import / export"
+msgstr "Validation and import / export"
+
+#: src/pages/docs/ContainerPage.tsx:131
+msgid "Volumes"
+msgstr "Volumes"
+
+#: src/pages/docs/OverviewPage.tsx:27
+msgid "What Multiview is"
+msgstr "What Multiview is"
+
+#: src/pages/docs/docsNav.tsx:38
+msgid "What Multiview is, the design pillars, and how to get started."
+msgstr "What Multiview is, the design pillars, and how to get started."
+
+#: src/pages/docs/OverviewPage.tsx:104
+msgid "Where to go next"
+msgstr "Where to go next"
+
+#: src/layout/components/CellsForm.tsx:364
+msgid "Width (%)"
+msgstr "Width (%)"
+
+#: src/pages/docs/ConfigPage.tsx:86
+msgid "Working pixel format: <0>nv12</0> (8-bit) or <1>p010</1> (10-bit)."
+msgstr "Working pixel format: <0>nv12</0> (8-bit) or <1>p010</1> (10-bit)."
+
+#: src/pages/docs/ConfigPage.tsx:254
+msgid "Writes an HLS playlist and segments to <0>path</0> with a <1>codec</1> and a <2>segment_ms</2> duration."
+msgstr "Writes an HLS playlist and segments to <0>path</0> with a <1>codec</1> and a <2>segment_ms</2> duration."
+
+#: src/pages/docs/OverviewPage.tsx:96
+msgid "You can also run the binary directly against a config file with <0>multiview run path/to/multiview.toml</0>. See the sections below for the container, compose, config, and API details."
+msgstr "You can also run the binary directly against a config file with <0>multiview run path/to/multiview.toml</0>. See the sections below for the container, compose, config, and API details."
+
+#. placeholder {0}: cell.z
+#: src/layout/components/CellsForm.tsx:334
+msgid "z = {0}"
+msgstr "z = {0}"

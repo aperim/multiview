@@ -3,6 +3,7 @@
 import type { JSX } from "react";
 import { Trans } from "@lingui/react/macro";
 import {
+  BookOpen,
   LayoutDashboard,
   LayoutGrid,
   Radio,
@@ -29,5 +30,6 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { path: "/sources", label: <Trans>Sources</Trans>, Icon: Radio },
   { path: "/outputs", label: <Trans>Outputs</Trans>, Icon: Send },
   { path: "/overlays", label: <Trans>Overlays</Trans>, Icon: Layers },
+  { path: "/help", label: <Trans>Docs</Trans>, Icon: BookOpen },
   { path: "/settings", label: <Trans>Settings</Trans>, Icon: Settings },
 ];

@@ -13,6 +13,13 @@ import {
   OverlaysPage,
   SourcesPage,
 } from "../pages/SimplePages";
+import { ApiPage } from "../pages/docs/ApiPage";
+import { ComposePage } from "../pages/docs/ComposePage";
+import { ConfigPage } from "../pages/docs/ConfigPage";
+import { ContainerPage } from "../pages/docs/ContainerPage";
+import { DocsLayout } from "../pages/docs/DocsLayout";
+import { FeaturesPage } from "../pages/docs/FeaturesPage";
+import { OverviewPage } from "../pages/docs/OverviewPage";
 
 /** The application router. */
 export const router = createBrowserRouter([
@@ -28,6 +35,20 @@ export const router = createBrowserRouter([
       { path: "outputs", element: <OutputsPage /> },
       { path: "overlays", element: <OverlaysPage /> },
       { path: "settings", element: <SettingsPage /> },
+      // In-app documentation under /help. (/docs is the backend Scalar API
+      // playground, so the SPA guide deliberately avoids that path.)
+      {
+        path: "help",
+        element: <DocsLayout />,
+        children: [
+          { index: true, element: <OverviewPage /> },
+          { path: "containers", element: <ContainerPage /> },
+          { path: "compose", element: <ComposePage /> },
+          { path: "config", element: <ConfigPage /> },
+          { path: "api", element: <ApiPage /> },
+          { path: "features", element: <FeaturesPage /> },
+        ],
+      },
       { path: "*", element: <NotFoundPage /> },
     ],
   },
