@@ -126,7 +126,9 @@ fn openapi_document_emits_layout_and_resource_write_ops() {
     ];
 
     for (path, input_schema) in write_paths {
-        let item = paths.get(path).unwrap_or_else(|| panic!("{path} documented"));
+        let item = paths
+            .get(path)
+            .unwrap_or_else(|| panic!("{path} documented"));
 
         // GET by id is read; POST creates; PUT replaces; DELETE removes.
         for verb in ["get", "post", "put", "delete"] {

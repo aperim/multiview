@@ -93,6 +93,21 @@ async fn list_layouts(
 }
 
 /// `GET /api/v1/layouts/{id}` — fetch one layout (role: read; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/layouts/{id}",
+        tag = "layouts",
+        params(("id" = String, Path, description = "Layout id.")),
+        responses(
+            (status = 200, description = "The layout (ETag in the response header).", body = Layout),
+            (status = 401, description = "Missing or invalid credentials.", body = Problem),
+            (status = 403, description = "Not authorized to read this layout.", body = Problem),
+            (status = 404, description = "No layout with that id.", body = Problem),
+        ),
+    )
+)]
 async fn get_layout(
     State(state): State<AppState>,
     principal: Principal,
@@ -105,6 +120,21 @@ async fn get_layout(
 }
 
 /// `POST /api/v1/layouts/{id}` — create a layout (role: write; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/layouts/{id}",
+        tag = "layouts",
+        params(("id" = String, Path, description = "Layout id.")),
+        request_body = LayoutInput,
+        responses(
+            (status = 201, description = "The created layout (ETag in the response header).", body = Layout),
+            (status = 401, description = "Missing or invalid credentials.", body = Problem),
+            (status = 403, description = "Not authorized to write.", body = Problem),
+        ),
+    )
+)]
 async fn create_layout(
     State(state): State<AppState>,
     principal: Principal,
@@ -126,6 +156,23 @@ async fn create_layout(
 }
 
 /// `PUT /api/v1/layouts/{id}` — replace a layout (role: write; If-Match → 412).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        put,
+        path = "/api/v1/layouts/{id}",
+        tag = "layouts",
+        params(("id" = String, Path, description = "Layout id.")),
+        request_body = LayoutInput,
+        responses(
+            (status = 200, description = "The replaced layout (new ETag in the response header).", body = Layout),
+            (status = 401, description = "Missing or invalid credentials.", body = Problem),
+            (status = 403, description = "Not authorized to write.", body = Problem),
+            (status = 404, description = "No layout with that id.", body = Problem),
+            (status = 412, description = "If-Match precondition failed.", body = Problem),
+        ),
+    )
+)]
 async fn update_layout(
     State(state): State<AppState>,
     principal: Principal,
@@ -151,6 +198,22 @@ async fn update_layout(
 }
 
 /// `DELETE /api/v1/layouts/{id}` — delete a layout (role: administer; If-Match).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        delete,
+        path = "/api/v1/layouts/{id}",
+        tag = "layouts",
+        params(("id" = String, Path, description = "Layout id.")),
+        responses(
+            (status = 204, description = "The layout was deleted."),
+            (status = 401, description = "Missing or invalid credentials.", body = Problem),
+            (status = 403, description = "Not authorized to administer.", body = Problem),
+            (status = 404, description = "No layout with that id.", body = Problem),
+            (status = 412, description = "If-Match precondition failed.", body = Problem),
+        ),
+    )
+)]
 async fn delete_layout(
     State(state): State<AppState>,
     principal: Principal,

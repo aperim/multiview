@@ -59,6 +59,21 @@ pub(crate) async fn list_outputs(
 }
 
 /// `GET /api/v1/outputs/{id}` — fetch one output (role: read; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/outputs/{id}",
+        tag = "outputs",
+        params(("id" = String, Path, description = "Output id.")),
+        responses(
+            (status = 200, description = "The output (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read this output.", body = crate::problem::Problem),
+            (status = 404, description = "No output with that id.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn get_output(
     State(state): State<AppState>,
     principal: Principal,
@@ -71,6 +86,21 @@ pub(crate) async fn get_output(
 }
 
 /// `POST /api/v1/outputs/{id}` — create an output (role: write; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/outputs/{id}",
+        tag = "outputs",
+        params(("id" = String, Path, description = "Output id.")),
+        request_body = crate::resource_store::ResourceInput,
+        responses(
+            (status = 201, description = "The created output (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn create_output(
     State(state): State<AppState>,
     principal: Principal,
@@ -91,6 +121,23 @@ pub(crate) async fn create_output(
 }
 
 /// `PUT /api/v1/outputs/{id}` — replace an output (role: write; If-Match → 412).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        put,
+        path = "/api/v1/outputs/{id}",
+        tag = "outputs",
+        params(("id" = String, Path, description = "Output id.")),
+        request_body = crate::resource_store::ResourceInput,
+        responses(
+            (status = 200, description = "The replaced output (new ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 404, description = "No output with that id.", body = crate::problem::Problem),
+            (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn update_output(
     State(state): State<AppState>,
     principal: Principal,
@@ -114,6 +161,22 @@ pub(crate) async fn update_output(
 }
 
 /// `DELETE /api/v1/outputs/{id}` — delete an output (role: administer; If-Match).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        delete,
+        path = "/api/v1/outputs/{id}",
+        tag = "outputs",
+        params(("id" = String, Path, description = "Output id.")),
+        responses(
+            (status = 204, description = "The output was deleted."),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to administer.", body = crate::problem::Problem),
+            (status = 404, description = "No output with that id.", body = crate::problem::Problem),
+            (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn delete_output(
     State(state): State<AppState>,
     principal: Principal,

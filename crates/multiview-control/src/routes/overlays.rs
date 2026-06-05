@@ -59,6 +59,21 @@ pub(crate) async fn list_overlays(
 }
 
 /// `GET /api/v1/overlays/{id}` — fetch one overlay (role: read; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/overlays/{id}",
+        tag = "overlays",
+        params(("id" = String, Path, description = "Overlay id.")),
+        responses(
+            (status = 200, description = "The overlay (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read this overlay.", body = crate::problem::Problem),
+            (status = 404, description = "No overlay with that id.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn get_overlay(
     State(state): State<AppState>,
     principal: Principal,
@@ -71,6 +86,21 @@ pub(crate) async fn get_overlay(
 }
 
 /// `POST /api/v1/overlays/{id}` — create an overlay (role: write; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/overlays/{id}",
+        tag = "overlays",
+        params(("id" = String, Path, description = "Overlay id.")),
+        request_body = crate::resource_store::ResourceInput,
+        responses(
+            (status = 201, description = "The created overlay (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn create_overlay(
     State(state): State<AppState>,
     principal: Principal,
@@ -91,6 +121,23 @@ pub(crate) async fn create_overlay(
 }
 
 /// `PUT /api/v1/overlays/{id}` — replace an overlay (role: write; If-Match → 412).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        put,
+        path = "/api/v1/overlays/{id}",
+        tag = "overlays",
+        params(("id" = String, Path, description = "Overlay id.")),
+        request_body = crate::resource_store::ResourceInput,
+        responses(
+            (status = 200, description = "The replaced overlay (new ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 404, description = "No overlay with that id.", body = crate::problem::Problem),
+            (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn update_overlay(
     State(state): State<AppState>,
     principal: Principal,
@@ -114,6 +161,22 @@ pub(crate) async fn update_overlay(
 }
 
 /// `DELETE /api/v1/overlays/{id}` — delete an overlay (role: administer; If-Match).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        delete,
+        path = "/api/v1/overlays/{id}",
+        tag = "overlays",
+        params(("id" = String, Path, description = "Overlay id.")),
+        responses(
+            (status = 204, description = "The overlay was deleted."),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to administer.", body = crate::problem::Problem),
+            (status = 404, description = "No overlay with that id.", body = crate::problem::Problem),
+            (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn delete_overlay(
     State(state): State<AppState>,
     principal: Principal,

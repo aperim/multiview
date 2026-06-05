@@ -59,6 +59,21 @@ pub(crate) async fn list_sources(
 }
 
 /// `GET /api/v1/sources/{id}` — fetch one source (role: read; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/sources/{id}",
+        tag = "sources",
+        params(("id" = String, Path, description = "Source id.")),
+        responses(
+            (status = 200, description = "The source (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read this source.", body = crate::problem::Problem),
+            (status = 404, description = "No source with that id.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn get_source(
     State(state): State<AppState>,
     principal: Principal,
@@ -71,6 +86,21 @@ pub(crate) async fn get_source(
 }
 
 /// `POST /api/v1/sources/{id}` — create a source (role: write; per-object authz).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/sources/{id}",
+        tag = "sources",
+        params(("id" = String, Path, description = "Source id.")),
+        request_body = crate::resource_store::ResourceInput,
+        responses(
+            (status = 201, description = "The created source (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn create_source(
     State(state): State<AppState>,
     principal: Principal,
@@ -91,6 +121,23 @@ pub(crate) async fn create_source(
 }
 
 /// `PUT /api/v1/sources/{id}` — replace a source (role: write; If-Match → 412).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        put,
+        path = "/api/v1/sources/{id}",
+        tag = "sources",
+        params(("id" = String, Path, description = "Source id.")),
+        request_body = crate::resource_store::ResourceInput,
+        responses(
+            (status = 200, description = "The replaced source (new ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 404, description = "No source with that id.", body = crate::problem::Problem),
+            (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn update_source(
     State(state): State<AppState>,
     principal: Principal,
@@ -114,6 +161,22 @@ pub(crate) async fn update_source(
 }
 
 /// `DELETE /api/v1/sources/{id}` — delete a source (role: administer; If-Match).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        delete,
+        path = "/api/v1/sources/{id}",
+        tag = "sources",
+        params(("id" = String, Path, description = "Source id.")),
+        responses(
+            (status = 204, description = "The source was deleted."),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to administer.", body = crate::problem::Problem),
+            (status = 404, description = "No source with that id.", body = crate::problem::Problem),
+            (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+        ),
+    )
+)]
 pub(crate) async fn delete_source(
     State(state): State<AppState>,
     principal: Principal,
