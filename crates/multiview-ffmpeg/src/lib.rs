@@ -79,10 +79,13 @@ pub use caption::{
     strip_ass_event, CaptionCue, CueAnchor, CueBitmap, CueError, CueRect, CueRegion, CueText,
 };
 
-pub use codec::{can_encode, candidate_encoders, VideoCodec};
+pub use codec::{
+    can_encode, can_encode_audio, candidate_audio_encoders, candidate_encoders, AudioCodec,
+    VideoCodec,
+};
 
 #[cfg(feature = "ffmpeg")]
-pub use codec::select_encoder;
+pub use codec::{select_audio_encoder, select_encoder};
 
 #[cfg(feature = "ffmpeg")]
 pub use avio_fetch::fetch_url_text;

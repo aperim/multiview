@@ -314,6 +314,8 @@ fn static_codec_name(name: &str) -> &'static str {
         "flac" => "flac",
         "pcm_s16le" => "pcm_s16le",
         "aac" => "aac",
+        "libopus" => "libopus",
+        "mp2" => "mp2",
         _ => "<encoder>",
     }
 }

@@ -160,6 +160,86 @@ pub fn select_encoder(codec: VideoCodec) -> Option<&'static str> {
         .find(|name| ffmpeg_next::encoder::find_by_name(name).is_some())
 }
 
+/// A logical audio codec the output pipeline can target.
+///
+/// The audio analogue of [`VideoCodec`]: callers request a *family* — "give me
+/// AAC" — and the concrete libav encoder is chosen by `select_audio_encoder`
+/// from the compiled features and what the linked `FFmpeg` provides.
+///
+/// All three variants resolve to an **LGPL** software encoder already present in
+/// a default `FFmpeg` build, so unlike H.264/H.265 there is no licence-blocked
+/// audio codec: the LGPL-clean default build can encode every one of them. The
+/// nonfree `libfdk_aac` encoder is deliberately **not** modelled here, so it can
+/// never be reached from a default build (see [`AudioCodec::lgpl_software_encoder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AudioCodec {
+    /// AAC-LC, encoded with `FFmpeg`'s **native** LGPL `aac` encoder — never the
+    /// nonfree `libfdk_aac`.
+    Aac,
+    /// Opus, encoded with the LGPL `libopus` encoder.
+    Opus,
+    /// MPEG-1 Audio Layer II, encoded with the LGPL `mp2` encoder.
+    Mp2,
+}
+
+impl AudioCodec {
+    /// The libav short-name of this codec's LGPL software encoder.
+    ///
+    /// Every audio codec has one — the default (`ffmpeg`-only) build can encode
+    /// all three — so this never returns [`None`]; the [`Option`] mirrors the
+    /// video API's shape and leaves room for future licence-blocked variants.
+    /// For [`AudioCodec::Aac`] this is `FFmpeg`'s native `aac`, **not** the
+    /// nonfree `libfdk_aac`.
+    #[must_use]
+    pub const fn lgpl_software_encoder(self) -> Option<&'static str> {
+        match self {
+            Self::Aac => Some("aac"),
+            Self::Opus => Some("libopus"),
+            Self::Mp2 => Some("mp2"),
+        }
+    }
+}
+
+/// The ordered preference list of concrete libav encoder short-names this build
+/// is allowed to use for `codec`, best first.
+///
+/// For audio the policy is simply the LGPL software encoder: the nonfree
+/// `libfdk_aac` is never modelled, so it can never be a candidate in any build.
+/// The result is pure compile-time data; no libav call happens here.
+#[must_use]
+pub fn candidate_audio_encoders(codec: AudioCodec) -> Vec<&'static str> {
+    let mut candidates = Vec::with_capacity(1);
+    if let Some(name) = codec.lgpl_software_encoder() {
+        candidates.push(name);
+    }
+    candidates
+}
+
+/// Whether this build *can* encode `codec` at all (its candidate list, before
+/// the run-time availability check, is non-empty).
+///
+/// Pure: the audio analogue of [`can_encode`] for early config validation
+/// without touching libav.
+#[must_use]
+pub fn can_encode_audio(codec: AudioCodec) -> bool {
+    !candidate_audio_encoders(codec).is_empty()
+}
+
+/// Pick the best concrete libav encoder for `codec` that is actually present in
+/// the linked `FFmpeg` build, walking [`candidate_audio_encoders`] best-first
+/// and returning the first that resolves.
+///
+/// Returns [`None`] only when **no** candidate resolves (e.g. an `FFmpeg` built
+/// without `libopus`); selection falls through gracefully rather than failing.
+#[cfg(feature = "ffmpeg")]
+#[must_use]
+pub fn select_audio_encoder(codec: AudioCodec) -> Option<&'static str> {
+    candidate_audio_encoders(codec)
+        .into_iter()
+        .find(|name| ffmpeg_next::encoder::find_by_name(name).is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +322,66 @@ mod tests {
             list.first(),
             Some(&"h264_nvenc"),
             "hardware NVENC must be preferred over software"
+        );
+    }
+
+    #[test]
+    fn audio_codecs_resolve_to_their_lgpl_software_encoder() {
+        // AAC/Opus/MP2 are all LGPL software encoders shipped in FFmpeg, so each
+        // logical audio codec resolves to a concrete name in the default build.
+        assert_eq!(AudioCodec::Aac.lgpl_software_encoder(), Some("aac"));
+        assert_eq!(AudioCodec::Opus.lgpl_software_encoder(), Some("libopus"));
+        assert_eq!(AudioCodec::Mp2.lgpl_software_encoder(), Some("mp2"));
+    }
+
+    #[test]
+    fn every_audio_codec_is_encodable_in_the_default_build() {
+        // Unlike H.264/H.265, none of the audio codecs are licence-blocked: the
+        // LGPL-clean default build can encode all three.
+        for codec in [AudioCodec::Aac, AudioCodec::Opus, AudioCodec::Mp2] {
+            assert!(
+                can_encode_audio(codec),
+                "audio codec {codec:?} must be encodable in the default build"
+            );
+            assert!(!candidate_audio_encoders(codec).is_empty());
+        }
+    }
+
+    #[test]
+    fn nonfree_libfdk_aac_is_never_a_candidate() {
+        // libfdk_aac is nonfree and must never appear: the default build can only
+        // reach FFmpeg's native LGPL `aac` encoder, never the nonfree one.
+        for codec in [AudioCodec::Aac, AudioCodec::Opus, AudioCodec::Mp2] {
+            let list = candidate_audio_encoders(codec);
+            assert!(
+                !list.contains(&"libfdk_aac"),
+                "nonfree libfdk_aac must never be an audio candidate ({codec:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn aac_resolves_to_native_lgpl_aac_not_the_nonfree_one() {
+        // The single AAC candidate is FFmpeg's native LGPL `aac` encoder; the
+        // list never offers a nonfree alternative.
+        assert_eq!(candidate_audio_encoders(AudioCodec::Aac), vec!["aac"]);
+    }
+
+    #[test]
+    fn audio_candidate_lists_end_with_the_lgpl_software_encoder() {
+        // The LGPL software encoder is always the final fallback in each list, so
+        // the default build never runs out of a usable audio encoder.
+        assert_eq!(
+            candidate_audio_encoders(AudioCodec::Aac).last(),
+            Some(&"aac")
+        );
+        assert_eq!(
+            candidate_audio_encoders(AudioCodec::Opus).last(),
+            Some(&"libopus")
+        );
+        assert_eq!(
+            candidate_audio_encoders(AudioCodec::Mp2).last(),
+            Some(&"mp2")
         );
     }
 }
