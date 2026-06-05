@@ -404,6 +404,12 @@ impl HeadlessEngine {
         // control plane can serve a live still without cloning every frame on the
         // hot loop. The store is a single atomic swap — it never blocks the clock.
         let preview = Arc::clone(&self.program_preview);
+        // Sparse tile-state events: the projection tracks each source's last
+        // *emitted* lifecycle state and emits at most one `tile.state` change per
+        // tick (seeding every tile once, then on transitions). The control plane
+        // sets the envelope id to the source id, so the monitoring UI keys each
+        // tile by it. This is change-driven — not a per-tick flood (inv #10).
+        let mut last_states: HashMap<String, multiview_core::traits::SourceState> = HashMap::new();
         self.drive(
             &mut runtime,
             publisher,
@@ -420,7 +426,21 @@ impl HeadlessEngine {
                     f.canvas.height(),
                 )
             },
-            |_f: &multiview_engine::CompositedFrame| -> Option<Event> { None },
+            move |f: &multiview_engine::CompositedFrame| -> Option<Event> {
+                for (source, &state) in &f.source_states {
+                    if last_states.get(source) != Some(&state) {
+                        let from = last_states.get(source).copied().unwrap_or(state);
+                        last_states.insert(source.clone(), state);
+                        return Some(Event::TileState(multiview_events::TileState {
+                            from: from.into(),
+                            to: state.into(),
+                            input: Some(source.clone()),
+                            trigger: "state_change".to_owned(),
+                        }));
+                    }
+                }
+                None
+            },
             control,
         )
         .await

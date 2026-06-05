@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { QueryClient } from "@tanstack/react-query";
 
+import { getStoredToken } from "../api/token";
 import { RealtimeConnection } from "./connection";
 import type { RealtimeStatus } from "./connection";
 import {
@@ -44,7 +45,14 @@ function resolveWsUrl(): string {
   // Same-origin: the dev proxy and the embedded build both serve `/api/v1/ws`.
   const { protocol, host } = window.location;
   const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-  return `${wsProtocol}//${host}/api/v1/ws`;
+  const base = `${wsProtocol}//${host}/api/v1/ws`;
+  // A browser WebSocket can't send an Authorization header, so the control plane
+  // also accepts the bearer token as an `access_token` query parameter; pass the
+  // operator's stored token (same-origin) so the privileged stream authenticates.
+  const token = getStoredToken();
+  return token === undefined
+    ? base
+    : `${base}?access_token=${encodeURIComponent(token)}`;
 }
 
 function tileFromEntry(entry: TileSnapshotEntry): LiveTile {

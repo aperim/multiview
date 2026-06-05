@@ -23,7 +23,8 @@
 use std::convert::Infallible;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
@@ -165,12 +166,18 @@ impl SessionStream {
                 let seq = self.issue_seq();
                 let event = (*seq_event.event).clone();
                 let topic = topic_for_event(&event);
-                let envelope = Envelope::new(
+                // Resource scope (the tile/input/output id) the client keys this
+                // delta by — read before the event is moved into the envelope.
+                let scope = event_scope_id(&event);
+                let mut envelope = Envelope::new(
                     topic,
                     seq,
                     MediaTime::from_nanos(i64::try_from(seq_event.seq).unwrap_or(i64::MAX)),
                     event,
                 );
+                if let Some(id) = scope {
+                    envelope = envelope.with_id(id);
+                }
                 Ok(Some(RealtimeFrame {
                     kind: FrameKind::Delta,
                     envelope,
@@ -185,6 +192,18 @@ impl SessionStream {
             }
             Err(RecvError::Closed) => Err(RecvError::Closed),
         }
+    }
+}
+
+/// The resource-scope id (the `Envelope::id`) a client keys an event delta by.
+/// For a tile-state change it is the bound input/tile id, which the monitoring
+/// UI uses to address the tile. Other events carry their scope in the envelope
+/// the producer builds, so they return `None` here.
+#[must_use]
+pub fn event_scope_id(event: &Event) -> Option<String> {
+    match event {
+        Event::TileState(tile) => tile.input.clone(),
+        _ => None,
     }
 }
 
@@ -243,19 +262,54 @@ fn current_engine_snapshot(state: &AppState) -> (EngineStateSnapshot, u64) {
 ///
 /// [`Role::Viewer`]: crate::auth::Role::Viewer
 pub async fn ws_handler(
-    principal: Principal,
     State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth): Query<AccessTokenQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // `principal` is declared first so the `Principal` extractor (and the role
-    // gate below) run *before* the `WebSocketUpgrade` extractor consumes the
-    // request: an unauthenticated or under-privileged client gets a 401/403
-    // `problem+json` response, never a confusing upgrade-handshake error or a
-    // silently-dropped socket.
+    // Resolve auth BEFORE the upgrade so an unauthenticated/under-privileged
+    // client gets a 401/403 `problem+json` response, never a silently-dropped
+    // socket. A browser WebSocket cannot set an `Authorization` header, so the
+    // bearer token is also accepted as `?access_token=` (header still wins).
+    let principal = match resolve_principal(&state, &headers, auth.access_token.as_deref()) {
+        Ok(principal) => principal,
+        Err(err) => return err.into_response(),
+    };
     if let Err(err) = principal.role.require(Action::Read) {
         return err.into_response();
     }
     ws.on_upgrade(move |socket| run_ws_session(socket, state))
+}
+
+/// The browser-transport token fallback: a WebSocket / `EventSource` cannot set
+/// an `Authorization` header, so the bearer token may be passed as the
+/// `access_token` query parameter (same-origin only).
+#[derive(Debug, serde::Deserialize)]
+pub struct AccessTokenQuery {
+    /// The raw `key_id.secret` bearer token, when not sent as a header.
+    access_token: Option<String>,
+}
+
+/// Resolve a [`Principal`] from the `Authorization` header (API key, then JWT) or,
+/// failing that, the `access_token` query parameter (the browser WS/SSE path).
+fn resolve_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+    access_token: Option<&str>,
+) -> Result<Principal, crate::error::ControlError> {
+    let header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    if let Ok(principal) = state.api_keys.verify_authorization(header) {
+        return Ok(principal);
+    }
+    if let Some(Ok(principal)) = state.authenticate_jwt(header) {
+        return Ok(principal);
+    }
+    if let Some(token) = access_token {
+        return state.api_keys.verify(token);
+    }
+    Err(crate::error::ControlError::Unauthenticated)
 }
 
 /// Run one upgraded WebSocket session to completion.
@@ -302,7 +356,15 @@ async fn run_ws_session(mut socket: WebSocket, state: AppState) {
 /// consumer.
 ///
 /// [`Role::Viewer`]: crate::auth::Role::Viewer
-pub async fn sse_handler(State(state): State<AppState>, principal: Principal) -> Response {
+pub async fn sse_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth): Query<AccessTokenQuery>,
+) -> Response {
+    let principal = match resolve_principal(&state, &headers, auth.access_token.as_deref()) {
+        Ok(principal) => principal,
+        Err(err) => return err.into_response(),
+    };
     if let Err(err) = principal.role.require(Action::Read) {
         return err.into_response();
     }
