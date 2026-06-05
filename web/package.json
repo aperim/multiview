@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "generate:api": "openapi-typescript ../docs/api/openapi.json -o src/api/schema.ts",
+    "generate:events": "node scripts/gen-events-types.mjs",
     "build": "lingui compile && tsc --noEmit && vite build",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",

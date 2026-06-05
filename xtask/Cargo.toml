@@ -12,6 +12,8 @@ publish = false
 # gen-openapi serializes multiview-control's utoipa OpenApi document. The `openapi`
 # feature (default-on in multiview-control) is what brings in utoipa + the ApiDoc.
 multiview-control = { workspace = true, features = ["openapi"] }
+# gen-asyncapi calls multiview-events::asyncapi::generate_asyncapi_document().
+multiview-events = { workspace = true }
 utoipa = { version = "5.5.0" }
 serde_json = { workspace = true }
 

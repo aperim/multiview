@@ -14,10 +14,13 @@ publish = false
 [dependencies]
 multiview-core = { workspace = true }
 serde = { workspace = true }
+# serde_json is used by the asyncapi module to build the AsyncAPI 3.0 document
+# as a Value tree. Kept in regular deps (not dev-only) because the asyncapi
+# module is part of the public library surface.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 proptest = "1.11.0"
 
 [lints]

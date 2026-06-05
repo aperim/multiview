@@ -4604,6 +4604,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "multiview-control",
+ "multiview-events",
  "serde_json",
  "utoipa",
 ]

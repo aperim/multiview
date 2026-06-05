@@ -17,13 +17,16 @@ use utoipa::OpenApi;
 /// Relative path (from the workspace root) of the generated `OpenAPI` document.
 const OPENAPI_OUT: &str = "docs/api/openapi.json";
 
+/// Relative path (from the workspace root) of the generated `AsyncAPI` document.
+const ASYNCAPI_OUT: &str = "docs/api/asyncapi.json";
+
 fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_else(|| "help".to_owned());
     match task.as_str() {
         "help" => {
             println!("xtask — Multiview developer automation");
-            println!("  gen-openapi   write the OpenAPI 3.1 document to {OPENAPI_OUT}");
-            println!("  (more tasks coming soon: build-web, gen-asyncapi, ...)");
+            println!("  gen-openapi    write the OpenAPI 3.1 document to {OPENAPI_OUT}");
+            println!("  gen-asyncapi   write the AsyncAPI 3.0 document to {ASYNCAPI_OUT}");
             ExitCode::SUCCESS
         }
         "gen-openapi" => match gen_openapi() {
@@ -33,6 +36,16 @@ fn main() -> ExitCode {
             }
             Err(err) => {
                 eprintln!("gen-openapi failed: {err}");
+                ExitCode::FAILURE
+            }
+        },
+        "gen-asyncapi" => match gen_asyncapi() {
+            Ok(path) => {
+                println!("wrote {}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("gen-asyncapi failed: {err}");
                 ExitCode::FAILURE
             }
         },
@@ -60,6 +73,30 @@ fn gen_openapi() -> Result<PathBuf, GenError> {
     // Write a trailing newline so the file is POSIX-clean and diff-friendly.
     let mut contents = json;
     contents.push('\n');
+    std::fs::write(&out, contents).map_err(|source| GenError::Write {
+        path: out.clone(),
+        source,
+    })?;
+    Ok(out)
+}
+
+/// Generate the `AsyncAPI` 3.0 document from [`multiview_events::asyncapi`] and
+/// write it to `docs/api/asyncapi.json` (relative to the workspace root),
+/// creating the directory if needed. Returns the path written.
+///
+/// The output is deterministic (re-running yields an identical file); the CI
+/// drift-gate regenerates and fails on any diff (ADR-RT006 Decision).
+fn gen_asyncapi() -> Result<PathBuf, GenError> {
+    let contents = multiview_events::asyncapi::generate_asyncapi_document();
+
+    let out = workspace_root().join(ASYNCAPI_OUT);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| GenError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    // `generate_asyncapi_document` already appends a trailing newline.
     std::fs::write(&out, contents).map_err(|source| GenError::Write {
         path: out.clone(),
         source,

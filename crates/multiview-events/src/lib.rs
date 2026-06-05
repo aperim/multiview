@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod asyncapi;
 pub mod envelope;
 pub mod error;
 pub mod event;
