@@ -21,6 +21,118 @@
 //! only describes the transport binding.
 use serde::{Deserialize, Serialize};
 
+/// A TAI instant as the NMOS `<seconds>:<nanoseconds>` pair, carried as integers.
+///
+/// IS-05 schedules activations against the **TAI** timeline (the same epoch PTP
+/// disciplines). This model only *compares* instants — it never paces output —
+/// so it needs no calendar/leap-second logic, just an ordered integer pair. The
+/// nanosecond field is always `< 1_000_000_000`; arithmetic is checked so a
+/// caller can never construct an out-of-range or overflowing instant silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaiTime {
+    seconds: u64,
+    nanoseconds: u32,
+}
+
+impl TaiTime {
+    /// The number of nanoseconds in one whole second.
+    const NANOS_PER_SEC: u32 = 1_000_000_000;
+
+    /// Construct a [`TaiTime`] from whole seconds and a sub-second nanosecond
+    /// remainder.
+    ///
+    /// A `nanoseconds` value at or beyond one whole second is **normalised** by
+    /// carrying the whole-second part into `seconds` (saturating at [`u64::MAX`]
+    /// rather than wrapping), so the stored remainder always stays `< 1e9`.
+    #[must_use]
+    pub fn new(seconds: u64, nanoseconds: u32) -> Self {
+        let carry = u64::from(nanoseconds / Self::NANOS_PER_SEC);
+        let rem = nanoseconds % Self::NANOS_PER_SEC;
+        Self {
+            seconds: seconds.saturating_add(carry),
+            nanoseconds: rem,
+        }
+    }
+
+    /// The whole-second component.
+    #[must_use]
+    pub const fn seconds(self) -> u64 {
+        self.seconds
+    }
+
+    /// The sub-second nanosecond component (always `< 1_000_000_000`).
+    #[must_use]
+    pub const fn nanoseconds(self) -> u32 {
+        self.nanoseconds
+    }
+
+    /// Add an offset instant to this one, returning [`None`] on overflow.
+    ///
+    /// Used to resolve an `ActivateScheduledRelative` offset against the instant
+    /// the change was staged. Both the nanosecond carry and the second sum are
+    /// checked, so the result is [`None`] rather than a wrapped instant.
+    #[must_use]
+    pub fn checked_add(self, offset: Self) -> Option<Self> {
+        let nanos = self.nanoseconds + offset.nanoseconds;
+        let carry = u64::from(nanos / Self::NANOS_PER_SEC);
+        let rem = nanos % Self::NANOS_PER_SEC;
+        let seconds = self
+            .seconds
+            .checked_add(offset.seconds)
+            .and_then(|s| s.checked_add(carry))?;
+        Some(Self {
+            seconds,
+            nanoseconds: rem,
+        })
+    }
+}
+
+impl PartialOrd for TaiTime {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TaiTime {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.seconds
+            .cmp(&other.seconds)
+            .then(self.nanoseconds.cmp(&other.nanoseconds))
+    }
+}
+
+/// Parse a TAI instant in the NMOS `<seconds>[:<nanoseconds>]` form.
+///
+/// This is a focused, **total** parser (no panic, no full RFC clock dependency),
+/// mirroring [`parse_sdp_transport`]'s discipline:
+/// * a bare `<seconds>` is accepted with a zero nanosecond field;
+/// * `<seconds>:<nanoseconds>` requires both fields to be present and non-empty;
+/// * the nanosecond field must be `< 1_000_000_000` (a sub-second remainder);
+/// * anything else — empty input, a third field, a sign, a decimal point, a
+///   non-digit — yields [`None`].
+#[must_use]
+pub fn parse_tai(text: &str) -> Option<TaiTime> {
+    let mut parts = text.split(':');
+    let seconds_str = parts.next()?;
+    let nanos_str = parts.next();
+    // Reject a third colon-separated field (e.g. "1:2:3").
+    if parts.next().is_some() {
+        return None;
+    }
+    let seconds = seconds_str.parse::<u64>().ok()?;
+    let nanoseconds = match nanos_str {
+        None => 0,
+        Some(nanos) => nanos.parse::<u32>().ok()?,
+    };
+    if nanoseconds >= TaiTime::NANOS_PER_SEC {
+        return None;
+    }
+    Some(TaiTime {
+        seconds,
+        nanoseconds,
+    })
+}
+
 /// The activation mode of an IS-05 connection change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -118,6 +230,12 @@ pub struct ConnectionState {
     /// A staged-but-not-yet-active change, if one is pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<ConnectionRequest>,
+    /// The TAI instant (`<seconds>:<nanoseconds>`) the pending change was staged
+    /// at, captured so an `ActivateScheduledRelative` offset has a base to
+    /// resolve against. [`None`] when nothing is staged, or when the stage was
+    /// recorded without a clock stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_at: Option<String>,
     /// Whether the endpoint is master-enabled.
     #[serde(default)]
     pub master_enable: bool,
@@ -125,16 +243,81 @@ pub struct ConnectionState {
 
 impl ConnectionState {
     /// Stage a connection request (does not activate it).
+    ///
+    /// No clock stamp is recorded, so a relative-scheduled request staged this
+    /// way has no base to resolve its offset against (and [`activate_due`] will
+    /// hold it pending). Use [`stage_at`] when a TAI stamp is available.
+    ///
+    /// [`activate_due`]: ConnectionState::activate_due
+    /// [`stage_at`]: ConnectionState::stage_at
     pub fn stage(&mut self, request: ConnectionRequest) {
         self.staged = Some(request);
+        self.staged_at = None;
+    }
+
+    /// Stage a connection request, recording the TAI instant it was staged at so
+    /// an `ActivateScheduledRelative` offset can be resolved against it.
+    pub fn stage_at(&mut self, request: ConnectionRequest, now: TaiTime) {
+        self.staged = Some(request);
+        self.staged_at = Some(format!("{}:{}", now.seconds(), now.nanoseconds()));
+    }
+
+    /// Resolve the absolute TAI instant the staged request becomes due, if any.
+    ///
+    /// * `ActivateImmediate` is due at the epoch (`0:0`) — i.e. always.
+    /// * `ActivateScheduledAbsolute` is due at its parsed `requested_time`.
+    /// * `ActivateScheduledRelative` is due at `staged_at + requested_time`,
+    ///   and is unresolvable (returns [`None`]) without a recorded `staged_at`.
+    /// * A staging-only request (no mode) is never due ([`None`]).
+    fn due_at(&self) -> Option<TaiTime> {
+        let request = self.staged.as_ref()?;
+        match request.activation.mode? {
+            ActivationMode::ActivateImmediate => Some(TaiTime::new(0, 0)),
+            ActivationMode::ActivateScheduledAbsolute => {
+                parse_tai(request.activation.requested_time.as_deref()?)
+            }
+            ActivationMode::ActivateScheduledRelative => {
+                let offset = parse_tai(request.activation.requested_time.as_deref()?)?;
+                let base = parse_tai(self.staged_at.as_deref()?)?;
+                base.checked_add(offset)
+            }
+        }
+    }
+
+    /// Promote the staged request to active **iff** its activation is due at the
+    /// given clock instant `now`, applying its transport params and
+    /// master-enable. Returns whether a change was activated.
+    ///
+    /// `now` is supplied by the control plane's clock seam — never an input PTS
+    /// (invariant #1): activating a receiver only changes which essence is
+    /// sampled, it never paces output. A request that is not yet due, is
+    /// staging-only, or whose schedule cannot be resolved is left pending.
+    pub fn activate_due(&mut self, now: TaiTime) -> bool {
+        let Some(due) = self.due_at() else {
+            return false;
+        };
+        if now < due {
+            return false;
+        }
+        let Some(request) = self.staged.take() else {
+            return false;
+        };
+        self.staged_at = None;
+        if let Some(enable) = request.master_enable {
+            self.master_enable = enable;
+        }
+        self.active = request.transport_params;
+        true
     }
 
     /// Promote the staged request to active **iff** it carries an immediate
     /// activation, applying its transport params and master-enable. Returns
     /// whether a change was activated.
     ///
-    /// A scheduled or staging-only request is left pending (a real device would
-    /// activate it at the scheduled time; that timing is out of this pure model).
+    /// A thin wrapper over [`activate_due`](ConnectionState::activate_due): an
+    /// immediate activation is due at the epoch, so any clock instant promotes
+    /// it, while a scheduled or staging-only request never matches the epoch and
+    /// is left pending.
     pub fn activate_if_immediate(&mut self) -> bool {
         let immediate = matches!(
             self.staged.as_ref().and_then(|r| r.activation.mode),
@@ -143,14 +326,7 @@ impl ConnectionState {
         if !immediate {
             return false;
         }
-        if let Some(request) = self.staged.take() {
-            if let Some(enable) = request.master_enable {
-                self.master_enable = enable;
-            }
-            self.active = request.transport_params;
-            return true;
-        }
-        false
+        self.activate_due(TaiTime::new(0, 0))
     }
 }
 
@@ -198,8 +374,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::{
-        parse_sdp_transport, Activation, ActivationMode, ConnectionRequest, ConnectionState,
-        TransportParams,
+        parse_sdp_transport, parse_tai, Activation, ActivationMode, ConnectionRequest,
+        ConnectionState, TaiTime, TransportParams,
     };
 
     fn request(immediate: bool) -> ConnectionRequest {
@@ -271,6 +447,145 @@ mod tests {
         state.stage(req);
         assert!(!state.activate_if_immediate());
         assert!(state.staged.is_some());
+    }
+
+    fn scheduled_request(mode: ActivationMode, requested_time: &str) -> ConnectionRequest {
+        let mut req = request(true);
+        req.activation = Activation {
+            mode: Some(mode),
+            requested_time: Some(requested_time.to_owned()),
+        };
+        req
+    }
+
+    #[test]
+    fn parse_tai_reads_seconds_and_nanos() {
+        assert_eq!(
+            parse_tai("1700001000:250"),
+            Some(TaiTime::new(1_700_001_000, 250))
+        );
+        // Bare seconds (no colon) defaults the nanosecond field to zero.
+        assert_eq!(parse_tai("42"), Some(TaiTime::new(42, 0)));
+        // A trailing-colon form is the canonical NMOS "<seconds>:<nanoseconds>".
+        assert_eq!(parse_tai("0:0"), Some(TaiTime::new(0, 0)));
+    }
+
+    #[test]
+    fn parse_tai_rejects_garbage_without_panicking() {
+        assert_eq!(parse_tai(""), None);
+        assert_eq!(parse_tai("notatime"), None);
+        assert_eq!(parse_tai("1700001000:"), None);
+        assert_eq!(parse_tai(":5"), None);
+        assert_eq!(parse_tai("1.5:0"), None);
+        assert_eq!(parse_tai("-1:0"), None);
+        // A nanosecond field at or beyond one whole second is invalid.
+        assert_eq!(parse_tai("1:1000000000"), None);
+        // More than two colon-separated fields is not the NMOS form.
+        assert_eq!(parse_tai("1:2:3"), None);
+    }
+
+    #[test]
+    fn tai_time_orders_by_seconds_then_nanos() {
+        assert!(TaiTime::new(10, 0) < TaiTime::new(10, 1));
+        assert!(TaiTime::new(10, 999_999_999) < TaiTime::new(11, 0));
+        assert_eq!(TaiTime::new(10, 5), TaiTime::new(10, 5));
+    }
+
+    #[test]
+    fn immediate_activation_is_always_due() {
+        let mut state = ConnectionState::default();
+        state.stage(request(true));
+        // The clock instant is irrelevant for an immediate activation.
+        let activated = state.activate_due(TaiTime::new(0, 0));
+        assert!(activated);
+        assert!(state.staged.is_none());
+        assert_eq!(state.active.len(), 1);
+        assert!(state.master_enable);
+    }
+
+    #[test]
+    fn staging_only_request_is_never_due() {
+        let mut state = ConnectionState::default();
+        state.stage(request(false));
+        assert!(!state.activate_due(TaiTime::new(2_000_000_000, 0)));
+        assert!(state.staged.is_some());
+        assert!(state.active.is_empty());
+    }
+
+    #[test]
+    fn scheduled_absolute_does_not_activate_before_due() {
+        let mut state = ConnectionState::default();
+        state.stage(scheduled_request(
+            ActivationMode::ActivateScheduledAbsolute,
+            "1700001000:0",
+        ));
+        // One nanosecond before the requested time: not yet due.
+        let activated = state.activate_due(TaiTime::new(1_700_000_999, 999_999_999));
+        assert!(!activated, "absolute schedule must not fire early");
+        assert!(state.staged.is_some());
+        assert!(state.active.is_empty());
+    }
+
+    #[test]
+    fn scheduled_absolute_activates_at_or_after_requested_time() {
+        // Exactly at the requested instant.
+        let mut at = ConnectionState::default();
+        at.stage(scheduled_request(
+            ActivationMode::ActivateScheduledAbsolute,
+            "1700001000:0",
+        ));
+        assert!(at.activate_due(TaiTime::new(1_700_001_000, 0)));
+        assert!(at.staged.is_none());
+        assert_eq!(at.active.len(), 1);
+
+        // Strictly after the requested instant.
+        let mut after = ConnectionState::default();
+        after.stage(scheduled_request(
+            ActivationMode::ActivateScheduledAbsolute,
+            "1700001000:0",
+        ));
+        assert!(after.activate_due(TaiTime::new(1_700_001_005, 1)));
+        assert!(after.staged.is_none());
+    }
+
+    #[test]
+    fn scheduled_relative_resolves_offset_against_staged_at() {
+        let mut state = ConnectionState::default();
+        // Stage at TAI 1000:0; a 30-second relative offset → due at 1030:0.
+        state.stage_at(
+            scheduled_request(ActivationMode::ActivateScheduledRelative, "30:0"),
+            TaiTime::new(1000, 0),
+        );
+        assert_eq!(state.staged_at.as_deref(), Some("1000:0"));
+        assert!(
+            !state.activate_due(TaiTime::new(1029, 999_999_999)),
+            "relative schedule must not fire before staged_at + offset"
+        );
+        assert!(state.staged.is_some());
+        assert!(state.activate_due(TaiTime::new(1030, 0)));
+        assert!(state.staged.is_none());
+        assert_eq!(state.active.len(), 1);
+    }
+
+    #[test]
+    fn scheduled_relative_without_staged_stamp_never_fires() {
+        let mut state = ConnectionState::default();
+        // `stage` records no clock stamp, so the relative offset has no base to
+        // resolve against and the change can never become due.
+        state.stage(scheduled_request(
+            ActivationMode::ActivateScheduledRelative,
+            "0:0",
+        ));
+        assert!(state.staged_at.is_none());
+        assert!(!state.activate_due(TaiTime::new(9_999_999_999, 0)));
+        assert!(state.staged.is_some());
+    }
+
+    #[test]
+    fn stage_records_the_staged_at_stamp() {
+        let mut state = ConnectionState::default();
+        state.stage_at(request(false), TaiTime::new(500, 7));
+        assert_eq!(state.staged_at.as_deref(), Some("500:7"));
     }
 
     #[test]
