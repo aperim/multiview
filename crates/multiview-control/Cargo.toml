@@ -19,7 +19,9 @@ multiview-config = { workspace = true }
 multiview-telemetry = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+# `net` adds `tokio::net::TcpListener` for `serve` (the real-socket bind that lets
+# `multiview run` expose the API+WebUI); pure Rust, stays in the default build.
+tokio = { workspace = true, features = ["net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -61,7 +63,14 @@ lettre = { version = "0.11.20", default-features = false, features = [
 ], optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+] }
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
 # Property tests for the pure value-machines in this crate (the IS-07 tally/GPI

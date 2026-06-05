@@ -117,6 +117,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-W010](ADR-W010.md) — Canvas layout editor: accessible-equivalent non-canvas editing path
 - [ADR-W011](ADR-W011.md) — Realtime status/tally/alarms: no color alone + disciplined aria-live
 - [ADR-W012](ADR-W012.md) — i18n: Lingui v5 + ECMAScript Intl, client-localized errors
+- [ADR-W013](ADR-W013.md) — Serve the management plane from `multiview run`: control↔engine integration (3 isolation-safe paths, Class-1/2)
 
 ## Dev Container
 
@@ -156,3 +157,4 @@ Decisions **Accepted** during the foundation build-out — the as-built state of
 - [ADR-W010](ADR-W010.md) — Canvas layout editor — accessible-equivalent non-canvas editing path
 - [ADR-W011](ADR-W011.md) — Realtime status/tally/alarms — no color alone + disciplined aria-live
 - [ADR-W012](ADR-W012.md) — i18n — Lingui v5 + ECMAScript Intl, client-localized errors
+- [ADR-W013](ADR-W013.md) — Serve the management plane from `multiview run` — control↔engine integration (3 isolation-safe paths, Class-1/2)

@@ -144,3 +144,29 @@ pub fn router(state: AppState) -> Router {
 
     app.with_state(state)
 }
+
+/// Serve the control-plane [`router`] on an already-bound
+/// [`tokio::net::TcpListener`], shutting down gracefully when `shutdown` resolves.
+///
+/// Binding is the caller's responsibility — so it can choose the address, log the
+/// resolved port, or hand in a socket inherited from a supervisor — and the
+/// caller's `shutdown` future (typically the engine's stop signal) drives a clean
+/// drain of in-flight requests before this returns. Everything served here is
+/// isolation-safe (invariant #10): the router only reads the engine's wait-free
+/// latest-state slot and drop-oldest event broadcast and submits to the
+/// non-blocking command bus, so no client it serves can back-pressure the engine.
+///
+/// # Errors
+/// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
+pub async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    axum::serve(listener, router(state).into_make_service())
+        .with_graceful_shutdown(shutdown)
+        .await
+}
