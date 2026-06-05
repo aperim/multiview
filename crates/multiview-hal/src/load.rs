@@ -799,4 +799,233 @@ mod tests {
             }
         }
     }
+
+    // ------------------------------------------------------------------------
+    // Linux i915/amdgpu sysfs/fdinfo parsing (ADR-0017, ENG-4).
+    //
+    // These exercise the PURE string -> DeviceLoad-field parsers against
+    // captured sysfs/fdinfo fixture STRINGS (no real GPU, no /sys read), plus
+    // the device-tree walk against a synthetic temp directory (NOT /sys).
+    // ------------------------------------------------------------------------
+    #[cfg(any(feature = "vaapi", feature = "qsv"))]
+    mod sysfs {
+        use super::super::linux_sysfs::{
+            classify_pci_vendor, parse_fdinfo_merged_media_frac, parse_gpu_busy_percent,
+            parse_vram_bytes, read_device_load_from, DeviceDirs, DrmRoot, FdinfoSample,
+        };
+        use super::super::{LoadProbe, Vendor};
+
+        #[test]
+        fn classify_pci_vendor_maps_known_ids() {
+            // Canonical lower-case hex with the kernel's `0x` prefix + trailing
+            // newline, exactly as `/sys/class/drm/cardN/device/vendor` reports.
+            assert_eq!(classify_pci_vendor("0x10de\n"), Some(Vendor::Nvidia));
+            assert_eq!(classify_pci_vendor("0x1002\n"), Some(Vendor::Amd));
+            assert_eq!(classify_pci_vendor("0x8086\n"), Some(Vendor::Intel));
+            // Upper-case + no newline still classifies (robust trim/parse).
+            assert_eq!(classify_pci_vendor("0x8086"), Some(Vendor::Intel));
+            // An unknown / non-GPU vendor id is None, never a wrong guess.
+            assert_eq!(classify_pci_vendor("0x1234\n"), None);
+            assert_eq!(classify_pci_vendor("garbage"), None);
+            assert_eq!(classify_pci_vendor(""), None);
+        }
+
+        #[test]
+        fn gpu_busy_percent_parses_and_clamps() {
+            assert_eq!(parse_gpu_busy_percent("0\n"), Some(0.0));
+            assert_eq!(parse_gpu_busy_percent("100\n"), Some(1.0));
+            assert_eq!(parse_gpu_busy_percent("50"), Some(0.5));
+            // A driver overshoot (>100) clamps to 1.0, never exceeds the unit
+            // interval and never panics.
+            assert_eq!(parse_gpu_busy_percent("137\n"), Some(1.0));
+            // Garbage / empty => unknown (None), never a fabricated zero.
+            assert_eq!(parse_gpu_busy_percent("notanumber"), None);
+            assert_eq!(parse_gpu_busy_percent(""), None);
+        }
+
+        #[test]
+        fn vram_bytes_parses_decimal_byte_count() {
+            // `mem_info_vram_total` / `_used` are plain decimal byte counts.
+            assert_eq!(parse_vram_bytes("12884901888\n"), Some(12_884_901_888));
+            assert_eq!(parse_vram_bytes("0"), Some(0));
+            assert_eq!(parse_vram_bytes("  6442450944  "), Some(6_442_450_944));
+            assert_eq!(parse_vram_bytes("nope"), None);
+            assert_eq!(parse_vram_bytes(""), None);
+        }
+
+        #[test]
+        fn fdinfo_merged_media_frac_differences_two_snapshots() {
+            // DRM fdinfo reports a monotonically increasing `drm-engine-<class>`
+            // nanosecond counter per client fd. The busy fraction over an
+            // interval is (delta engine-ns) / (interval wall-ns). AMD VCN4+
+            // merges decode+encode into one media engine figure, so we report a
+            // single combined media term.
+            let first = "drm-driver:\tamdgpu\ndrm-engine-gfx:\t1000000 ns\ndrm-engine-enc:\t2000000 ns\n";
+            let second = "drm-driver:\tamdgpu\ndrm-engine-gfx:\t1500000 ns\ndrm-engine-enc:\t2500000 ns\n";
+            let a = FdinfoSample::parse(first).expect("first parses");
+            let b = FdinfoSample::parse(second).expect("second parses");
+            // enc delta = 500_000 ns over a 1_000_000 ns (1 ms) wall interval =>
+            // 0.5 busy fraction for the merged media engine.
+            let frac = parse_fdinfo_merged_media_frac(&a, &b, 1_000_000)
+                .expect("media engine fraction known");
+            assert!((frac - 0.5).abs() < 1e-4, "0.5 expected, got {frac}");
+        }
+
+        #[test]
+        fn fdinfo_merged_media_frac_clamps_and_guards_zero_interval() {
+            let a = FdinfoSample::parse("drm-engine-dec:\t0 ns\n").expect("parses");
+            let b = FdinfoSample::parse("drm-engine-dec:\t9000000 ns\n").expect("parses");
+            // A zero / non-positive interval is a guard => None, never a divide.
+            assert_eq!(parse_fdinfo_merged_media_frac(&a, &b, 0), None);
+            // A delta exceeding the interval clamps to 1.0 (saturated engine).
+            let frac = parse_fdinfo_merged_media_frac(&a, &b, 1_000_000)
+                .expect("known");
+            assert_eq!(frac, 1.0);
+        }
+
+        #[test]
+        fn fdinfo_with_no_engine_keys_yields_none_media() {
+            let a = FdinfoSample::parse("drm-driver:\tamdgpu\n").expect("parses");
+            let b = FdinfoSample::parse("drm-driver:\tamdgpu\n").expect("parses");
+            // No media engine counters at all => unknown, not a fabricated zero.
+            assert_eq!(parse_fdinfo_merged_media_frac(&a, &b, 1_000_000), None);
+        }
+
+        /// Build a synthetic `card0/device/` tree under a unique temp dir (NOT
+        /// `/sys`) so the read path is exercised without a real GPU.
+        fn write_amd_card(root: &std::path::Path, card: &str) -> std::io::Result<()> {
+            let dev = root.join(card).join("device");
+            std::fs::create_dir_all(&dev)?;
+            std::fs::write(dev.join("vendor"), "0x1002\n")?;
+            std::fs::write(dev.join("device"), "0x73bf\n")?;
+            std::fs::write(dev.join("gpu_busy_percent"), "42\n")?;
+            std::fs::write(dev.join("mem_info_vram_total"), "17163091968\n")?;
+            std::fs::write(dev.join("mem_info_vram_used"), "4290772992\n")?;
+            // A stable PCI bus id is the symlink target's basename in real sysfs;
+            // the synthetic tree provides it via a `uevent` PCI_SLOT_NAME line.
+            std::fs::write(
+                dev.join("uevent"),
+                "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\n",
+            )?;
+            Ok(())
+        }
+
+        #[test]
+        fn read_amd_card_from_synthetic_tree() {
+            let base = std::env::temp_dir().join(format!(
+                "mv-eng4-amd-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            write_amd_card(&base, "card0").expect("fixture tree");
+
+            let dirs = DeviceDirs::for_card(&base, "card0").expect("classified as a GPU");
+            assert_eq!(dirs.vendor(), Vendor::Amd);
+            // Stable id is the PCI bus id, never the enumeration index.
+            assert_eq!(dirs.stable_id(), "0000:03:00.0");
+
+            let load = read_device_load_from(&dirs).expect("a Ready load");
+            assert_eq!(load.device_id.vendor(), Vendor::Amd);
+            assert_eq!(load.device_id.stable_id(), "0000:03:00.0");
+            assert!(
+                (load.gpu_busy_frac.expect("busy known") - 0.42).abs() < 1e-4,
+                "42% busy"
+            );
+            assert_eq!(load.vram_total_bytes, Some(17_163_091_968));
+            assert_eq!(load.vram_used_bytes, Some(4_290_772_992));
+            // AMD exposes no per-engine sysfs % here, so enc/dec stay unknown
+            // (honest None, never a fabricated zero) until an fdinfo source is
+            // wired.
+            assert!(load.enc_util_frac.is_none());
+            assert!(load.dec_util_frac.is_none());
+            assert!(load.nvenc_session_count.is_none());
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn read_device_load_missing_files_is_graceful() {
+            // A device dir with a known vendor but NO sysfs metrics files must
+            // yield a Ready load whose every metric is unknown — never a panic
+            // and never a fabricated value.
+            let base = std::env::temp_dir().join(format!(
+                "mv-eng4-empty-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            let dev = base.join("card0").join("device");
+            std::fs::create_dir_all(&dev).expect("dir");
+            std::fs::write(dev.join("vendor"), "0x8086\n").expect("vendor");
+            std::fs::write(
+                dev.join("uevent"),
+                "DRIVER=i915\nPCI_SLOT_NAME=0000:00:02.0\n",
+            )
+            .expect("uevent");
+
+            let dirs = DeviceDirs::for_card(&base, "card0").expect("intel GPU");
+            assert_eq!(dirs.vendor(), Vendor::Intel);
+            let load = read_device_load_from(&dirs).expect("ready, all-unknown");
+            assert!(load.gpu_busy_frac.is_none());
+            assert!(load.vram_total_bytes.is_none());
+            assert!(load.vram_used_bytes.is_none());
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn non_gpu_card_is_skipped() {
+            // A `cardN` whose vendor id is not a known GPU silicon family is not
+            // classified as a device (returns None), so it is never sampled.
+            let base = std::env::temp_dir().join(format!(
+                "mv-eng4-skip-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            let dev = base.join("card9").join("device");
+            std::fs::create_dir_all(&dev).expect("dir");
+            std::fs::write(dev.join("vendor"), "0xabcd\n").expect("vendor");
+            assert!(DeviceDirs::for_card(&base, "card9").is_none());
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn probe_over_synthetic_root_enumerates_and_samples() {
+            let base = std::env::temp_dir().join(format!(
+                "mv-eng4-root-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            write_amd_card(&base, "card0").expect("card0");
+            // A render-only node (`renderD128`) and a non-GPU card must be
+            // ignored by the cardN walk.
+            std::fs::create_dir_all(base.join("renderD128")).expect("render node");
+
+            let probe = DrmRoot::at(&base).into_probe();
+            let devices = probe.devices();
+            assert_eq!(devices.len(), 1, "exactly one classified GPU");
+            let load = probe.sample(&devices[0]);
+            assert!(load.is_ready(), "the synthetic AMD card samples Ready");
+            assert_eq!(
+                probe.sample_all().len(),
+                1,
+                "sample_all returns the one Ready load"
+            );
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn probe_over_absent_root_is_empty_never_panics() {
+            // A root that does not exist (the off-Linux / no-DRM fallback shape)
+            // enumerates nothing and samples nothing — graceful, never a panic.
+            let probe =
+                DrmRoot::at(std::path::Path::new("/nonexistent/mv-eng4/drm")).into_probe();
+            assert!(probe.devices().is_empty());
+            assert!(probe.sample_all().is_empty());
+        }
+    }
 }
