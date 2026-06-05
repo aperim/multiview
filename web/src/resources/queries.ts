@@ -1,67 +1,230 @@
-// Read hooks for the Sources/Outputs/Overlays resource views.
+// React Query bindings for the Sources / Outputs / Overlays resource lists.
 //
-// TODO(api-schema): these endpoints are not in the generated OpenAPI schema yet
-// (see ./types.ts). Until they ship, the hooks resolve a small, typed sample so
-// the views, the layout-editor palette, and the source-binding dropdowns have
-// honest shapes to render — every consumer is already wired to swap to the typed
-// client with no shape change. The data is marked `isStub` so the UI can badge
-// it as not-yet-live (never presented as authoritative engine state).
-import { useQuery } from '@tanstack/react-query';
-import type { UseQueryResult } from '@tanstack/react-query';
+// Each read hook fetches `GET /api/v1/{kind}` and projects every `{id,name,body}`
+// record onto its display view-model (see `./api.ts`). The engine is isolated
+// (invariant #10): these are best-effort reads and degrade to loading / error
+// states rather than assume a response.
+//
+// Writes (create / update / delete) go through the CRUD hooks below. Update and
+// delete read the per-resource ETag the list/get response carried and echo it as
+// `If-Match` for optimistic concurrency. Mutations invalidate the affected list
+// on settle so the projected views re-read authoritative server state.
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
+import type {
+  QueryClient,
+  UseMutationResult,
+  UseQueryResult,
+} from '@tanstack/react-query';
 
-import type { OutputView, OverlayView, SourceView } from './types';
+import {
+  deleteResource,
+  getResource,
+  listResources,
+  ResourceApiError,
+  toOutputView,
+  toOverlayView,
+  toSourceView,
+  writeResource,
+} from './api';
+import type { ResourceWithEtag } from './api';
+import type {
+  OutputView,
+  OverlayView,
+  ResourceInput,
+  ResourceKind,
+  ResourceRecord,
+  SourceView,
+} from './types';
 
-/** Query keys for the (stubbed) resource lists. */
+export type { ResourceInput, ResourceKind, ResourceRecord } from './types';
+
+/** A failed resource call, normalized to a single human-readable message. */
+export class ApiError extends Error {
+  /** The HTTP status code, when the failure carried an RFC 9457 problem body. */
+  readonly status: number | undefined;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+function toApiError(error: unknown): ApiError {
+  if (error instanceof ResourceApiError) {
+    return new ApiError(error.message, error.status);
+  }
+  if (error instanceof Error) {
+    return new ApiError(error.message);
+  }
+  return new ApiError('Unknown error');
+}
+
+/** Stable React Query keys for the resource lists and their ETag maps. */
 export const resourceKeys = {
-  sources: ['resources', 'sources'] as const,
-  outputs: ['resources', 'outputs'] as const,
-  overlays: ['resources', 'overlays'] as const,
+  list: (kind: ResourceKind): readonly string[] => ['resources', kind],
+  etags: (kind: ResourceKind): readonly string[] => ['resources', kind, 'etags'],
 };
 
-const SAMPLE_SOURCES: readonly SourceView[] = [
-  { id: 'cam-north', name: 'North Camera', kind: 'rtsp', url: 'rtsp://cam-north/stream' },
-  { id: 'cam-south', name: 'South Camera', kind: 'rtsp', url: 'rtsp://cam-south/stream' },
-  { id: 'studio-ndi', name: 'Studio NDI', kind: 'ndi', url: undefined },
-  { id: 'bars', name: 'Test Bars', kind: 'test', url: undefined },
-];
+/** Per-resource ETag map, mirrored into the cache for `If-Match`. */
+export type EtagMap = Readonly<Record<string, string>>;
 
-const SAMPLE_OUTPUTS: readonly OutputView[] = [
-  { id: 'program-hls', name: 'Program LL-HLS', kind: 'll-hls', enabled: true },
-  { id: 'program-rtsp', name: 'Program RTSP', kind: 'rtsp', enabled: true },
-  { id: 'archive-srt', name: 'Archive SRT', kind: 'srt', enabled: false },
-];
+/** Read the cached ETag map for a resource kind (empty when nothing stored). */
+export function readResourceEtags(queryClient: QueryClient, kind: ResourceKind): EtagMap {
+  return queryClient.getQueryData<EtagMap>(resourceKeys.etags(kind)) ?? {};
+}
 
-const SAMPLE_OVERLAYS: readonly OverlayView[] = [
-  { id: 'wall-clock', name: 'Wall Clock', kind: 'clock', z: 100 },
-  { id: 'tally', name: 'Tally Border', kind: 'tally_border', z: 90 },
-  { id: 'lower-third', name: 'Lower Third', kind: 'label', z: 80 },
-];
+/** Connection options threaded into the read + write helpers. */
+export interface ResourceContext {
+  /** Base URL for the helpers (defaults to same-origin). */
+  readonly baseUrl?: string;
+  /** Optional bearer token. */
+  readonly token?: string;
+}
 
-/** Whether the resource APIs are wired (false while stubbed). */
-export const RESOURCES_ARE_STUBBED = true;
+function requestOptions(context: ResourceContext): { baseUrl?: string; token?: string } {
+  return {
+    ...(context.baseUrl !== undefined ? { baseUrl: context.baseUrl } : {}),
+    ...(context.token !== undefined ? { token: context.token } : {}),
+  };
+}
 
-function useStub<T>(
-  key: readonly string[],
-  rows: readonly T[],
-): UseQueryResult<readonly T[], never> {
-  return useQuery<readonly T[], never>({
-    queryKey: key,
-    queryFn: (): readonly T[] => rows,
-    staleTime: Infinity,
+function rememberEtag(
+  queryClient: QueryClient,
+  kind: ResourceKind,
+  id: string,
+  etag: string | undefined,
+): void {
+  if (etag === undefined) {
+    return;
+  }
+  queryClient.setQueryData<EtagMap>(resourceKeys.etags(kind), (current) => ({
+    ...(current ?? {}),
+    [id]: etag,
+  }));
+}
+
+/**
+ * Build the read hook for a resource kind: list `GET /api/v1/{kind}` and project
+ * each record onto its view-model. The factory keeps Sources/Outputs/Overlays
+ * DRY while preserving their distinct, fully-typed view shapes.
+ */
+function makeListHook<View>(
+  kind: ResourceKind,
+  project: (record: ResourceRecord) => View,
+): (context?: ResourceContext) => UseQueryResult<readonly View[], ApiError> {
+  return function useList(
+    context: ResourceContext = {},
+  ): UseQueryResult<readonly View[], ApiError> {
+    const queryClient = useQueryClient();
+    return useQuery<readonly View[], ApiError>({
+      queryKey: resourceKeys.list(kind),
+      queryFn: async (): Promise<readonly View[]> => {
+        let records: ResourceRecord[];
+        try {
+          records = await listResources(kind, requestOptions(context));
+        } catch (error) {
+          throw toApiError(error);
+        }
+        // The list response does not carry per-item ETags; clear any stale map
+        // so an update re-fetches the current ETag via GET before its PUT.
+        queryClient.setQueryData<EtagMap>(resourceKeys.etags(kind), {});
+        return records.map(project);
+      },
+    });
+  };
+}
+
+/** List the managed ingest sources, projected to {@link SourceView}. */
+export const useSources = makeListHook<SourceView>('sources', toSourceView);
+
+/** List the configured outputs, projected to {@link OutputView}. */
+export const useOutputs = makeListHook<OutputView>('outputs', toOutputView);
+
+/** List the configured overlays, projected to {@link OverlayView}. */
+export const useOverlays = makeListHook<OverlayView>('overlays', toOverlayView);
+
+/** The variables passed to a save mutation. */
+export interface SaveResourceVars {
+  /** The target resource id (the path is authoritative). */
+  readonly id: string;
+  /** The create/update payload. */
+  readonly input: ResourceInput;
+  /** Create (`POST`) when true; update (`PUT` + `If-Match`) when false. */
+  readonly create: boolean;
+}
+
+/**
+ * Create or update a resource of the given kind. On update the stored ETag is
+ * read first (or fetched via GET when absent) and echoed as `If-Match`; the
+ * response ETag is remembered for the next write. The affected list is
+ * invalidated on settle so the projected view re-reads server state.
+ */
+export function useSaveResource(
+  kind: ResourceKind,
+  context: ResourceContext = {},
+): UseMutationResult<ResourceRecord, ApiError, SaveResourceVars> {
+  const queryClient = useQueryClient();
+  return useMutation<ResourceRecord, ApiError, SaveResourceVars>({
+    mutationFn: async ({ id, input, create }): Promise<ResourceRecord> => {
+      try {
+        let etag = readResourceEtags(queryClient, kind)[id];
+        if (!create && etag === undefined) {
+          // No cached ETag (e.g. first edit after a list read): fetch the
+          // current one so the conditional PUT carries an `If-Match`.
+          const current = await getResource(kind, id, requestOptions(context));
+          etag = current.etag;
+        }
+        const result: ResourceWithEtag = await writeResource(
+          kind,
+          id,
+          input,
+          create,
+          {
+            ...requestOptions(context),
+            ...(etag !== undefined ? { etag } : {}),
+          },
+        );
+        rememberEtag(queryClient, kind, result.record.id, result.etag);
+        return result.record;
+      } catch (error) {
+        throw toApiError(error);
+      }
+    },
+    onSettled: (): void => {
+      void queryClient.invalidateQueries({ queryKey: resourceKeys.list(kind) });
+    },
   });
 }
 
-/** List the (stubbed) managed sources. */
-export function useSources(): UseQueryResult<readonly SourceView[], never> {
-  return useStub(resourceKeys.sources, SAMPLE_SOURCES);
-}
-
-/** List the (stubbed) configured outputs. */
-export function useOutputs(): UseQueryResult<readonly OutputView[], never> {
-  return useStub(resourceKeys.outputs, SAMPLE_OUTPUTS);
-}
-
-/** List the (stubbed) configured overlays. */
-export function useOverlays(): UseQueryResult<readonly OverlayView[], never> {
-  return useStub(resourceKeys.overlays, SAMPLE_OVERLAYS);
+/**
+ * Delete a resource of the given kind, sending the stored ETag as `If-Match`
+ * when known. The list is invalidated on settle.
+ */
+export function useDeleteResource(
+  kind: ResourceKind,
+  context: ResourceContext = {},
+): UseMutationResult<undefined, ApiError, string> {
+  const queryClient = useQueryClient();
+  return useMutation<undefined, ApiError, string>({
+    mutationFn: async (id): Promise<undefined> => {
+      const etag = readResourceEtags(queryClient, kind)[id];
+      try {
+        await deleteResource(kind, id, {
+          ...requestOptions(context),
+          ...(etag !== undefined ? { etag } : {}),
+        });
+      } catch (error) {
+        throw toApiError(error);
+      }
+      return undefined;
+    },
+    onSettled: (): void => {
+      void queryClient.invalidateQueries({ queryKey: resourceKeys.list(kind) });
+    },
+  });
 }

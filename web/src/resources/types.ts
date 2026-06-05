@@ -1,18 +1,37 @@
-// Typed view-models for the resource surfaces the SPA shows alongside layouts.
+// Typed view-models for the resource surfaces the SPA manages alongside layouts.
 //
-// SCHEMA STATUS (read me)
-// -----------------------
-// The control plane will expose Sources, Outputs, and Overlays as first-class
-// REST resources, but those operations are NOT in the generated OpenAPI schema
-// yet (only `GET /api/v1/layouts` is). These interfaces are deliberately-marked
-// view-models that mirror the documented `multiview-config` shapes
-// (crates/multiview-config/src/schema.rs: `Source`, `Overlay`, output sinks). They
-// are NOT fake `as` casts of an untyped body — they are honest placeholders the
-// read views render until the API ships.
-//
-// TODO(api-schema): once `cargo xtask gen-openapi` emits Sources/Outputs/Overlays
-// operations, derive these from `components['schemas'][…]` and replace the stub
-// queries in `./queries.ts` with the typed client calls.
+// Sources, Outputs, and Overlays are first-class control-plane REST resources,
+// each stored as a `{ id, name, body }` record where `body` is the opaque,
+// validated config document (`multiview-config`: `Source`, `Output`, `Overlay`).
+// The control plane stores and version-stamps the body without the SPA having to
+// model every kind's fields. The view-models below are the small, display-facing
+// projections the read views and the layout-editor palette render; they are
+// derived from the opaque body with typed field guards (see `./api.ts`), never
+// `as`-casts.
+
+/** The resource collections the SPA manages (the REST path segment). */
+export type ResourceKind = 'sources' | 'outputs' | 'overlays';
+
+/**
+ * A persisted resource record, exactly as the control plane returns it: a stable
+ * id, an operator label, and the opaque config `body`.
+ */
+export interface ResourceRecord {
+  /** Stable resource id. */
+  readonly id: string;
+  /** Operator label. */
+  readonly name: string;
+  /** The opaque, validated config document. */
+  readonly body: Record<string, unknown>;
+}
+
+/** The create/update payload accepted by the control plane. */
+export interface ResourceInput {
+  /** Operator label. */
+  readonly name: string;
+  /** The config document to store. */
+  readonly body: Record<string, unknown>;
+}
 
 /** The transport kinds Multiview can ingest (config `[[sources]]` `kind`). */
 export type SourceKind =
@@ -23,6 +42,17 @@ export type SourceKind =
   | 'ndi'
   | 'file'
   | 'test';
+
+/** All source kinds, for building selectors. */
+export const SOURCE_KINDS: readonly SourceKind[] = [
+  'rtsp',
+  'hls',
+  'srt',
+  'rtmp',
+  'ndi',
+  'file',
+  'test',
+];
 
 /** A managed ingest source. */
 export interface SourceView {
@@ -39,6 +69,16 @@ export interface SourceView {
 /** The output transport kinds (config `[[outputs]]`). */
 export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt';
 
+/** All output kinds, for building selectors. */
+export const OUTPUT_KINDS: readonly OutputKind[] = [
+  'rtsp',
+  'hls',
+  'll-hls',
+  'ndi',
+  'rtmp',
+  'srt',
+];
+
 /** A configured output sink/server. */
 export interface OutputView {
   /** Stable output id. */
@@ -53,6 +93,15 @@ export interface OutputView {
 
 /** The overlay kinds (config `[[overlays]]` `kind`). */
 export type OverlayKind = 'clock' | 'label' | 'tally_border' | 'image' | 'subtitle';
+
+/** All overlay kinds, for building selectors. */
+export const OVERLAY_KINDS: readonly OverlayKind[] = [
+  'clock',
+  'label',
+  'tally_border',
+  'image',
+  'subtitle',
+];
 
 /** A configured overlay layer. */
 export interface OverlayView {

@@ -1,10 +1,9 @@
-// A small generic TanStack-Table wrapper for the read-only resource views.
+// A small generic TanStack-Table wrapper for the resource list views.
 //
 // Keeps the Sources/Outputs/Overlays views DRY: pass the typed rows + columns
-// and it renders an accessible table with loading/empty states. It is read-only
-// by design — these resources are stubbed until their write APIs ship.
+// and it renders an accessible table with an empty state. Row-level actions
+// (edit/delete) live in an `actions` column the caller supplies.
 import type { JSX } from 'react';
-import { Trans } from '@lingui/react/macro';
 import {
   flexRender,
   getCoreRowModel,
@@ -83,20 +82,5 @@ export function ResourceTable<T>({
         ))}
       </TableBody>
     </Table>
-  );
-}
-
-/** A standard "API not wired yet" banner for the stubbed resource views. */
-export function StubNotice(): JSX.Element {
-  return (
-    <p
-      role="note"
-      className="mb-4 rounded-md border border-dashed bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
-    >
-      <Trans>
-        Sample data shown. This resource is read-only until its management API
-        ships; the view is already typed to swap to live data with no change.
-      </Trans>
-    </p>
   );
 }
