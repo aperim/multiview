@@ -128,7 +128,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **IN-1** `M` — ST 2110 receive: frame assembler over the depacketizers  ·  _deps: —_
 - [ ] **IN-2** `L` — ST 2110 receive: wire `RtpReceiver`/`DualPathReceiver` into a `FrameProducer` + PTP timing  ·  _deps: IN-1_
 - [ ] **IN-3** `XL` — NDI ingest: runtime-loaded SDK → `FrameProducer` + CLI wiring  ·  _deps: IN-2_
-- [ ] **IN-4** `M` — YouTube live: pure resolver core over `yt-dlp -J`  ·  _deps: —_
+- [x] **IN-4** `M` — YouTube live: pure resolver core over `yt-dlp -J`  ·  _deps: —_
 - [ ] **IN-5** `L` — YouTube live: wire to HLS ingest + re-resolution loop  ·  _deps: IN-4_
 - [ ] **IN-6** `XL` — WebRTC ingest: ICE/DTLS/SRTP transport behind an application-layer media engine  ·  _deps: IN-1_
 - [ ] **IN-7** `S` — CI strategy: feature-gated compile + integration gating for the wired transports  ·  _deps: IN-2, IN-3, IN-6_
@@ -157,7 +157,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **ENG-3** `M` — NTP/PTP lock auto-detect for the wall-clock badge (task #37)  ·  _deps: ENG-5_
 - [ ] **ENG-4** `L` — Linux i915/amdgpu GPU load probe  ·  _deps: —_
 - [ ] **ENG-5** `L` — PTP / ST 2059 PHC NIC binding (`ptp` feature)  ·  _deps: ENG-3_
-- [ ] **ENG-6** `L` — HA cluster peer transport (`cluster` feature)  ·  _deps: —_
+- [x] **ENG-6** `L` — HA cluster peer transport (`cluster` feature)  ·  _deps: —_  · _`UdpClusterTransport` + failover/replication over loopback-tested; true multi-host partition is hardware-tier (gated)_
 
 ### GPU — Compositor, efficiency & hardware
 
@@ -165,7 +165,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **GPU-2** `M` — Converge the SOFTWARE engine onto `synth::generator_loop` so a clock source animates  ·  _deps: —_
 - [x] **GPU-3** `S` — GPU `describe_*` metadata trait methods: wire or remove  ·  _deps: —_
 - [ ] **GPU-4** `L` — Overlay IMAGE-primitive GPU texture upload (the wgpu shader branch)  ·  _deps: GPU-3_
-- [ ] **GPU-5** `XL` — Multi-GPU PLACEMENT decision engine: closed-loop controller + config + telemetry  ·  _deps: —_
+- [~] **GPU-5** `XL` — Multi-GPU PLACEMENT decision engine: closed-loop controller + config + telemetry  ·  _deps: —_  · _PARTIAL: HAL deliberate-split decision (`split.rs`: `plan_split`/`CutPoint`/`CrossGpuCopy`) landed `c995341`; the engine controller (sustained-overload SHED-vs-MIGRATE), config policy fields + telemetry counters REMAIN_
 - [ ] **GPU-6** `XL` — Hardware backend real decode/encode/composite PATHS (cuda/vaapi/qsv/metal)  ·  _deps: GPU-1, GPU-3_
 
 ### SUR — Captions · NMOS · web codegen
@@ -173,7 +173,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [x] **SUR-1** `M` — IS-05 scheduled activation (absolute + relative)  ·  _deps: —_
 - [ ] **SUR-2** `L` — IS-07 MQTT broker transport  ·  _deps: SUR-1_
 - [ ] **SUR-3** `XL` — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT  ·  _deps: —_
-- [ ] **SUR-4** `M` — OpenAPI: annotate the layout/resource write ops so they enter the spec  ·  _deps: —_
+- [x] **SUR-4** `M` — OpenAPI: annotate the layout/resource write ops so they enter the spec  ·  _deps: —_
 - [ ] **SUR-5** `M` — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes  ·  _deps: SUR-4_
 - [ ] **SUR-6** `XL` — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope)  ·  _deps: SUR-6_
 
@@ -773,7 +773,8 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` GPU-5 — Multi-GPU PLACEMENT decision engine: closed-loop controller + config + telemetry · effort: XL · deps: none
+### `[~]` GPU-5 — Multi-GPU PLACEMENT decision engine: closed-loop controller + config + telemetry · effort: XL · deps: none
+> **PARTIAL (2026-06-05):** the HAL deliberate-split decision shipped — `crates/multiview-hal/src/split.rs` (`plan_split` + `CutPoint`/`CrossGpuCopy`/`SplitPlan`/`SplitReject`, 8 tests), commit `c995341`. Step 1 (split completeness in `select.rs`) is done. **Remaining:** step 2 (the off-hot-path controller in `multiview-engine` — EWMA/sustained-overload SHED-vs-MIGRATE, make-before-break), step 3 (config policy fields), step 4 (telemetry counters). Track as a follow-on.
 - **Goal:** Turn the pure `multiview-hal::select` placement policy (already built) into a live system: an off-hot-path placement controller in `multiview-engine` that senses `DeviceLoad`, detects sustained overload, and proposes SHED-vs-MIGRATE — plus the config policy and telemetry counters ADR-0018 specifies.
 - **Touches:** `crates/multiview-hal/src/select.rs` (the pure `select_device` exists — extend with `SplitPlan`/`CutPoint` if absent), `crates/multiview-hal/src/load.rs` (`DeviceLoad`/`LoadPoller` exist, 403). New: a placement controller in `crates/multiview-engine/` (beside the existing `ControlLoop`/`Hysteresis` — confirm names in `engine/src/`), config policy fields in `crates/multiview-config/`, and per-GPU/migration counters in `crates/multiview-telemetry/`.
 - **Approach:**
