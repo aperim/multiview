@@ -118,6 +118,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-W011](ADR-W011.md) — Realtime status/tally/alarms: no color alone + disciplined aria-live
 - [ADR-W012](ADR-W012.md) — i18n: Lingui v5 + ECMAScript Intl, client-localized errors
 - [ADR-W013](ADR-W013.md) — Serve the management plane from `multiview run`: control↔engine integration (3 isolation-safe paths, Class-1/2)
+- [ADR-W014](ADR-W014.md) — Control-plane access: bootstrap admin token from `MULTIVIEW_CONTROL_TOKEN` (else generated + logged once)
 
 ## Dev Container
 

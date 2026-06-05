@@ -280,3 +280,98 @@ impl ApiKeyStore {
         self.verify(token.trim())
     }
 }
+
+/// Build the control plane's API-key store with a bootstrap **admin** key.
+///
+/// Secure-by-default access for the management API/UI without shipping a secret
+/// in config (CLAUDE.md secret hygiene — credentials come from the environment,
+/// not the repo):
+///
+/// * `admin_secret = Some(secret)` — the operator supplied the admin secret
+///   (e.g. via the `MULTIVIEW_CONTROL_TOKEN` environment variable). It is
+///   registered as the `admin` key and is **stable across restarts**, so a saved
+///   browser token keeps working. Returns `None` (nothing to surface — the
+///   operator already holds the token).
+/// * `admin_secret = None` — no secret was provided. A random admin secret is
+///   generated and the full bearer token `admin.<secret>` is **returned** so the
+///   caller can log it **once** for first access (the Grafana/Jenkins bootstrap
+///   pattern). Regenerated each start until a stable secret is configured.
+///
+/// The presented bearer token is always `admin.<secret>`. The HMAC pepper is a
+/// fresh random per process: digests are recomputed from the registered secret
+/// on each start, so the pepper need not be persisted, and it never leaves the
+/// process. Additional non-admin keys/roles are a follow-up (config-declared).
+#[must_use]
+pub fn provision_admin_keys(admin_secret: Option<String>) -> (ApiKeyStore, Option<String>) {
+    // A per-process random pepper binds the digests to this run; it is never
+    // persisted or logged. `uuid::Uuid::new_v4()` is CSPRNG-backed (getrandom).
+    let pepper = uuid::Uuid::new_v4().into_bytes().to_vec();
+    let mut store = ApiKeyStore::new(pepper);
+
+    let (secret, bootstrap_token) = if let Some(secret) = admin_secret {
+        (secret, None)
+    } else {
+        let secret = uuid::Uuid::new_v4().to_string();
+        let token = format!("admin.{secret}");
+        (secret, Some(token))
+    };
+
+    store.register(
+        "admin",
+        &secret,
+        Principal {
+            key_id: "admin".to_owned(),
+            role: Role::Admin,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+        },
+    );
+
+    (store, bootstrap_token)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn operator_supplied_secret_authenticates_and_is_not_surfaced() {
+        let (store, bootstrap) = provision_admin_keys(Some("s3cret".to_owned()));
+        // Nothing to log back — the operator already holds the secret.
+        assert!(bootstrap.is_none());
+        // The presented bearer token is `admin.<secret>` and authenticates as Admin.
+        let principal = store.verify("admin.s3cret").expect("admin token verifies");
+        assert_eq!(principal.role, Role::Admin);
+        assert_eq!(principal.key_id, "admin");
+        // A wrong secret is rejected.
+        assert!(store.verify("admin.wrong").is_err());
+    }
+
+    #[test]
+    fn generated_bootstrap_token_is_returned_and_authenticates() {
+        let (store, bootstrap) = provision_admin_keys(None);
+        // A full bearer token is surfaced for first access.
+        let token = bootstrap.expect("a bootstrap token is generated when none supplied");
+        assert!(
+            token.starts_with("admin."),
+            "the bootstrap token is the full `admin.<secret>` bearer value"
+        );
+        // The verbatim surfaced token authenticates as Admin.
+        let principal = store
+            .verify(token.strip_prefix("Bearer ").unwrap_or(&token))
+            .expect("the surfaced bootstrap token verifies");
+        assert_eq!(principal.role, Role::Admin);
+    }
+
+    #[test]
+    fn two_generations_differ_and_are_not_cross_valid() {
+        let (store_a, token_a) = provision_admin_keys(None);
+        let (_store_b, token_b) = provision_admin_keys(None);
+        let token_a = token_a.unwrap();
+        let token_b = token_b.unwrap();
+        assert_ne!(token_a, token_b, "each generated secret is random");
+        // store_a must not accept store_b's token (distinct secrets + peppers).
+        assert!(store_a.verify(&token_b).is_err());
+    }
+}

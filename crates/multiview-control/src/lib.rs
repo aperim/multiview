@@ -83,7 +83,9 @@ pub use audit::{
     AuditAction, AuditEntry, AuditLog, AuditRepository, InMemoryAuditLog, AUDIT_KIND,
     DEFAULT_AUDIT_CAPACITY,
 };
-pub use auth::{authorize_object, authorize_output, Action, ApiKeyStore, Principal, Role};
+pub use auth::{
+    authorize_object, authorize_output, provision_admin_keys, Action, ApiKeyStore, Principal, Role,
+};
 pub use command::{command_bus, Command, CommandReceiver, CommandSender, OperationId, SubmitError};
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use error::{ControlError, ControlResult};

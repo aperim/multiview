@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use multiview_control::{
-    ApiKeyStore, AppState, CommandSender, EngineStateSnapshot, InMemoryRepository,
+    provision_admin_keys, AppState, CommandSender, EngineStateSnapshot, InMemoryRepository,
 };
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
@@ -31,11 +31,14 @@ use tokio::task::JoinHandle;
 /// and drop-oldest event broadcast) and the inbound, non-blocking `commands` bus,
 /// neither of which can stall the engine (invariant #10).
 ///
-/// Authentication begins with an **empty** API-key store: the unauthenticated
-/// surface (`/docs`, `/api/v1/openapi.json`, and — with `embed-web` — the web UI
-/// shell) is reachable, while every mutating route is locked (`401`) until keys
-/// are provisioned. Key/JWT provisioning from config is a follow-up; serving the
-/// read/docs surface is deliberately safe by default.
+/// Access is provisioned with a bootstrap **admin** key
+/// ([`provision_admin_keys`]): the unauthenticated surface (`/docs`,
+/// `/api/v1/openapi.json`, and — with `embed-web` — the web UI shell) is always
+/// reachable, while every API route requires the admin token. The admin secret
+/// comes from the `MULTIVIEW_CONTROL_TOKEN` environment variable (stable across
+/// restarts, no secret in config); if unset, a random token is generated and
+/// **logged once** for first access. Finer-grained config-declared keys/roles
+/// are a follow-up.
 ///
 /// # Errors
 /// Returns any I/O error from binding the `listen` address.
@@ -50,11 +53,29 @@ where
 {
     let listener = TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
+
+    // Admin secret from the environment (12-factor; never from the repo/config),
+    // else a generated bootstrap token surfaced once below.
+    let admin_secret = std::env::var("MULTIVIEW_CONTROL_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let (api_keys, bootstrap_token) = provision_admin_keys(admin_secret);
+    if let Some(token) = bootstrap_token {
+        tracing::warn!(
+            token = %token,
+            "no MULTIVIEW_CONTROL_TOKEN set — generated a bootstrap admin token \
+             (use as `Authorization: Bearer <token>`); set MULTIVIEW_CONTROL_TOKEN \
+             to a stable secret for production"
+        );
+    } else {
+        tracing::info!("control admin key provisioned from MULTIVIEW_CONTROL_TOKEN");
+    }
+
     let state = AppState::new(
         publisher,
         commands,
         Arc::new(InMemoryRepository::new()),
-        Arc::new(ApiKeyStore::new(control_pepper())),
+        Arc::new(api_keys),
     );
     let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
     Ok((addr, handle))
@@ -75,14 +96,6 @@ pub fn state_snapshot(tick: u64, pts_ns: i64, width: u32, height: u32) -> Engine
         "pts_ns": pts_ns,
         "canvas": { "width": width, "height": height },
     })
-}
-
-/// The HMAC pepper for the (currently empty) API-key store. With no keys
-/// registered it is never used to verify a token; it becomes load-bearing only
-/// once key provisioning lands, at which point it must come from configuration /
-/// secret storage rather than this placeholder.
-fn control_pepper() -> Vec<u8> {
-    b"multiview-control-unprovisioned".to_vec()
 }
 
 #[cfg(test)]
