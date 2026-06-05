@@ -161,7 +161,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 ### GPU — Compositor, efficiency & hardware
 
-- [ ] **GPU-1** `L` — Hoist the single encoder into the bake consumer; fan packets to mux-only sinks  ·  _deps: —_
+- [~] **GPU-1** `L` — Hoist the single encoder into the bake consumer; fan packets to mux-only sinks  ·  _deps: —_  · _`ProgramEncoder` encode-once producer shipped+tested (`357d52b`: one VideoEncoder, tick-stamped monotonic PTS, GOP keyframes, byte-identical 2-muxer fan-out); wiring it into `consumer_main` + converting the sinks to `PacketMuxSink` (changes the hot-path fan-out frame→packet + the inv-#1/#10 streaming test seam) is **GPU-1b**_
 - [ ] **GPU-2** `M` — Converge the SOFTWARE engine onto `synth::generator_loop` so a clock source animates  ·  _deps: —_
 - [x] **GPU-3** `S` — GPU `describe_*` metadata trait methods: wire or remove  ·  _deps: —_
 - [~] **GPU-4** `L` — Overlay IMAGE-primitive GPU texture upload (the wgpu shader branch)  ·  _deps: GPU-3_  · _`8fd5d01`: WGSL `KIND_IMAGE` premultiplied blit + upload-once content-keyed texture cache + packing/bind-entry (CPU seams tested, naga-validated); runtime dispatch + SSIM/PSNR parity need a GPU runner → **GPU-4b** below_
@@ -183,6 +183,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **SUR-6b** `M` — Swap web realtime consumers (`connection.ts`/`useEngineEvents.ts`) onto the generated envelope types + serve `/asyncapi.json` on the axum router + AsyncAPI-CLI validation step in CI  ·  _deps: SUR-6_
 - [ ] **GPU-5b** `L` — GPU-5 remainder: off-hot-path placement controller in `multiview-engine` (EWMA sustained-overload SHED-vs-MIGRATE, make-before-break) + config policy fields + telemetry counters  ·  _deps: GPU-5_
 - [ ] **ENG-4b** `M` — GPU load probe remainder: live `/proc/<pid>/fdinfo` enc/dec-util walk (sum own PIDs) + i915 PMU `perf_event_open` path (isolated unsafe behind the probe) + telemetry gauge registration  ·  _deps: ENG-4_
+- [ ] **GPU-1b** `L` — Wire the `ProgramEncoder` (357d52b) into the cli bake consumer: `consumer_main` owns ONE `ProgramEncoder`, encodes each baked frame, fans the produced `EncodedPacket`s (owned copies) to N `PacketMuxSink` runners; convert `RunnableOutput`/`build_outputs`/`run_one_output`/`StreamingFrameSource`→packet-fed; evolve the `StreamTestParams`/`TestSinkRunner` seam frame→packet WITHOUT weakening the inv-#1/#10 streaming tests; retire the per-sink encoders; fix the aspirational "encoded once" comments at pipeline.rs:342/553. Verify with `--features ffmpeg`. Completes GPU-1 / inv #7.  ·  _deps: GPU-1_
 
 
 ---
