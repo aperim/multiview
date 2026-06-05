@@ -28,6 +28,7 @@
 //! ingest path — it is *sampled*, never *pacing*. Nothing in this module blocks
 //! or `.await`s the output clock.
 
+pub mod assembler;
 pub mod rtp;
 pub mod v20;
 pub mod v30;
