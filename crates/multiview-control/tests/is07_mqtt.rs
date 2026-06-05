@@ -62,10 +62,7 @@ fn topic_follows_the_nmos_convention() {
         "x-nmos/events/v1.0/sources/cam-3"
     );
     let msg = boolean_state("cam-3", false);
-    assert_eq!(
-        topic_for_message(&msg),
-        "x-nmos/events/v1.0/sources/cam-3"
-    );
+    assert_eq!(topic_for_message(&msg), "x-nmos/events/v1.0/sources/cam-3");
 }
 
 #[test]
@@ -136,8 +133,7 @@ mod live_broker {
     use multiview_control::is07::{GpiEvent, Is07Message, Is07Payload, Is07Timing};
 
     fn free_port() -> u16 {
-        let listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
         listener.local_addr().expect("local addr").port()
     }
 
@@ -185,23 +181,19 @@ mod live_broker {
         // Give the listener a moment to bind.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let cfg = BrokerConfig {
-            host: Ipv4Addr::LOCALHOST.to_string(),
-            port,
-            client_id: "mv-sub".to_owned(),
-            qos: Qos::AtLeastOnce,
-            capacity: 16,
-        };
+        let cfg = BrokerConfig::new(Ipv4Addr::LOCALHOST.to_string(), port, "mv-sub")
+            .with_qos(Qos::AtLeastOnce)
+            .with_capacity(16);
         // Subscriber first so the retained-free message is seen.
         let mut subscriber = MqttSubscriber::connect(&cfg).await.expect("subscriber");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let pub_cfg = BrokerConfig {
-            client_id: "mv-pub".to_owned(),
-            ..cfg.clone()
-        };
-        let publisher =
-            multiview_control::is07::mqtt::MqttPublisher::connect(&pub_cfg).await.expect("publisher");
+        let pub_cfg = BrokerConfig::new(Ipv4Addr::LOCALHOST.to_string(), port, "mv-pub")
+            .with_qos(Qos::AtLeastOnce)
+            .with_capacity(16);
+        let publisher = multiview_control::is07::mqtt::MqttPublisher::connect(&pub_cfg)
+            .await
+            .expect("publisher");
 
         let msg = Is07Message::State {
             source_id: "preview-bus".to_owned(),

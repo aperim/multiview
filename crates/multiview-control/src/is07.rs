@@ -297,32 +297,479 @@ pub fn tally_color_from_is07(message: &Is07Message) -> Option<TallyColor> {
     }
 }
 
-#[cfg(feature = "is07-mqtt")]
 pub mod mqtt {
-    //! MQTT transport bindings for IS-07 (off-by-default `is07-mqtt` feature).
+    //! MQTT transport bindings for IS-07.
     //!
-    //! IS-07 may be carried over MQTT instead of (or alongside) WebSocket. An
-    //! MQTT client is a native dependency, so this transport is feature-gated;
-    //! the pure message model is always available, so Multiview always speaks IS-07
-    //! over WebSocket regardless of this feature.
+    //! IS-07 may be carried over MQTT instead of (or alongside) WebSocket. The
+    //! **pure parts** — the NMOS topic convention, the JSON wire codec, the
+    //! [`Qos`] vocabulary, and the bounded drop-oldest [`PublishQueue`] that
+    //! isolates the engine from a slow broker — are **always compiled and always
+    //! tested**, so Multiview can model and serialise IS-07/MQTT messages with no
+    //! native deps.
     //!
-    //! This module is intentionally a thin, well-typed seam: it pins the MQTT
-    //! **topic convention** for IS-07 (the pure, testable part) and leaves the
-    //! live broker connection to the deployment. No raw broker client is
-    //! compiled into the default build.
+    //! The **live broker client** ([`MqttPublisher`]/[`MqttSubscriber`], built on
+    //! `rumqttc`) is a native async dependency and therefore lives behind the
+    //! off-by-default `is07-mqtt` feature; with the feature off Multiview still
+    //! speaks IS-07 over WebSocket and can still model the MQTT wire form.
+    //!
+    //! **Isolation (invariant #10).** A live publisher drains the bounded
+    //! [`PublishQueue`] on a detached task and `try_publish`es to the broker; the
+    //! engine-facing [`Publisher::try_publish`] never blocks and never awaits the
+    //! broker — when the queue is full it **drops the oldest** message (the
+    //! conflation posture of the realtime fan-out, `realtime-api.md §8`), so a
+    //! dead or slow broker can never back-pressure the engine.
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use super::Is07Message;
+
+    /// The NMOS MQTT topic prefix for IS-07 source events.
+    const TOPIC_PREFIX: &str = "x-nmos/events/v1.0/sources";
+
+    /// The wildcard topic filter a receiver subscribes to in order to receive
+    /// every IS-07 source's events (the single-level `+` matches any source id).
+    pub const SUBSCRIBE_TOPIC_FILTER: &str = "x-nmos/events/v1.0/sources/+";
 
     /// The MQTT topic an IS-07 message for `source_id` is published on, following
     /// the NMOS convention `x-nmos/events/v1.0/sources/<source_id>`.
     #[must_use]
     pub fn topic_for_source(source_id: &str) -> String {
-        format!("x-nmos/events/v1.0/sources/{source_id}")
+        format!("{TOPIC_PREFIX}/{source_id}")
     }
 
     /// The MQTT topic for a message, derived from its source id.
     #[must_use]
     pub fn topic_for_message(message: &Is07Message) -> String {
         topic_for_source(message.source_id())
+    }
+
+    /// MQTT delivery quality-of-service for an IS-07 publish/subscribe.
+    ///
+    /// The wire codes match the MQTT spec (`0`/`1`/`2`). NMOS guidance for IS-07
+    /// state delivery is **at-least-once** (the default) so a receiver does not
+    /// miss a tally change; a high-rate informational event may opt down to
+    /// at-most-once.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    #[non_exhaustive]
+    pub enum Qos {
+        /// Fire-and-forget (`0`): no broker acknowledgement.
+        AtMostOnce,
+        /// At-least-once (`1`): acknowledged, may be duplicated. The default for
+        /// IS-07 state messages.
+        #[default]
+        AtLeastOnce,
+        /// Exactly-once (`2`): the four-way handshake.
+        ExactlyOnce,
+    }
+
+    impl Qos {
+        /// The MQTT wire code for this [`Qos`] (`0`/`1`/`2`).
+        #[must_use]
+        pub const fn code(self) -> u8 {
+            match self {
+                Self::AtMostOnce => 0,
+                Self::AtLeastOnce => 1,
+                Self::ExactlyOnce => 2,
+            }
+        }
+    }
+
+    /// A failure decoding an MQTT payload back into an [`Is07Message`].
+    #[derive(Debug, thiserror::Error)]
+    #[non_exhaustive]
+    pub enum MqttDecodeError {
+        /// The payload was not the expected IS-07 JSON.
+        #[error("invalid IS-07 MQTT payload: {0}")]
+        Json(#[from] serde_json::Error),
+    }
+
+    /// Serialise an [`Is07Message`] to its MQTT payload bytes (compact IS-07
+    /// JSON, the tagged wire model — never `untagged`).
+    ///
+    /// # Errors
+    ///
+    /// [`serde_json::Error`] if the message cannot be serialised (it always can
+    /// for the current model; the result type keeps the seam total).
+    pub fn encode(message: &Is07Message) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(message)
+    }
+
+    /// Decode an MQTT payload back into an [`Is07Message`].
+    ///
+    /// # Errors
+    ///
+    /// [`MqttDecodeError::Json`] if `bytes` is not valid IS-07 JSON. A decode
+    /// failure is a *dropped frame*, never a panic — the caller degrades.
+    pub fn decode(bytes: &[u8]) -> Result<Is07Message, MqttDecodeError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+
+    /// The shared, bounded, drop-oldest buffer behind a [`Publisher`].
+    ///
+    /// Holds at most `capacity` messages; the newest always wins. This is the
+    /// load-bearing isolation primitive (invariant #10): the producer never
+    /// blocks, so a stalled drainer (a dead broker) cannot pace the engine.
+    #[derive(Debug)]
+    struct Shared {
+        queue: Mutex<VecDeque<Is07Message>>,
+        capacity: usize,
+        dropped: AtomicU64,
+    }
+
+    /// The engine-facing handle to a bounded drop-oldest publish queue.
+    ///
+    /// [`Publisher::try_publish`] is non-blocking and infallible from the
+    /// engine's perspective: it either enqueues the message or drops the oldest
+    /// to make room, **never** awaiting a consumer.
+    #[derive(Debug, Clone)]
+    pub struct Publisher {
+        shared: Arc<Shared>,
+    }
+
+    /// The consumer side of a [`PublishQueue`]: the live broker drainer reads
+    /// messages from here and forwards them to the broker.
+    #[derive(Debug)]
+    pub struct PublishReceiver {
+        shared: Arc<Shared>,
+    }
+
+    /// A bounded, drop-oldest publish channel for IS-07 MQTT messages.
+    #[derive(Debug)]
+    pub struct PublishQueue;
+
+    impl PublishQueue {
+        /// Create a bounded drop-oldest queue with the given capacity, returning
+        /// the producer ([`Publisher`]) and consumer ([`PublishReceiver`]) ends.
+        ///
+        /// A `capacity` of `0` is treated as `1` so the queue can always hold the
+        /// single newest message.
+        #[must_use]
+        pub fn bounded(capacity: usize) -> (Publisher, PublishReceiver) {
+            let capacity = capacity.max(1);
+            let shared = Arc::new(Shared {
+                queue: Mutex::new(VecDeque::with_capacity(capacity)),
+                capacity,
+                dropped: AtomicU64::new(0),
+            });
+            (
+                Publisher {
+                    shared: Arc::clone(&shared),
+                },
+                PublishReceiver { shared },
+            )
+        }
+    }
+
+    impl Publisher {
+        /// Enqueue a message without ever blocking.
+        ///
+        /// Returns `true` if the message was enqueued with room to spare, or
+        /// `false` if the queue was full and the **oldest** message was dropped
+        /// to admit this one (the dropped-count is also incremented). Either way
+        /// the newest message is retained — the engine is never paced.
+        ///
+        // The bool is an *advisory* drop indicator: the engine fire-and-forgets
+        // (it reads aggregate drops via `dropped()` for telemetry), so the
+        // result is deliberately ignorable — `#[must_use]` would mislead callers.
+        #[allow(clippy::must_use_candidate)]
+        pub fn try_publish(&self, message: Is07Message) -> bool {
+            // A poisoned lock means a drainer panicked mid-pop; recover the guard
+            // and keep serving rather than propagating a panic onto the engine.
+            let mut queue = match self.shared.queue.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if queue.len() >= self.shared.capacity {
+                queue.pop_front();
+                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                queue.push_back(message);
+                false
+            } else {
+                queue.push_back(message);
+                true
+            }
+        }
+
+        /// The total number of messages dropped-oldest so far (for telemetry /
+        /// the `$lag`-style conflation marker).
+        #[must_use]
+        pub fn dropped(&self) -> u64 {
+            self.shared.dropped.load(Ordering::Relaxed)
+        }
+    }
+
+    impl PublishReceiver {
+        /// Pop the oldest queued message, or [`None`] if the queue is empty.
+        #[must_use]
+        pub fn try_recv(&mut self) -> Option<Is07Message> {
+            let mut queue = match self.shared.queue.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            queue.pop_front()
+        }
+    }
+
+    #[cfg(feature = "is07-mqtt")]
+    pub use live::{BrokerConfig, MqttPublisher, MqttSubscriber, MqttTransportError};
+
+    #[cfg(feature = "is07-mqtt")]
+    mod live {
+        //! The live MQTT broker client (off-by-default `is07-mqtt` feature).
+        //!
+        //! `rumqttc`'s `AsyncClient` owns its own bounded request channel and a
+        //! detached `EventLoop` that must be polled to make progress. The
+        //! [`MqttPublisher`] spawns a task that drains the pure [`PublishQueue`]
+        //! and `try_publish`es each message to the broker, plus a task that polls
+        //! the event loop — so the engine-facing [`super::Publisher::try_publish`]
+        //! never touches the socket. The [`MqttSubscriber`] subscribes to the
+        //! NMOS wildcard and decodes each inbound frame back into an
+        //! [`Is07Message`], degrading a bad frame to a drop, never a panic.
+        use std::time::Duration;
+
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+        use tokio::sync::mpsc;
+
+        use super::super::Is07Message;
+        use super::{
+            decode, topic_for_message, PublishQueue, Publisher, Qos, SUBSCRIBE_TOPIC_FILTER,
+        };
+
+        /// How a [`MqttPublisher`]/[`MqttSubscriber`] reaches the broker.
+        #[derive(Debug, Clone)]
+        #[non_exhaustive]
+        pub struct BrokerConfig {
+            /// The broker host (DNS name or IP).
+            pub host: String,
+            /// The broker port (plain MQTT is conventionally `1883`).
+            pub port: u16,
+            /// The MQTT client id this connection registers as.
+            pub client_id: String,
+            /// The [`Qos`] used for publishes and the subscription.
+            pub qos: Qos,
+            /// The bound on the in-flight drop-oldest queue / inbound channel.
+            pub capacity: usize,
+        }
+
+        impl BrokerConfig {
+            /// A broker config for `host:port` registering as `client_id`, with
+            /// the default at-least-once [`Qos`] and a 16-deep in-flight queue.
+            #[must_use]
+            pub fn new(host: impl Into<String>, port: u16, client_id: impl Into<String>) -> Self {
+                Self {
+                    host: host.into(),
+                    port,
+                    client_id: client_id.into(),
+                    qos: Qos::AtLeastOnce,
+                    capacity: 16,
+                }
+            }
+
+            /// Override the publish/subscribe [`Qos`].
+            #[must_use]
+            pub const fn with_qos(mut self, qos: Qos) -> Self {
+                self.qos = qos;
+                self
+            }
+
+            /// Override the in-flight drop-oldest queue / inbound channel bound.
+            #[must_use]
+            pub const fn with_capacity(mut self, capacity: usize) -> Self {
+                self.capacity = capacity;
+                self
+            }
+
+            /// Map the NMOS [`Qos`] to the `rumqttc` wire `QoS`.
+            const fn rumqttc_qos(&self) -> QoS {
+                match self.qos {
+                    Qos::AtMostOnce => QoS::AtMostOnce,
+                    Qos::AtLeastOnce => QoS::AtLeastOnce,
+                    Qos::ExactlyOnce => QoS::ExactlyOnce,
+                }
+            }
+
+            /// Build the `rumqttc` options for this config.
+            fn options(&self) -> MqttOptions {
+                let mut opts =
+                    MqttOptions::new(self.client_id.clone(), self.host.clone(), self.port);
+                opts.set_keep_alive(Duration::from_secs(15));
+                opts
+            }
+
+            /// The capacity used for the in-flight queue / inbound channel (never
+            /// zero, so the channel can always hold the single newest message).
+            const fn cap(&self) -> usize {
+                if self.capacity == 0 {
+                    1
+                } else {
+                    self.capacity
+                }
+            }
+        }
+
+        /// A failure establishing or running a live MQTT transport.
+        #[derive(Debug, thiserror::Error)]
+        #[non_exhaustive]
+        pub enum MqttTransportError {
+            /// The `rumqttc` client rejected a request (e.g. an invalid topic).
+            #[error("MQTT client error: {0}")]
+            Client(#[from] rumqttc::ClientError),
+        }
+
+        /// A live IS-07 MQTT publisher.
+        ///
+        /// The engine pushes messages via [`Self::try_publish`] (which forwards to
+        /// the bounded drop-oldest [`super::Publisher`]); a detached task drains
+        /// the queue to the broker. Dropping the publisher stops the drain task.
+        #[derive(Debug)]
+        pub struct MqttPublisher {
+            producer: Publisher,
+            qos: QoS,
+            drain: tokio::task::JoinHandle<()>,
+            poll: tokio::task::JoinHandle<()>,
+        }
+
+        impl MqttPublisher {
+            /// Connect to the broker and start the drain + event-loop tasks.
+            ///
+            /// # Errors
+            ///
+            /// Never returns an error today (connection is lazy in `rumqttc`); the
+            /// `Result` keeps the seam total for future eager-connect variants.
+            pub async fn connect(config: &BrokerConfig) -> Result<Self, MqttTransportError> {
+                let (client, mut eventloop) = AsyncClient::new(config.options(), config.cap());
+                let (producer, mut receiver) = PublishQueue::bounded(config.cap());
+                let qos = config.rumqttc_qos();
+
+                // Poll the event loop so the client makes progress. This task
+                // owns the socket; it never signals back to the engine.
+                let poll = tokio::spawn(async move {
+                    loop {
+                        if eventloop.poll().await.is_err() {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                });
+
+                // Drain the bounded queue to the broker. `try_publish` is
+                // non-blocking; on a full client channel the message is dropped
+                // (the engine is never paced). A short idle sleep avoids a busy
+                // loop when the queue is empty.
+                let drain_client = client;
+                let drain = tokio::spawn(async move {
+                    loop {
+                        match receiver.try_recv() {
+                            Some(message) => {
+                                let topic = topic_for_message(&message);
+                                if let Ok(payload) = super::encode(&message) {
+                                    // Drop on any client-side failure; never block.
+                                    let _ = drain_client.try_publish(topic, qos, false, payload);
+                                }
+                            }
+                            None => tokio::time::sleep(Duration::from_millis(5)).await,
+                        }
+                    }
+                });
+
+                // Yield once so the runtime can schedule the just-spawned poll +
+                // drain tasks before the caller starts publishing — the client
+                // begins its TCP connect attempt without a publish round-trip.
+                tokio::task::yield_now().await;
+
+                Ok(Self {
+                    producer,
+                    qos,
+                    drain,
+                    poll,
+                })
+            }
+
+            /// Enqueue a message for publication without blocking.
+            ///
+            /// Returns `true` if enqueued with room to spare, `false` if the
+            /// oldest queued message was dropped to admit this one. Never awaits
+            /// the broker — invariant #10.
+            // Advisory drop indicator, fire-and-forget at the engine boundary —
+            // see `super::Publisher::try_publish`; `#[must_use]` would mislead.
+            #[allow(clippy::must_use_candidate)]
+            pub fn try_publish(&self, message: Is07Message) -> bool {
+                self.producer.try_publish(message)
+            }
+
+            /// The `rumqttc` wire [`QoS`](rumqttc::QoS) this publisher emits at.
+            #[must_use]
+            pub const fn qos(&self) -> QoS {
+                self.qos
+            }
+        }
+
+        impl Drop for MqttPublisher {
+            fn drop(&mut self) {
+                self.drain.abort();
+                self.poll.abort();
+            }
+        }
+
+        /// A live IS-07 MQTT subscriber.
+        ///
+        /// Subscribes to the NMOS wildcard and decodes each inbound frame into an
+        /// [`Is07Message`], delivered over a bounded channel. A frame that fails
+        /// to decode is dropped, never a panic.
+        #[derive(Debug)]
+        pub struct MqttSubscriber {
+            inbound: mpsc::Receiver<Is07Message>,
+            poll: tokio::task::JoinHandle<()>,
+        }
+
+        impl MqttSubscriber {
+            /// Connect, subscribe to the IS-07 wildcard, and start decoding.
+            ///
+            /// # Errors
+            ///
+            /// [`MqttTransportError::Client`] if the subscribe request is rejected.
+            pub async fn connect(config: &BrokerConfig) -> Result<Self, MqttTransportError> {
+                let (client, mut eventloop) = AsyncClient::new(config.options(), config.cap());
+                client
+                    .subscribe(SUBSCRIBE_TOPIC_FILTER, config.rumqttc_qos())
+                    .await?;
+                let (tx, inbound) = mpsc::channel(config.cap());
+
+                let poll = tokio::spawn(async move {
+                    loop {
+                        match eventloop.poll().await {
+                            Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                                if let Ok(message) = decode(&publish.payload) {
+                                    // Drop-oldest on a full inbound channel: a slow
+                                    // reader never back-pressures the broker poll.
+                                    if tx.try_send(message).is_err() {
+                                        // Channel full or closed; drop this frame.
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
+                        }
+                    }
+                });
+
+                Ok(Self { inbound, poll })
+            }
+
+            /// Receive the next decoded inbound IS-07 message, or [`None`] if the
+            /// transport has shut down.
+            pub async fn recv(&mut self) -> Option<Is07Message> {
+                self.inbound.recv().await
+            }
+        }
+
+        impl Drop for MqttSubscriber {
+            fn drop(&mut self) {
+                self.poll.abort();
+            }
+        }
     }
 }
 
@@ -488,7 +935,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "is07-mqtt")]
     #[test]
     fn mqtt_topic_follows_the_nmos_convention() {
         use super::mqtt;
