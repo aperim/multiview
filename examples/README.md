@@ -11,9 +11,12 @@ layout → cells → overlays → outputs, config-as-code). `fps` is **always** 
 | [`3x3.toml`](3x3.toml) | 3×3 grid | 9 × built-in `test` | Density demo. |
 | [`1plus5.toml`](1plus5.toml) | 1 large + 5 small | 6 × built-in `test` | Asymmetric grid via `grid-template-areas`. |
 | [`pip.toml`](pip.toml) | Picture-in-picture | 2 × built-in `test` | Absolute normalized rect overlap. |
+| [`synthetic-sources.toml`](synthetic-sources.toml) | 2×2 grid | `bars` + `solid` + 2 × `clock` | The first-class in-process synthetic sources (ADR-0027); no network, no GPL. |
 | [`public-streams-2x2.toml`](public-streams-2x2.toml) | 2×2 grid | Mixed source kinds | Synthetic + a sample clip + an example RTSP camera; fps/codec/**color** heterogeneity test — see below. |
 
-The `test` source is the built-in synthetic pattern, so the grid/PiP examples run with no external
+The synthetic source kinds — `bars` (75% colour bars; `test` is a back-compat alias), `solid`
+(a `#RRGGBB` slate), and `clock` (a full-frame analog/digital clock) — render in-process in pure
+Rust ([ADR-0027](../docs/decisions/ADR-0027.md)), so the grid/PiP examples run with no external
 dependencies. Replace a source's `kind`/`url` to point at real `rtsp`/`hls`/`ts`/`srt`/`ndi` inputs.
 
 ## `public-streams-2x2.toml` — the heterogeneity test

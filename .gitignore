@@ -42,3 +42,4 @@ dist/
 
 # Coding-agent local working directory (sessions, scratch) — never part of the product
 /.claude/
+demo-output/

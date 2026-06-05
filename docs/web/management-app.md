@@ -112,7 +112,8 @@ Add / edit / test ingest of `rtsp | hls | ts | srt | rtmp | ndi | file | test`. 
   **Cue** → **Take**. No blind commits.
 - **Dynamic protocol form:** the selector re-renders the sub-form to that protocol's fields
   (RTSP transport, HLS reconnect flags, SRT mode/latency with a µs-vs-ms helper, NDI source picker
-  fed by `/api/v1/discovery/ndi`, TS program selector, test pattern).
+  fed by `/api/v1/discovery/ndi`, TS program selector, and the synthetic source kinds — `bars`,
+  `solid` (colour), `clock` (face/12-hour/UTC offset) per [ADR-0027](../decisions/ADR-0027.md)).
 - **Color tab is the centerpiece** ([ADR-M003](../decisions/ADR-M003.md)): each of the four CICP
   axes (primaries / transfer / matrix / range) shows its **detected value + provenance badge**
   (Frame / Codec / Container / Guessed) with an Override dropdown defaulting to Auto, and a live

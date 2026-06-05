@@ -26,9 +26,10 @@ camera, and one public open-movie sample — makes a self-contained 2×2 (it is 
 [`examples/public-streams-2x2.toml`](../../examples/public-streams-2x2.toml) ships) and degrades
 gracefully to a synthetic-only set with no network.
 
-### 1. Synthetic untagged feed (25 fps PAL stand-in) — `test` / lavfi
+### 1. Synthetic untagged feed (25 fps PAL stand-in) — `bars` / lavfi
 
-- **Source:** the built-in `test` source, or a lavfi `testsrc2` pushed into a local server (see the
+- **Source:** a built-in synthetic source (`bars`, of which `test` is a back-compat alias — see
+  [ADR-0027](../decisions/ADR-0027.md)), or a lavfi `testsrc2` pushed into a local server (see the
   [synthetic recipes](#synthetic--reproducible-sources)).
 - **Video:** H.264-class, `yuv420p`, **25 fps (PAL)** — renditions e.g. **1024×576**, **640×360**
 - **Audio:** AAC-LC, **48 kHz**, stereo
@@ -37,9 +38,10 @@ gracefully to a synthetic-only set with no network.
 - **Exercises:** multivariant rendition selection · 25 fps → output-cadence resampling · untagged
   color defaulting · subtitle ingest (WebVTT) · ABR ladder.
 
-### 2. Synthetic BT.709-limited feed (29.97 fps NTSC stand-in) — `test` / lavfi
+### 2. Synthetic BT.709-limited feed (29.97 fps NTSC stand-in) — `bars` / lavfi
 
-- **Source:** the built-in `test` source, or a lavfi `smptebars` at `rate=30000/1001` tagged BT.709.
+- **Source:** a built-in synthetic source (`bars`; `test` is an alias — [ADR-0027](../decisions/ADR-0027.md)),
+  or a lavfi `smptebars` at `rate=30000/1001` tagged BT.709.
 - **Video:** H.264-class, `yuv420p`, **1280×720**, **29.97 fps (30000/1001)**
 - **Audio:** AAC-LC, **48 kHz**, stereo
 - **Color:** **fully tagged** — primaries `bt709`, transfer `bt709`, matrix `bt709`, range **`tv`** (limited)
@@ -145,6 +147,13 @@ Coverage achieved: **fps** {25, 29.92, 29.97, 30, 50, 60} · **codecs** {H.264, 
 For CI and for reproducing a specific failure mode **on demand and offline**. Multiview should ship
 test fixtures built on these. (`testsrc2` = moving test pattern with timecode; `smptebars` = color
 bars; `sine` = audio tone.)
+
+> The lavfi recipes below produce **external** streams (with chosen fps/codec/color tags) to exercise
+> the libav *decode* path. They are distinct from Multiview's **in-process** synthetic source kinds —
+> `bars`, `solid`, and `clock` — which render in pure Rust with no libav and no subprocess
+> ([ADR-0027](../decisions/ADR-0027.md)); see [`examples/synthetic-sources.toml`](../../examples/synthetic-sources.toml).
+> Use the in-process kinds for a self-contained picture; use the recipes when you need a specific
+> on-the-wire tagging/codec to test ingest.
 
 ### Generate sources with *exact* frame rate + color tags
 

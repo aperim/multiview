@@ -84,7 +84,7 @@ Every edit is classified and surfaced **before apply** via `POST /v1/outputs/{id
 | Source | ndi.source_name | PATCH {ndi.name}; GET /v1/discovery/ndi | NDI > Source picker (live + manual) | Hot | Bind-by-name; offline card if unresolved. |
 | Source | ndi.receive_color_format | PATCH {ndi.color_format} | NDI > Color format | Hot (reconnect) | fastest\|best. |
 | Source | ndi.bandwidth_mode | PATCH {ndi.bandwidth} | NDI > Bandwidth | Hot | highest\|lowest (proxy). |
-| Source | test.* | PATCH {test.pattern,size,rate,color_*} | Test > Pattern + size/fps/color | Hot | Reproducible slate/CI tile. |
+| Source | bars/solid/clock (synthetic) | PATCH {kind; solid.color; clock.face,twelve_hour,tz_offset_minutes} | Synthetic > Bars \| Solid (colour) \| Clock (face/12h/UTC offset) | Hot | In-process pure-Rust synthetic kinds; `test`=`bars` alias (ADR-0027). |
 | Source | file.path/loop | PATCH {file.path,file.loop} | File > Path + Loop | Hot (reconnect) | Slate/standby clip. |
 | Source.color_override | primaries | PATCH {color_override.primaries} | Color > Primaries (detected+override) | Hot | AXIS 1; auto = detection precedence. |
 | Source.color_override | transfer/trc | PATCH {color_override.transfer} | Color > Transfer | Hot | AXIS 2; never auto-promote PQ/HLG; warn on SDR. |

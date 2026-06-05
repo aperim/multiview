@@ -50,9 +50,13 @@ store, and the deadline-driven sampling are covered in depth in
 
 ## 2. Supported protocols
 
-The `kind` field (adjacently-tagged enum, `#[serde(tag="kind")]`) selects the protocol and exposes
-a protocol-specific options block. Canonical set:
-**`rtsp` · `hls` · `ts` · `srt` · `rtmp` · `ndi` · `file` · `test`**.
+The `kind` field (internally-tagged enum, `#[serde(tag="kind")]`) selects the source and exposes a
+kind-specific options block. The decoded protocols are
+**`rtsp` · `hls` · `ts` · `srt` · `rtmp` · `ndi` · `file`**; alongside them sit the in-process
+**synthetic** kinds **`bars` · `solid` · `clock`** (`test` is a back-compat alias for `bars`).
+Synthetic sources are first-class peers of decoded feeds — rendered in pure Rust with no libav and
+no subprocess, published per tick into the same per-tile store — see
+[ADR-0027](../decisions/ADR-0027.md).
 
 | `kind` | Backend(s) | Live? | Default transport | Feature | Notes |
 |--------|-----------|:----:|-------------------|---------|-------|
@@ -63,7 +67,9 @@ a protocol-specific options block. Canonical set:
 | `rtmp` | `rml_rtmp` **or** libav `rtmp://` | yes | TCP (FLV) | `ffmpeg` | App + stream key; key is a secret. |
 | `ndi`  | `grafton-ndi` (build-link) / `NDIlib_v6_load` (dynamic) | yes | mDNS LAN | `ndi` | Bind by source **name**; host-memory frames. |
 | `file` | libavformat | no (loopable) | — | `ffmpeg` | Slate/standby clip; `-re`-style pacing valid here. |
-| `test` | internal lavfi-style generator | yes | — | — | Reproducible slate / CI tile; no network. |
+| `bars` | in-process pure-Rust generator | yes | — | — | 75% colour bars (line-up signal); no network. `test` is an alias. |
+| `solid` | in-process pure-Rust generator | yes | — | — | Solid-colour slate; `color = "#RRGGBB"`. |
+| `clock` | in-process generator (reuses the clock rasterizer) | yes | — | (`overlay`) | Full-frame analog/digital clock; needs `overlay` in the full pipeline. |
 
 > **Resolver-backed extension (opt-in):** a **`youtube`** source kind is planned (backlog) as a thin
 > wrapper that resolves a YouTube live URL to an HLS master playlist via an external, runtime-discovered
@@ -145,14 +151,24 @@ a protocol-specific options block. Canonical set:
   attribution. See [ADR-0008](../decisions/ADR-0008.md). There is no public NDI over the internet —
   test with NDI Tools on a LAN ([example-streams](../reference/example-streams.md)).
 
-### 2.7 File & Test
+### 2.7 File & synthetic sources
 
 - **`file`** (`file.path`, `file.loop`): slate / standby clip. Files are the **only** input where
   wall-clock-throttled read (`-re`-style) is appropriate — live ingest must use the pacer, never
   `-re` ([§3](#3-the-input-pacer)).
-- **`test`** (`test.pattern`, `test.size`, `test.rate`, `test.color_*`): a reproducible internal
-  generator for slates and CI tiles; requires no network and reproduces specific failure modes
-  deterministically ([example-streams §Synthetic](../reference/example-streams.md)).
+- **`bars`** (no fields): built-in 75% SMPTE/EBU colour bars — the classic line-up signal.
+  Rendered in-process in pure Rust (no libav, no subprocess); requires no network and is identical
+  across the FFmpeg-free and full builds. `test` is accepted as a back-compat alias and
+  canonicalizes to `bars` ([ADR-0027](../decisions/ADR-0027.md)). The bars audio companion (tone) is
+  not yet implemented.
+- **`solid`** (`color`): a single-colour slate; `color` is a `#RRGGBB` (or `#RGB`) hex string,
+  validated at config-load time. In-process, pure-Rust.
+- **`clock`** (`face`, `twelve_hour`, `tz_offset_minutes`): a full-frame analog or digital clock that
+  can fill a tile or the whole canvas, disciplined by the system wall clock. `face` is `analog`
+  (default) or `digital`; `twelve_hour` selects a 12-hour AM/PM readout (digital only);
+  `tz_offset_minutes` is a UTC offset in minutes (`-720..=840`, validated at load). It reuses the
+  clock overlay rasterizer, so in the full pipeline it needs the `overlay` feature
+  ([ADR-0027](../decisions/ADR-0027.md)).
 
 ---
 
@@ -367,9 +383,10 @@ nosignal_ms = 10000
 range = "auto"                       # auto | tv | pc — highest-impact bug axis
 ```
 
-Per-protocol blocks (`hls`, `ts`, `srt`, `rtmp`, `ndi`, `file`, `test`) carry the options described
-in [§2](#2-supported-protocols). Secrets are referenced (`${secret:ref}` / `secret_ref`), never
-inlined ([ADR-M006](../decisions/ADR-M006.md)).
+Per-kind blocks (decoded: `hls`, `ts`, `srt`, `rtmp`, `ndi`, `file`; synthetic: `solid`'s `color`,
+`clock`'s `face`/`twelve_hour`/`tz_offset_minutes`; `bars`/`test` take no fields) carry the options
+described in [§2](#2-supported-protocols). Secrets are referenced (`${secret:ref}` / `secret_ref`),
+never inlined ([ADR-M006](../decisions/ADR-M006.md)).
 
 ---
 

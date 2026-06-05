@@ -96,7 +96,8 @@ Derived from the management-capability, preview, and realtime design briefs. Use
 - [ ] INPUTS: SRT mode, latency (microseconds), passphrase+pbkeylen, streamid, backend
 - [ ] INPUTS: RTMP app + stream key (secret)
 - [ ] INPUTS: NDI source bind-by-name (discovery + manual), receive color format, bandwidth mode
-- [ ] INPUTS: test pattern source (pattern/size/rate/color tags) and file source (path/loop)
+- [ ] INPUTS: in-process synthetic sources — `bars` (75% colour bars; `test` alias), `solid`
+      (`color`), `clock` (`face`/`twelve_hour`/`tz_offset_minutes`) per [ADR-0027](../decisions/ADR-0027.md) — and file source (path/loop)
 - [ ] INPUTS: I/O + connect timeouts (us) and DNS watchdog (ms)
 - [ ] INPUTS: reconnect backoff (initial/max/multiplier/jitter), max_attempts, circuit breaker, reconnect-now/reset
 - [ ] INPUTS: jitter buffer ms, queue depth, leaky drop policy

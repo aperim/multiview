@@ -14,7 +14,8 @@
 
 **Multiview** is an efficient, hardware-accelerated, Rust live video multiview generator. It:
 
-1. **Ingests** many live sources — RTSP, HLS/M3U, MPEG-TS, SRT, RTMP, NDI, file, and test patterns.
+1. **Ingests** many live sources — RTSP, HLS/M3U, MPEG-TS, SRT, RTMP, NDI, file, and first-class
+   in-process synthetic sources (colour `bars`, `solid` slates, full-frame `clock`s).
 2. **Composites** them into a templated multiview (2×2, 3×3, 1-large+5-small, PiP, custom) **on the GPU**.
 3. **Serves** the result robustly over RTSP, HLS/LL-HLS, NDI, and RTMP/SRT push.
 
