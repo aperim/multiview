@@ -60,6 +60,23 @@ where
     Ok((addr, handle))
 }
 
+/// Project a composited program frame into the compact JSON snapshot the control
+/// plane republishes from the wait-free latest-state slot (`EngineStateSnapshot`
+/// is an opaque `serde_json::Value`, so the engine state shape stays decoupled
+/// from the control plane). Kept intentionally small — schema tag, tick, output
+/// PTS, and canvas geometry — so the per-tick serialization stays cheap on the
+/// hot loop. Richer per-tile state is fed sparsely over the event stream as it
+/// changes, not dumped here every frame.
+#[must_use]
+pub fn state_snapshot(tick: u64, pts_ns: i64, width: u32, height: u32) -> EngineStateSnapshot {
+    serde_json::json!({
+        "v": 1,
+        "tick": tick,
+        "pts_ns": pts_ns,
+        "canvas": { "width": width, "height": height },
+    })
+}
+
 /// The HMAC pepper for the (currently empty) API-key store. With no keys
 /// registered it is never used to verify a token; it becomes load-bearing only
 /// once key provisioning lands, at which point it must come from configuration /
@@ -72,6 +89,16 @@ fn control_pepper() -> Vec<u8> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn state_snapshot_is_compact_and_tagged() {
+        let snap = state_snapshot(7, 233_333_333, 1920, 1080);
+        assert_eq!(snap["v"], 1);
+        assert_eq!(snap["tick"], 7);
+        assert_eq!(snap["pts_ns"], 233_333_333_i64);
+        assert_eq!(snap["canvas"]["width"], 1920);
+        assert_eq!(snap["canvas"]["height"], 1080);
+    }
 
     /// `bind_and_serve` binds a real loopback socket, serves the unauthenticated
     /// `OpenAPI` document, and returns cleanly once its shutdown future resolves.

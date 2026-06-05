@@ -104,6 +104,94 @@ codec = "h264"
     cfg
 }
 
+/// The control plane serves the API **while** the engine is running, sharing the
+/// engine's outbound publisher — and the engine's output never falters under a
+/// concurrent client (invariants #1 + #10). Also asserts the compact engine
+/// state snapshot reaches the shared latest-state slot (the dashboard bridge).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_run_serves_the_control_api_while_running() {
+    use multiview_cli::control;
+    use multiview_control::{command_bus, EngineStateSnapshot};
+    use multiview_engine::{EnginePublisher, StopSignal};
+    use multiview_events::Event;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let cfg = small_config();
+    let mut engine = HeadlessEngine::build(&cfg).expect("build headless engine");
+
+    // The engine's outbound publisher, shared (read-only) with the control plane.
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let (commands, _command_rx) = command_bus(8);
+    let stop = StopSignal::new();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (addr, server) = control::bind_and_serve(
+        "127.0.0.1:0",
+        Arc::clone(&publisher),
+        commands,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    )
+    .await
+    .expect("control server binds");
+
+    // Client: GET the unauthenticated OpenAPI doc while the engine runs, let a
+    // few frames produce, then raise the engine's stop signal.
+    let stop_for_client = stop.clone();
+    let client = tokio::spawn(async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET /api/v1/openapi.json HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stop_for_client.stop();
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    // The engine emits program output AND the control plane serves concurrently;
+    // this returns once the client raises stop.
+    let report = engine
+        .run_until_stopped(&stop, publisher.as_ref())
+        .await
+        .expect("headless serving run");
+    assert!(
+        !report.faltered,
+        "the output clock must not falter while the API is served"
+    );
+    assert!(
+        report.frames >= 1,
+        "the engine produced frames while serving"
+    );
+
+    let body = client.await.unwrap();
+    let status = body.lines().next().unwrap_or_default();
+    assert_eq!(
+        status.split_whitespace().nth(1),
+        Some("200"),
+        "openapi status line: {status:?}"
+    );
+    assert!(body.contains("openapi"), "served an OpenAPI document");
+
+    // The shared publisher carries the engine's compact state snapshot — the
+    // bridge the dashboard reads from the wait-free latest-state slot.
+    let snap = publisher
+        .state
+        .latest()
+        .expect("the engine published a state snapshot");
+    assert_eq!(
+        snap.as_ref()["canvas"]["width"].as_u64(),
+        Some(320),
+        "the snapshot carries the canvas geometry"
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = server.await;
+}
+
 #[tokio::test]
 async fn headless_run_emits_exactly_n_frames_for_n_ticks() {
     const TICKS: u64 = 90;

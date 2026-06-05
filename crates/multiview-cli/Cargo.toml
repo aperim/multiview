@@ -57,12 +57,12 @@ ffmpeg-next = { version = "7.1", optional = true }
 # all-features=false so it never sees this opt-in dependency.
 tempfile = { version = "3", optional = true }
 
-# Used ONLY by the `overlay`-feature pipeline to read kind-specific overlay
-# params (e.g. an analog `[[overlays]]` clock's placement) out of
-# `multiview_config::Overlay::params` (a `serde_json::Map`). Optional + gated by the
-# `overlay` feature so the default build never pulls it. `cargo deny` runs with
-# all-features=false so it never sees this opt-in dependency.
-serde_json = { workspace = true, optional = true }
+# Used by the control bridge (the compact per-tick engine state snapshot the
+# control plane republishes is a `serde_json::Value`) and by the `overlay`
+# pipeline (reading kind-specific `[[overlays]]` params out of
+# `multiview_config::Overlay::params`, a `serde_json::Map`). Pure Rust
+# (MIT/Apache-2.0); stays in the default build.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = [
@@ -131,7 +131,7 @@ software = []
 # the baseline build stays minimal; GPU-free and LGPL-clean. Combine with
 # `ffmpeg` (`run --features ffmpeg,overlay`) to overlay the real pipeline's
 # output; it works alone with the headless software run too.
-overlay = ["multiview-compositor/overlay", "dep:serde_json"]
+overlay = ["multiview-compositor/overlay"]
 
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once

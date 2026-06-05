@@ -16,14 +16,18 @@
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser as _;
 use multiview_cli::cli::{Cli, Command, RunArgs, ValidateArgs};
+use multiview_cli::control;
 use multiview_cli::run::{HeadlessEngine, RunReport};
 use multiview_cli::validate::validate_config;
-use multiview_config::MultiviewConfig;
-use multiview_engine::StopSignal;
+use multiview_config::{ControlConfig, MultiviewConfig};
+use multiview_control::{command_bus, EngineStateSnapshot};
+use multiview_engine::{EnginePublisher, StopSignal};
+use multiview_events::Event;
 use multiview_telemetry::tracing_init::SubscriberBuilder;
 
 #[tokio::main]
@@ -102,7 +106,7 @@ async fn run_headless(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("headless bounded run")?
     } else {
         tracing::info!("headless run: until Ctrl-C");
-        run_until_ctrl_c(&mut engine).await?
+        run_until_ctrl_c(&mut engine, config.control.as_ref()).await?
     };
 
     println!("{}", report.render());
@@ -194,8 +198,38 @@ async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<Ex
 /// A best-effort signal watcher raises the engine's stop flag on Ctrl-C; the
 /// engine checks it once per tick and finishes the current frame cleanly. The
 /// watcher cannot back-pressure the engine (invariant #10).
-async fn run_until_ctrl_c(engine: &mut HeadlessEngine) -> anyhow::Result<RunReport> {
+async fn run_until_ctrl_c(
+    engine: &mut HeadlessEngine,
+    control: Option<&ControlConfig>,
+) -> anyhow::Result<RunReport> {
     let stop = StopSignal::new();
+
+    // The engine's outbound publisher, shared read-only with the control plane
+    // when it is enabled: the API/WebUI observe live engine state through the
+    // wait-free latest-state slot + drop-oldest event broadcast, never able to
+    // back-pressure the engine (invariant #10). 64 = the broadcast ring depth.
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+
+    // Bring up the control server iff `[control]` is configured. It serves until
+    // `shutdown_rx` resolves, which happens once the engine loop returns. The
+    // command-bus receiver is held alive for the server's lifetime (dropping it
+    // would close the bus); the engine will drain it in a follow-up.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (server, _command_rx) = if let Some(cfg) = control {
+        let (commands, command_rx) = command_bus(64);
+        let (addr, handle) =
+            control::bind_and_serve(&cfg.listen, Arc::clone(&publisher), commands, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
+        tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
+        (Some(handle), Some(command_rx))
+    } else {
+        drop(shutdown_rx);
+        (None, None)
+    };
+
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -205,9 +239,19 @@ async fn run_until_ctrl_c(engine: &mut HeadlessEngine) -> anyhow::Result<RunRepo
     });
 
     let report = engine
-        .run_until_stopped(&stop)
+        .run_until_stopped(&stop, publisher.as_ref())
         .await
         .context("headless run until Ctrl-C")?;
+
+    // The engine loop returned; bring the control server down gracefully.
+    let _ = shutdown_tx.send(());
+    if let Some(handle) = server {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "control server I/O error at shutdown"),
+            Err(e) => tracing::warn!(error = %e, "control server task join error"),
+        }
+    }
     signal.abort();
     Ok(report)
 }

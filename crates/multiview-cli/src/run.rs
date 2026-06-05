@@ -26,12 +26,14 @@ use std::sync::Arc;
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
 use multiview_config::MultiviewConfig;
+use multiview_control::EngineStateSnapshot;
 use multiview_core::layout::Layout;
 use multiview_core::time::{MediaTime, Rational};
 use multiview_engine::{
     CompositorDrive, EnginePublisher, EngineRuntime, ManualTimeSource, MonotonicTimeSource,
     OutputClock, Pacer, RealtimePacer, RunStop, StopSignal, TimeSource,
 };
+use multiview_events::Event;
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 
 /// The per-subscriber drop-oldest depth of the engine's outbound event stream.
@@ -276,8 +278,23 @@ impl HeadlessEngine {
         let publisher: EnginePublisher<HeadlessState, HeadlessState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
-        self.drive(&mut runtime, &publisher, &stop, Some(max_ticks))
-            .await
+        self.drive(
+            &mut runtime,
+            &publisher,
+            &stop,
+            Some(max_ticks),
+            |f: &multiview_engine::CompositedFrame| HeadlessState {
+                tick: f.tick.index,
+                pts: f.pts(),
+            },
+            |f: &multiview_engine::CompositedFrame| {
+                Some(HeadlessState {
+                    tick: f.tick.index,
+                    pts: f.pts(),
+                })
+            },
+        )
+        .await
     }
 
     /// Drive the engine for `max_ticks` ticks under the production realtime
@@ -295,8 +312,23 @@ impl HeadlessEngine {
         let publisher: EnginePublisher<HeadlessState, HeadlessState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
-        self.drive(&mut runtime, &publisher, &stop, Some(max_ticks))
-            .await
+        self.drive(
+            &mut runtime,
+            &publisher,
+            &stop,
+            Some(max_ticks),
+            |f: &multiview_engine::CompositedFrame| HeadlessState {
+                tick: f.tick.index,
+                pts: f.pts(),
+            },
+            |f: &multiview_engine::CompositedFrame| {
+                Some(HeadlessState {
+                    tick: f.tick.index,
+                    pts: f.pts(),
+                })
+            },
+        )
+        .await
     }
 
     /// Drive the engine **forever** under the production realtime pacer until
@@ -305,14 +337,35 @@ impl HeadlessEngine {
     /// # Errors
     ///
     /// See [`HeadlessEngine::run_for`].
-    pub async fn run_until_stopped(&mut self, stop: &StopSignal) -> Result<RunReport, RunError> {
+    pub async fn run_until_stopped(
+        &mut self,
+        stop: &StopSignal,
+        publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+    ) -> Result<RunReport, RunError> {
         let time = Arc::new(MonotonicTimeSource::new());
         let ts: Arc<dyn TimeSource> = time;
         self.prime_stores(ts.as_ref());
         let mut runtime = self.build_runtime(ts, RealtimePacer)?;
-        let publisher: EnginePublisher<HeadlessState, HeadlessState> =
-            EnginePublisher::new(EVENT_CAPACITY);
-        self.drive(&mut runtime, &publisher, stop, None).await
+        // The caller owns the publisher so the control plane can share it
+        // (read-only). State is the compact per-tick JSON snapshot; events are
+        // left sparse for now (none emitted here — they arrive via change-driven
+        // mirrors in a follow-up), so the broadcast carries no per-tick flood.
+        self.drive(
+            &mut runtime,
+            publisher,
+            stop,
+            None,
+            |f: &multiview_engine::CompositedFrame| {
+                crate::control::state_snapshot(
+                    f.tick.index,
+                    f.pts().as_nanos(),
+                    f.canvas.width(),
+                    f.canvas.height(),
+                )
+            },
+            |_f: &multiview_engine::CompositedFrame| -> Option<Event> { None },
+        )
+        .await
     }
 
     /// Publish each source's synthetic frame into its store at the current
@@ -355,24 +408,20 @@ impl HeadlessEngine {
     /// The projection closures are cheap, panic-free, and run on the hot loop;
     /// they publish a per-tick state snapshot and event through the (non-blocking,
     /// drop-oldest) isolation channels — best-effort, never back-pressuring.
-    async fn drive<P: Pacer>(
+    async fn drive<P, S, E, FS, FE>(
         &self,
         runtime: &mut EngineRuntime<P>,
-        publisher: &EnginePublisher<HeadlessState, HeadlessState>,
+        publisher: &EnginePublisher<S, E>,
         stop: &StopSignal,
         max_ticks: Option<u64>,
-    ) -> Result<RunReport, RunError> {
-        let state_of = |frame: &multiview_engine::CompositedFrame| HeadlessState {
-            tick: frame.tick.index,
-            pts: frame.pts(),
-        };
-        let event_of = |frame: &multiview_engine::CompositedFrame| {
-            Some(HeadlessState {
-                tick: frame.tick.index,
-                pts: frame.pts(),
-            })
-        };
-
+        state_of: FS,
+        event_of: FE,
+    ) -> Result<RunReport, RunError>
+    where
+        P: Pacer,
+        FS: FnMut(&multiview_engine::CompositedFrame) -> S,
+        FE: FnMut(&multiview_engine::CompositedFrame) -> Option<E>,
+    {
         let outcome = match max_ticks {
             Some(max) => {
                 runtime
