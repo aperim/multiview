@@ -84,7 +84,9 @@ use multiview_engine::{
 };
 use multiview_ffmpeg::{DecodedVideoFrame, ScaleSpec, Scaler, StreamVideoDecoder};
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
-use multiview_output::sink::{EncodeConfig, FileSink, SegmentSink, VideoFrameSource};
+use multiview_output::sink::{
+    EncodeConfig, FileSink, PushProtocol, PushSink, SegmentSink, VideoFrameSource,
+};
 
 /// The per-subscriber drop-oldest depth of the engine's outbound event stream.
 /// The pipeline has no realtime consumers wired here, but the publisher still
@@ -326,6 +328,18 @@ enum RunnableOutput {
         sink: SegmentSink,
         /// Where the `.m3u8` playlist is written.
         playlist_path: PathBuf,
+    },
+    /// A live push transport (RTMP / SRT) streaming the encoded program to a
+    /// remote peer over the matching protocol — the encode-once-mux-many egress
+    /// twin of [`RunnableOutput::File`] (invariant #7), differing only in that the
+    /// muxer targets a network URL. A push whose peer is unreachable is reported
+    /// and dropped, never allowed to fail the program (invariants #1/#10).
+    Push {
+        /// The real push sink (built on the same `EncodeConfig` as the file/HLS
+        /// outputs, so the canvas is encoded once and the same packets are muxed).
+        sink: PushSink,
+        /// A short transport label (`rtmp`/`srt`) for the run report + logs.
+        label: &'static str,
     },
 }
 
@@ -1592,7 +1606,11 @@ fn consumer_main(
 /// off the sink thread, keeping the sink path identical to the batch one).
 ///
 /// # Errors
-/// Returns [`PipelineError::Output`] if the sink's encode/mux fails.
+/// Returns [`PipelineError::Output`] if a **file or HLS** sink's encode/mux fails
+/// (those write a local artifact a failed run must surface). A **push** sink whose
+/// peer is unreachable, by contrast, never fails the run: it is reported and
+/// dropped so the program's local outputs still complete (invariants #1/#10 — a
+/// dead remote consumer must not back-pressure or fail the program).
 fn run_one_output(
     output: RunnableOutput,
     rx: Receiver<Arc<Nv12Image>>,
@@ -1635,6 +1653,55 @@ fn run_one_output(
                 playlist: Some((playlist_path, playlist_text)),
                 frames: source.delivered,
             })
+        }
+        RunnableOutput::Push { sink, label } => Ok(run_push_output(&sink, label, rx)),
+    }
+}
+
+/// Run a live push sink (RTMP / SRT) over its fan-out channel, tolerating an
+/// unreachable peer. **Infallible** by design (returns a [`SinkRunOutcome`], never
+/// an error): a push that cannot be delivered must not fail the program.
+///
+/// [`PushSink::run`] connects when it opens the muxer; with a reachable peer it
+/// streams the encoded program (the same encode-once-mux-many drive loop the file
+/// sink uses) and reports the packet/keyframe counts. A connect failure (no peer)
+/// is **logged and the sink dropped** — never an error that fails the run: the
+/// caller drops the [`Receiver`] when this returns, so the bake consumer's next
+/// fan-out send to this sink fails and it marks the sink dead for the rest of the
+/// run, while the program's file/HLS outputs keep producing (invariants #1/#10). A
+/// push that connected and then errored mid-stream is reported the same tolerant
+/// way.
+fn run_push_output(
+    sink: &PushSink,
+    label: &'static str,
+    rx: Receiver<Arc<Nv12Image>>,
+) -> SinkRunOutcome {
+    let mut source = StreamingFrameSource::new(rx);
+    match sink.run(&mut source) {
+        Ok(stats) => SinkRunOutcome {
+            line: format!(
+                "{label} push {}: {} packet(s), {} keyframe(s)",
+                sink.url(),
+                stats.packets,
+                stats.keyframes
+            ),
+            playlist: None,
+            frames: source.delivered,
+        },
+        Err(e) => {
+            // A push peer that is unreachable / drops must never fail the program.
+            tracing::warn!(
+                transport = label,
+                url = sink.url(),
+                error = %e,
+                "live push could not be delivered (peer unreachable or dropped); \
+                 the program's other outputs are unaffected"
+            );
+            SinkRunOutcome {
+                line: format!("{label} push {}: not delivered ({e})", sink.url()),
+                playlist: None,
+                frames: source.delivered,
+            }
         }
     }
 }
@@ -2494,10 +2561,15 @@ fn output_codec(output: &Output) -> Option<&str> {
     }
 }
 
-/// Build the runnable file/HLS sinks from the config outputs. RTSP/NDI/RTMP/SRT
-/// transports are not run from the CLI yet (the servers are feature-gated
-/// scaffolds); they are skipped with a log line rather than failing the run, so
-/// a config mixing a server with a file/HLS output still produces a real file.
+/// Build the runnable sinks from the config outputs.
+///
+/// HLS/LL-HLS segment to disk; **RTMP and SRT push outputs are run** via the real
+/// [`PushSink`] (the same encode-once-mux-many drive loop the file/HLS sinks use —
+/// invariant #7 — only the muxer targets a network URL). The RTSP *server* and NDI
+/// out are genuinely not implemented (an RTSP server is its own RTP/RTSP protocol
+/// stack; NDI is the proprietary runtime-loaded SDK), so they are honestly skipped
+/// with a log line rather than pretended-runnable — a config mixing one with a
+/// real output still produces that real output.
 fn build_outputs(
     outputs: &[Output],
     cfg: &EncodeConfig,
@@ -2516,14 +2588,29 @@ fn build_outputs(
                     playlist_path,
                 });
             }
+            Output::Rtmp { url, .. } => {
+                runnable.push(RunnableOutput::Push {
+                    sink: PushSink::new(cfg.clone(), PushProtocol::Rtmp, url.clone()),
+                    label: "rtmp",
+                });
+            }
+            Output::Srt { url, .. } => {
+                runnable.push(RunnableOutput::Push {
+                    sink: PushSink::new(cfg.clone(), PushProtocol::Srt, url.clone()),
+                    label: "srt",
+                });
+            }
             Output::RtspServer { .. } => {
-                tracing::warn!("rtsp_server output is not yet runnable from the CLI; skipping");
+                tracing::warn!(
+                    "rtsp_server output is not implemented (an RTSP server is its own \
+                     RTP/RTSP protocol stack); skipping"
+                );
             }
             Output::Ndi { .. } => {
-                tracing::warn!("ndi output is not yet runnable from the CLI; skipping");
-            }
-            Output::Rtmp { .. } | Output::Srt { .. } => {
-                tracing::warn!("rtmp/srt push outputs are not yet runnable from the CLI; skipping");
+                tracing::warn!(
+                    "ndi output is not implemented (the NDI SDK is runtime-loaded and \
+                     not yet wired); skipping"
+                );
             }
             // `Output` is `#[non_exhaustive]`; an unrecognized future kind is
             // skipped rather than silently mishandled.
@@ -2547,7 +2634,9 @@ fn prepend_file_sink(mut runnable: Vec<RunnableOutput>, cfg: &EncodeConfig) -> V
         RunnableOutput::Hls { playlist_path, .. } => {
             Some(playlist_path.with_file_name("program.ts"))
         }
-        RunnableOutput::File(_) => None,
+        // A push has no on-disk directory to derive a program file from; only an
+        // HLS output anchors the self-contained `program.ts`.
+        RunnableOutput::File(_) | RunnableOutput::Push { .. } => None,
     });
     if let Some(path) = file_path {
         runnable.insert(0, RunnableOutput::File(FileSink::new(cfg.clone(), path)));
