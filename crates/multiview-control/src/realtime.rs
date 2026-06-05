@@ -23,7 +23,8 @@
 use std::convert::Infallible;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{FromRequestParts, Query, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -262,23 +263,48 @@ fn current_engine_snapshot(state: &AppState) -> (EngineStateSnapshot, u64) {
 ///
 /// [`Role::Viewer`]: crate::auth::Role::Viewer
 pub async fn ws_handler(
+    // The auth gate is the FIRST extractor, so authentication is decided before
+    // axum's `WebSocketUpgrade` extractor runs — an unauthenticated request is a
+    // `401`/`403` `problem+json`, never pre-empted by the upgrade extractor's
+    // `426` on a request without the upgrade handshake.
+    RealtimeViewer(_principal): RealtimeViewer,
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth): Query<AccessTokenQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Resolve auth BEFORE the upgrade so an unauthenticated/under-privileged
-    // client gets a 401/403 `problem+json` response, never a silently-dropped
-    // socket. A browser WebSocket cannot set an `Authorization` header, so the
-    // bearer token is also accepted as `?access_token=` (header still wins).
-    let principal = match resolve_principal(&state, &headers, auth.access_token.as_deref()) {
-        Ok(principal) => principal,
-        Err(err) => return err.into_response(),
-    };
-    if let Err(err) = principal.role.require(Action::Read) {
-        return err.into_response();
-    }
     ws.on_upgrade(move |socket| run_ws_session(socket, state))
+}
+
+/// A pre-upgrade auth gate for the realtime transports.
+///
+/// As a [`FromRequestParts`] extractor it resolves the `Bearer` / JWT /
+/// `?access_token=` [`Principal`] and enforces [`Action::Read`] — and because
+/// extractors run in argument order, placing it before [`WebSocketUpgrade`] makes
+/// authentication strictly precede the upgrade. So an unauthenticated /
+/// under-privileged client always gets a debuggable `401`/`403` HTTP response,
+/// not a `426` from the upgrade extractor (nor a silently-closed socket).
+pub struct RealtimeViewer(pub Principal);
+
+impl FromRequestParts<AppState> for RealtimeViewer {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // A browser WebSocket/EventSource cannot set an `Authorization` header,
+        // so the bearer token is also accepted as `?access_token=` (header wins).
+        let access_token = Query::<AccessTokenQuery>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .and_then(|q| q.0.access_token);
+        let principal = resolve_principal(state, &parts.headers, access_token.as_deref())
+            .map_err(IntoResponse::into_response)?;
+        principal
+            .role
+            .require(Action::Read)
+            .map_err(IntoResponse::into_response)?;
+        Ok(Self(principal))
+    }
 }
 
 /// The browser-transport token fallback: a WebSocket / `EventSource` cannot set
