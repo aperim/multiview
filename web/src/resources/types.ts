@@ -39,6 +39,9 @@ export interface ResourceInput {
  * so they double as the `kind` field written into the body.
  */
 export type SourceKind =
+  | 'bars'
+  | 'solid'
+  | 'clock'
   | 'rtsp'
   | 'hls'
   | 'ts'
@@ -46,10 +49,19 @@ export type SourceKind =
   | 'rtmp'
   | 'ndi'
   | 'file'
+  // `test` is a legacy alias for `bars` (ADR-0027); kept in the union for
+  // back-compat parsing of older bodies, but not offered in the picker.
   | 'test';
 
-/** All source kinds, for building selectors. */
+/**
+ * The user-pickable source kinds, for building selectors. Excludes the legacy
+ * `test` alias (folded to `bars`); `test` stays in {@link SourceKind} so older
+ * bodies still parse.
+ */
 export const SOURCE_KINDS: readonly SourceKind[] = [
+  'bars',
+  'solid',
+  'clock',
   'rtsp',
   'hls',
   'ts',
@@ -57,7 +69,6 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'rtmp',
   'ndi',
   'file',
-  'test',
 ];
 
 /** A managed ingest source. */
@@ -71,7 +82,8 @@ export interface SourceView {
   /**
    * The configured locator for display — the kind's key field: `url` for the
    * network kinds, the source `name` for NDI, the `path` for file. Absent for
-   * the parameter-free `test` kind.
+   * the synthetic kinds (`bars`/`solid`/`clock`, and the legacy `test` alias),
+   * which carry no locator.
    */
   readonly locator: string | undefined;
 }

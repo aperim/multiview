@@ -14,9 +14,11 @@ import type { ColumnDef } from '@tanstack/react-table';
 
 import {
   getResource,
+  numberField,
   outputHasCodec,
   outputTargetKey,
   sourceLocatorKey,
+  stringField,
   toOutputView,
   toOverlayView,
   toSourceView,
@@ -68,12 +70,26 @@ import { toast } from '../components/ui/use-toast';
 
 // --- shared form-state types ------------------------------------------------
 
+/** A clock-face style for the synthetic `clock` source kind. */
+type ClockFace = 'analog' | 'digital';
+
+/** The clock-face options (for the face selector). */
+const CLOCK_FACES: readonly ClockFace[] = ['analog', 'digital'];
+
 interface SourceFormState {
   readonly id: string;
   readonly name: string;
   readonly kind: SourceKind;
-  /** The kind's locator (url/name/path); unused for the `test` kind. */
+  /** The kind's locator (url/name/path); unused for the synthetic kinds. */
   readonly locator: string;
+  /** Fill colour for the `solid` kind (`#RGB`/`#RRGGBB`). */
+  readonly color?: string;
+  /** Face style for the `clock` kind. */
+  readonly clockFace?: ClockFace;
+  /** Whether the `clock` kind renders in 12-hour form. */
+  readonly clockTwelveHour?: boolean;
+  /** Timezone offset in minutes for the `clock` kind (−720…840). */
+  readonly clockTzMinutes?: number;
 }
 
 interface OutputFormState {
@@ -500,6 +516,43 @@ function RowActions<View>({
 
 // --- Sources ----------------------------------------------------------------
 
+/** Default fill colour for a fresh `solid` source. */
+const SOLID_DEFAULT_COLOR = '#101014';
+/** Default clock-face style for a fresh `clock` source. */
+const CLOCK_DEFAULT_FACE: ClockFace = 'analog';
+/** Minimum/maximum clock timezone offset (minutes): −12:00 … +14:00. */
+const CLOCK_TZ_MIN_MINUTES = -720;
+const CLOCK_TZ_MAX_MINUTES = 840;
+/** `#RGB` or `#RRGGBB` hex colour. */
+const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+/** Coerce an unknown body value to a {@link ClockFace}, defaulting to analog. */
+function asClockFace(value: string | undefined): ClockFace {
+  return CLOCK_FACES.find((face) => face === value) ?? CLOCK_DEFAULT_FACE;
+}
+
+/**
+ * Switch a source form to a new `kind`, seeding the kind's defaults. Always
+ * rebuilds from the id/name only so a previous kind's fields don't leak into
+ * the saved body.
+ */
+function withSourceKind(form: SourceFormState, kind: SourceKind): SourceFormState {
+  const base: SourceFormState = { id: form.id, name: form.name, kind, locator: form.locator };
+  switch (kind) {
+    case 'solid':
+      return { ...base, color: SOLID_DEFAULT_COLOR };
+    case 'clock':
+      return {
+        ...base,
+        clockFace: CLOCK_DEFAULT_FACE,
+        clockTwelveHour: false,
+        clockTzMinutes: 0,
+      };
+    default:
+      return base;
+  }
+}
+
 /** Sources management (ingest). */
 export function SourcesPage(): JSX.Element {
   const { t } = useLingui();
@@ -590,12 +643,25 @@ export function SourcesPage(): JSX.Element {
       emptyForm={(): SourceFormState => ({ id: '', name: '', kind: 'rtsp', locator: '' })}
       formFromRecord={(record): SourceFormState => {
         const view = toSourceView(record);
-        return {
+        const base: SourceFormState = {
           id: view.id,
           name: view.name,
           kind: view.kind,
           locator: view.locator ?? '',
         };
+        // Prefill the kind-specific synthetic fields from the opaque body.
+        if (view.kind === 'solid') {
+          return { ...base, color: stringField(record.body, 'color') ?? SOLID_DEFAULT_COLOR };
+        }
+        if (view.kind === 'clock') {
+          return {
+            ...base,
+            clockFace: asClockFace(stringField(record.body, 'face')),
+            clockTwelveHour: record.body.twelve_hour === true,
+            clockTzMinutes: numberField(record.body, 'tz_offset_minutes') ?? 0,
+          };
+        }
+        return base;
       }}
       validate={(form, creating): string | undefined => {
         if (creating && form.id.trim() === '') {
@@ -604,9 +670,23 @@ export function SourcesPage(): JSX.Element {
         if (form.name.trim() === '') {
           return t`A name is required.`;
         }
-        // Every kind except `test` needs its locator (url/name/path).
+        // Network kinds (url/name/path) need their locator; synthetic kinds
+        // don't (handled below).
         if (sourceLocatorKey(form.kind) !== undefined && form.locator.trim() === '') {
           return t`A locator is required for this source kind.`;
+        }
+        if (form.kind === 'solid' && !HEX_COLOR_RE.test((form.color ?? '').trim())) {
+          return t`A solid source needs a hex colour like #101014 or #abc.`;
+        }
+        if (form.kind === 'clock') {
+          const tz = form.clockTzMinutes ?? 0;
+          if (
+            !Number.isInteger(tz) ||
+            tz < CLOCK_TZ_MIN_MINUTES ||
+            tz > CLOCK_TZ_MAX_MINUTES
+          ) {
+            return t`The clock timezone offset must be a whole number between −720 and 840 minutes.`;
+          }
         }
         return undefined;
       }}
@@ -615,7 +695,14 @@ export function SourcesPage(): JSX.Element {
         const locatorKey = sourceLocatorKey(form.kind);
         if (locatorKey !== undefined) {
           body[locatorKey] = form.locator.trim();
+        } else if (form.kind === 'solid') {
+          body.color = (form.color ?? SOLID_DEFAULT_COLOR).trim();
+        } else if (form.kind === 'clock') {
+          body.face = form.clockFace ?? CLOCK_DEFAULT_FACE;
+          body.twelve_hour = form.clockTwelveHour ?? false;
+          body.tz_offset_minutes = form.clockTzMinutes ?? 0;
         }
+        // `bars` (and the legacy `test` alias) carry only `kind`.
         return {
           id: creating ? form.id.trim() : form.id,
           create: creating,
@@ -651,7 +738,7 @@ export function SourcesPage(): JSX.Element {
               value={form.kind}
               options={SOURCE_KINDS}
               onChange={(next): void => {
-                setForm({ ...form, kind: next });
+                setForm(withSourceKind(form, next));
               }}
             />
           </div>
@@ -666,6 +753,59 @@ export function SourcesPage(): JSX.Element {
                 setForm({ ...form, locator: next });
               }}
             />
+          ) : null}
+          {form.kind === 'solid' ? (
+            <TextField
+              id={`${ids.id}-color`}
+              label={t`Colour`}
+              value={form.color ?? ''}
+              required
+              placeholder="#101014"
+              onChange={(next): void => {
+                setForm({ ...form, color: next });
+              }}
+            />
+          ) : null}
+          {form.kind === 'clock' ? (
+            <>
+              <div className="flex flex-col gap-1">
+                <Label id={`${ids.kind}-face`}>{t`Face`}</Label>
+                <KindSelect<ClockFace>
+                  labelId={`${ids.kind}-face`}
+                  value={form.clockFace ?? CLOCK_DEFAULT_FACE}
+                  options={CLOCK_FACES}
+                  onChange={(next): void => {
+                    setForm({ ...form, clockFace: next });
+                  }}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  id={`${ids.id}-twelve-hour`}
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={form.clockTwelveHour ?? false}
+                  onChange={(event): void => {
+                    setForm({ ...form, clockTwelveHour: event.target.checked });
+                  }}
+                />
+                <Label htmlFor={`${ids.id}-twelve-hour`}>{t`12-hour clock`}</Label>
+              </div>
+              <TextField
+                id={`${ids.id}-tz`}
+                label={t`Timezone offset (minutes)`}
+                type="number"
+                value={String(form.clockTzMinutes ?? 0)}
+                placeholder="0"
+                onChange={(next): void => {
+                  const parsed = Number.parseInt(next, 10);
+                  setForm({
+                    ...form,
+                    clockTzMinutes: Number.isNaN(parsed) ? 0 : parsed,
+                  });
+                }}
+              />
+            </>
           ) : null}
         </>
       )}

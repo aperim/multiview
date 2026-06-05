@@ -213,11 +213,15 @@ export async function deleteResource(
 
 // --- body → view-model projections -----------------------------------------
 
+// All recognized wire tags, including the legacy `test` alias that
+// `SOURCE_KINDS` (the picker list) omits.
+const PARSEABLE_SOURCE_KINDS: readonly SourceKind[] = [...SOURCE_KINDS, 'test'];
+
 function asSourceKind(value: string | undefined): SourceKind {
-  // The config wire tags (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`ndi`/`file`/`test`)
-  // match these literals; an unrecognized/absent kind folds to the
-  // parameter-free `test` built-in.
-  return SOURCE_KINDS.find((k) => k === value) ?? 'test';
+  // The config wire tags (e.g. `bars`/`solid`/`clock`/`rtsp`/…/`test`) match
+  // these literals; an unrecognized/absent kind folds to the parameter-free
+  // `bars` built-in. The legacy `test` alias still parses to `test`.
+  return PARSEABLE_SOURCE_KINDS.find((k) => k === value) ?? 'bars';
 }
 
 /** The body key that carries a source kind's locator (url/name/path), if any. */
@@ -227,6 +231,10 @@ export function sourceLocatorKey(kind: SourceKind): 'url' | 'name' | 'path' | un
       return 'name';
     case 'file':
       return 'path';
+    // Synthetic kinds (ADR-0027) carry no locator; `test` is the legacy alias.
+    case 'bars':
+    case 'solid':
+    case 'clock':
     case 'test':
       return undefined;
     default:
