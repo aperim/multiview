@@ -23,7 +23,7 @@ msgstr "(opens in a new tab)"
 msgid "{0} cell(s) · {1} bound to a source"
 msgstr "{0} cell(s) · {1} bound to a source"
 
-#: src/pages/SimplePages.tsx:525
+#: src/pages/SimplePages.tsx:578
 msgid "/media/clip.mp4"
 msgstr "/media/clip.mp4"
 
@@ -75,7 +75,11 @@ msgstr "<0>Server-Sent Events</0> (fallback) at <1>/api/v1/events</1> — one-wa
 msgid "<0>WebSocket</0> (primary) at <1>/api/v1/ws</1> — bidirectional, used for the live UI."
 msgstr "<0>WebSocket</0> (primary) at <1>/api/v1/ws</1> — bidirectional, used for the live UI."
 
-#: src/pages/SimplePages.tsx:805
+#: src/pages/SimplePages.tsx:792
+msgid "12-hour clock"
+msgstr "12-hour clock"
+
+#: src/pages/SimplePages.tsx:945
 msgid "A codec is required for this output kind."
 msgstr "A codec is required for this output kind."
 
@@ -83,7 +87,7 @@ msgstr "A codec is required for this output kind."
 msgid "A CSS-grid layout with <0>columns</0> and <1>rows</1> track lists (<2>fr</2> / <3>px</3> / <4>%</4>), a <5>gap</5>, and an <6>areas</6> map that names where each cell sits."
 msgstr "A CSS-grid layout with <0>columns</0> and <1>rows</1> track lists (<2>fr</2> / <3>px</3> / <4>%</4>), a <5>gap</5>, and an <6>areas</6> map that names where each cell sits."
 
-#: src/pages/SimplePages.tsx:802
+#: src/pages/SimplePages.tsx:942
 msgid "A destination is required for this output kind."
 msgstr "A destination is required for this output kind."
 
@@ -95,7 +99,7 @@ msgstr "A layout decides where every tile sits on the canvas. Use a factory pres
 msgid "A layout name is required."
 msgstr "A layout name is required."
 
-#: src/pages/SimplePages.tsx:609
+#: src/pages/SimplePages.tsx:676
 msgid "A locator is required for this source kind."
 msgstr "A locator is required for this source kind."
 
@@ -103,9 +107,9 @@ msgstr "A locator is required for this source kind."
 msgid "A Multiview deployment is one declarative document. It is authored as TOML and round-trips losslessly to JSON (the API wire form)."
 msgstr "A Multiview deployment is one declarative document. It is authored as TOML and round-trips losslessly to JSON (the API wire form)."
 
-#: src/pages/SimplePages.tsx:605
-#: src/pages/SimplePages.tsx:799
-#: src/pages/SimplePages.tsx:977
+#: src/pages/SimplePages.tsx:671
+#: src/pages/SimplePages.tsx:939
+#: src/pages/SimplePages.tsx:1117
 msgid "A name is required."
 msgstr "A name is required."
 
@@ -129,15 +133,19 @@ msgstr "A salvo is a named, atomically-applied recall. One salvo can switch the 
 msgid "A small RTSP server that, on start, runs ffmpeg to publish a synthetic test pattern with a sine-wave audio tone to <0>rtsp://testsrc:8554/test</0>."
 msgstr "A small RTSP server that, on start, runs ffmpeg to publish a synthetic test pattern with a sine-wave audio tone to <0>rtsp://testsrc:8554/test</0>."
 
+#: src/pages/SimplePages.tsx:679
+msgid "A solid source needs a hex colour like #101014 or #abc."
+msgstr "A solid source needs a hex colour like #101014 or #abc."
+
 #: src/pages/docs/FeaturesPage.tsx:38
 msgid "A source is a managed input. Each one owns its ingest, decode, color handling, and reconnect behaviour, and is referenced by tiles via a stable id. Supported kinds include RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, file, and a built-in synthetic test pattern. When a source stops delivering frames, its tile holds the last good frame and moves through a clear state machine — live, stale, reconnecting, no-signal — while the engine reconnects without disturbing the rest of the wall."
 msgstr "A source is a managed input. Each one owns its ingest, decode, color handling, and reconnect behaviour, and is referenced by tiles via a stable id. Supported kinds include RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, file, and a built-in synthetic test pattern. When a source stops delivering frames, its tile holds the last good frame and moves through a clear state machine — live, stale, reconnecting, no-signal — while the engine reconnects without disturbing the rest of the wall."
 
-#: src/pages/SimplePages.tsx:578
+#: src/pages/SimplePages.tsx:631
 msgid "A source is an ingest input bound into the multiview by id."
 msgstr "A source is an ingest input bound into the multiview by id."
 
-#: src/pages/SimplePages.tsx:980
+#: src/pages/SimplePages.tsx:1120
 msgid "A target is required."
 msgstr "A target is required."
 
@@ -176,9 +184,9 @@ msgstr "Action"
 
 #: src/pages/AlarmsPage.tsx:221
 #: src/pages/LayoutsPage.tsx:82
-#: src/pages/SimplePages.tsx:556
-#: src/pages/SimplePages.tsx:743
-#: src/pages/SimplePages.tsx:921
+#: src/pages/SimplePages.tsx:609
+#: src/pages/SimplePages.tsx:883
+#: src/pages/SimplePages.tsx:1061
 #: src/pages/TallyPage.tsx:367
 msgid "Actions"
 msgstr "Actions"
@@ -207,7 +215,7 @@ msgstr "Actor"
 msgid "Add"
 msgstr "Add"
 
-#: src/pages/SimplePages.tsx:574
+#: src/pages/SimplePages.tsx:627
 msgid "Add and manage live ingest sources."
 msgstr "Add and manage live ingest sources."
 
@@ -265,17 +273,17 @@ msgstr "All endpoints live under <0>/api/v1</0>."
 msgid "Amber"
 msgstr "Amber"
 
-#: src/pages/SimplePages.tsx:602
-#: src/pages/SimplePages.tsx:796
-#: src/pages/SimplePages.tsx:974
+#: src/pages/SimplePages.tsx:668
+#: src/pages/SimplePages.tsx:936
+#: src/pages/SimplePages.tsx:1114
 msgid "An identifier is required."
 msgstr "An identifier is required."
 
-#: src/pages/SimplePages.tsx:765
+#: src/pages/SimplePages.tsx:905
 msgid "An output is a sink/server that publishes the program."
 msgstr "An output is a sink/server that publishes the program."
 
-#: src/pages/SimplePages.tsx:943
+#: src/pages/SimplePages.tsx:1083
 msgid "An overlay is a layer composited over the program at a stacking order."
 msgstr "An overlay is a layer composited over the program at a stacking order."
 
@@ -382,8 +390,8 @@ msgstr "Bus"
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
-#: src/pages/SimplePages.tsx:383
-#: src/pages/SimplePages.tsx:428
+#: src/pages/SimplePages.tsx:399
+#: src/pages/SimplePages.tsx:444
 #: src/pages/TallyPage.tsx:432
 msgid "Cancel"
 msgstr "Cancel"
@@ -401,7 +409,7 @@ msgstr "Canvas"
 msgid "Canvas height in pixels."
 msgstr "Canvas height in pixels."
 
-#: src/pages/SimplePages.tsx:1030
+#: src/pages/SimplePages.tsx:1170
 msgid "canvas or a cell id"
 msgstr "canvas or a cell id"
 
@@ -455,10 +463,14 @@ msgstr "Clear override"
 msgid "Cleared only"
 msgstr "Cleared only"
 
-#: src/pages/SimplePages.tsx:734
-#: src/pages/SimplePages.tsx:867
+#: src/pages/SimplePages.tsx:874
+#: src/pages/SimplePages.tsx:1007
 msgid "Codec"
 msgstr "Codec"
+
+#: src/pages/SimplePages.tsx:760
+msgid "Colour"
+msgstr "Colour"
 
 #: src/pages/SalvosPage.tsx:153
 msgid "Command accepted"
@@ -490,11 +502,11 @@ msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells
 msgid "Config-as-code"
 msgstr "Config-as-code"
 
-#: src/pages/SimplePages.tsx:761
+#: src/pages/SimplePages.tsx:901
 msgid "Configure output servers and renditions."
 msgstr "Configure output servers and renditions."
 
-#: src/pages/SimplePages.tsx:579
+#: src/pages/SimplePages.tsx:632
 msgid "Configured ingest sources."
 msgstr "Configured ingest sources."
 
@@ -502,11 +514,11 @@ msgstr "Configured ingest sources."
 msgid "Configured multiview layouts."
 msgstr "Configured multiview layouts."
 
-#: src/pages/SimplePages.tsx:766
+#: src/pages/SimplePages.tsx:906
 msgid "Configured output sinks."
 msgstr "Configured output sinks."
 
-#: src/pages/SimplePages.tsx:944
+#: src/pages/SimplePages.tsx:1084
 msgid "Configured overlay layers."
 msgstr "Configured overlay layers."
 
@@ -522,11 +534,11 @@ msgstr "Connecting"
 msgid "Could not acknowledge alarm"
 msgstr "Could not acknowledge alarm"
 
-#: src/pages/SimplePages.tsx:290
+#: src/pages/SimplePages.tsx:306
 msgid "Could not create"
 msgstr "Could not create"
 
-#: src/pages/SimplePages.tsx:309
+#: src/pages/SimplePages.tsx:325
 msgid "Could not delete"
 msgstr "Could not delete"
 
@@ -546,7 +558,7 @@ msgstr "Could not delete salvo"
 msgid "Could not load alarms:"
 msgstr "Could not load alarms:"
 
-#: src/pages/SimplePages.tsx:260
+#: src/pages/SimplePages.tsx:276
 msgid "Could not load for editing"
 msgstr "Could not load for editing"
 
@@ -554,11 +566,11 @@ msgstr "Could not load for editing"
 msgid "Could not load layouts:"
 msgstr "Could not load layouts:"
 
-#: src/pages/SimplePages.tsx:769
+#: src/pages/SimplePages.tsx:909
 msgid "Could not load outputs:"
 msgstr "Could not load outputs:"
 
-#: src/pages/SimplePages.tsx:947
+#: src/pages/SimplePages.tsx:1087
 msgid "Could not load overlays:"
 msgstr "Could not load overlays:"
 
@@ -570,7 +582,7 @@ msgstr "Could not load profiles:"
 msgid "Could not load salvos:"
 msgstr "Could not load salvos:"
 
-#: src/pages/SimplePages.tsx:582
+#: src/pages/SimplePages.tsx:635
 msgid "Could not load sources:"
 msgstr "Could not load sources:"
 
@@ -582,7 +594,7 @@ msgstr "Could not load tally state:"
 msgid "Could not load the audit log:"
 msgstr "Could not load the audit log:"
 
-#: src/pages/SimplePages.tsx:290
+#: src/pages/SimplePages.tsx:306
 msgid "Could not save"
 msgstr "Could not save"
 
@@ -594,7 +606,7 @@ msgstr "Could not save layout"
 msgid "Could not save salvo"
 msgstr "Could not save salvo"
 
-#: src/pages/SimplePages.tsx:386
+#: src/pages/SimplePages.tsx:402
 msgid "Create"
 msgstr "Create"
 
@@ -606,7 +618,7 @@ msgstr "Create your first layout"
 msgid "Create your first salvo"
 msgstr "Create your first salvo"
 
-#: src/pages/SimplePages.tsx:285
+#: src/pages/SimplePages.tsx:301
 msgid "Created"
 msgstr "Created"
 
@@ -635,8 +647,8 @@ msgstr "Definition"
 #: src/pages/LayoutsPage.tsx:267
 #: src/pages/SalvosPage.tsx:307
 #: src/pages/SalvosPage.tsx:436
-#: src/pages/SimplePages.tsx:435
-#: src/pages/SimplePages.tsx:495
+#: src/pages/SimplePages.tsx:451
+#: src/pages/SimplePages.tsx:511
 #: src/pages/TallyPage.tsx:392
 #: src/pages/TallyPage.tsx:435
 msgid "Delete"
@@ -650,11 +662,11 @@ msgstr "Delete layout"
 msgid "Delete layout?"
 msgstr "Delete layout?"
 
-#: src/pages/SimplePages.tsx:749
+#: src/pages/SimplePages.tsx:889
 msgid "Delete output"
 msgstr "Delete output"
 
-#: src/pages/SimplePages.tsx:927
+#: src/pages/SimplePages.tsx:1067
 msgid "Delete overlay"
 msgstr "Delete overlay"
 
@@ -670,7 +682,7 @@ msgstr "Delete salvo"
 msgid "Delete salvo?"
 msgstr "Delete salvo?"
 
-#: src/pages/SimplePages.tsx:562
+#: src/pages/SimplePages.tsx:615
 msgid "Delete source"
 msgstr "Delete source"
 
@@ -678,11 +690,11 @@ msgstr "Delete source"
 msgid "Delete tally profile?"
 msgstr "Delete tally profile?"
 
-#: src/pages/SimplePages.tsx:405
+#: src/pages/SimplePages.tsx:421
 msgid "Delete this resource?"
 msgstr "Delete this resource?"
 
-#: src/pages/SimplePages.tsx:305
+#: src/pages/SimplePages.tsx:321
 msgid "Deleted"
 msgstr "Deleted"
 
@@ -690,11 +702,11 @@ msgstr "Deleted"
 msgid "Design pillars"
 msgstr "Design pillars"
 
-#: src/pages/SimplePages.tsx:725
+#: src/pages/SimplePages.tsx:865
 msgid "Destination"
 msgstr "Destination"
 
-#: src/pages/SimplePages.tsx:693
+#: src/pages/SimplePages.tsx:833
 msgid "Destination URL"
 msgstr "Destination URL"
 
@@ -748,7 +760,7 @@ msgstr "Dropped onto the layout."
 msgid "Dropped outside any target; nothing changed."
 msgstr "Dropped outside any target; nothing changed."
 
-#: src/pages/SimplePages.tsx:633
+#: src/pages/SimplePages.tsx:720
 msgid "e.g. cam-north"
 msgstr "e.g. cam-north"
 
@@ -756,11 +768,11 @@ msgstr "e.g. cam-north"
 msgid "e.g. Main wall"
 msgstr "e.g. Main wall"
 
-#: src/pages/SimplePages.tsx:829
+#: src/pages/SimplePages.tsx:969
 msgid "e.g. program-hls"
 msgstr "e.g. program-hls"
 
-#: src/pages/SimplePages.tsx:1000
+#: src/pages/SimplePages.tsx:1140
 msgid "e.g. wall-clock"
 msgstr "e.g. wall-clock"
 
@@ -786,7 +798,7 @@ msgstr "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect<
 
 #: src/pages/LayoutsPage.tsx:90
 #: src/pages/SalvosPage.tsx:296
-#: src/pages/SimplePages.tsx:484
+#: src/pages/SimplePages.tsx:500
 msgid "Edit"
 msgstr "Edit"
 
@@ -797,13 +809,13 @@ msgstr "Edit"
 msgid "Edit layout"
 msgstr "Edit layout"
 
-#: src/pages/SimplePages.tsx:748
-#: src/pages/SimplePages.tsx:764
+#: src/pages/SimplePages.tsx:888
+#: src/pages/SimplePages.tsx:904
 msgid "Edit output"
 msgstr "Edit output"
 
-#: src/pages/SimplePages.tsx:926
-#: src/pages/SimplePages.tsx:942
+#: src/pages/SimplePages.tsx:1066
+#: src/pages/SimplePages.tsx:1082
 msgid "Edit overlay"
 msgstr "Edit overlay"
 
@@ -812,8 +824,8 @@ msgstr "Edit overlay"
 msgid "Edit salvo"
 msgstr "Edit salvo"
 
-#: src/pages/SimplePages.tsx:561
-#: src/pages/SimplePages.tsx:577
+#: src/pages/SimplePages.tsx:614
+#: src/pages/SimplePages.tsx:630
 msgid "Edit source"
 msgstr "Edit source"
 
@@ -846,6 +858,10 @@ msgstr "Every document starts with a <0>schema_version</0> and then declares the
 msgid "Exposed ports and roadmap"
 msgstr "Exposed ports and roadmap"
 
+#: src/pages/SimplePages.tsx:772
+msgid "Face"
+msgstr "Face"
+
 #: src/pages/docs/ApiPage.tsx:87
 msgid "Failures use RFC 9457 problem documents (<0>application/problem+json</0>) with a machine-readable type and a human-readable detail."
 msgstr "Failures use RFC 9457 problem documents (<0>application/problem+json</0>) with a machine-readable type and a human-readable detail."
@@ -855,7 +871,7 @@ msgstr "Failures use RFC 9457 problem documents (<0>application/problem+json</0>
 msgid "Feature guide"
 msgstr "Feature guide"
 
-#: src/pages/SimplePages.tsx:515
+#: src/pages/SimplePages.tsx:568
 msgid "File path"
 msgstr "File path"
 
@@ -926,9 +942,9 @@ msgstr "Idempotency"
 #: src/pages/LayoutsPage.tsx:66
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
-#: src/pages/SimplePages.tsx:629
-#: src/pages/SimplePages.tsx:825
-#: src/pages/SimplePages.tsx:996
+#: src/pages/SimplePages.tsx:716
+#: src/pages/SimplePages.tsx:965
+#: src/pages/SimplePages.tsx:1136
 #: src/pages/TallyPage.tsx:364
 msgid "Identifier"
 msgstr "Identifier"
@@ -962,10 +978,10 @@ msgid "Intel / AMD (VAAPI)"
 msgstr "Intel / AMD (VAAPI)"
 
 #: src/pages/AlarmsPage.tsx:218
-#: src/pages/SimplePages.tsx:542
-#: src/pages/SimplePages.tsx:648
-#: src/pages/SimplePages.tsx:900
-#: src/pages/SimplePages.tsx:1015
+#: src/pages/SimplePages.tsx:595
+#: src/pages/SimplePages.tsx:735
+#: src/pages/SimplePages.tsx:1040
+#: src/pages/SimplePages.tsx:1155
 msgid "Kind"
 msgstr "Kind"
 
@@ -1066,11 +1082,11 @@ msgstr "Loading layout…"
 msgid "Loading layouts…"
 msgstr "Loading layouts…"
 
-#: src/pages/SimplePages.tsx:768
+#: src/pages/SimplePages.tsx:908
 msgid "Loading outputs…"
 msgstr "Loading outputs…"
 
-#: src/pages/SimplePages.tsx:946
+#: src/pages/SimplePages.tsx:1086
 msgid "Loading overlays…"
 msgstr "Loading overlays…"
 
@@ -1082,7 +1098,7 @@ msgstr "Loading profiles…"
 msgid "Loading salvos…"
 msgstr "Loading salvos…"
 
-#: src/pages/SimplePages.tsx:581
+#: src/pages/SimplePages.tsx:634
 msgid "Loading sources…"
 msgstr "Loading sources…"
 
@@ -1098,11 +1114,11 @@ msgstr "Loading…"
 msgid "Locale"
 msgstr "Locale"
 
-#: src/pages/SimplePages.tsx:547
+#: src/pages/SimplePages.tsx:600
 msgid "Locator"
 msgstr "Locator"
 
-#: src/pages/SimplePages.tsx:517
+#: src/pages/SimplePages.tsx:570
 msgid "Locator URL"
 msgstr "Locator URL"
 
@@ -1114,7 +1130,7 @@ msgstr "Long-running ops"
 msgid "Low-latency HLS, adding <0>part_target_ms</0> and <1>gop_ms</1> tuning."
 msgstr "Low-latency HLS, adding <0>part_target_ms</0> and <1>gop_ms</1> tuning."
 
-#: src/pages/SimplePages.tsx:939
+#: src/pages/SimplePages.tsx:1079
 msgid "Manage overlay layers and subtitles."
 msgstr "Manage overlay layers and subtitles."
 
@@ -1139,7 +1155,7 @@ msgstr "Monitoring"
 msgid "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 msgstr "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 
-#: src/pages/SimplePages.tsx:687
+#: src/pages/SimplePages.tsx:827
 msgid "Mount point"
 msgstr "Mount point"
 
@@ -1155,7 +1171,7 @@ msgstr "Multiview is a hardware-accelerated live video multiview generator. It i
 msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 msgstr "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 
-#: src/pages/SimplePages.tsx:703
+#: src/pages/SimplePages.tsx:843
 msgid "Multiview Program"
 msgstr "Multiview Program"
 
@@ -1165,12 +1181,12 @@ msgstr "Mutable resources carry an <0>ETag</0>. Send it back as <1>If-Match</1> 
 
 #: src/pages/LayoutsPage.tsx:57
 #: src/pages/SalvosPage.tsx:210
-#: src/pages/SimplePages.tsx:537
-#: src/pages/SimplePages.tsx:640
-#: src/pages/SimplePages.tsx:715
-#: src/pages/SimplePages.tsx:836
-#: src/pages/SimplePages.tsx:895
-#: src/pages/SimplePages.tsx:1007
+#: src/pages/SimplePages.tsx:590
+#: src/pages/SimplePages.tsx:727
+#: src/pages/SimplePages.tsx:855
+#: src/pages/SimplePages.tsx:976
+#: src/pages/SimplePages.tsx:1035
+#: src/pages/SimplePages.tsx:1147
 #: src/pages/TallyPage.tsx:241
 msgid "Name"
 msgstr "Name"
@@ -1183,8 +1199,8 @@ msgstr "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a s
 msgid "Navigation"
 msgstr "Navigation"
 
-#: src/pages/SimplePages.tsx:513
-#: src/pages/SimplePages.tsx:691
+#: src/pages/SimplePages.tsx:566
+#: src/pages/SimplePages.tsx:831
 msgid "NDI source name"
 msgstr "NDI source name"
 
@@ -1197,13 +1213,13 @@ msgstr "New cell"
 msgid "New layout"
 msgstr "New layout"
 
-#: src/pages/SimplePages.tsx:762
-#: src/pages/SimplePages.tsx:763
+#: src/pages/SimplePages.tsx:902
+#: src/pages/SimplePages.tsx:903
 msgid "New output"
 msgstr "New output"
 
-#: src/pages/SimplePages.tsx:940
-#: src/pages/SimplePages.tsx:941
+#: src/pages/SimplePages.tsx:1080
+#: src/pages/SimplePages.tsx:1081
 msgid "New overlay"
 msgstr "New overlay"
 
@@ -1212,8 +1228,8 @@ msgstr "New overlay"
 msgid "New salvo"
 msgstr "New salvo"
 
-#: src/pages/SimplePages.tsx:575
-#: src/pages/SimplePages.tsx:576
+#: src/pages/SimplePages.tsx:628
+#: src/pages/SimplePages.tsx:629
 msgid "New source"
 msgstr "New source"
 
@@ -1249,11 +1265,11 @@ msgstr "No layouts are defined yet."
 msgid "No live tiles yet. They appear once the engine streams a snapshot."
 msgstr "No live tiles yet. They appear once the engine streams a snapshot."
 
-#: src/pages/SimplePages.tsx:767
+#: src/pages/SimplePages.tsx:907
 msgid "No outputs configured."
 msgstr "No outputs configured."
 
-#: src/pages/SimplePages.tsx:945
+#: src/pages/SimplePages.tsx:1085
 msgid "No overlays configured."
 msgstr "No overlays configured."
 
@@ -1269,7 +1285,7 @@ msgstr "No signal"
 msgid "No source"
 msgstr "No source"
 
-#: src/pages/SimplePages.tsx:580
+#: src/pages/SimplePages.tsx:633
 msgid "No sources configured."
 msgstr "No sources configured."
 
@@ -1326,14 +1342,14 @@ msgstr "Optional <0>captions</0> select a caption or subtitle track (auto, telet
 msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
 msgstr "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
 
-#: src/pages/SimplePages.tsx:689
+#: src/pages/SimplePages.tsx:829
 msgid "Output path"
 msgstr "Output path"
 
 #: src/app/navigation.tsx:36
 #: src/pages/docs/ConfigPage.tsx:242
 #: src/pages/docs/FeaturesPage.tsx:54
-#: src/pages/SimplePages.tsx:760
+#: src/pages/SimplePages.tsx:900
 msgid "Outputs"
 msgstr "Outputs"
 
@@ -1345,7 +1361,7 @@ msgstr "Over the layout drop zone."
 #: src/layout/components/SourcePalette.tsx:224
 #: src/pages/docs/ConfigPage.tsx:220
 #: src/pages/docs/FeaturesPage.tsx:98
-#: src/pages/SimplePages.tsx:938
+#: src/pages/SimplePages.tsx:1078
 msgid "Overlays"
 msgstr "Overlays"
 
@@ -1502,7 +1518,7 @@ msgstr "Salvos"
 
 #: src/pages/SalvosPage.tsx:398
 #: src/pages/SettingsPage.tsx:117
-#: src/pages/SimplePages.tsx:386
+#: src/pages/SimplePages.tsx:402
 msgid "Save"
 msgstr "Save"
 
@@ -1510,7 +1526,7 @@ msgstr "Save"
 msgid "Save layout"
 msgstr "Save layout"
 
-#: src/pages/SimplePages.tsx:285
+#: src/pages/SimplePages.tsx:301
 msgid "Saved"
 msgstr "Saved"
 
@@ -1563,15 +1579,15 @@ msgstr "Source"
 #: src/layout/components/SourcePalette.tsx:203
 #: src/pages/docs/ConfigPage.tsx:135
 #: src/pages/docs/FeaturesPage.tsx:36
-#: src/pages/SimplePages.tsx:573
+#: src/pages/SimplePages.tsx:626
 msgid "Sources"
 msgstr "Sources"
 
-#: src/pages/SimplePages.tsx:914
+#: src/pages/SimplePages.tsx:1054
 msgid "Stacking"
 msgstr "Stacking"
 
-#: src/pages/SimplePages.tsx:1037
+#: src/pages/SimplePages.tsx:1177
 msgid "Stacking order"
 msgstr "Stacking order"
 
@@ -1587,7 +1603,7 @@ msgstr "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retr
 msgid "State"
 msgstr "State"
 
-#: src/pages/SimplePages.tsx:523
+#: src/pages/SimplePages.tsx:576
 msgid "STUDIO (CAM 1)"
 msgstr "STUDIO (CAM 1)"
 
@@ -1621,8 +1637,8 @@ msgstr "Tally profiles and their rule counts."
 msgid "Tally shows which sources are on-air. A tally profile maps the bits of an external tally bus to colors (for example red for program, green for preview) and maps bus index positions to specific tiles. A <0>tally_border</0> overlay then lights the tile's edge to match. This lets an upstream router or mixer drive the borders on the wall."
 msgstr "Tally shows which sources are on-air. A tally profile maps the bits of an external tally bus to colors (for example red for program, green for preview) and maps bus index positions to specific tiles. A <0>tally_border</0> overlay then lights the tile's edge to match. This lets an upstream router or mixer drive the borders on the wall."
 
-#: src/pages/SimplePages.tsx:905
-#: src/pages/SimplePages.tsx:1027
+#: src/pages/SimplePages.tsx:1045
+#: src/pages/SimplePages.tsx:1167
 #: src/pages/TallyPage.tsx:205
 #: src/pages/TallyPage.tsx:318
 msgid "Target"
@@ -1655,6 +1671,10 @@ msgstr "The cell extends outside the canvas."
 #: src/layout/components/validationMessages.tsx:34
 msgid "The cell is too small."
 msgstr "The cell is too small."
+
+#: src/pages/SimplePages.tsx:688
+msgid "The clock timezone offset must be a whole number between −720 and 840 minutes."
+msgstr "The clock timezone offset must be a whole number between −720 and 840 minutes."
 
 #: src/pages/docs/ContainerPage.tsx:151
 msgid "The compose stack uses a real liveness check: the HLS playlist must have been rewritten within the last 30 seconds. Because the segmenter rewrites the playlist every segment, a fresh timestamp proves the output clock is still producing frames. The check uses only coreutils, so it works on the slim runtime."
@@ -1780,7 +1800,7 @@ msgstr "This permanently removes the layout. Running outputs are not affected un
 msgid "This permanently removes the profile's mapping rules."
 msgstr "This permanently removes the profile's mapping rules."
 
-#: src/pages/SimplePages.tsx:408
+#: src/pages/SimplePages.tsx:424
 msgid "This permanently removes the resource. Running outputs are not affected until a new configuration is applied."
 msgstr "This permanently removes the resource. Running outputs are not affected until a new configuration is applied."
 
@@ -1808,12 +1828,16 @@ msgstr "Tile status"
 msgid "Tiles"
 msgstr "Tiles"
 
+#: src/pages/SimplePages.tsx:796
+msgid "Timezone offset (minutes)"
+msgstr "Timezone offset (minutes)"
+
 #: src/layout/components/CellsForm.tsx:363
 msgid "Top (%)"
 msgstr "Top (%)"
 
-#: src/pages/SimplePages.tsx:720
-#: src/pages/SimplePages.tsx:844
+#: src/pages/SimplePages.tsx:860
+#: src/pages/SimplePages.tsx:984
 msgid "Transport"
 msgstr "Transport"
 
