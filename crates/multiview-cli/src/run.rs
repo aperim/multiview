@@ -4,8 +4,9 @@
 //! [`MultiviewConfig`]:
 //!
 //! * a fixed-cadence [`OutputClock`] at the canvas cadence (exact rational);
-//! * one [`TileStore<Nv12Image>`] per declared source, holding a synthetic
-//!   test-pattern frame (built-in `test` sources publish into these stores);
+//! * one [`TileStore<Nv12Image>`] per declared source, holding the source's
+//!   synthetic frame — real colour bars / solid for the `bars`/`solid` kinds, a
+//!   per-tile placeholder for kinds that need a decoder this build lacks;
 //! * a CPU reference [`CompositorDrive`] over the solved
 //!   [`multiview_core::layout::Layout`]; and
 //! * the engine's outbound [`EnginePublisher`] (invariant #10 isolation).
@@ -25,7 +26,7 @@ use std::sync::Arc;
 
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
-use multiview_config::MultiviewConfig;
+use multiview_config::{MultiviewConfig, Source, SourceKind};
 use multiview_control::EngineStateSnapshot;
 use multiview_core::layout::Layout;
 use multiview_core::time::{MediaTime, Rational};
@@ -148,8 +149,8 @@ pub struct SoftwareEngine {
     cadence: Rational,
     /// Per-source last-good-frame stores, keyed by source id.
     stores: HashMap<String, Arc<TileStore<Nv12Image>>>,
-    /// The synthetic test-pattern frame for each source (kept so a run can
-    /// (re)publish it into the stores).
+    /// The synthetic frame each source contributes (real bars/solid, or a
+    /// placeholder card), kept so a run can (re)publish it into the stores.
     patterns: HashMap<String, Arc<Nv12Image>>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited by default).
     canvas_color: CanvasColor,
@@ -172,8 +173,9 @@ impl SoftwareEngine {
     ///
     /// Solves the layout, creates one [`TileStore`] per source (with
     /// [`NoSignalPolicy::HoldForever`] so a once-published synthetic frame stays
-    /// available across the whole bounded run), and builds a distinctly-colored
-    /// NV12 test pattern for each source.
+    /// available across the whole bounded run), and builds each source's
+    /// synthetic frame via [`software_source_frame`] (real bars/solid, else a
+    /// per-tile placeholder).
     ///
     /// # Errors
     ///
@@ -202,8 +204,14 @@ impl SoftwareEngine {
             ));
             stores.insert(source.id.clone(), Arc::clone(&store));
 
-            let pattern = test_pattern(config.canvas.width, config.canvas.height, index, tag)
-                .map_err(|e| RunError::Pattern(e.to_string()))?;
+            let pattern = software_source_frame(
+                source,
+                config.canvas.width,
+                config.canvas.height,
+                index,
+                canvas_color,
+            )
+            .map_err(|e| RunError::Pattern(e.to_string()))?;
             patterns.insert(source.id.clone(), Arc::new(pattern));
         }
 
@@ -591,6 +599,34 @@ fn pts_at(cadence: Rational, index: u64) -> MediaTime {
 ///
 /// Returns the compositor [`multiview_compositor::Error`] if the geometry is
 /// rejected (odd/zero dimensions).
+/// The synthetic frame a source contributes in the FFmpeg-free software engine.
+///
+/// `bars` and `solid` render their real picture (the synthetic kinds that need no
+/// decoder — ADR-0027). Every other kind — a decoded feed the software build
+/// cannot open, or `clock` (whose animated render lands with the generator task)
+/// — contributes a distinct per-tile placeholder card so the smoke still
+/// composites a frame.
+fn software_source_frame(
+    source: &Source,
+    width: u32,
+    height: u32,
+    index: usize,
+    canvas: CanvasColor,
+) -> Result<Nv12Image, multiview_compositor::Error> {
+    match &source.kind {
+        SourceKind::Bars => Nv12Image::color_bars(width, height, canvas),
+        SourceKind::Solid { color } => {
+            // The colour was validated at config time; fall back to a slate if a
+            // caller somehow bypassed validation (never panic on the build path).
+            let (r, g, b) = multiview_config::parse_hex_color(color).unwrap_or((16, 16, 24));
+            Nv12Image::solid_rgb(width, height, r, g, b, canvas)
+        }
+        _ => test_pattern(width, height, index, canvas.output_tag()),
+    }
+}
+
+/// A distinct per-tile placeholder card (a flat hue per source index), used in
+/// the software smoke for kinds it does not render natively.
 fn test_pattern(
     width: u32,
     height: u32,
@@ -614,4 +650,88 @@ fn test_pattern(
         .copied()
         .unwrap_or((128, 128, 128));
     Nv12Image::solid(width, height, y, cb, cr, tag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pull a real [`Source`] out of the parser (it is `#[non_exhaustive]`, so it
+    /// cannot be struct-literal-constructed from this crate) by wrapping its
+    /// `kind` fields in a minimal 1x1 document.
+    fn source_with(kind_fields: &str) -> Source {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+{kind_fields}
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/x.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse minimal config");
+        cfg.sources.into_iter().next().expect("one source")
+    }
+
+    #[test]
+    fn bars_source_routes_to_real_colour_bars() {
+        let canvas = CanvasColor::default();
+        let src = source_with("kind = \"bars\"");
+        let got = software_source_frame(&src, 560, 240, 0, canvas).expect("frame");
+        let bars = Nv12Image::color_bars(560, 240, canvas).expect("bars");
+        assert_eq!(
+            got.y_plane(),
+            bars.y_plane(),
+            "a bars source must render real colour bars, not the placeholder"
+        );
+    }
+
+    #[test]
+    fn solid_source_routes_to_its_configured_colour() {
+        let canvas = CanvasColor::default();
+        let src = source_with("kind = \"solid\"\ncolor = \"#22aa44\"");
+        let got = software_source_frame(&src, 64, 64, 0, canvas).expect("frame");
+        let want = Nv12Image::solid_rgb(64, 64, 0x22, 0xaa, 0x44, canvas).expect("solid");
+        assert_eq!(
+            got.y_plane(),
+            want.y_plane(),
+            "a solid source must render its configured colour"
+        );
+    }
+
+    #[test]
+    fn a_decoded_kind_does_not_masquerade_as_bars() {
+        // A kind the software smoke cannot decode (rtsp) gets the per-index
+        // placeholder card — never silently rendered as bars.
+        let canvas = CanvasColor::default();
+        let src = source_with("kind = \"rtsp\"\nurl = \"rtsp://example/stream\"");
+        let got = software_source_frame(&src, 560, 240, 0, canvas).expect("frame");
+        let bars = Nv12Image::color_bars(560, 240, canvas).expect("bars");
+        assert_ne!(
+            got.y_plane(),
+            bars.y_plane(),
+            "a decoded kind must not look like bars"
+        );
+    }
 }
