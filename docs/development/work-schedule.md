@@ -125,7 +125,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 ### IN — Inputs (NDI · ST 2110 · WebRTC · YouTube)
 
-- [ ] **IN-1** `M` — ST 2110 receive: frame assembler over the depacketizers  ·  _deps: —_
+- [x] **IN-1** `M` — ST 2110 receive: frame assembler over the depacketizers  ·  _deps: —_  · _pure SRD/line reassembler (marker/seq/timestamp) tested; pgroup→NV12 unpack + `ProducedFrame` adaptation belong with IN-2_
 - [ ] **IN-2** `L` — ST 2110 receive: wire `RtpReceiver`/`DualPathReceiver` into a `FrameProducer` + PTP timing  ·  _deps: IN-1_
 - [ ] **IN-3** `XL` — NDI ingest: runtime-loaded SDK → `FrameProducer` + CLI wiring  ·  _deps: IN-2_
 - [x] **IN-4** `M` — YouTube live: pure resolver core over `yt-dlp -J`  ·  _deps: —_
@@ -155,7 +155,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **ENG-1** `M` — Bounded teardown join for a wedged sink (task #50)  ·  _deps: —_
 - [ ] **ENG-2** `XL` — Input PTS normalizer + pacer reroute (ADR-0021 points 1-3)  ·  _deps: —_
 - [ ] **ENG-3** `M` — NTP/PTP lock auto-detect for the wall-clock badge (task #37)  ·  _deps: ENG-5_
-- [ ] **ENG-4** `L` — Linux i915/amdgpu GPU load probe  ·  _deps: —_
+- [x] **ENG-4** `L` — Linux i915/amdgpu GPU load probe  ·  _deps: —_  · _sysfs busy%+VRAM probe (`SysfsLoadProbe`, PCI-bus keyed) + pure parsers tested; per-engine enc/dec via `/proc/pid/fdinfo` walk + i915 PMU (needs unsafe) are follow-up slices_
 - [ ] **ENG-5** `L` — PTP / ST 2059 PHC NIC binding (`ptp` feature)  ·  _deps: ENG-3_
 - [x] **ENG-6** `L` — HA cluster peer transport (`cluster` feature)  ·  _deps: —_  · _`UdpClusterTransport` + failover/replication over loopback-tested; true multi-host partition is hardware-tier (gated)_
 
@@ -171,10 +171,10 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 ### SUR — Captions · NMOS · web codegen
 
 - [x] **SUR-1** `M` — IS-05 scheduled activation (absolute + relative)  ·  _deps: —_
-- [ ] **SUR-2** `L` — IS-07 MQTT broker transport  ·  _deps: SUR-1_
+- [x] **SUR-2** `L` — IS-07 MQTT broker transport  ·  _deps: SUR-1_  · _codec+topics+bounded drop-oldest queue (always-built) + live `rumqttc` client behind `is07-mqtt`; round-trip exercised against an in-process `rumqttd` broker_
 - [ ] **SUR-3** `XL` — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT  ·  _deps: —_
 - [x] **SUR-4** `M` — OpenAPI: annotate the layout/resource write ops so they enter the spec  ·  _deps: —_
-- [ ] **SUR-5** `M` — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes  ·  _deps: SUR-4_
+- [x] **SUR-5** `M` — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes  ·  _deps: SUR-4_  · _generated openapi-fetch client; create/update/delete wired; tsc+eslint+build+76 tests green_
 - [ ] **SUR-6** `XL` — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope)  ·  _deps: SUR-6_
 
 
