@@ -27,6 +27,13 @@ tokio = { workspace = true }
 # (it forbids `unsafe`); it only calls multiview-ffmpeg's safe API.
 multiview-ffmpeg = { workspace = true, optional = true }
 
+# JSON info-dict parser + derive for the YouTube resolver (the `youtube`
+# feature). Pulled in only behind that off-by-default feature; the default build
+# stays without them. Pure-Rust, no native deps — the crate stays
+# `unsafe_code = forbid`.
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
 [dev-dependencies]
 proptest = "1.11.0"
 # Self-contained ffmpeg-feature tests generate their own tiny clip at runtime
@@ -56,6 +63,16 @@ tempfile = "3"
 # application layer; this crate never links a WebRTC native library, keeping the
 # default build pure-Rust and LGPL-clean.)
 "webrtc" = []
+# YouTube live ingest via a runtime-discovered `yt-dlp` binary (ADR-0015). OFF by
+# default: it spawns an external, operator-supplied resolver process, so the
+# default build neither contains nor requires it. The PURE info-dict parser
+# (`parse_info_dict` / `parse_expire` — no network, no subprocess) and the thin
+# `tokio::process` spawn wrapper live in `youtube`, gated entirely behind this
+# feature. Requires `ffmpeg` because the resolved HLS master is fed into the
+# libav/HLS ingest path (the wiring is a later item). `serde_json` parses the
+# `yt-dlp -J` output; `tokio/process` spawns the binary with a hard timeout. No
+# native deps in THIS crate, no FFI — it stays `unsafe_code = forbid`.
+"youtube" = ["ffmpeg", "dep:serde", "dep:serde_json", "tokio/process", "tokio/io-util"]
 
 [lints]
 workspace = true

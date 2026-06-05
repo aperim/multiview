@@ -265,9 +265,15 @@ impl MultiviewConfig {
                         )));
                     }
                 }
+                // Network/synthetic kinds carry no kind-specific field that can be
+                // validated structurally here (a URL's reachability is a runtime
+                // concern, not a config one). The `youtube` URL is resolved at
+                // ingest by an external `yt-dlp` (ADR-0015), so like the other URL
+                // kinds it is accepted as-is at config time.
                 SourceKind::Bars
                 | SourceKind::Rtsp { .. }
                 | SourceKind::Hls { .. }
+                | SourceKind::Youtube { .. }
                 | SourceKind::Ts { .. }
                 | SourceKind::Srt { .. }
                 | SourceKind::Rtmp { .. }

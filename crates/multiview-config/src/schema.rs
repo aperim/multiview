@@ -247,6 +247,18 @@ pub enum SourceKind {
         /// Playlist URL.
         url: String,
     },
+    /// `YouTube` live, bound by a watch/live/channel URL (ADR-0015).
+    ///
+    /// `YouTube` publishes no stable manifest URL, so this is a thin wrapper over
+    /// `hls`: an external, runtime-discovered `yt-dlp` resolver (the
+    /// off-by-default `youtube` feature in `multiview-input`) turns this URL into a
+    /// concrete `*.googlevideo.com` HLS master that the standard HLS ingest path
+    /// consumes, re-resolving before the manifest expires. Bound by the `YouTube`
+    /// URL — never a hand-copied manifest, which expires.
+    Youtube {
+        /// `YouTube` watch/live/channel URL (e.g. `https://www.youtube.com/watch?v=…`).
+        url: String,
+    },
     /// MPEG-TS input.
     Ts {
         /// Source URL.

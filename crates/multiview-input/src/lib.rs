@@ -57,6 +57,12 @@
 //!   `TestPatternSource`) over `multiview-ffmpeg`'s **safe** wrappers, implementing
 //!   [`source::FrameProducer`]. All FFI is owned by `multiview-ffmpeg`; this crate
 //!   stays `unsafe_code = forbid`.
+//! * `youtube` *(feature `youtube`)* — `YouTube` live resolver (ADR-0015): a
+//!   pure `yt-dlp -J` info-dict parser (manifest extraction, live-status
+//!   classification, `expire`-deadline parsing — no network/subprocess) plus a
+//!   thin `tokio::process` spawn shell around a runtime-discovered `yt-dlp`. The
+//!   resolved HLS master feeds the standard HLS ingest path; `yt-dlp` is never
+//!   vendored or linked, keeping the default build LGPL-clean.
 //!
 //! All timing math is exact (i64 nanoseconds / i128 intermediates / exact
 //! rationals via [`multiview_core::time`]) — **never** float fps.
@@ -86,5 +92,8 @@ pub mod webrtc;
 
 #[cfg(feature = "ffmpeg")]
 pub mod libav;
+
+#[cfg(feature = "youtube")]
+pub mod youtube;
 
 pub use error::{Error, Result};
