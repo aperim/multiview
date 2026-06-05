@@ -126,7 +126,7 @@ fn clock_face_at_three_oclock_points_the_hour_hand_right() {
         second_deg: 0.0,
     };
     let style = ClockFaceStyle::centred(64, 64, 30);
-    let prims = clock_face(angles, style);
+    let prims = clock_face(angles, style, 12);
     assert!(!prims.is_empty(), "clock face emits primitives");
 
     let mut canvas = LinearCanvasBuffer::transparent(64, 64);
@@ -160,7 +160,7 @@ fn clock_face_at_six_oclock_points_the_hour_hand_down() {
         minute_deg: 0.0,
         second_deg: 0.0,
     };
-    let prims = clock_face(angles, ClockFaceStyle::centred(64, 64, 30));
+    let prims = clock_face(angles, ClockFaceStyle::centred(64, 64, 30), 12);
     let mut canvas = LinearCanvasBuffer::transparent(64, 64);
     let mut list = OverlayDrawList::new();
     for p in prims {
@@ -183,6 +183,34 @@ fn clock_face_at_six_oclock_points_the_hour_hand_down() {
 }
 
 #[test]
+fn clock_face_draws_the_requested_number_of_hour_ticks() {
+    // The dial is `hour_ticks` evenly-spaced radial tick Strokes plus the three
+    // hand Strokes — so a 12-hour dial has 12+3 strokes and a 24-hour dial 24+3.
+    let angles = HandAngles {
+        hour_deg: 0.0,
+        minute_deg: 0.0,
+        second_deg: 0.0,
+    };
+    let style = ClockFaceStyle::centred(120, 120, 56);
+    let count_strokes = |ticks: u32| {
+        clock_face(angles, style, ticks)
+            .into_iter()
+            .filter(|p| matches!(p, OverlayPrimitive::Stroke { .. }))
+            .count()
+    };
+    assert_eq!(
+        count_strokes(12),
+        12 + 3,
+        "12-hour dial: 12 ticks + 3 hands"
+    );
+    assert_eq!(
+        count_strokes(24),
+        24 + 3,
+        "24-hour dial: 24 ticks + 3 hands"
+    );
+}
+
+#[test]
 fn clock_face_second_hand_is_longest_and_distinct_from_the_minute_hand() {
     // At 12:00:30 the second hand points DOWN and reaches further than the (short)
     // hour/minute hands point up — the three hands have distinct lengths.
@@ -191,7 +219,7 @@ fn clock_face_second_hand_is_longest_and_distinct_from_the_minute_hand() {
         minute_deg: 0.0,
         second_deg: 180.0,
     };
-    let prims = clock_face(angles, ClockFaceStyle::centred(80, 80, 36));
+    let prims = clock_face(angles, ClockFaceStyle::centred(80, 80, 36), 12);
     let mut canvas = LinearCanvasBuffer::transparent(80, 80);
     let mut list = OverlayDrawList::new();
     for p in prims {

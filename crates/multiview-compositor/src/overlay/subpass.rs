@@ -339,10 +339,15 @@ impl ClockFaceStyle {
 /// Angles are degrees clockwise from 12 o'clock (see [`HandAngles`]); `0°` is
 /// straight up, increasing clockwise — so `90°` points right (3 o'clock).
 #[must_use]
-pub fn clock_face(angles: HandAngles, style: ClockFaceStyle) -> Vec<OverlayPrimitive> {
+pub fn clock_face(
+    angles: HandAngles,
+    style: ClockFaceStyle,
+    hour_ticks: u32,
+) -> Vec<OverlayPrimitive> {
     let radius = style.radius.max(1.0);
     let color = OverlayColor::opaque(0.95, 0.95, 0.95);
-    let mut out = Vec::with_capacity(1 + 12 + 3 + 1);
+    let ticks = hour_ticks.max(1);
+    let mut out = Vec::with_capacity(usize::try_from(ticks).unwrap_or(24).saturating_add(5));
 
     // The bezel ring (outer rim). Thickness scales with the radius.
     let bezel_thick = (radius * 0.06).max(1.5);
@@ -354,12 +359,14 @@ pub fn clock_face(angles: HandAngles, style: ClockFaceStyle) -> Vec<OverlayPrimi
         color,
     });
 
-    // 12 hour ticks: short radial strokes just inside the bezel.
+    // `hour_ticks` hour ticks (12 for a 12-hour dial, 24 for a 24-hour dial):
+    // short radial strokes just inside the bezel, evenly spaced around the rim.
     let tick_outer = radius - bezel_thick;
     let tick_inner = tick_outer - (radius * 0.10).max(2.0);
     let tick_half = (radius * 0.025).max(1.0);
-    for hour in 0..12 {
-        let deg = unit_dim(hour) * 30.0;
+    let tick_step = 360.0 / unit_dim(ticks);
+    for hour in 0..ticks {
+        let deg = unit_dim(hour) * tick_step;
         let (ux, uy) = unit_vector(deg);
         out.push(OverlayPrimitive::Stroke {
             x0: style.cx + ux * tick_inner,

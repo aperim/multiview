@@ -166,3 +166,28 @@ fn clock_model_round_trips_through_json() {
     let back: ClockModel = serde_json::from_str(&json).unwrap();
     assert_eq!(model, back);
 }
+
+#[test]
+fn for_dial_hour_hand_rate_differs_between_12h_and_24h() {
+    // 18:00:00 UTC. On a 12-hour dial the hour hand is at 6 o'clock (180°); on a
+    // 24-hour dial (00:00 straight up, 15°/hour) it is at 18*15 = 270° (9 o'clock).
+    let local = WallTime::from_unix_seconds(18 * 3600).with_offset(TimeZoneOffset::UTC);
+    let twelve = AnalogHands::for_dial(local, true);
+    let twenty_four = AnalogHands::for_dial(local, false);
+    assert_deg(twelve.hour_deg, 180.0);
+    assert_deg(twenty_four.hour_deg, 270.0);
+    // Minute + second hands are identical between the two dials.
+    assert_deg(twelve.minute_deg, twenty_four.minute_deg);
+    assert_deg(twelve.second_deg, twenty_four.second_deg);
+    // The default `From<LocalTime>` is the 12-hour dial.
+    assert_deg(AnalogHands::from(local).hour_deg, 180.0);
+}
+
+#[test]
+fn for_dial_24h_advances_the_hour_hand_half_as_fast() {
+    // 06:00 vs 18:00 on a 24-hour dial are 12 hours apart -> 180° apart (90° vs 270°).
+    let six = WallTime::from_unix_seconds(6 * 3600).with_offset(TimeZoneOffset::UTC);
+    let eighteen = WallTime::from_unix_seconds(18 * 3600).with_offset(TimeZoneOffset::UTC);
+    assert_deg(AnalogHands::for_dial(six, false).hour_deg, 90.0);
+    assert_deg(AnalogHands::for_dial(eighteen, false).hour_deg, 270.0);
+}

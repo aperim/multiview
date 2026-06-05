@@ -162,21 +162,20 @@ fn render_clock(
     };
     use multiview_compositor::overlay::text::{FontFamily, TextEngine};
     use multiview_overlay::clock::{
-        ClockFace, ClockModel, RefSource, RefStatus, TimeRef, TimeZoneOffset,
+        AnalogHands, ClockFace, ClockModel, RefSource, RefStatus, TimeRef, TimeZoneOffset,
     };
 
     let cc = |e: multiview_compositor::Error| SynthError::Compositor(e.to_string());
     // A near-black slate to draw the clock onto.
     let bg = Nv12Image::solid_rgb(width, height, 8, 8, 12, canvas).map_err(cc)?;
     let zone = TimeZoneOffset::from_minutes(tz_offset_minutes);
-    // The time reference is the host system clock (free-running) — the value only
-    // feeds the a11y badge, which a standalone clock source does not draw.
-    let time_ref = TimeRef::new(RefSource::System, RefStatus::Freerun);
     let mut list = OverlayDrawList::new();
 
     if analog {
-        let model = ClockModel::new(ClockFace::analog(), zone, time_ref);
-        let hands = model.render_analog(now).ok_or(SynthError::ClockTime)?;
+        // `twelve_hour` selects the dial: a 12-hour dial (12 ticks, hour hand two
+        // revolutions/day) or a 24-hour dial (24 ticks, one revolution/day).
+        let hands = AnalogHands::for_dial(now.with_offset(zone), twelve_hour);
+        let hour_ticks = if twelve_hour { 12 } else { 24 };
         // Bezel ≈ 45 % of the smaller dimension, centred.
         let radius = width.min(height).saturating_mul(9) / 20;
         let style = ClockFaceStyle::centred(width, height, radius);
@@ -187,10 +186,14 @@ fn render_clock(
                 second_deg: hands.second_deg,
             },
             style,
+            hour_ticks,
         ) {
             list.push(prim);
         }
     } else {
+        // The time reference is the host system clock (free-running) — the value
+        // only feeds the a11y badge, which a standalone clock source does not draw.
+        let time_ref = TimeRef::new(RefSource::System, RefStatus::Freerun);
         let face = if twelve_hour {
             ClockFace::digital_12h()
         } else {
@@ -497,6 +500,34 @@ segment_ms = 1000
             three.y_plane(),
             nine.y_plane(),
             "the clock animates with time"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn analog_clock_honors_12h_vs_24h_dial() {
+        let c = canvas();
+        // 18:00 UTC: a 12-hour dial puts the hour hand at 6 o'clock (180°, down);
+        // a 24-hour dial (15°/hour, 24 ticks) puts it at 270° (left). The two
+        // dials must render a visibly different face.
+        let render_dial = |twelve_hour| {
+            render(
+                SyntheticKind::Clock {
+                    analog: true,
+                    twelve_hour,
+                    tz_offset_minutes: 0,
+                },
+                240,
+                240,
+                c,
+                WallTime::from_unix_seconds(18 * 3600),
+            )
+            .expect("analog clock")
+        };
+        assert_ne!(
+            render_dial(true).y_plane(),
+            render_dial(false).y_plane(),
+            "12-hour and 24-hour analog dials must render differently"
         );
     }
 

@@ -43,9 +43,13 @@ color = "#103a6b"           # #RRGGBB fill colour
 
 [[sources]]
 id = "in_analog"
-display_name = "Analog clock (UTC)"
+display_name = "Analog clock (UTC, 24h dial)"
 kind = "clock"
 face = "analog"
+# `twelve_hour` selects the dial for BOTH faces: false (default) = a 24-hour
+# analog dial (24 ticks, one hour-hand revolution/day); true = a conventional
+# 12-hour dial.
+twelve_hour = false
 tz_offset_minutes = 0       # UTC; real offsets span -720..=840
 
 [[sources]]

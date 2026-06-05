@@ -165,7 +165,9 @@ no subprocess, published per tick into the same per-tile store — see
   validated at config-load time. In-process, pure-Rust.
 - **`clock`** (`face`, `twelve_hour`, `tz_offset_minutes`): a full-frame analog or digital clock that
   can fill a tile or the whole canvas, disciplined by the system wall clock. `face` is `analog`
-  (default) or `digital`; `twelve_hour` selects a 12-hour AM/PM readout (digital only);
+  (default) or `digital`; `twelve_hour` selects 12-hour vs 24-hour mode for **both** faces —
+  a digital AM/PM readout or a 24-hour `00`–`23` one, and an analog 12-hour dial or a 24-hour dial
+  (24 ticks, one hour-hand revolution/day); defaults to `false` (24-hour);
   `tz_offset_minutes` is a UTC offset in minutes (`-720..=840`, validated at load). It reuses the
   clock overlay rasterizer, so it needs the `overlay` feature to render. **Where `overlay` is absent
   — including the default FFmpeg-free `--software` build — a `clock` source shows a placeholder

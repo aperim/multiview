@@ -466,7 +466,8 @@ impl OverlayBaker {
         if let Some(analog) = self.analog_clock {
             if let Some(hands) = analog.model.render_analog(wall) {
                 let style = ClockFaceStyle::at(analog.cx, analog.cy, analog.radius);
-                for prim in clock_face(hand_angles(hands), style) {
+                // The program-wide analog clock is a conventional 12-hour dial.
+                for prim in clock_face(hand_angles(hands), style, 12) {
                     list.push(prim);
                 }
             }

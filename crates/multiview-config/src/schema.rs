@@ -223,7 +223,10 @@ pub enum SourceKind {
         /// Analog (default) or digital face.
         #[serde(default)]
         face: ClockFaceConfig,
-        /// `true` for a 12-hour digital readout with AM/PM; ignored for analog.
+        /// Selects 12-hour vs 24-hour mode for **both** faces: a digital readout
+        /// shows AM/PM (`true`) or `00`–`23` (`false`); an analog dial uses a
+        /// 12-hour dial (`true`, hour hand two revolutions/day) or a 24-hour dial
+        /// (`false`, 24 ticks, one revolution/day). Defaults to `false` (24-hour).
         #[serde(default)]
         twelve_hour: bool,
         /// Timezone offset from UTC in minutes (e.g. `600` = UTC+10). Real

@@ -208,19 +208,38 @@ pub struct AnalogHands {
     pub second_deg: f32,
 }
 
-impl From<LocalTime> for AnalogHands {
-    fn from(local: LocalTime) -> Self {
-        let h = f32::from(local.hour() % 12);
+impl AnalogHands {
+    /// Hand angles for `local` on a **12-hour** dial (`twelve_hour == true`) or a
+    /// **24-hour** dial (`false`). The minute and second hands are identical
+    /// between the two; only the hour hand's rate differs:
+    /// * 12-hour: `30°/hour` (two revolutions/day; `12`/`24` o'clock straight up),
+    /// * 24-hour: `15°/hour` (one revolution/day; `00:00` straight up, `12:00`
+    ///   straight down).
+    #[must_use]
+    pub fn for_dial(local: LocalTime, twelve_hour: bool) -> Self {
         let m = f32::from(local.minute());
         let s = f32::from(local.second());
-        // 360 / 12 = 30 deg/hour, plus 0.5 deg per minute (30/60).
-        // 360 / 60 = 6 deg/minute, plus 0.1 deg per second (6/60).
-        // 360 / 60 = 6 deg/second.
+        // 360 / 60 = 6 deg/minute (+0.1/sec); 360 / 60 = 6 deg/second.
+        let hour_deg = if twelve_hour {
+            // 360 / 12 = 30 deg/hour, +0.5/min (30/60), +0.5/3600/sec.
+            f32::from(local.hour() % 12) * 30.0 + m * 0.5 + s * (0.5 / 60.0)
+        } else {
+            // 360 / 24 = 15 deg/hour, +0.25/min (15/60), +0.25/3600/sec.
+            f32::from(local.hour()) * 15.0 + m * 0.25 + s * (0.25 / 60.0)
+        };
         Self {
-            hour_deg: h * 30.0 + m * 0.5 + s * (0.5 / 60.0),
+            hour_deg,
             minute_deg: m * 6.0 + s * 0.1,
             second_deg: s * 6.0,
         }
+    }
+}
+
+impl From<LocalTime> for AnalogHands {
+    /// A 12-hour dial (the conventional default). Use [`AnalogHands::for_dial`]
+    /// to select a 24-hour dial.
+    fn from(local: LocalTime) -> Self {
+        Self::for_dial(local, true)
     }
 }
 
