@@ -144,6 +144,21 @@ pub fn canvas_linear_to_output_yuv(lin: [f32; 3], canvas: CanvasColor) -> Result
     ])
 }
 
+/// Convert one 8-bit sRGB-ish RGB sample to the canvas's output YUV code values.
+///
+/// Runs the canonical back half of the fixed colour pipeline (inv #8): per-channel
+/// EOTF to linear light, then [`canvas_linear_to_output_yuv`]. Used by the
+/// synthetic `solid`/`bars` source constructors so their colours land in exactly
+/// the canvas output space a decoded source's samples are converted into.
+fn rgb_to_canvas_yuv(r: u8, g: u8, b: u8, canvas: CanvasColor) -> Result<[u8; 3]> {
+    let lin = [
+        transfer::eotf(f32::from(r) / 255.0, canvas.transfer)?,
+        transfer::eotf(f32::from(g) / 255.0, canvas.transfer)?,
+        transfer::eotf(f32::from(b) / 255.0, canvas.transfer)?,
+    ];
+    canvas_linear_to_output_yuv(lin, canvas)
+}
+
 /// A tiny owned NV12 image: a `width x height` Y plane followed by a
 /// `width x (height/2)` interleaved Cb/Cr plane (4:2:0 semi-planar).
 ///
@@ -239,6 +254,88 @@ impl Nv12Image {
             uv_plane,
             color,
         })
+    }
+
+    /// A solid NV12 source filled with an 8-bit sRGB-ish `(r, g, b)` colour,
+    /// converted into the canvas output space (inv #8) and tagged with the
+    /// canvas's output [`ColorInfo`]. The synthetic `solid` source kind (ADR-0027).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Geometry`] for non-positive/odd dimensions, or an
+    /// `Unsupported*` colour variant if a canvas axis has no CPU implementation.
+    pub fn solid_rgb(
+        width: u32,
+        height: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+        canvas: CanvasColor,
+    ) -> Result<Self> {
+        let [y, cb, cr] = rgb_to_canvas_yuv(r, g, b, canvas)?;
+        Self::solid(width, height, y, cb, cr, canvas.output_tag())
+    }
+
+    /// 75 % colour bars (7 equal vertical bands, left→right: white, yellow, cyan,
+    /// green, magenta, red, blue) in the canvas output space. The synthetic
+    /// `bars` source kind (ADR-0027) — the standard line-up signal.
+    ///
+    /// The classic descending-luma staircase falls out of the colour conversion;
+    /// it is the content-aware property the tests assert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Geometry`] for non-positive/odd dimensions, or an
+    /// `Unsupported*` colour variant if a canvas axis has no CPU implementation.
+    pub fn color_bars(width: u32, height: u32, canvas: CanvasColor) -> Result<Self> {
+        // 75 % amplitude bars (191 = 0.75 * 255).
+        const BARS: [(u8, u8, u8); 7] = [
+            (191, 191, 191), // white
+            (191, 191, 0),   // yellow
+            (0, 191, 191),   // cyan
+            (0, 191, 0),     // green
+            (191, 0, 191),   // magenta
+            (191, 0, 0),     // red
+            (0, 0, 191),     // blue
+        ];
+        if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+            return Err(Error::Geometry(format!(
+                "NV12 dimensions must be positive and even (got {width}x{height})"
+            )));
+        }
+        let yuv = BARS
+            .iter()
+            .map(|&(r, g, b)| rgb_to_canvas_yuv(r, g, b, canvas))
+            .collect::<Result<Vec<[u8; 3]>>>()?;
+        let n = yuv.len();
+        let (w, h) = (
+            usize::try_from(width).map_err(|_| Error::Geometry("width overflow".to_owned()))?,
+            usize::try_from(height).map_err(|_| Error::Geometry("height overflow".to_owned()))?,
+        );
+        // The bar covering output column `x` (left→right), as its YUV triple.
+        let bar_of = |x: usize| -> [u8; 3] {
+            let idx = (x.saturating_mul(n) / w).min(n.saturating_sub(1));
+            yuv.get(idx).copied().unwrap_or([16, 128, 128])
+        };
+        let mut y_plane = Vec::with_capacity(w.saturating_mul(h));
+        for _row in 0..h {
+            for x in 0..w {
+                let [luma, _, _] = bar_of(x);
+                y_plane.push(luma);
+            }
+        }
+        // NV12 chroma: one interleaved Cb,Cr per 2×2 block; sample the block's
+        // left column (bars are wide, so the block never straddles two bars at
+        // any sane width).
+        let mut uv_plane = Vec::with_capacity(w.saturating_mul(h) / 2);
+        for _crow in 0..(h / 2) {
+            for cx in 0..(w / 2) {
+                let [_, cb, cr] = bar_of(cx.saturating_mul(2));
+                uv_plane.push(cb);
+                uv_plane.push(cr);
+            }
+        }
+        Self::new(width, height, y_plane, uv_plane, canvas.output_tag())
     }
 
     /// Image width in pixels.
