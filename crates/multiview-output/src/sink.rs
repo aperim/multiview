@@ -264,6 +264,125 @@ impl FrameConverter {
     }
 }
 
+/// The single **encode-once** producer (invariant #7, ADR-E003/E004, ADR-0026).
+///
+/// Owns ONE [`VideoEncoder`] plus the NV12 → codec-format [`FrameConverter`] and
+/// the output tick counter, turning each baked NV12 canvas frame into the coded
+/// [`EncodedPacket`]s it produced, with every PTS re-stamped from the tick
+/// (`out_pts = f(tick)`, inv #3 — never the input PTS). The cli's bake consumer
+/// owns one of these: it feeds each baked frame in and fans the produced
+/// packets — as independently-owned copies — to N mux-only [`PacketMuxSink`]s,
+/// so the canvas is encoded exactly once and the *same* coded packets feed every
+/// transport (file / HLS / push), never a per-output re-encode.
+///
+/// It holds no muxer and no channel and never blocks on a client: it is a pure
+/// frame-in → packets-out transform driven by the off-hot-path consumer, so it
+/// can neither stall the output clock (inv #1) nor be back-pressured by a slow
+/// sink (inv #10). The codec is fixed for the run, so the
+/// [`StreamCodecParameters`] each muxer seeds its stream from is snapshotted once
+/// at construction.
+pub struct ProgramEncoder {
+    /// The single video encoder (the one encode of invariant #7).
+    encoder: VideoEncoder,
+    /// NV12 → encoder-format conversion (libswscale), built lazily on first use.
+    converter: FrameConverter,
+    /// The codec-params snapshot every [`PacketMuxSink`] seeds its stream from
+    /// (taken once: the codec is fixed across the encode).
+    params: StreamCodecParameters,
+    /// The encoder time-base packets are stamped in (reciprocal of the cadence).
+    time_base: Rational,
+    /// The monotonic output tick; each [`encode_frame`](Self::encode_frame)
+    /// stamps the frame's PTS with it, then advances it by one.
+    tick: i64,
+    /// Set by [`finish`](Self::finish): the encoder has been flushed, so further
+    /// [`encode_frame`](Self::encode_frame) calls are rejected.
+    finished: bool,
+}
+
+impl ProgramEncoder {
+    /// Open the single encoder for `config` (validated first), snapshotting the
+    /// codec parameters and time-base every mux sink will seed its stream from.
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if the configuration is invalid (zero geometry /
+    /// GOP) or the encoder cannot be opened for the named codec.
+    pub fn new(config: &EncodeConfig) -> Result<Self> {
+        config.validate()?;
+        let encoder = VideoEncoder::new(&config.target()).map_err(ff)?;
+        let params = StreamCodecParameters::from_encoder(&encoder);
+        let time_base = encoder.time_base();
+        Ok(Self {
+            encoder,
+            converter: FrameConverter::new(config.format),
+            params,
+            time_base,
+            tick: 0,
+            finished: false,
+        })
+    }
+
+    /// The codec parameters each [`PacketMuxSink`] seeds its muxer stream from.
+    /// Snapshotted once at [`new`](Self::new) — the codec is fixed across the
+    /// encode (invariant #7), so this is cloned per sink, never rebuilt.
+    #[must_use]
+    pub fn codec_params(&self) -> &StreamCodecParameters {
+        &self.params
+    }
+
+    /// The encoder time-base the produced packets are stamped in (the reciprocal
+    /// of the output cadence), to be passed to [`PacketMuxSink::run`].
+    #[must_use]
+    pub fn time_base(&self) -> Rational {
+        self.time_base
+    }
+
+    /// Encode one baked canvas `frame`, returning the coded packets it produced
+    /// this call (zero or more — the encoder may buffer a frame before emitting).
+    /// The frame is converted to the encoder format if needed and its PTS is
+    /// re-stamped from the internal tick counter, which then advances by one
+    /// (`out_pts = f(tick)`, inv #3) — the input PTS is discarded.
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if called after [`finish`](Self::finish), or if
+    /// the format conversion or the encode fails.
+    pub fn encode_frame(&mut self, frame: DecodedVideoFrame) -> Result<Vec<EncodedPacket>> {
+        if self.finished {
+            return Err(Error::Output(
+                "ProgramEncoder::encode_frame called after finish".to_owned(),
+            ));
+        }
+        let prepared = self.converter.prepare(frame.frame, self.tick)?;
+        self.encoder.send_frame(&prepared).map_err(ff)?;
+        self.tick = self.tick.saturating_add(1);
+        self.drain()
+    }
+
+    /// Flush the encoder (send EOF) and return its trailing packets. Idempotent:
+    /// a second call yields no packets. After this, [`encode_frame`](Self::encode_frame)
+    /// is rejected.
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if signalling EOF or a trailing receive fails.
+    pub fn finish(&mut self) -> Result<Vec<EncodedPacket>> {
+        if self.finished {
+            return Ok(Vec::new());
+        }
+        self.finished = true;
+        self.encoder.send_eof().map_err(ff)?;
+        self.drain()
+    }
+
+    /// Drain every packet currently available from the encoder into owned
+    /// [`EncodedPacket`]s (each independently muxable by a downstream sink).
+    fn drain(&mut self) -> Result<Vec<EncodedPacket>> {
+        let mut out = Vec::new();
+        while let Some(packet) = self.encoder.receive_packet().map_err(ff)? {
+            out.push(EncodedPacket::from_packet(packet));
+        }
+        Ok(out)
+    }
+}
+
 /// Counters describing one encode run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeStats {

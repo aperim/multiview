@@ -50,5 +50,5 @@ pub use error::{Error, Result};
 #[cfg(feature = "ffmpeg")]
 pub use sink::{
     EncodeConfig, EncodeStats, FileSink, PacketMuxOutcome, PacketMuxSink, PacketSource,
-    PushProtocol, PushSink, SegmentResult, SegmentSink, VideoFrameSource,
+    ProgramEncoder, PushProtocol, PushSink, SegmentResult, SegmentSink, VideoFrameSource,
 };
