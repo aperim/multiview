@@ -441,9 +441,11 @@ struct IngestPlan {
     /// `overlay` (the burn-in renderer consumes the cues).
     #[cfg(feature = "overlay")]
     dvbsub: Option<DvbSubRoute>,
-    /// A generated `test` clip's tempdir, kept alive for the life of the
-    /// pipeline so the decode thread can open it.
-    _owned: Option<GeneratedClip>,
+    /// The canvas colour the source's frames are tagged in. Carried so an
+    /// in-process synthetic generator renders into the canvas output space.
+    canvas_color: CanvasColor,
+    /// The output cadence a synthetic generator paces its publishes to.
+    cadence: Rational,
 }
 
 /// The in-container DVB-sub decode route stashed on an [`IngestPlan`]: which
@@ -474,6 +476,10 @@ impl Pipeline {
     /// source's clip cannot be generated, an NDI/unsupported source kind is
     /// declared, no runnable output is declared, or the encoder cannot be
     /// resolved.
+    #[allow(clippy::too_many_lines)]
+    // reason: a sequential constructor that solves the layout, builds one store +
+    // ingest plan per source, wires native captions, and assembles the outputs —
+    // each step is in-scope and splitting it would only scatter the wiring.
     pub fn build(config: &MultiviewConfig) -> Result<Self, PipelineError> {
         let layout = Arc::new(config.solve_layout()?);
         let cadence = config.canvas.fps.rational();
@@ -514,7 +520,14 @@ impl Pipeline {
                 NoSignalPolicy::HoldForever,
             ));
             #[cfg_attr(not(feature = "overlay"), allow(unused_mut))]
-            let mut plan = ingest_plan_for(source, tile_w, tile_h, Arc::clone(&store))?;
+            let mut plan = ingest_plan_for(
+                source,
+                tile_w,
+                tile_h,
+                Arc::clone(&store),
+                canvas_color,
+                cadence,
+            )?;
 
             // Wire this source's native captions (HLS WebVTT rendition thread +/or
             // in-container DVB-sub route), registering any cue store + reader plan
@@ -2471,17 +2484,11 @@ fn build_meter_timelines(
 ) -> std::collections::HashMap<String, Vec<f64>> {
     let mut timelines = std::collections::HashMap::new();
     for source in &config.sources {
-        // Resolve a decodable local path, keeping any generated `test` clip's
-        // tempdir alive (`_clip`) for the whole decode.
-        let (path, _clip): (PathBuf, Option<GeneratedClip>) = match &source.kind {
-            SourceKind::File { path } => (PathBuf::from(path), None),
-            SourceKind::Bars => match generate_test_clip(&source.id) {
-                Ok(clip) => (clip.0.clone(), Some(clip)),
-                Err(_) => continue,
-            },
-            // Live URLs are not pre-decoded here (they never EOF); solid/clock
-            // synthetic sources carry no audio; NDI/unknown carry no file. None
-            // contribute a build-time meter timeline.
+        // Only a file-backed source has decodable audio to pre-measure here.
+        // Synthetic (bars/solid/clock) carry no audio; live URLs never EOF and are
+        // not pre-decoded; NDI/unknown carry no file. None get a build-time meter.
+        let path = match &source.kind {
+            SourceKind::File { path } => PathBuf::from(path),
             _ => continue,
         };
         match meter_timeline_for_file(&path, cadence) {
@@ -2896,17 +2903,22 @@ fn ingest_plan_for(
     tile_w: u32,
     tile_h: u32,
     store: Arc<TileStore<Nv12Image>>,
+    canvas_color: CanvasColor,
+    cadence: Rational,
 ) -> Result<IngestPlan, PipelineError> {
-    let mut owned = None;
     let (location, live) = match &source.kind {
-        SourceKind::Bars => {
-            let clip = generate_test_clip(&source.id).map_err(|reason| PipelineError::Ingest {
-                id: source.id.clone(),
-                reason,
-            })?;
-            let location = SourceLocation::Path(clip.0.clone());
-            owned = Some(clip);
-            (location, false)
+        // Synthetic sources (bars/solid/clock) are rendered in-process by a
+        // generator thread (ADR-0027) — a peer of a decode thread, `live` because
+        // it produces frames continuously. No ffmpeg subprocess, no media to open.
+        SourceKind::Bars | SourceKind::Solid { .. } | SourceKind::Clock { .. } => {
+            let kind =
+                crate::synth::SyntheticKind::from_source_kind(&source.kind).ok_or_else(|| {
+                    PipelineError::Ingest {
+                        id: source.id.clone(),
+                        reason: "invalid synthetic source parameters".to_owned(),
+                    }
+                })?;
+            (SourceLocation::Synthetic(kind), true)
         }
         SourceKind::File { path } => (SourceLocation::Path(PathBuf::from(path)), false),
         SourceKind::Rtsp { url, .. }
@@ -2914,17 +2926,6 @@ fn ingest_plan_for(
         | SourceKind::Ts { url }
         | SourceKind::Srt { url }
         | SourceKind::Rtmp { url } => (SourceLocation::Url(url.clone()), true),
-        // `solid` and `clock` are first-class synthetic kinds in the config model
-        // (ADR-0027), but the in-process generator that renders them is wired in a
-        // following slice; fail honestly here rather than render the wrong picture.
-        SourceKind::Solid { .. } | SourceKind::Clock { .. } => {
-            return Err(PipelineError::Ingest {
-                id: source.id.clone(),
-                reason: "synthetic `solid`/`clock` sources are accepted by the config but their \
-                         in-process renderer is not yet wired (ADR-0027)"
-                    .to_owned(),
-            })
-        }
         SourceKind::Ndi { .. } => {
             return Err(PipelineError::Ingest {
                 id: source.id.clone(),
@@ -2950,7 +2951,8 @@ fn ingest_plan_for(
         live,
         #[cfg(feature = "overlay")]
         dvbsub: None,
-        _owned: owned,
+        canvas_color,
+        cadence,
     })
 }
 
@@ -3027,7 +3029,7 @@ fn resolve_dvbsub_route(
     // source is decoded by the URL ingest path and is out of this MVP's scope.
     let path = match location {
         SourceLocation::Path(p) => p.as_path(),
-        SourceLocation::Url(_) => return None,
+        SourceLocation::Url(_) | SourceLocation::Synthetic(_) => return None,
     };
     let demux = match Demuxer::open(path) {
         Ok(d) => d,
@@ -3070,46 +3072,9 @@ enum SourceLocation {
     Path(PathBuf),
     /// A libav-openable URL (rtsp/hls/ts/srt/rtmp).
     Url(String),
-}
-
-/// A generated test clip plus the tempdir that owns it (kept alive for as long
-/// as the owning [`IngestPlan`] lives, so the ingest thread can open it).
-struct GeneratedClip(PathBuf, #[allow(dead_code)] tempfile::TempDir);
-
-/// Generate a small LGPL `testsrc` clip for a `test` source. Uses `mpeg2video`
-/// (LGPL, in-tree) — never x264/x265 — so generation stays LGPL-clean.
-fn generate_test_clip(id: &str) -> Result<GeneratedClip, String> {
-    let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
-    let clip = dir.path().join(format!("test-{id}.ts"));
-    let status = std::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=640x480:rate=25:duration=10",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:v",
-            "mpeg2video",
-            "-g",
-            "25",
-            "-f",
-            "mpegts",
-        ])
-        .arg(&clip)
-        .status()
-        .map_err(|e| format!("spawning ffmpeg CLI: {e}"))?;
-    if !status.success() {
-        return Err("ffmpeg CLI failed to generate the test clip".to_owned());
-    }
-    if !clip.exists() {
-        return Err("ffmpeg CLI produced no test clip".to_owned());
-    }
-    Ok(GeneratedClip(clip, dir))
+    /// An in-process synthetic source (bars/solid/clock) — no media to open;
+    /// rendered by [`crate::synth::generator_loop`] on the ingest thread.
+    Synthetic(crate::synth::SyntheticKind),
 }
 
 /// The total budget the startup **prime-wait** ([`wait_for_prime`]) spends
@@ -3257,6 +3222,20 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
 /// lock-free store, so it can neither pace nor stall the output clock
 /// (invariant #1) nor back-pressure the engine (invariant #10).
 fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
+    // Synthetic sources (bars/solid/clock) render in-process — no decode, no
+    // reconnect; the generator publishes into the store at cadence until `stop`.
+    if let SourceLocation::Synthetic(kind) = &plan.location {
+        crate::synth::generator_loop(
+            *kind,
+            &plan.store,
+            plan.tile_w,
+            plan.tile_h,
+            plan.canvas_color,
+            plan.cadence,
+            stop,
+        );
+        return;
+    }
     let tag = CanvasColor::default().output_tag();
     let mut attempt: u32 = 0;
     let mut jitter = JitterRng::seeded(&plan.id);
@@ -3317,6 +3296,11 @@ fn open_and_stream(
         }
         SourceLocation::Url(u) => {
             ffmpeg::format::input_with_dictionary(&u.as_str(), opts).map_err(|e| e.to_string())?
+        }
+        // Unreachable: `ingest_loop` routes synthetic sources to the generator
+        // before opening any media. Guarded so the match stays exhaustive.
+        SourceLocation::Synthetic(_) => {
+            return Err("synthetic source has no media to open".to_owned())
         }
     };
 

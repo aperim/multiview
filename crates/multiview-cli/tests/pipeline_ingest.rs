@@ -280,7 +280,112 @@ async fn pipeline_holds_output_when_a_source_runs_out() {
     );
 }
 
-/// A small 2x2 of built-in `test` sources (no external network) + an HLS output
+/// A 2x2 of every synthetic kind — bars, solid, an analog clock, a digital clock
+/// — proving they are first-class sources the full pipeline renders in-process
+/// (ADR-0027). Requires the `overlay` feature for the clock renderer.
+#[cfg(feature = "overlay")]
+fn synthetic_config_text(playlist: &Path) -> String {
+    format!(
+        r##"
+schema_version = 1
+[canvas]
+width = 480
+height = 320
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr", "1fr"]
+areas = ["a b", "c d"]
+[[sources]]
+id = "bars"
+kind = "bars"
+[[sources]]
+id = "slate"
+kind = "solid"
+color = "#cc3344"
+[[sources]]
+id = "clk_a"
+kind = "clock"
+face = "analog"
+[[sources]]
+id = "clk_d"
+kind = "clock"
+face = "digital"
+twelve_hour = true
+tz_offset_minutes = 600
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "bars"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "slate"
+[[cells]]
+id = "cell_c"
+area = "c"
+[cells.source]
+input_id = "clk_a"
+[[cells]]
+id = "cell_d"
+area = "d"
+[cells.source]
+input_id = "clk_d"
+[[outputs]]
+kind = "hls"
+path = "{playlist}"
+codec = "mpeg2video"
+segment_ms = 1000
+"##,
+        playlist = playlist.display(),
+    )
+}
+
+/// bars + solid + analog clock + digital clock, all first-class synthetic sources
+/// (ADR-0027), render through the full libav pipeline and produce a playable
+/// multiview that never falters — `solid` and `clock` used to be rejected at
+/// ingest; now they are rendered in-process (no `ffmpeg testsrc` subprocess).
+#[cfg(feature = "overlay")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn synthetic_sources_render_through_the_full_pipeline() {
+    const TICKS: u64 = 30; // ~1.2 s @ 25 fps — long enough for a clock tick
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("out");
+    let playlist = out_dir.join("index.m3u8");
+    let toml = synthetic_config_text(&playlist);
+    let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
+    config.validate().expect("config validates");
+
+    let mut pipeline = Pipeline::build(&config).expect("build pipeline");
+    assert_eq!(pipeline.source_count(), 4, "four synthetic sources");
+    let report = pipeline.run_for(TICKS).await.expect("bounded run");
+
+    // Invariant #1: synthetic sources never stall the output clock.
+    assert_eq!(
+        report.frames, TICKS,
+        "every synthetic source produced frames on every tick"
+    );
+    assert!(!report.faltered, "the output never faltered (invariant #1)");
+
+    // The composited program is a playable file with exactly N frames.
+    let program = out_dir.join("program.ts");
+    assert_eq!(
+        ffprobe_frame_count(&program),
+        TICKS,
+        "program.ts decodes to N frames composited from bars + solid + two clocks"
+    );
+    assert_eq!(ffprobe_v(&program, "codec_name"), "mpeg2video");
+}
+
+/// A small 2x2 of built-in `bars` sources (no external network) + an HLS output
 /// — the pipeline synthesizes each source, composites, and encodes locally.
 fn serving_config_text(playlist: &Path) -> String {
     format!(
