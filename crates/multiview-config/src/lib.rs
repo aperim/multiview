@@ -47,8 +47,8 @@ pub use error::ConfigError;
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
-    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ColorOverride, Fps, Layout, Output,
-    Overlay, Rect, RtspOptions, Source, SourceAuth, SourceKind,
+    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride, Fps,
+    Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth, SourceKind,
 };
 pub use tally::{BitColor, IndexCell, TallyProfile};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
@@ -114,6 +114,41 @@ pub struct MultiviewConfig {
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlConfig>,
+}
+
+/// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
+///
+/// Returns `None` for anything that is not a `#`-prefixed 3- or 6-digit ASCII
+/// hex triplet. Shared by config validation and the synthetic `solid` source
+/// generator so that a config which validates renders the exact colour asked
+/// for. Allocation-free and slicing-free (guardrail-clean for the data plane).
+#[must_use]
+pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let hex = s.strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    // Decode two ASCII hex digits into one byte without slicing.
+    let byte = |hi: u8, lo: u8| -> Option<u8> {
+        let buf = [hi, lo];
+        let text = core::str::from_utf8(&buf).ok()?;
+        u8::from_str_radix(text, 16).ok()
+    };
+    let b = hex.as_bytes();
+    match b.len() {
+        3 => {
+            let r = *b.first()?;
+            let g = *b.get(1)?;
+            let bl = *b.get(2)?;
+            Some((byte(r, r)?, byte(g, g)?, byte(bl, bl)?))
+        }
+        6 => Some((
+            byte(*b.first()?, *b.get(1)?)?,
+            byte(*b.get(2)?, *b.get(3)?)?,
+            byte(*b.get(4)?, *b.get(5)?)?,
+        )),
+        _ => None,
+    }
 }
 
 impl MultiviewConfig {
@@ -185,6 +220,7 @@ impl MultiviewConfig {
         }
 
         self.validate_unique_ids()?;
+        self.validate_sources()?;
         self.validate_cell_bindings()?;
         self.validate_outputs()?;
         self.validate_probes()?;
@@ -201,6 +237,44 @@ impl MultiviewConfig {
             other => ConfigError::Validation(other.to_string()),
         })?;
 
+        Ok(())
+    }
+
+    /// Validate per-source kind-specific fields so a config that validates cannot
+    /// fail at render time: a `solid` colour must be a parseable hex string, and a
+    /// `clock` timezone offset must be a real UTC offset (`-720..=840` minutes).
+    fn validate_sources(&self) -> Result<(), ConfigError> {
+        for source in &self.sources {
+            match &source.kind {
+                SourceKind::Solid { color } => {
+                    if parse_hex_color(color).is_none() {
+                        return Err(ConfigError::Validation(format!(
+                            "source {:?}: solid color {color:?} is not a #RGB / #RRGGBB hex color",
+                            source.id
+                        )));
+                    }
+                }
+                SourceKind::Clock {
+                    tz_offset_minutes, ..
+                } => {
+                    if !(-720..=840).contains(tz_offset_minutes) {
+                        return Err(ConfigError::Validation(format!(
+                            "source {:?}: clock tz_offset_minutes {tz_offset_minutes} is out of \
+                             range (real UTC offsets span -720..=840)",
+                            source.id
+                        )));
+                    }
+                }
+                SourceKind::Bars
+                | SourceKind::Rtsp { .. }
+                | SourceKind::Hls { .. }
+                | SourceKind::Ts { .. }
+                | SourceKind::Srt { .. }
+                | SourceKind::Rtmp { .. }
+                | SourceKind::Ndi { .. }
+                | SourceKind::File { .. } => {}
+            }
+        }
         Ok(())
     }
 

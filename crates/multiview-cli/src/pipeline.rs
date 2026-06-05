@@ -2475,12 +2475,13 @@ fn build_meter_timelines(
         // tempdir alive (`_clip`) for the whole decode.
         let (path, _clip): (PathBuf, Option<GeneratedClip>) = match &source.kind {
             SourceKind::File { path } => (PathBuf::from(path), None),
-            SourceKind::Test => match generate_test_clip(&source.id) {
+            SourceKind::Bars => match generate_test_clip(&source.id) {
                 Ok(clip) => (clip.0.clone(), Some(clip)),
                 Err(_) => continue,
             },
-            // Live URLs are not pre-decoded here (they never EOF); NDI/unknown
-            // carry no file. They contribute no build-time meter timeline.
+            // Live URLs are not pre-decoded here (they never EOF); solid/clock
+            // synthetic sources carry no audio; NDI/unknown carry no file. None
+            // contribute a build-time meter timeline.
             _ => continue,
         };
         match meter_timeline_for_file(&path, cadence) {
@@ -2898,7 +2899,7 @@ fn ingest_plan_for(
 ) -> Result<IngestPlan, PipelineError> {
     let mut owned = None;
     let (location, live) = match &source.kind {
-        SourceKind::Test => {
+        SourceKind::Bars => {
             let clip = generate_test_clip(&source.id).map_err(|reason| PipelineError::Ingest {
                 id: source.id.clone(),
                 reason,
@@ -2913,6 +2914,17 @@ fn ingest_plan_for(
         | SourceKind::Ts { url }
         | SourceKind::Srt { url }
         | SourceKind::Rtmp { url } => (SourceLocation::Url(url.clone()), true),
+        // `solid` and `clock` are first-class synthetic kinds in the config model
+        // (ADR-0027), but the in-process generator that renders them is wired in a
+        // following slice; fail honestly here rather than render the wrong picture.
+        SourceKind::Solid { .. } | SourceKind::Clock { .. } => {
+            return Err(PipelineError::Ingest {
+                id: source.id.clone(),
+                reason: "synthetic `solid`/`clock` sources are accepted by the config but their \
+                         in-process renderer is not yet wired (ADR-0027)"
+                    .to_owned(),
+            })
+        }
         SourceKind::Ndi { .. } => {
             return Err(PipelineError::Ingest {
                 id: source.id.clone(),

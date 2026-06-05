@@ -183,16 +183,54 @@ pub struct SourceAuth {
     pub secret_ref: String,
 }
 
+/// The face a [`SourceKind::Clock`] source renders (config-level mirror of the
+/// overlay clock face; mapped onto `multiview_overlay`'s model at render time).
+///
+/// A plain string enum (`analog` / `digital`); the digital-only `twelve_hour`
+/// flag rides alongside it on the [`SourceKind::Clock`] payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ClockFaceConfig {
+    /// Analog face: hour / minute / second hands on a ticked bezel.
+    #[default]
+    Analog,
+    /// Digital `HH:MM:SS` readout (see `twelve_hour`).
+    Digital,
+}
+
 /// The kind-specific payload of a managed input, internally tagged by `kind`.
 ///
-/// `test` is the built-in synthetic pattern (no parameters); the network kinds
-/// carry a `url`; NDI binds by source `name`.
+/// Synthetic sources (`bars`, `solid`, `clock`) are produced in-process and are
+/// first-class peers of the decoded kinds (ADR-0027): nothing downstream of
+/// ingest treats them differently. The network kinds carry a `url`; NDI binds by
+/// source `name`; `file` a path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceKind {
-    /// Built-in synthetic test pattern.
-    Test,
+    /// Built-in SMPTE/EBU colour bars (the line-up signal). `test` is accepted as
+    /// a back-compat alias and canonicalizes to `bars`.
+    #[serde(alias = "test")]
+    Bars,
+    /// A solid-colour slate (hex, e.g. `#101014`).
+    Solid {
+        /// Fill colour as a `#RRGGBB` (or `#RGB`) hex string.
+        color: String,
+    },
+    /// A full-frame clock disciplined by the system wall clock.
+    Clock {
+        /// Analog (default) or digital face.
+        #[serde(default)]
+        face: ClockFaceConfig,
+        /// `true` for a 12-hour digital readout with AM/PM; ignored for analog.
+        #[serde(default)]
+        twelve_hour: bool,
+        /// Timezone offset from UTC in minutes (e.g. `600` = UTC+10). Real
+        /// offsets span `-720..=840`.
+        #[serde(default)]
+        tz_offset_minutes: i32,
+    },
     /// RTSP pull.
     Rtsp {
         /// Source URL.

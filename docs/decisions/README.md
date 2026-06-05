@@ -52,6 +52,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-0023](ADR-0023.md) — Region-limited overlay bake: per-primitive dirty rects + exact passthrough, end the full-canvas colour round-trip (inv #5) *(Accepted)*
 - [ADR-0025](ADR-0025.md) — Streaming encode: bound memory + continuous output on run-until (off-hot-path bake consumer + bounded queue, offline-block/live-drop) *(Accepted)*
 - [ADR-0026](ADR-0026.md) — Encode-once-mux-many: hoist the single encoder into the bake consumer, fan encoded packets to mux-only sinks (folds in bounded teardown) *(Proposed)*
+- [ADR-0027](ADR-0027.md) — Synthetic sources are first-class: bars/solid/clock as in-process `SourceKind`s through the one uniform ingest path (`test` kept as a `bars` alias) *(Proposed)*
 
 ## Color
 
