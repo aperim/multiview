@@ -24,9 +24,10 @@ use multiview_cli::cli::{Cli, Command, RunArgs, ValidateArgs};
 use multiview_cli::control;
 use multiview_cli::run::{HeadlessEngine, RunReport};
 use multiview_cli::validate::validate_config;
-use multiview_config::{ControlConfig, MultiviewConfig};
+use multiview_compositor::pipeline::Nv12Image;
+use multiview_config::MultiviewConfig;
 use multiview_control::{command_bus, EngineStateSnapshot};
-use multiview_engine::{EnginePublisher, StopSignal};
+use multiview_engine::{CompositorDrive, EnginePublisher, StopSignal};
 use multiview_events::Event;
 use multiview_telemetry::tracing_init::SubscriberBuilder;
 
@@ -106,7 +107,7 @@ async fn run_headless(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("headless bounded run")?
     } else {
         tracing::info!("headless run: until Ctrl-C");
-        run_until_ctrl_c(&mut engine, config.control.as_ref()).await?
+        run_until_ctrl_c(&mut engine, config).await?
     };
 
     println!("{}", report.render());
@@ -200,8 +201,11 @@ async fn run_real(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<Ex
 /// watcher cannot back-pressure the engine (invariant #10).
 async fn run_until_ctrl_c(
     engine: &mut HeadlessEngine,
-    control: Option<&ControlConfig>,
+    config: &MultiviewConfig,
 ) -> anyhow::Result<RunReport> {
+    /// The boxed per-tick command drain the engine applies at the frame boundary.
+    type Drain = Box<dyn FnMut(&mut CompositorDrive<Nv12Image>)>;
+
     let stop = StopSignal::new();
 
     // The engine's outbound publisher, shared read-only with the control plane
@@ -210,12 +214,13 @@ async fn run_until_ctrl_c(
     // back-pressure the engine (invariant #10). 64 = the broadcast ring depth.
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
 
-    // Bring up the control server iff `[control]` is configured. It serves until
-    // `shutdown_rx` resolves, which happens once the engine loop returns. The
-    // command-bus receiver is held alive for the server's lifetime (dropping it
-    // would close the bus); the engine will drain it in a follow-up.
+    // Bring up the control server iff `[control]` is configured, and build the
+    // per-tick command drain the engine applies at the frame boundary. The drain
+    // is boxed so the run call is uniform: the real command-bus drain when the
+    // control plane is up, a no-op otherwise. The server serves until
+    // `shutdown_rx` resolves (once the engine loop returns).
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, _command_rx) = if let Some(cfg) = control {
+    let (server, drain): (Option<_>, Drain) = if let Some(cfg) = config.control.as_ref() {
         let (commands, command_rx) = command_bus(64);
         let (addr, handle) =
             control::bind_and_serve(&cfg.listen, Arc::clone(&publisher), commands, async move {
@@ -224,10 +229,13 @@ async fn run_until_ctrl_c(
             .await
             .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
         tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
-        (Some(handle), Some(command_rx))
+        (
+            Some(handle),
+            Box::new(control::command_drain(command_rx, config.clone())),
+        )
     } else {
         drop(shutdown_rx);
-        (None, None)
+        (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))
     };
 
     let stop_for_signal = stop.clone();
@@ -239,7 +247,7 @@ async fn run_until_ctrl_c(
     });
 
     let report = engine
-        .run_until_stopped(&stop, publisher.as_ref())
+        .run_until_stopped_with_control(&stop, publisher.as_ref(), drain)
         .await
         .context("headless run until Ctrl-C")?;
 

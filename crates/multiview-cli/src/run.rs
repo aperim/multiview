@@ -293,6 +293,7 @@ impl HeadlessEngine {
                     pts: f.pts(),
                 })
             },
+            |_d: &mut CompositorDrive<Nv12Image>| {},
         )
         .await
     }
@@ -327,6 +328,7 @@ impl HeadlessEngine {
                     pts: f.pts(),
                 })
             },
+            |_d: &mut CompositorDrive<Nv12Image>| {},
         )
         .await
     }
@@ -342,6 +344,27 @@ impl HeadlessEngine {
         stop: &StopSignal,
         publisher: &EnginePublisher<EngineStateSnapshot, Event>,
     ) -> Result<RunReport, RunError> {
+        self.run_until_stopped_with_control(stop, publisher, |_d| {})
+            .await
+    }
+
+    /// Like [`HeadlessEngine::run_until_stopped`], but additionally applies
+    /// control-plane reconfiguration at each frame boundary via `control` (e.g.
+    /// the command-bus drain from [`crate::control::command_drain`]). `control`
+    /// runs on the output-clock loop and must be non-blocking (invariants #1+#10).
+    ///
+    /// # Errors
+    ///
+    /// See [`HeadlessEngine::run_for`].
+    pub async fn run_until_stopped_with_control<FC>(
+        &mut self,
+        stop: &StopSignal,
+        publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+        control: FC,
+    ) -> Result<RunReport, RunError>
+    where
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
         let time = Arc::new(MonotonicTimeSource::new());
         let ts: Arc<dyn TimeSource> = time;
         self.prime_stores(ts.as_ref());
@@ -364,6 +387,7 @@ impl HeadlessEngine {
                 )
             },
             |_f: &multiview_engine::CompositedFrame| -> Option<Event> { None },
+            control,
         )
         .await
     }
@@ -408,7 +432,14 @@ impl HeadlessEngine {
     /// The projection closures are cheap, panic-free, and run on the hot loop;
     /// they publish a per-tick state snapshot and event through the (non-blocking,
     /// drop-oldest) isolation channels — best-effort, never back-pressuring.
-    async fn drive<P, S, E, FS, FE>(
+    #[allow(clippy::too_many_arguments)]
+    // reason: this is the single private dispatcher that folds the engine's run
+    // outcome into a RunReport; its parameters (runtime, publisher, stop,
+    // max_ticks, and the three hot-loop closures state_of/event_of/control) are
+    // each distinct and dictated by `EngineRuntime::run*_with_control`'s
+    // signature. Bundling them into a struct would only move the arity without
+    // improving clarity for the four thin callers.
+    async fn drive<P, S, E, FS, FE, FC>(
         &self,
         runtime: &mut EngineRuntime<P>,
         publisher: &EnginePublisher<S, E>,
@@ -416,19 +447,25 @@ impl HeadlessEngine {
         max_ticks: Option<u64>,
         state_of: FS,
         event_of: FE,
+        control: FC,
     ) -> Result<RunReport, RunError>
     where
         P: Pacer,
         FS: FnMut(&multiview_engine::CompositedFrame) -> S,
         FE: FnMut(&multiview_engine::CompositedFrame) -> Option<E>,
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
     {
         let outcome = match max_ticks {
             Some(max) => {
                 runtime
-                    .run_for(publisher, stop, max, state_of, event_of)
+                    .run_for_with_control(publisher, stop, max, state_of, event_of, control)
                     .await
             }
-            None => runtime.run(publisher, stop, state_of, event_of).await,
+            None => {
+                runtime
+                    .run_with_control(publisher, stop, state_of, event_of, control)
+                    .await
+            }
         }
         .map_err(|e| RunError::Engine(e.to_string()))?;
 

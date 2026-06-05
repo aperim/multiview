@@ -14,10 +14,13 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use multiview_compositor::pipeline::Nv12Image;
+use multiview_config::MultiviewConfig;
 use multiview_control::{
-    provision_admin_keys, AppState, CommandSender, EngineStateSnapshot, InMemoryRepository,
+    provision_admin_keys, AppState, Command, CommandReceiver, CommandSender, EngineStateSnapshot,
+    InMemoryRepository,
 };
-use multiview_engine::EnginePublisher;
+use multiview_engine::{CompositorDrive, EnginePublisher};
 use multiview_events::Event;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -96,6 +99,72 @@ pub fn state_snapshot(tick: u64, pts_ns: i64, width: u32, height: u32) -> Engine
         "pts_ns": pts_ns,
         "canvas": { "width": width, "height": height },
     })
+}
+
+/// Rebind the cell identified by `tile` to source `source` in `config`, in place.
+///
+/// Returns `true` if a cell with that id existed and was rebound (so the caller
+/// re-solves + applies), `false` if no such cell — an unknown tile id is ignored
+/// rather than an error (the command simply has no effect). The new binding is
+/// validated downstream by [`MultiviewConfig::solve_layout`], so a `source` that
+/// is not a declared input is rejected there (the layout is never swapped to an
+/// invalid one).
+fn apply_swap_source(config: &mut MultiviewConfig, tile: &str, source: &str) -> bool {
+    let Some(cell) = config.cells.iter_mut().find(|c| c.id == tile) else {
+        return false;
+    };
+    cell.source.input_id = Some(source.to_owned());
+    cell.source.kind = None;
+    cell.source.name = None;
+    cell.source.url = None;
+    true
+}
+
+/// Build the engine's per-tick control hook that drains the command bus and
+/// applies operational commands to the running compositor at the frame boundary.
+///
+/// Returned as an `FnMut(&mut CompositorDrive<Nv12Image>)` for
+/// [`EngineRuntime::run_with_control`](multiview_engine::EngineRuntime::run_with_control):
+/// each tick it [`try_drain`](CommandReceiver::try_drain)s the **non-blocking**
+/// queue (usually empty — O(pending), never awaits) and, for each command it can
+/// apply, mutates the working [`MultiviewConfig`], re-solves the layout, and
+/// hot-swaps it via [`CompositorDrive::set_layout`]. A command that does not map
+/// to a layout change (start/stop/salvo/tally) is left for the realtime/mirror
+/// path and skipped here. Applying at the frame boundary, non-blocking, is what
+/// keeps the output clock unstalled (invariants #1 + #10).
+///
+/// Currently handles [`Command::SwapSource`] (rebind a tile's source). The other
+/// operational commands and the per-command outcome events are a follow-up.
+pub fn command_drain(
+    mut commands: CommandReceiver,
+    mut config: MultiviewConfig,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    move |drive: &mut CompositorDrive<Nv12Image>| {
+        for command in commands.try_drain() {
+            let changed = match command {
+                Command::SwapSource { tile, source, .. } => {
+                    apply_swap_source(&mut config, &tile, &source)
+                }
+                // Other commands don't (yet) drive a layout swap from here.
+                _ => false,
+            };
+            if !changed {
+                continue;
+            }
+            match config.solve_layout() {
+                Ok(layout) => {
+                    if let Err(e) = drive.set_layout(Arc::new(layout)) {
+                        // The compositor rejected the re-solved layout; keep the
+                        // last-good one (set_layout retains it on error) and log.
+                        tracing::warn!(error = %e, "rejected a control-plane layout swap");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "control-plane command produced an invalid layout; ignored");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

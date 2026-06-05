@@ -108,6 +108,98 @@ codec = "h264"
 /// engine's outbound publisher — and the engine's output never falters under a
 /// concurrent client (invariants #1 + #10). Also asserts the compact engine
 /// state snapshot reaches the shared latest-state slot (the dashboard bridge).
+#[test]
+fn swap_source_command_drain_rebinds_the_tile_on_the_compositor() {
+    // End-to-end A3b: a SwapSource command, drained by the control hook, rebinds
+    // a tile on the LIVE CompositorDrive (re-solve + hot set_layout). Exercise the
+    // drain against a real drive built from the same config the engine uses.
+    use multiview_cli::control::command_drain;
+    use multiview_compositor::blend::LinearRgba;
+    use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+    use multiview_control::{command_bus, Command, OperationId};
+    use multiview_core::color::ColorInfo;
+    use multiview_engine::CompositorDrive;
+    use multiview_framestore::TileStore;
+    use std::collections::HashMap;
+
+    let cfg = small_config();
+    let (w, h) = (cfg.canvas.width, cfg.canvas.height);
+    let solved = Arc::new(cfg.solve_layout().expect("solve layout"));
+
+    // One store per declared source (empty is fine — we assert the binding, not
+    // pixels), built from the SAME source ids the config declares.
+    let mut stores = HashMap::new();
+    for source in &cfg.sources {
+        stores.insert(
+            source.id.clone(),
+            Arc::new(TileStore::<Nv12Image>::with_defaults(source.id.as_str())),
+        );
+    }
+    let color = ColorInfo::default().resolve_defaults(w, h);
+    let nosignal = Nv12Image::solid(w, h, 16, 128, 128, color).expect("nosignal");
+    let mut drive = CompositorDrive::new(
+        solved,
+        stores,
+        nosignal,
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+    )
+    .expect("build drive");
+
+    let count_bound_to = |drive: &CompositorDrive<Nv12Image>, src: &str| {
+        drive
+            .layout()
+            .cells
+            .iter()
+            .filter(|c| c.source.as_deref() == Some(src))
+            .count()
+    };
+
+    // Baseline: cell_a → in_a, cell_d → in_d (one cell each).
+    assert_eq!(count_bound_to(&drive, "in_a"), 1);
+    assert_eq!(count_bound_to(&drive, "in_d"), 1);
+
+    // Submit a SwapSource (cell_a → in_d) and drain it onto the live drive.
+    let (tx, rx) = command_bus(8);
+    tx.try_submit(Command::SwapSource {
+        op: OperationId::new(),
+        tile: "cell_a".to_owned(),
+        source: "in_d".to_owned(),
+    })
+    .expect("submit swap");
+    let mut drain = command_drain(rx, cfg.clone());
+    drain(&mut drive);
+
+    // The hot set_layout took effect: cell_a now also binds in_d, and in_a is no
+    // longer bound to any cell.
+    assert_eq!(
+        count_bound_to(&drive, "in_d"),
+        2,
+        "after the swap, cell_a must also bind in_d"
+    );
+    assert_eq!(
+        count_bound_to(&drive, "in_a"),
+        0,
+        "after the swap, no cell binds in_a"
+    );
+
+    // An unknown tile id is a no-op (drained, ignored, layout unchanged).
+    let (tx2, rx2) = command_bus(8);
+    tx2.try_submit(Command::SwapSource {
+        op: OperationId::new(),
+        tile: "no_such_cell".to_owned(),
+        source: "in_b".to_owned(),
+    })
+    .expect("submit swap");
+    let mut drain2 = command_drain(rx2, cfg);
+    drain2(&mut drive);
+    assert_eq!(
+        count_bound_to(&drive, "in_d"),
+        2,
+        "an unknown tile id must not change any binding"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_run_serves_the_control_api_while_running() {
     use multiview_cli::control;
