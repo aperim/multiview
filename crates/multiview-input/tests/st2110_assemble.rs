@@ -27,21 +27,14 @@ const H: u16 = 4;
 const BYTES_PER_LINE: usize = 8;
 
 fn geometry() -> RasterGeometry {
-    RasterGeometry::new(u32::from(W), u32::from(H), BYTES_PER_LINE)
-        .expect("toy geometry is valid")
+    RasterGeometry::new(u32::from(W), u32::from(H), BYTES_PER_LINE).expect("toy geometry is valid")
 }
 
 /// Build a `PacketUnit` carrying one SRD segment for `line` filled with `fill`.
 ///
 /// The returned unit owns its payload bytes; the embedded `V20Payload` segment
 /// points back into that payload at offset `0`.
-fn line_packet(
-    marker: bool,
-    timestamp: u32,
-    sequence: u16,
-    line: u16,
-    fill: u8,
-) -> PacketUnit {
+fn line_packet(marker: bool, timestamp: u32, sequence: u16, line: u16, fill: u8) -> PacketUnit {
     let payload = vec![fill; BYTES_PER_LINE];
     let payload_v20 = V20Payload {
         full_sequence: u32::from(sequence),
@@ -84,8 +77,15 @@ fn complete_frame_assembles_in_order() {
     let frame = emitted.expect("the marker packet closes exactly one frame");
     assert!(frame.complete, "a marker-closed full frame is complete");
     assert!(!frame.discontinuity, "in-order frame has no discontinuity");
-    assert_eq!(frame.raw_pts, 9000, "raw_pts carries the 90 kHz RTP timestamp");
-    assert_eq!(frame.lines_written, usize::from(H), "every line was written");
+    assert_eq!(
+        frame.raw_pts, 9000,
+        "raw_pts carries the 90 kHz RTP timestamp"
+    );
+    assert_eq!(
+        frame.lines_written,
+        usize::from(H),
+        "every line was written"
+    );
 
     // Each line landed at its addressed offset with the right fill byte.
     for line in 0..H {
@@ -135,7 +135,10 @@ fn timestamp_change_flushes_previous_partial() {
         "a frame closed by a timestamp change (no marker) is partial",
     );
     assert_eq!(flushed.raw_pts, 9000, "the flushed frame keeps its own pts");
-    assert_eq!(flushed.lines_written, 2, "only the two received lines landed");
+    assert_eq!(
+        flushed.lines_written, 2,
+        "only the two received lines landed"
+    );
 
     // The new frame is now in progress at ts=18000; closing it with a marker
     // yields a fresh, distinct frame.
@@ -202,12 +205,12 @@ fn eos_partial_is_dropped_not_awaited() {
     // "completed" frame.
     let leftover = asm.finish();
     assert!(
-        leftover.map(|f| f.complete) != Some(true),
+        leftover.is_none_or(|f| !f.complete),
         "an unfinished frame at EOS is never reported complete",
     );
 }
 
-/// A monotonic raw_pts: successive completed frames carry non-decreasing pts.
+/// A monotonic `raw_pts`: successive completed frames carry non-decreasing pts.
 #[test]
 fn raw_pts_is_monotonic_across_frames() {
     let mut asm = FrameAssembler::new(geometry());
