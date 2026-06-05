@@ -3,8 +3,12 @@
 # Multiview NVIDIA runtime image (NVDEC/NVENC/CUDA, LGPL-clean default build).
 #
 # Multi-stage:
+#   * web      — Node 22, builds the React SPA to `web/dist` (npm ci + npm run
+#                build). MUST precede the rust build: the `web` feature embeds
+#                `web/dist` into the binary at compile time (rust_embed).
 #   * builder  — Debian trixie + Rust, libav* -dev headers, builds `multiview`
-#                with `--features ffmpeg,nvidia` (CUDA decode/encode + wgpu).
+#                with `--features ffmpeg,nvidia,web` (CUDA decode/encode + wgpu,
+#                plus the embedded web UI + control API).
 #   * runtime  — nvidia/cuda:12.6.3-runtime-ubuntu24.04 with the FFmpeg 7.x
 #                runtime sonames + the binary, run as a non-root user.
 #
@@ -24,12 +28,29 @@
 #   FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04@sha256:<digest> AS runtime
 
 # -----------------------------------------------------------------------------
-# Stage 1: builder (Debian trixie => FFmpeg 7.x dev headers)
+# Stage 1: web — build the React SPA to web/dist (Node 22). The `web` cargo
+# feature embeds web/dist at compile time, so this must precede the rust build.
+# `npm ci` installs from web/package-lock.json; `npm run build` runs
+# `lingui compile && tsc --noEmit && vite build` and writes web/dist.
+# -----------------------------------------------------------------------------
+FROM node:22-trixie-slim AS web
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
+COPY web/ ./
+RUN npm run build
+
+# -----------------------------------------------------------------------------
+# Stage 2: builder (Debian trixie => FFmpeg 7.x dev headers)
 # -----------------------------------------------------------------------------
 FROM rust:1-trixie AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG CARGO_FEATURES=ffmpeg,nvidia
+# Default features include `web` (embeds the SPA + serves the control API). No
+# GPL deps; pass a different CARGO_FEATURES to vary the build.
+ARG CARGO_FEATURES=ffmpeg,nvidia,web
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -41,6 +62,10 @@ RUN apt-get update \
 WORKDIR /build
 COPY . .
 
+# Bring in the SPA built by the `web` stage (rust_embed folder `web/dist` must
+# exist before `cargo build`); overwrites any web/dist from `COPY . .`.
+COPY --from=web /web/dist ./web/dist
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
@@ -49,7 +74,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && /usr/local/bin/multiview --version
 
 # -----------------------------------------------------------------------------
-# Stage 2: runtime (CUDA 12.6 runtime on Ubuntu 24.04 + FFmpeg 7.x sonames)
+# Stage 3: runtime (CUDA 12.6 runtime on Ubuntu 24.04 + FFmpeg 7.x sonames)
 # -----------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS runtime
 
@@ -84,6 +109,11 @@ COPY --from=builder /usr/local/bin/multiview /usr/local/bin/multiview
 USER 10001:10001
 WORKDIR /var/lib/multiview
 
+# Control plane: web UI at `/`, REST `/api/v1`, WS `/api/v1/ws`, SSE
+# `/api/v1/events`, OpenAPI `/api/v1/openapi.json`, Scalar docs `/docs`. Bound by
+# `multiview run` when the config has a [control] section; the SPA serves because
+# this image is built with the `web` feature. Set MULTIVIEW_CONTROL_TOKEN for a
+# stable `admin.<secret>` bearer token (else one is generated + logged once).
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/multiview"]

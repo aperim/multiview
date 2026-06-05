@@ -23,9 +23,11 @@ a fixed, templated canvas and encodes that canvas **once per rendition** — the
 design then fans the same stream to many transports (RTSP, HLS/LL-HLS, NDI, RTMP, SRT).
 
 > **Status (early stage).** Today the engine ingests → composites → encodes → writes **HLS/file
-> output**, driven by declarative config (TOML). The additional live output *servers* (RTSP/NDI/
-> RTMP/SRT), the **web UI**, and the **OpenAPI-described control API** are built as libraries and on
-> the near-term [roadmap](ROADMAP.md) — they are not yet wired into the daemon. See "Roadmap".
+> output**, driven by declarative config (TOML). With a `[control]` section in the config, `multiview
+> run` also serves the **web UI**, the **REST/WS/SSE API**, and the **OpenAPI 3.1 / Scalar docs** on
+> one listener alongside the engine (the control plane is isolation-safe and cannot back-pressure the
+> output clock — invariant #10). The additional live output *servers* (RTSP/NDI/RTMP/SRT) are built
+> as libraries and remain on the near-term [roadmap](ROADMAP.md). See "Roadmap".
 
 The two non-negotiable theses:
 
@@ -118,7 +120,8 @@ flags, and invariants.
 
 The fastest way to see Multiview running. It brings up the engine plus a small companion
 container that publishes a **synthetic** `testsrc2` + `sine` RTSP feed (no real or private
-sources), composites a 2×2 canvas, encodes it, and serves the result as HLS.
+sources), composites a 2×2 canvas, encodes it, serves the result as HLS, and serves the **web UI +
+REST/WS API + OpenAPI/Scalar docs** on `:8080`.
 
 ```bash
 git clone https://github.com/aperim/multiview.git
@@ -128,10 +131,21 @@ cd multiview
 # nginx that serves the HLS output.
 docker compose -f deploy/compose.yaml up -d
 
-# Then open the multiview in a player (VLC / ffplay):
+# Open the management web UI and the interactive API docs:
+#   http://localhost:8080/        the web UI (manage the engine)
+#   http://localhost:8080/docs    the Scalar API playground (try-it-out)
+# Open the multiview itself in a player (VLC / ffplay):
 #   vlc http://localhost:8888/multiview.m3u8
 docker compose -f deploy/compose.yaml logs -f multiview
 ```
+
+The web UI is served because the published image is built with the `web` feature (the SPA is
+embedded in the binary) and the quick-start config has a `[control]` section. `/`, `/docs`, and
+`/api/v1/openapi.json` are unauthenticated; every `/api/v1` data route needs
+`Authorization: Bearer admin.<secret>`, where `<secret>` is the `MULTIVIEW_CONTROL_TOKEN` env var
+(the compose file defaults it to `local-dev-change-me` for local use — override it for anything
+real, or unset it and read the bootstrap token the server logs once at startup). Paste
+`admin.<secret>` into the Scalar playground's Auth field to call write routes.
 
 The quick-start config is [`deploy/config/multiview.toml`](deploy/config/multiview.toml) — one tile
 reads the companion's `rtsp://testsrc:8554/test`, the other three are built-in synthetic test
@@ -141,9 +155,9 @@ patterns. Edit it and re-run `up -d` to point a tile at your own source. Tear do
 > [!NOTE]
 > The default LGPL-clean image encodes **mpeg2video** — open the HLS in **VLC**/ffplay. For
 > browser-friendly **H.264**, use the `-gpl` image and set `codec = "h264"` (H.264/H.265 make the
-> build GPL). A **web UI + control API** (the embedded SPA and axum control plane are built) and
-> live **RTSP/NDI/RTMP output servers** are on the [roadmap](ROADMAP.md) — today the engine
-> composites, encodes, and writes HLS/file output to disk (no network listener yet).
+> build GPL). Live **RTSP/NDI/RTMP/SRT output servers** are still on the [roadmap](ROADMAP.md) —
+> today the engine composites, encodes, and writes HLS/file output to disk (the `hls` sidecar
+> serves it over HTTP).
 
 ### GPU one-liners
 
@@ -276,8 +290,13 @@ codec = "h264"
 latency_profile = "low_latency"
 ```
 
-Once the control plane is wired, the web UI and OpenAPI docs are served from the same process on
-`:8080` (Scalar try-it-out at `/docs`, spec at `/api/v1/openapi.json`).
+Add a `[control]` section (e.g. `listen = "0.0.0.0:8080"`) and `multiview run` serves the web UI
+(`/`), the REST/WS/SSE API (`/api/v1`), and the OpenAPI docs from the same process on that listener
+— Scalar try-it-out at `/docs`, spec at `/api/v1/openapi.json`. Build with `--features web` so the
+SPA is embedded (the published container images are); set `MULTIVIEW_CONTROL_TOKEN` for a stable
+`admin.<secret>` bearer token, else one is generated and logged once. The `rtsp_server` output
+above is a *target* example — live RTSP/NDI/RTMP/SRT output servers are on the
+[roadmap](ROADMAP.md); HLS/file output works today.
 
 > Synthetic and public test-stream recipes — reproducible `lavfi testsrc2`/`sine` feeds, Big Buck
 > Bunny, and a deliberately diverse "gotcha" matrix (mixed fps, codecs, untagged color, subtitles) —

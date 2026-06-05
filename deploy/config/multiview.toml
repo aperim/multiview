@@ -8,6 +8,27 @@
 # HLS output is written under /var/lib/multiview/hls (a named volume).
 schema_version = 1
 
+# Management control plane. When a [control] section is present, `multiview run`
+# binds this listener alongside the engine and serves: the embedded web UI at
+# `/` (only when the binary is built with the `web` feature — the published image
+# is), the REST API under `/api/v1`, the WebSocket at `/api/v1/ws`, the SSE
+# fallback at `/api/v1/events`, the OpenAPI 3.1 JSON at `/api/v1/openapi.json`,
+# and the interactive Scalar docs at `/docs`. `/`, `/docs`, and the OpenAPI JSON
+# are unauthenticated; every `/api/v1` data route requires
+# `Authorization: Bearer admin.<secret>`, where `<secret>` is the container's
+# MULTIVIEW_CONTROL_TOKEN env var (the compose file sets it). If that env var is
+# unset the server generates a bootstrap token and logs it once at startup.
+#
+# The control plane is isolation-safe (invariant #10): it only reads the engine's
+# wait-free state slot and drop-oldest event broadcast and submits to the
+# non-blocking command bus, so it can never back-pressure the output clock.
+#
+# Binding 0.0.0.0 exposes the authenticated API to the network — front it with
+# TLS termination / a network policy in production. Drop this section to run the
+# daemon headless (HLS/file output only, no listener).
+[control]
+listen = "0.0.0.0:8080"
+
 [canvas]
 width = 1280
 height = 720
@@ -101,7 +122,9 @@ path = "/var/lib/multiview/hls/multiview.m3u8"
 codec = "mpeg2video"
 segment_ms = 2000
 
-# NOTE: live RTSP / NDI / RTMP output *servers* and the web UI / control API are
-# on the roadmap — the current binary composites + encodes + writes HLS/file
-# output to disk (it does not yet bind a network listener). See the README
-# "Roadmap". Add an `[[outputs]] kind = "rtsp_server"` once the servers are wired.
+# NOTE: the web UI + REST/WS API + OpenAPI/Scalar docs are served from the
+# [control] listener above (open http://localhost:8080/ for the UI, /docs for the
+# API playground). Live RTSP / NDI / RTMP / SRT output *servers*, however, are
+# still on the roadmap — the current binary composites + encodes + writes
+# HLS/file output to disk (the [[outputs]] hls block above). See the README
+# "Roadmap"; add an `[[outputs]] kind = "rtsp_server"` once those servers exist.
