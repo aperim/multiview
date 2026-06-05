@@ -227,9 +227,12 @@ impl<P: Pacer> EngineRuntime<P> {
     /// snapshot + event through the (non-blocking) `publisher`. Never awaits an
     /// input or a consumer.
     ///
-    /// `state_of` / `event_of` project each tick's [`CompositedFrame`] into the
-    /// wire types `S`/`E`. They run on the hot loop, so keep them cheap and
-    /// panic-free.
+    /// `state_of` projects each tick's [`CompositedFrame`] into the wire state
+    /// type `S`, published to the wait-free latest slot every tick. `event_of`
+    /// projects it into an *optional* event `E`: it is published to the
+    /// drop-oldest broadcast only when it returns `Some`, so events stay sparse
+    /// (state-change driven), never one-per-tick. Both run on the hot loop, so
+    /// keep them cheap and panic-free.
     ///
     /// # Errors
     ///
@@ -244,7 +247,7 @@ impl<P: Pacer> EngineRuntime<P> {
     ) -> crate::Result<RunOutcome>
     where
         FS: FnMut(&CompositedFrame) -> S,
-        FE: FnMut(&CompositedFrame) -> E,
+        FE: FnMut(&CompositedFrame) -> Option<E>,
     {
         self.run_inner(publisher, stop, None, &mut state_of, &mut event_of)
             .await
@@ -266,7 +269,7 @@ impl<P: Pacer> EngineRuntime<P> {
     ) -> crate::Result<RunOutcome>
     where
         FS: FnMut(&CompositedFrame) -> S,
-        FE: FnMut(&CompositedFrame) -> E,
+        FE: FnMut(&CompositedFrame) -> Option<E>,
     {
         self.run_inner(
             publisher,
@@ -288,7 +291,7 @@ impl<P: Pacer> EngineRuntime<P> {
     ) -> crate::Result<RunOutcome>
     where
         FS: FnMut(&CompositedFrame) -> S,
-        FE: FnMut(&CompositedFrame) -> E,
+        FE: FnMut(&CompositedFrame) -> Option<E>,
     {
         let mut emitted: u64 = 0;
         loop {
@@ -326,7 +329,12 @@ impl<P: Pacer> EngineRuntime<P> {
             // 4. Publish outward — wait-free state slot + non-blocking drop-oldest
             //    event stream. Neither can be back-pressured by a consumer.
             publisher.publish_state(state_of(&frame));
-            publisher.publish_event(event_of(&frame));
+            // Events are sparse: publish only when the projection yields one, so
+            // the drop-oldest broadcast carries state changes, not a per-tick
+            // flood. The state slot above still refreshes every tick.
+            if let Some(event) = event_of(&frame) {
+                publisher.publish_event(event);
+            }
 
             emitted = emitted.saturating_add(1);
             self.ticks_emitted.fetch_add(1, Ordering::AcqRel);

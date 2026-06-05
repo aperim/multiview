@@ -215,7 +215,7 @@ fn soak_one_valid_frame_per_tick_on_schedule_while_inputs_and_clients_misbehave(
                     width: f.canvas.width(),
                     height: f.canvas.height(),
                 },
-                |f| f.tick.index,
+                |f| Some(f.tick.index),
             )
             .await
     });
@@ -396,7 +396,7 @@ async fn runtime_keeps_schedule_while_a_consumer_is_stalled() {
                 &stop,
                 TICKS,
                 |f| f.pts().as_nanos(),
-                |f| f.tick.index,
+                |f| Some(f.tick.index),
             )
             .await
     });
@@ -508,7 +508,12 @@ async fn runtime_stops_promptly_on_stop_signal() {
     let engine = tokio::spawn(async move {
         // `run` (not `run_for`) -> only the stop signal ends it.
         runtime
-            .run(run_pub.as_ref(), &stop2, |f| f.tick.index, |f| f.tick.index)
+            .run(
+                run_pub.as_ref(),
+                &stop2,
+                |f| f.tick.index,
+                |f| Some(f.tick.index),
+            )
             .await
     });
 
@@ -526,4 +531,89 @@ async fn runtime_stops_promptly_on_stop_signal() {
     let outcome = engine.await.unwrap().unwrap();
     assert_eq!(outcome.stop, multiview_engine::RunStop::Stopped);
     assert!(outcome.ticks >= 10, "produced frames before stopping");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_of_none_publishes_no_events_while_state_advances_every_tick() {
+    // The sparse-event contract: an `event_of` that returns `None` publishes
+    // ZERO events, yet the wait-free state slot still refreshes every tick. (The
+    // positive case — events flow when `event_of` is `Some` — is exercised by the
+    // soak's adversarial consumer above.) This is what lets the control plane
+    // carry state-change events, not a per-tick flood, without any change to the
+    // output clock's one-frame-per-tick guarantee.
+    let (w, h) = (16, 16);
+    let mut stores = HashMap::new();
+    stores.insert(
+        "cam-a".to_owned(),
+        Arc::new(TileStore::<Nv12Image>::with_defaults("cam-a")),
+    );
+    let drive = CompositorDrive::new(
+        Arc::new(Layout {
+            name: "one".to_owned(),
+            canvas: Canvas {
+                width: w,
+                height: h,
+                fps_num: 60,
+                fps_den: 1,
+            },
+            cells: vec![Cell {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                fit: FitMode::Contain,
+                source: Some("cam-a".to_owned()),
+                ..Cell::default()
+            }],
+        }),
+        stores,
+        nosignal_card(w, h),
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+    )
+    .unwrap();
+
+    let time_source = Arc::new(ManualTimeSource::new());
+    let ts: Arc<dyn TimeSource> = time_source.clone();
+    let publisher: Arc<EnginePublisher<u64, u64>> = Arc::new(EnginePublisher::new(8));
+    // Subscribe BEFORE the run, so any event the engine published would be seen.
+    let events = publisher.events.subscribe();
+
+    let mut runtime = EngineRuntime::new(
+        OutputClock::new(Rational::FPS_60).unwrap(),
+        drive,
+        ts,
+        CooperativePacer,
+    );
+    time_source.set(runtime.seed_nanos() + 1_000_000_000);
+    let stop = StopSignal::new();
+    let stop2 = stop.clone();
+    let run_pub = Arc::clone(&publisher);
+
+    let engine = tokio::spawn(async move {
+        // State every tick; events NEVER (`event_of` is always `None`).
+        runtime
+            .run(run_pub.as_ref(), &stop2, |f| f.tick.index, |_f| None::<u64>)
+            .await
+    });
+
+    let started = Instant::now();
+    while publisher.state.sequence() < 10 {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "runtime stalled"
+        );
+        tokio::task::yield_now().await;
+    }
+    stop.stop();
+    let outcome = engine.await.unwrap().unwrap();
+
+    assert!(outcome.ticks >= 10, "state must advance for >= 10 ticks");
+    // Despite >= 10 ticks of fresh state, the event broadcast received nothing.
+    assert_eq!(
+        events.len(),
+        0,
+        "event_of returning None must publish zero events"
+    );
 }

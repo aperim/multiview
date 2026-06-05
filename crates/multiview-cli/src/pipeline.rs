@@ -913,9 +913,11 @@ impl RealPipeline {
                 pts: frame.pts(),
             }
         };
-        let event_of = |frame: &CompositedFrame| TickState {
-            tick: frame.tick.index,
-            pts: frame.pts(),
+        let event_of = |frame: &CompositedFrame| {
+            Some(TickState {
+                tick: frame.tick.index,
+                pts: frame.pts(),
+            })
         };
 
         let outcome = match max_ticks {

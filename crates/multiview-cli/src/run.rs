@@ -366,7 +366,12 @@ impl HeadlessEngine {
             tick: frame.tick.index,
             pts: frame.pts(),
         };
-        let event_of = state_of;
+        let event_of = |frame: &multiview_engine::CompositedFrame| {
+            Some(HeadlessState {
+                tick: frame.tick.index,
+                pts: frame.pts(),
+            })
+        };
 
         let outcome = match max_ticks {
             Some(max) => {
