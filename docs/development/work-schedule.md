@@ -107,7 +107,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 ### AUD — Audio pipeline + tone
 
-- [ ] **AUD-1** `M` — Logical audio-codec selector + license-aware resolution  ·  _deps: —_
+- [x] **AUD-1** `M` — Logical audio-codec selector + license-aware resolution  ·  _deps: —_
 - [ ] **AUD-2** `L` — Per-source runtime audio decode thread (peer of video ingest)  ·  _deps: AUD-1_
 - [ ] **AUD-3** `L` — Program-bus mix + per-tick sample budget on the output clock  ·  _deps: AUD-2_
 - [ ] **AUD-4** `XL` — Audio encode + dual-stream mux in the output sinks (the core gap)  ·  _deps: AUD-1, AUD-3_
@@ -170,7 +170,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 ### SUR — Captions · NMOS · web codegen
 
-- [ ] **SUR-1** `M` — IS-05 scheduled activation (absolute + relative)  ·  _deps: —_
+- [x] **SUR-1** `M` — IS-05 scheduled activation (absolute + relative)  ·  _deps: —_
 - [ ] **SUR-2** `L` — IS-07 MQTT broker transport  ·  _deps: SUR-1_
 - [ ] **SUR-3** `XL` — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT  ·  _deps: —_
 - [ ] **SUR-4** `M` — OpenAPI: annotate the layout/resource write ops so they enter the spec  ·  _deps: —_
