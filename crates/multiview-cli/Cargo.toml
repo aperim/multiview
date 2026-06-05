@@ -24,6 +24,7 @@ multiview-core = { workspace = true }
 multiview-engine = { workspace = true }
 multiview-control = { workspace = true }
 multiview-config = { workspace = true }
+multiview-events = { workspace = true }
 multiview-telemetry = { workspace = true }
 multiview-compositor = { workspace = true }
 multiview-framestore = { workspace = true }
@@ -37,7 +38,7 @@ multiview-preview = { workspace = true }
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "net"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -64,7 +65,14 @@ tempfile = { version = "3", optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = [
+    "test-util",
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "net",
+    "io-util",
+] }
 tempfile = "3"
 
 # The real-pipeline integration test needs the `ffmpeg` feature (a real libav*

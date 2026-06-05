@@ -34,6 +34,7 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod control;
 pub mod run;
 pub mod validate;
 
