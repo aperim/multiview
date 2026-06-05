@@ -124,7 +124,7 @@ export function ApiPage(): JSX.Element {
           title={
             <span className="inline-flex items-center gap-2">
               <Trans>Authentication</Trans>
-              <StatusBadge status="roadmap" />
+              <StatusBadge status="available" />
             </span>
           }
         >
@@ -140,10 +140,12 @@ export function ApiPage(): JSX.Element {
             <Trans>
               In this UI, set your token under Settings, then API access. For a
               container, supply it as the <Code>MULTIVIEW_CONTROL_TOKEN</Code>{" "}
-              environment variable. Note the honest current state: the control API
-              and this UI are built, but the run command does not yet bind a
-              network listener, so there is no live endpoint to call yet — that
-              wiring is on the roadmap.
+              environment variable — the presented token is{" "}
+              <Code>admin.&lt;secret&gt;</Code>. When that variable is unset, the
+              server generates a token and logs it once at startup. The
+              unauthenticated surface is just <Code>/</Code>, <Code>/docs</Code>,
+              and <Code>/api/v1/openapi.json</Code>; every <Code>/api/v1</Code>{" "}
+              data route requires the token.
             </Trans>
           </Prose>
         </DocSection>

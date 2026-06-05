@@ -119,7 +119,7 @@ msgstr "Accessible editing path: Cells form + Inspector in the editor"
 #~ msgid "Accessible editing path: planned (Cells form + Inspector)"
 #~ msgstr "Accessible editing path: planned (Cells form + Inspector)"
 
-#: src/pages/SettingsPage.tsx:71
+#: src/pages/SettingsPage.tsx:140
 msgid "Accessible toasts announce via a live region."
 msgstr "Accessible toasts announce via a live region."
 
@@ -151,6 +151,10 @@ msgstr "Add cell"
 msgid "Add to layout"
 msgstr "Add to layout"
 
+#: src/pages/SettingsPage.tsx:108
+msgid "admin.xxxxxxxx-xxxx-…"
+msgstr "admin.xxxxxxxx-xxxx-…"
+
 #: src/pages/docs/ConfigPage.tsx:283
 msgid "Advertise the canvas as an NDI source by <0>name</0>."
 msgstr "Advertise the canvas as an NDI source by <0>name</0>."
@@ -176,15 +180,32 @@ msgstr "All endpoints live under <0>/api/v1</0>."
 msgid "API & realtime"
 msgstr "API & realtime"
 
+#: src/pages/SettingsPage.tsx:88
+msgid "API access"
+msgstr "API access"
+
 #: src/pages/docs/ContainerPage.tsx:168
 msgid "API access token"
 msgstr "API access token"
 
-#: src/pages/SettingsPage.tsx:34
+#: src/pages/SettingsPage.tsx:102
+msgid "API token"
+msgstr "API token"
+
+#: src/pages/SettingsPage.tsx:35
+#: src/pages/SettingsPage.tsx:125
+msgid "API token cleared"
+msgstr "API token cleared"
+
+#: src/pages/SettingsPage.tsx:35
+msgid "API token saved"
+msgstr "API token saved"
+
+#: src/pages/SettingsPage.tsx:54
 msgid "Appearance"
 msgstr "Appearance"
 
-#: src/pages/SettingsPage.tsx:27
+#: src/pages/SettingsPage.tsx:47
 msgid "Appearance and language preferences."
 msgstr "Appearance and language preferences."
 
@@ -213,8 +234,8 @@ msgid "Base path"
 msgstr "Base path"
 
 #: src/pages/docs/ContainerPage.tsx:188
-msgid "Be honest about the current state: the control API and this embedded UI are built, but the binary does not yet bind a network listener when it runs — so there is no API or web-UI port to publish yet. Wiring the listener into the run command is on the roadmap. Until then, the engine is driven entirely by the config file."
-msgstr "Be honest about the current state: the control API and this embedded UI are built, but the binary does not yet bind a network listener when it runs — so there is no API or web-UI port to publish yet. Wiring the listener into the run command is on the roadmap. Until then, the engine is driven entirely by the config file."
+#~ msgid "Be honest about the current state: the control API and this embedded UI are built, but the binary does not yet bind a network listener when it runs — so there is no API or web-UI port to publish yet. Wiring the listener into the run command is on the roadmap. Until then, the engine is driven entirely by the config file."
+#~ msgstr "Be honest about the current state: the control API and this embedded UI are built, but the binary does not yet bind a network listener when it runs — so there is no API or web-UI port to publish yet. Wiring the listener into the run command is on the roadmap. Until then, the engine is driven entirely by the config file."
 
 #: src/layout/components/CellsForm.tsx:372
 msgid "Bring forward"
@@ -263,9 +284,13 @@ msgstr "Cells"
 msgid "Cells (accessible)"
 msgstr "Cells (accessible)"
 
-#: src/pages/SettingsPage.tsx:37
+#: src/pages/SettingsPage.tsx:57
 msgid "Choose light, dark, or follow the system."
 msgstr "Choose light, dark, or follow the system."
+
+#: src/pages/SettingsPage.tsx:128
+msgid "Clear"
+msgstr "Clear"
 
 #: src/pages/docs/ComposePage.tsx:83
 msgid "Compose merges files left to right. The GPU overlay files swap the <0>multiview</0> image and add device access; the other services are inherited unchanged. Layer an overlay on top of the base file:"
@@ -534,8 +559,12 @@ msgid "Images"
 msgstr "Images"
 
 #: src/pages/docs/ApiPage.tsx:140
-msgid "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable. Note the honest current state: the control API and this UI are built, but the run command does not yet bind a network listener, so there is no live endpoint to call yet — that wiring is on the roadmap."
-msgstr "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable. Note the honest current state: the control API and this UI are built, but the run command does not yet bind a network listener, so there is no live endpoint to call yet — that wiring is on the roadmap."
+msgid "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable — the presented token is <1>admin.<secret></1>. When that variable is unset, the server generates a token and logs it once at startup. The unauthenticated surface is just <2>/</2>, <3>/docs</3>, and <4>/api/v1/openapi.json</4>; every <5>/api/v1</5> data route requires the token."
+msgstr "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable — the presented token is <1>admin.<secret></1>. When that variable is unset, the server generates a token and logs it once at startup. The unauthenticated surface is just <2>/</2>, <3>/docs</3>, and <4>/api/v1/openapi.json</4>; every <5>/api/v1</5> data route requires the token."
+
+#: src/pages/docs/ApiPage.tsx:140
+#~ msgid "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable. Note the honest current state: the control API and this UI are built, but the run command does not yet bind a network listener, so there is no live endpoint to call yet — that wiring is on the roadmap."
+#~ msgstr "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable. Note the honest current state: the control API and this UI are built, but the run command does not yet bind a network listener, so there is no live endpoint to call yet — that wiring is on the roadmap."
 
 #: src/pages/docs/OverviewPage.tsx:38
 msgid "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
@@ -555,7 +584,7 @@ msgid "Kinds: <0>test</0>, <1>rtsp</1>, <2>hls</2>, <3>ts</3>, <4>srt</4>, <5>rt
 msgstr "Kinds: <0>test</0>, <1>rtsp</1>, <2>hls</2>, <3>ts</3>, <4>srt</4>, <5>rtmp</5>, <6>ndi</6>, <7>file</7>."
 
 #: src/components/LocaleSwitcher.tsx:35
-#: src/pages/SettingsPage.tsx:51
+#: src/pages/SettingsPage.tsx:71
 msgid "Language"
 msgstr "Language"
 
@@ -622,7 +651,7 @@ msgstr "Loading layouts…"
 msgid "Loading…"
 msgstr "Loading…"
 
-#: src/pages/SettingsPage.tsx:59
+#: src/pages/SettingsPage.tsx:79
 msgid "Locale"
 msgstr "Locale"
 
@@ -722,7 +751,7 @@ msgstr "No source"
 msgid "No sources configured."
 msgstr "No sources configured."
 
-#: src/pages/SettingsPage.tsx:68
+#: src/pages/SettingsPage.tsx:137
 msgid "Notifications"
 msgstr "Notifications"
 
@@ -785,6 +814,10 @@ msgstr "Page not found"
 msgid "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
 msgstr "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
 
+#: src/pages/SettingsPage.tsx:91
+msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
+msgstr "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
+
 #. placeholder {0}: String(active.id)
 #: src/layout/components/SourcePalette.tsx:183
 msgid "Picked up {0}."
@@ -814,6 +847,10 @@ msgstr "Remove"
 #: src/layout/components/CellsForm.tsx:371
 msgid "Remove cell"
 msgstr "Remove cell"
+
+#: src/pages/SettingsPage.tsx:38
+msgid "Requests will be unauthenticated."
+msgstr "Requests will be unauthenticated."
 
 #: src/pages/docs/ContainerPage.tsx:96
 msgid "Requires the NVIDIA driver and the NVIDIA Container Toolkit on the host. The modern path requests devices through CDI; NVENC and NVDEC also need the <0>video</0> driver capability."
@@ -852,6 +889,10 @@ msgstr "Salvos"
 msgid "Sample data shown. This resource is read-only until its management API ships; the view is already typed to swap to live data with no change."
 msgstr "Sample data shown. This resource is read-only until its management API ships; the view is already typed to swap to live data with no change."
 
+#: src/pages/SettingsPage.tsx:117
+msgid "Save"
+msgstr "Save"
+
 #: src/layout/components/LayoutEditor.tsx:149
 msgid "Save layout"
 msgstr "Save layout"
@@ -873,11 +914,11 @@ msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 
 #: src/app/navigation.tsx:34
-#: src/pages/SettingsPage.tsx:26
+#: src/pages/SettingsPage.tsx:46
 msgid "Settings"
 msgstr "Settings"
 
-#: src/pages/SettingsPage.tsx:84
+#: src/pages/SettingsPage.tsx:153
 msgid "Show a test notification"
 msgstr "Show a test notification"
 
@@ -921,7 +962,7 @@ msgstr "State"
 msgid "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
 msgstr "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
 
-#: src/pages/SettingsPage.tsx:54
+#: src/pages/SettingsPage.tsx:74
 msgid "Switch the interface language and text direction."
 msgstr "Switch the interface language and text direction."
 
@@ -933,7 +974,7 @@ msgstr "Tally"
 msgid "Tally shows which sources are on-air. A tally profile maps the bits of an external tally bus to colors (for example red for program, green for preview) and maps bus index positions to specific tiles. A <0>tally_border</0> overlay then lights the tile's edge to match. This lets an upstream router or mixer drive the borders on the wall."
 msgstr "Tally shows which sources are on-air. A tally profile maps the bits of an external tally bus to colors (for example red for program, green for preview) and maps bus index positions to specific tiles. A <0>tally_border</0> overlay then lights the tile's edge to match. This lets an upstream router or mixer drive the borders on the wall."
 
-#: src/pages/SettingsPage.tsx:79
+#: src/pages/SettingsPage.tsx:148
 msgid "Test notification"
 msgstr "Test notification"
 
@@ -994,8 +1035,8 @@ msgid "The fastest way to see Multiview running is the quick-start compose stack
 msgstr "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
 
 #: src/pages/docs/ContainerPage.tsx:174
-msgid "The management API authenticates callers with a bearer token. In a container, supply it through the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable so it is never baked into an image or written to the config file."
-msgstr "The management API authenticates callers with a bearer token. In a container, supply it through the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable so it is never baked into an image or written to the config file."
+#~ msgid "The management API authenticates callers with a bearer token. In a container, supply it through the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable so it is never baked into an image or written to the config file."
+#~ msgstr "The management API authenticates callers with a bearer token. In a container, supply it through the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable so it is never baked into an image or written to the config file."
 
 #: src/pages/docs/ApiPage.tsx:26
 msgid "The management API, its conventions, the realtime event streams, and where to find the live, interactive reference."
@@ -1041,11 +1082,19 @@ msgstr "The TOML schema: canvas, layout, sources, cells, overlays, and outputs."
 msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 msgstr "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 
+#: src/pages/SettingsPage.tsx:39
+msgid "The UI will authenticate with this token."
+msgstr "The UI will authenticate with this token."
+
+#: src/pages/docs/ContainerPage.tsx:194
+msgid "The unauthenticated surface is just <0>/</0>, <1>/docs</1>, and <2>/api/v1/openapi.json</2>; every <3>/api/v1</3> data route requires the token. The image must be built with the <4>web</4> feature for the UI to be embedded (the published image is)."
+msgstr "The unauthenticated surface is just <0>/</0>, <1>/docs</1>, and <2>/api/v1/openapi.json</2>; every <3>/api/v1</3> data route requires the token. The image must be built with the <4>web</4> feature for the UI to be embedded (the published image is)."
+
 #: src/pages/docs/ConfigPage.tsx:95
 msgid "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
 msgstr "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
 
-#: src/pages/SettingsPage.tsx:42
+#: src/pages/SettingsPage.tsx:62
 msgid "Theme"
 msgstr "Theme"
 
@@ -1073,7 +1122,7 @@ msgstr "This permanently removes the layout. Running outputs are not affected un
 msgid "This screen is part of an upcoming milestone."
 msgstr "This screen is part of an upcoming milestone."
 
-#: src/pages/SettingsPage.tsx:80
+#: src/pages/SettingsPage.tsx:149
 msgid "This toast is announced to assistive technology."
 msgstr "This toast is announced to assistive technology."
 
@@ -1112,6 +1161,10 @@ msgstr "What Multiview is"
 #: src/pages/docs/docsNav.tsx:38
 msgid "What Multiview is, the design pillars, and how to get started."
 msgstr "What Multiview is, the design pillars, and how to get started."
+
+#: src/pages/docs/ContainerPage.tsx:174
+msgid "When the config has a <0>[control]</0> section, the binary binds that listener and serves the web UI, REST API, and docs alongside the engine. Authenticate callers with a bearer token — supply it through the <1>MULTIVIEW_CONTROL_TOKEN</1> environment variable so it is never baked into an image or written to the config file. The presented token is <2>admin.<secret></2>; if the variable is unset, the server generates one and logs it once at startup. Publish the listener's port (default <3>8080</3>) to reach it."
+msgstr "When the config has a <0>[control]</0> section, the binary binds that listener and serves the web UI, REST API, and docs alongside the engine. Authenticate callers with a bearer token — supply it through the <1>MULTIVIEW_CONTROL_TOKEN</1> environment variable so it is never baked into an image or written to the config file. The presented token is <2>admin.<secret></2>; if the variable is unset, the server generates one and logs it once at startup. Publish the listener's port (default <3>8080</3>) to reach it."
 
 #: src/pages/docs/OverviewPage.tsx:104
 msgid "Where to go next"

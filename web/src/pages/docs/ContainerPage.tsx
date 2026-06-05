@@ -166,31 +166,37 @@ test -f "$f" && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 30 ]`}
           title={
             <span className="inline-flex items-center gap-2">
               <Trans>API access token</Trans>
-              <StatusBadge status="roadmap" />
+              <StatusBadge status="available" />
             </span>
           }
         >
           <Prose>
             <Trans>
-              The management API authenticates callers with a bearer token. In a
-              container, supply it through the <Code>MULTIVIEW_CONTROL_TOKEN</Code>{" "}
+              When the config has a <Code>[control]</Code> section, the binary
+              binds that listener and serves the web UI, REST API, and docs
+              alongside the engine. Authenticate callers with a bearer token —
+              supply it through the <Code>MULTIVIEW_CONTROL_TOKEN</Code>{" "}
               environment variable so it is never baked into an image or written
-              to the config file.
+              to the config file. The presented token is{" "}
+              <Code>admin.&lt;secret&gt;</Code>; if the variable is unset, the
+              server generates one and logs it once at startup. Publish the
+              listener's port (default <Code>8080</Code>) to reach it.
             </Trans>
           </Prose>
           <CodeBlock label="Shell command">
-            {`docker run --rm \\
+            {`docker run --rm -p 8080:8080 \\
   -e MULTIVIEW_CONTROL_TOKEN="$MULTIVIEW_CONTROL_TOKEN" \\
   ghcr.io/aperim/multiview:latest \\
-  run /etc/multiview/multiview.toml`}
+  run /etc/multiview/multiview.toml
+# then open http://localhost:8080/ (UI) and /docs (API playground)`}
           </CodeBlock>
           <Prose>
             <Trans>
-              Be honest about the current state: the control API and this embedded
-              UI are built, but the binary does not yet bind a network listener
-              when it runs — so there is no API or web-UI port to publish yet.
-              Wiring the listener into the run command is on the roadmap. Until
-              then, the engine is driven entirely by the config file.
+              The unauthenticated surface is just <Code>/</Code>,{" "}
+              <Code>/docs</Code>, and <Code>/api/v1/openapi.json</Code>; every{" "}
+              <Code>/api/v1</Code> data route requires the token. The image must
+              be built with the <Code>web</Code> feature for the UI to be
+              embedded (the published image is).
             </Trans>
           </Prose>
         </DocSection>
