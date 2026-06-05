@@ -6,7 +6,7 @@
 // generated schema declares. They FAIL until `useSaveLayout`/`useDeleteLayout`
 // are rewritten to call the typed client instead of the bespoke fetch helpers.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { http, HttpResponse } from 'msw';

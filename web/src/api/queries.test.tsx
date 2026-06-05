@@ -2,6 +2,11 @@
 // MSW. These assert real behaviour: list reads decode the typed body, saves and
 // deletes apply optimistic cache updates and roll back on error, and update/
 // delete echo the stored ETag as `If-Match`.
+//
+// Write ops go through the typed openapi-fetch client and hit the spec-correct
+// paths: `POST /api/v1/layouts/{id}` (create), `PUT /api/v1/layouts/{id}`
+// (update), `DELETE /api/v1/layouts/{id}` (delete).  The id is caller-supplied
+// on create, matching the control-plane spec.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -26,12 +31,17 @@ let lastIfMatch: string | null = null;
 
 const server = setupServer(
   http.get(`${BASE}/api/v1/layouts`, () => HttpResponse.json(store)),
-  http.post(`${BASE}/api/v1/layouts`, async ({ request }) => {
+
+  // CREATE — spec: POST /api/v1/layouts/{id} (id in path, caller-supplied)
+  http.post(`${BASE}/api/v1/layouts/:id`, async ({ request, params }) => {
     const body = (await request.json()) as { name: string; body: unknown };
-    const created: Layout = { id: `srv-${String(store.length)}`, name: body.name, body: body.body };
+    const id = String(params.id);
+    const created: Layout = { id, name: body.name, body: body.body };
     store = [...store, created];
-    return HttpResponse.json(created, { headers: { ETag: '"v1"' } });
+    return HttpResponse.json(created, { status: 201, headers: { ETag: '"v1"' } });
   }),
+
+  // UPDATE — spec: PUT /api/v1/layouts/{id}
   http.put(`${BASE}/api/v1/layouts/:id`, async ({ request, params }) => {
     lastIfMatch = request.headers.get('If-Match');
     const body = (await request.json()) as { name: string; body: unknown };
@@ -40,6 +50,8 @@ const server = setupServer(
     store = store.map((l) => (l.id === id ? updated : l));
     return HttpResponse.json(updated, { headers: { ETag: '"v2"' } });
   }),
+
+  // DELETE — spec: DELETE /api/v1/layouts/{id}
   http.delete(`${BASE}/api/v1/layouts/:id`, ({ request, params }) => {
     lastIfMatch = request.headers.get('If-Match');
     const id = String(params.id);
@@ -106,12 +118,15 @@ describe('useLayouts', () => {
 });
 
 describe('useSaveLayout', () => {
-  it('creates a layout and stores its ETag', async () => {
+  it('creates a layout (POST /api/v1/layouts/{id}) and stores its ETag', async () => {
     const qc = newClient();
-    const { result } = renderHook(() => useSaveLayout({ baseUrl: BASE }), {
+    const api = createApiClient({ baseUrl: BASE });
+    const { result } = renderHook(() => useSaveLayout({ api }), {
       wrapper: wrapper(qc),
     });
+    // The spec requires the id on create — the caller nominates it.
     const saved = await result.current.mutateAsync({
+      id: 'srv-0',
       input: { name: 'New', body: { schema_version: 1 } },
     });
     expect(saved.id).toBe('srv-0');
@@ -123,7 +138,8 @@ describe('useSaveLayout', () => {
     qc.setQueryData(queryKeys.layouts, [{ id: 'a', name: 'Old', body: {} }]);
     qc.setQueryData(queryKeys.etags, { a: '"v1"' });
     store = [{ id: 'a', name: 'Old', body: {} }];
-    const { result } = renderHook(() => useSaveLayout({ baseUrl: BASE }), {
+    const api = createApiClient({ baseUrl: BASE });
+    const { result } = renderHook(() => useSaveLayout({ api }), {
       wrapper: wrapper(qc),
     });
     await result.current.mutateAsync({ id: 'a', input: { name: 'Renamed', body: {} } });
@@ -133,7 +149,7 @@ describe('useSaveLayout', () => {
 
   it('rolls back the optimistic list when the server rejects the save', async () => {
     server.use(
-      http.post(`${BASE}/api/v1/layouts`, () =>
+      http.post(`${BASE}/api/v1/layouts/:id`, () =>
         HttpResponse.json(
           { type: '/problems/conflict', title: 'Conflict', status: 409 },
           { status: 409 },
@@ -142,11 +158,12 @@ describe('useSaveLayout', () => {
     );
     const qc = newClient();
     qc.setQueryData(queryKeys.layouts, [{ id: 'a', name: 'Existing', body: {} }]);
-    const { result } = renderHook(() => useSaveLayout({ baseUrl: BASE }), {
+    const api = createApiClient({ baseUrl: BASE });
+    const { result } = renderHook(() => useSaveLayout({ api }), {
       wrapper: wrapper(qc),
     });
     await expect(
-      result.current.mutateAsync({ input: { name: 'Doomed', body: {} } }),
+      result.current.mutateAsync({ id: 'new-id', input: { name: 'Doomed', body: {} } }),
     ).rejects.toMatchObject({ status: 409 });
     const list = qc.getQueryData<Layout[]>(queryKeys.layouts);
     expect(list).toHaveLength(1);
@@ -166,7 +183,8 @@ describe('useDeleteLayout', () => {
       { id: 'a', name: 'Keep', body: {} },
       { id: 'b', name: 'Drop', body: {} },
     ];
-    const { result } = renderHook(() => useDeleteLayout({ baseUrl: BASE }), {
+    const api = createApiClient({ baseUrl: BASE });
+    const { result } = renderHook(() => useDeleteLayout({ api }), {
       wrapper: wrapper(qc),
     });
     await result.current.mutateAsync('b');

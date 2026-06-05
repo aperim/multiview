@@ -493,7 +493,7 @@ msgstr ""
 msgid "Compose reference"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:123
+#: src/pages/LayoutEditorPage.tsx:125
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr ""
 
@@ -598,7 +598,7 @@ msgstr ""
 msgid "Could not save"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:65
+#: src/pages/LayoutEditorPage.tsx:67
 msgid "Could not save layout"
 msgstr ""
 
@@ -802,10 +802,10 @@ msgstr ""
 msgid "Edit"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:77
-#: src/pages/LayoutEditorPage.tsx:88
-#: src/pages/LayoutEditorPage.tsx:101
-#: src/pages/LayoutEditorPage.tsx:121
+#: src/pages/LayoutEditorPage.tsx:79
+#: src/pages/LayoutEditorPage.tsx:90
+#: src/pages/LayoutEditorPage.tsx:103
+#: src/pages/LayoutEditorPage.tsx:123
 msgid "Edit layout"
 msgstr ""
 
@@ -1015,7 +1015,7 @@ msgstr ""
 msgid "Layout or preset name (optional)"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:60
+#: src/pages/LayoutEditorPage.tsx:62
 msgid "Layout saved"
 msgstr ""
 
@@ -1074,7 +1074,7 @@ msgstr ""
 msgid "Loading canvas…"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:79
+#: src/pages/LayoutEditorPage.tsx:81
 msgid "Loading layout…"
 msgstr ""
 
@@ -1208,7 +1208,7 @@ msgstr ""
 msgid "New cell"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:121
+#: src/pages/LayoutEditorPage.tsx:123
 #: src/pages/LayoutsPage.tsx:165
 msgid "New layout"
 msgstr ""
@@ -1648,7 +1648,7 @@ msgstr ""
 msgid "Test notification"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:90
+#: src/pages/LayoutEditorPage.tsx:92
 msgid "That layout no longer exists."
 msgstr ""
 
@@ -1788,7 +1788,7 @@ msgstr ""
 msgid "Theme: system. Switch to light."
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:109
+#: src/pages/LayoutEditorPage.tsx:111
 msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 msgstr ""
 

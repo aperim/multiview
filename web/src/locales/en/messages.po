@@ -493,7 +493,7 @@ msgstr "Compose merges files left to right. The GPU overlay files swap the <0>mu
 msgid "Compose reference"
 msgstr "Compose reference"
 
-#: src/pages/LayoutEditorPage.tsx:123
+#: src/pages/LayoutEditorPage.tsx:125
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 
@@ -598,7 +598,7 @@ msgstr "Could not load the audit log:"
 msgid "Could not save"
 msgstr "Could not save"
 
-#: src/pages/LayoutEditorPage.tsx:65
+#: src/pages/LayoutEditorPage.tsx:67
 msgid "Could not save layout"
 msgstr "Could not save layout"
 
@@ -802,10 +802,10 @@ msgstr "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect<
 msgid "Edit"
 msgstr "Edit"
 
-#: src/pages/LayoutEditorPage.tsx:77
-#: src/pages/LayoutEditorPage.tsx:88
-#: src/pages/LayoutEditorPage.tsx:101
-#: src/pages/LayoutEditorPage.tsx:121
+#: src/pages/LayoutEditorPage.tsx:79
+#: src/pages/LayoutEditorPage.tsx:90
+#: src/pages/LayoutEditorPage.tsx:103
+#: src/pages/LayoutEditorPage.tsx:123
 msgid "Edit layout"
 msgstr "Edit layout"
 
@@ -1015,7 +1015,7 @@ msgstr "Layout name"
 msgid "Layout or preset name (optional)"
 msgstr "Layout or preset name (optional)"
 
-#: src/pages/LayoutEditorPage.tsx:60
+#: src/pages/LayoutEditorPage.tsx:62
 msgid "Layout saved"
 msgstr "Layout saved"
 
@@ -1074,7 +1074,7 @@ msgstr "Loading audit log…"
 msgid "Loading canvas…"
 msgstr "Loading canvas…"
 
-#: src/pages/LayoutEditorPage.tsx:79
+#: src/pages/LayoutEditorPage.tsx:81
 msgid "Loading layout…"
 msgstr "Loading layout…"
 
@@ -1208,7 +1208,7 @@ msgstr "NDI source name"
 msgid "New cell"
 msgstr "New cell"
 
-#: src/pages/LayoutEditorPage.tsx:121
+#: src/pages/LayoutEditorPage.tsx:123
 #: src/pages/LayoutsPage.tsx:165
 msgid "New layout"
 msgstr "New layout"
@@ -1648,7 +1648,7 @@ msgstr "Target"
 msgid "Test notification"
 msgstr "Test notification"
 
-#: src/pages/LayoutEditorPage.tsx:90
+#: src/pages/LayoutEditorPage.tsx:92
 msgid "That layout no longer exists."
 msgstr "That layout no longer exists."
 
@@ -1788,7 +1788,7 @@ msgstr "Theme: light. Switch to dark."
 msgid "Theme: system. Switch to light."
 msgstr "Theme: system. Switch to light."
 
-#: src/pages/LayoutEditorPage.tsx:109
+#: src/pages/LayoutEditorPage.tsx:111
 msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 msgstr "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 

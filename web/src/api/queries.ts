@@ -5,11 +5,11 @@
 // is isolated (invariant #10): the UI is a best-effort reader and must degrade
 // to loading / error states rather than assume a response.
 //
-// Writes go through `./layouts.ts` (see its header: the write path operations
-// are not in the generated schema yet, so they use an explicitly-typed
-// view-model that reuses the generated request/response types). Mutations apply
-// OPTIMISTIC cache updates and roll back on error, and track per-layout ETags
-// for `If-Match` optimistic concurrency.
+// Writes go through the typed client functions in `./layouts.ts`
+// (`createLayout`/`updateLayout`/`deleteLayoutById`), which call the spec-
+// correct paths (`POST /api/v1/layouts/{id}`, `PUT`, `DELETE`). Mutations
+// apply optimistic cache updates and roll back on error, and track per-layout
+// ETags for `If-Match` optimistic concurrency (conventions §6).
 import {
   useMutation,
   useQuery,
@@ -23,9 +23,10 @@ import type {
 
 import type { MultiviewApiClient } from './client';
 import {
-  deleteLayout,
+  createLayout,
+  deleteLayoutById,
   LayoutApiError,
-  writeLayout,
+  updateLayout,
 } from './layouts';
 import type { Layout, LayoutInput } from './layouts';
 
@@ -77,12 +78,10 @@ export function useLayouts(client: MultiviewApiClient): UseQueryResult<Layout[],
   });
 }
 
-/** Connection options threaded into the write helpers. */
+/** Connection context for the mutation hooks — just the typed client. */
 export interface MutationContext {
-  /** Base URL for the write helpers (defaults to same-origin). */
-  readonly baseUrl?: string;
-  /** Optional bearer token. */
-  readonly token?: string;
+  /** The typed API client (base URL + auth already baked in). */
+  readonly api: MultiviewApiClient;
 }
 
 function toApiError(error: unknown): ApiError {
@@ -95,12 +94,26 @@ function toApiError(error: unknown): ApiError {
   return new ApiError('Unknown error');
 }
 
-/** The shape passed to {@link useSaveLayout}. */
+/**
+ * The shape passed to {@link useSaveLayout}.
+ *
+ * For **create**, supply both `id` (the caller-chosen resource id, per the
+ * spec's `POST /api/v1/layouts/{id}`) and `input`.
+ * For **update**, supply `id` and `input`; the stored ETag is read from the
+ * cache and sent as `If-Match`.
+ */
 export interface SaveLayoutVars {
+  /** The resource id — required for both create and update. */
+  readonly id: string;
   /** The create/update payload. */
   readonly input: LayoutInput;
-  /** The resource id when updating; omit to create. */
-  readonly id?: string;
+  /**
+   * Pass `true` to force a create (POST), `false` to force an update (PUT).
+   * When omitted, the presence of the id in the cached ETag map determines
+   * whether to create or update: if the id has a known ETag it is an update,
+   * otherwise a create.
+   */
+  readonly create?: boolean;
 }
 
 interface SaveSnapshot {
@@ -111,26 +124,27 @@ interface SaveSnapshot {
  * Create or update a layout with an optimistic cache update. On error the
  * previous layouts list is restored. ETags are read for `If-Match` (update) and
  * the response ETag is stored for the next write.
+ *
+ * The typed client calls `POST /api/v1/layouts/{id}` for create and
+ * `PUT /api/v1/layouts/{id}` for update — both paths are in the generated spec.
  */
 export function useSaveLayout(
-  context: MutationContext = {},
+  context: MutationContext,
 ): UseMutationResult<Layout, ApiError, SaveLayoutVars, SaveSnapshot> {
   const queryClient = useQueryClient();
   return useMutation<Layout, ApiError, SaveLayoutVars, SaveSnapshot>({
-    mutationFn: async ({ input, id }): Promise<Layout> => {
+    mutationFn: async ({ input, id, create }): Promise<Layout> => {
       const etags = readEtags(queryClient);
-      const etag = id !== undefined ? etags[id] : undefined;
+      // Decide create vs update: explicit `create` flag wins; otherwise check
+      // whether we already have an ETag (which means the server knows it).
+      const isCreate = create ?? !(id in etags);
       let result;
       try {
-        result = await writeLayout(
-          input,
-          {
-            ...(context.baseUrl !== undefined ? { baseUrl: context.baseUrl } : {}),
-            ...(context.token !== undefined ? { token: context.token } : {}),
-            ...(etag !== undefined ? { etag } : {}),
-          },
-          id,
-        );
+        if (isCreate) {
+          result = await createLayout(context.api, id, input);
+        } else {
+          result = await updateLayout(context.api, id, input, etags[id]);
+        }
       } catch (error) {
         throw toApiError(error);
       }
@@ -164,21 +178,19 @@ export function useSaveLayout(
 function applyOptimisticSave(
   current: readonly Layout[],
   input: LayoutInput,
-  id: string | undefined,
+  id: string,
 ): Layout[] {
-  if (id !== undefined) {
+  const exists = current.some((layout) => layout.id === id);
+  if (exists) {
     return current.map((layout) =>
       layout.id === id
         ? { ...layout, name: input.name, body: input.body }
         : layout,
     );
   }
-  // Create: append a placeholder with a temporary id until the server replies.
-  const optimistic: Layout = {
-    id: `optimistic-${String(current.length)}`,
-    name: input.name,
-    body: input.body,
-  };
+  // Create: append a placeholder with the caller-supplied id until the server
+  // confirms.
+  const optimistic: Layout = { id, name: input.name, body: input.body };
   return [...current, optimistic];
 }
 
@@ -188,20 +200,18 @@ interface DeleteSnapshot {
 
 /**
  * Delete a layout with an optimistic removal; restores the list on error.
+ * Calls `DELETE /api/v1/layouts/{id}` through the typed client, forwarding the
+ * stored ETag as `If-Match`.
  */
 export function useDeleteLayout(
-  context: MutationContext = {},
+  context: MutationContext,
 ): UseMutationResult<undefined, ApiError, string, DeleteSnapshot> {
   const queryClient = useQueryClient();
   return useMutation<undefined, ApiError, string, DeleteSnapshot>({
     mutationFn: async (id): Promise<undefined> => {
       const etag = readEtags(queryClient)[id];
       try {
-        await deleteLayout(id, {
-          ...(context.baseUrl !== undefined ? { baseUrl: context.baseUrl } : {}),
-          ...(context.token !== undefined ? { token: context.token } : {}),
-          ...(etag !== undefined ? { etag } : {}),
-        });
+        await deleteLayoutById(context.api, id, etag);
       } catch (error) {
         throw toApiError(error);
       }

@@ -115,7 +115,7 @@ export function LayoutsPage(): JSX.Element {
   const { t } = useLingui();
   const client = useMemo(() => createApiClient(), []);
   const layouts = useLayouts(client);
-  const deleteLayout = useDeleteLayout();
+  const deleteLayout = useDeleteLayout({ api: client });
   const [pendingDelete, setPendingDelete] = useState<Layout | null>(null);
 
   const columns = useColumns(setPendingDelete);

@@ -30,7 +30,7 @@ export function LayoutEditorPage(): JSX.Element {
   const layouts = useLayouts(client);
   const sources = useSources();
   const overlays = useOverlays();
-  const save = useSaveLayout();
+  const save = useSaveLayout({ api: client });
 
   const existing = useMemo(
     () => layouts.data?.find((layout) => layout.id === layoutId),
@@ -50,11 +50,13 @@ export function LayoutEditorPage(): JSX.Element {
   }, [existing, isNew]);
 
   const handleSave = (payload: LayoutSavePayload): void => {
+    // The spec requires the id on both create and update
+    // (`POST /api/v1/layouts/{id}`). For a fresh draft the editor uses an empty
+    // id, so we generate one client-side using a random UUID. Existing layouts
+    // carry their persisted id from the URL param.
+    const id = payload.id !== '' ? payload.id : crypto.randomUUID();
     save.mutate(
-      {
-        input: { name: payload.name, body: payload.body },
-        ...(payload.id !== '' ? { id: payload.id } : {}),
-      },
+      { id, input: { name: payload.name, body: payload.body } },
       {
         onSuccess: (): void => {
           toast({ title: t`Layout saved` });
