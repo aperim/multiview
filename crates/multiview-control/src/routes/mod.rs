@@ -26,7 +26,10 @@ use crate::state::AppState;
 pub mod alarms;
 pub mod audit;
 pub mod config;
+pub mod outputs;
+pub mod overlays;
 pub mod salvos;
+pub mod sources;
 pub mod tally;
 
 /// A `202 Accepted` body returned for an asynchronously-applied command.
@@ -298,6 +301,33 @@ pub fn api_router() -> Router<AppState> {
                 .post(create_layout)
                 .put(update_layout)
                 .delete(delete_layout),
+        )
+        // Sources resource CRUD (managed inputs), mirroring layouts.
+        .route("/sources", get(sources::list_sources))
+        .route(
+            "/sources/{id}",
+            get(sources::get_source)
+                .post(sources::create_source)
+                .put(sources::update_source)
+                .delete(sources::delete_source),
+        )
+        // Outputs resource CRUD (managed sinks/servers), mirroring layouts.
+        .route("/outputs", get(outputs::list_outputs))
+        .route(
+            "/outputs/{id}",
+            get(outputs::get_output)
+                .post(outputs::create_output)
+                .put(outputs::update_output)
+                .delete(outputs::delete_output),
+        )
+        // Overlays resource CRUD (managed overlay layers), mirroring layouts.
+        .route("/overlays", get(overlays::list_overlays))
+        .route(
+            "/overlays/{id}",
+            get(overlays::get_overlay)
+                .post(overlays::create_overlay)
+                .put(overlays::update_overlay)
+                .delete(overlays::delete_overlay),
         )
         .route("/commands/start", post(cmd_start))
         .route("/commands/stop", post(cmd_stop))

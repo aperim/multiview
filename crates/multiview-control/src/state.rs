@@ -19,6 +19,9 @@ use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
 use crate::nmos::NmosRegistry;
 use crate::repository::Repository;
+use crate::resource_store::{
+    InMemoryOutputStore, InMemoryOverlayStore, InMemorySourceStore, ResourceRepository,
+};
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
 use crate::tally_state::{
@@ -65,6 +68,12 @@ pub struct AppState {
     pub commands: CommandSender,
     /// The resource repository (CRUD persistence).
     pub repository: Arc<dyn Repository>,
+    /// The sources store (versioned CRUD over config-as-code managed inputs).
+    pub sources: Arc<dyn ResourceRepository>,
+    /// The outputs store (versioned CRUD over config-as-code managed sinks).
+    pub outputs: Arc<dyn ResourceRepository>,
+    /// The overlays store (versioned CRUD over config-as-code overlay layers).
+    pub overlays: Arc<dyn ResourceRepository>,
     /// The alarm mirror store (versioned, fed from the engine event stream).
     pub alarms: Arc<dyn AlarmRepository>,
     /// The salvo definition store (versioned CRUD over config-as-code salvos).
@@ -129,6 +138,9 @@ impl AppState {
             engine,
             commands,
             repository,
+            sources: Arc::new(InMemorySourceStore::new()),
+            outputs: Arc::new(InMemoryOutputStore::new()),
+            overlays: Arc::new(InMemoryOverlayStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             salvos: Arc::new(InMemorySalvoStore::new()),
             tally: Arc::new(TallyMirror::new()),
@@ -207,6 +219,27 @@ impl AppState {
     #[must_use]
     pub fn with_salvo_store(mut self, salvos: Arc<dyn SalvoRepository>) -> Self {
         self.salvos = salvos;
+        self
+    }
+
+    /// Replace the sources store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_sources_store(mut self, sources: Arc<dyn ResourceRepository>) -> Self {
+        self.sources = sources;
+        self
+    }
+
+    /// Replace the outputs store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_outputs_store(mut self, outputs: Arc<dyn ResourceRepository>) -> Self {
+        self.outputs = outputs;
+        self
+    }
+
+    /// Replace the overlays store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_overlays_store(mut self, overlays: Arc<dyn ResourceRepository>) -> Self {
+        self.overlays = overlays;
         self
     }
 

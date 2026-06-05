@@ -280,6 +280,94 @@
         }
       }
     },
+    "/api/v1/outputs": {
+      "get": {
+        "tags": [
+          "outputs"
+        ],
+        "summary": "`GET /api/v1/outputs` — list all outputs (role: read).",
+        "operationId": "list_outputs",
+        "responses": {
+          "200": {
+            "description": "All outputs, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/overlays": {
+      "get": {
+        "tags": [
+          "overlays"
+        ],
+        "summary": "`GET /api/v1/overlays` — list all overlays (role: read).",
+        "operationId": "list_overlays",
+        "responses": {
+          "200": {
+            "description": "All overlays, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/salvos": {
       "get": {
         "tags": [
@@ -658,6 +746,50 @@
           },
           "503": {
             "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sources": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "`GET /api/v1/sources` — list all sources (role: read).",
+        "operationId": "list_sources",
+        "responses": {
+          "200": {
+            "description": "All sources, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2119,6 +2251,28 @@
           }
         }
       },
+      "Resource": {
+        "type": "object",
+        "description": "A persisted management resource: a stable `id`, a display `name`, and the\nopaque `body` document (the config-as-code shape as canonical JSON).",
+        "required": [
+          "id",
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "description": "The opaque resource document, as canonical JSON."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable resource id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
       "ResourceCore": {
         "type": "object",
         "description": "The IS-04 fields common to every resource.\n\nFlattened into each resource type with `#[serde(flatten)]` so the wire JSON\nis a flat object (as IS-04 defines), not a nested `core` object.",
@@ -2156,6 +2310,23 @@
           "version": {
             "type": "string",
             "description": "The TAI version `<seconds>:<nanoseconds>` ordering updates to this\nresource (a newer version supersedes an older one)."
+          }
+        }
+      },
+      "ResourceInput": {
+        "type": "object",
+        "description": "The fields a create/update accepts (the id is supplied separately on create\nand immutable on update).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "description": "The opaque resource document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
           }
         }
       },
@@ -2529,6 +2700,18 @@
     {
       "name": "layouts",
       "description": "Layout resource CRUD"
+    },
+    {
+      "name": "sources",
+      "description": "Source (managed input) resource CRUD"
+    },
+    {
+      "name": "outputs",
+      "description": "Output (managed sink/server) resource CRUD"
+    },
+    {
+      "name": "overlays",
+      "description": "Overlay (managed overlay layer) resource CRUD"
     },
     {
       "name": "commands",

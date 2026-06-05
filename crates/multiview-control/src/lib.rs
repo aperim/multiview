@@ -52,6 +52,7 @@ pub mod notify;
 pub mod problem;
 pub mod realtime;
 pub mod repository;
+pub mod resource_store;
 pub mod router;
 pub mod routes;
 pub mod salvo_store;
@@ -108,6 +109,11 @@ pub use notify::{AlarmTransitionKind, Destination, RoutingRule, SeverityRouter};
 pub use problem::{Problem, PROBLEM_JSON};
 pub use realtime::{RealtimeFrame, SessionStream};
 pub use repository::{InMemoryRepository, Layout, LayoutInput, Repository, VersionedLayout};
+pub use resource_store::{
+    InMemoryOutputStore, InMemoryOverlayStore, InMemoryResourceStore, InMemorySourceStore,
+    OutputKind, OverlayKind, Resource, ResourceInput, ResourceKind, ResourceRepository, SourceKind,
+    VersionedResource, OUTPUT_KIND, OVERLAY_KIND, SOURCE_KIND,
+};
 pub use router::{
     ingest_route, route_follow, route_follow_all, RouteBinding, RouteFollowUpdate, RouteTable,
     RouterRoute,
