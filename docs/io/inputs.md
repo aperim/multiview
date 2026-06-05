@@ -69,7 +69,7 @@ no subprocess, published per tick into the same per-tile store — see
 | `file` | libavformat | no (loopable) | — | `ffmpeg` | Slate/standby clip; `-re`-style pacing valid here. |
 | `bars` | in-process pure-Rust generator | yes | — | — | 75% colour bars (line-up signal); no network. `test` is an alias. |
 | `solid` | in-process pure-Rust generator | yes | — | — | Solid-colour slate; `color = "#RRGGBB"`. |
-| `clock` | in-process generator (reuses the clock rasterizer) | yes | — | (`overlay`) | Full-frame analog/digital clock; needs `overlay` in the full pipeline. |
+| `clock` | in-process generator (reuses the clock rasterizer) | yes | — | (`overlay`) | Full-frame analog/digital clock; needs `overlay` to render — a placeholder card without it (incl. the FFmpeg-free `--software` build). |
 
 > **Resolver-backed extension (opt-in):** a **`youtube`** source kind is planned (backlog) as a thin
 > wrapper that resolves a YouTube live URL to an HLS master playlist via an external, runtime-discovered
@@ -167,7 +167,10 @@ no subprocess, published per tick into the same per-tile store — see
   can fill a tile or the whole canvas, disciplined by the system wall clock. `face` is `analog`
   (default) or `digital`; `twelve_hour` selects a 12-hour AM/PM readout (digital only);
   `tz_offset_minutes` is a UTC offset in minutes (`-720..=840`, validated at load). It reuses the
-  clock overlay rasterizer, so in the full pipeline it needs the `overlay` feature
+  clock overlay rasterizer, so it needs the `overlay` feature to render. **Where `overlay` is absent
+  — including the default FFmpeg-free `--software` build — a `clock` source shows a placeholder
+  card, not a clock** (the animated clock renders in the full `ffmpeg`+`overlay` pipeline; the
+  software engine onto the generator is a tracked follow-up). `bars`/`solid` render in every build
   ([ADR-0027](../decisions/ADR-0027.md)).
 
 ---

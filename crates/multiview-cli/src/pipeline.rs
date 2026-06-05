@@ -2886,16 +2886,17 @@ fn copy_plane(
 /// Resolve a config [`Source`] into a streaming [`IngestPlan`] (it does **not**
 /// decode anything — the plan is consumed later by an ingest thread).
 ///
-/// `test` sources are generated up-front with the `ffmpeg` CLI (LGPL `testsrc`
-/// → `mpeg2video`) into a tempdir owned by the plan; file/rtsp/hls/ts/srt/rtmp
-/// sources record their path/URL to be opened on the ingest thread.
-/// Live transports (rtsp/hls/ts/srt/rtmp) are flagged `live` so the ingest loop
-/// reconnects on EOF/error rather than ending; `test`/`file` are finite.
+/// Synthetic sources (bars/solid/clock) record a [`SourceLocation::Synthetic`]
+/// rendered in-process by [`crate::synth::generator_loop`] (no subprocess, no
+/// media to open); file/rtsp/hls/ts/srt/rtmp sources record their path/URL to be
+/// opened on the ingest thread. Live transports (rtsp/hls/ts/srt/rtmp) and the
+/// continuously-rendered synthetic sources are flagged `live` so the ingest loop
+/// runs forever; a `file` source is finite.
 ///
 /// # Errors
 ///
-/// Returns [`PipelineError::Ingest`] for an NDI/unsupported source kind, or if a
-/// `test` source's clip cannot be generated. (Opening/decoding errors surface on
+/// Returns [`PipelineError::Ingest`] for an NDI/unsupported source kind, or a
+/// synthetic source with invalid parameters. (Opening/decoding errors surface on
 /// the ingest thread later — they must never fail the *build* of a never-ending
 /// live source.)
 fn ingest_plan_for(

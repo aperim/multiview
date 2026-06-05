@@ -263,9 +263,10 @@ impl SoftwareEngine {
     /// Control whether synthetic test-pattern frames are published into the
     /// stores at the start of a run.
     ///
-    /// Default `true`: each `test` source's tile shows its pattern (LIVE). Set
-    /// `false` to leave every store empty, proving the output produces a valid
-    /// slate frame per tick even with no inputs (invariant #1 + #2).
+    /// Default `true`: each source's tile shows its synthetic frame — real bars/
+    /// solid, else a placeholder card (LIVE). Set `false` to leave every store
+    /// empty, proving the output produces a valid slate frame per tick even with
+    /// no inputs (invariant #1 + #2).
     pub fn set_publish_test_frames(&mut self, publish: bool) {
         self.publish_test_frames = publish;
     }
