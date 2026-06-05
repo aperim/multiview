@@ -24,6 +24,12 @@
 //!   [`select::select_device`] placement policy (ADR-0018): pins win, hard gates
 //!   build the whole-pipeline candidate set, survivors are scored by a
 //!   dominant-resource load model.
+//! - [`split`] — the deliberate last-resort multi-GPU [`split::plan_split`]
+//!   decision (ADR-0018 §20): reached only when no single GPU can host the whole
+//!   island, it cuts at the cheapest point (never fragmenting `composite`),
+//!   accounts the cross-GPU host round-trip explicitly, and is gated by a
+//!   minimum-gain threshold so a live pipeline is never churned for a marginal
+//!   improvement.
 //!
 //! Hardware probing ([`probe`]) is the only seam that touches vendors. It
 //! follows the three-layer model (core-engine §6.2): the injectable
@@ -50,6 +56,7 @@ pub mod planner;
 pub mod probe;
 pub mod registry;
 pub mod select;
+pub mod split;
 
 pub use capability::{Capability, Resolution, Stage};
 pub use cost::{CostBudget, TileLoad};
@@ -67,6 +74,9 @@ pub use registry::BackendRegistry;
 pub use select::{
     select_device, GpuCandidate, LoadWeights, Pins, PipelineDemand, PlacementPolicy, RejectReason,
     ScoreWeight, SelectOutcome, Selection, StageCaps,
+};
+pub use split::{
+    plan_split, CrossGpuCopy, CutPoint, SplitOutcome, SplitPlan, SplitPolicy, SplitReject,
 };
 
 // Re-export the shared enums the HAL describes assignments with, so downstream

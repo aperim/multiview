@@ -233,6 +233,58 @@ impl PipelineDemand {
     fn plan(&self) -> crate::planner::Plan {
         crate::planner::Plan::new(self.cadence, self.loads.clone())
     }
+
+    /// The output cadence in frames/sec (`0.0` for a degenerate rational).
+    ///
+    /// Used by the deliberate-split cost accounting
+    /// ([`crate::split::plan_split`]) to size the per-frame cross-GPU copy.
+    #[must_use]
+    pub fn cadence_fps(&self) -> f64 {
+        if self.cadence.is_valid() {
+            self.cadence.as_f64()
+        } else {
+            0.0
+        }
+    }
+
+    /// The total load a single [`Stage`] imposes, in megapixels/sec at the
+    /// pipeline cadence (the same per-stage sum the [`Planner`] budgets).
+    ///
+    /// The split decision ([`crate::split::plan_split`]) uses this to model how
+    /// much load isolating a bottleneck stage onto its own GPU relieves.
+    #[must_use]
+    pub fn stage_load_mpps(&self, stage: Stage) -> f64 {
+        self.plan().stage_load_mpps(stage)
+    }
+
+    /// The largest **decode**-stage tile resolution — the source surface that
+    /// would cross the host on a `decode | composite+encode` split. Falls back
+    /// to the overall peak resolution when the demand carries no decode tile.
+    #[must_use]
+    pub fn peak_decode_resolution(&self) -> Resolution {
+        self.peak_stage_resolution(Stage::Decode)
+            .unwrap_or(self.peak_resolution)
+    }
+
+    /// The largest **encode**-stage (rendition) resolution — the composited
+    /// canvas that would cross the host on a `decode+composite | encode` split.
+    /// Falls back to the overall peak resolution when the demand carries no
+    /// encode tile.
+    #[must_use]
+    pub fn peak_output_resolution(&self) -> Resolution {
+        self.peak_stage_resolution(Stage::Encode)
+            .unwrap_or(self.peak_resolution)
+    }
+
+    /// The largest tile resolution on a given stage, if the demand has any tile
+    /// for that stage. `Resolution` orders by pixel area, so `max` is the peak.
+    fn peak_stage_resolution(&self, stage: Stage) -> Option<Resolution> {
+        self.loads
+            .iter()
+            .filter(|load| load.stage == stage)
+            .map(|load| load.resolution)
+            .max()
+    }
 }
 
 /// A candidate GPU for placement: its identity, the capabilities relevant to
