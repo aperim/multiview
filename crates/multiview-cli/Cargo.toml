@@ -25,6 +25,7 @@ multiview-engine = { workspace = true }
 multiview-control = { workspace = true }
 multiview-config = { workspace = true }
 multiview-events = { workspace = true }
+arc-swap = "1.9.1"
 multiview-telemetry = { workspace = true }
 multiview-compositor = { workspace = true }
 multiview-framestore = { workspace = true }

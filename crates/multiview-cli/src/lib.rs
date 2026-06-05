@@ -35,6 +35,7 @@
 
 pub mod cli;
 pub mod control;
+pub mod preview;
 pub mod run;
 pub mod validate;
 

@@ -222,12 +222,24 @@ async fn run_until_ctrl_c(
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (server, drain): (Option<_>, Drain) = if let Some(cfg) = config.control.as_ref() {
         let (commands, command_rx) = command_bus(64);
-        let (addr, handle) =
-            control::bind_and_serve(&cfg.listen, Arc::clone(&publisher), commands, async move {
+        // The engine-backed live-preview provider (program slot + per-input
+        // stores), shared read-only with the control plane (invariant #10).
+        let preview: multiview_control::SharedPreview =
+            Arc::new(multiview_cli::preview::CliPreviewProvider::new(
+                engine.program_preview(),
+                engine.preview_stores(),
+            ));
+        let (addr, handle) = control::bind_and_serve(
+            &cfg.listen,
+            Arc::clone(&publisher),
+            commands,
+            preview,
+            async move {
                 let _ = shutdown_rx.await;
-            })
-            .await
-            .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
+            },
+        )
+        .await
+        .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
         tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
         (
             Some(handle),

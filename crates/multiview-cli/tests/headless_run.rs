@@ -221,6 +221,7 @@ async fn headless_run_serves_the_control_api_while_running() {
         "127.0.0.1:0",
         Arc::clone(&publisher),
         commands,
+        multiview_control::no_preview(),
         async move {
             let _ = shutdown_rx.await;
         },

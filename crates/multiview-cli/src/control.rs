@@ -18,7 +18,7 @@ use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_control::{
     provision_admin_keys, AppState, Command, CommandReceiver, CommandSender, EngineStateSnapshot,
-    InMemoryRepository,
+    InMemoryRepository, SharedPreview,
 };
 use multiview_engine::{CompositorDrive, EnginePublisher};
 use multiview_events::Event;
@@ -49,6 +49,7 @@ pub async fn bind_and_serve<F>(
     listen: &str,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
+    preview: SharedPreview,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)>
 where
@@ -79,7 +80,8 @@ where
         commands,
         Arc::new(InMemoryRepository::new()),
         Arc::new(api_keys),
-    );
+    )
+    .with_preview(preview);
     let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
     Ok((addr, handle))
 }
@@ -190,9 +192,15 @@ mod tests {
         let (commands, _rx) = multiview_control::command_bus(8);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let (addr, handle) = bind_and_serve("127.0.0.1:0", publisher, commands, async move {
-            let _ = shutdown_rx.await;
-        })
+        let (addr, handle) = bind_and_serve(
+            "127.0.0.1:0",
+            publisher,
+            commands,
+            multiview_control::no_preview(),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
         .await
         .expect("bind + serve should start");
 

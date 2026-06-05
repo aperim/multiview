@@ -28,6 +28,7 @@ pub mod audit;
 pub mod config;
 pub mod outputs;
 pub mod overlays;
+pub mod preview;
 pub mod salvos;
 pub mod sources;
 pub mod tally;
@@ -358,6 +359,10 @@ pub fn api_router() -> Router<AppState> {
                 .put(tally::put_profile)
                 .delete(tally::delete_profile),
         )
+        // Live preview snapshots (program + per-input JPEG stills).
+        .route("/preview/program.jpg", get(preview::program_jpeg))
+        .route("/preview/inputs", get(preview::list_input_ids))
+        .route("/preview/inputs/{id}", get(preview::input_jpeg))
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
         // Config versioning: history + commit, single revision, diff, rollback.

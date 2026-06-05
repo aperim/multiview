@@ -113,6 +113,10 @@ pub struct AppState {
     pub idempotency: Arc<IdempotencyStore>,
     /// The clock used to stamp alarm acknowledgements **and** audit entries.
     pub ack_clock: AckClock,
+    /// The live-preview provider (program + per-input JPEG stills). The default
+    /// ([`NoPreview`](crate::preview::NoPreview)) yields no frames; the binary
+    /// swaps in an engine-backed provider. Isolation-safe (invariant #10).
+    pub preview: crate::preview::SharedPreview,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -155,7 +159,16 @@ impl AppState {
             config_versions: Arc::new(InMemoryConfigVersionStore::new()),
             idempotency: Arc::new(IdempotencyStore::new()),
             ack_clock: Arc::new(system_ack_clock),
+            preview: crate::preview::no_preview(),
         }
+    }
+
+    /// Replace the live-preview provider (the binary wires an engine-backed one;
+    /// the default yields no frames).
+    #[must_use]
+    pub fn with_preview(mut self, preview: crate::preview::SharedPreview) -> Self {
+        self.preview = preview;
+        self
     }
 
     /// Enable `OAuth2`/JWT authentication as an alternative to API keys, validating

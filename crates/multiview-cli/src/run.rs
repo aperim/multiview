@@ -40,6 +40,11 @@ use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 /// Headless has no consumers, but the publisher still needs a positive ring.
 const EVENT_CAPACITY: usize = 64;
 
+/// Capture the composited program frame into the live-preview slot every Nth
+/// tick. At 30–60 fps this is ≈2–4 preview frames/sec — enough for a monitoring
+/// still, cheap enough to clone on the hot loop without affecting the cadence.
+const PREVIEW_CAPTURE_EVERY: u64 = 15;
+
 /// The state snapshot the headless engine publishes each tick (invariant #10):
 /// the tick index and its presentation timestamp. Best-effort; no consumer can
 /// back-pressure its publication.
@@ -155,6 +160,10 @@ pub struct HeadlessEngine {
     /// start of a run (default `true`). Set `false` to prove the output is
     /// independent of input health (every tile shows the slate).
     publish_test_frames: bool,
+    /// Wait-free slot the continuous run loop publishes a throttled clone of the
+    /// composited program frame into, for the control plane's live preview. Read
+    /// by the preview provider off the hot loop (invariant #10).
+    program_preview: crate::preview::ProgramSlot,
 }
 
 impl HeadlessEngine {
@@ -212,7 +221,22 @@ impl HeadlessEngine {
             nosignal_card,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
             publish_test_frames: true,
+            program_preview: crate::preview::program_slot(),
         })
+    }
+
+    /// The wait-free program-preview slot (shared with the control plane's
+    /// preview provider; the continuous run loop publishes into it).
+    #[must_use]
+    pub fn program_preview(&self) -> crate::preview::ProgramSlot {
+        Arc::clone(&self.program_preview)
+    }
+
+    /// The per-source frame stores (shared with the preview provider for the
+    /// per-input thumbnails).
+    #[must_use]
+    pub fn preview_stores(&self) -> HashMap<String, Arc<TileStore<Nv12Image>>> {
+        self.stores.clone()
     }
 
     /// The fixed output cadence (exact rational).
@@ -373,12 +397,22 @@ impl HeadlessEngine {
         // (read-only). State is the compact per-tick JSON snapshot; events are
         // left sparse for now (none emitted here — they arrive via change-driven
         // mirrors in a follow-up), so the broadcast carries no per-tick flood.
+        //
+        // The same per-tick projection also publishes a THROTTLED clone of the
+        // composited canvas into the wait-free program-preview slot (every
+        // `PREVIEW_CAPTURE_EVERY`th tick ≈ a couple of frames per second), so the
+        // control plane can serve a live still without cloning every frame on the
+        // hot loop. The store is a single atomic swap — it never blocks the clock.
+        let preview = Arc::clone(&self.program_preview);
         self.drive(
             &mut runtime,
             publisher,
             stop,
             None,
-            |f: &multiview_engine::CompositedFrame| {
+            move |f: &multiview_engine::CompositedFrame| {
+                if f.tick.index % PREVIEW_CAPTURE_EVERY == 0 {
+                    preview.store(Some(Arc::new(f.canvas.clone())));
+                }
                 crate::control::state_snapshot(
                     f.tick.index,
                     f.pts().as_nanos(),
