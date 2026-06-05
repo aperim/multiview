@@ -105,6 +105,62 @@ fn openapi_document_builds_as_3_1_and_lists_routes() {
     }
 }
 
+#[test]
+fn openapi_document_emits_layout_and_resource_write_ops() {
+    use multiview_control::openapi::ApiDoc;
+    use utoipa::OpenApi;
+
+    let doc = ApiDoc::openapi();
+    let json = serde_json::to_value(&doc).expect("OpenAPI serializes");
+    let paths = &json["paths"];
+
+    // Every layout/resource `{id}` path must now emit its full read+write set
+    // (today only the `list` reads enter the spec). The request body the SPA
+    // client is generated from references the input schema, and the mutating
+    // verbs (PUT/DELETE) carry the If-Match `412` response (ADR-W006).
+    let write_paths: &[(&str, &str)] = &[
+        ("/api/v1/layouts/{id}", "LayoutInput"),
+        ("/api/v1/sources/{id}", "ResourceInput"),
+        ("/api/v1/outputs/{id}", "ResourceInput"),
+        ("/api/v1/overlays/{id}", "ResourceInput"),
+    ];
+
+    for (path, input_schema) in write_paths {
+        let item = paths.get(path).unwrap_or_else(|| panic!("{path} documented"));
+
+        // GET by id is read; POST creates; PUT replaces; DELETE removes.
+        for verb in ["get", "post", "put", "delete"] {
+            assert!(
+                item.get(verb).is_some(),
+                "{verb} {path} documented in the OpenAPI spec"
+            );
+        }
+
+        // The create (POST) and replace (PUT) handlers carry a typed request
+        // body referencing the resource's input schema, so the generated TS
+        // client is fully typed.
+        for verb in ["post", "put"] {
+            let body_ref = item[verb]["requestBody"]["content"]["application/json"]["schema"]
+                ["$ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{verb} {path} has a JSON request body"));
+            assert!(
+                body_ref.ends_with(input_schema),
+                "{verb} {path} request body references {input_schema}, got {body_ref}"
+            );
+        }
+
+        // The optimistic-concurrency mutations (PUT replace, DELETE) advertise
+        // the `412 Precondition Failed` outcome the If-Match guard produces.
+        for verb in ["put", "delete"] {
+            assert!(
+                item[verb]["responses"].get("412").is_some(),
+                "{verb} {path} documents the 412 If-Match response"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn openapi_json_is_served() {
     let h = harness();
