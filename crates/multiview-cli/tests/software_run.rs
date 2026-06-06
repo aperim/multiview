@@ -653,7 +653,10 @@ async fn clock_run_without_overlay_still_produces_a_frame_per_tick() {
         .await
         .expect("non-overlay clock run succeeds");
 
-    assert_eq!(report.frames, TICKS, "output is independent of clock render");
+    assert_eq!(
+        report.frames, TICKS,
+        "output is independent of clock render"
+    );
     assert_eq!(report.ticks, TICKS);
     assert!(
         !report.faltered,

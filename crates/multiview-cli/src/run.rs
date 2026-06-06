@@ -22,7 +22,9 @@
 //! in tests (manual time + cooperative pacer, no real sleeps) and in production
 //! (monotonic time + realtime pacer).
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
@@ -36,6 +38,8 @@ use multiview_engine::{
 };
 use multiview_events::Event;
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+use crate::synth::{generator_loop, SyntheticKind};
 
 /// The per-subscriber drop-oldest depth of the engine's outbound event stream.
 /// The software smoke has no consumers, but the publisher still needs a positive
@@ -152,6 +156,12 @@ pub struct SoftwareEngine {
     /// The synthetic frame each source contributes (real bars/solid, or a
     /// placeholder card), kept so a run can (re)publish it into the stores.
     patterns: HashMap<String, Arc<Nv12Image>>,
+    /// Sources whose picture **changes over time** (the `clock` kind), driven by
+    /// a [`synth::generator_loop`](crate::synth::generator_loop) thread rather
+    /// than primed once. Empty unless an animated source is built **and** this
+    /// build renders it (the `overlay` feature is on); without `overlay` an
+    /// animated source falls back to the primed placeholder card instead.
+    animated: Vec<AnimatedSource>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited by default).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -166,6 +176,58 @@ pub struct SoftwareEngine {
     /// composited program frame into, for the control plane's live preview. Read
     /// by the preview provider off the hot loop (invariant #10).
     program_preview: crate::preview::ProgramSlot,
+}
+
+/// An animated synthetic source recorded for a generator thread: its store, the
+/// resolved synthetic kind, and the canvas geometry it renders at.
+struct AnimatedSource {
+    /// The per-source last-good-frame store the generator publishes into.
+    store: Arc<TileStore<Nv12Image>>,
+    /// The resolved synthetic kind (a `clock` variant — [`SyntheticKind::animated`]).
+    kind: SyntheticKind,
+    /// The width the generator renders at (the full canvas width; the compositor
+    /// scales to the tile).
+    width: u32,
+    /// The height the generator renders at (the full canvas height).
+    height: u32,
+}
+
+/// A running set of synthetic-source generator threads (the `clock` sources).
+///
+/// Each thread runs [`synth::generator_loop`](crate::synth::generator_loop),
+/// publishing a freshly-baked frame into its lock-free [`TileStore`] every tick
+/// (re-baking only when the displayed second changes). The engine only *samples*
+/// those stores, so a generator can neither pace nor stall the output clock
+/// (invariant #1) nor back-pressure the engine (invariant #10).
+///
+/// [`GeneratorSupervisor::shutdown`] raises the shared stop flag and joins every
+/// thread; the chunked `sleep_until` inside `generator_loop` makes teardown
+/// prompt (a thread observes the flag within ≤25 ms).
+#[must_use = "the generators run until shutdown; drop without shutdown leaks threads"]
+pub struct GeneratorSupervisor {
+    /// The shared cooperative stop flag every generator thread polls.
+    stop: Arc<AtomicBool>,
+    /// One join handle per spawned generator thread.
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl GeneratorSupervisor {
+    /// Raise the shared stop flag and join every generator thread.
+    ///
+    /// Idempotent-shaped: consumes the supervisor. A thread that failed to spawn
+    /// was never recorded, so this only joins live threads.
+    pub fn shutdown(self) {
+        self.stop.store(true, Ordering::Release);
+        for handle in self.handles {
+            // A generator thread only ever *writes* a lock-free store it shares by
+            // `Arc` and owns no external resource, so a join error (a panicked
+            // thread) cannot corrupt the produced output; log and continue so one
+            // wedged generator never blocks teardown of the rest.
+            if handle.join().is_err() {
+                tracing::error!("a synthetic-source generator thread panicked");
+            }
+        }
+    }
 }
 
 impl SoftwareEngine {
@@ -195,6 +257,7 @@ impl SoftwareEngine {
             HashMap::with_capacity(config.sources.len());
         let mut patterns: HashMap<String, Arc<Nv12Image>> =
             HashMap::with_capacity(config.sources.len());
+        let mut animated: Vec<AnimatedSource> = Vec::new();
 
         for (index, source) in config.sources.iter().enumerate() {
             let store = Arc::new(TileStore::new(
@@ -203,6 +266,27 @@ impl SoftwareEngine {
                 NoSignalPolicy::HoldForever,
             ));
             stores.insert(source.id.clone(), Arc::clone(&store));
+
+            // An animated synthetic kind (the `clock`) is driven by a generator
+            // thread (one bake/sec) — but only when this build can actually render
+            // it. The `clock` render needs the `overlay` feature; without it the
+            // generator returns `OverlayRequired` and would publish nothing, so an
+            // overlay-off build falls through to the primed placeholder card
+            // instead (an honest static fallback rather than a blank tile).
+            let synthetic = SyntheticKind::from_source_kind(&source.kind);
+            let drive_with_generator =
+                cfg!(feature = "overlay") && synthetic.is_some_and(SyntheticKind::animated);
+            if let Some(kind) = synthetic.filter(|_| drive_with_generator) {
+                // Recorded for a generator; NOT primed (no double-publish): the
+                // generator owns this tile's stream of frames.
+                animated.push(AnimatedSource {
+                    store: Arc::clone(&store),
+                    kind,
+                    width: config.canvas.width,
+                    height: config.canvas.height,
+                });
+                continue;
+            }
 
             let pattern = software_source_frame(
                 source,
@@ -226,6 +310,7 @@ impl SoftwareEngine {
             cadence,
             stores,
             patterns,
+            animated,
             canvas_color,
             nosignal_card,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
@@ -269,6 +354,61 @@ impl SoftwareEngine {
     /// no inputs (invariant #1 + #2).
     pub fn set_publish_test_frames(&mut self, publish: bool) {
         self.publish_test_frames = publish;
+    }
+
+    /// The number of animated synthetic sources this build drives with a
+    /// generator thread (the `clock` kind, when the `overlay` feature renders it).
+    #[must_use]
+    pub fn animated_source_count(&self) -> usize {
+        self.animated.len()
+    }
+
+    /// Spawn one [`synth::generator_loop`](crate::synth::generator_loop) thread
+    /// per **animated** synthetic source (the `clock` kind), publishing a freshly
+    /// baked frame into its lock-free [`TileStore`] at the canvas cadence (re-
+    /// baking only when the displayed second changes — one bake/sec).
+    ///
+    /// Returns a [`GeneratorSupervisor`]; call [`GeneratorSupervisor::shutdown`]
+    /// to stop and join the threads. When test-pattern publishing is disabled
+    /// (see [`SoftwareEngine::set_publish_test_frames`]) or there are no animated
+    /// sources, the returned supervisor owns no threads (every tile then rides
+    /// the slate — proving the output is independent of input health, inv #1/#2).
+    ///
+    /// The generators only ever *write* the stores the engine samples, so they
+    /// can neither pace nor stall the output clock (invariant #1) nor back-
+    /// pressure the engine (invariant #10).
+    //
+    // The returned `GeneratorSupervisor` is itself `#[must_use]` (dropping it
+    // without `shutdown` would leak threads), so a redundant `#[must_use]` here
+    // would trip `clippy::double_must_use`.
+    pub fn spawn_generators(&self) -> GeneratorSupervisor {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::with_capacity(self.animated.len());
+        if !self.publish_test_frames {
+            return GeneratorSupervisor { stop, handles };
+        }
+        for source in &self.animated {
+            let stop = Arc::clone(&stop);
+            let store = Arc::clone(&source.store);
+            let kind = source.kind;
+            let (width, height) = (source.width, source.height);
+            let canvas = self.canvas_color;
+            let cadence = self.cadence;
+            let id = store.id().to_owned();
+            let builder = std::thread::Builder::new().name(format!("multiview-synth-{id}"));
+            match builder.spawn(move || {
+                generator_loop(kind, &store, width, height, canvas, cadence, &stop);
+            }) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // A generator that cannot spawn is logged and skipped: its tile
+                    // simply rides the slate rather than failing the run (invariant
+                    // #1 — the output clock is independent of inputs).
+                    tracing::error!(error = %e, source = %id, "could not spawn synthetic generator thread");
+                }
+            }
+        }
+        GeneratorSupervisor { stop, handles }
     }
 
     /// Drive the engine for exactly `max_ticks` ticks under an injected,
@@ -337,24 +477,34 @@ impl SoftwareEngine {
         let publisher: EnginePublisher<SoftwareState, SoftwareState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
-        self.drive(
-            &mut runtime,
-            &publisher,
-            &stop,
-            Some(max_ticks),
-            |f: &multiview_engine::CompositedFrame| SoftwareState {
-                tick: f.tick.index,
-                pts: f.pts(),
-            },
-            |f: &multiview_engine::CompositedFrame| {
-                Some(SoftwareState {
+        // Animated synthetic sources (the `clock`) are driven by wall-clock
+        // generator threads; the engine only samples their stores. This bounded,
+        // jumped-clock path runs at executor speed (no real time elapses), so a
+        // clock does not visibly animate here — but the generators are still
+        // spawned and torn down cleanly after the tick budget so the wiring is
+        // identical across paths and no thread leaks.
+        let generators = self.spawn_generators();
+        let report = self
+            .drive(
+                &mut runtime,
+                &publisher,
+                &stop,
+                Some(max_ticks),
+                |f: &multiview_engine::CompositedFrame| SoftwareState {
                     tick: f.tick.index,
                     pts: f.pts(),
-                })
-            },
-            control,
-        )
-        .await
+                },
+                |f: &multiview_engine::CompositedFrame| {
+                    Some(SoftwareState {
+                        tick: f.tick.index,
+                        pts: f.pts(),
+                    })
+                },
+                control,
+            )
+            .await;
+        generators.shutdown();
+        report
     }
 
     /// Drive the engine for `max_ticks` ticks under the production realtime
@@ -372,24 +522,31 @@ impl SoftwareEngine {
         let publisher: EnginePublisher<SoftwareState, SoftwareState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
-        self.drive(
-            &mut runtime,
-            &publisher,
-            &stop,
-            Some(max_ticks),
-            |f: &multiview_engine::CompositedFrame| SoftwareState {
-                tick: f.tick.index,
-                pts: f.pts(),
-            },
-            |f: &multiview_engine::CompositedFrame| {
-                Some(SoftwareState {
+        // Real time elapses on this path, so an animated `clock` source actually
+        // animates: its generator thread re-bakes once a second into the lock-free
+        // store the engine samples. Tear the generators down after the tick budget.
+        let generators = self.spawn_generators();
+        let report = self
+            .drive(
+                &mut runtime,
+                &publisher,
+                &stop,
+                Some(max_ticks),
+                |f: &multiview_engine::CompositedFrame| SoftwareState {
                     tick: f.tick.index,
                     pts: f.pts(),
-                })
-            },
-            |_d: &mut CompositorDrive<Nv12Image>| {},
-        )
-        .await
+                },
+                |f: &multiview_engine::CompositedFrame| {
+                    Some(SoftwareState {
+                        tick: f.tick.index,
+                        pts: f.pts(),
+                    })
+                },
+                |_d: &mut CompositorDrive<Nv12Image>| {},
+            )
+            .await;
+        generators.shutdown();
+        report
     }
 
     /// Drive the engine **forever** under the production realtime pacer until
@@ -445,40 +602,49 @@ impl SoftwareEngine {
         // sets the envelope id to the source id, so the monitoring UI keys each
         // tile by it. This is change-driven — not a per-tick flood (inv #10).
         let mut last_states: HashMap<String, multiview_core::traits::SourceState> = HashMap::new();
-        self.drive(
-            &mut runtime,
-            publisher,
-            stop,
-            None,
-            move |f: &multiview_engine::CompositedFrame| {
-                if f.tick.index % PREVIEW_CAPTURE_EVERY == 0 {
-                    preview.store(Some(Arc::new(f.canvas.clone())));
-                }
-                crate::control::state_snapshot(
-                    f.tick.index,
-                    f.pts().as_nanos(),
-                    f.canvas.width(),
-                    f.canvas.height(),
-                )
-            },
-            move |f: &multiview_engine::CompositedFrame| -> Option<Event> {
-                for (source, &state) in &f.source_states {
-                    if last_states.get(source) != Some(&state) {
-                        let from = last_states.get(source).copied().unwrap_or(state);
-                        last_states.insert(source.clone(), state);
-                        return Some(Event::TileState(multiview_events::TileState {
-                            from: from.into(),
-                            to: state.into(),
-                            input: Some(source.clone()),
-                            trigger: "state_change".to_owned(),
-                        }));
+        // Real time elapses on the forever path, so an animated `clock` source
+        // animates: its generator re-bakes once a second into the lock-free store
+        // the engine samples. The generators share their own stop flag; raising
+        // the run's `StopSignal` (Ctrl-C) returns from `drive`, after which they
+        // are torn down and joined here.
+        let generators = self.spawn_generators();
+        let report = self
+            .drive(
+                &mut runtime,
+                publisher,
+                stop,
+                None,
+                move |f: &multiview_engine::CompositedFrame| {
+                    if f.tick.index % PREVIEW_CAPTURE_EVERY == 0 {
+                        preview.store(Some(Arc::new(f.canvas.clone())));
                     }
-                }
-                None
-            },
-            control,
-        )
-        .await
+                    crate::control::state_snapshot(
+                        f.tick.index,
+                        f.pts().as_nanos(),
+                        f.canvas.width(),
+                        f.canvas.height(),
+                    )
+                },
+                move |f: &multiview_engine::CompositedFrame| -> Option<Event> {
+                    for (source, &state) in &f.source_states {
+                        if last_states.get(source) != Some(&state) {
+                            let from = last_states.get(source).copied().unwrap_or(state);
+                            last_states.insert(source.clone(), state);
+                            return Some(Event::TileState(multiview_events::TileState {
+                                from: from.into(),
+                                to: state.into(),
+                                input: Some(source.clone()),
+                                trigger: "state_change".to_owned(),
+                            }));
+                        }
+                    }
+                    None
+                },
+                control,
+            )
+            .await;
+        generators.shutdown();
+        report
     }
 
     /// Publish each source's synthetic frame into its store at the current
@@ -625,13 +791,17 @@ fn pts_at(cadence: Rational, index: u64) -> MediaTime {
 ///
 /// Returns the compositor [`multiview_compositor::Error`] if the geometry is
 /// rejected (odd/zero dimensions).
-/// The synthetic frame a source contributes in the FFmpeg-free software engine.
+/// The **static** synthetic frame a source contributes in the FFmpeg-free
+/// software engine (primed once into its store).
 ///
-/// `bars` and `solid` render their real picture (the synthetic kinds that need no
-/// decoder — ADR-0027). Every other kind — a decoded feed the software build
-/// cannot open, or `clock` (whose animated render lands with the generator task)
-/// — contributes a distinct per-tile placeholder card so the smoke still
-/// composites a frame.
+/// `bars` and `solid` render their real picture (the static synthetic kinds that
+/// need no decoder — ADR-0027). Every other kind contributes a distinct per-tile
+/// placeholder card so the smoke still composites a frame: a decoded feed the
+/// software build cannot open, **and** `clock` in this exact non-animated path —
+/// the animated `clock` is instead driven by a generator thread (see
+/// [`SoftwareEngine::spawn_generators`]) when this build can render it (the
+/// `overlay` feature), so it reaches here only as the honest static fallback for
+/// an overlay-off build.
 fn software_source_frame(
     source: &Source,
     width: u32,
