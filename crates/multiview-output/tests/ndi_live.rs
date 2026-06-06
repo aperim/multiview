@@ -36,9 +36,13 @@ fn probe_is_typed_and_never_panics_without_runtime() {
     // never crash or block. (On a host that happens to have NDI it reports
     // Available — also fine.)
     let status = NdiCapability::probe();
-    match status {
-        NdiLoadStatus::Available
-        | NdiLoadStatus::RuntimeNotFound
-        | NdiLoadStatus::Unusable { .. } => {}
-    }
+    // The contract is: a typed status with no panic/block. In CI the runtime is
+    // absent, so this is RuntimeNotFound; `is_available()` reflects the variant.
+    let recognised = matches!(
+        status,
+        NdiLoadStatus::Available | NdiLoadStatus::RuntimeNotFound | NdiLoadStatus::Unusable { .. }
+    );
+    assert!(recognised, "probe must return a recognised typed status");
+    // `is_available()` is true only for the Available variant.
+    assert_eq!(status.is_available(), status == NdiLoadStatus::Available);
 }

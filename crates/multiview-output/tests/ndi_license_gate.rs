@@ -13,10 +13,8 @@
     clippy::indexing_slicing
 )]
 
-use multiview_output::ndi::{
-    FakeNdiApi, NdiLicense, NdiLicenseError, NdiOutput,
-};
 use multiview_output::ndi::license::LicenseAcceptance;
+use multiview_output::ndi::{FakeNdiApi, NdiLicense, NdiLicenseError, NdiOutput};
 
 fn accepted() -> NdiLicense {
     NdiLicense::accept(LicenseAcceptance {
@@ -43,7 +41,10 @@ fn unaccepted_setting_refuses_and_never_constructs_a_sender() {
     // `NdiOutput::new` takes `NdiLicense` by value, which we could not obtain.
     // The fake API records no sender because the gate stopped us first.
     let api = FakeNdiApi::new();
-    assert_eq!(api.created, None, "no sender may be created when unlicensed");
+    assert_eq!(
+        api.created, None,
+        "no sender may be created when unlicensed"
+    );
     assert!(!api.open);
 }
 

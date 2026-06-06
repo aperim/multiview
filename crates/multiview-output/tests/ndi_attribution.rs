@@ -26,6 +26,9 @@ fn attribution_url_points_at_ndi_video() {
 #[test]
 fn attribution_block_contains_both_notice_and_link() {
     let block = ndi::attribution();
-    assert!(block.contains("Vizrt NDI AB"), "must name the trademark holder");
+    assert!(
+        block.contains("Vizrt NDI AB"),
+        "must name the trademark holder"
+    );
     assert!(block.contains("ndi.video"), "must carry the ndi.video link");
 }

@@ -12,7 +12,9 @@
 )]
 
 use multiview_output::ndi::license::LicenseAcceptance;
-use multiview_output::ndi::{FakeNdiApi, NdiFourCc, NdiLicense, NdiOutput, NdiSendError, NdiVideoFrame};
+use multiview_output::ndi::{
+    FakeNdiApi, NdiFourCc, NdiLicense, NdiOutput, NdiSendError, NdiVideoFrame,
+};
 
 fn accepted() -> NdiLicense {
     NdiLicense::accept(LicenseAcceptance {
