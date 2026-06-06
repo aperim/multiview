@@ -102,6 +102,7 @@ pub mod runtime;
 pub mod salvo;
 pub mod scheduler;
 pub mod supervisor;
+pub mod sysref;
 pub mod tally;
 
 pub use alarm::{
@@ -134,6 +135,10 @@ pub use salvo::{Salvo, SalvoBatch, SalvoChange, SalvoPhase};
 pub use scheduler::{EventKind, ScheduledAction, Scheduler, TriggerEvent};
 pub use supervisor::{
     Actor, ActorExit, RestartDecision, RestartPolicy, StopReason, SupervisionOutcome, Supervisor,
+};
+pub use sysref::{
+    classify_system, NtpClockState, NtpQuery, NtpReading, NtpStatusFlags, ReferenceSelector,
+    SelectedReference, SystemRefConfig, SystemRefTracker,
 };
 pub use tally::{
     BitMapping, ConflictPolicy, Edge, GpiPoint, GpoPoint, LatchPolicy, Polarity, TallyArbiter,

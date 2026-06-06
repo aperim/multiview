@@ -36,6 +36,13 @@ serde_json = { workspace = true, optional = true }
 # FFI, so there is no `unsafe` in this crate. License: MIT OR Apache-2.0 OR
 # BSD-2-Clause (LGPL-clean).
 rustix = { version = "1.1.4", features = ["time"], optional = true }
+# Safe wrapper over the Linux `adjtimex(2)` NTP clock-discipline read for the
+# wall-clock reference badge (`sysref::live`). Optional + activated only by the
+# off-by-default `ntp` feature — the default pure-Rust build does not link it.
+# Keeps the engine `forbid(unsafe_code)`: the single `unsafe` syscall lives in
+# this leaf crate (which is `unsafe_code = "deny"` + `// SAFETY:`), so there is no
+# `unsafe` in the engine. License: MIT OR Apache-2.0 (LGPL-clean).
+multiview-ntpsys = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
@@ -53,6 +60,14 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync
 # only adds the thin `ptp::phc` disciplined-reference wrapper. The output clock
 # (`out_pts = f(tick)`) is never paced by PTP — see the `ptp` module docs.
 "ptp" = ["dep:rustix"]
+# Live system-clock NTP/chrony discipline read for the wall-clock badge
+# (`sysref::live`). OFF by default: the *Locked* result needs a host actually
+# synchronised by ntpd/chrony, so it is compile-verified here and live-gated in
+# tests. The PURE classification + source-selection (`sysref::classify_system`,
+# `sysref::ReferenceSelector`) is always compiled and fully tested; this feature
+# only adds the thin `adjtimex` adapter over the `multiview-ntpsys` FFI leaf
+# crate. The discipline reference never paces the output clock — see `sysref`.
+"ntp" = ["dep:multiview-ntpsys"]
 # M9 high-availability cluster transport (peer heartbeat sockets + state
 # replication wire I/O). OFF by default: it needs a real network and a live
 # multi-node cluster, so it is compile-verified only here. The PURE HA model —

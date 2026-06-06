@@ -2057,6 +2057,7 @@ dependencies = [
  "multiview-framestore",
  "multiview-hal",
  "multiview-input",
+ "multiview-ntpsys",
  "multiview-output",
  "multiview-overlay",
  "multiview-telemetry",
@@ -2130,6 +2131,13 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "multiview-ntpsys"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
