@@ -753,6 +753,40 @@ mod linux_sysfs {
             }
             loads
         }
+
+        /// Like [`SysfsLoadProbe::sample_all_with_media`], but additionally folds
+        /// the **Intel i915 PMU** per-engine media busy fraction into any Intel
+        /// device whose enc/dec util the per-process fdinfo walk left unknown.
+        ///
+        /// This is the Intel fallback path: where DRM fdinfo enc/dec counters are
+        /// unavailable (e.g. no attributable media fd, or a kernel that does not
+        /// expose them per-process), the whole-device i915 PMU — owned by the
+        /// `multiview-i915pmu` FFI leaf crate (the only place the
+        /// `perf_event_open` syscall lives) — supplies a merged media busy figure
+        /// via [`IntelPmuMediaTracker`]. The fdinfo term is preferred when present
+        /// (it attributes to our own work); the PMU only fills a field fdinfo left
+        /// `None`, and only on Intel devices ([`fold_intel_pmu_media_frac`]). A
+        /// device with no openable counter (no i915, perf denied) or on its first
+        /// poll keeps the honest-unknown `None`. `&mut self` + `&mut pmu` because
+        /// both diffs are stateful; this is the off-hot-path poll, never on the
+        /// data plane and never blocking the engine.
+        #[cfg(feature = "i915-pmu")]
+        #[must_use]
+        pub fn sample_all_with_media_and_pmu(
+            &mut self,
+            pids: &[u32],
+            interval_ns: u64,
+            pmu: &mut super::IntelPmuMediaTracker,
+        ) -> Vec<DeviceLoad> {
+            let mut loads = self.sample_all_with_media(pids, interval_ns);
+            for load in &mut loads {
+                if load.device_id.vendor() == Vendor::Intel {
+                    let frac = pmu.merged_media_frac(&load.device_id);
+                    super::fold_intel_pmu_media_frac(load, frac);
+                }
+            }
+            loads
+        }
     }
 
     impl LoadProbe for SysfsLoadProbe {
@@ -1225,6 +1259,217 @@ mod linux_sysfs {
             self.previous = Some(latest.clone());
             frac
         }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Intel i915 PMU per-engine media-util fallback (ADR-0017).
+//
+// Where the per-process DRM fdinfo enc/dec counters are unavailable on Intel,
+// the whole-device i915 PMU exposes per-engine busy-ns via `perf_event_open(2)`.
+// That syscall needs `unsafe`, so it is owned by the `multiview-i915pmu` FFI leaf
+// crate; this module folds its busy fraction into an Intel `DeviceLoad`'s
+// enc/dec util WITHOUT this crate ever performing `unsafe` (it stays
+// `forbid(unsafe_code)`). The fold decision + the two-snapshot diff are pure and
+// tested; the live counter open/read is gated on a real i915 + perf permission.
+// ----------------------------------------------------------------------------
+
+#[cfg(feature = "i915-pmu")]
+pub use self::i915_pmu::{fold_intel_pmu_media_frac, IntelPmuMediaTracker};
+
+#[cfg(feature = "i915-pmu")]
+mod i915_pmu {
+    use super::{DeviceId, DeviceLoad, Vendor};
+    #[cfg(target_os = "linux")]
+    use multiview_i915pmu::read_pmu_type;
+    use multiview_i915pmu::{
+        busy_fraction, engine_busy_config, I915PmuCounter, ENGINE_CLASS_VIDEO,
+        ENGINE_CLASS_VIDEO_ENHANCE,
+    };
+    use std::collections::HashMap;
+    #[cfg(target_os = "linux")]
+    use std::path::Path;
+    use std::time::Instant;
+
+    /// The sysfs root under which the kernel publishes each i915 PMU's dynamic
+    /// `type` (one `i915` or `i915_<pci-bus-id>` directory per GPU).
+    #[cfg(target_os = "linux")]
+    const SYS_DEVICES: &str = "/sys/devices";
+
+    /// Fold a PMU-derived merged media busy fraction into an Intel device's
+    /// `enc_util_frac`/`dec_util_frac`, **only** where they are still unknown.
+    ///
+    /// The contract (ADR-0017, [gpu-monitoring §3.6]): the per-process DRM fdinfo
+    /// term is preferred when present (it attributes to our own work); the i915
+    /// PMU is the *fallback* whole-device figure used **only** when fdinfo left a
+    /// field `None`. It is applied to Intel devices only (the PMU is i915), and a
+    /// `None` fraction (no counter, first poll, denied) is a no-op — the field
+    /// stays honest-unknown, never a fabricated zero. Pure and total.
+    pub fn fold_intel_pmu_media_frac(load: &mut DeviceLoad, frac: Option<f32>) {
+        if load.device_id.vendor() != Vendor::Intel {
+            return;
+        }
+        let Some(frac) = frac else {
+            return;
+        };
+        // Only fill what fdinfo could not: never overwrite a per-process reading.
+        if load.enc_util_frac.is_none() {
+            load.enc_util_frac = Some(frac);
+        }
+        if load.dec_util_frac.is_none() {
+            load.dec_util_frac = Some(frac);
+        }
+    }
+
+    /// One device's previous PMU busy-ns sample + the wall instant it was taken,
+    /// so the next poll can difference busy-ns over the elapsed wall-ns.
+    #[derive(Debug, Clone, Copy)]
+    struct PrevSample {
+        busy_ns: u64,
+        at: Instant,
+    }
+
+    /// The stateful two-snapshot differ that turns a sequence of i915 PMU
+    /// per-engine busy-ns reads into a per-device merged-media busy fraction.
+    ///
+    /// The i915 PMU busy counter is a monotonically increasing busy-ns total, so
+    /// a fraction needs **two** reads a known wall interval apart. The tracker
+    /// holds, per device, the open VCS (video) + VECS (video-enhance) counters
+    /// and the previous summed busy-ns + its instant; each poll reads the live
+    /// counters, differences against the retained sample over the measured
+    /// elapsed wall-ns, and retains the new sample. The first poll for a device
+    /// (no prior) is `None` — unknown until two samples exist, never a fabricated
+    /// zero. The tracker is the off-hot-path state the load poll thread owns
+    /// (ADR-0017 §2); the counters are opened lazily per device and closed on
+    /// `Drop`.
+    ///
+    /// Opening a counter needs a real i915 + perf permission; where that is
+    /// unavailable the per-device entry stays without counters and
+    /// [`IntelPmuMediaTracker::merged_media_frac`] returns `None` — the honest
+    /// fallback that leaves the sysfs probe's Intel enc/dec fields unknown.
+    #[derive(Debug, Default)]
+    pub struct IntelPmuMediaTracker {
+        per_device: HashMap<String, DeviceCounters>,
+    }
+
+    /// The opened-or-absent PMU counters + previous sample for one device.
+    #[derive(Debug, Default)]
+    struct DeviceCounters {
+        /// The video (VCS) busy-ns counter, if it opened.
+        video: Option<I915PmuCounter>,
+        /// The video-enhance (VECS) busy-ns counter, if it opened.
+        video_enhance: Option<I915PmuCounter>,
+        /// Whether an open was already attempted (so we do not retry every poll
+        /// on a host that denies it — a denied open stays denied).
+        opened: bool,
+        /// The previous summed busy-ns + its wall instant.
+        prev: Option<PrevSample>,
+    }
+
+    impl IntelPmuMediaTracker {
+        /// Difference the live i915 PMU media-engine busy-ns for one Intel device
+        /// against the retained previous sample and return its merged media busy
+        /// fraction (`0.0..=1.0`), then retain the new sample for the next poll.
+        ///
+        /// `device` must be an Intel device; its `stable_id` keys the per-device
+        /// counters. The merged figure sums the video (VCS) and video-enhance
+        /// (VECS) engines — Intel meters them separately but Multiview reports one
+        /// combined media term, mirroring the AMD merged fallback. Returns `None`
+        /// on the first poll (no prior), when no counter could be opened (no i915,
+        /// perf denied), or when a read failed this tick — honest unknown, never a
+        /// fabricated zero. Never panics, never blocks on the engine.
+        pub fn merged_media_frac(&mut self, device: &DeviceId) -> Option<f32> {
+            if device.vendor() != Vendor::Intel {
+                return None;
+            }
+            let key = device.stable_id().to_owned();
+            let counters = self.per_device.entry(key).or_default();
+            counters.ensure_opened(device);
+
+            let now = Instant::now();
+            let busy_ns = counters.read_summed_busy_ns()?;
+            let frac = counters.prev.and_then(|prev| {
+                let interval_ns = elapsed_ns(prev.at, now);
+                busy_fraction(prev.busy_ns, busy_ns, interval_ns)
+            });
+            counters.prev = Some(PrevSample { busy_ns, at: now });
+            frac
+        }
+    }
+
+    impl DeviceCounters {
+        /// Open the VCS + VECS busy-ns counters for `device` once (idempotent).
+        ///
+        /// Resolves the device's i915 PMU `type` from sysfs, then opens a counter
+        /// per engine class. A device whose PMU type cannot be resolved, or whose
+        /// open is denied, leaves the counters `None`; the attempt is recorded so
+        /// it is not retried on every poll.
+        fn ensure_opened(&mut self, device: &DeviceId) {
+            if self.opened {
+                return;
+            }
+            self.opened = true;
+            let Some(pmu_type) = resolve_pmu_type(device) else {
+                return;
+            };
+            self.video = I915PmuCounter::open(pmu_type, engine_busy_config(ENGINE_CLASS_VIDEO, 0));
+            self.video_enhance =
+                I915PmuCounter::open(pmu_type, engine_busy_config(ENGINE_CLASS_VIDEO_ENHANCE, 0));
+        }
+
+        /// Sum the live busy-ns of the opened media counters, or `None` if no
+        /// counter is open or a read failed this tick.
+        fn read_summed_busy_ns(&self) -> Option<u64> {
+            let video = self.video.as_ref().and_then(I915PmuCounter::read_busy_ns);
+            let vecs = self
+                .video_enhance
+                .as_ref()
+                .and_then(I915PmuCounter::read_busy_ns);
+            match (video, vecs) {
+                (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            }
+        }
+    }
+
+    /// Elapsed nanoseconds between two instants, saturating into a `u64`.
+    ///
+    /// `Instant::saturating_duration_since` never goes backwards (so the busy
+    /// fraction's interval is always non-negative); the ns count saturates at
+    /// `u64::MAX` for an implausibly long gap rather than overflowing.
+    fn elapsed_ns(earlier: Instant, later: Instant) -> u64 {
+        let nanos = later.saturating_duration_since(earlier).as_nanos();
+        u64::try_from(nanos).unwrap_or(u64::MAX)
+    }
+
+    /// Resolve an Intel device's dynamic i915 PMU `type` number from sysfs.
+    ///
+    /// The kernel publishes the PMU under `/sys/devices/i915` (single GPU) or
+    /// `/sys/devices/i915_<pci-bus-id>` (one per GPU; the bus id has `:`/`.`
+    /// rewritten to `_`). We prefer the device-specific directory matching the
+    /// `DeviceId`'s PCI bus id, then fall back to the plain `i915` directory.
+    /// Returns `None` off-Linux or where no i915 PMU is present.
+    #[cfg(target_os = "linux")]
+    fn resolve_pmu_type(device: &DeviceId) -> Option<u32> {
+        let root = Path::new(SYS_DEVICES);
+        // The per-device PMU dir name rewrites the PCI separators to `_`
+        // (e.g. `0000:03:00.0` -> `i915_0000_03_00.0`).
+        let device_dir = format!("i915_{}", device.stable_id().replace([':'], "_"));
+        for candidate in [device_dir.as_str(), "i915"] {
+            let type_path = root.join(candidate).join("type");
+            if let Some(t) = read_pmu_type(&type_path) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// Off-Linux there is no i915 PMU sysfs; the type is always unresolved.
+    #[cfg(not(target_os = "linux"))]
+    fn resolve_pmu_type(_device: &DeviceId) -> Option<u32> {
+        None
     }
 }
 
@@ -1913,6 +2158,91 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&drm);
             let _ = std::fs::remove_dir_all(&proc);
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Intel i915 PMU media-util fallback (ADR-0017, ENG-4c).
+    //
+    // The live `perf_event_open` read needs a real i915 + perf permission and is
+    // gated in the FFI leaf crate's own tests. Here we exercise the PURE fold
+    // decision (PMU fills enc/dec only where fdinfo left them unknown, Intel
+    // only) and the tracker's no-counter / non-Intel = None contract — no real
+    // PMU, no syscall.
+    // ------------------------------------------------------------------------
+    #[cfg(feature = "i915-pmu")]
+    mod i915_pmu {
+        use super::super::{
+            fold_intel_pmu_media_frac, DeviceId, DeviceLoad, IntelPmuMediaTracker, Vendor,
+        };
+
+        fn intel(id: &str) -> DeviceId {
+            DeviceId::new(Vendor::Intel, id, 0)
+        }
+
+        #[test]
+        fn pmu_frac_fills_only_unknown_enc_dec_on_intel() {
+            // An Intel device whose fdinfo walk left enc/dec unknown: the PMU
+            // fraction fills BOTH (Intel meters VCS+VECS; we report one merged
+            // media term, mirroring the AMD fallback).
+            let mut load = DeviceLoad::unknown(intel("0000:00:02.0"));
+            fold_intel_pmu_media_frac(&mut load, Some(0.5));
+            assert_eq!(load.enc_util_frac, Some(0.5));
+            assert_eq!(load.dec_util_frac, Some(0.5));
+        }
+
+        #[test]
+        fn pmu_frac_never_overwrites_an_fdinfo_reading() {
+            // fdinfo already supplied a per-process enc reading; the PMU is the
+            // fallback and must NOT clobber it. The unknown dec field is filled.
+            let mut load = DeviceLoad::unknown(intel("0000:00:02.0"));
+            load.enc_util_frac = Some(0.2);
+            fold_intel_pmu_media_frac(&mut load, Some(0.9));
+            assert_eq!(
+                load.enc_util_frac,
+                Some(0.2),
+                "fdinfo enc reading preserved"
+            );
+            assert_eq!(load.dec_util_frac, Some(0.9), "unknown dec filled by PMU");
+        }
+
+        #[test]
+        fn pmu_frac_is_a_noop_for_non_intel_devices() {
+            // The i915 PMU is Intel-only; an AMD device must never be touched by
+            // it even if a fraction is offered.
+            let mut load = DeviceLoad::unknown(DeviceId::new(Vendor::Amd, "0000:03:00.0", 0));
+            fold_intel_pmu_media_frac(&mut load, Some(0.7));
+            assert!(load.enc_util_frac.is_none(), "AMD enc untouched");
+            assert!(load.dec_util_frac.is_none(), "AMD dec untouched");
+        }
+
+        #[test]
+        fn pmu_none_fraction_is_a_noop() {
+            // No counter / first poll / denied => None fraction: the fields stay
+            // honest-unknown, never a fabricated zero.
+            let mut load = DeviceLoad::unknown(intel("0000:00:02.0"));
+            fold_intel_pmu_media_frac(&mut load, None);
+            assert!(load.enc_util_frac.is_none());
+            assert!(load.dec_util_frac.is_none());
+        }
+
+        #[test]
+        fn tracker_is_none_for_non_intel_and_without_a_counter() {
+            // A non-Intel device is never sampled by the PMU tracker. An Intel
+            // device with no real i915 PMU (this box / CI) cannot open a counter,
+            // so the first (and every) poll is the honest None — never a panic,
+            // never a block.
+            let mut tracker = IntelPmuMediaTracker::default();
+            assert_eq!(
+                tracker.merged_media_frac(&DeviceId::new(Vendor::Amd, "0000:03:00.0", 0)),
+                None,
+                "non-Intel device is not a PMU candidate"
+            );
+            assert_eq!(
+                tracker.merged_media_frac(&intel("0000:00:02.0")),
+                None,
+                "no i915 PMU here => unknown, never a panic"
+            );
         }
     }
 }

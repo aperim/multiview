@@ -21,6 +21,14 @@ tracing = { workspace = true }
 # default pure-Rust build never sees it and `cargo deny check`
 # (`all-features = false`) does not scan it.
 nvml-wrapper = { version = "0.10", optional = true }
+# Intel i915 PMU per-engine busy-ns counter (ADR-0017). The single
+# `perf_event_open(2)` syscall lives in this FFI leaf crate (which is
+# `unsafe_code = "deny"` + `// SAFETY:`), so `multiview-hal` stays
+# `forbid(unsafe_code)`. OFF by default and pulled in ONLY by the `i915-pmu`
+# feature, so the default pure-Rust build never links it and `cargo deny check`
+# (`all-features = false`) does not scan it. License: MIT OR Apache-2.0
+# (LGPL-clean).
+multiview-i915pmu = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
@@ -31,6 +39,15 @@ proptest = "1.11.0"
 "vaapi" = []
 "qsv" = []
 "videotoolbox" = []
+# Intel-only per-engine encode/decode utilisation via the i915 PMU
+# (`perf_event_open`), the fallback for hosts where the per-process DRM fdinfo
+# enc/dec counters are unavailable. Builds on the sysfs probe (`vaapi`/`qsv`)
+# and adds the FFI leaf crate that owns the syscall. OFF by default: it needs a
+# real i915 device + perf permission, so it is compile-verified here and the
+# live read is gated. The pure busy-ns -> fraction diff is always tested.
+# Implies `vaapi` so the `SysfsLoadProbe` (the Intel/AMD sysfs+fdinfo seam this
+# folds into) is built; the PMU term enriches that probe's Intel devices.
+"i915-pmu" = ["dep:multiview-i915pmu", "vaapi"]
 
 [lints]
 workspace = true

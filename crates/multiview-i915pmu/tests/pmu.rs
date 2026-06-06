@@ -137,8 +137,24 @@ fn live_open_does_not_panic_and_reads_monotonic() {
     use multiview_i915pmu::{read_pmu_type, I915PmuCounter};
     use std::path::PathBuf;
 
-    // Resolve the first i915 PMU `type` file, if any (single-GPU plain path or a
-    // per-device `i915_<pci>` directory). Absent on a non-Intel host.
+    // A tiny self-contained resolver (no glob crate dep) for the first i915 PMU
+    // `type` file (single-GPU plain path or a per-device `i915_<pci>` dir).
+    fn glob_first_i915_type() -> Option<PathBuf> {
+        let entries = std::fs::read_dir("/sys/devices").ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "i915" || name.starts_with("i915_") {
+                let candidate = entry.path().join("type");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    // Resolve the first i915 PMU `type` file, if any. Absent on a non-Intel host.
     let pmu_type = glob_first_i915_type().and_then(|p| read_pmu_type(&p));
 
     let require = std::env::var_os("MULTIVIEW_I915_LIVE").is_some();
@@ -170,21 +186,5 @@ fn live_open_does_not_panic_and_reads_monotonic() {
                 "MULTIVIEW_I915_LIVE set but perf_event_open was denied"
             );
         }
-    }
-
-    // A tiny helper so the test stays self-contained (no glob crate dep).
-    fn glob_first_i915_type() -> Option<PathBuf> {
-        let entries = std::fs::read_dir("/sys/devices").ok()?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name == "i915" || name.starts_with("i915_") {
-                let candidate = entry.path().join("type");
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
     }
 }

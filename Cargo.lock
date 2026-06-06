@@ -2111,6 +2111,7 @@ name = "multiview-hal"
 version = "0.1.0"
 dependencies = [
  "multiview-core",
+ "multiview-i915pmu",
  "nvml-wrapper",
  "proptest",
  "thiserror 1.0.69",
