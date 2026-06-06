@@ -96,6 +96,7 @@ pub mod error;
 pub mod ha;
 pub mod heads;
 pub mod isolation;
+pub mod placement;
 pub mod probe;
 pub mod ptp;
 pub mod runtime;
@@ -122,6 +123,9 @@ pub use heads::{HeadBinding, HeadPlacement, WallComposition};
 pub use isolation::{
     event_stream, EnginePublisher, EventStream, EventSubscription, LatestState, RecvError,
     SeqEvent, TryRecvError,
+};
+pub use placement::{
+    MigrationPlan, PlacementController, PlacementControllerConfig, PlacementProposal, ShedReason,
 };
 pub use probe::{
     BlackConfig, BlackProbe, DetectionZone, ExpectedFormat, FormatAxis, FormatMismatch,
