@@ -25,6 +25,18 @@ confidence-threshold = 0.9
 # The default build must stay permissive/LGPL-clean. The `gpl-codecs` feature
 # (x264/x265) intentionally makes a build GPL — that is opt-in and NOT covered
 # by this allowlist; see docs/architecture/conventions.md §7.
+#
+# The off-by-default `webrtc-native` feature (multiview-preview, PRV-1b) pulls
+# `str0m` (the native ICE/DTLS/SRTP WebRTC stack — `MIT OR Apache-2.0`) and its
+# sans-IO crypto closure (`str0m-rust-crypto`, `dimpl`, the RustCrypto crates,
+# and `aws-lc-rs`/`aws-lc-sys` for the elliptic-curve / DTLS-cert primitives).
+# Every crate in that closure resolves to a license already on this allowlist —
+# `MIT`, `Apache-2.0`, `ISC`, and `BSD-3-Clause` (`aws-lc-sys` is the union of
+# all four). NOTE: this str0m 0.16.x line uses `aws-lc-rs`, NOT `ring`, for its
+# pure-Rust crypto backend. Because `[graph] all-features = false`, cargo-deny
+# scans only the default (str0m-free) build, so none of these appear in the
+# scanned graph today; they are listed here so a future `--all-features` scan
+# (or moving the feature on) is already license-clean with no surprise additions.
 allow = [
   "MIT",
   "Apache-2.0",

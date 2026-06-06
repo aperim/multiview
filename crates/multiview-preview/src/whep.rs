@@ -20,10 +20,13 @@
 //! ([`transport::TransportAnswer`], folded in by [`WhepSession::build_answer`]),
 //! and the bounded drop-oldest [`transport::SampleFeed`]. That seam is
 //! socket-free and pulls **no** native dependency, so even the `webrtc`-feature
-//! build stays pure Rust, green, and deny-clean. A *native* (`str0m`) or
-//! `MediaMTX`-sidecar implementation of the seam — the part that needs real
-//! UDP/STUN + DTLS certificates — lands behind a *further* gate. See the brief's
-//! "Sidecar reuse" note.
+//! build stays pure Rust, green, and deny-clean. A *native* (`str0m`)
+//! implementation of the seam — the part that needs real UDP/STUN + DTLS
+//! certificates — lives in [`native`] behind the *further* off-by-default
+//! `webrtc-native` gate (str0m is sans-IO, so its SDP offer→answer negotiation is
+//! still socket-free and CI-tested; only the live DTLS-SRTP egress needs a
+//! socket). A `MediaMTX`-sidecar republisher is the other option (brief's
+//! "Sidecar reuse" note).
 //!
 //! ## Isolation (invariant #10)
 //!
@@ -35,6 +38,8 @@ use std::fmt::Write as _;
 
 use crate::token::AccessScope;
 
+#[cfg(feature = "webrtc-native")]
+pub mod native;
 pub mod program;
 pub mod transport;
 

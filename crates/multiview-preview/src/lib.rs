@@ -54,10 +54,18 @@
 //!   [`whep::program::ProgramFocusSession`] lifecycle (always labeled
 //!   [`whep::program::FidelityLabel::PreEncodeCanvasApprox`] per ADR-P005). The
 //!   seam is socket-free and pulls **no** native dependency, so this feature build
-//!   stays pure Rust; a native (str0m) ICE/DTLS/SRTP transport **and** the real
-//!   GPU downscale blit + low-latency H.264 encode lands behind a *further* gate
-//!   (it needs UDP/STUN + DTLS certificates and a GPU). The default build is the
+//!   stays pure Rust; the real GPU downscale blit + low-latency H.264 encode still
+//!   land behind a *further* gate (they need a GPU). The default build is the
 //!   MJPEG/snapshot model plus signed tokens, with no native or GPU dependency.
+//! * `webrtc-native` (off by default; implies `webrtc`) — the **native str0m**
+//!   ICE/DTLS/SRTP implementation of the [`whep::transport::WhepTransport`] seam,
+//!   in [`whep::native`]. It pulls the `str0m` sans-IO WebRTC stack (and a small
+//!   `aws-lc-rs` C/assembly crypto blob), so it is NOT part of the pure-Rust CI
+//!   default. Because str0m is sans-IO, the SDP offer→answer negotiation (real
+//!   ICE credentials + a real self-signed DTLS-certificate fingerprint) is still
+//!   socket-free and unit-tested in CI; only the live DTLS-SRTP handshake + RTP
+//!   egress need a real socket/peer and run under an env-gated `#[ignore]`d
+//!   loopback test.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
