@@ -43,6 +43,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod backend;
 pub mod blend;
 pub mod error;
 #[cfg(feature = "wgpu")]
@@ -57,6 +58,7 @@ pub mod range;
 pub mod transfer;
 pub mod transfer_lut;
 
+pub use backend::{RunBackend, RunBackendKind};
 pub use error::{Error, Result};
 pub use native::{
     admit_native_composite, CompositeBackend, NativeAdmission, NativeRejection, TileFormats,
