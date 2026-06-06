@@ -18,6 +18,7 @@ use multiview_core::time::Rational;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::audio::OutputAudio;
 use crate::error::ConfigError;
 use crate::grid::{GridLayout, Track};
 use crate::placement::DevicePin;
@@ -541,6 +542,10 @@ pub enum Output {
         /// ([`DevicePin`], ADR-0018 §2.1). Absent ⇒ auto-placed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection (program bus vs explicit tracks). Absent
+        /// ⇒ the engine's default (the mixed program bus only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
     },
     /// Low-latency HLS packager.
     LlHls {
@@ -560,6 +565,9 @@ pub enum Output {
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. Absent ⇒ the mixed program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
     },
     /// HLS packager.
     Hls {
@@ -573,6 +581,9 @@ pub enum Output {
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. Absent ⇒ the mixed program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
     },
     /// NDI output.
     Ndi {
@@ -581,6 +592,10 @@ pub enum Output {
         /// Operator pin for this output's frame source to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. NDI carries a channel-map (not selectable
+        /// tracks); the capability matrix in `multiview-audio` validates this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
     },
     /// RTMP push.
     Rtmp {
@@ -591,6 +606,10 @@ pub enum Output {
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. RTMP multitrack is endpoint-gated; the
+        /// capability matrix in `multiview-audio` validates this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
     },
     /// SRT push.
     Srt {
@@ -601,6 +620,9 @@ pub enum Output {
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. Absent ⇒ the mixed program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
     },
 }
 
@@ -616,6 +638,35 @@ impl Output {
             | Output::Ndi { gpu_pin, .. }
             | Output::Rtmp { gpu_pin, .. }
             | Output::Srt { gpu_pin, .. } => gpu_pin.as_ref(),
+        }
+    }
+
+    /// The per-output audio selection, if any. `None` ⇒ the engine carries the
+    /// mixed program bus by default for this output.
+    #[must_use]
+    pub const fn audio(&self) -> Option<&OutputAudio> {
+        match self {
+            Output::RtspServer { audio, .. }
+            | Output::LlHls { audio, .. }
+            | Output::Hls { audio, .. }
+            | Output::Ndi { audio, .. }
+            | Output::Rtmp { audio, .. }
+            | Output::Srt { audio, .. } => audio.as_ref(),
+        }
+    }
+
+    /// A stable label for this output (its kind + addressed endpoint) used in
+    /// validation diagnostics. Outputs carry no operator id, so the mount/path/
+    /// url/name addresses it.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Output::RtspServer { mount, .. } => format!("rtsp_server {mount}"),
+            Output::LlHls { path, .. } => format!("ll_hls {path}"),
+            Output::Hls { path, .. } => format!("hls {path}"),
+            Output::Ndi { name, .. } => format!("ndi {name}"),
+            Output::Rtmp { url, .. } => format!("rtmp {url}"),
+            Output::Srt { url, .. } => format!("srt {url}"),
         }
     }
 }

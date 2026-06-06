@@ -14,8 +14,7 @@
 )]
 
 use multiview_config::{
-    AudioChannels, AudioRoute, AudioRouting, ConfigError, MultiviewConfig, OutputAudio,
-    OutputAudioMode,
+    AudioChannels, AudioRouting, ConfigError, MultiviewConfig, OutputAudio, OutputAudioMode,
 };
 
 /// A complete, valid document carrying a program bus + two discrete tracks and a
@@ -95,7 +94,8 @@ fn parse(doc: &str) -> MultiviewConfig {
 #[test]
 fn base_document_is_valid() {
     let cfg = parse(BASE);
-    cfg.validate().expect("the base routing document must validate");
+    cfg.validate()
+        .expect("the base routing document must validate");
 
     let audio = cfg.audio.as_ref().expect("audio block present");
     assert_eq!(audio.sample_rate_hz, 48_000);
@@ -120,7 +120,10 @@ fn round_trips_through_toml_and_json_losslessly() {
 
     // Cross-format identity: TOML→value and JSON→value must agree (the union
     // tags are robust across the self-describing and non-self-describing forms).
-    assert_eq!(from_toml, from_json, "TOML and JSON must decode identically");
+    assert_eq!(
+        from_toml, from_json,
+        "TOML and JSON must decode identically"
+    );
 }
 
 #[test]
@@ -129,16 +132,24 @@ fn rejects_route_referencing_unknown_source() {
     let cfg = parse(&doc);
     let err = cfg.validate().expect_err("unknown source must be rejected");
     assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");
-    assert!(err.to_string().contains("ghost"), "names the bad ref: {err}");
+    assert!(
+        err.to_string().contains("ghost"),
+        "names the bad ref: {err}"
+    );
 }
 
 #[test]
 fn rejects_output_audio_selecting_unknown_track() {
     let doc = BASE.replace(r#""prog", "trk_a", "trk_b""#, r#""prog", "trk_a", "ghost""#);
     let cfg = parse(&doc);
-    let err = cfg.validate().expect_err("unknown track selection must be rejected");
+    let err = cfg
+        .validate()
+        .expect_err("unknown track selection must be rejected");
     assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");
-    assert!(err.to_string().contains("ghost"), "names the bad track: {err}");
+    assert!(
+        err.to_string().contains("ghost"),
+        "names the bad track: {err}"
+    );
 }
 
 #[test]
@@ -146,7 +157,9 @@ fn rejects_duplicate_target_track() {
     // Two routes claiming the same discrete track is ambiguous wiring.
     let doc = BASE.replace(r#"target_track = "trk_b""#, r#"target_track = "trk_a""#);
     let cfg = parse(&doc);
-    let err = cfg.validate().expect_err("duplicate target_track must be rejected");
+    let err = cfg
+        .validate()
+        .expect_err("duplicate target_track must be rejected");
     assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");
     assert!(err.to_string().contains("trk_a"), "names the track: {err}");
 }
@@ -163,7 +176,9 @@ channels = { kind = "stereo" }
 target_track = "trk_b""#,
     );
     let cfg = parse(&doc);
-    let err = cfg.validate().expect_err("duplicate input route must be rejected");
+    let err = cfg
+        .validate()
+        .expect_err("duplicate input route must be rejected");
     assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");
     assert!(err.to_string().contains("cam_a"), "names the input: {err}");
 }
@@ -175,20 +190,20 @@ fn rejects_program_bus_with_only_muted_or_zeroed_members() {
     // dead bus an operator did not intend.
     let doc = BASE
         .replace(
-            r#"include_in_program_bus = true
+            r"include_in_program_bus = true
 gain_db = -3.0
-mute = false"#,
-            r#"include_in_program_bus = true
+mute = false",
+            r"include_in_program_bus = true
 gain_db = -3.0
-mute = true"#,
+mute = true",
         )
         .replace(
-            r#"include_in_program_bus = true
+            r"include_in_program_bus = true
 gain_db = 0.0
-mute = false"#,
-            r#"include_in_program_bus = true
+mute = false",
+            r"include_in_program_bus = true
 gain_db = 0.0
-mute = true"#,
+mute = true",
         );
     let cfg = parse(&doc);
     let err = cfg
@@ -231,21 +246,30 @@ fn rejects_empty_route_input_id() {
 
 #[test]
 fn programmatic_construction_validates() {
-    // The schema is usable directly (not only via TOML): build a routing block
-    // in Rust and validate it in a minimal document.
-    let routing = AudioRouting {
-        sample_rate_hz: 48_000,
-        routes: vec![AudioRoute {
-            input_id: "cam_a".to_owned(),
-            channels: AudioChannels::Mono,
-            target_track: Some("trk_a".to_owned()),
-            language: None,
-            title: None,
-            include_in_program_bus: true,
-            gain_db: 0.0,
-            mute: false,
-        }],
-    };
+    // The schema is usable directly via its public validation seams (the DTOs
+    // are `#[non_exhaustive]`, matching the rest of this crate, so they are
+    // authored declaratively and decoded — never built by struct literal
+    // downstream). Decode a routing block and check its consistency seam.
+    let routing: AudioRouting = serde_json::from_str(
+        r#"{
+            "sample_rate_hz": 48000,
+            "routes": [
+                {
+                    "input_id": "cam_a",
+                    "channels": { "kind": "mono" },
+                    "target_track": "trk_a",
+                    "include_in_program_bus": true,
+                    "gain_db": 0.0,
+                    "mute": false
+                }
+            ]
+        }"#,
+    )
+    .expect("routing JSON decodes");
+    assert_eq!(routing.routes.len(), 1);
+    assert_eq!(routing.routes[0].channels, AudioChannels::Mono);
+    assert!(routing.routes[0].contributes_to_program());
+
     // The constructed routing's own consistency check passes.
     let declared: Vec<&str> = vec!["cam_a"];
     routing
@@ -253,10 +277,10 @@ fn programmatic_construction_validates() {
         .expect("a single sane route validates");
 
     // And an OutputAudio selecting a known track is consistent.
-    let sel = OutputAudio {
-        mode: OutputAudioMode::Tracks,
-        tracks: vec!["prog".to_owned(), "trk_a".to_owned()],
-    };
+    let sel: OutputAudio =
+        serde_json::from_str(r#"{ "mode": "tracks", "tracks": ["prog", "trk_a"] }"#)
+            .expect("output-audio JSON decodes");
+    assert_eq!(sel.mode, OutputAudioMode::Tracks);
     sel.validate("out0", &["prog", "trk_a"])
         .expect("a known-track selection validates");
 }

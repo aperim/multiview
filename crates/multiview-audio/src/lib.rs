@@ -20,6 +20,10 @@
 //!   (the dB→deflection mapping itself lives in `multiview-compositor`).
 //! - [`chanmap`] — channel mapping / shuffle / de-embed routing matrix for
 //!   multichannel (16+) streams.
+//! - [`capability`] — the machine-readable per-output audio **capability
+//!   matrix** (TS/RTSP = N tracks, HLS = select-one, RTMP = endpoint-gated,
+//!   NDI = channel-map): the declarative half of AUD-7's validation, referencing
+//!   [`ChannelLayout`]. The routing *schema* it gates lives in `multiview-config`.
 //! - [`probe`] — content-aware audio fault probes (silence, over-level, clip,
 //!   phase-invert, imbalance) with dwell/hysteresis, emitting
 //!   [`multiview_core::alarm`] records.
@@ -44,6 +48,7 @@
 #![warn(missing_docs)]
 
 pub mod ballistics;
+pub mod capability;
 pub mod chanmap;
 pub mod correlation;
 #[cfg(feature = "ffmpeg")]
@@ -59,6 +64,7 @@ pub mod store;
 pub mod truepeak;
 
 pub use ballistics::{Ballistics, MeterScale, PeakMode, PpmKind, SampleScale};
+pub use capability::{DiscreteTracks, OutputCapability, OutputTransport, TrackSupport};
 pub use chanmap::{ChannelMatrix, Route};
 pub use correlation::{CorrelationMeter, GonioPoint, SurroundDownmix};
 #[cfg(feature = "ffmpeg")]

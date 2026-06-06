@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod audio;
 pub mod error;
 pub mod grid;
 pub mod placement;
@@ -44,6 +45,10 @@ use multiview_core::layout::{
     Canvas as CoreCanvas, Cell as CoreCell, FitMode, Layout as CoreLayout,
 };
 
+use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
+pub use audio::{
+    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioMode, PROGRAM_TRACK,
+};
 pub use error::ConfigError;
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
@@ -120,6 +125,12 @@ pub struct MultiviewConfig {
     /// conservative built-in defaults (single-GPU hosts add zero behaviour).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<PlacementConfig>,
+    /// The audio routing block (ADR-R005): program-bus mix membership/gains and
+    /// discrete per-input track wiring. Absent ⇒ no managed audio routing (the
+    /// engine carries no audio for this document). The mix/encode/mux runtime
+    /// that consumes these routes is `multiview-audio` + the engine (AUD-3/AUD-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioRouting>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -229,6 +240,7 @@ impl MultiviewConfig {
         self.validate_sources()?;
         self.validate_cell_bindings()?;
         self.validate_outputs()?;
+        self.validate_audio()?;
         self.validate_probes()?;
         self.validate_tally_profiles()?;
         self.validate_salvos()?;
@@ -497,6 +509,38 @@ impl MultiviewConfig {
                     .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
             }
         }
+        Ok(())
+    }
+
+    /// Validate the optional audio routing block (ADR-R005) and every output's
+    /// audio selection against it.
+    ///
+    /// Enforces (in addition to [`AudioRouting::validate`] and
+    /// [`OutputAudio::validate`]): a route may only reference a declared source;
+    /// the discrete tracks an output selects must be the ones the routing block
+    /// declares (program bus + named tracks). When the document declares no
+    /// `[audio]` block, an output that nonetheless selects discrete tracks is
+    /// rejected (there is nothing to select from) — an output asking only for the
+    /// implicit program bus is fine.
+    fn validate_audio(&self) -> Result<(), ConfigError> {
+        // The selectable-track universe: the program bus is always available;
+        // named discrete tracks come from the routing block (if any).
+        let selectable: Vec<&str> = match &self.audio {
+            Some(routing) => routing.declared_tracks(),
+            None => vec![PROGRAM_TRACK_NAME],
+        };
+
+        if let Some(routing) = &self.audio {
+            let source_ids: Vec<&str> = self.sources.iter().map(|s| s.id.as_str()).collect();
+            routing.validate(&source_ids, &selectable)?;
+        }
+
+        for output in &self.outputs {
+            if let Some(selection) = output.audio() {
+                selection.validate(&output.label(), &selectable)?;
+            }
+        }
+
         Ok(())
     }
 
