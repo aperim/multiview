@@ -228,6 +228,7 @@ fn rtsp_live_push_reaches_a_listening_sidecar() {
         cadence: Rational::new(25, 1),
         gop: 25,
         bit_rate: 1_500_000,
+        audio: None,
     };
     let sink = PushSink::new(config, target.protocol(), target.publish_url());
     let mut source = GrayNv12Source { remaining: FRAMES };

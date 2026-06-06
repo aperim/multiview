@@ -37,12 +37,14 @@
 
 use std::path::{Path, PathBuf};
 
-use ffmpeg_next::format::Pixel;
+use ffmpeg_next::format::sample::Type as SampleType;
+use ffmpeg_next::format::{Pixel, Sample};
 use ffmpeg_next::util::frame::Video;
+use ffmpeg_next::ChannelLayout;
 use multiview_core::time::{rescale, MediaTime, Rational};
 use multiview_ffmpeg::{
-    DecodedVideoFrame, EncodedPacket, Muxer, ScaleSpec, Scaler, StreamCodecParameters,
-    VideoEncodeTarget, VideoEncoder,
+    AudioEncodeTarget, DecodedVideoFrame, EncodedPacket, Muxer, ScaleSpec, Scaler,
+    StreamCodecParameters, VideoEncodeTarget, VideoEncoder,
 };
 
 use crate::error::{Error, Result};
@@ -164,11 +166,79 @@ pub struct EncodeConfig {
     pub gop: u32,
     /// Target bitrate in bits/sec (`0` lets the codec choose).
     pub bit_rate: usize,
+    /// Optional program-audio encoder muxed alongside the video (AUD-4). `None`
+    /// is video-only output: the muxer registers a single video stream and every
+    /// existing video-only sink/test is unchanged. `Some` adds a second (audio)
+    /// elementary stream carrying the mixed program bus.
+    pub audio: Option<AudioEncodeConfig>,
+}
+
+/// Configuration for the optional program-audio encoder (AUD-4).
+///
+/// The program bus (`multiview_audio::program::ProgramBus`) mixes per-input
+/// audio into one stream at a fixed rate; this names the codec it is encoded
+/// with before being muxed as the output's second elementary stream. Kept
+/// backend-agnostic (a short codec name + rate/channels/bitrate); [`audio_target`]
+/// translates it into the [`AudioEncodeTarget`] the encoder is opened from.
+///
+/// [`audio_target`]: AudioEncodeConfig::audio_target
+#[derive(Debug, Clone)]
+pub struct AudioEncodeConfig {
+    /// libav short codec name (`"aac"`, `"flac"`). LGPL-clean for the default
+    /// build (AAC's native libav encoder is LGPL — no external `libfdk`).
+    pub codec_name: String,
+    /// Sample rate in Hz. The program bus runs at 48 kHz.
+    pub sample_rate: u32,
+    /// Channel count (`1` = mono, `2` = stereo); selects the encoder's layout.
+    pub channels: u16,
+    /// Target bitrate in bits/sec (`0` lets the codec choose).
+    pub bit_rate: usize,
+}
+
+impl AudioEncodeConfig {
+    /// The default LGPL-clean program-audio codec: native libav `aac`.
+    #[must_use]
+    pub fn aac(sample_rate: u32, channels: u16, bit_rate: usize) -> Self {
+        Self {
+            codec_name: "aac".to_owned(),
+            sample_rate,
+            channels,
+            bit_rate,
+        }
+    }
+
+    /// The channel layout for this configuration's channel count. Mono and
+    /// stereo are named explicitly (the only layouts the program bus mixes
+    /// today); any other count falls back to libav's default layout for it.
+    #[must_use]
+    fn channel_layout(&self) -> ChannelLayout {
+        match self.channels {
+            1 => ChannelLayout::MONO,
+            2 => ChannelLayout::STEREO,
+            other => ChannelLayout::default(i32::from(other)),
+        }
+    }
+
+    /// Translate into the `multiview-ffmpeg` [`AudioEncodeTarget`] the
+    /// [`AudioEncoder`](multiview_ffmpeg::AudioEncoder) is opened from. The
+    /// program bus is planar float (`fltp`), the format AAC and FLAC accept, so
+    /// the encoder is fed the bus samples without an extra resample.
+    #[must_use]
+    pub fn audio_target(&self) -> AudioEncodeTarget {
+        AudioEncodeTarget {
+            codec_name: self.codec_name.clone(),
+            format: Sample::F32(SampleType::Planar),
+            channel_layout: self.channel_layout(),
+            sample_rate: self.sample_rate,
+            bit_rate: self.bit_rate,
+        }
+    }
 }
 
 impl EncodeConfig {
     /// A sensible LGPL-clean default for tests/examples: `mpeg2video` fed
-    /// `yuv420p`, 30 fps, the given geometry, a one-second GOP.
+    /// `yuv420p`, 30 fps, the given geometry, a one-second GOP. Video-only
+    /// (`audio: None`) so existing streaming-encode tests are unchanged.
     #[must_use]
     pub fn mpeg2(width: u32, height: u32) -> Self {
         Self {
@@ -179,6 +249,7 @@ impl EncodeConfig {
             cadence: Rational::FPS_30,
             gop: 30,
             bit_rate: 2_000_000,
+            audio: None,
         }
     }
 
@@ -1217,12 +1288,37 @@ mod tests {
     use multiview_ffmpeg::{DecodedVideoFrame, StreamVideoDecoder};
 
     use super::{
-        EncodeConfig, Result, SegmentSink, VideoFrameSource, SEED_ENCODER_BUILDS, SEGMENT_FINALIZES,
+        AudioEncodeConfig, EncodeConfig, Result, SegmentSink, VideoFrameSource,
+        SEED_ENCODER_BUILDS, SEGMENT_FINALIZES,
     };
     use crate::error::Error;
 
     const WIDTH: u32 = 160;
     const HEIGHT: u32 = 120;
+
+    #[test]
+    fn audio_encode_config_maps_to_a_planar_float_target() {
+        // AUD-4: the optional program-audio config translates to the
+        // multiview-ffmpeg AudioEncodeTarget the ProgramEncoder opens. AAC is fed
+        // planar float (fltp) at the program-bus rate; the channel count selects
+        // the layout. The default mpeg2() example stays video-only (audio: None)
+        // so every existing video-only sink/test is unchanged.
+        use ffmpeg::format::sample::Type as SampleType;
+        use ffmpeg::format::Sample;
+        use ffmpeg::ChannelLayout;
+
+        assert!(EncodeConfig::mpeg2(WIDTH, HEIGHT).audio.is_none());
+
+        let stereo = AudioEncodeConfig::aac(48_000, 2, 128_000).audio_target();
+        assert_eq!(stereo.codec_name, "aac");
+        assert_eq!(stereo.sample_rate, 48_000);
+        assert_eq!(stereo.bit_rate, 128_000);
+        assert_eq!(stereo.format, Sample::F32(SampleType::Planar));
+        assert_eq!(stereo.channel_layout, ChannelLayout::STEREO);
+
+        let mono = AudioEncodeConfig::aac(48_000, 1, 96_000).audio_target();
+        assert_eq!(mono.channel_layout, ChannelLayout::MONO);
+    }
 
     /// Serializes the counter-based tests: the seed/finalize counters are
     /// process-global statics, and both tests exercise both counters (opening

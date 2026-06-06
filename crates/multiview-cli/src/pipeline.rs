@@ -595,6 +595,10 @@ impl Pipeline {
             cadence,
             gop,
             bit_rate: 4_000_000,
+            // AUD-4: video-only until the program-audio path is wired through
+            // drive_streaming (subsequent slice); `None` keeps the muxer
+            // single-stream so the existing run output is unchanged.
+            audio: None,
         };
 
         let outputs = build_outputs(&config.outputs)?;

@@ -49,6 +49,7 @@ fn config(fps: i64, gop: u32) -> EncodeConfig {
         cadence: Rational::new(fps, 1),
         gop,
         bit_rate: 2_000_000,
+        audio: None,
     }
 }
 

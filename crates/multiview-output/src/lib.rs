@@ -77,6 +77,7 @@ pub use rtsp_server::{
 
 #[cfg(feature = "ffmpeg")]
 pub use sink::{
-    EncodeConfig, EncodeStats, FileSink, PacketMuxOutcome, PacketMuxSink, PacketSource,
-    ProgramEncoder, PushProtocol, PushSink, SegmentResult, SegmentSink, VideoFrameSource,
+    AudioEncodeConfig, EncodeConfig, EncodeStats, FileSink, PacketMuxOutcome, PacketMuxSink,
+    PacketSource, ProgramEncoder, PushProtocol, PushSink, SegmentResult, SegmentSink,
+    VideoFrameSource,
 };

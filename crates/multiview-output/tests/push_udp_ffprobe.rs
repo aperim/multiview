@@ -121,6 +121,7 @@ fn ts_config(fps: i64, gop: u32) -> EncodeConfig {
         cadence: Rational::new(fps, 1),
         gop,
         bit_rate: 1_500_000,
+        audio: None,
     }
 }
 
