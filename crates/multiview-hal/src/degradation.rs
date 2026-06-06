@@ -25,28 +25,58 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum DegradationAction {
-    /// 1. Drop per-tile decode resolution (lowest-priority tiles first).
+    // --- Preview rungs (topmost, cheapest to shed) -----------------------
+    // Per [preview-subsystem §8](../../../docs/research/preview-subsystem.md)
+    // and ADR-P001, preview is the FIRST thing shed under sustained overload —
+    // ALL preview rungs are applied before any tile/program lever moves
+    // (invariant #9: cheapest-impact-first; preview loses every resource fight
+    // against the program). These rungs touch only the best-effort, isolated
+    // preview side-channel (invariant #10), never the protected output path.
+    /// 1. Shed click-to-focus WHEP sessions: suspend existing focus encodes and
+    ///    refuse new focus (the `503 fallback: ws-jpeg` shape). The single most
+    ///    expensive preview transport, shed first.
+    ShedFocusWhep,
+    /// 2. Drop the preview grid/thumbnail fps (fewer JPEG/MJPEG ticks).
+    DropPreviewGridFps,
+    /// 3. Drop the preview grid/thumbnail resolution.
+    DropPreviewGridRes,
+    /// 4. Stop off-air cue/pre-warm decoders (ADR-P004 Tier B workers).
+    DropOffAirCueDecoders,
+    /// 5. Suspend the preview subsystem entirely (no taps, no encodes).
+    SuspendPreviewEntirely,
+
+    // --- Tile / shared-resource rungs (pre-program) ----------------------
+    /// 6. Drop per-tile decode resolution (lowest-priority tiles first).
     DropTileResolution,
-    /// 2. Drop per-tile fps (`skip_frame` noref -> nokey).
+    /// 7. Drop per-tile fps (`skip_frame` noref -> nokey).
     DropTileFps,
-    /// 3. Switch to a simpler/faster scaler.
+    /// 8. Switch to a simpler/faster scaler.
     SimplerScaler,
-    /// 4. Step the output encoder preset faster (cheap, large swing).
+
+    // --- Program-affecting rungs (the output everyone sees) --------------
+    /// 9. Step the output encoder preset faster (cheap, large swing).
     FasterEncoderPreset,
-    /// 5. Lower output bitrate.
+    /// 10. Lower output bitrate.
     LowerOutputBitrate,
-    /// 6. Lower output fps.
+    /// 11. Lower output fps.
     LowerOutputFps,
-    /// 7. Lower output resolution.
+    /// 12. Lower output resolution.
     LowerOutputResolution,
-    /// 8. Shed/freeze lowest-priority tiles entirely (`AVDISCARD_ALL`).
+    /// 13. Shed/freeze lowest-priority tiles entirely (`AVDISCARD_ALL`).
     ShedTiles,
 }
 
 impl DegradationAction {
     /// The ladder in cheapest-impact-first order (the order actions are
-    /// applied as pressure rises; recovery reverses it).
-    pub const LADDER: [DegradationAction; 8] = [
+    /// applied as pressure rises; recovery reverses it). The five preview rungs
+    /// lead, then the tile/shared-resource rungs, then the program-affecting
+    /// rungs — so preview is fully shed before the program is ever touched.
+    pub const LADDER: [DegradationAction; 13] = [
+        DegradationAction::ShedFocusWhep,
+        DegradationAction::DropPreviewGridFps,
+        DegradationAction::DropPreviewGridRes,
+        DegradationAction::DropOffAirCueDecoders,
+        DegradationAction::SuspendPreviewEntirely,
         DegradationAction::DropTileResolution,
         DegradationAction::DropTileFps,
         DegradationAction::SimplerScaler,
@@ -61,25 +91,60 @@ impl DegradationAction {
     #[must_use]
     pub const fn rung(self) -> usize {
         match self {
-            DegradationAction::DropTileResolution => 0,
-            DegradationAction::DropTileFps => 1,
-            DegradationAction::SimplerScaler => 2,
-            DegradationAction::FasterEncoderPreset => 3,
-            DegradationAction::LowerOutputBitrate => 4,
-            DegradationAction::LowerOutputFps => 5,
-            DegradationAction::LowerOutputResolution => 6,
-            DegradationAction::ShedTiles => 7,
+            DegradationAction::ShedFocusWhep => 0,
+            DegradationAction::DropPreviewGridFps => 1,
+            DegradationAction::DropPreviewGridRes => 2,
+            DegradationAction::DropOffAirCueDecoders => 3,
+            DegradationAction::SuspendPreviewEntirely => 4,
+            DegradationAction::DropTileResolution => 5,
+            DegradationAction::DropTileFps => 6,
+            DegradationAction::SimplerScaler => 7,
+            DegradationAction::FasterEncoderPreset => 8,
+            DegradationAction::LowerOutputBitrate => 9,
+            DegradationAction::LowerOutputFps => 10,
+            DegradationAction::LowerOutputResolution => 11,
+            DegradationAction::ShedTiles => 12,
         }
     }
 
-    /// Whether this rung degrades the **program output** everyone sees (rung 4
-    /// onward), as opposed to individual low-priority tiles / shared resources.
+    /// Whether this rung sheds the best-effort, isolated **preview**
+    /// side-channel (the five topmost rungs), as opposed to a tile or program
+    /// lever. The degradation driver maps these onto
+    /// [`crate::degradation`]'s preview hooks (e.g. `FocusGate::suspend`) so a
+    /// preview rung is shed BEFORE any tile/program rung (ADR-P001, invariant
+    /// #9). A preview rung never affects the program ([`Self::affects_program`]
+    /// is always `false` for it).
+    #[must_use]
+    pub const fn affects_preview(self) -> bool {
+        self.rung() < DegradationAction::first_non_preview_level()
+    }
+
+    /// Whether this rung degrades the **program output** everyone sees (the
+    /// `FasterEncoderPreset` rung onward), as opposed to the preview
+    /// side-channel or individual low-priority tiles / shared resources.
     ///
     /// The planner can surface this so an operator (or a policy) treats
     /// crossing into program-affecting territory differently.
     #[must_use]
     pub const fn affects_program(self) -> bool {
-        self.rung() >= DegradationAction::FasterEncoderPreset.rung()
+        self.rung() >= DegradationAction::first_program_level()
+    }
+
+    /// The level at which the **first non-preview** (tile) rung begins: every
+    /// rung strictly below this is a preview rung. Equals the number of preview
+    /// rungs, so all of them are shed before any tile/program lever moves.
+    #[must_use]
+    pub const fn first_non_preview_level() -> usize {
+        DegradationAction::DropTileResolution.rung()
+    }
+
+    /// The level at which the **first program-affecting** rung begins: every
+    /// rung strictly below this is preview-or-tile (pre-program). This is the
+    /// boundary invariant #9 protects — nothing the program shows is touched
+    /// until pressure has climbed past every cheaper rung.
+    #[must_use]
+    pub const fn first_program_level() -> usize {
+        DegradationAction::FasterEncoderPreset.rung()
     }
 }
 

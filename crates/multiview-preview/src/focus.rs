@@ -55,7 +55,7 @@ impl Default for FocusCaps {
     }
 }
 
-/// Why a focus admission was refused — always because a hard cap is full.
+/// Why a focus admission was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FocusDenied {
@@ -63,6 +63,11 @@ pub enum FocusDenied {
     GlobalFull,
     /// The [`FocusCaps::per_scope`] ceiling for this scope is full.
     ScopeFull,
+    /// The gate is **suspended** by the degradation ladder: under sustained
+    /// overload preview focus is the first rung shed (ADR-P001, invariant #9),
+    /// so new focus is refused regardless of cap headroom until load clears and
+    /// the ladder [`FocusGate::resume`]s the gate.
+    Suspended,
 }
 
 /// Shared, mutex-guarded counters — the gate's *entire* state.
@@ -76,6 +81,14 @@ struct Inner<K> {
     /// Live focus count server-wide (the sum of `per_scope`'s values, tracked
     /// separately so the global check is O(1)).
     global: usize,
+    /// Whether the degradation ladder has suspended preview focus. While `true`,
+    /// [`FocusGate::try_acquire`] refuses every new focus with
+    /// [`FocusDenied::Suspended`], regardless of cap headroom (PRV-4: preview is
+    /// the first rung shed under sustained overload, ADR-P001). Held leases are
+    /// untouched here — their sessions are torn down out-of-band by the driver
+    /// that flipped the flag; releasing a lease while suspended still frees its
+    /// slot normally.
+    suspended: bool,
 }
 
 /// A hard, deterministic cap on concurrent WHEP focus sessions.
@@ -119,6 +132,7 @@ where
                 caps,
                 per_scope: HashMap::new(),
                 global: 0,
+                suspended: false,
             })),
         }
     }
@@ -135,6 +149,8 @@ where
     ///
     /// # Errors
     ///
+    /// * [`FocusDenied::Suspended`] — the degradation ladder has suspended
+    ///   preview focus (shed-first under overload); refused before any cap check.
     /// * [`FocusDenied::GlobalFull`] — the server-wide cap has no headroom.
     /// * [`FocusDenied::ScopeFull`] — this scope's per-scope cap has no headroom.
     pub fn try_acquire(&self, scope: K) -> Result<FocusLease<K>, FocusDenied> {
@@ -144,6 +160,12 @@ where
         let Ok(mut guard) = self.inner.lock() else {
             return Err(FocusDenied::GlobalFull);
         };
+        // Preview shed-first: while the ladder holds the gate suspended, refuse
+        // every new focus (the `503 fallback` shape) before any cap check, so the
+        // operator sheds to the always-available JPEG transport (PRV-4).
+        if guard.suspended {
+            return Err(FocusDenied::Suspended);
+        }
         if guard.global >= guard.caps.global {
             return Err(FocusDenied::GlobalFull);
         }
@@ -176,6 +198,42 @@ where
         self.inner
             .lock()
             .map_or(0, |g| g.per_scope.get(scope).copied().unwrap_or(0))
+    }
+
+    /// **Suspend** preview focus: the hook the degradation ladder drives when it
+    /// climbs onto the topmost (preview) rung under sustained overload (PRV-4,
+    /// ADR-P001, invariant #9). While suspended, [`Self::try_acquire`] refuses
+    /// every new focus with [`FocusDenied::Suspended`] regardless of cap
+    /// headroom — the existing `503 fallback` shape, so callers shed to the
+    /// always-available JPEG transport.
+    ///
+    /// Idempotent. This flips only the gate's own flag; it does **not** drop
+    /// leases already held — the driver that suspended the gate tears those
+    /// focus encodes down out-of-band (and each [`FocusLease`]'s `Drop` still
+    /// frees its slot normally). A poisoned lock is ignored: it is preview-only
+    /// bookkeeping that never involves the engine (invariant #10).
+    pub fn suspend(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.suspended = true;
+        }
+    }
+
+    /// **Resume** preview focus once sustained overload clears and the ladder
+    /// recovers the preview rung: new focus is admissible again (subject to the
+    /// usual caps). Idempotent; the inverse of [`Self::suspend`].
+    pub fn resume(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.suspended = false;
+        }
+    }
+
+    /// Whether the gate is currently suspended by the degradation ladder.
+    ///
+    /// A poisoned lock reports `true` (fail-closed: treat an unknown state as
+    /// suspended rather than admit focus we cannot account for).
+    #[must_use]
+    pub fn is_suspended(&self) -> bool {
+        self.inner.lock().map_or(true, |g| g.suspended)
     }
 
     /// Release one focus slot for `scope`. Internal: called from

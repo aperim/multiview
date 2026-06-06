@@ -90,8 +90,8 @@ fn actions_at_level_is_cumulative_and_clamped() {
 fn preview_rungs_are_the_topmost_cheapest_rungs() {
     use DegradationAction::*;
     // The five preview rungs occupy levels 0..5 — strictly below every other
-    // rung. `affects_preview()` distinguishes them; `is_preview` and the helper
-    // `first_non_preview_level()` agree on the boundary.
+    // rung. `affects_preview()` distinguishes them; the helper
+    // `first_non_preview_level()` agrees on the boundary.
     let preview = [
         ShedFocusWhep,
         DropPreviewGridFps,
@@ -101,7 +101,10 @@ fn preview_rungs_are_the_topmost_cheapest_rungs() {
     ];
     for (level, action) in preview.iter().enumerate() {
         assert_eq!(action.rung(), level, "{action:?} must be rung {level}");
-        assert!(action.affects_preview(), "{action:?} must be a preview rung");
+        assert!(
+            action.affects_preview(),
+            "{action:?} must be a preview rung"
+        );
     }
     // The boundary helper points at the first NON-preview rung.
     assert_eq!(
@@ -172,7 +175,7 @@ fn climbing_pressure_sheds_all_preview_before_any_tile_or_program_lever() {
     assert_eq!(h.level(), first_non_preview);
     assert!(actions_at_level(h.level())
         .iter()
-        .all(DegradationAction::affects_preview));
+        .all(|a| a.affects_preview()));
 
     // The NEXT step finally reaches the first tile lever (still pre-program).
     assert_eq!(h.observe(0.99), LadderMove::Down);
