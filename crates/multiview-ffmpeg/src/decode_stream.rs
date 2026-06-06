@@ -39,8 +39,16 @@ pub struct DecodedVideoFrame {
     /// The decoded pixels as a host [`Video`] frame in NV12 (or P010 for 10-bit
     /// sources). Borrow planes via [`Video::data`]/[`Video::stride`].
     pub frame: Video,
-    /// The pure-Rust metadata describing this frame.
+    /// The pure-Rust metadata describing this frame. Its `pts` is already
+    /// rescaled to the canonical nanosecond timeline.
     pub meta: FrameMeta,
+    /// The **raw** best-effort presentation timestamp in the source stream's own
+    /// time-base ticks (pre-rescale), or `None` when the decoder emitted no
+    /// usable timestamp. This is the unwrap-domain value a downstream
+    /// [`PtsNormalizer`](multiview_input::normalize::PtsNormalizer) needs to
+    /// detect a 33-bit MPEG-TS / 32-bit RTP wrap; `meta.pts` has already been
+    /// rescaled and cannot reveal the wrap. Sampled, never used to pace.
+    pub raw_pts: Option<i64>,
 }
 
 /// A video decoder that consumes caller-supplied packets and yields NV12 host
@@ -168,7 +176,11 @@ impl StreamVideoDecoder {
             format: multiview_format,
             color,
         };
-        Ok(Some(DecodedVideoFrame { frame: nv12, meta }))
+        Ok(Some(DecodedVideoFrame {
+            frame: nv12,
+            meta,
+            raw_pts,
+        }))
     }
 
     /// Convert a decoded frame to NV12 if it is not already a canonical working

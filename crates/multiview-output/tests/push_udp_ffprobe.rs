@@ -104,7 +104,11 @@ impl VideoFrameSource for RampNv12Source {
             // -- invariant #8); the sink re-stamps and tags downstream.
             color: ColorInfo::default(),
         };
-        Ok(Some(DecodedVideoFrame { frame, meta }))
+        Ok(Some(DecodedVideoFrame {
+            frame,
+            meta,
+            raw_pts: None,
+        }))
     }
 }
 

@@ -3009,7 +3009,13 @@ fn nv12_to_decoded(image: &Nv12Image) -> Result<DecodedVideoFrame, PipelineError
         format: PixelFormat::Nv12,
         color: image.color(),
     };
-    Ok(DecodedVideoFrame { frame, meta })
+    // The composited canvas is not an ingested stream — there is no source-tick
+    // PTS to unwrap (the encoder re-stamps from its tick counter), so no raw PTS.
+    Ok(DecodedVideoFrame {
+        frame,
+        meta,
+        raw_pts: None,
+    })
 }
 
 /// Bridge a CPU-reference [`Nv12Image`] into a libav NV12 [`Video`] frame by
@@ -3469,6 +3475,22 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
     }
 }
 
+/// Map one decoded frame onto the timeline the store is stamped with.
+///
+/// Returns the decoder's already-rescaled presentation time for this frame.
+/// (ENG-2 will route the **raw** source-tick PTS through the per-input
+/// [`PtsNormalizer`](multiview_input::normalize::PtsNormalizer) here so a 33-bit
+/// MPEG-TS wrap is unwrapped onto one monotonic nanosecond timeline — proven by
+/// the `eng2_timeline_tests`, which currently fail against this passthrough.)
+fn timeline_pts(
+    normalizer: &mut multiview_input::normalize::PtsNormalizer,
+    _raw_pts: Option<i64>,
+    fallback: MediaTime,
+) -> MediaTime {
+    let _ = normalizer;
+    fallback
+}
+
 /// Open `plan.location`, decode its best video stream to NV12 scaled to the tile
 /// size, and publish each frame into `plan.store` paced to wall-clock by PTS.
 ///
@@ -3523,6 +3545,20 @@ fn open_and_stream(
         .with_declared_fps(Some(declared_fps));
     let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
 
+    // Per-input PTS normalizer (invariant #3, the unified timing model): unwrap a
+    // 33-bit MPEG-TS wrap, synthesize a genpts fallback from the declared cadence
+    // when a frame carries no PTS, smooth discontinuities, and enforce a strict
+    // monotonic guard — producing one clean nanosecond timeline before pace/publish.
+    // Every CLI ingest source is MPEG-TS-family: the live transports
+    // (RTSP/HLS/TS/SRT/RTMP) carry 33-bit PTS, and file containers carry continuous
+    // 64-bit PTS that the 33-bit delta-unwrap passes through unchanged. (No raw
+    // `rtp://` 32-bit source kind exists in the CLI path yet, so `Rtp32` is unused.)
+    let mut normalizer = multiview_input::normalize::PtsNormalizer::new(
+        multiview_input::normalize::WrapBits::Mpeg33,
+        time_base,
+        declared_fps,
+    );
+
     // Build the in-container DVB-sub decoder once, from the SAME open container's
     // subtitle stream parameters (#36 Phase 2). Its packets are pumped as a
     // sibling of the video packets below — they never go through `receive_frame`.
@@ -3542,17 +3578,21 @@ fn open_and_stream(
         }
         while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
             let image = to_tile.convert(&decoded.frame, tag)?;
-            // Pace to the frame's PTS (invariant #4) so a file/VOD source is not
-            // slurped into the ring faster than real time, then publish it
-            // stamped with its SOURCE-RELATIVE media time — the timeline the
-            // output clock latches against (latch-on-tick; see `publish_time`).
-            // Re-check `stop` after the (possibly long) pace wait.
-            pacer.wait_for(decoded.meta.pts, stop);
+            // Normalize the RAW source-tick PTS onto the unified monotonic
+            // nanosecond timeline (invariant #3) before pacing/publish; a frame
+            // with no usable PTS or a degenerate timebase falls back to the
+            // decoder's own rescaled time so ingest never drops a frame.
+            let pts = timeline_pts(&mut normalizer, decoded.raw_pts, decoded.meta.pts);
+            // Pace to that PTS (invariant #4) so a file/VOD source is not slurped
+            // into the ring faster than real time, then publish it stamped with
+            // its SOURCE-RELATIVE media time — the timeline the output clock
+            // latches against (latch-on-tick; see `publish_time`). Re-check `stop`
+            // after the (possibly long) pace wait.
+            pacer.wait_for(pts, stop);
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
-            plan.store
-                .publish(image, pacer.publish_time(decoded.meta.pts));
+            plan.store.publish(image, pacer.publish_time(pts));
         }
         if drained {
             return Ok(());
@@ -4399,5 +4439,75 @@ mod reconnect_tests {
         let path = SourceLocation::Path(std::path::PathBuf::from("/tmp/clip.mp4"));
         let opts = ingest_open_options(&path);
         assert_eq!(opts.get("rw_timeout"), None);
+    }
+}
+
+#[cfg(test)]
+mod eng2_timeline_tests {
+    //! ENG-2: the ingest publish timeline must be the *normalized* one — raw
+    //! source-tick PTS unwrapped onto a monotonic nanosecond timeline (invariant
+    //! #3) — not the decoder's bare rescaled PTS. These exercise [`timeline_pts`]'s
+    //! wiring of the per-input [`PtsNormalizer`]; the wrap arithmetic itself is
+    //! unit-proven in `multiview-input::normalize`.
+
+    use multiview_core::time::{MediaTime, Rational};
+    use multiview_input::normalize::{PtsNormalizer, WrapBits};
+
+    use super::timeline_pts;
+
+    /// A long-running live MPEG-TS source wraps its 33-bit PTS at the 90 kHz
+    /// clock; the published timeline must stay strictly monotonic across the wrap.
+    /// The `fallback` (the decoder's rescaled PTS) is deliberately `ZERO` every
+    /// frame, so a regression that dropped the normalizer and returned the
+    /// fallback would collapse the timeline to a constant and fail here.
+    #[test]
+    fn publish_timeline_is_monotonic_across_a_33bit_pts_wrap() {
+        let time_base = Rational::new(1, 90_000); // 90 kHz MPEG-TS clock
+        let cadence = Rational::new(30, 1); // 30 fps
+        let mut normalizer = PtsNormalizer::new(WrapBits::Mpeg33, time_base, cadence);
+
+        let modulus: i64 = 1 << 33; // 33-bit PTS wraps at 2^33 ticks
+        let step: i64 = 3_000; // 90 kHz ticks per 30 fps frame
+        // Five frames straddling the wrap: the third is the post-wrap masked
+        // value (as libav would present it after 2^33 ticks elapse).
+        let raws = [
+            modulus - 2 * step,
+            modulus - step,
+            step,
+            2 * step,
+            3 * step,
+        ];
+
+        let out: Vec<MediaTime> = raws
+            .into_iter()
+            .map(|raw| timeline_pts(&mut normalizer, Some(raw), MediaTime::ZERO))
+            .collect();
+
+        for pair in out.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "published timeline must be strictly monotonic across a 33-bit wrap, got {out:?}"
+            );
+        }
+    }
+
+    /// A source that emits no usable PTS (`AV_NOPTS`) must still advance one frame
+    /// period per frame via the genpts fallback — never collapse to a constant.
+    #[test]
+    fn missing_pts_advances_via_genpts_fallback() {
+        let time_base = Rational::new(1, 90_000);
+        let cadence = Rational::new(25, 1); // PAL 25 fps
+        let mut normalizer = PtsNormalizer::new(WrapBits::Mpeg33, time_base, cadence);
+
+        let out: Vec<MediaTime> = (0..4)
+            .map(|_| timeline_pts(&mut normalizer, None, MediaTime::ZERO))
+            .collect();
+
+        for pair in out.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "genpts fallback must advance the timeline each frame, got {out:?}"
+            );
+        }
     }
 }
