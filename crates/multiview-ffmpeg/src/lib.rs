@@ -205,7 +205,7 @@ pub use hwframe::{HwDeviceContext, HwFramesContext, HwFramesSpec};
 pub use mux::Muxer;
 
 #[cfg(feature = "ffmpeg")]
-pub use packet::{EncodedPacket, StreamCodecParameters};
+pub use packet::{EncodedPacket, StreamCodecParameters, StreamKind};
 
 #[cfg(feature = "ffmpeg")]
 pub use resample::{ResampleSpec, Resampler};

@@ -32,6 +32,20 @@
 use ffmpeg::codec;
 use ffmpeg_next as ffmpeg;
 
+/// Which elementary stream an [`EncodedPacket`] belongs to.
+///
+/// Encode-once-mux-many fans the *same* coded packets to N muxers; with audio
+/// (AUD-4) a muxer registers two streams (video + audio), so each packet must
+/// say which one it writes to. The kind selects the muxer `stream_index`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StreamKind {
+    /// The composited program video.
+    Video,
+    /// The mixed program audio.
+    Audio,
+}
+
 /// One encoded packet, movable across threads and copyable per consumer.
 ///
 /// Built from the encoder's `receive_packet` output. The fan-out hands one of
@@ -40,15 +54,36 @@ use ffmpeg_next as ffmpeg;
 /// timestamp rescale never aliases another sink's packet).
 pub struct EncodedPacket {
     packet: codec::packet::Packet,
+    kind: StreamKind,
 }
 
 impl EncodedPacket {
-    /// Wrap an encoded packet pulled from a
-    /// [`VideoEncoder::receive_packet`](crate::encode::VideoEncoder::receive_packet)
-    /// (or audio).
+    /// Wrap a **video** encoded packet pulled from a
+    /// [`VideoEncoder::receive_packet`](crate::encode::VideoEncoder::receive_packet).
     #[must_use]
     pub fn from_packet(packet: codec::packet::Packet) -> Self {
-        Self { packet }
+        Self {
+            packet,
+            kind: StreamKind::Video,
+        }
+    }
+
+    /// Wrap an **audio** encoded packet pulled from an
+    /// [`AudioEncoder::receive_packet`](crate::encode::AudioEncoder::receive_packet)
+    /// (AUD-4): tags it [`StreamKind::Audio`] so the fan-out routes it to the
+    /// muxer's audio stream.
+    #[must_use]
+    pub fn from_audio_packet(packet: codec::packet::Packet) -> Self {
+        Self {
+            packet,
+            kind: StreamKind::Audio,
+        }
+    }
+
+    /// Which elementary stream this packet belongs to (video or audio).
+    #[must_use]
+    pub const fn kind(&self) -> StreamKind {
+        self.kind
     }
 
     /// The packet presentation timestamp in encoder time-base, or `None` if the
@@ -111,6 +146,7 @@ impl Clone for EncodedPacket {
     fn clone(&self) -> Self {
         Self {
             packet: self.packet.clone(),
+            kind: self.kind,
         }
     }
 }
@@ -118,6 +154,7 @@ impl Clone for EncodedPacket {
 impl std::fmt::Debug for EncodedPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncodedPacket")
+            .field("kind", &self.kind())
             .field("pts", &self.pts())
             .field("dts", &self.dts())
             .field("is_keyframe", &self.is_keyframe())
@@ -183,5 +220,29 @@ impl std::fmt::Debug for StreamCodecParameters {
             .field("medium", &self.parameters.medium())
             .field("codec_id", &self.parameters.id())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod stream_kind_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{EncodedPacket, StreamKind};
+    use ffmpeg_next as ffmpeg;
+
+    #[test]
+    fn from_packet_defaults_to_video_and_from_audio_tags_audio() {
+        // AUD-4: the fan-out must route audio packets to the audio mux stream, so
+        // every EncodedPacket carries its stream kind. The existing video path
+        // (`from_packet`) must stay Video so video-only sinks are unchanged.
+        let v = EncodedPacket::from_packet(ffmpeg::codec::packet::Packet::empty());
+        assert_eq!(v.kind(), StreamKind::Video);
+
+        let a = EncodedPacket::from_audio_packet(ffmpeg::codec::packet::Packet::empty());
+        assert_eq!(a.kind(), StreamKind::Audio);
+
+        // The kind survives the per-muxer ref-counted clone (the fan-out clones
+        // before handing each sink its owned copy).
+        assert_eq!(a.clone().kind(), StreamKind::Audio);
     }
 }
