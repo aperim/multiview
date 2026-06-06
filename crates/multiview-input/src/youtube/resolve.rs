@@ -64,6 +64,28 @@ pub struct ResolvedHls {
     pub expire_unix: Option<i64>,
 }
 
+impl ResolvedHls {
+    /// Construct a [`ResolvedHls`] from its parts.
+    ///
+    /// `ResolvedHls` is `#[non_exhaustive]`, so callers in other crates (and the
+    /// re-resolution loop's tests/fakes) cannot use a struct literal; this
+    /// constructor is the supported way to build one. `expire_unix` is the `expire`
+    /// deadline parsed off `manifest_url` (typically via [`parse_expire`]), or
+    /// `None` when absent.
+    #[must_use]
+    pub fn new(
+        manifest_url: impl Into<String>,
+        live_status: LiveStatus,
+        expire_unix: Option<i64>,
+    ) -> Self {
+        Self {
+            manifest_url: manifest_url.into(),
+            live_status,
+            expire_unix,
+        }
+    }
+}
+
 /// One entry of the `yt-dlp -J` `formats` array. Only the fields the resolver
 /// reads are modelled; `yt-dlp` emits many more (all ignored).
 #[derive(Debug, Deserialize)]

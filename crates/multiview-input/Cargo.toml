@@ -39,6 +39,11 @@ proptest = "1.11.0"
 # Self-contained ffmpeg-feature tests generate their own tiny clip at runtime
 # (via the `ffmpeg` CLI) into a tempdir — no checked-in media.
 tempfile = "3"
+# `test-util` enables `tokio::time` pause/advance so the YouTube re-resolution
+# loop test drives an expiry boundary deterministically with NO real sleeping and
+# NO network. `macros`/`rt` bring `#[tokio::test]`. Feature flags only — the
+# `tokio` package is already in the workspace lock (no new dependency).
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 
 [features]
 "default" = []

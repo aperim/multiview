@@ -3130,6 +3130,19 @@ fn ingest_plan_for(
         | SourceKind::Ts { url }
         | SourceKind::Srt { url }
         | SourceKind::Rtmp { url } => (SourceLocation::Url(url.clone()), true),
+        // A YouTube live source is a thin wrapper over HLS (ADR-0015): bound by its
+        // watch URL, resolved to a fresh `*.googlevideo.com` HLS master on every
+        // (re)connect by `yt-dlp`. It is `live` so the ingest loop reconnects (and
+        // re-resolves) forever; a resolve failure never fails the build — it
+        // degrades the tile on the ingest thread (invariants #1/#10). Only wired
+        // under the off-by-default `youtube` feature.
+        #[cfg(feature = "youtube")]
+        SourceKind::Youtube { url } => (
+            SourceLocation::Youtube {
+                watch_url: url.clone(),
+            },
+            true,
+        ),
         SourceKind::Ndi { .. } => {
             return Err(PipelineError::Ingest {
                 id: source.id.clone(),
@@ -3234,6 +3247,8 @@ fn resolve_dvbsub_route(
     let path = match location {
         SourceLocation::Path(p) => p.as_path(),
         SourceLocation::Url(_) | SourceLocation::Synthetic(_) => return None,
+        #[cfg(feature = "youtube")]
+        SourceLocation::Youtube { .. } => return None,
     };
     let demux = match Demuxer::open(path) {
         Ok(d) => d,
@@ -3279,6 +3294,19 @@ enum SourceLocation {
     /// An in-process synthetic source (bars/solid/clock) — no media to open;
     /// rendered by [`crate::synth::generator_loop`] on the ingest thread.
     Synthetic(crate::synth::SyntheticKind),
+    /// A `YouTube` live source (ADR-0015): bound by its **watch** URL, resolved to
+    /// a time-limited `*.googlevideo.com` HLS master by a runtime-discovered
+    /// `yt-dlp` ([`multiview_input::youtube`]). The watch URL — never a hand-copied
+    /// manifest — is carried so the ingest loop re-resolves a fresh master on every
+    /// (re)connect: a manifest that ages out and starts 403-ing simply EOFs/errors
+    /// the open, and the existing reconnect bracket re-enters and re-resolves, so a
+    /// long run survives the ~6 h expiry. The resolution runs on the ingest thread
+    /// (the control/IO plane), never on the output data plane (invariants #1/#10).
+    #[cfg(feature = "youtube")]
+    Youtube {
+        /// The `YouTube` watch/live/channel URL bound by the config.
+        watch_url: String,
+    },
 }
 
 /// The total budget the startup **prime-wait** ([`wait_for_prime`]) spends
@@ -3403,7 +3431,18 @@ fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
 /// empty dictionary (a slow disk must not abort a finite source mid-decode).
 fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static> {
     let mut opts = ffmpeg::Dictionary::new();
-    if matches!(location, SourceLocation::Url(_)) {
+    // Network sources (a plain URL or a resolved YouTube HLS master) get the
+    // `rw_timeout` so a dead/stalled live source fails the open or a blocking read
+    // instead of hanging the decode thread; local files and synthetic sources do
+    // not. (A YouTube source's resolved master is a `*.googlevideo.com` URL — a
+    // network source — so it is treated exactly like any other URL here.)
+    let is_network = match location {
+        SourceLocation::Url(_) => true,
+        #[cfg(feature = "youtube")]
+        SourceLocation::Youtube { .. } => true,
+        SourceLocation::Path(_) | SourceLocation::Synthetic(_) => false,
+    };
+    if is_network {
         // `rw_timeout` is expressed in microseconds; libav copies the strings.
         opts.set("rw_timeout", &INGEST_RW_TIMEOUT.as_micros().to_string());
     }
@@ -3497,6 +3536,36 @@ fn timeline_pts(
     normalizer.normalize(raw_pts, 0).unwrap_or(fallback)
 }
 
+/// Resolve a `YouTube` **watch** URL to a fresh live HLS master URL (ADR-0015),
+/// for opening by the standard HLS ingest path.
+///
+/// This is the CLI's wiring seam onto [`multiview_input::youtube`]: it spawns the
+/// runtime-discovered `yt-dlp` resolver under its hard timeout and returns the
+/// resolved `*.googlevideo.com` manifest URL ([`ingest_url`](multiview_input::youtube::reresolve::ingest_url)).
+/// It runs on the calling **ingest thread** (a `std::thread`, the control/IO
+/// plane), so it spins up a small current-thread Tokio runtime to drive the async
+/// resolver; the output data plane is never involved (invariants #1/#10). A
+/// resolve failure (binary absent, timeout, extraction broke, or the stream is not
+/// live) is returned as a `String` error — the caller's reconnect bracket backs
+/// off and retries while the tile degrades; it is never a panic.
+#[cfg(feature = "youtube")]
+fn resolve_youtube_master(watch_url: &str) -> Result<String, String> {
+    use multiview_input::youtube::reresolve::{ingest_url, ProcessResolver, Resolver};
+
+    // A dedicated current-thread runtime for this one resolve. `yt-dlp`'s own hard
+    // timeout (ResolverConfig::default) bounds the await, so this never blocks the
+    // ingest thread indefinitely; the reconnect backoff bounds retry frequency.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("youtube resolver runtime: {e}"))?;
+    let process = ProcessResolver::default();
+    let master = runtime
+        .block_on(process.resolve(watch_url))
+        .map_err(|e| e.to_string())?;
+    Ok(ingest_url(&master).to_owned())
+}
+
 /// Open `plan.location`, decode its best video stream to NV12 scaled to the tile
 /// size, and publish each frame into `plan.store` paced to wall-clock by PTS.
 ///
@@ -3513,6 +3582,21 @@ fn open_and_stream(
 ) -> Result<(), String> {
     multiview_ffmpeg::ensure_initialized().map_err(|e| e.to_string())?;
 
+    // A YouTube source resolves its watch URL to a FRESH `*.googlevideo.com` HLS
+    // master here, on every (re)connect (ADR-0015): the resolved master is
+    // time-limited and 403s at its `expire` deadline, so re-resolving on each open
+    // — driven by the existing reconnect bracket in `ingest_loop` — is what keeps
+    // the tile alive across the ~6 h expiry. Resolution runs on THIS ingest thread
+    // (the control/IO plane) under a hard timeout (a hung `yt-dlp` is killed, never
+    // awaited); it never touches the output data plane (invariants #1/#10). A
+    // resolve failure returns `Err`, which the reconnect bracket backs off and
+    // retries while the tile rides last-good → NO_SIGNAL.
+    #[cfg(feature = "youtube")]
+    let resolved_youtube_url = match &plan.location {
+        SourceLocation::Youtube { watch_url } => Some(resolve_youtube_master(watch_url)?),
+        _ => None,
+    };
+
     // Network sources open with an `rw_timeout` so a dead live source fails fast
     // instead of hanging this decode thread on open or a blocking read (#45).
     let opts = ingest_open_options(&plan.location);
@@ -3522,6 +3606,17 @@ fn open_and_stream(
         }
         SourceLocation::Url(u) => {
             ffmpeg::format::input_with_dictionary(&u.as_str(), opts).map_err(|e| e.to_string())?
+        }
+        // A YouTube source opens the manifest URL resolved above (a network HLS
+        // master) exactly like any other URL.
+        #[cfg(feature = "youtube")]
+        SourceLocation::Youtube { .. } => {
+            // `resolved_youtube_url` is `Some` for this arm (set just above for the
+            // same `Youtube` location); a `let-else` keeps it panic-free.
+            let Some(url) = resolved_youtube_url.as_deref() else {
+                return Err("youtube source did not resolve a manifest url".to_owned());
+            };
+            ffmpeg::format::input_with_dictionary(&url, opts).map_err(|e| e.to_string())?
         }
         // Unreachable: `ingest_loop` routes synthetic sources to the generator
         // before opening any media. Guarded so the match stays exhaustive.
@@ -4445,6 +4540,78 @@ mod reconnect_tests {
         let path = SourceLocation::Path(std::path::PathBuf::from("/tmp/clip.mp4"));
         let opts = ingest_open_options(&path);
         assert_eq!(opts.get("rw_timeout"), None);
+    }
+}
+
+/// Tests for the `YouTube` ingest seam (IN-5): a `youtube` source plans as a
+/// re-resolvable, live, network ingest location bound by its **watch** URL — never
+/// a hand-copied manifest. The resolver core + the re-resolution policy/loop are
+/// unit-proven (no network) in `multiview-input`; here we pin only the CLI wiring
+/// (plan mapping + network classification), with no network and no `yt-dlp`.
+#[cfg(test)]
+#[cfg(feature = "youtube")]
+mod youtube_tests {
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_config::Source;
+    use multiview_core::time::Rational;
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    use super::{ingest_open_options, ingest_plan_for, SourceLocation};
+
+    /// Build a `youtube` `Source` via serde (the type is `#[non_exhaustive]`, so a
+    /// struct literal is not available cross-crate — config is produced by
+    /// deserialization anyway).
+    fn youtube_source(id: &str, url: &str) -> Source {
+        let json = serde_json::json!({
+            "id": id,
+            "kind": "youtube",
+            "url": url,
+        });
+        serde_json::from_value(json).expect("youtube source deserializes")
+    }
+
+    #[test]
+    fn youtube_source_plans_as_a_live_rebindable_watch_url() {
+        let source = youtube_source("yt-live", "https://www.youtube.com/watch?v=abcdEFGH123");
+        let store = Arc::new(TileStore::new(
+            source.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = ingest_plan_for(
+            &source,
+            320,
+            180,
+            Arc::clone(&store),
+            CanvasColor::default(),
+            Rational::new(30, 1),
+        )
+        .expect("youtube source plans without failing the build");
+
+        // It is bound by the WATCH url (so it can re-resolve), not a manifest, and
+        // it is `live` so the ingest loop reconnects + re-resolves forever.
+        let SourceLocation::Youtube { watch_url } = &plan.location else {
+            panic!("expected a Youtube location for a youtube source");
+        };
+        assert_eq!(watch_url, "https://www.youtube.com/watch?v=abcdEFGH123");
+        assert!(plan.live, "a youtube live source must be live (reconnects)");
+    }
+
+    #[test]
+    fn youtube_location_is_classified_as_a_network_source() {
+        // The resolved master is a `*.googlevideo.com` URL: a network source, so it
+        // must get the `rw_timeout` (a stalled live source fails the open / a
+        // blocking read rather than hanging the decode thread — invariant #1/#10).
+        let location = SourceLocation::Youtube {
+            watch_url: "https://www.youtube.com/watch?v=abcdEFGH123".to_owned(),
+        };
+        let opts = ingest_open_options(&location);
+        assert_eq!(
+            opts.get("rw_timeout"),
+            Some(super::INGEST_RW_TIMEOUT.as_micros().to_string().as_str()),
+        );
     }
 }
 

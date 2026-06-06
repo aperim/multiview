@@ -39,9 +39,14 @@
 //! (ADR-0015 §7).
 
 pub mod process;
+pub mod reresolve;
 pub mod resolve;
 
 pub use process::{probe_version, resolve as resolve_url, ResolverConfig};
+pub use reresolve::{
+    ingest_url, run_reresolve_loop, ManualClock, ProcessResolver, ReresolveConfig,
+    ReresolveOutcome, ReresolveSchedule, Resolver, SystemUnixClock, UnixClock,
+};
 pub use resolve::{parse_expire, parse_info_dict, LiveStatus, ResolvedHls};
 
 /// Errors raised by the `YouTube` resolver.

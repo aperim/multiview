@@ -32,11 +32,7 @@ fn resolved_with_expire(tag: &str, expire_unix: i64) -> ResolvedHls {
     let manifest_url = format!(
         "https://manifest.googlevideo.com/api/manifest/hls_playlist/{tag}/index.m3u8?expire={expire_unix}"
     );
-    ResolvedHls {
-        manifest_url,
-        live_status: LiveStatus::Live,
-        expire_unix: Some(expire_unix),
-    }
+    ResolvedHls::new(manifest_url, LiveStatus::Live, Some(expire_unix))
 }
 
 // ---------------------------------------------------------------------------
@@ -72,12 +68,11 @@ fn schedule_falls_back_to_ttl_guard_when_expire_absent() {
         error_burst_threshold: 5,
     };
     // A resolved URL with NO parsed expiry: the upper-bound TTL guard applies.
-    let resolved = ResolvedHls {
-        manifest_url: "https://manifest.googlevideo.com/api/manifest/hls_playlist/x/index.m3u8"
-            .to_owned(),
-        live_status: LiveStatus::Live,
-        expire_unix: None,
-    };
+    let resolved = ResolvedHls::new(
+        "https://manifest.googlevideo.com/api/manifest/hls_playlist/x/index.m3u8",
+        LiveStatus::Live,
+        None,
+    );
     let sched = ReresolveSchedule::new(cfg, &resolved, 1000);
 
     // Deadline = resolved_at(1000) + ttl_guard(21600) - lead(900) = 21700.
@@ -261,4 +256,52 @@ async fn loop_unresolvable_url_degrades_without_panic() {
     // No URL was ever published — the tile degrades; the loop stopped cleanly.
     assert!(swaps.lock().expect("lock").is_empty());
     assert_eq!(outcome, ReresolveOutcome::Stopped);
+}
+
+// ---------------------------------------------------------------------------
+// Live end-to-end (network-gated): resolve a REAL YouTube live URL with the
+// real `yt-dlp` resolver and assert it yields a future-dated HLS master.
+// ---------------------------------------------------------------------------
+
+/// End-to-end resolution against a real live `YouTube` URL. This needs the
+/// network, a current `yt-dlp` on `PATH`, and a *currently live* stream, none of
+/// which exist in CI — so it is `#[ignore]`d and only runs when an operator points
+/// it at a live URL via `MULTIVIEW_YOUTUBE_LIVE_URL` and runs with `--ignored`.
+///
+/// It proves the production resolver path end to end: the resolved URL is a
+/// `*.googlevideo.com` HLS master with a parsed `expire` in the future — the exact
+/// input the HLS ingest path opens and the re-resolution loop schedules against.
+#[tokio::test]
+#[ignore = "needs network + a live YouTube stream + yt-dlp (set MULTIVIEW_YOUTUBE_LIVE_URL)"]
+async fn live_youtube_resolves_to_a_future_dated_hls_master() {
+    use multiview_input::youtube::reresolve::{
+        ProcessResolver, Resolver, SystemUnixClock, UnixClock,
+    };
+
+    let Ok(url) = std::env::var("MULTIVIEW_YOUTUBE_LIVE_URL") else {
+        panic!("set MULTIVIEW_YOUTUBE_LIVE_URL to a currently-live YouTube watch URL");
+    };
+
+    let process = ProcessResolver::default();
+    let master = process
+        .resolve(&url)
+        .await
+        .expect("a live youtube url must resolve to an HLS master");
+
+    assert_eq!(master.live_status, LiveStatus::Live);
+    assert!(
+        master.manifest_url.contains("googlevideo.com"),
+        "resolved master must be a googlevideo HLS URL: {}",
+        master.manifest_url
+    );
+    // The resolved URL must be valid into the future — otherwise the
+    // re-resolution loop would have nothing to schedule against.
+    let now = SystemUnixClock.now_unix();
+    let expire = master
+        .expire_unix
+        .expect("a resolved live HLS master carries an expire deadline");
+    assert!(
+        expire > now,
+        "resolved master already expired (expire={expire}, now={now})"
+    );
 }
