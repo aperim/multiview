@@ -1,12 +1,13 @@
 //! The `YouTube` **re-resolution** policy and supervised loop (ADR-0015 phases
-//! P2–P4): keep a live tile alive across the ~6 h `*.googlevideo.com` HLS URL
-//! expiry by refreshing the manifest URL **before** it 403s, off the data plane.
+//! P2–P4): the mechanism for keeping a live tile alive across the ~6 h
+//! `*.googlevideo.com` HLS URL expiry by refreshing the manifest URL ahead of the
+//! `expire` deadline, off the data plane.
 //!
 //! A resolved googlevideo URL is time-limited — it carries an `expire` Unix
 //! timestamp after which the CDN returns HTTP 403 (for live HLS the window is
 //! roughly six hours; see [`super::resolve::parse_expire`]). A long-running
-//! ingest that does nothing watches its tile go dark at that boundary. So the
-//! `youtube` source runs a re-resolution loop that:
+//! ingest that does nothing watches its tile go dark at that boundary. This module
+//! provides the loop that prevents that. The loop:
 //!
 //! * parses the deadline and refreshes **`lead`** seconds ahead of it
 //!   ([`ReresolveSchedule`]), falling back to a **`ttl_guard`** upper bound when
@@ -31,6 +32,20 @@
 //! [`UnixClock`], and publishes each fresh URL through a caller-supplied swap sink.
 //! It does no decoding of its own — the resolved manifest is fed to the standard
 //! HLS ingest path, which owns the actual demux/decode.
+//!
+//! ## Wiring status (honest, no aspiration)
+//!
+//! [`ReresolveSchedule`] + [`run_reresolve_loop`] are implemented and unit-tested
+//! here, but the **proactive lead-time loop is not yet spawned by the CLI** — that
+//! bridge (the async loop ↔ the synchronous std decode thread, with a swappable
+//! URL slot) is the remaining slice (tracked as **IN-5b**). What the CLI ingest
+//! path (`multiview-cli`'s `open_and_stream`) does **today** is re-resolve a fresh
+//! master on every (re)connect via the existing reconnect/backoff bracket: a
+//! long run still survives the ~6 h expiry — the segment fetch 403s, the reconnect
+//! re-resolves, and the tile rides LIVE → STALE → reconnect back to LIVE — but the
+//! tile **does briefly degrade at the boundary** (break-before-make) rather than
+//! refreshing ahead of it. Wiring the loop above into ingest upgrades that to the
+//! make-before-break, refresh-before-expiry behaviour this module already provides.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

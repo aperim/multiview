@@ -166,11 +166,14 @@ impl Resolver for FakeResolver {
 
 #[tokio::test(start_paused = true)]
 async fn loop_swaps_make_before_break_across_an_expiry() {
-    // Two successive resolves: the loop must publish the first URL, then — at the
-    // refresh deadline — publish the SECOND, and the second must be live before
-    // the loop considers the first retired (make-before-break: a swap event is
-    // only emitted once the new URL is in hand).
-    let first = resolved_with_expire("v1", 0); // expire parsed but the loop uses the injected clock
+    // Pins make-before-break ORDERING + exactly-two-publishes: the loop publishes
+    // the first URL, then the SECOND, each only once the new URL is in hand (a swap
+    // event is emitted only after the fresh resolve succeeds — never a gap). With
+    // `expire = 0` (below the injected clock of 1000) the refresh deadline is
+    // already in the past, so the second resolve fires WITHOUT a timed wait — this
+    // test exercises the swap ordering, not the lead-time delay (the lead-time
+    // deadline math is covered by the pure `ReresolveSchedule` tests above).
+    let first = resolved_with_expire("v1", 0); // expire below the clock → deadline already passed
     let second = resolved_with_expire("v2", 0);
     let resolver = FakeResolver::new(vec![Ok(first.clone()), Ok(second.clone())]);
 
@@ -200,8 +203,9 @@ async fn loop_swaps_make_before_break_across_an_expiry() {
         .await
     });
 
-    // Let the loop perform the initial resolve + first swap, then advance virtual
-    // time past the (ttl_guard - lead = 9 s) refresh deadline so it re-resolves.
+    // Let the loop run both resolves (the deadline is already past, so the second
+    // fires immediately after the first), then stop. The sleep only yields enough
+    // virtual time for both swaps to land before the stop flag is observed.
     tokio::time::sleep(Duration::from_secs(15)).await;
     stop.store(true, Ordering::SeqCst);
     // Nudge time so the interruptible sleep wakes and observes the stop flag.
