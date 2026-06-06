@@ -21,6 +21,13 @@
 //!   RTSP ANNOUNCE/RECORD publish URL from a base + mount for the existing
 //!   `PushProtocol::Rtsp` push path. No native dependency; the in-process
 //!   `gst-rtsp-server` is OUT-2 (a separate feature).
+//! - [`rtsp_server`] — the OUT-2 in-process RTSP **server** (ADR-0006 primary
+//!   path): the always-compiled typed seam ([`rtsp_server::RtspServerSink`]
+//!   [`PacketSink`](fanout::PacketSink) over a bounded drop-oldest
+//!   [`rtsp_server::BoundedPacketQueue`], [`rtsp_server::RtspMount`], and
+//!   [`rtsp_server::RtspCodec`] caps selection) plus, behind the off-by-default
+//!   `rtsp-server` feature, the `gst-rtsp-server` serving thread that fans the
+//!   already-encoded canvas to RTSP clients with no re-encode.
 //!
 //! The transports themselves (RTSP via `gst-rtsp-server`, the CMAF segmenter +
 //! LL-HLS HTTP origin, NDI, RTMP/SRT) are feature-gated (`ffmpeg`, `ndi`, …) so
@@ -43,6 +50,7 @@ pub mod error;
 pub mod fanout;
 pub mod hls;
 pub mod rtsp;
+pub mod rtsp_server;
 pub mod tsl;
 
 /// Real encode-once-mux-many output sinks (file + HLS segmenter), built on
@@ -62,6 +70,10 @@ pub mod ndi;
 
 pub use error::{Error, Result};
 pub use rtsp::{RtspPublishError, RtspPublishTarget};
+pub use rtsp_server::{
+    units_to_nanos, BoundedPacketQueue, RtspCapsError, RtspCodec, RtspMount, RtspMountError,
+    RtspServerSink,
+};
 
 #[cfg(feature = "ffmpeg")]
 pub use sink::{

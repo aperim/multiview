@@ -21,7 +21,9 @@
 use std::sync::Arc;
 
 use multiview_output::fanout::{EncodedPacket, PacketKind, PacketSink, RenditionId};
-use multiview_output::rtsp_server::{BoundedPacketQueue, RtspMount, RtspMountError, RtspServerSink};
+use multiview_output::rtsp_server::{
+    BoundedPacketQueue, RtspMount, RtspMountError, RtspServerSink,
+};
 
 fn packet(pts: i64, byte: u8) -> Arc<EncodedPacket> {
     Arc::new(EncodedPacket {
@@ -48,7 +50,7 @@ fn queue_drops_oldest_when_consumer_is_slow() {
     // Capacity 3, no consumer draining: pushing 5 keeps only the newest 3.
     let queue = BoundedPacketQueue::new(3);
     for pts in 0..5 {
-        let dropped = queue.push(&packet(pts, pts as u8));
+        let dropped = queue.push(&packet(pts, 0));
         // The first 3 fit; pushes 4 and 5 each evict one oldest.
         if pts < 3 {
             assert!(!dropped, "push {pts} should fit without dropping");
@@ -65,7 +67,10 @@ fn queue_drops_oldest_when_consumer_is_slow() {
     let drained: Vec<i64> = std::iter::from_fn(|| queue.pop().map(|p| p.pts)).collect();
     assert_eq!(drained, vec![2, 3, 4]);
     assert_eq!(queue.len(), 0);
-    assert!(queue.pop().is_none(), "drained queue yields None, never blocks");
+    assert!(
+        queue.pop().is_none(),
+        "drained queue yields None, never blocks"
+    );
 }
 
 #[test]
@@ -108,7 +113,11 @@ fn sink_deliver_enqueues_without_blocking() {
 
     sink.deliver(&packet(0, 0));
     sink.deliver(&packet(1, 1));
-    assert_eq!(sink.queued(), 2, "deliver must enqueue into the bounded buffer");
+    assert_eq!(
+        sink.queued(),
+        2,
+        "deliver must enqueue into the bounded buffer"
+    );
 }
 
 #[test]
@@ -149,7 +158,10 @@ fn sink_fan_out_shares_packet_allocation() {
 fn mount_builds_served_url() {
     let mount = RtspMount::new("program").unwrap();
     assert_eq!(mount.path(), "/program");
-    assert_eq!(mount.served_url("127.0.0.1", 8554), "rtsp://127.0.0.1:8554/program");
+    assert_eq!(
+        mount.served_url("127.0.0.1", 8554),
+        "rtsp://127.0.0.1:8554/program"
+    );
 }
 
 #[test]

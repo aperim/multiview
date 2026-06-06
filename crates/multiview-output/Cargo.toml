@@ -25,6 +25,17 @@ tokio = { workspace = true }
 # (`all-features = false`) never scans it.
 multiview-ndi-sys = { workspace = true, optional = true }
 
+# Off-by-default `rtsp-server` path ONLY (OUT-2 / ADR-0006): the in-process RTSP
+# server. These are the SAFE Rust bindings over GStreamer/GLib; this crate writes
+# NO `unsafe` and stays `forbid(unsafe_code)`. The GStreamer/GLib C libraries are
+# LGPL-2.1 and resolved by DYNAMIC LINK at run time (never vendored), so the
+# default build is unaffected and LGPL-clean. Pulled in ONLY by the `rtsp-server`
+# feature; `cargo deny` runs with all-features=false so it never sees them.
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
+gstreamer-rtsp-server = { workspace = true, optional = true }
+glib = { workspace = true, optional = true }
+
 # Real libav* encode/mux path — opt-in only behind the `ffmpeg` feature so the
 # DEFAULT build stays pure-Rust / native-dep-free. All raw FFI is owned by
 # `multiview-ffmpeg`; this crate only calls its SAFE wrappers (it stays
@@ -83,6 +94,22 @@ multiview-input = { workspace = true }
 # I/O additionally stays inert until an operator accepts the runtime license gate
 # (see `crate::ndi::NdiLicense`).
 "ndi" = ["dep:multiview-ndi-sys"]
+# In-process RTSP server (OUT-2 / ADR-0006 primary path). OFF by default: it pulls
+# the GStreamer/GLib C stack (a GLib main loop) via the SAFE `gst-rtsp-server`
+# Rust bindings. The bindings are MIT/Apache-2.0 and the C libraries are LGPL-2.1,
+# resolved by DYNAMIC LINK at run time — never vendored — so enabling this does
+# NOT make the build GPL and the DEFAULT build links nothing GStreamer. The pure
+# typed seam (bounded drop-oldest queue, `RtspServerSink`, mount/caps) is ALWAYS
+# compiled and CI-tested; this feature only adds the `rtsp_server::server` serving
+# thread. NOTE: building this feature requires the GStreamer dev libraries present
+# (gstreamer-1.0, gstreamer-app, gstreamer-rtsp-server-1.0); without them the
+# link/build fails — it is a GStreamer-equipped-runner concern, not CI.
+"rtsp-server" = [
+    "dep:gstreamer",
+    "dep:gstreamer-app",
+    "dep:gstreamer-rtsp-server",
+    "dep:glib",
+]
 
 [lints]
 workspace = true
