@@ -20,16 +20,18 @@
 use multiview_core::time::MediaTime;
 use multiview_framestore::TileStore;
 use multiview_input::source::{FrameProducer, IngestConfig, IngestPump, StoredFrame};
+use multiview_input::st2022_7::Path;
 use multiview_input::st2110::assembler::RasterGeometry;
 use multiview_input::st2110::transport::{
     DualPathPacketSource, PacketSource, St2110Packet, St2110Producer,
 };
-use multiview_input::st2022_7::Path;
 
 /// A small 4-line raster, 8 bytes per line (toy geometry matching the IN-1 tests).
 const W: u32 = 4;
 const H: u32 = 4;
 const BYTES_PER_LINE: usize = 8;
+/// The full reassembled raster size (`H * BYTES_PER_LINE`), as a `usize`.
+const RASTER_BYTES: usize = 4 * BYTES_PER_LINE;
 
 fn geometry() -> RasterGeometry {
     RasterGeometry::new(W, H, BYTES_PER_LINE).expect("toy geometry is valid")
@@ -47,7 +49,7 @@ fn v20_payload(line: u16, fill: u8) -> Vec<u8> {
     p.extend_from_slice(&len.to_be_bytes()); // SRD length
     p.extend_from_slice(&line.to_be_bytes()); // C=0, line number
     p.extend_from_slice(&0u16.to_be_bytes()); // F=0, pixel offset 0
-    p.extend(std::iter::repeat(fill).take(BYTES_PER_LINE));
+    p.extend(std::iter::repeat_n(fill, BYTES_PER_LINE));
     p
 }
 
@@ -116,14 +118,11 @@ fn injected_rtp_sequence_assembles_and_produces_a_frame() {
     assert_eq!(frame.meta.height, H);
     assert_eq!(
         frame.pixels.len(),
-        H as usize * BYTES_PER_LINE,
+        RASTER_BYTES,
         "the produced frame carries the full reassembled raster"
     );
     // Clean end-of-stream once the scripted packets are drained.
-    assert!(producer
-        .next_frame()
-        .expect("clean EOS pull")
-        .is_none());
+    assert!(producer.next_frame().expect("clean EOS pull").is_none());
 }
 
 #[test]
@@ -168,16 +167,8 @@ fn dual_path_source_dedups_merged_sequences() {
     // loss: path A drops line 1, path B drops line 2; merged, every sequence
     // appears exactly once and the frame still completes.
     let frame = complete_frame(9000, 0);
-    let path_a: Vec<St2110Packet> = frame
-        .iter()
-        .filter(|p| p.sequence != 1)
-        .cloned()
-        .collect();
-    let path_b: Vec<St2110Packet> = frame
-        .iter()
-        .filter(|p| p.sequence != 2)
-        .cloned()
-        .collect();
+    let path_a: Vec<St2110Packet> = frame.iter().filter(|p| p.sequence != 1).cloned().collect();
+    let path_b: Vec<St2110Packet> = frame.iter().filter(|p| p.sequence != 2).cloned().collect();
 
     let merged = DualPathPacketSource::new(
         Box::new(ScriptedSource::new(path_a)),
@@ -186,14 +177,14 @@ fn dual_path_source_dedups_merged_sequences() {
     );
     let mut producer = St2110Producer::new(Box::new(merged), geometry());
 
-    let produced = producer
+    let frame = producer
         .next_frame()
         .expect("merged producer pulls without faulting")
         .expect("the merged stream closes the frame");
     // All four lines arrived across the two paths (none lost on BOTH).
     assert_eq!(
-        produced.pixels.len(),
-        H as usize * BYTES_PER_LINE,
+        frame.pixels.len(),
+        RASTER_BYTES,
         "the merged frame carries the full raster"
     );
 }
@@ -221,6 +212,37 @@ fn dual_path_source_discards_the_duplicate_copy() {
     // The merge is sequence-keyed: Path is opaque to the dedup (both paths feed
     // the same reconstructor).
     assert_ne!(Path::A, Path::B);
+}
+
+#[test]
+fn channel_bridge_is_bounded_and_drives_the_producer() {
+    use multiview_input::st2110::transport::ChannelPacketSource;
+
+    // The bounded-channel bridge: the async receive task (here, a synchronous
+    // `try_send`) feeds units; the sync source `try_recv`s them. This is the seam
+    // the live NIC path crosses, exercised without a socket.
+    let (tx, source) = ChannelPacketSource::bounded(8);
+    for pkt in complete_frame(9000, 100) {
+        tx.try_send(pkt)
+            .expect("bounded channel has room for one frame");
+    }
+    let mut producer = St2110Producer::new(Box::new(source), geometry());
+    let frame = producer
+        .next_frame()
+        .expect("producer pulls without faulting")
+        .expect("the bridged packets close one frame");
+    assert_eq!(frame.pixels.len(), RASTER_BYTES);
+
+    // The channel is BOUNDED (invariant #10): once full, a further `try_send`
+    // fails fast rather than growing — a stalled reader can never back-pressure
+    // the receive task into unbounded memory.
+    let (tx2, _src2) = ChannelPacketSource::bounded(2);
+    assert!(tx2.try_send(line_packet(false, 1, 1, 0, 0)).is_ok());
+    assert!(tx2.try_send(line_packet(false, 1, 2, 1, 0)).is_ok());
+    assert!(
+        tx2.try_send(line_packet(false, 1, 3, 2, 0)).is_err(),
+        "a full bounded channel rejects the overflow instead of growing"
+    );
 }
 
 /// Live ST 2110 UDP receive path — **gated, requires a real ST 2110 network +
