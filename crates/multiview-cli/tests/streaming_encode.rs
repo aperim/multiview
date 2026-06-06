@@ -1,13 +1,15 @@
 //! Streaming-encode behavioural tests for [`Pipeline`] (ADR-0025).
 //!
-//! These are sleep-free, GPU-free, FFmpeg-codec-free behavioural tests of the
-//! streaming bake→encode→fan-out path. They drive the engine over a
-//! [`ManualTimeSource`] + [`CooperativePacer`] (no wall-clock waits) and inject
-//! **fake** off-hot-path sinks via the `drive_streaming_for_test` seam, so the
-//! tests assert the *concurrency contract* — bounded memory, no engine stall,
-//! exact-N offline, and streaming-not-batch — without needing a real encoder or
-//! the `ffmpeg`/`ffprobe` CLIs. The end-to-end "does it produce a playable file"
-//! coverage lives in `real_pipeline.rs`/`overlay_pipeline.rs`.
+//! These are sleep-free, GPU-free behavioural tests of the streaming
+//! bake→encode→fan-out path. They drive the engine over a [`ManualTimeSource`] +
+//! [`CooperativePacer`] (no wall-clock waits) and inject **fake** off-hot-path
+//! **mux** sinks via the `drive_streaming_for_test` seam, so the tests assert the
+//! *concurrency contract* — bounded memory, no engine stall, exact-N offline, and
+//! streaming-not-batch — without the `ffprobe` CLI. Since the encode-once-mux-many
+//! refactor (invariant #7) the consumer owns a single real LGPL `mpeg2video`
+//! encoder, so the fakes consume the **coded-packet** fan-out (one packet per
+//! baked frame); the end-to-end "does it produce a playable file" coverage lives
+//! in `real_pipeline.rs`/`overlay_pipeline.rs`.
 //!
 //! Why a test seam: `Pipeline::drive` is private; the public `run_for`/
 //! `run_until` always wire the *real* file/HLS sinks. The seam exposes the same
@@ -27,9 +29,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use multiview_cli::pipeline::{Pipeline, SendPolicy, StreamTestParams, TestSinkOutcome};
-use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource, StopSignal, TimeSource};
+use multiview_ffmpeg::EncodedPacket;
 
 /// A tiny single-tile config: one built-in `test` source into a 1x1 grid, an
 /// HLS output (so a file + HLS sink are derived). The streaming-encode tests do
@@ -108,7 +110,7 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
     // never be able to stall the engine — the hot loop sheds frames instead.
     let received = Arc::new(AtomicUsize::new(0));
     let received_in_sink = Arc::clone(&received);
-    let blocked_runner = move |rx: Receiver<Arc<Nv12Image>>| -> TestSinkOutcome {
+    let blocked_runner = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
         // Pull exactly one frame, then block forever (until the channel is
         // dropped at teardown, which unblocks recv with Err).
         if rx.recv().is_ok() {
@@ -187,7 +189,7 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
     );
     assert!(
         received.load(Ordering::Acquire) >= 1,
-        "the sink should have received at least one frame before wedging"
+        "the sink should have received at least one coded packet before wedging"
     );
 }
 
@@ -208,8 +210,8 @@ async fn offline_block_for_exact_delivers_all_n_frames() {
     // so every frame is delivered and none dropped.
     let counted = Arc::new(AtomicUsize::new(0));
     let counted_in_sink = Arc::clone(&counted);
-    let slow_runner = move |rx: Receiver<Arc<Nv12Image>>| -> TestSinkOutcome {
-        while let Ok(_frame) = rx.recv() {
+    let slow_runner = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
+        while let Ok(_packet) = rx.recv() {
             std::thread::sleep(std::time::Duration::from_millis(1));
             counted_in_sink.fetch_add(1, Ordering::Release);
         }
@@ -253,7 +255,7 @@ async fn offline_block_for_exact_delivers_all_n_frames() {
     assert_eq!(
         result.sink_frames,
         vec![usize::try_from(TICKS).unwrap()],
-        "the sink must have received exactly N frames (all baked, none dropped)"
+        "the sink must have received exactly N coded packets (one per baked frame, none dropped)"
     );
 }
 
@@ -277,9 +279,9 @@ async fn frame_zero_is_encoded_while_engine_still_ticking() {
     let tick_at_frame_zero = Arc::new(AtomicU64::new(u64::MAX));
     let observed = Arc::clone(&tick_at_frame_zero);
 
-    let runner = move |rx: Receiver<Arc<Nv12Image>>| -> TestSinkOutcome {
+    let runner = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
         let mut frames = 0_usize;
-        while let Ok(_frame) = rx.recv() {
+        while let Ok(_packet) = rx.recv() {
             if frames == 0 {
                 observed.store(hot_tick_for_sink.load(Ordering::Acquire), Ordering::Release);
             }
@@ -341,7 +343,7 @@ async fn clean_stop_closes_sinks_for_finalisation() {
 
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let finished_in_sink = Arc::clone(&finished);
-    let runner = move |rx: Receiver<Arc<Nv12Image>>| -> TestSinkOutcome {
+    let runner = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
         let mut frames = 0_usize;
         // recv loop: returns Err ONLY when the consumer drops the sender at
         // teardown — i.e. end-of-program. Setting the flag proves the sink got a

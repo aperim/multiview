@@ -86,10 +86,12 @@ use multiview_engine::{
     OutputClock, Pacer, RealtimePacer, StopSignal, TimeSource,
 };
 use multiview_events::Event;
-use multiview_ffmpeg::{DecodedVideoFrame, ScaleSpec, Scaler, StreamVideoDecoder};
+use multiview_ffmpeg::{
+    DecodedVideoFrame, EncodedPacket, ScaleSpec, Scaler, StreamCodecParameters, StreamVideoDecoder,
+};
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 use multiview_output::sink::{
-    EncodeConfig, FileSink, PushProtocol, PushSink, SegmentSink, VideoFrameSource,
+    EncodeConfig, PacketMuxOutcome, PacketMuxSink, PacketSource, ProgramEncoder, PushProtocol,
 };
 
 /// The per-subscriber drop-oldest depth of the engine's outbound event stream.
@@ -322,28 +324,37 @@ fn resolve_encoder(codec_token: &str) -> Result<ResolvedEncoder, PipelineError> 
     })
 }
 
-/// A runnable output sink resolved from a config `[[outputs]]` entry.
+/// A runnable **mux-only** output sink resolved from a config `[[outputs]]`
+/// entry. None of these holds an encoder: the canvas is encoded ONCE by the bake
+/// consumer's single [`ProgramEncoder`] and the *same* coded packets are fanned,
+/// as owned copies, to each of these muxers (invariant #7, encode-once-mux-many).
 enum RunnableOutput {
-    /// A single container file (codec/extension from the config path).
-    File(FileSink),
+    /// A single container file (container inferred from the path extension).
+    File {
+        /// The packet-fed file muxer.
+        sink: PacketMuxSink,
+        /// Where the container is written (for the run report).
+        path: PathBuf,
+    },
     /// An HLS segmenter writing `seg*.ts` + a media playlist into a directory.
     Hls {
-        /// The segmenter.
-        sink: SegmentSink,
+        /// The packet-fed GOP-segment muxer.
+        sink: PacketMuxSink,
         /// Where the `.m3u8` playlist is written.
         playlist_path: PathBuf,
     },
-    /// A live push transport (RTMP / SRT) streaming the encoded program to a
-    /// remote peer over the matching protocol — the encode-once-mux-many egress
-    /// twin of [`RunnableOutput::File`] (invariant #7), differing only in that the
-    /// muxer targets a network URL. A push whose peer is unreachable is reported
-    /// and dropped, never allowed to fail the program (invariants #1/#10).
+    /// A live push transport (RTMP / SRT) muxing the same packets to a remote
+    /// peer over the matching protocol — the egress twin of
+    /// [`RunnableOutput::File`], differing only in that the muxer targets a
+    /// network URL. A push whose peer is unreachable is reported and dropped,
+    /// never allowed to fail the program (invariants #1/#10).
     Push {
-        /// The push sink (built on the same `EncodeConfig` as the file/HLS
-        /// outputs, so the canvas is encoded once and the same packets are muxed).
-        sink: PushSink,
+        /// The packet-fed push muxer.
+        sink: PacketMuxSink,
         /// A short transport label (`rtmp`/`srt`) for the run report + logs.
         label: &'static str,
+        /// The destination URL (for the run report + logs).
+        url: String,
     },
 }
 
@@ -409,6 +420,10 @@ pub struct Pipeline {
     background: LinearRgba,
     /// The resolved concrete encoder (name + fed pixel format).
     encoder: ResolvedEncoder,
+    /// The single encode configuration the bake consumer builds its one
+    /// [`ProgramEncoder`] from (invariant #7): the canvas is encoded ONCE per
+    /// run and the same packets are fanned to every mux-only sink.
+    encode_cfg: EncodeConfig,
     /// The runnable outputs declared in the config.
     outputs: Vec<RunnableOutput>,
 }
@@ -571,7 +586,7 @@ impl Pipeline {
             bit_rate: 4_000_000,
         };
 
-        let outputs = build_outputs(&config.outputs, &cfg)?;
+        let outputs = build_outputs(&config.outputs)?;
         if outputs.is_empty() {
             return Err(PipelineError::NoOutput("file/HLS"));
         }
@@ -617,6 +632,7 @@ impl Pipeline {
             nosignal_card,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
             encoder,
+            encode_cfg: cfg,
             outputs,
             #[cfg(feature = "overlay")]
             subtitles: None,
@@ -769,19 +785,21 @@ impl Pipeline {
     }
 
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
-    /// drives the **existing, tested** `multiview_output` sink's `run()` verbatim
-    /// over a [`StreamingFrameSource`] that pulls baked NV12 canvases off that
-    /// sink's bounded fan-out channel — so a sink encodes the program as it is
-    /// produced (ADR-0025) rather than after the whole run. Taking the outputs by
-    /// value here moves them out of `self`, so a second `drive_streaming` call
-    /// simply has no sinks (the run produces no further artifacts) rather than
-    /// double-running a sink.
+    /// drives the **existing, tested** `multiview_output` `PacketMuxSink::run`
+    /// over a [`StreamingPacketSource`] that pulls coded packets off that sink's
+    /// bounded fan-out channel — so a sink muxes the program as the single encoder
+    /// produces it (invariant #7) rather than after the whole run. Taking the
+    /// outputs by value here moves them out of `self`, so a second
+    /// `drive_streaming` call simply has no sinks (the run produces no further
+    /// artifacts) rather than double-running a sink.
     fn build_sink_runners(&mut self) -> Vec<SinkRunner> {
         let outputs = std::mem::take(&mut self.outputs);
         outputs
             .into_iter()
             .map(|output| -> SinkRunner {
-                Box::new(move |rx: Receiver<Arc<Nv12Image>>| run_one_output(output, rx))
+                Box::new(move |rx, params, time_base| {
+                    run_one_output(output, rx, &params, time_base)
+                })
             })
             .collect()
     }
@@ -821,10 +839,12 @@ impl Pipeline {
         let runners: Vec<SinkRunner> = runners
             .into_iter()
             .map(|r| -> SinkRunner {
-                Box::new(move |rx| {
+                // The fake sink consumes the coded-packet fan-out channel; it does
+                // not mux, so the seeded codec params + time-base are unused.
+                Box::new(move |rx, _params, _time_base| {
                     let outcome = r(rx);
                     Ok(SinkRunOutcome {
-                        line: format!("test sink: {} frame(s)", outcome.frames),
+                        line: format!("test sink: {} packet(s)", outcome.frames),
                         playlist: None,
                         frames: outcome.frames,
                     })
@@ -935,14 +955,21 @@ impl Pipeline {
         // the bounded-wait rationale and the invariant-#1/#2 guarantees.
         self.prime_bound_tiles(ts.as_ref());
 
+        // Build the SINGLE program encoder (invariant #7) the consumer owns: the
+        // canvas is encoded once and the same packets fan to every mux-only sink.
+        let encoder = ProgramEncoder::new(&self.encode_cfg).map_err(|e| PipelineError::Output {
+            kind: "encode",
+            reason: e.to_string(),
+        })?;
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
         // The consumer owns a Send `BakeContext` and builds its own (non-Send)
-        // overlay baker from it; the bake math is identical to the old post-loop
-        // path, only the call site moved off the hot loop.
+        // overlay baker from it, plus the single `ProgramEncoder`; the bake +
+        // encode math moved off the hot loop, never onto it.
         let bake_ctx = self.bake_context();
-        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy);
+        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder);
 
         // Build the runtime now (post-prime): `EngineRuntime::new` reads the seed
         // from `ts` here, so tick 0 is due at this instant — the prime delay sits
@@ -1441,12 +1468,19 @@ struct SinkRunOutcome {
     frames: usize,
 }
 
-/// A boxed closure that drives ONE output sink to completion over its bounded
-/// fan-out channel, run on its own thread by the [`StreamEgress`]. Production
-/// builds one per [`RunnableOutput`] (calling the existing `sink.run()` over a
-/// [`StreamingFrameSource`]); the test seam injects fakes.
-type SinkRunner =
-    Box<dyn FnOnce(Receiver<Arc<Nv12Image>>) -> Result<SinkRunOutcome, PipelineError> + Send>;
+/// A boxed closure that drives ONE mux-only output sink to completion over its
+/// bounded fan-out channel of coded packets, run on its own thread by the
+/// [`StreamEgress`]. Production builds one per [`RunnableOutput`] (calling
+/// `PacketMuxSink::run` over a [`StreamingPacketSource`], seeded by the single
+/// encoder's [`StreamCodecParameters`] + time-base); the test seam injects fakes.
+type SinkRunner = Box<
+    dyn FnOnce(
+            Receiver<EncodedPacket>,
+            StreamCodecParameters,
+            Rational,
+        ) -> Result<SinkRunOutcome, PipelineError>
+        + Send,
+>;
 
 /// What one **test** fake sink reports after consuming its fan-out channel:
 /// the number of baked frames it received (ADR-0025 test seam).
@@ -1457,11 +1491,12 @@ pub struct TestSinkOutcome {
 }
 
 /// A boxed fake-sink closure the [`Pipeline::drive_streaming_for_test`] seam
-/// injects: it consumes the fan-out [`Receiver`] (each baked `Arc<Nv12Image>`)
-/// and returns a [`TestSinkOutcome`]. It runs on its own off-hot-path thread,
-/// exactly like a production sink, so a test can block/slow/count it to assert
-/// the streaming concurrency contract.
-pub type TestSinkRunner = Box<dyn FnOnce(Receiver<Arc<Nv12Image>>) -> TestSinkOutcome + Send>;
+/// injects: it consumes the coded-packet fan-out [`Receiver`] (each
+/// [`EncodedPacket`] the single encoder produced) and returns a
+/// [`TestSinkOutcome`]. It runs on its own off-hot-path thread, exactly like a
+/// production mux sink, so a test can block/slow/count it to assert the streaming
+/// concurrency contract.
+pub type TestSinkRunner = Box<dyn FnOnce(Receiver<EncodedPacket>) -> TestSinkOutcome + Send>;
 
 /// The outcome of [`Pipeline::drive_streaming`]: the report plus streaming
 /// observability folded from the egress threads.
@@ -1569,20 +1604,29 @@ impl StreamEgress {
         ctx: BakeContext,
         runners: Vec<SinkRunner>,
         policy: SendPolicy,
+        encoder: ProgramEncoder,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
 
-        // One bounded fan-out channel + thread per sink. The sink thread drives the
-        // existing tested `sink.run()` verbatim over a `StreamingFrameSource` (or a
-        // test fake) — encoding the program as it is produced.
-        let mut sink_txs: Vec<SyncSender<Arc<Nv12Image>>> = Vec::with_capacity(runners.len());
+        // The codec parameters + time-base every mux sink seeds its stream from
+        // are snapshotted ONCE from the single encoder (invariant #7); the encoder
+        // itself moves into the bake consumer below to do the one encode.
+        let params = encoder.codec_params().clone();
+        let time_base = encoder.time_base();
+
+        // One bounded fan-out channel of coded packets + thread per sink. The sink
+        // thread drives `PacketMuxSink::run` (or a test fake) over a
+        // `StreamingPacketSource` — muxing the SAME packets the single encoder
+        // produced, never re-encoding (encode-once-mux-many).
+        let mut sink_txs: Vec<SyncSender<EncodedPacket>> = Vec::with_capacity(runners.len());
         let mut sinks = Vec::with_capacity(runners.len());
         for (i, runner) in runners.into_iter().enumerate() {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<Nv12Image>>(SINK_QUEUE_CAP);
+            let (tx, rx) = std::sync::mpsc::sync_channel::<EncodedPacket>(SINK_QUEUE_CAP);
             sink_txs.push(tx);
             let builder = std::thread::Builder::new().name(format!("multiview-sink-{i}"));
-            match builder.spawn(move || runner(rx)) {
+            let params = params.clone();
+            match builder.spawn(move || runner(rx, params, time_base)) {
                 Ok(handle) => sinks.push(handle),
                 Err(e) => {
                     // A sink thread that cannot spawn is a real failure (we cannot
@@ -1599,7 +1643,7 @@ impl StreamEgress {
         let consumer_in_flight = Arc::clone(&in_flight);
         let builder = std::thread::Builder::new().name("multiview-bake-consumer".to_owned());
         let consumer = builder
-            .spawn(move || consumer_main(ctx, &hot_rx, sink_txs, &consumer_in_flight))
+            .spawn(move || consumer_main(ctx, &hot_rx, sink_txs, encoder, &consumer_in_flight))
             .unwrap_or_else(|_| {
                 // Spawning the consumer failed: fall back to a thread that does
                 // nothing. The `hot_rx`/`sink_txs` moved into the failed closure
@@ -1666,23 +1710,30 @@ fn spawn_failed_sink(reason: String) -> JoinHandle<Result<SinkRunOutcome, Pipeli
     })
 }
 
-/// The single bake-consumer thread body (ADR-0025): build the [`StreamBaker`]
-/// from the owned [`BakeContext`], then loop receiving [`StreamItem`]s, baking
-/// each into an `Arc<Nv12Image>` and fanning it to every sink's bounded channel
-/// (blocking send — off the hot path). On end-of-program (the hot sender drops)
-/// the loop ends and the sink senders drop, so each sink sees its channel close
-/// and finalises (writes its trailer).
+/// The single bake-consumer thread body (encode-once-mux-many, invariant #7):
+/// build the [`StreamBaker`] from the owned [`BakeContext`] and own the single
+/// [`ProgramEncoder`], then loop receiving [`StreamItem`]s — bake each into an
+/// `Arc<Nv12Image>`, encode it ONCE, and fan each produced [`EncodedPacket`] (an
+/// independently-owned copy) to every sink's bounded channel (blocking send —
+/// off the hot path). On end-of-program (the hot sender drops) the loop ends, the
+/// encoder is flushed (its trailing packets fanned), and the sink senders drop —
+/// so each sink sees its channel close and finalises (writes its trailer).
 ///
-/// A bake error stops the consumer (the sink senders still drop on return, so the
-/// sinks finalise what they have); a sink whose receiver has hung up is simply
-/// skipped for the rest of the run.
+/// A bake or encode error stops the consumer (the sink senders still drop on
+/// return, so the sinks finalise what they have); a sink whose receiver has hung
+/// up is simply skipped for the rest of the run. The encoder runs on THIS
+/// off-hot-path thread: it can neither stall the output clock (the engine already
+/// handed the frame off — invariant #1) nor be back-pressured by a slow sink
+/// (invariant #10).
 ///
 /// # Errors
-/// Returns [`PipelineError::Engine`] if building the baker or baking a frame fails.
+/// Returns [`PipelineError`] if building the baker, baking a frame, or the single
+/// encode fails.
 fn consumer_main(
     ctx: BakeContext,
     hot_rx: &Receiver<StreamItem>,
-    sink_txs: Vec<SyncSender<Arc<Nv12Image>>>,
+    sink_txs: Vec<SyncSender<EncodedPacket>>,
+    mut encoder: ProgramEncoder,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -1695,23 +1746,54 @@ fn consumer_main(
         // One frame left the queue.
         in_flight.fetch_sub(1, Ordering::AcqRel);
         let overlaid = baker.bake(&item)?;
+        // Bridge once + encode once (invariant #7): the canvas is encoded a SINGLE
+        // time here, never once per sink.
+        let frame = nv12_to_decoded(&overlaid)?;
+        let packets = encoder
+            .encode_frame(frame)
+            .map_err(|e| PipelineError::Output {
+                kind: "encode",
+                reason: e.to_string(),
+            })?;
+        fan_packets(&sink_txs, &mut live, packets);
+    }
+    // End-of-program: flush the encoder and fan its trailing packets, then drop
+    // the sink senders so each sink sees end-of-program and finalises.
+    let tail = encoder.finish().map_err(|e| PipelineError::Output {
+        kind: "encode",
+        reason: e.to_string(),
+    })?;
+    fan_packets(&sink_txs, &mut live, tail);
+    drop(sink_txs);
+    Ok(())
+}
+
+/// Fan each coded packet to every still-live sink as an independently-owned copy
+/// (so each muxer's in-place stream-index set + rescale is sound even though the
+/// same packet feeds many muxers — invariant #7). A blocking send paces the
+/// CONSUMER to the slowest sink, never the engine (the engine already handed the
+/// frame off); a hung-up receiver (the sink ended) marks that sink dead for the
+/// rest of the run.
+fn fan_packets(
+    sink_txs: &[SyncSender<EncodedPacket>],
+    live: &mut [bool],
+    packets: Vec<EncodedPacket>,
+) {
+    for packet in packets {
         for (i, tx) in sink_txs.iter().enumerate() {
             if !live.get(i).copied().unwrap_or(false) {
                 continue;
             }
-            // Blocking send: this paces the CONSUMER to the slowest sink, never the
-            // engine (the engine already handed this frame off). A hung-up receiver
-            // (the sink ended) marks the sink dead for the rest of the run.
-            if tx.send(Arc::clone(&overlaid)).is_err() {
+            if tx
+                .send(EncodedPacket::from_packet(packet.to_owned_packet()))
+                .is_err()
+            {
                 if let Some(flag) = live.get_mut(i) {
                     *flag = false;
                 }
             }
         }
     }
-    // Drop the sink senders so each sink sees end-of-program and finalises.
-    drop(sink_txs);
-    Ok(())
 }
 
 /// Drive one runnable output to completion over its bounded fan-out channel,
@@ -1728,21 +1810,27 @@ fn consumer_main(
 /// dead remote consumer must not back-pressure or fail the program).
 fn run_one_output(
     output: RunnableOutput,
-    rx: Receiver<Arc<Nv12Image>>,
+    rx: Receiver<EncodedPacket>,
+    params: &StreamCodecParameters,
+    time_base: Rational,
 ) -> Result<SinkRunOutcome, PipelineError> {
     match output {
-        RunnableOutput::File(sink) => {
-            let mut source = StreamingFrameSource::new(rx);
-            let stats = sink.run(&mut source).map_err(|e| PipelineError::Output {
-                kind: "file",
-                reason: e.to_string(),
-            })?;
+        RunnableOutput::File { sink, path } => {
+            let mut source = StreamingPacketSource::new(rx);
+            let outcome =
+                sink.run(&mut source, params, time_base)
+                    .map_err(|e| PipelineError::Output {
+                        kind: "file",
+                        reason: e.to_string(),
+                    })?;
+            let (packets, keyframes) = match &outcome {
+                PacketMuxOutcome::Single(s) => (s.packets, s.keyframes),
+                PacketMuxOutcome::Segment(s) => (s.stats.packets, s.stats.keyframes),
+            };
             Ok(SinkRunOutcome {
                 line: format!(
-                    "file {}: {} packet(s), {} keyframe(s)",
-                    sink.path().display(),
-                    stats.packets,
-                    stats.keyframes
+                    "file {}: {packets} packet(s), {keyframes} keyframe(s)",
+                    path.display()
                 ),
                 playlist: None,
                 frames: source.delivered,
@@ -1752,24 +1840,44 @@ fn run_one_output(
             sink,
             playlist_path,
         } => {
-            let mut source = StreamingFrameSource::new(rx);
-            let result = sink.run(&mut source).map_err(|e| PipelineError::Output {
-                kind: "hls",
-                reason: e.to_string(),
-            })?;
-            let playlist_text = result.playlist.render();
-            Ok(SinkRunOutcome {
-                line: format!(
-                    "hls {} + {} segment(s) ({} packet(s))",
-                    playlist_path.display(),
-                    result.segments.len(),
-                    result.stats.packets
-                ),
-                playlist: Some((playlist_path, playlist_text)),
-                frames: source.delivered,
-            })
+            let mut source = StreamingPacketSource::new(rx);
+            let outcome =
+                sink.run(&mut source, params, time_base)
+                    .map_err(|e| PipelineError::Output {
+                        kind: "hls",
+                        reason: e.to_string(),
+                    })?;
+            match outcome {
+                PacketMuxOutcome::Segment(result) => {
+                    let playlist_text = result.playlist.render();
+                    Ok(SinkRunOutcome {
+                        line: format!(
+                            "hls {} + {} segment(s) ({} packet(s))",
+                            playlist_path.display(),
+                            result.segments.len(),
+                            result.stats.packets
+                        ),
+                        playlist: Some((playlist_path, playlist_text)),
+                        frames: source.delivered,
+                    })
+                }
+                // A segment sink always yields `Segment`; tolerate the otherwise
+                // unreachable single-container shape without a playlist rather
+                // than panicking on the hot teardown path.
+                PacketMuxOutcome::Single(stats) => Ok(SinkRunOutcome {
+                    line: format!(
+                        "hls {}: {} packet(s) (no segments)",
+                        playlist_path.display(),
+                        stats.packets
+                    ),
+                    playlist: None,
+                    frames: source.delivered,
+                }),
+            }
         }
-        RunnableOutput::Push { sink, label } => Ok(run_push_output(&sink, label, rx)),
+        RunnableOutput::Push { sink, label, url } => {
+            Ok(run_push_output(&sink, label, &url, rx, params, time_base))
+        }
     }
 }
 
@@ -1787,33 +1895,37 @@ fn run_one_output(
 /// push that connected and then errored mid-stream is reported the same tolerant
 /// way.
 fn run_push_output(
-    sink: &PushSink,
+    sink: &PacketMuxSink,
     label: &'static str,
-    rx: Receiver<Arc<Nv12Image>>,
+    url: &str,
+    rx: Receiver<EncodedPacket>,
+    params: &StreamCodecParameters,
+    time_base: Rational,
 ) -> SinkRunOutcome {
-    let mut source = StreamingFrameSource::new(rx);
-    match sink.run(&mut source) {
-        Ok(stats) => SinkRunOutcome {
-            line: format!(
-                "{label} push {}: {} packet(s), {} keyframe(s)",
-                sink.url(),
-                stats.packets,
-                stats.keyframes
-            ),
-            playlist: None,
-            frames: source.delivered,
-        },
+    let mut source = StreamingPacketSource::new(rx);
+    match sink.run(&mut source, params, time_base) {
+        Ok(outcome) => {
+            let (packets, keyframes) = match &outcome {
+                PacketMuxOutcome::Single(s) => (s.packets, s.keyframes),
+                PacketMuxOutcome::Segment(s) => (s.stats.packets, s.stats.keyframes),
+            };
+            SinkRunOutcome {
+                line: format!("{label} push {url}: {packets} packet(s), {keyframes} keyframe(s)"),
+                playlist: None,
+                frames: source.delivered,
+            }
+        }
         Err(e) => {
             // A push peer that is unreachable / drops must never fail the program.
             tracing::warn!(
                 transport = label,
-                url = sink.url(),
+                url,
                 error = %e,
                 "live push could not be delivered (peer unreachable or dropped); \
                  the program's other outputs are unaffected"
             );
             SinkRunOutcome {
-                line: format!("{label} push {}: not delivered ({e})", sink.url()),
+                line: format!("{label} push {url}: not delivered ({e})"),
                 playlist: None,
                 frames: source.delivered,
             }
@@ -2680,10 +2792,7 @@ fn output_codec(output: &Output) -> Option<&str> {
 /// stack; NDI is the proprietary runtime-loaded SDK), so they are honestly skipped
 /// with a log line rather than pretended-runnable — a config mixing one with a
 /// supported output still produces that supported output.
-fn build_outputs(
-    outputs: &[Output],
-    cfg: &EncodeConfig,
-) -> Result<Vec<RunnableOutput>, PipelineError> {
+fn build_outputs(outputs: &[Output]) -> Result<Vec<RunnableOutput>, PipelineError> {
     let mut runnable = Vec::new();
     for output in outputs {
         match output {
@@ -2694,20 +2803,22 @@ fn build_outputs(
                     reason: format!("creating {}: {e}", dir.display()),
                 })?;
                 runnable.push(RunnableOutput::Hls {
-                    sink: SegmentSink::new(cfg.clone(), dir, prefix),
+                    sink: PacketMuxSink::segment(dir, prefix),
                     playlist_path,
                 });
             }
             Output::Rtmp { url, .. } => {
                 runnable.push(RunnableOutput::Push {
-                    sink: PushSink::new(cfg.clone(), PushProtocol::Rtmp, url.clone()),
+                    sink: PacketMuxSink::push(PushProtocol::Rtmp, url.clone()),
                     label: "rtmp",
+                    url: url.clone(),
                 });
             }
             Output::Srt { url, .. } => {
                 runnable.push(RunnableOutput::Push {
-                    sink: PushSink::new(cfg.clone(), PushProtocol::Srt, url.clone()),
+                    sink: PacketMuxSink::push(PushProtocol::Srt, url.clone()),
                     label: "srt",
+                    url: url.clone(),
                 });
             }
             Output::RtspServer { .. } => {
@@ -2733,23 +2844,29 @@ fn build_outputs(
     // derived from the FIRST HLS output's directory (program.<ext>) so the run
     // always writes a self-contained playable container alongside the segments.
     // If no HLS output exists, there is nothing runnable.
-    Ok(prepend_file_sink(runnable, cfg))
+    Ok(prepend_file_sink(runnable))
 }
 
-/// Derive a single-file container sink from the first HLS output (same encode),
-/// so a `run` always produces a self-contained playable file in addition to the
-/// segmented playlist (encode-once-mux-many — invariant #7).
-fn prepend_file_sink(mut runnable: Vec<RunnableOutput>, cfg: &EncodeConfig) -> Vec<RunnableOutput> {
+/// Derive a single-file container sink from the first HLS output (fed the same
+/// one encode), so a `run` always produces a self-contained playable file in
+/// addition to the segmented playlist (encode-once-mux-many — invariant #7).
+fn prepend_file_sink(mut runnable: Vec<RunnableOutput>) -> Vec<RunnableOutput> {
     let file_path = runnable.iter().find_map(|r| match r {
         RunnableOutput::Hls { playlist_path, .. } => {
             Some(playlist_path.with_file_name("program.ts"))
         }
         // A push has no on-disk directory to derive a program file from; only an
         // HLS output anchors the self-contained `program.ts`.
-        RunnableOutput::File(_) | RunnableOutput::Push { .. } => None,
+        RunnableOutput::File { .. } | RunnableOutput::Push { .. } => None,
     });
     if let Some(path) = file_path {
-        runnable.insert(0, RunnableOutput::File(FileSink::new(cfg.clone(), path)));
+        runnable.insert(
+            0,
+            RunnableOutput::File {
+                sink: PacketMuxSink::file(path.clone()),
+                path,
+            },
+        );
     }
     runnable
 }
@@ -2774,45 +2891,56 @@ fn hls_paths(path: &Path) -> (PathBuf, String, PathBuf) {
     }
 }
 
-/// A [`VideoFrameSource`] over the bake consumer's per-sink fan-out channel
-/// (ADR-0025): it pulls each baked `Arc<Nv12Image>` off the bounded receiver and
-/// bridges it into a libav NV12 [`Video`] frame for the existing, tested output
-/// sink `run()`. `recv()` blocking on a frame is the sink's own pull (off the hot
-/// path — it can never back-pressure the engine, only the off-hot-path consumer);
-/// a closed channel (`recv() == Err`) is end-of-program → `Ok(None)`, so the sink
-/// writes its trailer exactly as in the old batch path. The frame's PTS is left
-/// for the sink to re-stamp from the tick counter (invariant #3).
-struct StreamingFrameSource {
-    rx: Receiver<Arc<Nv12Image>>,
-    /// How many frames this source delivered (for the per-sink report count).
+/// A [`PacketSource`] over the bake consumer's per-sink fan-out channel of coded
+/// packets (encode-once-mux-many): it pulls each [`EncodedPacket`] — an owned
+/// copy the consumer fanned out from the single [`ProgramEncoder`] — off the
+/// bounded receiver and hands it to the mux-only sink's `run()`. `recv()`
+/// blocking on a packet is the sink's own pull (off the hot path — it can never
+/// back-pressure the engine, only the off-hot-path consumer); a closed channel
+/// (`recv() == Err`) is end-of-program → `Ok(None)`, so the sink writes its
+/// trailer. The packets are already PTS-stamped in the encoder time-base (the
+/// muxer rescales them) — nothing re-stamps here (invariant #3 was applied at
+/// encode).
+struct StreamingPacketSource {
+    rx: Receiver<EncodedPacket>,
+    /// How many packets this source delivered (for the per-sink report count).
     delivered: usize,
 }
 
-impl StreamingFrameSource {
-    fn new(rx: Receiver<Arc<Nv12Image>>) -> Self {
+impl StreamingPacketSource {
+    fn new(rx: Receiver<EncodedPacket>) -> Self {
         Self { rx, delivered: 0 }
     }
 }
 
-impl VideoFrameSource for StreamingFrameSource {
-    fn next_frame(&mut self) -> multiview_output::Result<Option<DecodedVideoFrame>> {
-        // Block until the consumer fans the next baked frame, or the channel
+impl PacketSource for StreamingPacketSource {
+    fn next_packet(&mut self) -> multiview_output::Result<Option<EncodedPacket>> {
+        // Block until the consumer fans the next coded packet, or the channel
         // closes (end-of-program). This is the sink's pull, off the hot path.
-        let Ok(image) = self.rx.recv() else {
+        let Ok(packet) = self.rx.recv() else {
             return Ok(None);
         };
         self.delivered = self.delivered.saturating_add(1);
-        let frame = nv12_to_video(&image)
-            .map_err(|e| multiview_output::Error::Output(format!("canvas bridge: {e}")))?;
-        let meta = FrameMeta {
-            pts: MediaTime::ZERO,
-            width: image.width(),
-            height: image.height(),
-            format: PixelFormat::Nv12,
-            color: image.color(),
-        };
-        Ok(Some(DecodedVideoFrame { frame, meta }))
+        Ok(Some(packet))
     }
+}
+
+/// Bridge a baked CPU-reference [`Nv12Image`] into the [`DecodedVideoFrame`] the
+/// single [`ProgramEncoder`] consumes (NV12 → a libav frame). The encoder
+/// re-stamps the PTS from its own tick counter, so the meta PTS here is an unused
+/// placeholder. The consumer calls this once per baked frame, before the single
+/// encode (invariant #7) — the bridge that used to run once *per sink* now runs
+/// once *per frame*.
+fn nv12_to_decoded(image: &Nv12Image) -> Result<DecodedVideoFrame, PipelineError> {
+    let frame = nv12_to_video(image)?;
+    let meta = FrameMeta {
+        pts: MediaTime::ZERO,
+        width: image.width(),
+        height: image.height(),
+        format: PixelFormat::Nv12,
+        color: image.color(),
+    };
+    Ok(DecodedVideoFrame { frame, meta })
 }
 
 /// Bridge a CPU-reference [`Nv12Image`] into a libav NV12 [`Video`] frame by
