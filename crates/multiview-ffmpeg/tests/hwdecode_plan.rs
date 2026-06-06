@@ -93,7 +93,10 @@ fn intel_and_amd_decode_full_res_then_scale_separately() {
             "{kind:?} decodes at full source resolution"
         );
         assert_eq!(plan.bitstream_resolution, TileSize::new(1920, 1080));
-        assert!(plan.device_resident, "{kind:?} keeps the scale pass on the media block");
+        assert!(
+            plan.device_resident,
+            "{kind:?} keeps the scale pass on the media block"
+        );
     }
 }
 

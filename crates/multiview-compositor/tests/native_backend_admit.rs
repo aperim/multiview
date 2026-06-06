@@ -34,7 +34,7 @@ fn nv12_tiles_on_a_matching_device_admit_the_native_path() {
     let admission = admit_native_composite(
         BackendKind::Cuda,
         BackendKind::Cuda,
-        TileFormats::all_nv12(9),
+        &TileFormats::all_nv12(9),
     );
     assert_eq!(
         admission,
@@ -49,7 +49,7 @@ fn p010_tiles_still_admit_the_native_path() {
     let admission = admit_native_composite(
         BackendKind::Vaapi,
         BackendKind::Vaapi,
-        TileFormats::all_p010(4),
+        &TileFormats::all_p010(4),
     );
     assert_eq!(
         admission,
@@ -64,8 +64,7 @@ fn an_rgba_tile_rejects_the_native_path_for_inv5() {
     // fallback so the caller degrades explicitly rather than silently.
     let mut formats = TileFormats::all_nv12(9);
     formats.set_rgba(3);
-    let admission =
-        admit_native_composite(BackendKind::Cuda, BackendKind::Cuda, formats);
+    let admission = admit_native_composite(BackendKind::Cuda, BackendKind::Cuda, &formats);
     assert_eq!(
         admission,
         NativeAdmission::Fallback {
@@ -84,7 +83,7 @@ fn a_cross_vendor_request_falls_back_to_wgpu() {
     let admission = admit_native_composite(
         BackendKind::Cuda,
         BackendKind::Vaapi,
-        TileFormats::all_nv12(4),
+        &TileFormats::all_nv12(4),
     );
     assert_eq!(
         admission,
@@ -102,7 +101,7 @@ fn a_software_decode_source_falls_back_to_wgpu() {
     let admission = admit_native_composite(
         BackendKind::Software,
         BackendKind::Cuda,
-        TileFormats::all_nv12(2),
+        &TileFormats::all_nv12(2),
     );
     assert_eq!(
         admission,
@@ -121,7 +120,7 @@ fn the_portable_wgpu_request_is_not_a_native_path() {
     let admission = admit_native_composite(
         BackendKind::Cuda,
         BackendKind::Wgpu,
-        TileFormats::all_nv12(4),
+        &TileFormats::all_nv12(4),
     );
     assert_eq!(
         admission,
@@ -136,8 +135,11 @@ fn the_portable_wgpu_request_is_not_a_native_path() {
 fn an_empty_tile_set_admits_trivially_on_a_matching_device() {
     // No tiles yet (a just-started canvas). There is nothing to violate inv #5,
     // so a matching-device native path is admissible.
-    let admission =
-        admit_native_composite(BackendKind::Cuda, BackendKind::Cuda, TileFormats::all_nv12(0));
+    let admission = admit_native_composite(
+        BackendKind::Cuda,
+        BackendKind::Cuda,
+        &TileFormats::all_nv12(0),
+    );
     assert_eq!(
         admission,
         NativeAdmission::Admit(CompositeBackend::Native(BackendKind::Cuda))
@@ -151,7 +153,7 @@ fn admission_reports_a_renderable_backend_kind_either_way() {
     let admit = admit_native_composite(
         BackendKind::Cuda,
         BackendKind::Cuda,
-        TileFormats::all_nv12(4),
+        &TileFormats::all_nv12(4),
     );
     assert!(matches!(
         admit.backend(),
@@ -161,7 +163,7 @@ fn admission_reports_a_renderable_backend_kind_either_way() {
     let fallback = admit_native_composite(
         BackendKind::Software,
         BackendKind::Cuda,
-        TileFormats::all_nv12(4),
+        &TileFormats::all_nv12(4),
     );
     assert_eq!(fallback.backend(), CompositeBackend::Wgpu);
 }

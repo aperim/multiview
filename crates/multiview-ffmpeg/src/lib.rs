@@ -69,6 +69,14 @@ pub mod codec;
 
 pub mod error;
 
+/// Host-side hardware-decode planning. The [`hwdecode::HwDeviceKind`] enum, the
+/// per-backend decode-resize strategy, the content-sized surface-pool geometry,
+/// and the logical-codec -> `*_cuvid` name mapping are pure (always compiled,
+/// unit-tested, GPU-free); only the libav-backed `hwdecode::select_decoder`
+/// registry resolve lives behind the `ffmpeg` feature (named as a plain code
+/// span: it is absent from the default doc build).
+pub mod hwdecode;
+
 /// ST 2110-22 JPEG XS codec identity + capability detection. The selection
 /// algorithm and value types are pure (always compiled, unit-tested); the
 /// libav-backed `probe`/`is_available` runtime queries live behind the
@@ -91,6 +99,15 @@ pub use codec::{select_audio_encoder, select_encoder};
 pub use avio_fetch::fetch_url_text;
 
 pub use error::{FfmpegError, Result};
+
+pub use hwdecode::{
+    cuvid_decoder, decode_surface_pool, plan_decode_resize, DecodeResizeStrategy,
+    DecodeSurfacePool, HwBitDepth, HwDecodePlan, HwDeviceKind, HwInputCodec, PoolInputs,
+    ResizeInputs, TileSize,
+};
+
+#[cfg(feature = "ffmpeg")]
+pub use hwdecode::select_decoder;
 
 pub use jpegxs::{
     resolve_availability, select_codec_name, JpegXsAvailability, JpegXsRole, JPEGXS_CODEC_NAMES,
@@ -179,8 +196,10 @@ pub use demux::{Demuxer, ReadPacket, StreamParams};
 #[cfg(feature = "ffmpeg")]
 pub use encode::{AudioEncodeTarget, AudioEncoder, VideoEncodeTarget, VideoEncoder};
 
+// `HwDeviceKind` is re-exported unconditionally from `hwdecode` (it is pure);
+// `hwframe` provides the FFI device/frames handles behind the `ffmpeg` feature.
 #[cfg(feature = "ffmpeg")]
-pub use hwframe::{HwDeviceContext, HwDeviceKind, HwFramesContext, HwFramesSpec};
+pub use hwframe::{HwDeviceContext, HwFramesContext, HwFramesSpec};
 
 #[cfg(feature = "ffmpeg")]
 pub use mux::Muxer;

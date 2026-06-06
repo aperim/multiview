@@ -30,6 +30,9 @@
 //! - [`primaries`] — linear-light gamut conversion (709<->2020 via XYZ).
 //! - [`blend`] — premultiplied-alpha source-over in linear light.
 //! - [`pipeline`] — the fixed-order pipeline + CPU reference compositor.
+//! - [`native`] — host-side admission for the vendor native composite fast
+//!   paths (`cuda`/`vaapi`/`metal`): the GPU-free decision of whether a native
+//!   island can serve a tile set (inv #5 + ADR-0004) or must fall back to wgpu.
 //! - `gpu` *(feature `wgpu`)* — the portable GPU compositor + WGSL shaders
 //!   (named as a plain code span: the module is absent from the default doc build).
 //! - `overlay` *(feature `overlay`)* — the overlay text engine: cosmic-text +
@@ -45,6 +48,7 @@ pub mod error;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
 pub mod matrix;
+pub mod native;
 #[cfg(feature = "overlay")]
 pub mod overlay;
 pub mod pipeline;
@@ -54,6 +58,9 @@ pub mod transfer;
 pub mod transfer_lut;
 
 pub use error::{Error, Result};
+pub use native::{
+    admit_native_composite, CompositeBackend, NativeAdmission, NativeRejection, TileFormats,
+};
 pub use pipeline::{
     canvas_linear_to_output_yuv, composite, composite_with, composite_with_threads,
     tile_yuv_to_canvas_linear, CanvasColor, Nv12Image, Tile,

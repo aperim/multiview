@@ -37,53 +37,34 @@ use ffmpeg::format::Pixel;
 use ffmpeg_next as ffmpeg;
 
 use crate::error::{FfmpegError, Result};
+pub use crate::hwdecode::HwDeviceKind;
 
-/// A hardware backend family Multiview can target, mapped to libav's
-/// `AVHWDeviceType`. Mirrors the per-vendor zero-copy islands (core-engine §7);
-/// no cross-vendor on-GPU path is ever modeled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum HwDeviceKind {
-    /// NVIDIA CUDA (NVDEC/NVENC island).
-    Cuda,
-    /// Linux VA-API (Intel/AMD island).
-    Vaapi,
-    /// Intel Quick Sync via oneVPL.
-    Qsv,
-    /// Apple `VideoToolbox`.
-    VideoToolbox,
-}
-
-impl HwDeviceKind {
-    /// The libav device-type name used to resolve the `AVHWDeviceType`.
-    #[must_use]
-    pub const fn libav_name(self) -> &'static str {
-        match self {
-            Self::Cuda => "cuda",
-            Self::Vaapi => "vaapi",
-            Self::Qsv => "qsv",
-            Self::VideoToolbox => "videotoolbox",
-        }
+/// Resolve a [`HwDeviceKind`] to the libav `AVHWDeviceType` discriminant.
+///
+/// The pure enum + its `libav_name` live in [`crate::hwdecode`] (always
+/// compiled, GPU-free); this is the libav-touching resolution, so it lives here
+/// in the crate's designated FFI module.
+///
+/// # Errors
+/// Returns [`FfmpegError::UnknownHwDevice`] if `kind` is
+/// [`HwDeviceKind::Software`] (no libav hardware device) or the linked `FFmpeg`
+/// build does not know the device type.
+fn to_av_type(kind: HwDeviceKind) -> Result<ffi::AVHWDeviceType> {
+    let name = kind.libav_name();
+    // `Software` maps to the empty name — there is no hardware device to open.
+    if name.is_empty() {
+        return Err(FfmpegError::UnknownHwDevice(name.to_owned()));
     }
-
-    /// Resolve to the libav `AVHWDeviceType` discriminant.
-    ///
-    /// # Errors
-    /// Returns [`FfmpegError::UnknownHwDevice`] if the linked `FFmpeg` build does
-    /// not know this device type.
-    fn to_av_type(self) -> Result<ffi::AVHWDeviceType> {
-        let name = CString::new(self.libav_name())
-            .map_err(|_| FfmpegError::UnknownHwDevice(self.libav_name().to_owned()))?;
-        // SAFETY: `av_hwdevice_find_type_by_name` reads a NUL-terminated C string
-        // (guaranteed by `CString`) and returns a plain enum by value; it has no
-        // ownership effects and cannot fail destructively. `name` outlives the
-        // call.
-        let ty = unsafe { ffi::av_hwdevice_find_type_by_name(name.as_ptr()) };
-        if ty == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
-            Err(FfmpegError::UnknownHwDevice(self.libav_name().to_owned()))
-        } else {
-            Ok(ty)
-        }
+    let name_c = CString::new(name).map_err(|_| FfmpegError::UnknownHwDevice(name.to_owned()))?;
+    // SAFETY: `av_hwdevice_find_type_by_name` reads a NUL-terminated C string
+    // (guaranteed by `CString`) and returns a plain enum by value; it has no
+    // ownership effects and cannot fail destructively. `name_c` outlives the
+    // call.
+    let ty = unsafe { ffi::av_hwdevice_find_type_by_name(name_c.as_ptr()) };
+    if ty == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+        Err(FfmpegError::UnknownHwDevice(name.to_owned()))
+    } else {
+        Ok(ty)
     }
 }
 
@@ -117,7 +98,7 @@ impl HwDeviceContext {
     /// * [`FfmpegError::HwContext`] — libav could not create the device
     ///   (no driver / no device / bad selector).
     pub fn create(kind: HwDeviceKind, device: Option<&str>) -> Result<Self> {
-        let ty = kind.to_av_type()?;
+        let ty = to_av_type(kind)?;
         let device_c = match device {
             Some(d) => {
                 Some(CString::new(d).map_err(|_| FfmpegError::UnknownHwDevice(d.to_owned()))?)

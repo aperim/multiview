@@ -17,14 +17,32 @@ use multiview_ffmpeg::hwdecode::{cuvid_decoder, HwInputCodec};
 
 #[test]
 fn cuvid_names_follow_the_libav_convention() {
-    // The pure mapping is always available; the names must match libav's
-    // registered `*_cuvid` wrappers (verified by name, exactly like the encoder
-    // candidate list).
+    // The pure name mapping is always available (feature-independent); the names
+    // must match libav's registered `*_cuvid` wrappers, verified by name exactly
+    // like the encoder candidate list.
+    assert_eq!(HwInputCodec::H264.cuvid_name(), Some("h264_cuvid"));
+    assert_eq!(HwInputCodec::H265.cuvid_name(), Some("hevc_cuvid"));
+    assert_eq!(HwInputCodec::Av1.cuvid_name(), Some("av1_cuvid"));
+    assert_eq!(HwInputCodec::Vp9.cuvid_name(), Some("vp9_cuvid"));
+    assert_eq!(HwInputCodec::Mpeg2Video.cuvid_name(), Some("mpeg2_cuvid"));
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuvid_decoder_offers_the_nvdec_name_only_with_cuda() {
+    // The feature-gated `cuvid_decoder` selector returns the NVDEC name when the
+    // `cuda` feature is compiled — the decode-side analogue of `nvenc_encoder`.
     assert_eq!(cuvid_decoder(HwInputCodec::H264), Some("h264_cuvid"));
     assert_eq!(cuvid_decoder(HwInputCodec::H265), Some("hevc_cuvid"));
-    assert_eq!(cuvid_decoder(HwInputCodec::Av1), Some("av1_cuvid"));
-    assert_eq!(cuvid_decoder(HwInputCodec::Vp9), Some("vp9_cuvid"));
-    assert_eq!(cuvid_decoder(HwInputCodec::Mpeg2Video), Some("mpeg2_cuvid"));
+}
+
+#[cfg(not(feature = "cuda"))]
+#[test]
+fn cuvid_decoder_offers_nothing_without_cuda() {
+    // Without `cuda`, the selector names no NVDEC decoder: the LGPL/software
+    // default can never silently reach NVDEC (matches the encoder-side policy).
+    assert_eq!(cuvid_decoder(HwInputCodec::H264), None);
+    assert_eq!(cuvid_decoder(HwInputCodec::H265), None);
 }
 
 // The candidate-list / availability-probe seam needs the `ffmpeg` feature (it
