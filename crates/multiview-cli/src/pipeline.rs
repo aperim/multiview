@@ -113,10 +113,21 @@ const OFFLINE_QUEUE_CAP: usize = 8;
 const LIVE_QUEUE_CAP: usize = 4;
 
 /// Bounded capacity of each consumer → sink fan-out queue. The consumer drives
-/// these with a blocking `send` (it is off the hot path, so blocking there is
-/// allowed — it can only back-pressure the *consumer*, never the engine), so a
+/// these with a bounded `send_timeout` (it is off the hot path, so blocking there
+/// is allowed — it can only back-pressure the *consumer*, never the engine), so a
 /// slow sink paces the consumer rather than dropping a baked frame.
 const SINK_QUEUE_CAP: usize = 4;
+
+/// The grace a wedged sink is given before it is detached so teardown stays
+/// bounded (ENG-1, invariant #1 — `stop` always completes). It bounds BOTH the
+/// consumer's per-packet fan-out `send_timeout` (so a sink that never drains
+/// cannot stall the consumer) AND the [`StreamEgress::join`] wait for each sink
+/// thread to finish (so a sink wedged finalising — e.g. a push muxer blocked
+/// writing its trailer to a dead peer — cannot hang the join forever). A healthy
+/// sink drains/finalises in milliseconds, far inside this window; only a genuine
+/// wedge trips it, and it is then reported (never silently dropped) and detached
+/// (reaped at process exit). Matches the ingest [`INGEST_JOIN_GRACE`] posture.
+const SINK_WEDGE_GRACE: Duration = Duration::from_secs(2);
 
 /// How the hot-loop projection hands each composited tick to the bake consumer
 /// over the bounded streaming queue (ADR-0025). The choice is the single
@@ -1665,18 +1676,50 @@ impl StreamEgress {
 
     /// Join the bake consumer + every sink thread, folding their outcomes. Joins
     /// the consumer FIRST (it drops the sink senders on the way out, so each sink
-    /// then sees end-of-program and finalises), then each sink. A panicked thread
-    /// surfaces as an engine error rather than being swallowed.
+    /// then sees end-of-program and finalises), then each sink with a **bounded**
+    /// wait. A panicked thread surfaces as an engine error rather than being
+    /// swallowed.
+    ///
+    /// **Bounded teardown (ENG-1, invariant #1):** a sink that drained then wedged
+    /// in its finalise (e.g. a push muxer blocked writing its trailer to a dead
+    /// peer) must never hang `stop`. Each sink is given [`SINK_WEDGE_GRACE`] to
+    /// finish (polled via `is_finished()`, never a `join()` that cannot return);
+    /// a sink still running past the grace is REPORTED and DETACHED — its handle
+    /// dropped without joining, its own muxer state freed in `Drop`, reaped at
+    /// process exit — so teardown always completes. Joining the consumer first is
+    /// itself bounded because the consumer's fan-out uses a bounded `send_timeout`,
+    /// so a wedged sink can no longer block it either.
     ///
     /// # Errors
-    /// Returns a [`PipelineError`] if the consumer or any sink errored/panicked.
+    /// Returns a [`PipelineError`] if the consumer panicked, or a sink that DID
+    /// finish errored/panicked (a detached wedged sink is reported, not errored).
     fn join(self) -> Result<EgressOutcome, PipelineError> {
         self.consumer
             .join()
             .map_err(|_| PipelineError::Engine("bake consumer thread panicked".to_owned()))??;
         let mut lines = Vec::with_capacity(self.sinks.len());
         let mut frames = Vec::with_capacity(self.sinks.len());
-        for handle in self.sinks {
+        // A shared teardown budget: healthy sinks finish in milliseconds; only a
+        // genuinely wedged sink consumes the grace before being detached.
+        let deadline = Instant::now() + SINK_WEDGE_GRACE;
+        for (i, handle) in self.sinks.into_iter().enumerate() {
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if !handle.is_finished() {
+                // Wedged: detach (drop the handle without joining) so `stop`
+                // completes, and report it (never silently dropped).
+                tracing::warn!(
+                    sink = i,
+                    "sink wedged finalising (teardown grace exceeded); detaching so stop \
+                     completes (invariant #1)"
+                );
+                lines.push(format!(
+                    "sink {i}: WEDGED (teardown grace exceeded, detached)"
+                ));
+                frames.push(0);
+                continue;
+            }
             let outcome = handle.join().map_err(|_| PipelineError::Output {
                 kind: "sink",
                 reason: "sink thread panicked".to_owned(),
@@ -1784,14 +1827,40 @@ fn fan_packets(
             if !live.get(i).copied().unwrap_or(false) {
                 continue;
             }
-            if tx
-                .send(EncodedPacket::from_packet(packet.to_owned_packet()))
-                .is_err()
-            {
+            // Bounded send: a healthy sink drains within the grace, so this
+            // succeeds (near-)instantly; a sink that has hung up OR has wedged and
+            // stopped draining for `SINK_WEDGE_GRACE` marks the sink dead for the
+            // rest of the run, so a wedged sink can never stall the consumer
+            // forever (ENG-1, inv #1).
+            if !send_bounded(tx, EncodedPacket::from_packet(packet.to_owned_packet())) {
                 if let Some(flag) = live.get_mut(i) {
                     *flag = false;
                 }
             }
+        }
+    }
+}
+
+/// Send `packet` on `tx`, waiting at most [`SINK_WEDGE_GRACE`] for a slot. Returns
+/// `true` once enqueued; `false` if the receiver hung up (`Disconnected`) or the
+/// sink stopped draining for the whole grace (wedged) — the caller then marks the
+/// sink dead. `std`'s `SyncSender` has no stable `send_timeout`, so this polls a
+/// non-blocking `try_send` with a short sleep (off the hot path; a healthy sink
+/// takes the first `try_send`, never the sleep).
+fn send_bounded(tx: &SyncSender<EncodedPacket>, packet: EncodedPacket) -> bool {
+    let deadline = Instant::now() + SINK_WEDGE_GRACE;
+    let mut packet = packet;
+    loop {
+        match tx.try_send(packet) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(returned)) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                packet = returned;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
         }
     }
 }

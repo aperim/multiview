@@ -413,6 +413,9 @@ async fn clean_stop_closes_sinks_for_finalisation() {
 #[test]
 fn wedged_sink_does_not_hang_teardown() {
     const TICKS: u64 = 30;
+    // The drive result, ferried back from the drive thread to the watchdog.
+    type DriveResult =
+        Result<multiview_cli::pipeline::StreamTestResult, multiview_cli::pipeline::PipelineError>;
 
     // Shared with the sink closures so the assertions can observe them.
     let healthy_count = Arc::new(AtomicUsize::new(0));
@@ -422,10 +425,6 @@ fn wedged_sink_does_not_hang_teardown() {
     let reached_in = Arc::clone(&reached_wedge);
 
     // Run the whole drive on its own OS thread; the test thread is the watchdog.
-    type DriveResult = Result<
-        multiview_cli::pipeline::StreamTestResult,
-        multiview_cli::pipeline::PipelineError,
-    >;
     let (done_tx, done_rx) = std::sync::mpsc::channel::<DriveResult>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -484,7 +483,9 @@ fn wedged_sink_does_not_hang_teardown() {
     // this budget; without the bounded join it never would.
     let result = done_rx
         .recv_timeout(std::time::Duration::from_secs(8))
-        .expect("teardown must complete within the bound — a wedged sink must NOT hang stop (inv #1)")
+        .expect(
+            "teardown must complete within the bound — a wedged sink must NOT hang stop (inv #1)",
+        )
         .expect("drive streaming");
 
     assert!(
