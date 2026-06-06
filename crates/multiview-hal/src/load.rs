@@ -623,11 +623,15 @@ mod nvml {
 }
 
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
-pub use self::linux_sysfs::{parse_fdinfo_merged_media_frac, FdinfoSample, SysfsLoadProbe};
+pub use self::linux_sysfs::{
+    parse_fdinfo_merged_media_frac, parse_fdinfo_pdev, FdinfoMediaSnapshot, FdinfoMediaTracker,
+    FdinfoSample, SysfsLoadProbe,
+};
 
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
 mod linux_sysfs {
     use super::{percent_to_busy_frac, DeviceId, DeviceLoad, LoadProbe, LoadSample, Vendor};
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
     /// The canonical Linux DRM sysfs root the probe walks (`/sys/class/drm`),
@@ -644,25 +648,39 @@ mod linux_sysfs {
     /// PCI vendor id for Intel silicon (`0x8086`).
     const PCI_VENDOR_INTEL: u16 = 0x8086;
 
+    /// The canonical Linux proc root the fdinfo walk reads
+    /// (`/proc/<pid>/fdinfo/<fd>`), where each process exposes its open DRM
+    /// client fds with the per-engine `drm-engine-*` busy-ns counters.
+    #[cfg(target_os = "linux")]
+    const PROC_ROOT: &str = "/proc";
+
     /// The Linux Intel/AMD live-load probe over the DRM sysfs tree (ADR-0017).
     ///
     /// Construction binds a [`DrmRoot`] (real `/sys/class/drm` in production, a
-    /// synthetic temp tree in tests). Enumeration classifies each `cardN` by its
-    /// PCI vendor id and keys it by the **stable PCI bus id** (never the
-    /// enumeration index, [gpu-monitoring §2.1]); sampling reads the SMU-aggregate
-    /// `gpu_busy_percent` and the `mem_info_vram_*` byte counters via plain
-    /// `std::fs` (no native lib, no `unsafe`). Per-engine encoder/decoder
-    /// utilisation is **not** read from sysfs here — on AMD it is per-process
-    /// fdinfo only (merged from VCN4) and on Intel it is the i915 PMU — so those
-    /// stay `None` (honest unknown, never a fabricated zero); see
-    /// [`parse_fdinfo_merged_media_frac`] for the testable fdinfo-difference core
-    /// that a follow-up wires to live `/proc/<pid>/fdinfo`.
+    /// synthetic temp tree in tests) plus a proc root for the fdinfo walk (real
+    /// `/proc` in production, a synthetic tree in tests). Enumeration classifies
+    /// each `cardN` by its PCI vendor id and keys it by the **stable PCI bus id**
+    /// (never the enumeration index, [gpu-monitoring §2.1]); sampling reads the
+    /// SMU-aggregate `gpu_busy_percent` and the `mem_info_vram_*` byte counters
+    /// via plain `std::fs` (no native lib, no `unsafe`).
+    ///
+    /// Per-engine encoder/decoder utilisation is not in sysfs — on AMD it is
+    /// per-process DRM fdinfo only (merged decode+encode from VCN4) and on Intel
+    /// it is the i915 PMU. [`SysfsLoadProbe::sample_all_with_media`] populates the
+    /// merged-media term into `enc_util_frac`/`dec_util_frac` by walking the
+    /// caller's own PIDs' `/proc/<pid>/fdinfo` and differencing two snapshots a
+    /// known interval apart (the [`FdinfoMediaTracker`]); the plain `sample` path
+    /// leaves them `None` (honest unknown). The Intel i915 **PMU**
+    /// (`perf_event_open`, which needs `unsafe`) is a deliberate follow-on and is
+    /// **not** wired here.
     ///
     /// Every read that fails (file absent, off-Linux, garbled) degrades to an
     /// unknown field or an empty enumeration — never a panic and never a block.
     #[derive(Debug, Clone)]
     pub struct SysfsLoadProbe {
         root: DrmRoot,
+        proc_root: PathBuf,
+        media_tracker: FdinfoMediaTracker,
     }
 
     impl Default for SysfsLoadProbe {
@@ -672,21 +690,68 @@ mod linux_sysfs {
     }
 
     impl SysfsLoadProbe {
-        /// Construct the probe bound to the real `/sys/class/drm` root.
+        /// Construct the probe bound to the real `/sys/class/drm` + `/proc` roots.
         ///
-        /// The DRM sysfs tree is Linux-only, so off-Linux the probe binds to a
-        /// path that does not exist; enumeration then yields nothing (graceful
-        /// absence, never a panic) while the parsing core stays available for
-        /// tests on any OS.
+        /// Both trees are Linux-only, so off-Linux the probe binds to paths that
+        /// do not exist; enumeration then yields nothing and the fdinfo walk an
+        /// empty snapshot (graceful absence, never a panic) while the parsing core
+        /// stays available for tests on any OS.
         #[must_use]
         pub fn new() -> Self {
-            // Bind the real root only on Linux; elsewhere there is no DRM sysfs,
-            // so a non-existent path makes enumeration return empty.
+            // Bind the real roots only on Linux; elsewhere there is no DRM sysfs
+            // and no /proc fdinfo, so non-existent paths make the walks return
+            // empty.
             #[cfg(target_os = "linux")]
-            let root = DrmRoot::at(Path::new(DRM_ROOT));
+            let (drm_root, proc_root) = (Path::new(DRM_ROOT), Path::new(PROC_ROOT));
             #[cfg(not(target_os = "linux"))]
-            let root = DrmRoot::at(Path::new("/nonexistent/multiview/no-drm-off-linux"));
-            root.into_probe()
+            let (drm_root, proc_root) = (
+                Path::new("/nonexistent/multiview/no-drm-off-linux"),
+                Path::new("/nonexistent/multiview/no-proc-off-linux"),
+            );
+            DrmRoot::at(drm_root).into_probe().with_proc_root(proc_root)
+        }
+
+        /// Override the proc root the fdinfo walk reads (a synthetic tree in
+        /// tests; `/proc` in production). Returns the probe for chaining.
+        #[must_use]
+        pub fn with_proc_root(mut self, proc_root: &Path) -> Self {
+            self.proc_root = proc_root.to_path_buf();
+            self
+        }
+
+        /// Sample every visible device, then enrich each with the merged
+        /// media-engine busy fraction derived from the caller's own PIDs'
+        /// `/proc/<pid>/fdinfo`.
+        ///
+        /// This is the off-hot-path poll the engine's load thread calls (ADR-0017
+        /// §2): it takes one sysfs `sample_all`, walks `/proc/<pid>/fdinfo` for
+        /// `pids`, differences the merged media-ns against the previous snapshot
+        /// over `interval_ns`, and folds the resulting `0.0..=1.0` fraction into
+        /// **both** `enc_util_frac` and `dec_util_frac` of the matching device —
+        /// AMD VCN4+ merges decode+encode into one figure, so we report the same
+        /// combined term for both rather than fabricating a split
+        /// ([gpu-monitoring §3.6]). A device for which no attributable media fd is
+        /// seen, or the first poll (no prior snapshot), leaves those fields
+        /// `None` (honest unknown). `&mut self` because the two-snapshot diff is
+        /// stateful; it is **never** called on the data plane. The walk reads only
+        /// the caller's own PIDs.
+        #[must_use]
+        pub fn sample_all_with_media(&mut self, pids: &[u32], interval_ns: u64) -> Vec<DeviceLoad> {
+            let mut loads = self.sample_all();
+            let snapshot = FdinfoMediaSnapshot::walk_proc(&self.proc_root, pids);
+            for load in &mut loads {
+                let pdev = load.device_id.stable_id();
+                if let Some(frac) =
+                    self.media_tracker
+                        .merged_media_frac(pdev, &snapshot, interval_ns)
+                {
+                    // VCN4+ merges decode+encode — report the combined media term
+                    // for both engines, never a fabricated per-engine split.
+                    load.enc_util_frac = Some(frac);
+                    load.dec_util_frac = Some(frac);
+                }
+            }
+            loads
         }
     }
 
@@ -743,9 +808,17 @@ mod linux_sysfs {
         }
 
         /// Consume the root into a [`SysfsLoadProbe`] over it.
+        ///
+        /// The proc root defaults to a non-existent path (so the fdinfo walk is
+        /// empty); a test that exercises the media path chains
+        /// [`SysfsLoadProbe::with_proc_root`] onto a synthetic proc tree.
         #[must_use]
         pub(crate) fn into_probe(self) -> SysfsLoadProbe {
-            SysfsLoadProbe { root: self }
+            SysfsLoadProbe {
+                root: self,
+                proc_root: PathBuf::from("/nonexistent/multiview/no-proc-for-test-root"),
+                media_tracker: FdinfoMediaTracker::default(),
+            }
         }
 
         /// Classify every `cardN` directory under the root as a GPU device,
@@ -1005,6 +1078,153 @@ mod linux_sysfs {
         let later_ns = later.media_ns?;
         let delta = later_ns.checked_sub(earlier_ns)?;
         Some(super::busy_ratio(delta, interval_ns))
+    }
+
+    /// Extract the owning device's PCI bus id from a DRM fdinfo file body.
+    ///
+    /// The DRM common fdinfo schema reports the device a client fd belongs to as
+    /// a `drm-pdev:\t<domain>:<bus>:<dev>.<func>` line (e.g. `0000:03:00.0`) —
+    /// the **same** PCI bus id the sysfs walk keys a [`DeviceId`] by
+    /// ([gpu-monitoring §2.1], the `PCI_SLOT_NAME`), so a walked fd attributes to
+    /// a card. Returns `None` when the line is absent or its value is empty
+    /// (the fd cannot be attributed — unknown, never a wrong guess).
+    #[must_use]
+    pub fn parse_fdinfo_pdev(body: &str) -> Option<String> {
+        body.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if key.trim() != "drm-pdev" {
+                return None;
+            }
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_owned())
+            }
+        })
+    }
+
+    /// One captured pass over the process set's DRM fdinfo: the merged
+    /// media-engine busy-ns summed **per device** (keyed by the `drm-pdev:` PCI
+    /// bus id) across every render fd our own PIDs hold.
+    ///
+    /// Built by [`FdinfoMediaSnapshot::walk_proc`] (the live `/proc/<pid>/fdinfo`
+    /// read on Linux) or, in tests, by feeding fdinfo bodies through
+    /// [`FdinfoMediaSnapshot::accumulate_fd`]. A busy fraction is derived by
+    /// differencing two snapshots a known wall interval apart — see
+    /// [`FdinfoMediaTracker`]. AMD VCN4+ merges decode+encode into one media
+    /// figure, so this is the **combined** enc+dec term (the brief's per-process
+    /// AMD fallback, [gpu-monitoring §3.6]); pre-VCN4 the separate `-enc`/`-dec`
+    /// keys still sum into the same merged total here.
+    ///
+    /// An fd with no `drm-pdev:` (unattributable) or no media counter
+    /// contributes nothing — never a fabricated zero, never a panic.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct FdinfoMediaSnapshot {
+        /// PCI bus id -> summed merged media-engine busy-ns across the fds.
+        per_device_ns: HashMap<String, u64>,
+    }
+
+    impl FdinfoMediaSnapshot {
+        /// Fold one DRM fdinfo file body into the snapshot.
+        ///
+        /// Attributes the fd to its device via `drm-pdev:` and adds the merged
+        /// media-engine busy-ns ([`FdinfoSample::parse`]) to that device's
+        /// running sum. A body with no pdev or no media counter is a no-op.
+        pub fn accumulate_fd(&mut self, body: &str) {
+            let Some(pdev) = parse_fdinfo_pdev(body) else {
+                return;
+            };
+            let Some(sample) = FdinfoSample::parse(body) else {
+                return;
+            };
+            let Some(media_ns) = sample.media_ns else {
+                return;
+            };
+            self.per_device_ns
+                .entry(pdev)
+                .and_modify(|ns| *ns = ns.saturating_add(media_ns))
+                .or_insert(media_ns);
+        }
+
+        /// The merged media-engine busy-ns summed for one device, or `None` if no
+        /// attributable media fd for it was seen (honest unknown).
+        #[must_use]
+        pub fn media_ns(&self, pdev: &str) -> Option<u64> {
+            self.per_device_ns.get(pdev).copied()
+        }
+
+        /// Walk `<proc_root>/<pid>/fdinfo/*` for each PID in `pids`, summing the
+        /// merged media-engine busy-ns per device into a fresh snapshot.
+        ///
+        /// `proc_root` is `/proc` in production and a synthetic tree in tests.
+        /// Each `fdinfo/<fd>` file is read with plain `std::fs` (no `unsafe`, no
+        /// native lib); a file that is absent, unreadable, or not a DRM client fd
+        /// contributes nothing. A missing root or pid directory yields an empty
+        /// snapshot — graceful absence, never a panic and never a block. Only the
+        /// caller's **own** PIDs are walked (we own our processes,
+        /// [gpu-monitoring §3.6]); no other process's fds are read.
+        #[must_use]
+        pub fn walk_proc(proc_root: &Path, pids: &[u32]) -> Self {
+            let mut snapshot = Self::default();
+            for &pid in pids {
+                let fdinfo_dir = proc_root.join(pid.to_string()).join("fdinfo");
+                let Ok(entries) = std::fs::read_dir(&fdinfo_dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let Ok(body) = std::fs::read_to_string(entry.path()) else {
+                        continue;
+                    };
+                    snapshot.accumulate_fd(&body);
+                }
+            }
+            snapshot
+        }
+    }
+
+    /// The stateful two-snapshot differ that turns a sequence of
+    /// [`FdinfoMediaSnapshot`]s into a per-device merged-media busy fraction.
+    ///
+    /// The DRM media-engine counter is a monotonically increasing busy-ns total,
+    /// so a fraction needs **two** samples a known wall interval apart. The
+    /// tracker holds the previous snapshot; each poll differences the new one
+    /// against it ([`parse_fdinfo_merged_media_frac`]) and then retains the new
+    /// one for next time. The first poll (no prior) is `None` — unknown until
+    /// two samples exist, never a fabricated zero. The tracker is the off-hot-path
+    /// state the load poll thread owns (ADR-0017 §2); it does no I/O itself.
+    #[derive(Debug, Clone, Default)]
+    pub struct FdinfoMediaTracker {
+        previous: Option<FdinfoMediaSnapshot>,
+    }
+
+    impl FdinfoMediaTracker {
+        /// Difference `latest` against the retained previous snapshot for one
+        /// device and return its merged media busy fraction (`0.0..=1.0`) over
+        /// `interval_ns`, then retain `latest` for the next poll.
+        ///
+        /// Returns `None` on the first call (no prior), when this device had no
+        /// attributable media fd in either snapshot, when the interval is
+        /// non-positive (a divide guard), or when the counter went backwards (a
+        /// reset — unknown this tick). Never panics, never blocks.
+        pub fn merged_media_frac(
+            &mut self,
+            pdev: &str,
+            latest: &FdinfoMediaSnapshot,
+            interval_ns: u64,
+        ) -> Option<f32> {
+            let frac = self.previous.as_ref().and_then(|prev| {
+                let earlier = FdinfoSample {
+                    media_ns: prev.media_ns(pdev),
+                };
+                let later = FdinfoSample {
+                    media_ns: latest.media_ns(pdev),
+                };
+                parse_fdinfo_merged_media_frac(&earlier, &later, interval_ns)
+            });
+            self.previous = Some(latest.clone());
+            frac
+        }
     }
 }
 
@@ -1417,8 +1637,9 @@ mod tests {
     #[cfg(any(feature = "vaapi", feature = "qsv"))]
     mod fdinfo_walk {
         use super::super::linux_sysfs::{
-            parse_fdinfo_pdev, FdinfoMediaSnapshot, FdinfoMediaTracker,
+            parse_fdinfo_pdev, DrmRoot, FdinfoMediaSnapshot, FdinfoMediaTracker,
         };
+        use super::super::Vendor;
 
         #[test]
         fn pdev_line_extracts_the_pci_bus_id() {
@@ -1571,9 +1792,127 @@ mod tests {
             // snapshot — graceful absence, never a panic, never a block.
             let snap = FdinfoMediaSnapshot::walk_proc(
                 std::path::Path::new("/nonexistent/mv-eng4b/proc"),
-                &[424242],
+                &[424_242],
             );
             assert_eq!(snap.media_ns("0000:03:00.0"), None);
+        }
+
+        /// Build a synthetic AMD `card0/device/` tree whose `uevent` PCI bus id
+        /// matches the fdinfo `drm-pdev:` so the device attributes to the walk.
+        fn write_amd_card(root: &std::path::Path) -> std::io::Result<()> {
+            let dev = root.join("card0").join("device");
+            std::fs::create_dir_all(&dev)?;
+            std::fs::write(dev.join("vendor"), "0x1002\n")?;
+            std::fs::write(dev.join("gpu_busy_percent"), "30\n")?;
+            std::fs::write(dev.join("mem_info_vram_total"), "17163091968\n")?;
+            std::fs::write(dev.join("mem_info_vram_used"), "4290772992\n")?;
+            std::fs::write(
+                dev.join("uevent"),
+                "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\n",
+            )?;
+            Ok(())
+        }
+
+        #[test]
+        fn probe_folds_merged_media_into_enc_and_dec_after_two_polls() {
+            // End-to-end of the ENG-4b wiring: a synthetic DRM card + a synthetic
+            // /proc tree whose fdinfo media counter advances between polls. The
+            // first poll has no prior snapshot (enc/dec stay None); the second
+            // yields the merged media fraction folded into BOTH enc and dec.
+            let drm = std::env::temp_dir().join(format!(
+                "mv-eng4b-drm-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let proc = std::env::temp_dir().join(format!(
+                "mv-eng4b-proc-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+            write_amd_card(&drm).expect("amd card");
+
+            let mut probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
+
+            // Poll 1: media counter at 1_000_000 ns; no prior snapshot yet.
+            write_proc_fd(
+                &proc,
+                4242,
+                3,
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n",
+            )
+            .expect("fd v1");
+            let first = probe.sample_all_with_media(&[4242], 1_000_000);
+            assert_eq!(first.len(), 1, "the one synthetic AMD card");
+            assert!(
+                first[0].enc_util_frac.is_none() && first[0].dec_util_frac.is_none(),
+                "first poll has no prior snapshot => unknown, not a fabricated zero"
+            );
+
+            // Poll 2: counter advanced 500_000 ns over the 1 ms interval => 0.5.
+            std::fs::write(
+                proc.join("4242").join("fdinfo").join("3"),
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n",
+            )
+            .expect("fd v2");
+            let second = probe.sample_all_with_media(&[4242], 1_000_000);
+            assert_eq!(second.len(), 1);
+            let load = &second[0];
+            assert_eq!(load.device_id.vendor(), Vendor::Amd);
+            let enc = load.enc_util_frac.expect("enc folded from merged media");
+            let dec = load.dec_util_frac.expect("dec folded from merged media");
+            // VCN4+ merges decode+encode — both carry the same combined term.
+            assert!((enc - 0.5).abs() < 1e-4, "0.5 enc expected, got {enc}");
+            assert!((dec - 0.5).abs() < 1e-4, "0.5 dec expected, got {dec}");
+
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+        }
+
+        #[test]
+        fn probe_with_no_matching_fds_leaves_enc_dec_unknown() {
+            // A card whose PCI bus id no fdinfo fd references gets no media term —
+            // enc/dec stay None (honest unknown), never a fabricated zero, even
+            // across two polls.
+            let drm = std::env::temp_dir().join(format!(
+                "mv-eng4b-drm-nomatch-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let proc = std::env::temp_dir().join(format!(
+                "mv-eng4b-proc-nomatch-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+            write_amd_card(&drm).expect("amd card");
+            // An fd for a DIFFERENT device than the card.
+            write_proc_fd(
+                &proc,
+                4243,
+                3,
+                "drm-pdev:\t0000:09:00.0\ndrm-engine-enc:\t1000000 ns\n",
+            )
+            .expect("fd");
+
+            let mut probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
+            let _ = probe.sample_all_with_media(&[4243], 1_000_000);
+            std::fs::write(
+                proc.join("4243").join("fdinfo").join("3"),
+                "drm-pdev:\t0000:09:00.0\ndrm-engine-enc:\t1500000 ns\n",
+            )
+            .expect("fd v2");
+            let loads = probe.sample_all_with_media(&[4243], 1_000_000);
+            assert_eq!(loads.len(), 1);
+            assert!(
+                loads[0].enc_util_frac.is_none() && loads[0].dec_util_frac.is_none(),
+                "no fd matches the card's bus id => unknown enc/dec"
+            );
+
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
         }
     }
 }
