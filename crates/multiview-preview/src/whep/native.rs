@@ -16,16 +16,22 @@
 //! * [`Str0mWhepTransport::close`] drives the session's lifecycle handle to
 //!   [`SessionState::Closed`] and drops the owned `Rtc`.
 //!
-//! ## What still needs a socket (the live path)
+//! ## What still needs a socket + a peer (NOT yet complete — PRV-1c)
 //!
-//! Completing the **DTLS handshake** and sending **SRTP** packets requires a real
-//! UDP socket and a peer, neither of which is reliable in CI. That egress loop —
-//! bind a socket, gather host candidates, run str0m's `poll_output` /
-//! `handle_input` drive loop, and packetize the [`super::transport::SampleFeed`]
-//! into SRTP — is exercised only by the env-gated `#[ignore]`d loopback test in
-//! `tests/whep_native.rs` (`MULTIVIEW_WHEP_LOOPBACK=1`). [`Str0mWhepTransport::new`]
-//! builds a socket-free negotiating transport; [`Str0mWhepTransport::bind_loopback`]
-//! builds one bound to a loopback UDP socket for that live test.
+//! The live egress path is **only partially built**, and honestly so:
+//! [`Str0mWhepTransport::drive_egress_once`] implements the single
+//! poll-`str0m`-and-`send`-one-datagram step, and the env-gated `#[ignore]`d
+//! loopback test (`MULTIVIEW_WHEP_LOOPBACK=1`, `tests/whep_native.rs`) drives it
+//! against a bound loopback UDP socket to confirm str0m **emits** ICE/DTLS
+//! datagrams. What is **not** done: a full **DTLS handshake** needs a real
+//! WebRTC peer (a browser / a second agent), which CI has no reliable way to
+//! provide, so it is not verified here; and **SRTP media egress** —
+//! packetizing the [`super::transport::SampleFeed`] into RTP and feeding str0m —
+//! is **not yet wired** at all. [`Str0mWhepTransport::new`] builds a socket-free
+//! negotiating transport; [`Str0mWhepTransport::bind_loopback`] binds a loopback
+//! socket for the partial live test. Completing the handshake-against-a-peer +
+//! the SampleFeed→SRTP feed + an ffprobe egress check is the remaining slice
+//! (PRV-1c).
 //!
 //! ## Isolation (invariant #10)
 //!

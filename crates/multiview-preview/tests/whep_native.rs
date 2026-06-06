@@ -6,10 +6,11 @@
 //! parsing the browser offer, building the `Rtc`, accepting the offer, and
 //! producing an answer that carries **real** str0m-minted ICE ufrag/pwd + a real
 //! self-signed DTLS-certificate fingerprint — runs with **no socket** and is
-//! therefore fully tested here in CI. Only the live packet exchange (the DTLS
-//! handshake, SRTP egress, and the ffprobe egress check) needs a real UDP
-//! socket/peer; that path lives behind the env-gated `#[ignore]`d loopback test
-//! at the bottom (`MULTIVIEW_WHEP_LOOPBACK=1`).
+//! therefore fully tested here in CI. The live packet exchange — the DTLS
+//! handshake, SRTP media egress, and an ffprobe check — needs a real UDP
+//! socket/peer and is **NOT** exercised here: the env-gated `#[ignore]`d loopback
+//! test at the bottom (`MULTIVIEW_WHEP_LOOPBACK=1`) only confirms socket bind +
+//! host-candidate gathering; completing the handshake/SRTP/ffprobe is PRV-1c.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -245,11 +246,15 @@ a=setup:passive\r\n";
     assert!(parse_answer_attributes(NO_ICE).is_err());
 }
 
-/// Live DTLS-SRTP loopback (env-gated): the real packet-exchange half.
+/// Loopback socket bring-up (env-gated). HONEST SCOPE: this verifies only that a
+/// socket-bound native transport **binds** a loopback UDP socket and **gathers at
+/// least one host candidate** when accepting an offer — it does NOT complete a
+/// DTLS handshake, does NOT exchange SRTP, and does NOT call `drive_egress_once`
+/// (all of which need a real peer). The full handshake + SampleFeed→SRTP egress +
+/// ffprobe check are the remaining slice (PRV-1c).
 ///
-/// This needs a real UDP socket and a peer to complete the DTLS handshake, so it
-/// is `#[ignore]`d by default and additionally gated on
-/// `MULTIVIEW_WHEP_LOOPBACK=1` so it never runs in CI. Run it explicitly with:
+/// `#[ignore]`d by default and additionally gated on `MULTIVIEW_WHEP_LOOPBACK=1`
+/// so it never runs in CI. Run it explicitly with:
 ///
 /// ```text
 /// MULTIVIEW_WHEP_LOOPBACK=1 cargo test -p multiview-preview \
