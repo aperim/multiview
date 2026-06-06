@@ -130,7 +130,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **IN-3** `XL` — NDI ingest: runtime-loaded SDK → `FrameProducer` + CLI wiring  ·  _deps: IN-2_
 - [x] **IN-4** `M` — YouTube live: pure resolver core over `yt-dlp -J`  ·  _deps: —_
 - [ ] **IN-5** `L` — YouTube live: wire to HLS ingest + re-resolution loop  ·  _deps: IN-4_
-- [ ] **IN-6** `XL` — WebRTC ingest: ICE/DTLS/SRTP transport behind an application-layer media engine  ·  _deps: IN-1_
+- [~] **IN-6** `XL` — WebRTC ingest: ICE/DTLS/SRTP transport behind an application-layer media engine  ·  _deps: IN-1_  · _`831e3af`: testable core landed behind `webrtc` — session lifecycle + `MediaEngine` seam + RFC-6184 H264 depacketizer (keyframe-gated, bounded) + `WebRtcProducer: FrameProducer`, fake-driven tests; live ICE/DTLS/SRTP engine (str0m) + cli wiring + Opus/VP8 = **IN-6b**_
 - [ ] **IN-7** `S` — CI strategy: feature-gated compile + integration gating for the wired transports  ·  _deps: IN-2, IN-3, IN-6_
 
 ### CTL — Control plane → engine
@@ -154,7 +154,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 - [ ] **ENG-1** `M` — Bounded teardown join for a wedged sink (task #50)  ·  _deps: —_
 - [ ] **ENG-2** `XL` — Input PTS normalizer + pacer reroute (ADR-0021 points 1-3)  ·  _deps: —_
-- [ ] **ENG-3** `M` — NTP/PTP lock auto-detect for the wall-clock badge (task #37)  ·  _deps: ENG-5_
+- [~] **ENG-3** `M` — NTP/PTP lock auto-detect for the wall-clock badge (task #37)  ·  _deps: ENG-5_  · _`d87b69d`: `sysref` classifier + `ReferenceSelector` (NTP/SYS vs PTP) pure-tested + new `multiview-ntpsys` FFI leaf crate owning the one read-only `adjtimex` unsafe (deny+SAFETY, libc, `ntp` feature) + gated live read; wiring it into the cli `SystemWallClock::reference()` badge = **ENG-3b**_
 - [x] **ENG-4** `L` — Linux i915/amdgpu GPU load probe  ·  _deps: —_  · _sysfs busy%+VRAM probe (`SysfsLoadProbe`, PCI-bus keyed) + pure parsers tested; per-engine enc/dec via `/proc/pid/fdinfo` walk + i915 PMU (needs unsafe) are follow-up slices_
 - [x] **ENG-5** `L` — PTP / ST 2059 PHC NIC binding (`ptp` feature)  ·  _deps: ENG-3_  · _`9cb742b`: lock-state machine + offset servo (pure, tested) + Linux `/dev/ptpN` read via `rustix` (no unsafe), live test gated_
 - [x] **ENG-6** `L` — HA cluster peer transport (`cluster` feature)  ·  _deps: —_  · _`UdpClusterTransport` + failover/replication over loopback-tested; true multi-host partition is hardware-tier (gated)_
@@ -180,7 +180,9 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 #### Discovered follow-on slices (added during shipping — keep the plan complete)
 - [ ] **GPU-4b** `M` — Wire the overlay-image GPU dispatch into the compositor `composite()` (upload image cache layers + bind group + `OverlaySubpass` between composite and encode) + the GPU-vs-CPU SSIM/PSNR parity test (GPU-tagged runner)  ·  _deps: GPU-4_
 - [ ] **PRV-1b** `XL` — Native str0m `WhepTransport` impl: real ICE/DTLS/SRTP behind a `webrtc-native` feature + env-gated DTLS-SRTP loopback test + ffprobe egress check; add str0m/ring to `deny.toml`  ·  _deps: PRV-1_
-- [ ] **SUR-6b** `M` — Swap web realtime consumers (`connection.ts`/`useEngineEvents.ts`) onto the generated envelope types + serve `/asyncapi.json` on the axum router + AsyncAPI-CLI validation step in CI  ·  _deps: SUR-6_
+- [x] **SUR-6b** `M` — Swap web realtime consumers (`connection.ts`/`useEngineEvents.ts`) onto the generated envelope types + serve `/asyncapi.json` on the axum router  ·  _deps: SUR-6_  · _`7b9fd90`: GET /asyncapi.json served (embedded, route-tested) + web `LifecycleState`/`TileState` now from generated-types (91 web tests); the AsyncAPI-CLI **CI** validation step is a separate `.github` follow-on (fold into IN-7's CI work)_
+- [ ] **IN-6b** `XL` — WebRTC ingest native engine: a concrete str0m-backed ICE/DTLS/SRTP `MediaEngine` behind a `webrtc-native` feature + env-gated loopback test + wire `WebRtcProducer` into the cli; Opus/VP8 depacketizers; add str0m/ring to `deny.toml`  ·  _deps: IN-6_
+- [ ] **ENG-3b** `S` — Wire `SystemRefTracker`/`ReferenceSelector` (ENG-3) into the cli `SystemWallClock::reference()` so the rendered wall-clock badge reflects the measured NTP/PTP status; cli `ntp` feature passthrough + update the badge render test  ·  _deps: ENG-3_
 - [ ] **GPU-5b** `L` — GPU-5 remainder: off-hot-path placement controller in `multiview-engine` (EWMA sustained-overload SHED-vs-MIGRATE, make-before-break) + config policy fields + telemetry counters  ·  _deps: GPU-5_
 - [ ] **ENG-4b** `M` — GPU load probe remainder: live `/proc/<pid>/fdinfo` enc/dec-util walk (sum own PIDs) + i915 PMU `perf_event_open` path (isolated unsafe behind the probe) + telemetry gauge registration  ·  _deps: ENG-4_
 - [ ] **GPU-1b** `L` — Wire the `ProgramEncoder` (357d52b) into the cli bake consumer: `consumer_main` owns ONE `ProgramEncoder`, encodes each baked frame, fans the produced `EncodedPacket`s (owned copies) to N `PacketMuxSink` runners; convert `RunnableOutput`/`build_outputs`/`run_one_output`/`StreamingFrameSource`→packet-fed; evolve the `StreamTestParams`/`TestSinkRunner` seam frame→packet WITHOUT weakening the inv-#1/#10 streaming tests; retire the per-sink encoders; fix the aspirational "encoded once" comments at pipeline.rs:342/553. Verify with `--features ffmpeg`. Completes GPU-1 / inv #7.  ·  _deps: GPU-1_
