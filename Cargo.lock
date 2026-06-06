@@ -2143,6 +2143,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiview-ndi-sys"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "tempfile",
+]
+
+[[package]]
 name = "multiview-ntpsys"
 version = "0.1.0"
 dependencies = [
@@ -2157,6 +2165,7 @@ dependencies = [
  "multiview-core",
  "multiview-ffmpeg",
  "multiview-input",
+ "multiview-ndi-sys",
  "proptest",
  "tempfile",
  "thiserror 1.0.69",

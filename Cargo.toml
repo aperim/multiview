@@ -17,6 +17,12 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Runtime `dlopen`/`dlsym` for the off-by-default `ndi` path (resolving the
+# proprietary NDI runtime via `NDIlib_v6_load` at RUN time — never linked at
+# build time; ADR-0008). Dual ISC-licensed (LGPL-clean) and already transitively
+# in the workspace graph. Only `multiview-ndi-sys` (pulled solely by the `ndi`
+# feature) depends on it; the default build never links it.
+libloading = "0.8"
 # Internal crates
 multiview-core = { path = "crates/multiview-core" }
 multiview-hal = { path = "crates/multiview-hal" }
@@ -35,6 +41,7 @@ multiview-preview = { path = "crates/multiview-preview" }
 multiview-telemetry = { path = "crates/multiview-telemetry" }
 multiview-ntpsys = { path = "crates/multiview-ntpsys" }
 multiview-i915pmu = { path = "crates/multiview-i915pmu" }
+multiview-ndi-sys = { path = "crates/multiview-ndi-sys" }
 multiview-cli = { path = "crates/multiview-cli" }
 
 [profile.release]

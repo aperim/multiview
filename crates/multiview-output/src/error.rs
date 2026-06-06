@@ -35,6 +35,13 @@ pub enum Error {
     /// Carries the underlying [`crate::tsl::TslError`].
     #[error("tsl encode: {0}")]
     Tsl(#[from] crate::tsl::TslError),
+
+    /// An NDI output failure: the runtime license was not accepted, the NDI
+    /// runtime could not be resolved/loaded, or the sender could not be created
+    /// (behind the off-by-default `ndi` feature). Carries a human-readable detail.
+    #[cfg(feature = "ndi")]
+    #[error("ndi: {0}")]
+    Ndi(String),
 }
 
 impl From<Error> for multiview_core::Error {

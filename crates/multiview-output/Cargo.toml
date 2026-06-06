@@ -17,6 +17,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
+# Off-by-default `ndi` path ONLY. The proprietary NDI® runtime is resolved at RUN
+# time via `NDIlib_v6_load` (never linked/vendored at build time; ADR-0008). All
+# the raw `dlopen`/`dlsym` `unsafe` lives in this tiny FFI leaf crate, so
+# `multiview-output` stays `forbid(unsafe_code)`. Pulled in ONLY by the `ndi`
+# feature, so the default build never links it and `cargo deny`
+# (`all-features = false`) never scans it.
+multiview-ndi-sys = { workspace = true, optional = true }
+
 # Real libav* encode/mux path — opt-in only behind the `ffmpeg` feature so the
 # DEFAULT build stays pure-Rust / native-dep-free. All raw FFI is owned by
 # `multiview-ffmpeg`; this crate only calls its SAFE wrappers (it stays
@@ -67,7 +75,14 @@ multiview-input = { workspace = true }
 # multiview-ffmpeg's `cuda` so the codec selector may consider h264_nvenc/hevc_nvenc.
 # Implies `ffmpeg` (selection's run-time probe needs libav).
 "cuda" = ["ffmpeg", "multiview-ffmpeg/cuda"]
-"ndi" = []
+# Proprietary NDI® output (ADR-0008). OFF by default and LICENSE-ISOLATING: it is
+# NOT part of the `full` preset and is requested explicitly. Pulls the
+# `multiview-ndi-sys` FFI leaf crate, which resolves the NDI runtime at RUN time
+# via `NDIlib_v6_load` — NOTHING is linked or vendored at build time, so both the
+# default build AND this `ndi` build compile and link WITHOUT the SDK present. NDI
+# I/O additionally stays inert until an operator accepts the runtime license gate
+# (see `crate::ndi::NdiLicense`).
+"ndi" = ["dep:multiview-ndi-sys"]
 
 [lints]
 workspace = true

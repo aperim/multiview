@@ -45,6 +45,15 @@ pub mod tsl;
 #[cfg(feature = "ffmpeg")]
 pub mod sink;
 
+/// Proprietary NDI® output (ADR-0008): the runtime-load scaffolding (locate +
+/// `dlopen` the NDI runtime via `NDIlib_v6_load`), the runtime license gate, the
+/// mandatory attribution constants, and the safe `NdiOutput` sink seam over the
+/// resolved API table. Behind the off-by-default, license-isolating `ndi`
+/// feature; the raw FFI lives in the `multiview-ndi-sys` leaf crate so this crate
+/// stays `forbid(unsafe_code)`.
+#[cfg(feature = "ndi")]
+pub mod ndi;
+
 pub use error::{Error, Result};
 
 #[cfg(feature = "ffmpeg")]
