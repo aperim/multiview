@@ -128,7 +128,7 @@ pub enum WhepReject {
 /// The control plane stays free of any WebRTC/native dependency: it carries the
 /// SDP offer string and the [`WhepScope`] in, and hands back a [`WhepAnswer`] or
 /// a [`WhepReject`]. The binary (`multiview-cli`) implements this over the
-/// `multiview-preview` `WhepTransport` seam (str0m or a MediaMTX sidecar behind a
+/// `multiview-preview` `WhepTransport` seam (str0m or a `MediaMTX` sidecar behind a
 /// further gate); the in-memory fake used in tests proves the route wiring.
 ///
 /// ## Isolation (invariant #10)

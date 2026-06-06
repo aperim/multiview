@@ -1163,6 +1163,435 @@
         }
       }
     },
+    "/api/v1/preview/inputs/{id}/whep": {
+      "post": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`POST /api/v1/preview/inputs/{id}/whep` — open a WHEP focus on input `id`\n(role: write).",
+        "operationId": "input_whep_open",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The input (source) id to focus.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "SDP offer",
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Focus opened; SDP answer in the body, Location at the session resource.",
+            "content": {
+              "application/sdp": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to open a focus.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The input id is not focusable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The offer advertises no supported preview codec.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Focus capacity exhausted; body carries a `fallback` transport hint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/preview/inputs/{id}/whep/{session_id}": {
+      "delete": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`DELETE /api/v1/preview/inputs/{id}/whep/{session_id}` — release an input\nfocus session (role: write).",
+        "operationId": "input_whep_close",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The input (source) id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHEP session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Focus session released."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to release a focus.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such live focus session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/preview/outputs/{id}/whep": {
+      "post": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`POST /api/v1/preview/outputs/{id}/whep` — open a WHEP focus on output `id`\n(role: write).",
+        "operationId": "output_whep_open",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The output (rendition) id to focus.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "SDP offer",
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Focus opened; SDP answer in the body, Location at the session resource.",
+            "content": {
+              "application/sdp": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to open a focus.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The output id is not focusable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The offer advertises no supported preview codec.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Focus capacity exhausted; body carries a `fallback` transport hint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/preview/outputs/{id}/whep/{session_id}": {
+      "delete": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`DELETE /api/v1/preview/outputs/{id}/whep/{session_id}` — release an output\nfocus session (role: write).",
+        "operationId": "output_whep_close",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The output (rendition) id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHEP session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Focus session released."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to release a focus.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such live focus session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/preview/program/whep": {
+      "post": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`POST /api/v1/preview/program/whep` — open a WHEP focus on the program\ncanvas (role: write). SDP offer in, `201` + answer SDP + `Location` out.",
+        "operationId": "program_whep_open",
+        "requestBody": {
+          "description": "SDP offer",
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Focus opened; SDP answer in the body, Location at the session resource.",
+            "content": {
+              "application/sdp": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to open a focus (a View token cannot).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The offer advertises no supported preview codec.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Focus capacity exhausted; body carries a `fallback` transport hint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/preview/program/whep/{session_id}": {
+      "delete": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`DELETE /api/v1/preview/program/whep/{session_id}` — release a program focus\nsession (role: write). `204` on success, `404` if unknown.",
+        "operationId": "program_whep_close",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHEP session id from the open response's Location.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Focus session released."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to release a focus.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such live focus session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/salvos": {
       "get": {
         "tags": [
@@ -3799,6 +4228,10 @@
     {
       "name": "audit",
       "description": "Read-only change audit log (who/what/when)"
+    },
+    {
+      "name": "preview",
+      "description": "Live preview: WHEP focus sessions per scope (program/input/output)"
     },
     {
       "name": "config",

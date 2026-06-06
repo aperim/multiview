@@ -197,7 +197,10 @@ async fn focus_offer_yields_created_answer_for_all_scopes() {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        assert!(ct.starts_with("application/sdp"), "answer is SDP for {path}");
+        assert!(
+            ct.starts_with("application/sdp"),
+            "answer is SDP for {path}"
+        );
         let location = resp
             .headers()
             .get(header::LOCATION)
@@ -209,7 +212,10 @@ async fn focus_offer_yields_created_answer_for_all_scopes() {
             "Location {location} extends {path} with a session id"
         );
         let body = String::from_utf8(body_bytes(resp).await).unwrap();
-        assert!(body.contains("v=0"), "answer carries an SDP body for {path}");
+        assert!(
+            body.contains("v=0"),
+            "answer carries an SDP body for {path}"
+        );
         assert_eq!(whep.active_sessions(), 1, "one live session for {path}");
     }
 }
@@ -269,7 +275,10 @@ async fn release_frees_the_session() {
     // Deleting an unknown session id is a 404 (nothing to free).
     let unknown = send(
         &router,
-        delete("/api/v1/preview/program/whep/does-not-exist", OPERATOR_TOKEN),
+        delete(
+            "/api/v1/preview/program/whep/does-not-exist",
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);

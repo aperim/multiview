@@ -426,6 +426,23 @@ pub fn api_router() -> Router<AppState> {
         .route("/preview/program.jpg", get(preview::program_jpeg))
         .route("/preview/inputs", get(preview::list_input_ids))
         .route("/preview/inputs/{id}", get(preview::input_jpeg))
+        // WHEP focus sessions (sub-second WebRTC preview) per scope: SDP offer
+        // in -> 201 + answer SDP + Location; DELETE the resource to release.
+        .route("/preview/program/whep", post(preview::program_whep_open))
+        .route(
+            "/preview/program/whep/{session_id}",
+            axum::routing::delete(preview::program_whep_close),
+        )
+        .route("/preview/inputs/{id}/whep", post(preview::input_whep_open))
+        .route(
+            "/preview/inputs/{id}/whep/{session_id}",
+            axum::routing::delete(preview::input_whep_close),
+        )
+        .route("/preview/outputs/{id}/whep", post(preview::output_whep_open))
+        .route(
+            "/preview/outputs/{id}/whep/{session_id}",
+            axum::routing::delete(preview::output_whep_close),
+        )
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
         // Config versioning: history + commit, single revision, diff, rollback.

@@ -103,6 +103,23 @@ fn openapi_document_builds_as_3_1_and_lists_routes() {
     ] {
         assert!(routes.contains(&expected), "route {expected} listed");
     }
+
+    // The WHEP focus routes (PRV-2) are both enumerated and documented with the
+    // right verb, for all three scopes.
+    for (verb, path) in [
+        ("post", "/api/v1/preview/program/whep"),
+        ("delete", "/api/v1/preview/program/whep/{session_id}"),
+        ("post", "/api/v1/preview/inputs/{id}/whep"),
+        ("delete", "/api/v1/preview/inputs/{id}/whep/{session_id}"),
+        ("post", "/api/v1/preview/outputs/{id}/whep"),
+        ("delete", "/api/v1/preview/outputs/{id}/whep/{session_id}"),
+    ] {
+        assert!(
+            paths.get(path).and_then(|p| p.get(verb)).is_some(),
+            "{} {path} documented in the OpenAPI spec",
+            verb.to_uppercase()
+        );
+    }
 }
 
 #[test]
