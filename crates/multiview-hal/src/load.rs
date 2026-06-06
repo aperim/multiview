@@ -1403,4 +1403,177 @@ mod tests {
             assert!(probe.sample_all().is_empty());
         }
     }
+
+    // ------------------------------------------------------------------------
+    // Live /proc/<pid>/fdinfo per-engine enc/dec walk (ADR-0017, ENG-4b).
+    //
+    // The PURE core: (1) extract the DRM `drm-pdev:` PCI bus id from an fdinfo
+    // body so an fd is attributable to a DeviceId; (2) accumulate the merged
+    // media-engine busy-ns per device across the process set into one snapshot;
+    // (3) difference two snapshots a known wall interval apart into a 0..=1
+    // busy fraction. The live `/proc` walk runs against a SYNTHETIC proc tree
+    // (NOT the real /proc) so it is exercised with no GPU and on any OS.
+    // ------------------------------------------------------------------------
+    #[cfg(any(feature = "vaapi", feature = "qsv"))]
+    mod fdinfo_walk {
+        use super::super::linux_sysfs::{
+            parse_fdinfo_pdev, FdinfoMediaSnapshot, FdinfoMediaTracker,
+        };
+
+        #[test]
+        fn pdev_line_extracts_the_pci_bus_id() {
+            // The DRM common fdinfo schema reports the owning device as a
+            // `drm-pdev:\t<domain>:<bus>:<dev>.<func>` line — the same bus id
+            // the sysfs walk keys a DeviceId by, so an fd attributes to a card.
+            let body = "drm-driver:\tamdgpu\ndrm-pdev:\t0000:03:00.0\ndrm-client-id:\t42\n";
+            assert_eq!(parse_fdinfo_pdev(body).as_deref(), Some("0000:03:00.0"));
+            // No pdev line => unknown (cannot attribute), never a wrong guess.
+            assert_eq!(parse_fdinfo_pdev("drm-driver:\tamdgpu\n"), None);
+            // Empty value is not a usable id.
+            assert_eq!(parse_fdinfo_pdev("drm-pdev:\t\n"), None);
+        }
+
+        #[test]
+        fn snapshot_sums_media_ns_per_device_across_fds() {
+            // Two render fds owned by our process set, both bound to the same
+            // card, contribute their media-engine ns to ONE per-device sum.
+            let fd_a =
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\ndrm-engine-dec:\t500000 ns\n";
+            let fd_b = "drm-pdev:\t0000:03:00.0\ndrm-engine-dec:\t250000 ns\n";
+            // A third fd on a different card stays separate.
+            let fd_c = "drm-pdev:\t0000:01:00.0\ndrm-engine-enc:\t9000000 ns\n";
+
+            let mut snap = FdinfoMediaSnapshot::default();
+            snap.accumulate_fd(fd_a);
+            snap.accumulate_fd(fd_b);
+            snap.accumulate_fd(fd_c);
+
+            // card 03:00.0 = 1_000_000 + 500_000 + 250_000 = 1_750_000 ns merged.
+            assert_eq!(snap.media_ns("0000:03:00.0"), Some(1_750_000));
+            assert_eq!(snap.media_ns("0000:01:00.0"), Some(9_000_000));
+            // A device we never saw is unknown, never a fabricated zero.
+            assert_eq!(snap.media_ns("0000:09:00.0"), None);
+        }
+
+        #[test]
+        fn snapshot_ignores_fds_with_no_pdev_or_no_media() {
+            // An fd with engine counters but no pdev cannot be attributed, and a
+            // pdev with no media counters carries no media-ns — both are skipped
+            // without panicking or polluting another device's sum.
+            let mut snap = FdinfoMediaSnapshot::default();
+            snap.accumulate_fd("drm-engine-enc:\t7777 ns\n"); // no pdev
+            snap.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-driver:\tamdgpu\n"); // no media
+            assert_eq!(snap.media_ns("0000:03:00.0"), None);
+        }
+
+        #[test]
+        fn tracker_differences_two_snapshots_into_a_fraction() {
+            // The tracker holds the previous snapshot + capture instant; each
+            // poll diffs the new snapshot against it. media delta 500_000 ns over
+            // a 1_000_000 ns (1 ms) interval => 0.5 busy for the merged engine.
+            let earlier = {
+                let mut s = FdinfoMediaSnapshot::default();
+                s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n");
+                s
+            };
+            let later = {
+                let mut s = FdinfoMediaSnapshot::default();
+                s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n");
+                s
+            };
+            let mut tracker = FdinfoMediaTracker::default();
+            // First poll has no prior snapshot => unknown (need two samples).
+            assert!(tracker
+                .merged_media_frac("0000:03:00.0", &earlier, 1_000_000)
+                .is_none());
+            let frac = tracker
+                .merged_media_frac("0000:03:00.0", &later, 1_000_000)
+                .expect("a second snapshot yields a fraction");
+            assert!((frac - 0.5).abs() < 1e-4, "0.5 expected, got {frac}");
+            // A non-positive interval is a divide guard => None, never a panic.
+            assert!(tracker
+                .merged_media_frac("0000:03:00.0", &later, 0)
+                .is_none());
+        }
+
+        #[test]
+        fn tracker_counter_reset_is_unknown_not_negative() {
+            // A counter that went backwards (driver/client reset) is unknown for
+            // that tick — never a wrapped/negative fraction, never a panic.
+            let high = {
+                let mut s = FdinfoMediaSnapshot::default();
+                s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t9000000 ns\n");
+                s
+            };
+            let low = {
+                let mut s = FdinfoMediaSnapshot::default();
+                s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t10000 ns\n");
+                s
+            };
+            let mut tracker = FdinfoMediaTracker::default();
+            assert!(tracker
+                .merged_media_frac("0000:03:00.0", &high, 1_000_000)
+                .is_none());
+            assert!(tracker
+                .merged_media_frac("0000:03:00.0", &low, 1_000_000)
+                .is_none());
+        }
+
+        /// Build a synthetic `<root>/<pid>/fdinfo/<fd>` tree (NOT real `/proc`)
+        /// so the live walk is exercised with no GPU and on any OS.
+        fn write_proc_fd(
+            root: &std::path::Path,
+            pid: u32,
+            fd: u32,
+            body: &str,
+        ) -> std::io::Result<()> {
+            let dir = root.join(pid.to_string()).join("fdinfo");
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join(fd.to_string()), body)
+        }
+
+        #[test]
+        fn walk_proc_fdinfo_sums_own_pids_per_device() {
+            let base = std::env::temp_dir().join(format!(
+                "mv-eng4b-walk-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            // Our process set is {1000, 1001}. Two fds on the same card across
+            // two pids, plus a non-DRM fd that the walk skips.
+            write_proc_fd(
+                &base,
+                1000,
+                3,
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n",
+            )
+            .expect("fd");
+            write_proc_fd(
+                &base,
+                1001,
+                4,
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-dec:\t500000 ns\n",
+            )
+            .expect("fd");
+            write_proc_fd(&base, 1000, 9, "pos:\t0\nflags:\t0100002\n").expect("non-drm fd");
+
+            let snap = FdinfoMediaSnapshot::walk_proc(&base, &[1000, 1001]);
+            // 1_000_000 (enc, pid 1000) + 500_000 (dec, pid 1001) = 1_500_000.
+            assert_eq!(snap.media_ns("0000:03:00.0"), Some(1_500_000));
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn walk_proc_absent_root_is_empty_never_panics() {
+            // A missing proc root (off-Linux / no such pid) yields an empty
+            // snapshot — graceful absence, never a panic, never a block.
+            let snap = FdinfoMediaSnapshot::walk_proc(
+                std::path::Path::new("/nonexistent/mv-eng4b/proc"),
+                &[424242],
+            );
+            assert_eq!(snap.media_ns("0000:03:00.0"), None);
+        }
+    }
 }
