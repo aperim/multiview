@@ -184,10 +184,11 @@ target_track = "trk_b""#,
 }
 
 #[test]
-fn rejects_program_bus_with_only_muted_or_zeroed_members() {
+fn rejects_program_bus_with_only_muted_members() {
     // A program-bus member that is muted contributes nothing; if EVERY bus
     // member is muted the program bus is silent — reject rather than ship a
-    // dead bus an operator did not intend.
+    // dead bus an operator did not intend. (A low *gain* is NOT treated as
+    // non-contributing — a quiet member is still audio the operator may want.)
     let doc = BASE
         .replace(
             r"include_in_program_bus = true

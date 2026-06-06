@@ -28,8 +28,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::ConfigError;
 
 /// The channel layout requested for one routed input, internally tagged by
-/// `kind` (mirrors `multiview_audio::ChannelLayout`; kept independent here so the
-/// pure config schema does not depend on the audio crate).
+/// `kind`. Mirrors the **variants** of `multiview_audio::ChannelLayout` (kept
+/// independent here so the pure config schema does not depend on the audio
+/// crate), but uses `snake_case` tags per the config-as-code convention whereas
+/// the audio crate's own `ChannelLayout` serializes its tags `PascalCase`; the
+/// runtime maps between them by variant, never by a serde round-trip.
 ///
 /// Only the layouts the program bus and discrete-track model need are
 /// enumerated; the audio crate's capability matrix maps these onto a concrete
