@@ -1926,6 +1926,7 @@ name = "multiview-audio"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "arc-swap",
  "multiview-core",
  "multiview-ffmpeg",
  "proptest",

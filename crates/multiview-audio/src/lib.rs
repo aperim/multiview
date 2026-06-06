@@ -25,6 +25,10 @@
 //!   [`multiview_core::alarm`] records.
 //! - [`mixer`] — the mix/route *model*: a program bus, clean discrete
 //!   per-input tracks, and a per-input gain/route matrix (ADR-R005).
+//! - [`store`] — the bounded, lock-free, gap-free per-source **last-good audio
+//!   store** (the audio peer of the video tile store) plus the per-source audio
+//!   decode loop: a decode thread publishes blocks, the output clock samples
+//!   exactly the frames it needs per tick (never pacing, never blocking — #1/#10).
 //! - [`filter`] / [`truepeak`] — the supporting DSP primitives.
 //!
 //! Decode and resample (turning coded packets into the in-memory
@@ -51,6 +55,7 @@ pub mod loudness;
 pub mod meterdata;
 pub mod mixer;
 pub mod probe;
+pub mod store;
 pub mod truepeak;
 
 pub use ballistics::{Ballistics, MeterScale, PeakMode, PpmKind, SampleScale};
@@ -64,3 +69,6 @@ pub use loudness::LoudnessMeter;
 pub use meterdata::{Conflator, MeterSample, StereoMeterSample, DISPLAY_HZ};
 pub use mixer::{Mixer, RoutePoint};
 pub use probe::{AudioProbeBank, AudioProbeConfig, ProbeSeverityProfile};
+#[cfg(feature = "ffmpeg")]
+pub use store::audio_decode_loop;
+pub use store::AudioStore;

@@ -34,7 +34,6 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use multiview_audio::decode::AudioFileDecoder;
 use multiview_audio::store::{audio_decode_loop, AudioStore};
 use multiview_audio::{AudioFormat, ChannelLayout};
 
@@ -107,10 +106,10 @@ fn decode_loop_fills_store_then_silence_past_eof() {
     // 0.5 s of a clearly-non-silent tone (48_000 * 0.5 = 24_000 frames).
     let wav = encode_to_wav(dir.path(), &sine_interleaved(0.5, 0.5));
 
-    let decoder = AudioFileDecoder::open(&wav, ChannelLayout::Stereo).unwrap();
-    let format = decoder.format();
-    assert_eq!(format, AudioFormat::new(FS, ChannelLayout::Stereo));
-
+    // The decoder is opened *inside* the loop on the worker thread (the libav
+    // context is not `Send`); the spawn carries only the `Send` path + layout,
+    // exactly like the video `ingest_loop`.
+    let format = AudioFormat::new(FS, ChannelLayout::Stereo);
     let store = Arc::new(AudioStore::new(format, 96_000));
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -118,8 +117,9 @@ fn decode_loop_fills_store_then_silence_past_eof() {
     // thread). It returns promptly at EOF without `stop` being raised.
     let loop_store = Arc::clone(&store);
     let loop_stop = Arc::clone(&stop);
-    let handle =
-        std::thread::spawn(move || audio_decode_loop(decoder, &loop_store, &loop_stop));
+    let handle = std::thread::spawn(move || {
+        audio_decode_loop(&wav, ChannelLayout::Stereo, &loop_store, &loop_stop);
+    });
     handle.join().expect("decode loop thread panicked");
 
     // The whole 24_000-frame tone is buffered (bounded ring is 96k, so nothing
@@ -129,11 +129,20 @@ fn decode_loop_fills_store_then_silence_past_eof() {
     let s = out.interleaved();
     // The first ~24_000 frames carry the tone: at least some samples are
     // clearly non-zero (a 0.5-amplitude sine is not silence).
-    let tone_energy: f64 = s[..48_000].iter().map(|&v| f64::from(v) * f64::from(v)).sum();
-    assert!(tone_energy > 1.0, "decoded tone region is unexpectedly silent");
+    let tone_energy: f64 = s[..48_000]
+        .iter()
+        .map(|&v| f64::from(v) * f64::from(v))
+        .sum();
+    assert!(
+        tone_energy > 1.0,
+        "decoded tone region is unexpectedly silent"
+    );
     // The tail past EOF (frames ~24_000..48_000) is silence-filled, not a gap.
     let tail: f64 = s[48_000..].iter().map(|&v| f64::from(v).abs()).sum();
-    assert_eq!(tail, 0.0, "frames past decoder EOF must be silence, not a gap");
+    assert_eq!(
+        tail, 0.0,
+        "frames past decoder EOF must be silence, not a gap"
+    );
 }
 
 /// A "dead source" (decoder that yields nothing) must not wedge the loop: with
@@ -151,8 +160,7 @@ fn dead_source_loop_joins_promptly_on_stop() {
     // bounded regardless of decoder state.
     let dir = tempfile::tempdir().unwrap();
     let wav = encode_to_wav(dir.path(), &sine_interleaved(0.1, 0.001));
-    let decoder = AudioFileDecoder::open(&wav, ChannelLayout::Stereo).unwrap();
-    let format = decoder.format();
+    let format = AudioFormat::new(FS, ChannelLayout::Stereo);
 
     let store = Arc::new(AudioStore::new(format, 4_096));
     let stop = Arc::new(AtomicBool::new(true)); // already requested to stop
@@ -160,8 +168,9 @@ fn dead_source_loop_joins_promptly_on_stop() {
     let loop_store = Arc::clone(&store);
     let loop_stop = Arc::clone(&stop);
     let start = std::time::Instant::now();
-    let handle =
-        std::thread::spawn(move || audio_decode_loop(decoder, &loop_store, &loop_stop));
+    let handle = std::thread::spawn(move || {
+        audio_decode_loop(&wav, ChannelLayout::Stereo, &loop_store, &loop_stop);
+    });
     handle.join().expect("decode loop thread panicked");
     let elapsed = start.elapsed();
     assert!(

@@ -10,8 +10,10 @@
     clippy::indexing_slicing,
     clippy::panic
 )]
-// reason: test-only float<->index arithmetic on small exact ranges.
-#![allow(clippy::as_conversions, clippy::cast_precision_loss)]
+// reason: test-only float<->index arithmetic on small exact ranges — the ramp
+// values are integers exactly representable in f32, so the exact comparisons are
+// intentional and the index<->float casts are loss-free here.
+#![allow(clippy::as_conversions, clippy::cast_precision_loss, clippy::float_cmp)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -43,7 +45,11 @@ fn ramp(start: usize, frames: usize) -> AudioBlock {
 fn empty_store_reads_silence_not_a_gap() {
     let store = AudioStore::new(stereo(), 48_000);
     let block = store.read(256);
-    assert_eq!(block.frame_count(), 256, "read must return exactly N frames");
+    assert_eq!(
+        block.frame_count(),
+        256,
+        "read must return exactly N frames"
+    );
     assert_eq!(block.format(), stereo());
     assert!(
         block.interleaved().iter().all(|&s| s == 0.0),
@@ -57,11 +63,10 @@ fn empty_store_reads_silence_not_a_gap() {
 #[test]
 fn reads_are_contiguous_then_silence_past_eof() {
     let store = AudioStore::new(stereo(), 48_000);
-    // Two ramps published back to back: frames 0..100 then 100..150.
-    store.publish(ramp(0, 100)).unwrap();
-    store.publish(ramp(200, 50)).unwrap(); // sample value start=200 (== 100 frames*2ch)
+    // Only frames 0..100 are published; nothing beyond is written yet.
+    store.publish(&ramp(0, 100)).unwrap();
 
-    // Read 120 frames: 100 real frames then 20 of silence.
+    // Read 120 frames: 100 real frames then 20 of silence (past EOF), never short.
     let out = store.read(120);
     assert_eq!(out.frame_count(), 120);
     let s = out.interleaved();
@@ -69,18 +74,21 @@ fn reads_are_contiguous_then_silence_past_eof() {
     for (i, &v) in s.iter().take(200).enumerate() {
         assert_eq!(v, i as f32, "sample {i} broke contiguity");
     }
-    // Next 20 frames are silence (nothing published there yet).
+    // Frames 100..120 (samples 200..240) are silence — nothing published there.
     assert!(
         s[200..].iter().all(|&v| v == 0.0),
-        "frames past EOF must be silence-filled"
+        "frames past EOF must be silence-filled, not a gap"
     );
 
-    // The cursor advanced exactly 120 frames: the next read starts at frame 120,
-    // i.e. interleaved sample value 240 (frame 120 * 2ch), continuing the second
-    // ramp (which covers frames 100..150 with values 200..300).
+    // Now the producer catches up, publishing frames 100..150 contiguously
+    // (sample value start = 100 frames * 2ch = 200). The reader's cursor already
+    // advanced past 120, so its next read continues the stream gap-free from
+    // frame 120 — it does NOT re-read the silence it already consumed.
+    store.publish(&ramp(200, 50)).unwrap();
     let next = store.read(10);
     assert_eq!(next.frame_count(), 10);
-    // Frames 120..130 -> sample values 240..260.
+    // Frames 120..130 -> sample values 240..260: the cursor advanced by exactly
+    // 120 and the just-published frames slot in contiguously.
     for (i, &v) in next.interleaved().iter().enumerate() {
         assert_eq!(v, (240 + i) as f32, "read cursor did not advance by 120");
     }
@@ -99,7 +107,7 @@ fn bounded_ring_drops_oldest_never_grows() {
     let chunk = 250;
     let mut written = 0;
     while written < total {
-        store.publish(ramp(written * 2, chunk)).unwrap();
+        store.publish(&ramp(written * 2, chunk)).unwrap();
         written += chunk;
     }
     assert!(
@@ -129,7 +137,7 @@ fn bounded_ring_drops_oldest_never_grows() {
 fn publish_format_mismatch_is_an_error() {
     let store = AudioStore::new(stereo(), 48_000);
     let mono = AudioBlock::silence(AudioFormat::new(FS, ChannelLayout::Mono), 10);
-    let err = store.publish(mono).unwrap_err();
+    let err = store.publish(&mono).unwrap_err();
     assert!(
         matches!(err, multiview_audio::AudioError::FormatMismatch { .. }),
         "publishing a mismatched-format block must be a FormatMismatch error, got {err:?}"
@@ -156,7 +164,7 @@ fn producer_thread_never_back_pressures_reader() {
             if prod_stop.load(Ordering::Acquire) {
                 break;
             }
-            prod_store.publish(ramp(written * 2, 48)).unwrap();
+            prod_store.publish(&ramp(written * 2, 48)).unwrap();
             written += 48;
         }
         written
@@ -170,7 +178,10 @@ fn producer_thread_never_back_pressures_reader() {
         assert_eq!(out.frame_count(), 96, "read returned a short/gapped block");
         frames_seen += out.frame_count();
     }
-    assert_eq!(frames_seen, 48_000, "reader did not get its requested frames");
+    assert_eq!(
+        frames_seen, 48_000,
+        "reader did not get its requested frames"
+    );
 
     let written = producer.join().expect("producer thread panicked");
     assert!(written > 0, "producer never published");
