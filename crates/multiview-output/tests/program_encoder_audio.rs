@@ -71,6 +71,35 @@ fn program_encoder_encodes_program_audio_into_tagged_packets() {
 }
 
 #[test]
+fn program_encoder_encodes_interleaved_program_audio() {
+    // The program bus hands the cli interleaved samples ([L, R, L, R, …]); the
+    // encoder de-interleaves into the FIFO and produces audio-tagged packets.
+    let mut pe = ProgramEncoder::new(&cfg_with_audio()).expect("open");
+    let frames = 1600_usize;
+    let interleaved = vec![0.015_f32; frames * 2];
+
+    let mut audio_packets = 0_usize;
+    for _ in 0..20 {
+        let pkts = pe
+            .encode_audio_interleaved(&interleaved, frames)
+            .expect("encode interleaved audio");
+        for pkt in &pkts {
+            assert_eq!(pkt.kind(), StreamKind::Audio);
+        }
+        audio_packets += pkts.len();
+    }
+    let tail = pe.finish().expect("finish");
+    let tail_audio = tail
+        .iter()
+        .filter(|p| p.kind() == StreamKind::Audio)
+        .count();
+    assert!(
+        audio_packets + tail_audio > 0,
+        "interleaved program audio produced AAC packets"
+    );
+}
+
+#[test]
 fn video_only_program_encoder_has_no_audio_surface() {
     let mut pe = ProgramEncoder::new(&EncodeConfig::mpeg2(160, 120)).expect("open");
     assert!(pe.audio_codec_params().is_none());

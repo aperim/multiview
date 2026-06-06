@@ -512,6 +512,31 @@ impl ProgramEncoder {
         }
     }
 
+    /// Encode one program-bus audio block given as **interleaved** f32 samples
+    /// (`[L, R, L, R, …]` for stereo) carrying `frames` frames — the layout the
+    /// [`AudioBlock`](multiview_audio::AudioBlock) program bus produces. The block
+    /// is de-interleaved into the per-channel FIFO and encoded exactly like
+    /// [`encode_audio`](Self::encode_audio). A no-op for a video-only run.
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if called after [`finish`](Self::finish), the
+    /// block is shorter than `frames × channels`, or the encode fails.
+    pub fn encode_audio_interleaved(
+        &mut self,
+        interleaved: &[f32],
+        frames: usize,
+    ) -> Result<Vec<EncodedPacket>> {
+        if self.finished {
+            return Err(Error::Output(
+                "ProgramEncoder::encode_audio_interleaved called after finish".to_owned(),
+            ));
+        }
+        match self.audio.as_mut() {
+            Some(state) => state.encode_interleaved(interleaved, frames),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// The codec parameters each [`PacketMuxSink`] seeds its muxer stream from.
     /// Snapshotted once at [`new`](Self::new) — the codec is fixed across the
     /// encode (invariant #7), so this is cloned per sink, never rebuilt.
@@ -616,6 +641,36 @@ impl AudioState {
                 Error::Output("program audio plane shorter than the sample count".to_owned())
             })?;
             queue.extend_from_slice(src);
+        }
+        self.drain_full_frames()
+    }
+
+    /// De-interleave `interleaved` (`frames × channels` f32, `[L, R, L, R, …]`)
+    /// into the per-channel FIFO and encode every full frame.
+    fn encode_interleaved(
+        &mut self,
+        interleaved: &[f32],
+        frames: usize,
+    ) -> Result<Vec<EncodedPacket>> {
+        let channels = self.fifo.len();
+        if channels == 0 {
+            return Ok(Vec::new());
+        }
+        let needed = frames
+            .checked_mul(channels)
+            .ok_or_else(|| Error::Output("interleaved audio frame count overflow".to_owned()))?;
+        if interleaved.len() < needed {
+            return Err(Error::Output(
+                "interleaved program audio shorter than frames × channels".to_owned(),
+            ));
+        }
+        for frame in 0..frames {
+            let base = frame * channels;
+            for (channel, queue) in self.fifo.iter_mut().enumerate() {
+                // `.get` (not index) keeps this panic-free even on a short block.
+                let sample = interleaved.get(base + channel).copied().unwrap_or(0.0);
+                queue.push(sample);
+            }
         }
         self.drain_full_frames()
     }
