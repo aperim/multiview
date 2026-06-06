@@ -8,6 +8,7 @@
 //! (invariant #10).
 use std::sync::Arc;
 
+use multiview_config::MultiviewConfig;
 use multiview_core::time::MediaTime;
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
@@ -17,10 +18,12 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
+use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
-use crate::repository::Repository;
+use crate::repository::{InMemoryRepository, LayoutInput, Repository};
 use crate::resource_store::{
-    InMemoryOutputStore, InMemoryOverlayStore, InMemorySourceStore, ResourceRepository,
+    InMemoryOutputStore, InMemoryOverlayStore, InMemorySourceStore, ResourceInput,
+    ResourceRepository,
 };
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
@@ -45,6 +48,149 @@ pub type AckClock = Arc<dyn Fn() -> MediaTime + Send + Sync>;
 /// subscribe-time snapshot frame. It is intentionally an opaque JSON value here
 /// so this crate does not couple to the engine's internal state shape.
 pub type EngineStateSnapshot = serde_json::Value;
+
+/// The control-plane resource stores seeded from a loaded [`MultiviewConfig`].
+///
+/// Produced by [`seed_resources`] and installed onto an [`AppState`] with
+/// [`AppState::with_seeded_resources`], so the web UI Sources/Outputs/Overlays
+/// (and layout) pages are non-empty under a live `multiview run` instead of
+/// starting blank. The stores are ordinary in-memory control-plane state:
+/// read-mostly, never on the engine's data plane, so they cannot back-pressure
+/// the engine (invariant #10). Seeding happens once at bind time, off the
+/// per-tick hot loop.
+pub struct SeededResources {
+    /// The `sources` store, one resource per `config.sources`.
+    pub sources: Arc<dyn ResourceRepository>,
+    /// The `outputs` store, one resource per `config.outputs`.
+    pub outputs: Arc<dyn ResourceRepository>,
+    /// The `overlays` store, one resource per `config.overlays`.
+    pub overlays: Arc<dyn ResourceRepository>,
+    /// The layout store carrying the single working layout (canvas + cells).
+    pub layouts: Arc<dyn Repository>,
+}
+
+/// Map a `serde_json` serialization fault to a repository error.
+///
+/// Serializing the config-as-code value types ([`Source`](multiview_config::Source)
+/// / [`Output`](multiview_config::Output) / [`Overlay`](multiview_config::Overlay))
+/// has no failing path in practice (plain derived `Serialize`, no non-string map
+/// keys), but the guardrails forbid `unwrap`/`expect`, so the `Result` is
+/// propagated rather than panicked.
+fn to_body(value: &impl serde::Serialize) -> ControlResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| ControlError::Repository(format!("serializing a config resource body: {e}")))
+}
+
+/// Build fresh in-memory resource stores seeded from `config`, mirroring one
+/// resource per `config.sources` / `config.outputs` / `config.overlays` plus the
+/// single working layout (canvas + cells) into the layout store.
+///
+/// Each resource's `body` is the typed config value serialized to canonical JSON
+/// (`serde_json::to_value`), so it round-trips back to the config type — engine-
+/// side validation still happens at apply time; the store keeps the document
+/// opaque (`resource_store` doc). Ids:
+/// * **sources** / **overlays** use their intrinsic config `id`;
+/// * **outputs** have no intrinsic id in the schema, so a stable, index-derived
+///   `output-{n}` id is assigned in config order (deterministic across runs of
+///   the same config).
+///
+/// The function never fails on an otherwise-runnable config: config validation
+/// (run before this) already enforces unique source ids, so the `create` calls
+/// cannot collide; a serialization fault (not expected for these derived types)
+/// surfaces as [`ControlError::Repository`] rather than a panic.
+///
+/// Isolation (invariant #10): this allocates plain control-plane stores and runs
+/// once at bind time — it touches no engine channel and is off the hot loop.
+///
+/// # Errors
+///
+/// [`ControlError::Repository`] if a config value fails to serialize, and any
+/// [`ControlError`] a backing `create` surfaces (e.g. a duplicate id — not
+/// expected for a validated config).
+pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources> {
+    let sources = InMemorySourceStore::new();
+    for source in &config.sources {
+        let name = source
+            .display_name
+            .clone()
+            .unwrap_or_else(|| source.id.clone());
+        sources.create(
+            &source.id,
+            ResourceInput {
+                name,
+                body: to_body(source)?,
+            },
+        )?;
+    }
+
+    let overlays = InMemoryOverlayStore::new();
+    for overlay in &config.overlays {
+        overlays.create(
+            &overlay.id,
+            ResourceInput {
+                name: overlay.id.clone(),
+                body: to_body(overlay)?,
+            },
+        )?;
+    }
+
+    let outputs = InMemoryOutputStore::new();
+    for (index, output) in config.outputs.iter().enumerate() {
+        // Outputs carry no intrinsic id in the config schema; assign a stable,
+        // config-order id so the resource is addressable. The `kind` tag (read
+        // back from the serialized body) is the human-friendly name.
+        let body = to_body(output)?;
+        let kind = body
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("output")
+            .to_owned();
+        let id = format!("output-{index}");
+        outputs.create(&id, ResourceInput { name: kind, body })?;
+    }
+
+    let layouts = InMemoryRepository::new();
+    seed_working_layout(config, &layouts)?;
+
+    Ok(SeededResources {
+        sources: Arc::new(sources),
+        outputs: Arc::new(outputs),
+        overlays: Arc::new(overlays),
+        layouts: Arc::new(layouts),
+    })
+}
+
+/// Seed the single working layout (canvas + grid/layout strategy + cells) into
+/// the layout store so the web UI layout page is non-empty under a live run.
+///
+/// The body is the authored shape — `{ canvas, layout, cells }` as canonical
+/// JSON — kept opaque exactly like every other layout document; the editor reads
+/// and the engine validates it on apply. The id/name is the solved working
+/// layout's name when the config solves, else the stable fallback `"working"`
+/// (seeding must not fail just because a config would not yet solve — it still
+/// mirrors the authored cells).
+fn seed_working_layout(
+    config: &MultiviewConfig,
+    layouts: &InMemoryRepository,
+) -> ControlResult<()> {
+    let id = config
+        .solve_layout()
+        .ok()
+        .map_or_else(|| "working".to_owned(), |layout| layout.name);
+    let body = serde_json::json!({
+        "canvas": to_body(&config.canvas)?,
+        "layout": to_body(&config.layout)?,
+        "cells": to_body(&config.cells)?,
+    });
+    layouts.create_layout(
+        &id,
+        LayoutInput {
+            name: id.clone(),
+            body,
+        },
+    )?;
+    Ok(())
+}
 
 /// The shared application state.
 ///
@@ -272,6 +418,22 @@ impl AppState {
         self
     }
 
+    /// Install resource stores seeded from a loaded config ([`seed_resources`]),
+    /// replacing the empty default sources/outputs/overlays stores **and** the
+    /// layout repository in one call.
+    ///
+    /// The binary uses this so the web UI resource pages reflect the running
+    /// config's sources/outputs/overlays/layout. Read-mostly control-plane state;
+    /// installed once at bind time, off the engine hot loop (invariant #10).
+    #[must_use]
+    pub fn with_seeded_resources(mut self, seeded: SeededResources) -> Self {
+        self.sources = seeded.sources;
+        self.outputs = seeded.outputs;
+        self.overlays = seeded.overlays;
+        self.repository = seeded.layouts;
+        self
+    }
+
     /// Replace the resolved-tally mirror (e.g. to share one with the tally
     /// ingest task or a test).
     #[must_use]
@@ -485,7 +647,10 @@ areas = ["a"]
             let stored = seeded.sources.get(&want.id).expect("source present");
             let got: Source =
                 serde_json::from_value(stored.resource.body.clone()).expect("body is a Source");
-            assert_eq!(&got, want, "seeded body must round-trip to the config source");
+            assert_eq!(
+                &got, want,
+                "seeded body must round-trip to the config source"
+            );
         }
     }
 
@@ -498,8 +663,8 @@ areas = ["a"]
         assert_eq!(outputs.len(), 2, "two config outputs seeded");
         // Each stored output body round-trips to the typed config Output, in order.
         for (versioned, want) in outputs.iter().zip(config.outputs.iter()) {
-            let got: Output = serde_json::from_value(versioned.resource.body.clone())
-                .expect("body is an Output");
+            let got: Output =
+                serde_json::from_value(versioned.resource.body.clone()).expect("body is an Output");
             assert_eq!(&got, want);
         }
 
@@ -527,7 +692,7 @@ areas = ["a"]
         let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
         let seeded = seed_resources(&config).expect("seed resources");
 
-        // The single working layout is mirrored so the WebUI layout page is
+        // The single working layout is mirrored so the web UI layout page is
         // non-empty under a live run; its body carries the two authored cells.
         let layouts = seeded.layouts.list_layouts().expect("list layouts");
         assert_eq!(layouts.len(), 1, "one working layout seeded");
@@ -536,6 +701,10 @@ areas = ["a"]
             .get("cells")
             .and_then(|c| c.as_array())
             .expect("layout body carries a cells array");
-        assert_eq!(cells.len(), 2, "both authored cells mirrored into the layout");
+        assert_eq!(
+            cells.len(),
+            2,
+            "both authored cells mirrored into the layout"
+        );
     }
 }

@@ -43,10 +43,20 @@ use tokio::task::JoinHandle;
 /// **logged once** for first access. Finer-grained config-declared keys/roles
 /// are a follow-up.
 ///
+/// The loaded `config` seeds the control plane's Sources/Outputs/Overlays (and
+/// the working layout) resource stores at startup
+/// ([`multiview_control::seed_resources`]), so the web UI resource pages are
+/// non-empty under a live run instead of starting blank. Seeding is one-shot,
+/// off the engine hot loop, into read-mostly control-plane stores that can never
+/// back-pressure the engine (invariant #10).
+///
 /// # Errors
-/// Returns any I/O error from binding the `listen` address.
+/// Returns an I/O error from binding the `listen` address, or — wrapped as
+/// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
+/// from `config` (not expected for a validated config).
 pub async fn bind_and_serve<F>(
     listen: &str,
+    config: &MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
@@ -57,6 +67,12 @@ where
 {
     let listener = TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
+
+    // Mirror the loaded config into the control-plane resource stores before the
+    // router carries them, so `GET /api/v1/{sources,outputs,overlays}` reflect
+    // the running config. Off the hot loop; isolation-safe (invariant #10).
+    let seeded = multiview_control::seed_resources(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     // Admin secret from the environment (12-factor; never from the repo/config),
     // else a generated bootstrap token surfaced once below.
@@ -81,6 +97,7 @@ where
         Arc::new(InMemoryRepository::new()),
         Arc::new(api_keys),
     )
+    .with_seeded_resources(seeded)
     .with_preview(preview);
     let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
     Ok((addr, handle))
@@ -668,6 +685,7 @@ input_id = "in_b"
 
         let (addr, handle) = bind_and_serve(
             "127.0.0.1:0",
+            &test_config(),
             publisher,
             commands,
             multiview_control::no_preview(),

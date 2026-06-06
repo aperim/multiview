@@ -492,6 +492,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (addr, server) = control::bind_and_serve(
         "127.0.0.1:0",
+        &config,
         Arc::clone(&publisher),
         commands,
         Arc::clone(&provider),

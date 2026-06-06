@@ -224,6 +224,7 @@ async fn software_run_serves_the_control_api_while_running() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (addr, server) = control::bind_and_serve(
         "127.0.0.1:0",
+        &cfg,
         Arc::clone(&publisher),
         commands,
         multiview_control::no_preview(),

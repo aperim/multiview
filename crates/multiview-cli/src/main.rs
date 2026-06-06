@@ -191,6 +191,7 @@ async fn run_pipeline_until_ctrl_c(
             ));
         let (addr, handle) = control::bind_and_serve(
             &cfg.listen,
+            config,
             Arc::clone(&publisher),
             commands,
             provider,
@@ -301,6 +302,7 @@ async fn run_software_until_ctrl_c(
             ));
         let (addr, handle) = control::bind_and_serve(
             &cfg.listen,
+            config,
             Arc::clone(&publisher),
             commands,
             preview,
