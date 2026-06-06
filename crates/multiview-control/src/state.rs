@@ -374,3 +374,168 @@ impl AppState {
         })
     }
 }
+
+#[cfg(test)]
+mod seed_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
+
+    use multiview_config::{MultiviewConfig, Output, Overlay, Source};
+
+    use super::seed_resources;
+
+    /// A config carrying 3 sources, 2 outputs, and 1 overlay (plus the
+    /// canvas/layout/cells the parser requires).
+    const SEED_DOC: &str = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "cam_a"
+display_name = "Camera A"
+kind = "rtsp"
+url = "rtsp://x/a"
+[[sources]]
+id = "cam_b"
+kind = "hls"
+url = "https://x/b.m3u8"
+[[sources]]
+id = "cam_c"
+kind = "ndi"
+name = "STUDIO (CAM C)"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "cam_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "cam_b"
+[[overlays]]
+id = "clock_1"
+kind = "clock"
+target = "canvas"
+[[outputs]]
+kind = "rtsp_server"
+mount = "/multiview"
+codec = "h264"
+[[outputs]]
+kind = "ll_hls"
+path = "/srv/hls"
+codec = "h264"
+"##;
+
+    /// A minimal config with NO sources/outputs/overlays (still parses: canvas +
+    /// grid layout only).
+    const EMPTY_DOC: &str = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+"##;
+
+    #[test]
+    fn seeds_one_resource_per_config_source() {
+        let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        let listed = seeded.sources.list().expect("list sources");
+        let ids: Vec<&str> = listed.iter().map(|v| v.resource.id.as_str()).collect();
+        // id-sorted, exactly the three config source ids.
+        assert_eq!(ids, vec!["cam_a", "cam_b", "cam_c"]);
+
+        // The display name is mirrored when present, else the id.
+        let cam_a = seeded.sources.get("cam_a").expect("cam_a present");
+        assert_eq!(cam_a.resource.name, "Camera A");
+        let cam_b = seeded.sources.get("cam_b").expect("cam_b present");
+        assert_eq!(cam_b.resource.name, "cam_b");
+    }
+
+    #[test]
+    fn mirror_roundtrips_source_body() {
+        let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        for want in &config.sources {
+            let stored = seeded.sources.get(&want.id).expect("source present");
+            let got: Source =
+                serde_json::from_value(stored.resource.body.clone()).expect("body is a Source");
+            assert_eq!(&got, want, "seeded body must round-trip to the config source");
+        }
+    }
+
+    #[test]
+    fn seeds_outputs_and_overlays_with_roundtrip_bodies() {
+        let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        let outputs = seeded.outputs.list().expect("list outputs");
+        assert_eq!(outputs.len(), 2, "two config outputs seeded");
+        // Each stored output body round-trips to the typed config Output, in order.
+        for (versioned, want) in outputs.iter().zip(config.outputs.iter()) {
+            let got: Output = serde_json::from_value(versioned.resource.body.clone())
+                .expect("body is an Output");
+            assert_eq!(&got, want);
+        }
+
+        let overlays = seeded.overlays.list().expect("list overlays");
+        let overlay_ids: Vec<&str> = overlays.iter().map(|v| v.resource.id.as_str()).collect();
+        assert_eq!(overlay_ids, vec!["clock_1"]);
+        let stored = seeded.overlays.get("clock_1").expect("overlay present");
+        let got: Overlay =
+            serde_json::from_value(stored.resource.body.clone()).expect("body is an Overlay");
+        assert_eq!(got, config.overlays[0]);
+    }
+
+    #[test]
+    fn empty_config_yields_empty_stores() {
+        let config = MultiviewConfig::load_from_toml(EMPTY_DOC).expect("parse empty config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        assert!(seeded.sources.list().expect("list").is_empty());
+        assert!(seeded.outputs.list().expect("list").is_empty());
+        assert!(seeded.overlays.list().expect("list").is_empty());
+    }
+
+    #[test]
+    fn seeds_a_layout_resource_from_canvas_and_cells() {
+        let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        // The single working layout is mirrored so the WebUI layout page is
+        // non-empty under a live run; its body carries the two authored cells.
+        let layouts = seeded.layouts.list_layouts().expect("list layouts");
+        assert_eq!(layouts.len(), 1, "one working layout seeded");
+        let body = &layouts[0].layout.body;
+        let cells = body
+            .get("cells")
+            .and_then(|c| c.as_array())
+            .expect("layout body carries a cells array");
+        assert_eq!(cells.len(), 2, "both authored cells mirrored into the layout");
+    }
+}
