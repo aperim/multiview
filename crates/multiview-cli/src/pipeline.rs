@@ -3477,18 +3477,24 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
 
 /// Map one decoded frame onto the timeline the store is stamped with.
 ///
-/// Returns the decoder's already-rescaled presentation time for this frame.
-/// (ENG-2 will route the **raw** source-tick PTS through the per-input
-/// [`PtsNormalizer`](multiview_input::normalize::PtsNormalizer) here so a 33-bit
-/// MPEG-TS wrap is unwrapped onto one monotonic nanosecond timeline — proven by
-/// the `eng2_timeline_tests`, which currently fail against this passthrough.)
+/// Routes the frame's **raw** source-tick PTS through the per-input
+/// [`PtsNormalizer`](multiview_input::normalize::PtsNormalizer): unwrap a 33-bit
+/// MPEG-TS wrap, synthesize a genpts fallback from the declared cadence when the
+/// raw PTS is absent, smooth a discontinuity, and enforce a strict monotonic
+/// guard — yielding one clean nanosecond timeline (invariant #3). Anchoring at
+/// `master_now = 0` places the first frame at the source-relative origin; the
+/// wall-clock pacer handles real-time release and `publish_time` stamps
+/// source-relative media time for latch-on-tick.
+///
+/// A degenerate input timebase (a zero denominator — impossible for a real
+/// opened stream) makes [`PtsNormalizer::normalize`] error; that case falls back
+/// to `fallback` (the decoder's own rescaled PTS) so ingest never drops a frame.
 fn timeline_pts(
     normalizer: &mut multiview_input::normalize::PtsNormalizer,
-    _raw_pts: Option<i64>,
+    raw_pts: Option<i64>,
     fallback: MediaTime,
 ) -> MediaTime {
-    let _ = normalizer;
-    fallback
+    normalizer.normalize(raw_pts, 0).unwrap_or(fallback)
 }
 
 /// Open `plan.location`, decode its best video stream to NV12 scaled to the tile
@@ -4468,15 +4474,10 @@ mod eng2_timeline_tests {
 
         let modulus: i64 = 1 << 33; // 33-bit PTS wraps at 2^33 ticks
         let step: i64 = 3_000; // 90 kHz ticks per 30 fps frame
+
         // Five frames straddling the wrap: the third is the post-wrap masked
         // value (as libav would present it after 2^33 ticks elapse).
-        let raws = [
-            modulus - 2 * step,
-            modulus - step,
-            step,
-            2 * step,
-            3 * step,
-        ];
+        let raws = [modulus - 2 * step, modulus - step, step, 2 * step, 3 * step];
 
         let out: Vec<MediaTime> = raws
             .into_iter()
