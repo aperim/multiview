@@ -31,6 +31,7 @@
 
 pub mod error;
 pub mod grid;
+pub mod placement;
 pub mod probe;
 pub mod salvo;
 pub mod schema;
@@ -44,6 +45,7 @@ use multiview_core::layout::{
 };
 
 pub use error::ConfigError;
+pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
@@ -114,6 +116,10 @@ pub struct MultiviewConfig {
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlConfig>,
+    /// The GPU work-placement policy (ADR-0018). Absent ⇒ the engine uses its
+    /// conservative built-in defaults (single-GPU hosts add zero behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementConfig>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -228,6 +234,7 @@ impl MultiviewConfig {
         self.validate_salvos()?;
         self.validate_walls()?;
         self.validate_control()?;
+        self.validate_placement()?;
 
         // Solving + the core structural check covers geometry (rects in 0..1,
         // positive extent, valid cadence) and grid wiring (areas resolve).
@@ -245,6 +252,11 @@ impl MultiviewConfig {
     /// `clock` timezone offset must be a real UTC offset (`-720..=840` minutes).
     fn validate_sources(&self) -> Result<(), ConfigError> {
         for source in &self.sources {
+            if let Some(pin) = &source.gpu_pin {
+                pin.validate().map_err(|e| {
+                    ConfigError::Validation(format!("source {:?} gpu_pin: {e}", source.id))
+                })?;
+            }
             match &source.kind {
                 SourceKind::Solid { color } => {
                     if parse_hex_color(color).is_none() {
@@ -480,6 +492,20 @@ impl MultiviewConfig {
                     ));
                 }
             }
+            if let Some(pin) = output.gpu_pin() {
+                pin.validate()
+                    .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the optional placement policy block (ADR-0018): reserve-headroom
+    /// in range, weights non-negative, migration policy sane. Absent ⇒ the
+    /// engine's conservative built-in defaults apply (nothing to validate).
+    fn validate_placement(&self) -> Result<(), ConfigError> {
+        if let Some(placement) = &self.placement {
+            placement.validate()?;
         }
         Ok(())
     }

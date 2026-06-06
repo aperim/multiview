@@ -29,6 +29,10 @@
 //!   `{gpu, vendor}` label, the whole-system [`gpu::CpuGauge`], and the pure
 //!   std-only [`gpu::CpuSampler`] (`/proc/stat`). Unknown vendor metrics are
 //!   **not registered** (ADR-0017 §4.1 — "n/a", never a false zero).
+//! * [`placement`] — placement/migration/split decision counters
+//!   ([`placement::PlacementCounters`]) for the GPU work-placement loop
+//!   (ADR-0018 — "every adaptation logged"), labelled by a bounded
+//!   `outcome`/`reason` vocabulary.
 //! * [`tracing_init`] — [`tracing_init::SubscriberBuilder`] for an
 //!   `EnvFilter`-based subscriber.
 //! * [`syslog`] — a **pure** RFC 5424 message formatter (always compiled); the
@@ -46,6 +50,7 @@ pub mod error;
 pub mod gpu;
 pub mod health;
 pub mod metrics;
+pub mod placement;
 #[cfg(feature = "snmp")]
 pub mod snmp;
 pub mod syslog;
@@ -59,5 +64,6 @@ pub use metrics::{
     Counter, Gauge, Histogram, HistogramSnapshot, Labels, MetricKind, MetricsRegistry,
     SeriesDescriptor,
 };
+pub use placement::{PlacementCounters, SuppressReason};
 pub use syslog::{Facility, SdElement, Severity, SyslogMessage};
 pub use tracing_init::{Output, SubscriberBuilder};

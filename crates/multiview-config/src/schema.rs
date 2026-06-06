@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::ConfigError;
 use crate::grid::{GridLayout, Track};
+use crate::placement::DevicePin;
 
 /// An exact frame rate parsed from a `"num/den"` string (e.g. `"30000/1001"`).
 ///
@@ -312,6 +313,11 @@ pub struct Source {
     /// cost). See [`CaptionSelector`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captions: Option<CaptionSelector>,
+    /// Operator pin for this source's **decode** stage to a stable GPU
+    /// ([`DevicePin`], ADR-0018 §2.1). Absent ⇒ the placement engine auto-places
+    /// the source's decode. A pin always wins (it is never silently relocated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_pin: Option<DevicePin>,
 }
 
 /// How captions/subtitles are sourced for one input, decoded **natively from the
@@ -531,6 +537,10 @@ pub enum Output {
         /// Latency profile hint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         latency_profile: Option<String>,
+        /// Operator pin for this output's **encode** stage to a stable GPU
+        /// ([`DevicePin`], ADR-0018 §2.1). Absent ⇒ auto-placed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
     },
     /// Low-latency HLS packager.
     LlHls {
@@ -547,6 +557,9 @@ pub enum Output {
         /// GOP duration (ms).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gop_ms: Option<u32>,
+        /// Operator pin for this output's **encode** stage to a stable GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
     },
     /// HLS packager.
     Hls {
@@ -557,11 +570,17 @@ pub enum Output {
         /// Segment duration (ms).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         segment_ms: Option<u32>,
+        /// Operator pin for this output's **encode** stage to a stable GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
     },
     /// NDI output.
     Ndi {
         /// NDI source name to advertise.
         name: String,
+        /// Operator pin for this output's frame source to a stable GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
     },
     /// RTMP push.
     Rtmp {
@@ -569,6 +588,9 @@ pub enum Output {
         url: String,
         /// Video codec.
         codec: String,
+        /// Operator pin for this output's **encode** stage to a stable GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
     },
     /// SRT push.
     Srt {
@@ -576,7 +598,26 @@ pub enum Output {
         url: String,
         /// Video codec.
         codec: String,
+        /// Operator pin for this output's **encode** stage to a stable GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
     },
+}
+
+impl Output {
+    /// The operator GPU pin for this output's encode stage, if any (ADR-0018
+    /// §2.1). `None` ⇒ the placement engine auto-places the output's encode.
+    #[must_use]
+    pub const fn gpu_pin(&self) -> Option<&DevicePin> {
+        match self {
+            Output::RtspServer { gpu_pin, .. }
+            | Output::LlHls { gpu_pin, .. }
+            | Output::Hls { gpu_pin, .. }
+            | Output::Ndi { gpu_pin, .. }
+            | Output::Rtmp { gpu_pin, .. }
+            | Output::Srt { gpu_pin, .. } => gpu_pin.as_ref(),
+        }
+    }
 }
 
 impl Layout {

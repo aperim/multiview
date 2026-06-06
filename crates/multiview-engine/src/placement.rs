@@ -341,12 +341,21 @@ impl PlacementController {
         //    overload can be raised before we have evidence.
         let share = self.ewma.get(&self.current).copied().unwrap_or(0.0);
         let mv = self.overload.observe(f64::from(share));
-        let _sustained = self.note_sustained(mv);
-        let _ = (loads, share);
+        let sustained = self.note_sustained(mv);
 
-        // RED STUB (GPU-5b TDD): the sustained-overload SHED/MIGRATE/split
-        // decision is not implemented yet — the controller proposes nothing.
-        PlacementProposal::Hold
+        if !sustained {
+            return PlacementProposal::Hold;
+        }
+
+        // 3. A pinned pipeline never migrates off its device — shed locally.
+        if self.is_pinned_here() {
+            return PlacementProposal::Shed {
+                reason: ShedReason::Pinned,
+            };
+        }
+
+        // 4. SHED vs MIGRATE: re-select over the *other* candidates and compare.
+        self.decide_relief(loads, share)
     }
 
     /// Update the EWMA register for `device` with a fresh `sample` share.
@@ -410,7 +419,7 @@ impl PlacementController {
             // No single *other* GPU can host the whole pipeline: the move that
             // would cure the imbalance does not exist. Try the deliberate split
             // as the last resort; otherwise shed locally.
-            Err(reason) => self.consider_split_or_shed(loads, reason),
+            Err(reason) => self.consider_split_or_shed(loads, &reason),
         }
     }
 
@@ -463,30 +472,22 @@ impl PlacementController {
     fn consider_split_or_shed(
         &self,
         loads: &[DeviceLoad],
-        reason: RejectReason,
+        reason: &RejectReason,
     ) -> PlacementProposal {
         // Only attempt a split when the no-fit cause is the whole pipeline not
-        // fitting (degrade-to-fit's territory); an unsatisfiable pin or an empty
-        // candidate set is never a split (ADR-0018 §20 — a split needs two GPUs
-        // and a real bottleneck).
-        let bottleneck = match reason {
-            RejectReason::NoCandidateFitsWholePipeline | RejectReason::AllOverHeadroomCeiling => {
-                self.infer_bottleneck_stage()
-            }
-            RejectReason::PinUnsatisfiable { .. } | RejectReason::NoCandidates => {
-                return PlacementProposal::Shed {
-                    reason: ShedReason::NoBetterHome,
-                }
-            }
-            // `RejectReason` is `#[non_exhaustive]`: a future reject we do not yet
-            // understand is treated conservatively as "no usable move" — shed
-            // locally rather than guess a split.
-            _ => {
-                return PlacementProposal::Shed {
-                    reason: ShedReason::NoBetterHome,
-                }
-            }
-        };
+        // fitting (degrade-to-fit's territory). An unsatisfiable pin, an empty
+        // candidate set, or any future reject is never a split (ADR-0018 §20 — a
+        // split needs two GPUs and a real bottleneck); those shed locally.
+        let splittable = matches!(
+            reason,
+            &RejectReason::NoCandidateFitsWholePipeline | &RejectReason::AllOverHeadroomCeiling
+        );
+        if !splittable {
+            return PlacementProposal::Shed {
+                reason: ShedReason::NoBetterHome,
+            };
+        }
+        let bottleneck = self.infer_bottleneck_stage();
 
         let devices: Vec<DeviceId> = self
             .candidates
