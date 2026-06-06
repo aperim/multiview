@@ -424,3 +424,86 @@ async fn realtime_software_run_paces_to_wall_clock() {
         "realtime pacing should consume roughly N tick-periods, got {elapsed:?} (expected ~{expected:?})"
     );
 }
+
+#[tokio::test]
+async fn control_command_flood_never_falters_the_output_clock() {
+    // CTL-1 invariant guard (#1 output-clock + #10 isolation): the command drain
+    // runs on the output-clock loop, so a CONTINUOUSLY-FLOODED command bus must
+    // never stall the clock or skip a frame — exactly N frames for N ticks, never
+    // faltered, no matter how many control commands are pending each tick. This is
+    // the engine-level re-assertion the swap/unit tests cannot make (they call the
+    // drain closure directly rather than through a real bounded run).
+    use multiview_cli::control::command_drain;
+    use multiview_control::{command_bus, Command, EngineStateSnapshot, OperationId};
+    use multiview_engine::EnginePublisher;
+    use multiview_events::Event;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const TICKS: u64 = 120;
+
+    let cfg = small_config();
+    let mut engine = SoftwareEngine::build(&cfg).expect("build software engine");
+
+    // A small bus so it is trivially saturated; pre-fill it to capacity so the
+    // very first per-tick drain already faces a full queue.
+    let (tx, rx) = command_bus(64);
+    while tx
+        .try_submit(Command::Start {
+            op: OperationId::new(),
+        })
+        .is_ok()
+    {}
+
+    // Background flooder: keep the bus saturated with a mix of EVERY command class
+    // for the whole run. A full bus just drops the submit (Err) — the sender can
+    // only ever pressure, never coordinate with, the clock (invariant #10).
+    let stop_flood = Arc::new(AtomicBool::new(false));
+    let flooder = {
+        let stop_flood = Arc::clone(&stop_flood);
+        std::thread::spawn(move || {
+            while !stop_flood.load(Ordering::Relaxed) {
+                let _ = tx.try_submit(Command::Start {
+                    op: OperationId::new(),
+                });
+                let _ = tx.try_submit(Command::Stop {
+                    op: OperationId::new(),
+                });
+                let _ = tx.try_submit(Command::SwapSource {
+                    op: OperationId::new(),
+                    tile: "cell_a".to_owned(),
+                    source: "in_b".to_owned(),
+                });
+                let _ = tx.try_submit(Command::ApplyLayout {
+                    op: OperationId::new(),
+                    layout: "schema_v1".to_owned(),
+                });
+            }
+        })
+    };
+
+    // The drop-oldest outcome publisher the drain emits to (capacity 8, so the
+    // flood of OutputStatus/Salvo echoes also stresses the drop-oldest path); its
+    // events are not inspected here — the property under test is the clock cadence.
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(8));
+    let drain = command_drain(rx, cfg.clone(), Arc::clone(&publisher));
+
+    // Deterministic clock (jumped past the final deadline — no real sleeps).
+    let time = Arc::new(ManualTimeSource::new());
+    let report = engine
+        .run_for_with_control(Arc::clone(&time), CooperativePacer, TICKS, drain)
+        .await
+        .expect("software run with a flooded control bus succeeds");
+
+    stop_flood.store(true, Ordering::Relaxed);
+    let _ = flooder.join();
+
+    assert_eq!(
+        report.frames, TICKS,
+        "a flooded command bus must still produce exactly N frames for N ticks"
+    );
+    assert_eq!(report.ticks, TICKS);
+    assert!(
+        !report.faltered,
+        "a flooded command bus must never falter the output clock (invariants #1 + #10)"
+    );
+}

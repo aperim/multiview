@@ -296,6 +296,31 @@ impl SoftwareEngine {
         TS: Advanceable + 'static,
         P: Pacer,
     {
+        self.run_for_with_control(time_source, pacer, max_ticks, |_d| {})
+            .await
+    }
+
+    /// Like [`SoftwareEngine::run_for`], but applies control-plane reconfiguration
+    /// at each frame boundary via `control` (e.g. the command-bus drain from
+    /// [`crate::control::command_drain`]). `control` runs on the deterministic
+    /// output-clock loop and must be non-blocking (invariants #1 + #10): even a
+    /// flooded command bus must not stall the clock or skip a frame.
+    ///
+    /// # Errors
+    ///
+    /// See [`SoftwareEngine::run_for`].
+    pub async fn run_for_with_control<TS, P, FC>(
+        &mut self,
+        time_source: Arc<TS>,
+        pacer: P,
+        max_ticks: u64,
+        control: FC,
+    ) -> Result<RunReport, RunError>
+    where
+        TS: Advanceable + 'static,
+        P: Pacer,
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
         self.prime_stores(time_source.as_ref());
         let ts: Arc<dyn TimeSource> = time_source.clone();
         let mut runtime = self.build_runtime(ts, pacer)?;
@@ -327,7 +352,7 @@ impl SoftwareEngine {
                     pts: f.pts(),
                 })
             },
-            |_d: &mut CompositorDrive<Nv12Image>| {},
+            control,
         )
         .await
     }

@@ -336,14 +336,17 @@ fn apply_command(
             // to a program-bus lamp of that colour at the default brightness; a
             // cleared override (`None`) maps to the unlit default state.
             // FOLLOW-UP: route through the real arbiter once it exists.
-            let state = match color {
+            let tally_state = match color {
                 Some(color) => multiview_core::tally::TallyState {
                     color,
                     ..multiview_core::tally::TallyState::default()
                 },
                 None => multiview_core::tally::TallyState::default(),
             };
-            publisher.publish_event(Event::TallyState(TallyEvent { target, state }));
+            publisher.publish_event(Event::TallyState(TallyEvent {
+                target,
+                state: tally_state,
+            }));
         }
         // `Command` is `#[non_exhaustive]`: a future variant this build does not
         // know about is logged and skipped, never panicked on.
