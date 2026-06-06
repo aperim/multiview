@@ -1,6 +1,6 @@
 //! End-to-end embedded CEA-608 caption decode (SUR-3b), proven against a
 //! self-contained, libav-generated `mpeg2video` MPEG-TS fixture whose frames
-//! carry the caption as `AV_FRAME_DATA_A53_CC` side data (the FFmpeg CLI cannot
+//! carry the caption as `AV_FRAME_DATA_A53_CC` side data (the `FFmpeg` CLI cannot
 //! inject known A53 captions into a video bitstream; the fixture is built through
 //! libav by [`multiview_ffmpeg::test_fixtures`], the `test-fixtures` feature).
 //!
@@ -29,10 +29,14 @@ use multiview_ffmpeg::test_fixtures::{generate_a53_cc_ts, A53_CAPTION_TEXT};
 use multiview_ffmpeg::{extract_a53_cc, CaptionCue};
 use tempfile::TempDir;
 
+/// One decoded video frame's raw stream PTS and the A53 cc-data bytes it carried
+/// (or `None` for the common no-caption frame).
+type FrameCc = (Option<i64>, Option<Vec<u8>>);
+
 /// Decode every video frame of `clip`, returning each frame's raw stream PTS and
 /// the A53 cc-data bytes it carried (or `None`). Uses the raw decoded frame
 /// **before** any pixel conversion so the A53 side data is intact.
-fn decoded_frames(clip: &std::path::Path) -> (Rational, Vec<(Option<i64>, Option<Vec<u8>>)>) {
+fn decoded_frames(clip: &std::path::Path) -> (Rational, Vec<FrameCc>) {
     multiview_ffmpeg::ensure_initialized().unwrap();
     let mut input = ffmpeg::format::input(&clip).expect("open fixture");
     let (idx, params, tb) = {

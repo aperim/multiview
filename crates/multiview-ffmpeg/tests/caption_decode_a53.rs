@@ -27,7 +27,7 @@ use multiview_ffmpeg::caption_decode::{CaptionDecoder, CaptionSource, CcChannel}
 use multiview_ffmpeg::CaptionCue;
 
 /// A 90 kHz (MPEG-TS) packet time-base — what a real embedded-CC video stream
-/// carries, and a non-trivial rebasing (90_000 ticks == 1 s) so a 1:1
+/// carries, and a non-trivial rebasing (`90_000` ticks == 1 s) so a 1:1
 /// tick==ns shortcut would be visibly wrong.
 fn ts_time_base() -> Rational {
     Rational::new(1, 90_000)

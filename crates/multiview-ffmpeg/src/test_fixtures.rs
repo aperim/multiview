@@ -1,22 +1,29 @@
-//! Test-only **DVB-subtitle MPEG-TS fixture generator** (`test-fixtures`
-//! feature, `#[doc(hidden)]`).
+//! Test-only **caption MPEG-TS fixture generators** (`test-fixtures` feature,
+//! `#[doc(hidden)]`): a DVB-subtitle clip and an embedded-CEA-608 clip.
 //!
-//! The Debian/CI `FFmpeg` 7.1 CLI cannot transcode a text subtitle into a bitmap
-//! `dvbsub` stream ("Subtitle encoding currently only possible from text to text
-//! or bitmap to bitmap"; the `text2graphicsub` filter is not compiled), so the
-//! DVB-sub caption tests build the fixture directly through libav: an in-tree
-//! LGPL `mpeg2video` program plus a `dvbsub` (codec `dvb_subtitle`) bitmap
-//! subtitle cue, muxed into MPEG-TS.
+//! The Debian/CI `FFmpeg` 7.1 CLI cannot build either fixture: it cannot
+//! transcode a text subtitle into a bitmap `dvbsub` stream ("Subtitle encoding
+//! currently only possible from text to text or bitmap to bitmap"; the
+//! `text2graphicsub` filter is not compiled), and it has no source that attaches
+//! known `AV_FRAME_DATA_A53_CC` side data to a video frame for `-a53cc` to
+//! forward. So both clips are built directly through libav:
 //!
-//! This lives in `multiview-ffmpeg` (the **only** crate allowed `unsafe` for raw
-//! libav* FFI) so the strictly-`forbid(unsafe)` `multiview-cli` test can call it
-//! across the crate boundary; the `multiview-ffmpeg` demux test uses it too. It is
-//! gated behind the off-by-default `test-fixtures` feature and `#[doc(hidden)]`
-//! — it is **not** part of the product API. There is no safe `ffmpeg_next`
-//! constructor for an outbound `AVSubtitle` bitmap rect, so the rect is poked
-//! through the raw FFI; every `unsafe` block is bounded to libav-owned buffers
-//! we allocate here and carries a `// SAFETY:` note (the crate is `unsafe =
-//! deny`).
+//! * [`generate_dvbsub_ts`] — an in-tree LGPL `mpeg2video` program plus a
+//!   `dvbsub` (codec `dvb_subtitle`) bitmap subtitle cue, muxed into MPEG-TS.
+//! * [`generate_a53_cc_ts`] — an `mpeg2video` program whose frames each carry one
+//!   EIA-608 word as A53 cc-data side data, encoded with `a53cc=1` so a `cc_dec`
+//!   over the decoded frames recovers the caption ([`A53_CAPTION_TEXT`]).
+//!
+//! Both are LGPL-clean (`mpeg2video` / in-tree `dvbsub` / linked `cc_dec`, no
+//! x264/x265). This lives in `multiview-ffmpeg` (the **only** crate allowed
+//! `unsafe` for raw libav* FFI) so the strictly-`forbid(unsafe)` `multiview-cli`
+//! test can call it across the crate boundary; the `multiview-ffmpeg` demux test
+//! uses it too. It is gated behind the off-by-default `test-fixtures` feature and
+//! `#[doc(hidden)]` — it is **not** part of the product API. There is no safe
+//! `ffmpeg_next` constructor for an outbound `AVSubtitle` bitmap rect, so the
+//! rect is poked through the raw FFI; every `unsafe` block is bounded to
+//! libav-owned buffers we allocate here and carries a `// SAFETY:` note (the
+//! crate is `unsafe = deny`).
 
 // reason: this is a libav fixture generator; raw `AVSubtitle`/`AVSubtitleRect`
 // FFI has no safe `ffmpeg_next` wrapper. Every `unsafe` block has a `// SAFETY:`.
@@ -477,4 +484,311 @@ unsafe fn fill_plane(data: *mut u8, linesize: i32, w: i32, h: i32, val: u8) {
         let line = data.offset(stride);
         ptr::write_bytes(line, val, width);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Embedded CEA-608 (A53_CC) MPEG-TS fixture
+// ---------------------------------------------------------------------------
+//
+// The FFmpeg CLI cannot inject a known EIA-608 caption into a *video* bitstream
+// as `AV_FRAME_DATA_A53_CC` side data: `-a53cc 1` only *forwards* A53 side data
+// that is already on the encoder's input frames, and the CLI has no source that
+// attaches it. So, like the DVB-sub fixture above, this builds the clip directly
+// through libav: a small `mpeg2video` program whose input frames each carry one
+// EIA-608 control/character word as an A53 cc-data triplet, encoded with
+// `a53cc=1` so the words land in the bitstream and a `cc_dec` over the decoded
+// frames recovers them. `mpeg2video` is LGPL — no x264/x265 (captions.md §9).
+
+/// The caption text the [`generate_a53_cc_ts`] fixture burns into the video as
+/// EIA-608 closed captions; a `cc_dec` over the decoded A53 side data recovers it.
+pub const A53_CAPTION_TEXT: &str = "HELLO WORLD";
+
+/// The output frame rate of the A53 fixture (fps).
+pub const A53_FPS: i32 = 25;
+
+/// Build the EIA-608 control/character word sequence for a pop-on caption of
+/// [`A53_CAPTION_TEXT`]: Resume-Caption-Loading, Erase-Non-displayed-Memory, a
+/// preamble address code (row 15), the odd-parity character pairs, then
+/// End-Of-Caption (which is what makes `cc_dec` emit the cue). Each entry is a
+/// two-byte 608 word; both bytes carry odd parity.
+fn eia608_words() -> Vec<(u8, u8)> {
+    // Two-byte control codes (channel 1, field 1).
+    const RCL: (u8, u8) = (0x14, 0x20); // Resume Caption Loading (pop-on)
+    const ENM: (u8, u8) = (0x14, 0x2e); // Erase Non-displayed Memory
+    const PAC15: (u8, u8) = (0x14, 0x70); // Preamble Address Code, row 15
+    const EOC: (u8, u8) = (0x14, 0x2f); // End Of Caption (swap to display)
+
+    let mut words = vec![RCL, ENM, PAC15];
+    let mut chars: Vec<u8> = A53_CAPTION_TEXT.bytes().collect();
+    if chars.len() % 2 == 1 {
+        chars.push(0x00); // pad to whole 608 words with a null
+    }
+    for pair in chars.chunks_exact(2) {
+        if let [a, b] = *pair {
+            words.push((a, b));
+        }
+    }
+    words.push(EOC);
+    words
+}
+
+/// Set the high bit of a 7-bit EIA-608 byte so the total number of set bits is
+/// odd (the line-21 parity rule the decoder validates).
+fn odd_parity(byte: u8) -> u8 {
+    let low = byte & 0x7f;
+    if low.count_ones() % 2 == 0 {
+        low | 0x80
+    } else {
+        low
+    }
+}
+
+/// Wrap one EIA-608 word as a single A53 cc-data triplet: a `0xFC` marker
+/// (`cc_valid = 1`, `cc_type = 0` → field-1 line-21) followed by the two
+/// odd-parity data bytes. This is exactly the `AV_FRAME_DATA_A53_CC` payload an
+/// H.264/MPEG-2 decoder reproduces.
+fn a53_triplet(word: (u8, u8)) -> [u8; 3] {
+    [0xFC, odd_parity(word.0), odd_parity(word.1)]
+}
+
+/// Generate an MPEG-TS clip at `path` carrying [`A53_CAPTION_TEXT`] as embedded
+/// EIA-608 closed captions in the `mpeg2video` bitstream (one 608 word per frame
+/// as `AV_FRAME_DATA_A53_CC` side data, encoded with `a53cc=1`). Decoding the
+/// video and feeding the recovered A53 side data to `cc_dec` reproduces the text.
+///
+/// The clip is `A53_FPS`-cadence, 64×64, and runs a few frames past the last
+/// caption word so the encoder fully flushes.
+///
+/// # Errors
+/// Returns [`FfmpegError`] if any libav allocation/open/encode/mux step fails.
+pub fn generate_a53_cc_ts(path: &Path) -> Result<()> {
+    crate::decode::ensure_initialized()?;
+    // SAFETY: a single-threaded libav build sequence. We own every context /
+    // stream / packet / frame allocated below and free them before returning;
+    // each inner block documents the buffers it touches.
+    unsafe { generate_a53_inner(path) }
+}
+
+unsafe fn generate_a53_inner(path: &Path) -> Result<()> {
+    let cpath = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| bug())?;
+    let cfmt = CString::new("mpegts").map_err(|_| bug())?;
+
+    let mut oc: *mut ffi::AVFormatContext = ptr::null_mut();
+    // SAFETY: fresh null out-param + valid CStrings; libav fills `oc` on success.
+    let r = ffi::avformat_alloc_output_context2(
+        &raw mut oc,
+        ptr::null_mut(),
+        cfmt.as_ptr(),
+        cpath.as_ptr(),
+    );
+    if r < 0 || oc.is_null() {
+        return Err(ff_err(r));
+    }
+    let result = build_a53_all(oc, &cpath);
+    // SAFETY: free the context we allocated exactly once (releases its streams).
+    ffi::avformat_free_context(oc);
+    result
+}
+
+/// Add an `mpeg2video` stream with `a53cc=1`, encode the caption-bearing frames,
+/// and finalise the container.
+unsafe fn build_a53_all(oc: *mut ffi::AVFormatContext, cpath: &CString) -> Result<()> {
+    let (vst, vctx) = add_a53_video_stream(oc)?;
+
+    // SAFETY: `oformat` flags read on the live context.
+    let needs_file = ((*(*oc).oformat).flags & ffi::AVFMT_NOFILE) == 0;
+    if needs_file {
+        // SAFETY: `pb` out-param of the live context; `cpath` is a valid CString.
+        let r = ffi::avio_open(&raw mut (*oc).pb, cpath.as_ptr(), ffi::AVIO_FLAG_WRITE);
+        if r < 0 {
+            return Err(ff_err(r));
+        }
+    }
+    // SAFETY: header write on the live, fully-configured context.
+    let r = ffi::avformat_write_header(oc, ptr::null_mut());
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+
+    let res = encode_a53_video(oc, vst, vctx);
+
+    if res.is_ok() {
+        // SAFETY: trailer on the live context after a successful header + frames.
+        let r = ffi::av_write_trailer(oc);
+        if r < 0 {
+            return Err(ff_err(r));
+        }
+    }
+    if needs_file {
+        // SAFETY: closes + nulls the `pb` we opened above.
+        ffi::avio_closep(&raw mut (*oc).pb);
+    }
+    let mut vctx_p = vctx;
+    // SAFETY: free the encoder context we allocated + opened, exactly once.
+    ffi::avcodec_free_context(&raw mut vctx_p);
+    res
+}
+
+/// Add an `mpeg2video` stream with the `a53cc` private option enabled, returning
+/// `(stream, opened encoder ctx)`.
+unsafe fn add_a53_video_stream(
+    oc: *mut ffi::AVFormatContext,
+) -> Result<(*mut ffi::AVStream, *mut ffi::AVCodecContext)> {
+    // SAFETY: encoder lookup by id; static codec descriptor or null.
+    let vcodec = ffi::avcodec_find_encoder(ffi::AVCodecID::AV_CODEC_ID_MPEG2VIDEO);
+    if vcodec.is_null() {
+        return Err(bug());
+    }
+    // SAFETY: adds a stream to the live context; null on failure.
+    let vst = ffi::avformat_new_stream(oc, ptr::null());
+    if vst.is_null() {
+        return Err(bug());
+    }
+    // SAFETY: allocates an encoder context for the found codec; null on failure.
+    let vctx = ffi::avcodec_alloc_context3(vcodec);
+    if vctx.is_null() {
+        return Err(bug());
+    }
+    // SAFETY: `vctx` is a fresh, exclusively-owned context; plain field writes.
+    (*vctx).width = 64;
+    (*vctx).height = 64;
+    (*vctx).time_base = ffi::AVRational {
+        num: 1,
+        den: A53_FPS,
+    };
+    (*vctx).framerate = ffi::AVRational {
+        num: A53_FPS,
+        den: 1,
+    };
+    (*vctx).pix_fmt = ffi::AVPixelFormat::AV_PIX_FMT_YUV420P;
+    (*vctx).gop_size = A53_FPS;
+    (*vctx).bit_rate = 1_000_000;
+    // Enable A53 closed-caption forwarding so the per-frame A53 side data is
+    // written into the bitstream.
+    let key = CString::new("a53cc").map_err(|_| bug())?;
+    let val = CString::new("1").map_err(|_| bug())?;
+    // SAFETY: `priv_data` is the mpeg2video encoder's private AVOptions block,
+    // valid on the freshly allocated (not-yet-opened) context; `key`/`val` are
+    // valid CStrings living for the call.
+    ffi::av_opt_set((*vctx).priv_data, key.as_ptr(), val.as_ptr(), 0);
+
+    // SAFETY: `oformat` flags read on the live context.
+    if ((*(*oc).oformat).flags & ffi::AVFMT_GLOBALHEADER) != 0 {
+        let flag = i32::try_from(ffi::AV_CODEC_FLAG_GLOBAL_HEADER).map_err(|_| bug())?;
+        (*vctx).flags |= flag;
+    }
+    // SAFETY: opens the encoder on its own context.
+    let r = ffi::avcodec_open2(vctx, vcodec, ptr::null_mut());
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+    // SAFETY: copies opened-encoder params into the stream's codecpar.
+    let r = ffi::avcodec_parameters_from_context((*vst).codecpar, vctx);
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+    // SAFETY: plain field write on the owned stream.
+    (*vst).time_base = (*vctx).time_base;
+    Ok((vst, vctx))
+}
+
+/// Encode the caption-bearing frames: one 608 word per frame as A53 side data
+/// (followed by a few caption-free frames so the encoder flushes cleanly).
+unsafe fn encode_a53_video(
+    oc: *mut ffi::AVFormatContext,
+    vst: *mut ffi::AVStream,
+    vctx: *mut ffi::AVCodecContext,
+) -> Result<()> {
+    let words = eia608_words();
+    let total = i64::try_from(words.len()).map_err(|_| bug())? + 6;
+
+    for i in 0..total {
+        // Use the safe `frame::Video` so the pixel-format discriminant + backing
+        // allocation are handled without an `as`-cast on the C enum.
+        let mut video = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 64, 64);
+        // SAFETY: `video` is the live owned frame; fill its planes via raw pointers
+        // (the safe API has no constant-fill).
+        {
+            let frame = video.as_mut_ptr();
+            let r = ffi::av_frame_make_writable(frame);
+            if r < 0 {
+                return Err(ff_err(r));
+            }
+            fill_plane((*frame).data[0], (*frame).linesize[0], 64, 64, 40);
+            fill_plane((*frame).data[1], (*frame).linesize[1], 32, 32, 128);
+            fill_plane((*frame).data[2], (*frame).linesize[2], 32, 32, 128);
+            (*frame).pts = i;
+        }
+        // Attach this frame's 608 word as one A53 cc-data triplet.
+        if let Some(word) = words.get(usize::try_from(i).unwrap_or(usize::MAX)) {
+            let trip = a53_triplet(*word);
+            attach_a53_side_data(&mut video, &trip)?;
+        }
+        // SAFETY: `video.as_ptr()` is the live owned frame, fully populated.
+        let frame = video.as_ptr();
+        drain_a53_video(oc, vst, vctx, frame)?;
+    }
+    // SAFETY: flush the encoder with a null frame, then drain.
+    let r = ffi::avcodec_send_frame(vctx, ptr::null());
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+    drain_a53_video(oc, vst, vctx, ptr::null())
+}
+
+/// Attach `bytes` to `video` as `AV_FRAME_DATA_A53_CC` side data via the safe
+/// `ffmpeg_next` allocator, copying the bytes into the libav-owned buffer.
+unsafe fn attach_a53_side_data(video: &mut ffmpeg::frame::Video, bytes: &[u8]) -> Result<()> {
+    use ffmpeg::util::frame::side_data::Type as SideDataType;
+    let mut sd = video
+        .new_side_data(SideDataType::A53CC, bytes.len())
+        .ok_or_else(bug)?;
+    // SAFETY: `new_side_data` allocated a `bytes.len()`-byte buffer on the frame;
+    // `sd.as_mut_ptr()` points at the live `AVFrameSideData` whose `data` field
+    // is that buffer. We write exactly `bytes.len()` bytes into it.
+    let dst = std::slice::from_raw_parts_mut((*sd.as_mut_ptr()).data, bytes.len());
+    dst.copy_from_slice(bytes);
+    Ok(())
+}
+
+/// Send `frame` (or null to flush) to the encoder and mux every packet it yields.
+unsafe fn drain_a53_video(
+    oc: *mut ffi::AVFormatContext,
+    vst: *mut ffi::AVStream,
+    vctx: *mut ffi::AVCodecContext,
+    frame: *const ffi::AVFrame,
+) -> Result<()> {
+    if !frame.is_null() {
+        // SAFETY: send a valid, fully-populated frame to the opened encoder.
+        let r = ffi::avcodec_send_frame(vctx, frame);
+        if r < 0 {
+            return Err(ff_err(r));
+        }
+    }
+    let pkt = ffi::av_packet_alloc();
+    if pkt.is_null() {
+        return Err(bug());
+    }
+    let result = (|| -> Result<()> {
+        loop {
+            // SAFETY: drains buffered packets from the encoder into `pkt`.
+            let r = ffi::avcodec_receive_packet(vctx, pkt);
+            if r == ffi::AVERROR(ffi::EAGAIN) || r == ffi::AVERROR_EOF {
+                return Ok(());
+            }
+            if r < 0 {
+                return Err(ff_err(r));
+            }
+            (*pkt).stream_index = (*vst).index;
+            ffi::av_packet_rescale_ts(pkt, (*vctx).time_base, (*vst).time_base);
+            let r = ffi::av_interleaved_write_frame(oc, pkt);
+            if r < 0 {
+                return Err(ff_err(r));
+            }
+        }
+    })();
+    let mut pkt_p = pkt;
+    // SAFETY: free the drain packet exactly once.
+    ffi::av_packet_free(&raw mut pkt_p);
+    result
 }

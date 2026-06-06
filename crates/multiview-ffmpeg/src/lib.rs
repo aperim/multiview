@@ -158,7 +158,7 @@ pub mod test_fixtures;
 pub use audio_file::{AudioFileDecoder, AudioSamplesF32};
 
 #[cfg(feature = "ffmpeg")]
-pub use caption_decode::{CaptionDecoder, CaptionSource, CcChannel};
+pub use caption_decode::{extract_a53_cc, CaptionDecoder, CaptionSource, CcChannel};
 
 #[cfg(feature = "ffmpeg")]
 pub use convert::{

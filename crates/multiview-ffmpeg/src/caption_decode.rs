@@ -36,6 +36,8 @@
 
 use ffmpeg::codec::subtitle::{Rect, Subtitle};
 use ffmpeg::codec::{context::Context, packet::Packet, Id, Parameters};
+use ffmpeg::util::frame::side_data::Type as SideDataType;
+use ffmpeg::util::frame::Video;
 use ffmpeg::Dictionary;
 use ffmpeg_next as ffmpeg;
 
@@ -157,10 +159,22 @@ impl CaptionSource {
                 // libzvbi_teletextdec selects the page via the `txt_page` option.
                 vec![("txt_page", page.to_string())]
             }
-            Self::EmbeddedCc { channel } => channel
-                .data_field_option()
-                .map(|f| vec![("data_field", f.to_owned())])
-                .unwrap_or_default(),
+            Self::EmbeddedCc { channel } => {
+                // `cc_dec` has the `delay` capability: by default it buffers an
+                // entire caption block and only emits the cue on a *flush* packet
+                // (a null packet drained at end-of-stream). Our streaming contract
+                // decodes one packet → returns its cues on the input thread and
+                // never injects a flush, so the default decoder would emit nothing
+                // until the stream ended. `real_time=1` makes `cc_dec` emit each
+                // subtitle event as the closing control code (608 End-Of-Caption /
+                // 708 service block end) is decoded — exactly the live, sampled
+                // delivery the cue store expects (captions.md §4/§5).
+                let mut opts = vec![("real_time", "1".to_owned())];
+                if let Some(field) = channel.data_field_option() {
+                    opts.push(("data_field", field.to_owned()));
+                }
+                opts
+            }
             _ => Vec::new(),
         }
     }
@@ -324,6 +338,47 @@ impl CaptionDecoder {
         self.decode(&packet)
     }
 
+    /// Decode the embedded CEA-608/708 closed captions carried on a decoded
+    /// **video** frame as `AV_FRAME_DATA_A53_CC` side data — the embedded-CC
+    /// path end-to-end.
+    ///
+    /// CEA-608/708 captions are not a stream of their own: they ride as side data
+    /// on the H.264/MPEG-2 video frames the per-source decode already produces
+    /// ([`docs/io/captions.md`](../docs/io/captions.md) §2/§4 "CEA special case"),
+    /// so extracting them costs nothing extra. This pulls the A53 cc-data bytes
+    /// off `frame` (via [`extract_a53_cc`]) and feeds them to this decoder's
+    /// `cc_dec`, anchoring the cue at `pts` (in the decoder's configured
+    /// time-base, i.e. the video stream's).
+    ///
+    /// A frame carrying **no** A53 side data — the common case, since only the
+    /// frames that happen to carry caption bytes have it — yields an empty
+    /// [`Vec`], never an error (invariants #2, #10). Because `cc_dec` only emits a
+    /// cue when it sees a caption's closing control code, most frames that *do*
+    /// carry A53 bytes still yield nothing; the cue appears on the frame whose
+    /// bytes complete it.
+    ///
+    /// This is only meaningful for a decoder built for
+    /// [`CaptionSource::EmbeddedCc`]; for any other source the extracted bytes
+    /// would not be the right wire format and the call returns an empty [`Vec`]
+    /// rather than feeding `cc_dec` bytes it cannot parse.
+    ///
+    /// # Errors
+    /// As [`CaptionDecoder::decode`] — a genuine libav decode error on the A53
+    /// bytes; never for "no caption on this frame".
+    pub fn decode_video_frame(
+        &mut self,
+        frame: &Video,
+        pts: Option<i64>,
+    ) -> Result<Vec<CaptionCue>> {
+        if !matches!(self.source, CaptionSource::EmbeddedCc { .. }) {
+            return Ok(Vec::new());
+        }
+        match extract_a53_cc(frame) {
+            Some(bytes) => self.decode_bytes(&bytes, pts),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// The cue anchor (ns) for a decoded subtitle: prefer the packet PTS rebased
     /// through the stream time-base (consistent with video/audio rebasing); fall
     /// back to the subtitle's own PTS (which libav reports in microseconds).
@@ -405,6 +460,36 @@ impl CaptionDecoder {
 /// arm holds a `&'static str`).
 fn decoder_static_name(source: &CaptionSource) -> &'static str {
     source.decoder_name()
+}
+
+/// Extract the embedded CEA-608/708 caption bytes (`AV_FRAME_DATA_A53_CC` side
+/// data) from a decoded video frame, or [`None`] if the frame carries none.
+///
+/// A53 closed captions are not a separate elementary stream: H.264/MPEG-2 video
+/// carries them in SEI / user-data, which libav surfaces as the `A53_CC` side
+/// data on each decoded video frame
+/// ([`docs/io/captions.md`](../docs/io/captions.md) §2). The returned bytes are
+/// the raw `cc_data` triplet sequence (`cc_type`/`cc_valid` marker + two 608/708
+/// data bytes per entry) that [`CaptionDecoder::decode_bytes`] feeds straight to
+/// `cc_dec`. They are copied out of the libav-owned side-data buffer (a few bytes
+/// per frame), so the result outlives the borrow of `frame`.
+///
+/// Most decoded frames have no A53 side data (captions are sparse) — this returns
+/// [`None`] for them, never an error: the embedded-CC path is sampled, never
+/// pacing (invariants #2, #10). An empty side-data buffer also yields [`None`].
+///
+/// Note this must run on the **raw decoded video frame**, before any pixel-format
+/// conversion: libswscale produces a *new* frame that does not carry the source
+/// frame's side data.
+#[must_use]
+pub fn extract_a53_cc(frame: &Video) -> Option<Vec<u8>> {
+    let sd = frame.side_data(SideDataType::A53CC)?;
+    let bytes = sd.data();
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes.to_vec())
+    }
 }
 
 /// Convert a decoded DVB-sub bitmap rect (PAL8: 8-bit palette indices plus an
