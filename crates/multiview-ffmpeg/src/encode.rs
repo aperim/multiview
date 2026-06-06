@@ -176,6 +176,20 @@ pub struct AudioEncoder {
     sample_rate: u32,
 }
 
+// SAFETY: every field is owned and carries no thread-affine interior state: the
+// libav `encoder::audio::Encoder` owns its `AVCodecContext` outright (the same
+// ownership `VideoEncoder` relies on for its auto-`Send`), and `ChannelLayout`
+// is an owned value whose only non-`Send` member is a `*mut AVChannelCustom`
+// that libav populates as plain owned heap data, never shared. Moving the whole
+// encoder between threads is therefore sound (the cli's bake consumer owns the
+// `ProgramEncoder` on a single thread and drives it serially). It is
+// deliberately NOT `Sync` (no `unsafe impl Sync`): a libav encoder context must
+// be externally synchronized for shared access, and `encoder::audio::Encoder`
+// is `!Sync` by default, so leaving `Sync` underived enforces single-thread
+// access — matching `VideoEncoder`, `Scaler`, and `HwDeviceContext`.
+#[allow(unsafe_code)]
+unsafe impl Send for AudioEncoder {}
+
 impl AudioEncoder {
     /// Configure and open an audio encoder for `target`.
     ///
