@@ -9,8 +9,11 @@ root [`CLAUDE.md`](../../CLAUDE.md). This page is the map, not the territory.
 > there are ~500 tests. `multiview-engine` realizes invariants #1 (output clock) and #10 (isolation)
 > with tests; `multiview-control`/`multiview-preview`/`multiview-cli` and the `web/` SPA have substantial
 > partial implementations. The **GPU `wgpu` compositor** (`compositor/gpu/`) and the **FFmpeg media
-> path** live behind **off-by-default features** — they are not in the default build, not yet
-> CI-gated here, and not verified on real hardware in this environment. See
+> path** live behind **off-by-default features** — they are not in the default build. The pure-Rust
+> off-by-default transport features (`st2110`, `webrtc`, `youtube`, `ptp`, `cluster`, `ntp`,
+> `is07-mqtt`, `nmos`, `i915-pmu`) are CI-linted via a separate `feature-clippy` matrix job (IN-7).
+> GPU/native-SDK features (`cuda`, `vaapi`, `ffmpeg`, `gpl-codecs`, `ndi`) are not in the shared-runner
+> CI and not verified on real hardware in this environment. See
 > [`ROADMAP.md`](../../ROADMAP.md) and [`FEATURES.md`](../../FEATURES.md) for per-milestone /
 > per-feature status.
 
