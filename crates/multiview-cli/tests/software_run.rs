@@ -508,3 +508,155 @@ async fn control_command_flood_never_falters_the_output_clock() {
         "a flooded command bus must never falter the output clock (invariants #1 + #10)"
     );
 }
+
+/// A 1x1 grid whose only source is an analog **clock** — the animated synthetic
+/// kind that must be driven by a generator thread (one bake/sec), not primed as
+/// a single static placeholder. The canvas runs at 25 fps so a real second is a
+/// whole number of ticks.
+fn clock_config() -> MultiviewConfig {
+    let toml = r##"
+schema_version = 1
+
+[canvas]
+width = 240
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+
+[[sources]]
+id = "clk"
+kind = "clock"
+
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "clk"
+
+[[outputs]]
+kind = "rtsp_server"
+mount = "/multiview"
+codec = "h264"
+"##;
+    let cfg = MultiviewConfig::load_from_toml(toml).expect("parse clock config");
+    cfg.validate().expect("clock config validates");
+    cfg
+}
+
+/// GPU-2 — under `feature = "overlay"`, a `clock` source is driven by a live
+/// generator thread, so its `TileStore` content **changes across a real second
+/// boundary** (one bake/sec) instead of holding a single static placeholder.
+///
+/// Content-aware (the same shape as `synth::analog_clock_renders_and_animates`):
+/// build the engine, spawn the generators, read the clock store's y-plane, sleep
+/// ~1.1s of REAL wall time (the generator is wall-clock based), read again, and
+/// assert the y-plane differs — the second hand moved. The generator publishes
+/// into the lock-free store the engine only samples (inv #10); the read never
+/// blocks.
+#[cfg(feature = "overlay")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clock_source_generator_animates_the_tile_store() {
+    use multiview_core::time::MediaTime;
+
+    let cfg = clock_config();
+    let engine = SoftwareEngine::build(&cfg).expect("build clock engine");
+
+    let stores = engine.preview_stores();
+    let clock = stores.get("clk").expect("clock store wired").clone();
+
+    // Read latched far in the future so HoldForever always hands back the latest
+    // published frame (we assert content change, not the freshness ladder).
+    let far = MediaTime::from_nanos(60 * 1_000_000_000);
+    let plane_now = |s: &std::sync::Arc<
+        multiview_framestore::TileStore<multiview_compositor::pipeline::Nv12Image>,
+    >|
+     -> Option<Vec<u8>> { s.read(far).frame().map(|f| f.y_plane().to_vec()) };
+
+    let generators = engine.spawn_generators();
+
+    // Wait until the generator has published its first frame (bounded), so the
+    // baseline is a real clock bake rather than an empty store.
+    let mut first: Option<Vec<u8>> = None;
+    for _ in 0..40 {
+        if let Some(p) = plane_now(&clock) {
+            first = Some(p);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let first = first.expect("the clock generator published a first frame");
+
+    // Cross a real second boundary: the displayed second changes, so the clock
+    // re-bakes and the store's content differs.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let second = plane_now(&clock).expect("the clock store still holds a frame");
+
+    generators.shutdown();
+
+    assert_ne!(
+        first, second,
+        "an animated clock source must change its tile-store content across a second boundary"
+    );
+}
+
+/// GPU-2 inv #1 re-assertion: with a clock generator running (overlay on), a
+/// bounded realtime run still emits exactly N frames for N ticks and never
+/// falters. The generator only ever writes the lock-free store the engine
+/// samples, so it can neither pace nor stall the output clock (inv #1 + #10).
+#[cfg(feature = "overlay")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clock_run_emits_n_frames_for_n_ticks_without_faltering() {
+    const TICKS: u64 = 10;
+
+    let cfg = clock_config();
+    let mut engine = SoftwareEngine::build(&cfg).expect("build clock engine");
+
+    let report = engine
+        .run_for_realtime(TICKS)
+        .await
+        .expect("realtime clock run succeeds");
+
+    assert_eq!(
+        report.frames, TICKS,
+        "a clock generator must not change the one-frame-per-tick contract"
+    );
+    assert_eq!(report.ticks, TICKS);
+    assert!(
+        !report.faltered,
+        "the output clock must not falter with a live clock generator (inv #1)"
+    );
+}
+
+/// GPU-2 honesty: in a build **without** the `overlay` feature the clock
+/// generator cannot render (it returns `OverlayRequired`), so the run must still
+/// produce a valid slate/card frame per tick — exactly N frames for N ticks,
+/// never faltered (inv #1/#2). This proves the non-overlay fallback path.
+#[cfg(not(feature = "overlay"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clock_run_without_overlay_still_produces_a_frame_per_tick() {
+    const TICKS: u64 = 8;
+
+    let cfg = clock_config();
+    let mut engine = SoftwareEngine::build(&cfg).expect("build clock engine");
+
+    let report = engine
+        .run_for_realtime(TICKS)
+        .await
+        .expect("non-overlay clock run succeeds");
+
+    assert_eq!(report.frames, TICKS, "output is independent of clock render");
+    assert_eq!(report.ticks, TICKS);
+    assert!(
+        !report.faltered,
+        "a non-overlay clock build must still emit a valid frame per tick (inv #1)"
+    );
+}
