@@ -20,6 +20,7 @@
     clippy::float_cmp,
     clippy::print_stdout,
     clippy::as_conversions,
+    clippy::cast_lossless,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
@@ -53,19 +54,29 @@ fn an_image_cue_plans_one_upload_onto_a_resolved_layer() {
     let mut cache = ImageTextureCache::new(8);
     let plan = plan_image_uploads(&list, &mut cache);
 
-    assert!(plan.dispatch(), "an Image primitive warrants an overlay dispatch");
+    assert!(
+        plan.dispatch(),
+        "an Image primitive warrants an overlay dispatch"
+    );
     assert_eq!(plan.uploads().len(), 1, "exactly one image cue to upload");
 
     let upload = &plan.uploads()[0];
     assert!(upload.needs_upload, "the first sight of a cue must upload");
     assert_eq!(upload.src_width, 16);
     assert_eq!(upload.src_height, 12);
-    assert_eq!(upload.rgba.len(), 16 * 12 * 4, "the premultiplied bytes ride the plan");
+    assert_eq!(
+        upload.rgba.len(),
+        16 * 12 * 4,
+        "the premultiplied bytes ride the plan"
+    );
 
     // The packed primitive routes to KIND_IMAGE carrying the resolved layer.
     let packed = &plan.prims()[0];
     assert_eq!(packed.kind_meta[0], PrimitiveKind::Image.as_u32());
-    assert_eq!(packed.kind_meta[1], upload.layer, "packed layer == resolved layer");
+    assert_eq!(
+        packed.kind_meta[1], upload.layer,
+        "packed layer == resolved layer"
+    );
     assert_eq!(packed.geom[0], 16.0, "source width rides geom.x");
     assert_eq!(packed.color[3], 0.8, "fade rides color.a");
 }
@@ -115,7 +126,10 @@ fn analytic_primitives_dispatch_but_plan_no_image_upload() {
     let mut cache = ImageTextureCache::new(8);
     let plan = plan_image_uploads(&list, &mut cache);
     assert!(plan.dispatch(), "a rect still needs the overlay pass");
-    assert!(plan.uploads().is_empty(), "no image cue ⇒ no texture upload");
+    assert!(
+        plan.uploads().is_empty(),
+        "no image cue ⇒ no texture upload"
+    );
     assert_eq!(plan.prims().len(), 1, "the rect is packed for the subpass");
     assert_eq!(plan.prims()[0].kind_meta[0], PrimitiveKind::Rect.as_u32());
 }
@@ -128,7 +142,9 @@ mod gpu_parity {
     use multiview_compositor::error::Error;
     use multiview_compositor::gpu::GpuCompositor;
     use multiview_compositor::overlay::subpass::apply_overlays_to_nv12_reference;
-    use multiview_compositor::pipeline::{composite as cpu_composite, CanvasColor, Nv12Image, Tile};
+    use multiview_compositor::pipeline::{
+        composite as cpu_composite, CanvasColor, Nv12Image, Tile,
+    };
     use multiview_core::color::{
         ColorInfo, ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristic,
     };
@@ -243,10 +259,10 @@ mod gpu_parity {
 
         // CPU oracle: composite, then burn the cue via the full-canvas reference
         // (the same `blend_image` math the GPU subpass mirrors).
-        let base = cpu_composite(cw, ch, canvas, LinearRgba::TRANSPARENT, &tiles)
-            .expect("cpu composite");
-        let cpu = apply_overlays_to_nv12_reference(&base, &list, canvas)
-            .expect("cpu overlay reference");
+        let base =
+            cpu_composite(cw, ch, canvas, LinearRgba::TRANSPARENT, &tiles).expect("cpu composite");
+        let cpu =
+            apply_overlays_to_nv12_reference(&base, &list, canvas).expect("cpu overlay reference");
 
         // GPU: composite + overlay dispatch in one path.
         let got = gpu

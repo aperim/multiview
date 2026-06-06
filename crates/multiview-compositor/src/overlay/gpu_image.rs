@@ -19,6 +19,9 @@
 
 use std::collections::HashMap;
 
+use crate::overlay::gpu_subpass::OverlayPrimGpu;
+use crate::overlay::subpass::{OverlayDrawList, OverlayPrimitive};
+
 /// Hard cap on distinct image-cue layers held in the GPU image texture-array,
 /// sizing it at construction. Bounded by design (data-plane memory is fixed,
 /// never per-frame; ADR-E005). A request beyond the cap evicts the
@@ -267,4 +270,122 @@ pub fn nearest_source_texel(d: u32, dst_len: u32, src_len: u32) -> u32 {
 /// `crate::overlay::subpass::unit_from_u8`).
 fn unit(v: u8) -> f32 {
     f32::from(v) / 255.0
+}
+
+/// One image cue's resolved upload: which texture-array `layer` it occupies,
+/// whether its premultiplied bytes still need a `write_texture` this tick
+/// ([`LayerSlot::needs_upload`] — `false` once it is resident, the upload-once
+/// property), and the source bytes + dimensions to upload.
+///
+/// `rgba` borrows the cue's buffer from the [`OverlayDrawList`] the plan was
+/// built from, so no copy is made; the GPU dispatch uploads it directly only
+/// when `needs_upload` is set.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageUpload<'a> {
+    /// The texture-array layer this cue's bitmap lives in.
+    pub layer: u32,
+    /// `true` when the bytes must be uploaded this tick (a fresh/evicted layer);
+    /// `false` when the layer is already resident (skip the upload — upload-once).
+    pub needs_upload: bool,
+    /// Source bitmap width, pixels.
+    pub src_width: u32,
+    /// Source bitmap height, pixels.
+    pub src_height: u32,
+    /// The cue's already-premultiplied RGBA bytes, `src_width * src_height * 4`.
+    pub rgba: &'a [u8],
+}
+
+/// The upload + pack plan for one frame's overlay [`OverlayDrawList`]: the
+/// per-Image-cue uploads (resolved against the texture cache, upload-once) and
+/// the packed [`OverlayPrimGpu`] list the [`crate::overlay::gpu_subpass::OverlaySubpass`] dispatch consumes.
+///
+/// This is the GPU-free seam between the cache bookkeeping and the actual
+/// dispatch: the GPU compositor calls [`plan_image_uploads`], `write_texture`s
+/// each [`ImageUpload`] that `needs_upload`, uploads [`Self::prims`] into the
+/// primitive storage buffer, and dispatches the subpass exactly when
+/// [`Self::dispatch`] is set. The bookkeeping is fully unit-testable without a
+/// GPU; only the `write_texture` + dispatch need an adapter.
+#[derive(Debug)]
+pub struct ImageUploadPlan<'a> {
+    uploads: Vec<ImageUpload<'a>>,
+    prims: Vec<OverlayPrimGpu>,
+}
+
+impl<'a> ImageUploadPlan<'a> {
+    /// The per-Image-cue uploads, in draw order. Empty when the frame has no
+    /// image cues (analytic-only overlays touch no image texture).
+    #[must_use]
+    pub fn uploads(&self) -> &[ImageUpload<'a>] {
+        &self.uploads
+    }
+
+    /// The packed primitives the overlay subpass blends (images carry their
+    /// resolved texture-array layer; analytic primitives are self-describing).
+    #[must_use]
+    pub fn prims(&self) -> &[OverlayPrimGpu] {
+        &self.prims
+    }
+
+    /// Whether the overlay subpass should be dispatched this frame: `true` iff
+    /// there is at least one primitive to blend. An empty draw list warrants no
+    /// dispatch, so the no-overlay GPU composite path stays byte-for-byte
+    /// unchanged (composite → encode directly).
+    #[must_use]
+    pub fn dispatch(&self) -> bool {
+        !self.prims.is_empty()
+    }
+}
+
+/// Resolve a frame's overlay [`OverlayDrawList`] into an [`ImageUploadPlan`]:
+/// each [`OverlayPrimitive::Image`] cue is content-keyed and resolved against
+/// `cache` (assigning/reusing a texture-array layer, signalling whether its
+/// bytes must be uploaded this tick), and every primitive is packed for the
+/// [`crate::overlay::gpu_subpass::OverlaySubpass`] dispatch — images onto their resolved layer
+/// ([`OverlayPrimGpu::pack_image`]), analytic primitives self-described
+/// ([`OverlayPrimGpu::pack`]).
+///
+/// Glyph primitives are **skipped** here (they sample the persistent glyph
+/// atlas, which the GPU compositor's image-only dispatch does not own — the
+/// CLI bake owns the atlas; GPU-4b wires the image path). Skipping holds
+/// last-good rather than packing a glyph the dispatch cannot sample.
+///
+/// Packing is bounded at [`crate::overlay::gpu_subpass::MAX_OVERLAY_PRIMS`]
+/// (data-plane memory is fixed, never per-frame; ADR-E005).
+#[must_use]
+pub fn plan_image_uploads<'a>(
+    list: &'a OverlayDrawList,
+    cache: &mut ImageTextureCache,
+) -> ImageUploadPlan<'a> {
+    let cap = usize::try_from(crate::overlay::gpu_subpass::MAX_OVERLAY_PRIMS).unwrap_or(usize::MAX);
+    let mut uploads = Vec::new();
+    let mut prims = Vec::with_capacity(list.primitives.len().min(cap));
+    for primitive in &list.primitives {
+        if prims.len() >= cap {
+            break;
+        }
+        match primitive {
+            OverlayPrimitive::Image {
+                src_width,
+                src_height,
+                rgba,
+                ..
+            } => {
+                let key = ImageKey::from_bitmap(*src_width, *src_height, rgba);
+                let slot = cache.resolve(key, *src_width, *src_height);
+                uploads.push(ImageUpload {
+                    layer: slot.layer,
+                    needs_upload: slot.needs_upload,
+                    src_width: *src_width,
+                    src_height: *src_height,
+                    rgba,
+                });
+                prims.push(OverlayPrimGpu::pack_image(primitive, slot.layer));
+            }
+            // Glyphs need the persistent atlas this dispatch does not own → skip.
+            OverlayPrimitive::Glyph { .. } => {}
+            // Analytic primitives (rect / line / stroke / ring) are self-described.
+            other => prims.push(OverlayPrimGpu::pack(other, 0, 0)),
+        }
+    }
+    ImageUploadPlan { uploads, prims }
 }
