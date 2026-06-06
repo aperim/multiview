@@ -77,4 +77,51 @@ RUN mkdir -p /usr/local/cargo/registry /usr/local/cargo/git
 RUN ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
  && ln -sf "$(command -v batcat)" /usr/local/bin/bat
 
+# -----------------------------------------------------------------------------
+# OPTIONAL, OPERATOR-LICENSED NDI SDK (OFF by default; ADR-0008 / ADR-T010).
+#
+# Native NDI (the off-by-default `ndi` feature) runtime-LOADS libndi via
+# NDIlib_v6_load at run time and is NEVER build-linked or vendored into the repo
+# (ADR-0008). Two things still come from Audinate's NDI SDK: the NDIlib v6
+# HEADER (to declare the FFI ABI in `multiview-ndi-sys` as original binding work)
+# and the libndi RUNTIME (for the gated loopback test). Downloading the SDK
+# REQUIRES ACCEPTING AUDINATE'S LICENCE, so this stage is gated on an explicit
+# operator opt-in and installs into the IMAGE ONLY (never the git repo).
+#
+# Default OFF: with NDI_SDK_ACCEPT_LICENSE unset this is a no-op and the image
+# stays proprietary-free / LGPL-clean. To enable, an operator who attests they
+# hold an NDI SDK licence rebuilds with:
+#   --build-arg NDI_SDK_ACCEPT_LICENSE=1 \
+#   --build-arg NDI_SDK_URL=<URL of their NDI SDK for Linux tarball>
+# (Audinate gates the SDK download behind a registration form, so there is no
+# stable public URL to hardcode — the operator supplies it. Self-extracting
+# `.sh` SDK installers need their own EULA-accept flags; the tarball path below
+# is the clean case and may need tuning to the exact SDK package layout.)
+USER root
+ARG NDI_SDK_ACCEPT_LICENSE=
+ARG NDI_SDK_URL=
+ENV NDI_RUNTIME_DIR_V6=/usr/local/lib
+RUN if [ -n "${NDI_SDK_ACCEPT_LICENSE}" ]; then \
+      set -eu; \
+      if [ -z "${NDI_SDK_URL}" ]; then \
+        echo "NDI_SDK_ACCEPT_LICENSE set but NDI_SDK_URL empty — supply the SDK URL" >&2; exit 1; \
+      fi; \
+      echo "Installing operator-licensed NDI SDK (image only, never the repo)"; \
+      mkdir -p /tmp/ndi /opt/ndi/include; \
+      curl -fSL "${NDI_SDK_URL}" -o /tmp/ndi/ndi-sdk.tar.gz; \
+      tar -xzf /tmp/ndi/ndi-sdk.tar.gz -C /tmp/ndi; \
+      inc="$(find /tmp/ndi -type f -name 'Processing.NDI.Lib.h' -printf '%h\n' | head -1)"; \
+      [ -n "${inc}" ] || { echo "NDIlib headers not found in the SDK tarball" >&2; exit 1; }; \
+      cp -a "${inc}/." /opt/ndi/include/; \
+      find /tmp/ndi -type f -name 'libndi.so*' -exec cp -a {} /usr/local/lib/ \; ; \
+      ldconfig; \
+      rm -rf /tmp/ndi; \
+      echo "NDI SDK installed: headers in /opt/ndi/include, libndi in /usr/local/lib"; \
+    else \
+      echo "NDI SDK NOT installed (NDI_SDK_ACCEPT_LICENSE unset) — open build, native NDI inert"; \
+    fi
+# Header search prefix for the (off-by-default) `ndi` FFI binding; harmless when
+# the SDK is absent.
+ENV NDI_SDK_INCLUDE_DIR=/opt/ndi/include
+
 USER vscode
