@@ -41,7 +41,10 @@ async fn apply_layout_returns_202_with_op_id() {
     let drained = h.commands.try_drain();
     assert_eq!(drained.len(), 1, "exactly one command reached the engine");
     match &drained[0] {
-        multiview_control::Command::ApplyLayout { op: drained_op, layout } => {
+        multiview_control::Command::ApplyLayout {
+            op: drained_op,
+            layout,
+        } => {
             assert_eq!(layout, "grid-3x3");
             assert_eq!(
                 drained_op.as_str(),

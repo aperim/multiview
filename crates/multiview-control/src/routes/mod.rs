@@ -54,6 +54,14 @@ pub struct SwapRequest {
     pub source: String,
 }
 
+/// The body of a `POST /commands/apply-layout` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ApplyLayoutRequest {
+    /// The layout id to make active on the running multiview.
+    pub layout: String,
+}
+
 /// Attach the resource's `ETag` to a successful response carrying a layout.
 fn layout_response(status: StatusCode, versioned: &VersionedLayout) -> Response {
     let etag = versioned.version.to_etag();
@@ -343,6 +351,53 @@ async fn cmd_swap(
     Ok(response)
 }
 
+/// `POST /api/v1/commands/apply-layout` — apply a layout to the running
+/// multiview (role: write; per-object authz; 202).
+///
+/// Mirrors [`cmd_swap`]: it only `try_submit`s the command via
+/// [`submit_accepted`] (idempotency + shed-on-full free) and never blocks the
+/// engine (invariant #10). The eventual outcome arrives on the realtime stream
+/// correlated by the returned operation id (ADR-W008).
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/commands/apply-layout",
+        tag = "commands",
+        request_body = ApplyLayoutRequest,
+        responses(
+            (status = 202, description = "Apply-layout accepted; outcome on the realtime stream.", body = AcceptedBody),
+            (status = 401, description = "Missing or invalid credentials.", body = Problem),
+            (status = 403, description = "Not authorized to apply a layout.", body = Problem),
+            (status = 503, description = "Engine command bus at capacity; shed.", body = Problem),
+        ),
+    )
+)]
+pub(crate) async fn cmd_apply_layout(
+    State(state): State<AppState>,
+    principal: Principal,
+    idem: IdempotencyKey,
+    Json(req): Json<ApplyLayoutRequest>,
+) -> ControlResult<Response> {
+    principal.role.require(Action::Write)?;
+    crate::auth::authorize_object(&principal, &req.layout)?;
+    let layout = req.layout.clone();
+    let response = submit_accepted(&state, &idem, |op| Command::ApplyLayout {
+        op,
+        layout: req.layout,
+    })?;
+    // Audit the accepted command (the engine reports its outcome separately on
+    // the realtime stream; what we audit here is the operator's request).
+    state.audit(
+        &principal.key_id,
+        AuditAction::Command,
+        "layout",
+        &layout,
+        Some(serde_json::json!({ "command": "apply_layout" })),
+    );
+    Ok(response)
+}
+
 impl axum::extract::FromRequestParts<AppState> for Principal {
     type Rejection = ControlError;
 
@@ -412,6 +467,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/commands/start", post(cmd_start))
         .route("/commands/stop", post(cmd_stop))
         .route("/commands/swap", post(cmd_swap))
+        .route("/commands/apply-layout", post(cmd_apply_layout))
         .route("/alarms", get(alarms::list_alarms))
         .route("/alarms/{id}/ack", post(alarms::ack_alarm))
         // Salvo operator surface: CRUD + arm/take/cancel.
