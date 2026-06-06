@@ -93,38 +93,85 @@ fn spawn_clock_driver(clock: Arc<ManualTimeSource>, stop: Arc<std::sync::atomic:
     });
 }
 
-/// (1) Live + a blocked sink: the engine still emits all N ticks, the channel
-/// occupancy never exceeds the cap, and the overload is counted (`dropped > 0`).
+/// (1) Live + a blocked sink: the engine still emits every tick, the channel
+/// occupancy never exceeds the cap, and the overload is shed and counted (a hard,
+/// encoder-independent floor of dropped frames, not merely `dropped > 0`).
 ///
-/// RED today: the pre-ADR-0025 `drive` collects every tick into an unbounded
-/// `Vec` and encodes only after the loop — so there is no cap, no drop counter,
-/// and a blocked consumer would grow memory without bound (the OOM the ADR
-/// fixes). The seam does not even exist yet, so this fails to compile/run.
+/// **Determinism across encoder speeds (ENG-1c).** The drop is forced by the
+/// *engine* outpacing a *frozen* consumer, NOT by the real encoder being fast.
+/// The earlier shape used a fixed tick budget (`max_ticks = 400`) and hoped the
+/// real `mpeg2video` encoder emitted enough packets *within that budget* to fill
+/// the sink channel (cap `SINK_QUEUE_CAP`), wedge the bake consumer, back up the
+/// hot queue (cap `LIVE_QUEUE_CAP`), and make the hot loop `try_send` see `Full`.
+/// On a slower encoder (e.g. ffmpeg 5.1) the no-sleep engine reached tick 400 and
+/// the run *ended* before the consumer had wedged long enough to back up the hot
+/// queue — so `dropped == 0` and the assertion failed, even though the
+/// drop-oldest policy is correct. The bound here was on real encode latency, not
+/// on the policy under test.
+///
+/// This version removes that race. It drives the engine **unbounded**
+/// (`max_ticks = None`) and lets a watcher stop it only once the consumer is
+/// provably wedged AND the engine has driven a generous margin of *additional*
+/// ticks past that point. The sink freezes after its first packet, so the bake
+/// consumer wedges on the full sink channel and cannot pull another hot item;
+/// from then on the engine (manual clock, no real sleep) produces ticks at memory
+/// speed while the consumer is frozen, so *every* tick after the hot queue fills
+/// is dropped. The encoder speed only changes *how soon* that first packet lands
+/// — not whether drops then accumulate — so `dropped` is large and deterministic
+/// regardless of ffmpeg version. The never-stall / bounded-memory assertions are
+/// unchanged and strengthened (we now also pin the exact post-saturation drop
+/// floor, not just `> 0`).
 #[tokio::test(flavor = "current_thread")]
 async fn live_blocked_sink_stays_bounded_and_never_stalls() {
-    const TICKS: u64 = 400;
+    // Ticks the engine must drive *past* the moment the consumer wedges before we
+    // stop it. Once wedged, the consumer cannot pull another hot item, so the hot
+    // queue (cap `LIVE_QUEUE_CAP`) fills within a few ticks and every subsequent
+    // tick is shed. This margin therefore lower-bounds (minus the in-flight buffer
+    // depth below) how many frames *must* be dropped before we stop — an encoder-
+    // independent count.
+    const POST_WEDGE_TICKS: u64 = 200;
+    // The number of ticks that can still *succeed* in the window after the watcher
+    // first observes the wedge (`received >= 1`) before the pipeline saturates and
+    // drops begin. It bounds the total buffering between the hot-loop sender and
+    // the frozen sink: the hot queue (`LIVE_QUEUE_CAP` = 4) + one frame in transit
+    // at the consumer's `recv` + one being baked/encoded + the sink fan-out channel
+    // (`SINK_QUEUE_CAP` = 4) + the one packet the sink already pulled, plus a couple
+    // of ticks of scheduling slack between the watcher's `received`-read and its
+    // `hot_tick` base-read. Measured at 9 here (ffmpeg 7.1); 24 is a generous
+    // ceiling that holds across encoders/schedulers while still pinning a hard
+    // floor of `POST_WEDGE_TICKS - 24` = 176 dropped — far stronger than `> 0`.
+    const IN_FLIGHT_SLACK: u64 = 24;
+    // Generous bound on how long the engine takes to drive `POST_WEDGE_TICKS`
+    // memory-speed ticks once wedged; far above the microseconds it actually
+    // needs, so the watcher never gives up early on a slow CI box.
+    const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
 
     let mut pipeline = build_pipeline();
 
-    // A fake sink that consumes very SLOWLY (a wedged-ish encoder/muxer): it must
-    // never be able to stall the engine — the hot loop sheds frames instead.
+    // A fake sink that pulls exactly one packet and then freezes forever: a wedged
+    // muxer/encoder that cannot keep up. It must never be able to stall the engine
+    // — under the drop-on-overload policy the hot loop sheds frames instead.
     let received = Arc::new(AtomicUsize::new(0));
     let received_in_sink = Arc::clone(&received);
     let blocked_runner = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
-        // Pull exactly one frame, then block forever (until the channel is
-        // dropped at teardown, which unblocks recv with Err).
+        // Pull exactly one packet (records that the fan-out reached the sink), then
+        // stop draining entirely. The sink channel fills behind us, wedging the
+        // bake consumer, which can no longer pull from the hot queue.
         if rx.recv().is_ok() {
             received_in_sink.fetch_add(1, Ordering::Release);
         }
-        // Now stall: keep trying to recv but never finishing fast. When the
-        // consumer drops the sender at teardown, recv() returns Err and we exit.
-        while rx.recv().is_ok() {
-            // deliberately do nothing fast — simulate a wedged sink that cannot
-            // keep up; under DropOnOverload the hot loop must shed, not block.
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        TestSinkOutcome {
-            frames: received_in_sink.load(Ordering::Acquire),
+        // Now freeze HARD: never drain another packet. The sink channel
+        // (cap `SINK_QUEUE_CAP`) fills behind us and stays full, so the bake
+        // consumer wedges on its bounded fan-out send and can no longer pull from
+        // the hot queue — which then fills and forces the hot loop to shed every
+        // subsequent tick. We hold `rx` (so the channel is not Disconnected) and
+        // park; teardown detaches this thread after the bounded `SINK_WEDGE_GRACE`
+        // (exactly the bounded-teardown path test (5) exercises), so it never hangs
+        // `stop`. Under DropOnOverload the hot loop sheds, never blocks, so the
+        // output clock keeps ticking despite this permanent wedge.
+        let _hold = rx;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     };
 
@@ -133,6 +180,45 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
     let driver_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     spawn_clock_driver(Arc::clone(&clock), Arc::clone(&driver_stop));
 
+    // The hot-loop tick observer: incremented once per emitted tick on the hot
+    // loop (before the send), so the watcher can count engine ticks and prove the
+    // engine drove well past the consumer's wedge — independent of encoder speed.
+    let hot_tick = Arc::new(AtomicU64::new(0));
+
+    // The watcher decides when the engine has provably outpaced the frozen
+    // consumer, then raises `stop`. It does NOT touch the hot path — it only
+    // *observes* (the sink's first-packet flag + the hot-tick gauge) and signals
+    // stop, exactly like a controller would. This is what makes the drop count
+    // deterministic across encoder speeds: the engine keeps ticking (and shedding)
+    // until we say stop, rather than racing a fixed budget against the encoder.
+    let watch_received = Arc::clone(&received);
+    let watch_hot_tick = Arc::clone(&hot_tick);
+    let watch_stop = stop.clone();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + WATCHDOG;
+        // 1) Wait for the consumer to wedge: the sink got its first packet, so the
+        //    sink channel is now backing up behind the frozen sink.
+        while watch_received.load(Ordering::Acquire) == 0 {
+            if std::time::Instant::now() >= deadline {
+                watch_stop.stop();
+                return;
+            }
+            std::thread::yield_now();
+        }
+        // 2) From the tick the wedge was first observable, drive POST_WEDGE_TICKS
+        //    further ticks. Every tick past the point the hot queue fills is shed,
+        //    so this lower-bounds the drop count regardless of the encoder.
+        let base = watch_hot_tick.load(Ordering::Acquire);
+        let target = base.saturating_add(POST_WEDGE_TICKS);
+        while watch_hot_tick.load(Ordering::Acquire) < target {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        watch_stop.stop();
+    });
+
     let clock_concrete: Arc<ManualTimeSource> = Arc::clone(&clock);
     let ts: Arc<dyn TimeSource> = clock_concrete;
     let result = pipeline
@@ -140,10 +226,12 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
             StreamTestParams {
                 time: ts,
                 pacer: CooperativePacer,
-                max_ticks: Some(TICKS),
+                // Unbounded: the engine runs until the watcher stops it, so drops
+                // are forced by saturation, not by a budget racing the encoder.
+                max_ticks: None,
                 policy: SendPolicy::DropOnOverload,
                 runners: vec![Box::new(blocked_runner)],
-                hot_tick_observer: None,
+                hot_tick_observer: Some(Arc::clone(&hot_tick)),
             },
             &stop,
         )
@@ -151,14 +239,18 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
         .expect("drive streaming");
     driver_stop.store(true, Ordering::Release);
 
-    // Invariant #1: the engine emitted all N ticks despite the wedged sink.
-    assert_eq!(
-        result.report.frames, TICKS,
-        "the output clock must emit all N ticks regardless of a stalled sink (inv #1)"
+    // Invariant #1: the engine kept emitting ticks throughout despite the wedged
+    // sink — it drove past the wedge by at least the post-wedge margin.
+    assert!(
+        result.report.frames >= POST_WEDGE_TICKS,
+        "the output clock must keep ticking past the wedge (inv #1): emitted {} ticks, \
+         expected at least the post-wedge margin {POST_WEDGE_TICKS}",
+        result.report.frames
     );
     // Invariant #10 / bounded memory: occupancy is O(cap) — bounded by the fixed
-    // cap, INDEPENDENT of the run length (it stays tiny next to TICKS=400, never
-    // growing with the number of frames; that is the OOM the ADR fixes).
+    // cap, INDEPENDENT of the run length (it stays tiny next to the hundreds of
+    // ticks driven, never growing with the number of frames; that is the OOM the
+    // ADR fixes).
     //
     // The bound is cap+1, not cap, and that ceiling is exact and race-free — NOT
     // a fudge. `peak_occupancy` is a gauge: the single engine sender does
@@ -178,9 +270,17 @@ async fn live_blocked_sink_stays_bounded_and_never_stalls() {
         result.capacity + 1
     );
     // Overload was shed and COUNTED (visible, not hidden), so the run faltered.
+    // Deterministic floor: once the consumer wedges, every tick after the whole
+    // pipeline buffer (hot queue + in-transit + sink channel, bounded by
+    // `IN_FLIGHT_SLACK`) fills is shed. The watcher drove POST_WEDGE_TICKS ticks
+    // past the wedge, so at least `POST_WEDGE_TICKS - IN_FLIGHT_SLACK` of them MUST
+    // have been dropped — a hard, encoder-independent lower bound, not just `> 0`.
+    let min_drops = POST_WEDGE_TICKS.saturating_sub(IN_FLIGHT_SLACK);
     assert!(
-        result.report.dropped > 0,
-        "a wedged sink under live policy must shed frames and count them (got {} dropped)",
+        result.report.dropped >= min_drops,
+        "a wedged sink under live policy must shed frames and count them: got {} dropped, \
+         expected at least {min_drops} (POST_WEDGE_TICKS {POST_WEDGE_TICKS} minus the \
+         in-flight buffer depth {IN_FLIGHT_SLACK} that can still drain after the wedge)",
         result.report.dropped
     );
     assert!(
