@@ -138,6 +138,21 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **NDI-L6** `M` — Tally + metadata  ·  _deps: NDI-L1_  · _`send_get_tally` → engine tally arbiter; extend `ReceivedFrame` (already `#[non_exhaustive]`) with metadata/timecode variants._
 - [ ] **NDI-HX** `XL` — NDI|HX (Advanced SDK, compressed H.264/HEVC)  ·  _deps: NDI-L1_  · _SEPARATE off-by-default `ndi-advanced` feature + its OWN license attestation (Advanced SDK is separately licensed; H.264/HEVC royalties are the operator's). HX-RECEIVE comes largely free via the standard SDK transparently decoding HX sources once NDI-L3 lands — so prioritise documenting/validating HX-recv there. HX-SEND needs the Advanced-SDK entry point + compressed-frame send path. Both inert until the operator attests the Advanced license (mirror the NdiLicense gate)._
 
+### AES67 / Dante audio-over-IP (research done → [ADR-T010](../decisions/ADR-T010.md); brief docs/research/dante-audio.md, 2026-06-06)
+
+> **Decision (ADR-T010):** Dante interop is delivered via the OPEN **AES67 / ST 2110-30** standard (Audinate's own licence-free bridge) — NOT native Dante. Multiview already owns the load-bearing part: the ST 2110-30/AES67 L16/L24 PCM depacketizer + RTP parser (`multiview-input/src/st2110/v30.rs`, property-tested) + the PTP servo. Native Dante is closed/SDK-licensed → offered ONLY as an off-by-default, never-vendored, operator-attested feature mirroring NDI/ADR-0008, and only with a paid Audinate OEM relationship. Dante-AES67 interop budget: L24/48k/1ms ptime/≤8ch/239.x16/PTPv2 domain 0/SAP-SDP discovery. TEST: gated AES67 RTP loopback (wire contract) + on the box `linuxptp` (ptp4l) GM + ffmpeg AES67 counterpart; **DVS is NOT AES67-capable so it can't be the interop target** (real Dante-over-AES67 needs AES67 hardware + SAP).
+
+- [ ] **AES67-1** `L` — Audio `FrameProducer` over the `v30` depacketizer → `AudioStore` (Dante/AES67 INGEST; single-path `RtpReceiver`, sampled-not-pacing #1)  ·  _deps: IN-2, AUD-2_
+- [ ] **AES67-2** `M` — AES67-audio SDP parse + generate (RFC 4566/8866: `m=audio RTP/AVP`, `a=rtpmap L24/48000/ch`) — fills channels/depth/ptime the depacketizer needs  ·  _deps: AES67-1_
+- [ ] **AES67-3** `M` — SAP announce + listen (RFC 2974, UDP 9875, 224.2.127.254) for discovery both directions; DDM-proxy note for legacy Dante  ·  _deps: AES67-2_
+- [ ] **AES67-4** `L` — AES67/ST 2110-30 RTP **transmit** from the program bus (L24/48k/1ms, 239.x/16); PTP-referenced media clock; bounded/off-hot-path (#1/#10)  ·  _deps: AES67-2, AUD-3, AUD-4_
+- [ ] **AES67-5** `M` — PTP profile/domain config (AES67 media profile / ST 2059, domain 0) on the existing servo; config `SourceKind`/`Output`; gated loopback interop test + chaos-gate #10; box test = ptp4l GM + ffmpeg AES67 counterpart  ·  _deps: AES67-3, AES67-4, `ptp`_
+- [ ] **DANTE-1** `XL` (native, deferred/optional) — `multiview-dante-sys` runtime-load leaf: dlopen the operator-installed Audinate DAL/API dylib, declare the C ABI from documented headers, sole `allow(unsafe_code)`. **Only with a paid Audinate licence; never in the default build.**  ·  _deps: —_
+- [ ] **DANTE-2** `M` — `DanteLicense` typestate gate + `[system.dante] accept_license` on input+output (mirror `NdiLicense`/ADR-0008) + trademark attribution  ·  _deps: DANTE-1_
+- [ ] **DANTE-3** `L` — native Dante source over the SDK table → `AudioStore` (program-clock rebase); fake-seam tests + gated live (licensed runtime)  ·  _deps: DANTE-1, DANTE-2, AUD-2_
+- [ ] **DANTE-4** `L` — native Dante sink from the program bus (channel-map per the capability matrix)  ·  _deps: DANTE-1, DANTE-2, AUD-3, AUD-4_
+- [ ] **DANTE-5** `S` — UI/About attribution + capability report + SDK-equipped CI lane (no SDK fetch in shared CI)  ·  _deps: DANTE-2_
+
 ### IN — Inputs (NDI · ST 2110 · WebRTC · YouTube)
 
 - [x] **IN-1** `M` — ST 2110 receive: frame assembler over the depacketizers  ·  _deps: —_  · _pure SRD/line reassembler (marker/seq/timestamp) tested; pgroup→NV12 unpack + `ProducedFrame` adaptation belong with IN-2_

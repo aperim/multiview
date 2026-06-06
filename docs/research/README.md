@@ -11,6 +11,7 @@ Deep, verification-hardened design records that back the Multiview implementatio
 - [Streaming Robustness Runbook](streaming-gotchas.md) — Streaming/Timing
 - [Timing Architecture](timing-architecture.md) — Streaming/Timing (pacing + reference-lock + frame-sync + wall-clock + timecode)
 - [Input Timing & Frame-Sync](input-timing-and-sync.md) — Streaming/Timing (best-effort PTS normalisation + wall-clock pacer + sample-at-tick)
+- [Dante audio in/out](dante-audio.md) — Streaming/Timing (AES67/ST 2110-30 open interop vs licence-gated native Dante; drives ADR-T010)
 - [Preview Subsystem](preview-subsystem.md) — Preview
 - [Realtime / Eventing API](realtime-api.md) — Realtime API
 - [Management Capability Matrix](management-capability-matrix.md) — Management
