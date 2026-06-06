@@ -79,6 +79,46 @@ fn nv12_to_uyvy_packs_in_u_y0_v_y1_order_with_correct_geometry() {
 }
 
 #[test]
+fn nv12_to_uyvy_advances_chroma_rows_for_a_multi_chroma_row_canvas() {
+    // A 4x4 canvas has TWO chroma rows (rows 0-1 share chroma row 0; rows 2-3
+    // share chroma row 1). Distinct chroma per row proves the chroma-row-stride
+    // math (`chroma_row_base = (row/2) * (width/2) * 2`) advances — a single
+    // chroma row (the 4x2 case) cannot catch a chroma-row regression.
+    let (w, h) = (4u32, 4u32);
+    // Y: a unique value per pixel so luma ordering is unambiguous.
+    let y: Vec<u8> = (0u8..16).collect();
+    // UV: chroma row 0 = (Cb=10, Cr=20); chroma row 1 = (Cb=30, Cr=40); two pairs
+    // per chroma row (width/2). 2 chroma rows x 2 pairs x 2 bytes = 8 = w*h/2.
+    let uv = vec![10, 20, 10, 20, 30, 40, 30, 40];
+    let canvas = Nv12Canvas::new(w, h, &y, &uv).expect("valid 4x4 canvas");
+    let uyvy = nv12_to_uyvy(&canvas);
+    assert_eq!(uyvy.len(), 4 * 2 * 4);
+
+    // Rows 0 and 1 use chroma row 0 (Cb=10, Cr=20).
+    assert_eq!(
+        &uyvy[0..8],
+        &[10, 0, 20, 1, 10, 2, 20, 3],
+        "row 0 / chroma row 0"
+    );
+    assert_eq!(
+        &uyvy[8..16],
+        &[10, 4, 20, 5, 10, 6, 20, 7],
+        "row 1 / chroma row 0"
+    );
+    // Rows 2 and 3 MUST use chroma row 1 (Cb=30, Cr=40) — the stride advanced.
+    assert_eq!(
+        &uyvy[16..24],
+        &[30, 8, 40, 9, 30, 10, 40, 11],
+        "row 2 must use the SECOND chroma row"
+    );
+    assert_eq!(
+        &uyvy[24..32],
+        &[30, 12, 40, 13, 30, 14, 40, 15],
+        "row 3 must use the SECOND chroma row"
+    );
+}
+
+#[test]
 fn to_uyvy_frame_builds_a_valid_send_descriptor() {
     let (w, h, y, uv) = ramp_canvas();
     let canvas = Nv12Canvas::new(w, h, &y, &uv).expect("valid canvas");
