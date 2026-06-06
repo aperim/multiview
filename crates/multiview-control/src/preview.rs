@@ -245,10 +245,13 @@ pub struct GatedWhep {
 
 impl std::fmt::Debug for GatedWhep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The inner transport object and the live-lease map are omitted (the
+        // former has no useful Debug, the latter could be large); the live
+        // `active` count and the fallback hint are the diagnostic fields.
         f.debug_struct("GatedWhep")
             .field("active", &self.gate.active())
             .field("fallback", &self.fallback)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -275,10 +278,30 @@ impl GatedWhep {
 
 impl WhepProvider for GatedWhep {
     fn negotiate(&self, scope: &WhepScope, offer: &str) -> Result<WhepAnswer, WhepReject> {
-        // RED STUB: this initial implementation delegates straight through,
-        // ignoring the gate, so the cap-enforcement tests FAIL until the green
-        // implementation admits against the `FocusGate` first.
-        self.inner.negotiate(scope, offer)
+        // Admit against the cap FIRST: acquiring the lease reserves the slot
+        // before the (expensive) inner negotiation runs. A full cap sheds
+        // honestly to the JPEG fallback (the existing `503 fallback` shape) —
+        // never queued, never able to stall the engine (invariant #10).
+        let lease = self.gate.try_acquire(scope.label()).map_err(|_denied| {
+            WhepReject::CapacityExceeded {
+                fallback: self.fallback.clone(),
+            }
+        })?;
+        // The slot is reserved; delegate the actual SDP/ICE negotiation. If the
+        // inner transport refuses the offer, dropping `lease` here frees the slot
+        // immediately so a refused focus never leaks capacity.
+        let answer = self.inner.negotiate(scope, offer)?;
+        // Success: keep the lease alive, keyed by the transport's session id, so
+        // the matching DELETE/expiry releases exactly this slot.
+        if let Ok(mut leases) = self.leases.lock() {
+            leases.insert(answer.session_id.clone(), lease);
+        }
+        // If the lease-map lock were poisoned (only reachable after a panic in
+        // another thread while it was held), `lease` is dropped here instead and
+        // its slot is freed immediately — the session is admitted but stops being
+        // cap-tracked. This is preview-only bookkeeping (never the engine); the
+        // worst case is one extra concurrent focus, not a stalled output path.
+        Ok(answer)
     }
 
     fn release(&self, scope: &WhepScope, session_id: &str) -> bool {

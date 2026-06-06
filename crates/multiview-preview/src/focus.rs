@@ -123,20 +123,40 @@ where
         }
     }
 
-    /// Try to admit a focus session for `scope`.
+    /// Try to admit a focus session for `scope`, returning a [`FocusLease`] that
+    /// holds the slot until dropped.
     ///
-    /// RED STUB: this initial implementation admits unconditionally, ignoring
-    /// the caps. The cap-enforcement tests therefore FAIL until the green
-    /// implementation lands.
+    /// Admission is **deterministic and non-blocking**: the global cap is
+    /// checked first, then the per-scope cap. A session is admitted only if both
+    /// have headroom; otherwise it is rejected (the caller sheds to the JPEG
+    /// fallback). The decision and the counter bump happen under one short-lived
+    /// lock, so the live count can never exceed the cap even under concurrent
+    /// callers (invariant #10: bounded, deterministic).
     ///
     /// # Errors
     ///
-    /// Returns [`FocusDenied`] when a cap is full (not yet — see above).
+    /// * [`FocusDenied::GlobalFull`] — the server-wide cap has no headroom.
+    /// * [`FocusDenied::ScopeFull`] — this scope's per-scope cap has no headroom.
     pub fn try_acquire(&self, scope: K) -> Result<FocusLease<K>, FocusDenied> {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.global = guard.global.saturating_add(1);
-            *guard.per_scope.entry(scope.clone()).or_insert(0) += 1;
+        // A poisoned counter lock is purely preview bookkeeping (it never
+        // involves the engine); fail closed — refuse the focus rather than panic
+        // or silently exceed the cap.
+        let Ok(mut guard) = self.inner.lock() else {
+            return Err(FocusDenied::GlobalFull);
+        };
+        if guard.global >= guard.caps.global {
+            return Err(FocusDenied::GlobalFull);
         }
+        let scope_count = guard.per_scope.get(&scope).copied().unwrap_or(0);
+        if scope_count >= guard.caps.per_scope {
+            return Err(FocusDenied::ScopeFull);
+        }
+        // Both caps have headroom: commit the slot atomically under the lock.
+        guard.global = guard.global.saturating_add(1);
+        guard
+            .per_scope
+            .insert(scope.clone(), scope_count.saturating_add(1));
+        drop(guard);
         Ok(FocusLease {
             gate: self.clone(),
             scope,
@@ -201,10 +221,12 @@ where
     K: Eq + Hash + Clone + std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The back-reference `gate` is deliberately omitted (it would recurse and
+        // adds no diagnostic value); `finish_non_exhaustive` records that.
         f.debug_struct("FocusLease")
             .field("scope", &self.scope)
             .field("released", &self.released)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
