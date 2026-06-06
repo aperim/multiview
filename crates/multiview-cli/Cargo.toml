@@ -140,6 +140,13 @@ web = ["multiview-control/embed-web"]
 # output; it works alone with the headless software run too.
 overlay = ["multiview-compositor/overlay"]
 
+# Report the MEASURED kernel NTP/PTP discipline status on the wall-clock badge
+# (ENG-3b) instead of an assumed one. Off by default: it pulls the engine's `ntp`
+# feature, which links the `multiview-ntpsys` FFI leaf crate (the one `adjtimex`
+# syscall). `multiview-cli` itself stays `forbid(unsafe_code)`. Linux-only effect;
+# elsewhere / on a denied read the badge honestly shows the assumed default.
+ntp = ["multiview-engine/ntp"]
+
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once
 # (LGPL `mpeg2video` by default) -> fan out to the file + HLS output sinks. Wires

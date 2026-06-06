@@ -27,14 +27,17 @@
 //! [`RefSource`] + [`RefStatus`] so the clock can show an accessible
 //! text-and-glyph reference badge (never colour alone). This source reports
 //! [`RefSource::System`] (label `SYS`): *the host's system clock, which the
-//! deployment disciplines via NTP*. For the MVP the status is **configured /
-//! assumed** rather than measured: it defaults to [`RefStatus::Locked`] on the
-//! basis that the deployment host is NTP-disciplined. True kernel lock-state
-//! detection (Linux `adjtimex` / macOS `ntp_adjtime`) is platform-specific and
-//! needs `unsafe` FFI — which `multiview-cli` forbids ([`forbid(unsafe_code)`]) — so
-//! it is deferred to a tracked follow-up. Operators who know their host is *not*
-//! disciplined can construct the source with [`RefStatus::Freerun`] to be honest
-//! about it.
+//! deployment disciplines via NTP*.
+//!
+//! By default ([`SystemWallClock`]) the status is **configured / assumed** —
+//! [`RefStatus::Locked`] on the basis that the deployment host is NTP-disciplined
+//! (operators who know it is not can construct it with [`RefStatus::Freerun`]).
+//! Under the **`ntp` feature** ([`MeasuredSystemWallClock`], ENG-3b) the status is
+//! **measured**: each badge draw reads the Linux kernel `adjtimex` discipline
+//! state and classifies it (Locked / Holdover / Freerun) via the engine `sysref`
+//! classifier. The one `adjtimex` syscall is isolated in the `multiview-ntpsys`
+//! FFI leaf crate, so `multiview-cli` itself keeps `forbid(unsafe_code)`; off
+//! Linux or on a denied read it falls back honestly to the assumed default.
 //!
 //! ## Injectable seam (testability + anti-drift proof)
 //!
@@ -47,7 +50,44 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use multiview_engine::sysref::{classify_system, NtpQuery, SelectedReference, SystemRefConfig};
 use multiview_overlay::clock::{RefSource, RefStatus, TimeRef, WallTime};
+
+/// Read `CLOCK_REALTIME` as whole Unix seconds (UTC). A clock somehow set before
+/// 1970 yields a negative count via the error arm — [`WallTime`] resolves it with
+/// a Euclidean remainder, so the face still reads a valid time-of-day.
+fn os_unix_seconds() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+        Err(before) => i64::try_from(before.duration().as_secs())
+            .unwrap_or(i64::MAX)
+            .saturating_neg(),
+    }
+}
+
+/// Map one kernel NTP-discipline reading (or its absence) onto the overlay
+/// reference badge (ENG-3b). Reads `query` once and classifies a present reading
+/// via the engine `sysref` classifier (the SAME mapping the PTP path uses, via
+/// [`SelectedReference::to_time_ref`]); when the read is unavailable (denied,
+/// non-Linux, or the `ntp` feature is off) it falls back to the configured
+/// assumed state — honest, never a fabricated "locked".
+///
+/// Pure over the injected `query`: the off-hot-path overlay baker calls this at
+/// draw time, so it can neither pace nor stall the engine output clock (inv #1).
+/// There is no holdover-dwell hysteresis here (a tracked refinement); the badge
+/// reflects the instantaneous measured discipline.
+fn ref_from_query<Q: NtpQuery>(query: &mut Q, config: &SystemRefConfig) -> TimeRef {
+    let (state, offset_ns) = match query.read() {
+        Some(reading) => (classify_system(&reading, config), reading.offset_ns),
+        None => (config.assumed_when_unavailable, 0),
+    };
+    SelectedReference {
+        source: RefSource::System,
+        state,
+        offset_ns,
+    }
+    .to_time_ref()
+}
 
 /// The injectable source of the **current** wall-clock instant for the displayed
 /// time-of-day, plus the timing-reference descriptor to surface on the clock.
@@ -107,16 +147,63 @@ impl WallClock for SystemWallClock {
     /// Unix-seconds value, and `with_offset` resolves it with a Euclidean
     /// remainder, so the face still reads a valid time-of-day.
     fn unix_seconds(&self) -> i64 {
-        match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
-            Err(before) => i64::try_from(before.duration().as_secs())
-                .unwrap_or(i64::MAX)
-                .saturating_neg(),
-        }
+        os_unix_seconds()
     }
 
     fn reference(&self) -> TimeRef {
         TimeRef::new(RefSource::System, self.status)
+    }
+}
+
+/// The **measured** system wall-clock (ENG-3b, behind the off-by-default `ntp`
+/// feature): identical to [`SystemWallClock`] for the time-of-day, but
+/// [`reference`](MeasuredSystemWallClock::reference) reports the **live** kernel
+/// NTP-discipline status — Linux `adjtimex` read through the engine `sysref`
+/// classifier over the `multiview-ntpsys` FFI leaf crate — instead of an assumed
+/// one. On a non-Linux host, a denied syscall, or no synchronisation it falls
+/// back honestly to the configured assumed state.
+///
+/// `reference()` is called by the overlay baker (the off-hot-path bake thread,
+/// never the engine output clock), so its per-draw `adjtimex` read is inv-#1-safe;
+/// `multiview-cli` itself stays `forbid(unsafe_code)` — the one syscall lives in
+/// the `multiview-ntpsys` leaf crate.
+#[cfg(feature = "ntp")]
+#[derive(Debug, Clone, Copy)]
+pub struct MeasuredSystemWallClock {
+    /// Classifier tuning (lock tolerance + the assumed-when-unavailable state).
+    config: SystemRefConfig,
+}
+
+#[cfg(feature = "ntp")]
+impl MeasuredSystemWallClock {
+    /// A measured system clock with the default classifier tuning (a 100 us lock
+    /// tolerance; assumes [`LockState::Locked`](multiview_engine::ptp::LockState)
+    /// when the read is unavailable — the host is taken to be NTP-disciplined).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: SystemRefConfig::default(),
+        }
+    }
+}
+
+#[cfg(feature = "ntp")]
+impl Default for MeasuredSystemWallClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "ntp")]
+impl WallClock for MeasuredSystemWallClock {
+    fn unix_seconds(&self) -> i64 {
+        os_unix_seconds()
+    }
+
+    fn reference(&self) -> TimeRef {
+        // Off-hot-path live read (overlay baker), classified into the badge.
+        let mut query = multiview_engine::sysref::live::SystemNtpQuery::new();
+        ref_from_query(&mut query, &self.config)
     }
 }
 
@@ -139,11 +226,20 @@ impl WallClockSource {
         Self { clock }
     }
 
-    /// A source backed by the real OS clock ([`SystemWallClock`]) reporting the
-    /// default (NTP-disciplined ⇒ [`RefStatus::Locked`]) reference status.
+    /// A source backed by the real OS clock. Under the `ntp` feature it reports
+    /// the **measured** kernel NTP-discipline status ([`MeasuredSystemWallClock`],
+    /// ENG-3b); otherwise the assumed default (NTP-disciplined ⇒
+    /// [`RefStatus::Locked`], [`SystemWallClock`]).
     #[must_use]
     pub fn system() -> Self {
-        Self::new(Arc::new(SystemWallClock::default()))
+        #[cfg(feature = "ntp")]
+        {
+            Self::new(Arc::new(MeasuredSystemWallClock::new()))
+        }
+        #[cfg(not(feature = "ntp"))]
+        {
+            Self::new(Arc::new(SystemWallClock::default()))
+        }
     }
 
     /// Sample the **current** wall-clock instant as a [`WallTime`] (whole Unix
