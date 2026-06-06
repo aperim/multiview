@@ -98,6 +98,26 @@ fn an_empty_mount_is_rejected() {
 }
 
 #[test]
+fn a_scheme_only_base_with_no_authority_is_rejected() {
+    // A bare `rtsp://` has the scheme but no host:port; joining a mount onto it
+    // would yield a host-less `rtsp:/program` URL, so the typed builder rejects it
+    // rather than handing a silently-wrong target to libav.
+    match RtspPublishTarget::new("rtsp://", "program") {
+        Err(RtspPublishError::MissingAuthority { base }) => {
+            assert_eq!(base, "rtsp://");
+        }
+        other => panic!("expected MissingAuthority, got {other:?}"),
+    }
+    // A scheme followed only by a slash is equally authority-less.
+    match RtspPublishTarget::new("rtsps:///", "program") {
+        Err(RtspPublishError::MissingAuthority { base }) => {
+            assert_eq!(base, "rtsps:///");
+        }
+        other => panic!("expected MissingAuthority, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_base_with_a_path_is_rejected() {
     // The base is host[:port] only; a path belongs in the mount, so a base that
     // already carries a path is ambiguous and rejected (no silent concatenation).

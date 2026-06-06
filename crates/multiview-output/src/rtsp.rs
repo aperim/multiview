@@ -11,7 +11,7 @@
 //! * **Baseline (OUT-1, here):** the **publish hop** — libav RTSP ANNOUNCE/RECORD
 //!   to a *listening* RTSP endpoint such as a local
 //!   [MediaMTX](https://github.com/bluenviron/mediamtx) sidecar. This reuses the
-//!   existing [`PushProtocol::Rtsp`](crate::sink::PushProtocol::Rtsp) push
+//!   existing `PushProtocol::Rtsp` push
 //!   transport (which already maps to libav's `rtsp` muxer) — **zero new sink
 //!   code** — and stays LGPL-clean and native-light (no `GLib`).
 //!
@@ -19,7 +19,7 @@
 //! pure-Rust way to derive the publish URL from a configured base + mount. It is
 //! **always compiled** (no `ffmpeg`/native dependency, so it is always
 //! CI-tested); the coupling to the push transport — selecting
-//! [`PushProtocol::Rtsp`](crate::sink::PushProtocol::Rtsp) — is the only part
+//! `PushProtocol::Rtsp` — is the only part
 //! gated behind the `ffmpeg` feature.
 //!
 //! # The publish URL
@@ -27,7 +27,7 @@
 //! A deploy configures a publish *base* (host + port of the RTSP sidecar, e.g.
 //! the `MediaMTX` default `rtsp://127.0.0.1:8554`) and each output names a *mount*
 //! (the RTSP path the program is published under). [`RtspPublishTarget`] joins
-//! them into the `rtsp://host:port/mount` URL the [`PushSink`](crate::sink::PushSink)
+//! them into the `rtsp://host:port/mount` URL the `PushSink`
 //! opens, using **checked string formatting only** — no panics, no indexing, no
 //! `as` casts (guardrails). The base must be an RTSP(S) scheme with no path of its
 //! own; the mount must be a non-empty, whitespace-free RTSP path.
@@ -39,7 +39,7 @@
 //! absent RTSP sidecar surfaces as a typed
 //! [`Error::Output`](crate::Error::Output) at connect time on the push sink's own
 //! thread; it never stalls the output clock (#1) or back-pressures the engine
-//! (#10), exactly like every other [`PushSink`](crate::sink::PushSink) target.
+//! (#10), exactly like every other `PushSink` target.
 
 use thiserror::Error;
 
@@ -50,7 +50,7 @@ use crate::sink::PushProtocol;
 ///
 /// Built from a publish *base* (`rtsp://host:port`, the listening sidecar) and a
 /// *mount* (the RTSP path), it exposes the joined [`publish_url`](Self::publish_url)
-/// a [`PushSink`](crate::sink::PushSink) opens. Construction validates both parts
+/// a `PushSink` opens. Construction validates both parts
 /// up front so a misconfigured base/mount is a typed error, never a silently-wrong
 /// URL handed to libav.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +87,8 @@ impl RtspPublishTarget {
     /// * the base is empty ([`EmptyBase`](RtspPublishError::EmptyBase)),
     /// * the base is not an `rtsp://`/`rtsps://` scheme
     ///   ([`NotRtspScheme`](RtspPublishError::NotRtspScheme)),
+    /// * the base has the scheme but no `host:port` authority, e.g. a bare
+    ///   `rtsp://` ([`MissingAuthority`](RtspPublishError::MissingAuthority)),
     /// * the base already carries a path past `host:port`
     ///   ([`BaseHasPath`](RtspPublishError::BaseHasPath)),
     /// * the mount is empty or only slashes
@@ -106,6 +108,14 @@ impl RtspPublishTarget {
         let authority = strip_rtsp_scheme(base).ok_or_else(|| RtspPublishError::NotRtspScheme {
             base: base.to_owned(),
         })?;
+        // The authority must carry a real `host[:port]`; a bare `rtsp://` (empty
+        // authority) would otherwise join into a host-less `rtsp:/mount` URL —
+        // a silently-wrong target the typed builder must reject (no panic).
+        if authority.trim_end_matches('/').is_empty() {
+            return Err(RtspPublishError::MissingAuthority {
+                base: base.to_owned(),
+            });
+        }
         // A path on the base is ambiguous with the mount, so reject it (a bare
         // trailing slash is fine and is trimmed below).
         if authority.trim_end_matches('/').contains('/') {
@@ -151,7 +161,7 @@ impl RtspPublishTarget {
     }
 
     /// The fully-joined publish URL (`rtsp://host:port/mount`) a
-    /// [`PushSink`](crate::sink::PushSink) opens.
+    /// `PushSink` opens.
     #[must_use]
     pub fn publish_url(&self) -> &str {
         &self.publish_url
@@ -164,7 +174,7 @@ impl RtspPublishTarget {
     }
 
     /// The push protocol this target streams through — always
-    /// [`PushProtocol::Rtsp`](crate::sink::PushProtocol::Rtsp), which selects
+    /// `PushProtocol::Rtsp`, which selects
     /// libav's `rtsp` muxer (the OUT-1 baseline reuses the existing push path; no
     /// new sink code).
     ///
@@ -202,6 +212,15 @@ pub enum RtspPublishError {
     /// than a silently-wrong URL.
     #[error("rtsp publish base must be an rtsp:// or rtsps:// url, got `{base}`")]
     NotRtspScheme {
+        /// The offending base.
+        base: String,
+    },
+
+    /// The publish base had an `rtsp(s)://` scheme but no `host:port` authority
+    /// (e.g. a bare `rtsp://`). Joining a mount onto it would produce a host-less
+    /// URL, so it is rejected rather than handed to libav.
+    #[error("rtsp publish base has no host:port authority, got `{base}`")]
+    MissingAuthority {
         /// The offending base.
         base: String,
     },

@@ -266,7 +266,7 @@ impl FrameConverter {
 
 /// The single **encode-once** producer (invariant #7, ADR-E003/E004, ADR-0026).
 ///
-/// Owns ONE [`VideoEncoder`] plus the NV12 → codec-format [`FrameConverter`] and
+/// Owns ONE [`VideoEncoder`] plus the NV12 → codec-format `FrameConverter` and
 /// the output tick counter, turning each baked NV12 canvas frame into the coded
 /// [`EncodedPacket`]s it produced, with every PTS re-stamped from the tick
 /// (`out_pts = f(tick)`, inv #3 — never the input PTS). The cli's bake consumer
