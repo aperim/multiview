@@ -207,9 +207,13 @@ mod linux {
     /// the documented backward-compatible request.
     ///
     /// Field order/types follow `<linux/perf_event.h>` `struct perf_event_attr`
-    /// up through `read_format`; the trailing reserved/extension fields the i915
-    /// busy counter does not use are folded into one zeroed `_tail` array sized
-    /// to the kernel's `PERF_ATTR_SIZE_VER0` baseline so `size` is honest.
+    /// up through the `bp_len`/`config2` union — exactly the `PERF_ATTR_SIZE_VER1`
+    /// (72-byte) ABI prefix. Every field the i915 busy counter does not use
+    /// (`sample_*`, `read_format`, the `disabled/inherit/…` flags bitfield,
+    /// `wakeup`, `bp_type`, `config1`/`config2`) is declared explicitly and left
+    /// zero; the kernel reads `size` to know how much of the (versioned, growable)
+    /// struct we provided, so a fully-zeroed tail past `config` is the documented
+    /// backward-compatible request and `size = size_of::<Self>()` is honest.
     #[repr(C)]
     struct PerfEventAttr {
         /// `PERF_TYPE_*` or, for the i915 PMU, the dynamic `type` from sysfs.
