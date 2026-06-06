@@ -279,12 +279,48 @@ impl CaptionDecoder {
     /// time-base) — the **embedded-CC** convenience: wrap the A53 bytes
     /// extracted from a video frame's side data as a packet and decode them.
     ///
+    /// No packet duration is set, so a text decoder that derives its on-screen
+    /// window from the packet duration (`subrip`, `webvtt`, `mov_text`) falls
+    /// back to the bounded [`DEFAULT_HOLD_NS`] hold. Use
+    /// [`CaptionDecoder::decode_bytes_for_window`] when the source carried an
+    /// explicit cue duration.
+    ///
     /// # Errors
     /// As [`CaptionDecoder::decode`].
     pub fn decode_bytes(&mut self, data: &[u8], pts: Option<i64>) -> Result<Vec<CaptionCue>> {
         let mut packet = Packet::copy(data);
         packet.set_pts(pts);
         packet.set_dts(pts);
+        self.decode(&packet)
+    }
+
+    /// Decode raw caption-data bytes anchored at `pts`, also carrying the
+    /// packet's on-screen `duration` (both in the configured time-base) — the
+    /// in-container **text** path (`subrip`, `webvtt`, `mov_text`), where the
+    /// demuxed packet carries the cue body plus its duration.
+    ///
+    /// This differs from [`CaptionDecoder::decode_bytes`] only in that it also
+    /// stamps the packet duration; a zero/negative `duration` is left unset. The
+    /// on-screen window the decoder reports (`end_display_time`) is honoured when
+    /// the libav decoder context carries the packet time-base — i.e. when driven
+    /// from a real demuxed stream. When it does not (a standalone, demux-less
+    /// context), the decoder reports no explicit end and the bounded
+    /// [`DEFAULT_HOLD_NS`] fallback closes the cue.
+    ///
+    /// # Errors
+    /// As [`CaptionDecoder::decode`].
+    pub fn decode_bytes_for_window(
+        &mut self,
+        data: &[u8],
+        pts: Option<i64>,
+        duration: i64,
+    ) -> Result<Vec<CaptionCue>> {
+        let mut packet = Packet::copy(data);
+        packet.set_pts(pts);
+        packet.set_dts(pts);
+        if duration > 0 {
+            packet.set_duration(duration);
+        }
         self.decode(&packet)
     }
 
