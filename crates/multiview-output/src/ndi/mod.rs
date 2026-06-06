@@ -36,11 +36,13 @@
 //! NDI network and is gated behind a live-only, ignored-by-default test.
 
 pub mod api;
+pub mod convert;
 pub mod license;
 pub mod loader;
 pub mod output;
 
 pub use api::{FakeNdiApi, NdiApi, NdiFourCc, NdiSendError, NdiVideoFrame};
+pub use convert::{nv12_to_uyvy, Nv12Canvas};
 pub use license::{NdiLicense, NdiLicenseError};
 pub use loader::{NdiCapability, NdiLoadStatus};
 pub use output::NdiOutput;

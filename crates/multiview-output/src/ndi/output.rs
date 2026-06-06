@@ -12,6 +12,7 @@
 //! the deterministic [`super::api::FakeNdiApi`].
 
 use super::api::{NdiApi, NdiSendError, NdiVideoFrame};
+use super::convert::{nv12_to_uyvy, Nv12Canvas};
 use super::license::NdiLicense;
 
 /// A single-source NDI output sender, gated behind an accepted license.
@@ -83,6 +84,34 @@ impl<A: NdiApi> NdiOutput<A> {
             return Err(NdiSendError::Closed);
         }
         self.api.send_video(frame)
+    }
+
+    /// Publish one composited NV12 canvas as an NDI frame (the OUT-4 sink step).
+    ///
+    /// This is the canvas→NDI host-copy boundary (ADR-0004): the NV12 (4:2:0)
+    /// canvas is converted to the low-latency NDI default UYVY (4:2:2 packed) in
+    /// host memory and sent with the given tick-derived `timecode` (invariant #3)
+    /// and exact-rational cadence (`frame_rate_n`/`frame_rate_d`; never float
+    /// fps). The conversion is pure and panic-free; a malformed canvas/descriptor
+    /// is a typed refusal, never a panic — so a send never threatens the output
+    /// clock (invariant #1).
+    ///
+    /// # Errors
+    /// [`NdiSendError::Closed`] if the sender is closed;
+    /// [`NdiSendError::InvalidFrame`] if the canvas/descriptor is inconsistent.
+    pub fn send_canvas(
+        &mut self,
+        canvas: &Nv12Canvas<'_>,
+        timecode: i64,
+        frame_rate_n: u32,
+        frame_rate_d: u32,
+    ) -> Result<(), NdiSendError> {
+        if !self.open {
+            return Err(NdiSendError::Closed);
+        }
+        let uyvy = nv12_to_uyvy(canvas);
+        let frame = canvas.to_uyvy_frame(timecode, frame_rate_n, frame_rate_d, &uyvy)?;
+        self.api.send_video(&frame)
     }
 
     /// Close the sender, destroying the SDK handle. Idempotent.

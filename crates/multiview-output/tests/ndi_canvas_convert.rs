@@ -67,7 +67,8 @@ fn nv12_to_uyvy_packs_in_u_y0_v_y1_order_with_correct_geometry() {
     let uyvy = nv12_to_uyvy(&canvas);
 
     // UYVY is 2 bytes/pixel: stride = width*2, total = width*2*height.
-    assert_eq!(uyvy.len(), (w as usize) * 2 * (h as usize));
+    let (wz, hz) = (usize::try_from(w).unwrap(), usize::try_from(h).unwrap());
+    assert_eq!(uyvy.len(), wz * 2 * hz);
 
     // Row 0 covers Y = [0,10,20,30] with the single chroma pair (Cb=100, Cr=200)
     // replicated across the two 2-pixel groups: U,Y0,V,Y1, U,Y2,V,Y3.
@@ -95,7 +96,9 @@ fn to_uyvy_frame_builds_a_valid_send_descriptor() {
     assert_eq!(frame.frame_rate_d, 1001);
     assert_eq!(frame.timecode, 333_667);
     // The descriptor must already pass the SDK-foot-gun validation.
-    frame.validate().expect("descriptor is internally consistent");
+    frame
+        .validate()
+        .expect("descriptor is internally consistent");
 }
 
 #[test]
@@ -103,7 +106,8 @@ fn to_uyvy_frame_rejects_a_mismatched_buffer() {
     let (w, h, y, uv) = ramp_canvas();
     let canvas = Nv12Canvas::new(w, h, &y, &uv).expect("valid canvas");
     // A buffer one row short of the packed UYVY size is refused, not silently sent.
-    let short = vec![0u8; (w as usize) * 2 * (h as usize) - 1];
+    let (wz, hz) = (usize::try_from(w).unwrap(), usize::try_from(h).unwrap());
+    let short = vec![0u8; wz * 2 * hz - 1];
     let err = canvas
         .to_uyvy_frame(0, 30, 1, &short)
         .expect_err("short UYVY buffer refused");
@@ -136,7 +140,9 @@ fn send_canvas_publishes_the_converted_frame_with_tick_timecode() {
     assert_eq!(sent.len(), 3);
     // Each recorded frame carries the canvas geometry + UYVY FourCC + the exact
     // tick-derived timecode, in order.
-    assert!(sent.iter().all(|s| s.0 == w && s.1 == h && s.2 == NdiFourCc::Uyvy));
+    assert!(sent
+        .iter()
+        .all(|s| s.0 == w && s.1 == h && s.2 == NdiFourCc::Uyvy));
     assert_eq!(
         sent.iter().map(|s| s.3).collect::<Vec<_>>(),
         vec![0, 333_667, 667_334]
