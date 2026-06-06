@@ -108,7 +108,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 ### AUD — Audio pipeline + tone
 
 - [x] **AUD-1** `M` — Logical audio-codec selector + license-aware resolution  ·  _deps: —_
-- [ ] **AUD-2** `L` — Per-source runtime audio decode thread (peer of video ingest)  ·  _deps: AUD-1_
+- [~] **AUD-2** `L` — Per-source runtime audio decode thread (peer of video ingest)  ·  _deps: AUD-1_  · _red `4fdd8ca` → green `6042dca` (orchestrated, adversarially reviewed, me-verified): new `multiview-audio::store::AudioStore` — bounded (drop-oldest, never grows), lock-free (`arc_swap` snapshot, wait-free reader), gap-free per-source last-good store on an absolute frame timeline whose `read(frames)` always returns exactly `frames` (silence-filling un-written/evicted spans) — audio sampled-not-pacing (inv #1), cannot back-pressure the engine (inv #10). `audio_decode_loop` (ffmpeg feature): peer of video ingest, opens the !Send libav decoder ON the worker thread, publishes blocks, prompt stop/EOF teardown. `arc-swap` is the SAME 1.9.1 already in-tree (framestore) — no new crate. **Remaining → AUD-3:** the cli ingest-supervisor seam (spawn the loop alongside video) + the output-clock per-tick `samples_per_tick` pull feeding `Mixer::mix_program`._
 - [ ] **AUD-3** `L` — Program-bus mix + per-tick sample budget on the output clock  ·  _deps: AUD-2_
 - [ ] **AUD-4** `XL` — Audio encode + dual-stream mux in the output sinks (the core gap)  ·  _deps: AUD-1, AUD-3_
 - [ ] **AUD-5** `M` — `bars` synthetic-source 1 kHz tone companion  ·  _deps: AUD-2, AUD-3_
@@ -118,7 +118,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 ### OUT — Output servers (RTSP, NDI)
 
-- [ ] **OUT-1** `M` — RTSP egress decision spike + sidecar baseline (MediaMTX) wired as a Push target  ·  _deps: —_
+- [~] **OUT-1** `M` — RTSP egress decision spike + sidecar baseline (MediaMTX) wired as a Push target  ·  _deps: —_  · _red `b9a29d4` → green `6021adc` + review-fix `008d7ec` (orchestrated, adversarially reviewed, me-verified): locks the ADR-0006 decision (in-process gst-rtsp-server = OUT-2) and lands the pure-Rust always-compiled `multiview-output::rtsp` seam — `RtspPublishTarget::new(base, mount)` derives the validated `rtsp://host:port/mount` publish URL (checked formatting, no `as`/indexing/panic; rejects non-rtsp scheme, authority-less base, base-with-path, empty/whitespace mount) + `DEFAULT_BASE` (MediaMTX loopback 8554); under `ffmpeg`, `protocol()` couples to the existing `PushProtocol::Rtsp`→`rtsp` muxer (inv #7, zero new sink code). Review-fix closed two minor defects (broken default-`cargo doc` intra-doc links + an accepted authority-less `rtsp://`). 12 always-CI tests + 1 ffmpeg-gated; the live network push is `#[ignore]`-with-reason (no MediaMTX peer in CI). **Remaining → OUT-2:** in-process RTSP server; + the cli `Output::RtspServer` wiring, a sidecar-gated `push_rtsp_ffprobe` live test, and a `deploy/` MediaMTX manifest._
 - [ ] **OUT-2** `XL` — In-process RTSP server via `gst-rtsp-server`, fed pre-encoded NALs (`PacketSink`)  ·  _deps: OUT-1_
 - [x] **OUT-3** `L` — NDI dynamic-load backend (`NDIlib_v6_load`) + feature/license scaffolding  ·  _deps: —_  · _`407056a`: NEW `multiview-ndi-sys` FFI crate (deny+SAFETY dlopen/dlsym/NDIlib_v6_load via libloading ISC, opaque NonNull table — no SDK vendored, no build-time link) + `multiview-output::ndi` (loader path-search, runtime license gate, attribution constants, `NdiOutput` sink seam over a fake API). multiview-output stays forbid(unsafe). Live send over the real SDK table + cli `RunnableOutput::Ndi`/NV12→UYVY/`[system.ndi]` license config = OUT-4 + cli glue (gated)_
 - [ ] **OUT-4** `L` — NDI output Sender wired as a Sink (host-memory copy from canvas)  ·  _deps: OUT-3_
@@ -135,7 +135,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 ### CTL — Control plane → engine
 
-- [ ] **CTL-1** `L` — Drain-apply every accepted command + emit outcome events  ·  _deps: —_
+- [~] **CTL-1** `L` — Drain-apply every accepted command + emit outcome events  ·  _deps: —_  · _red `73118df` → green `c3c8e09` + gap-fix `99d3ace` (orchestrated, adversarially reviewed, me-verified + gap-closed): `command_drain` now applies EVERY accepted command at the frame boundary + emits an outcome (no more 202-then-no-op). Threads a non-blocking `Arc<EnginePublisher>` in; Start/Stop→`OutputStatus{Running|Idle}` (added `OutputRunState::Idle`); ApplyLayout re-applies the working layout; Arm/Take/CancelSalvo apply the salvo's source-recalls + emit `Salvo{Armed,Taken,Cancelled}`; SetTallyOverride→`TallyState` echo; SwapSource keeps its swap. My gap-fix added the Acceptance-mandated engine-level soak (`run_for_with_control` + `control_command_flood_never_falters_the_output_clock`: a saturated bus flooded across 120 ticks → frames==ticks, !faltered — inv #1+#10) + renamed a `state` shadow. 8 control/software_run tests green. **[~] honest scope (downstream subsystems not built):** ApplyLayout can only re-apply the single working layout (no named-layout LIBRARY → CTL-4/CTL-2), salvo applies sources-only (no layout-preset/tally/umd — no arbiter), tally is an echo (no arbiter). No event variant invented for SwapSource._
 - [ ] **CTL-2** `L` — Apply Source/Output/Overlay CRUD to the running engine via the command bus  ·  _deps: CTL-1, CTL-3_
 - [ ] **CTL-3** `M` — Mirror `multiview run` config into the resource store at startup + on change  ·  _deps: —_
 - [ ] **CTL-4** `S` — `ApplyLayout` HTTP route  ·  _deps: CTL-1_
@@ -220,7 +220,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Native `aac`/`libopus`/`mp2` are all LGPL — keep them in the default candidate list; only `libfdk_aac` is nonfree and must stay gated. CI has FFmpeg present (video tests already encode), so the audio encoders should `find_by_name` fine; if a build lacks `libopus`, `select_audio_encoder` must fall through (don't `expect`).
 - **Read first:** ADR-R005 (decode→re-encode normalized, capability matrix); `crates/multiview-ffmpeg/src/codec.rs` header doc.
 
-### `[ ]` AUD-2 — Per-source runtime audio decode thread (peer of video ingest) · effort: L · deps: AUD-1
+### `[~]` AUD-2 — Per-source runtime audio decode thread (peer of video ingest) · effort: L · deps: AUD-1
 - **Goal:** Decode each file/URL source's audio on its own thread into a per-source lock-free audio store (48k fltp), so the output clock can *sample* audio per tick exactly as it samples video tiles — never pacing or stalling the engine (#1/#10).
 - **Touches:** new `crates/multiview-cli/src/audio.rs` (peer of `synth.rs`); `IngestPlan` (pipeline.rs:421) gains an optional audio route; `IngestSupervisor::start` (pipeline.rs:930) spawns the audio thread alongside the video decode thread. Reuse `multiview_audio::AudioFileDecoder` (decode.rs:48) and `multiview_ffmpeg::Resampler` (resample.rs:54).
 - **Approach:**
@@ -310,7 +310,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 ## OUT — Output servers (RTSP, NDI)
 
 
-### `[ ]` OUT-1 — RTSP egress decision spike + sidecar baseline (MediaMTX) wired as a Push target · effort: M · deps: none
+### `[~]` OUT-1 — RTSP egress decision spike + sidecar baseline (MediaMTX) wired as a Push target · effort: M · deps: none
 - **Goal:** Land a *working* RTSP egress immediately via the ADR-0006 sidecar fallback (publish the existing encoded stream to MediaMTX over libav RTSP), and lock the in-process-vs-sidecar decision before committing to the GStreamer C-stack, so RTSP output stops being a no-op without dragging GLib into the lean default build.
 - **Touches:** `crates/multiview-cli/src/pipeline.rs:2713` (replace the warn-and-skip arm); `crates/multiview-output/src/sink.rs:550-573` (`PushProtocol::Rtsp` already maps to the `rtsp` muxer — reuse it); `crates/multiview-config/src/schema.rs:514` (`Output::RtspServer { mount, codec, latency_profile }`); a new `docs/decisions/ADR-0006` follow-up note (read-only here — propose, don't write).
 - **Approach:**
@@ -475,7 +475,7 @@ The central design decision threaded through every item: **give the drain closur
 
 ---
 
-### `[ ]` CTL-1 — Drain-apply every accepted command + emit outcome events  · effort: L · deps: none
+### `[~]` CTL-1 — Drain-apply every accepted command + emit outcome events  · effort: L · deps: none
 - **Goal:** Make the engine actually apply Start/Stop/ApplyLayout/Arm/Take/CancelSalvo/SetTallyOverride at the frame boundary (today they 202 then no-op), and emit each one's outcome on the event stream, so the WebUI's accepted commands take effect and are observable.
 - **Touches:** `crates/multiview-cli/src/control.rs:140` (`command_drain`), `crates/multiview-cli/src/main.rs:206,312` and `:328` (drain construction + `run_until_stopped_with_control` call), `crates/multiview-cli/src/run.rs:393` (signature already threads `publisher`), `crates/multiview-engine/src/isolation.rs:347` (`publish_event`), `crates/multiview-events/src/event.rs` (`SalvoEvent`/`SalvoPhase`/`OutputStatus`/`OutputRunState`).
 - **Approach:**
