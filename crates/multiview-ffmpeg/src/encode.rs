@@ -17,6 +17,7 @@
 //! sending — raw input PTS is never forwarded. The receive side reports packet
 //! PTS/DTS in encoder time-base for the muxer to rescale into stream time-base.
 
+use ffmpeg::format::sample::Type as SampleType;
 use ffmpeg::format::{Pixel, Sample};
 use ffmpeg::util::frame::{Audio, Video};
 use ffmpeg::{codec, encoder, ChannelLayout};
@@ -167,6 +168,12 @@ pub struct AudioEncoder {
     encoder: encoder::audio::Encoder,
     time_base: Rational,
     frame_size: u32,
+    /// The sample format the encoder accepts (used to build input frames).
+    format: Sample,
+    /// The channel layout the encoder was opened with.
+    channel_layout: ChannelLayout,
+    /// The sample rate in Hz (stamped onto each built frame).
+    sample_rate: u32,
 }
 
 impl AudioEncoder {
@@ -202,7 +209,16 @@ impl AudioEncoder {
             encoder,
             time_base,
             frame_size,
+            format: target.format,
+            channel_layout: target.channel_layout,
+            sample_rate: target.sample_rate,
         })
+    }
+
+    /// The channel count this encoder was opened with.
+    #[must_use]
+    pub fn channels(&self) -> usize {
+        usize::try_from(self.channel_layout.channels().max(0)).unwrap_or(0)
     }
 
     /// The encoder time-base (`1/sample_rate`).
@@ -239,6 +255,46 @@ impl AudioEncoder {
     /// Returns [`FfmpegError::Encode`] on a libav send error.
     pub fn send_frame(&mut self, frame: &Audio) -> Result<()> {
         self.encoder.send_frame(frame).map_err(FfmpegError::Encode)
+    }
+
+    /// Build and send one planar-`f32` audio frame from `planes` (one slice per
+    /// channel, each at least `samples` long), stamped at `pts` in the encoder
+    /// time-base (`1/sample_rate`). This owns the libav frame construction so a
+    /// caller (the program-bus encode path) never names a raw frame type.
+    ///
+    /// `pts` must come from a sample counter (`audio_pts = Σ samples`), the audio
+    /// analogue of the output tick (invariant #3) — never a raw input PTS.
+    ///
+    /// # Errors
+    /// * [`FfmpegError::FrameMismatch`] — the encoder is not planar `f32`, the
+    ///   plane count does not match the channel layout, or a plane is shorter
+    ///   than `samples`.
+    /// * [`FfmpegError::Encode`] — a libav send error.
+    pub fn send_planar_f32(&mut self, planes: &[&[f32]], samples: usize, pts: i64) -> Result<()> {
+        if self.format != Sample::F32(SampleType::Planar) {
+            return Err(FfmpegError::FrameMismatch(
+                "send_planar_f32 requires a planar-f32 encoder",
+            ));
+        }
+        if planes.len() != self.channels() {
+            return Err(FfmpegError::FrameMismatch(
+                "planar audio block channel count does not match the encoder layout",
+            ));
+        }
+
+        let mut frame = Audio::new(self.format, samples, self.channel_layout);
+        frame.set_rate(self.sample_rate);
+        for (channel, plane) in planes.iter().enumerate() {
+            // `.get(..samples)` (not `[..samples]`) so a short plane is a typed
+            // FrameMismatch, never a slice-index panic. The frame's plane is
+            // allocated to exactly `samples`, so `copy_from_slice` lengths match.
+            let src = plane.get(..samples).ok_or(FfmpegError::FrameMismatch(
+                "planar audio plane shorter than the requested sample count",
+            ))?;
+            frame.plane_mut::<f32>(channel).copy_from_slice(src);
+        }
+        frame.set_pts(Some(pts));
+        self.send_frame(&frame)
     }
 
     /// Flush the encoder (signal EOF).
