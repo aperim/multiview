@@ -12,6 +12,7 @@ Deep, verification-hardened design records that back the Multiview implementatio
 - [Timing Architecture](timing-architecture.md) — Streaming/Timing (pacing + reference-lock + frame-sync + wall-clock + timecode)
 - [Input Timing & Frame-Sync](input-timing-and-sync.md) — Streaming/Timing (best-effort PTS normalisation + wall-clock pacer + sample-at-tick)
 - [Dante audio in/out](dante-audio.md) — Streaming/Timing (AES67/ST 2110-30 open interop vs licence-gated native Dante; drives ADR-T010)
+- [NDI + NDI|HX integration](ndi-integration.md) — IO/Transport (own-the-FFI-binding over the NewTek/Vizrt C SDK: NV12-native send, transparent HX decode, Advanced-SDK HX send; + open libndi+SpeedHQ receive path)
 - [Preview Subsystem](preview-subsystem.md) — Preview
 - [Realtime / Eventing API](realtime-api.md) — Realtime API
 - [Management Capability Matrix](management-capability-matrix.md) — Management
