@@ -88,7 +88,7 @@ pub struct AudioMeter {
 }
 
 /// The running state of an output sink.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OutputRunState {
@@ -231,7 +231,7 @@ pub struct TallyEvent {
 /// UMD + tally arming) applied via an arm/take (ADR-MV004). Serialised
 /// **tagged** (`#[serde(tag = "phase")]`); never `untagged`. `#[non_exhaustive]`
 /// so additional phases can be added without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SalvoPhase {

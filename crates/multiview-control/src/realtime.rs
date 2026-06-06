@@ -20,7 +20,10 @@
 //! malicious — can stall the engine. The client-facing socket write is the only
 //! thing that can block, and it blocks only this client's task, never the
 //! engine.
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Query, State};
@@ -30,9 +33,12 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
 use multiview_engine::{EventSubscription, RecvError};
-use multiview_events::{Envelope, Event, FrameKind, Hello, SchemaVersion, Seq, Topic};
+use multiview_events::{
+    Envelope, Event, FrameKind, Hello, OutputRunState, SalvoPhase, SchemaVersion, Seq, Topic,
+};
 
 use crate::auth::{Action, Principal};
+use crate::command::{Command, OperationId};
 use crate::state::{AppState, EngineStateSnapshot};
 
 /// The session heartbeat interval advertised in `$hello`.
@@ -43,6 +49,244 @@ const MIN_RATE_HZ: u32 = 1;
 const MAX_RATE_HZ: u32 = 60;
 /// The default wire cadence advertised in `$hello`.
 const DEFAULT_RATE_HZ: u32 = 30;
+
+/// The correlation key that links an accepted command to its eventual outcome
+/// event on the realtime stream (ADR-W008).
+///
+/// A command is 202'd with an [`OperationId`]; the engine later publishes an
+/// outcome [`Event`] that does **not** itself carry the op id. This key is the
+/// stable bridge: it is derived identically from the *command* (at 202 time,
+/// [`CorrKey::for_command`]) and from the matching *outcome event* (at
+/// projection time, [`CorrKey::for_event`]), so the realtime layer can recover
+/// the op id and stamp it onto the outcome envelope's `corr` — **without**
+/// adding an op id to the [`Event`] enum or touching the engine hot loop.
+///
+/// Only commands with a single, unambiguous outcome event are keyed here
+/// (start/stop and named-salvo arm/take/cancel). A command with no realtime
+/// outcome event (e.g. `SwapSource`, whose outcome is the layout change) or an
+/// ambiguous one (`TakeSalvo`/`CancelSalvo` of the *armed* salvo, whose name is
+/// not known until the engine resolves it) yields [`None`] and is simply not
+/// correlated on the wire — the [`Envelope::corr`] stays `None`, which is the
+/// honest "uncorrelated" state, never a wrong id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CorrKey {
+    /// An output run-state transition (the outcome of `Start`/`Stop`).
+    OutputState(OutputRunState),
+    /// A named salvo entering a lifecycle phase (the outcome of a named
+    /// `ArmSalvo`/`TakeSalvo`/`CancelSalvo`).
+    Salvo {
+        /// The salvo name (must match the outcome `SalvoEvent::salvo`).
+        salvo: String,
+        /// The lifecycle phase the salvo transitions into.
+        phase: SalvoPhase,
+    },
+}
+
+impl CorrKey {
+    /// The correlation key a command's eventual outcome event will carry, or
+    /// [`None`] when the command has no single unambiguous realtime outcome to
+    /// correlate (so it is left uncorrelated rather than mis-correlated).
+    ///
+    /// * `Start` → `OutputState(Running)`, `Stop` → `OutputState(Idle)` — the
+    ///   `OutputStatus` echo the drain emits.
+    /// * `ArmSalvo`/`TakeSalvo`/`CancelSalvo` of a **named** salvo →
+    ///   `Salvo { salvo, phase }`. A salvo `None` (take/cancel the *armed*
+    ///   salvo) is not keyed: the outcome's name is resolved engine-side and is
+    ///   not known here.
+    /// * `SwapSource`/`ApplyLayout`/`SetTallyOverride` → [`None`]: the first two
+    ///   have no dedicated outcome event, and the tally echo is not a
+    ///   command-acknowledgement outcome.
+    #[must_use]
+    pub fn for_command(command: &Command) -> Option<Self> {
+        match command {
+            Command::Start { .. } => Some(Self::OutputState(OutputRunState::Running)),
+            Command::Stop { .. } => Some(Self::OutputState(OutputRunState::Idle)),
+            Command::ArmSalvo { salvo, .. } => Some(Self::Salvo {
+                salvo: salvo.clone(),
+                phase: SalvoPhase::Armed,
+            }),
+            Command::TakeSalvo {
+                salvo: Some(salvo), ..
+            } => Some(Self::Salvo {
+                salvo: salvo.clone(),
+                phase: SalvoPhase::Taken,
+            }),
+            Command::CancelSalvo {
+                salvo: Some(salvo), ..
+            } => Some(Self::Salvo {
+                salvo: salvo.clone(),
+                phase: SalvoPhase::Cancelled,
+            }),
+            // Take/cancel of the *armed* salvo: the name is resolved engine-side
+            // and unknown here, so it is left uncorrelated rather than guessed.
+            Command::TakeSalvo { salvo: None, .. }
+            | Command::CancelSalvo { salvo: None, .. }
+            // No dedicated realtime outcome event to correlate.
+            | Command::SwapSource { .. }
+            | Command::ApplyLayout { .. }
+            | Command::SetTallyOverride { .. } => None,
+        }
+    }
+
+    /// The correlation key an outcome event carries, or [`None`] when the event
+    /// is not a command outcome (so it is never stamped with a stale `corr`).
+    ///
+    /// Mirrors [`CorrKey::for_command`]: only `OutputStatus` and the named
+    /// salvo arm/take/cancel events map to a key; every other event — tile
+    /// state, alerts, audio meters, the control frames — yields [`None`].
+    #[must_use]
+    pub fn for_event(event: &Event) -> Option<Self> {
+        match event {
+            Event::OutputStatus(status) => Some(Self::OutputState(status.state)),
+            Event::SalvoArmed(e) => Some(Self::Salvo {
+                salvo: e.salvo.clone(),
+                phase: SalvoPhase::Armed,
+            }),
+            Event::SalvoTaken(e) => Some(Self::Salvo {
+                salvo: e.salvo.clone(),
+                phase: SalvoPhase::Taken,
+            }),
+            Event::SalvoCancelled(e) => Some(Self::Salvo {
+                salvo: e.salvo.clone(),
+                phase: SalvoPhase::Cancelled,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A bounded, control-plane-only registry pairing an accepted command with the
+/// [`OperationId`] its outcome event must echo as `corr` (ADR-W008).
+///
+/// The command surface records `(key, op)` at 202 time ([`CorrRegistry::record`]);
+/// the realtime projection pops it when the matching outcome event is delivered
+/// ([`CorrRegistry::take`]). Correlations are consumed **once** (FIFO per key),
+/// so a re-emitted event after the outcome carries no stale corr.
+///
+/// **Isolation (invariant #10).** This is ordinary control-plane state behind a
+/// short-held `Mutex` that the engine never touches: `record` runs on the HTTP
+/// 202 path and `take` on the per-client realtime projection — neither is on the
+/// engine hot loop, and the engine's publish path (`broadcast::send`) never
+/// locks this. It is **bounded**: at most `capacity` pending correlations are
+/// retained; recording over capacity drops the oldest pending entry
+/// (drop-oldest), so a flood of un-consumed correlations can never grow memory
+/// without bound. A dropped correlation simply leaves its outcome uncorrelated
+/// (`corr: None`) — acceptable, never a wrong id.
+#[derive(Debug)]
+pub struct CorrRegistry {
+    inner: Mutex<CorrInner>,
+    /// The maximum number of pending correlations retained at once.
+    capacity: usize,
+}
+
+/// The mutex-guarded interior of [`CorrRegistry`].
+#[derive(Debug, Default)]
+struct CorrInner {
+    /// FIFO queues of pending op ids keyed by their outcome key.
+    pending: HashMap<CorrKey, VecDeque<OperationId>>,
+    /// Drop-oldest insertion order across all keys, so the global bound evicts
+    /// the oldest pending correlation regardless of key.
+    order: VecDeque<CorrKey>,
+    /// Op ids already resolved for a specific outcome **engine seq**. The first
+    /// client to project an outcome pops the pending op and memoizes it here, so
+    /// every other client projecting the SAME engine event (the realtime stream
+    /// fans one engine event out to all subscribers) stamps the SAME `corr`
+    /// rather than only the first reader seeing it. Bounded the same way as
+    /// `order` (one resolved entry per consumed correlation).
+    resolved: HashMap<u64, OperationId>,
+    /// Insertion order of `resolved` engine seqs, so the global bound evicts the
+    /// oldest resolved correlation alongside the pending ones.
+    resolved_order: VecDeque<u64>,
+}
+
+impl CorrRegistry {
+    /// Build a registry retaining at most `capacity` pending **and** `capacity`
+    /// resolved correlations (drop-oldest beyond that). A `capacity` of `0` is
+    /// promoted to `1`.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(CorrInner::default()),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Record that the outcome event matching `key` should echo `op` as `corr`.
+    ///
+    /// Non-blocking and bounded: holds the lock only to push, and evicts the
+    /// oldest pending correlation when over `capacity` (drop-oldest, invariant
+    /// #10). A poisoned lock is treated as "registry unavailable" and the record
+    /// is skipped — the outcome stays uncorrelated rather than the call panicking
+    /// on the 202 path.
+    pub fn record(&self, key: CorrKey, op: OperationId) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.pending.entry(key.clone()).or_default().push_back(op);
+        inner.order.push_back(key);
+        // Enforce the global bound: evict the oldest pending correlation.
+        while inner.order.len() > self.capacity {
+            if let Some(evicted) = inner.order.pop_front() {
+                if let Some(queue) = inner.pending.get_mut(&evicted) {
+                    queue.pop_front();
+                    if queue.is_empty() {
+                        inner.pending.remove(&evicted);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve the op id to stamp as `corr` on the outcome event with engine
+    /// sequence `engine_seq` and correlation `key`, or [`None`] when nothing
+    /// correlates (then the outcome rides uncorrelated).
+    ///
+    /// **Resolve-once-per-engine-seq.** The first caller for a given `engine_seq`
+    /// pops the oldest pending op under `key` (FIFO) and memoizes it against that
+    /// seq; every subsequent caller for the same `engine_seq` (the other realtime
+    /// clients, which each project the same fanned-out engine event) returns the
+    /// memoized op — so all clients stamp the same `corr`. A later **re-emission**
+    /// of the same outcome carries a different `engine_seq`, so it does not reuse
+    /// a consumed correlation: it pops the next pending op (or [`None`]).
+    ///
+    /// A poisoned lock yields [`None`] (uncorrelated) rather than panicking on the
+    /// realtime projection path.
+    #[must_use]
+    pub fn resolve(&self, key: &CorrKey, engine_seq: u64) -> Option<OperationId> {
+        let Ok(mut inner) = self.inner.lock() else {
+            return None;
+        };
+        // A client already resolved this exact outcome event: reuse its op so
+        // every subscriber stamps a consistent `corr`.
+        if let Some(op) = inner.resolved.get(&engine_seq) {
+            return Some(op.clone());
+        }
+        // First resolver for this engine seq: pop the oldest pending op for the
+        // key and memoize it against the seq.
+        let op = {
+            let queue = inner.pending.get_mut(key)?;
+            let popped = queue.pop_front();
+            if queue.is_empty() {
+                inner.pending.remove(key);
+            }
+            popped
+        }?;
+        // Drop the first matching key from the pending order so the bound stays
+        // exact and a consumed correlation cannot be evicted twice.
+        if let Some(pos) = inner.order.iter().position(|k| k == key) {
+            inner.order.remove(pos);
+        }
+        inner.resolved.insert(engine_seq, op.clone());
+        inner.resolved_order.push_back(engine_seq);
+        // Bound the resolved memo the same way as pending correlations.
+        while inner.resolved_order.len() > self.capacity {
+            if let Some(evicted) = inner.resolved_order.pop_front() {
+                inner.resolved.remove(&evicted);
+            }
+        }
+        Some(op)
+    }
+}
 
 /// One realtime frame plus the metadata the transport needs to emit it.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +325,11 @@ pub struct SessionStream {
     /// A resume cursor: deltas with an engine seq `<= resume_after` are skipped
     /// (already observed by the client before its disconnect).
     resume_after: Option<u64>,
+    /// The command-outcome correlation registry, when wired. When present,
+    /// [`SessionStream::next_delta`] stamps an outcome event's envelope with the
+    /// `corr` (op id) the accepted command recorded (ADR-W008). When [`None`]
+    /// (e.g. the existing transport-only tests) no `corr` is stamped.
+    corr: Option<Arc<CorrRegistry>>,
 }
 
 impl SessionStream {
@@ -100,7 +349,20 @@ impl SessionStream {
             next_seq: 0,
             snapshot_sent: false,
             resume_after,
+            corr: None,
         }
+    }
+
+    /// Wire the command-outcome correlation registry onto this session.
+    ///
+    /// With it installed, [`SessionStream::next_delta`] stamps each outcome
+    /// event's envelope with the `corr` (op id) the originating command recorded
+    /// at 202 time (ADR-W008), consuming the correlation once. Without it the
+    /// stream is unchanged (every `corr` stays `None`).
+    #[must_use]
+    pub fn with_corr_registry(mut self, corr: Arc<CorrRegistry>) -> Self {
+        self.corr = Some(corr);
+        self
     }
 
     /// Allocate the next per-connection sequence number.
@@ -170,6 +432,18 @@ impl SessionStream {
                 // Resource scope (the tile/input/output id) the client keys this
                 // delta by — read before the event is moved into the envelope.
                 let scope = event_scope_id(&event);
+                // The command-outcome correlation, read before the event moves:
+                // if this event is the outcome of an accepted command, resolve the
+                // op id the 202'd request recorded so the envelope echoes it as
+                // `corr` (ADR-W008). Keyed by the engine seq so every subscriber
+                // stamps a consistent `corr` for one outcome, while a re-emitted
+                // outcome (a new engine seq) does not reuse a consumed
+                // correlation. Non-command events stay uncorrelated. The registry
+                // lock is control-plane-only and never touches the engine hot loop
+                // (invariant #10).
+                let corr = self.corr.as_ref().and_then(|registry| {
+                    CorrKey::for_event(&event).and_then(|key| registry.resolve(&key, seq_event.seq))
+                });
                 let mut envelope = Envelope::new(
                     topic,
                     seq,
@@ -178,6 +452,9 @@ impl SessionStream {
                 );
                 if let Some(id) = scope {
                     envelope = envelope.with_id(id);
+                }
+                if let Some(op) = corr {
+                    envelope = envelope.with_corr(op.as_str());
                 }
                 Ok(Some(RealtimeFrame {
                     kind: FrameKind::Delta,
@@ -342,7 +619,8 @@ fn resolve_principal(
 async fn run_ws_session(mut socket: WebSocket, state: AppState) {
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
-    let mut session = SessionStream::new(sub, session_id, None);
+    let mut session =
+        SessionStream::new(sub, session_id, None).with_corr_registry(Arc::clone(&state.corr));
 
     let (_snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let hello = session.snapshot_frame(snapshot_seq);
@@ -397,7 +675,8 @@ pub async fn sse_handler(
 
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
-    let mut session = SessionStream::new(sub, session_id, None);
+    let mut session =
+        SessionStream::new(sub, session_id, None).with_corr_registry(Arc::clone(&state.corr));
     let (_snapshot, snapshot_seq) = current_engine_snapshot(&state);
 
     let stream = async_stream::stream! {

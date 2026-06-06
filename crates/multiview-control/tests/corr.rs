@@ -13,14 +13,18 @@
     clippy::indexing_slicing
 )]
 
+mod support;
+
 use std::sync::Arc;
 
 use multiview_control::realtime::{CorrKey, CorrRegistry};
-use multiview_control::{Command, OperationId, SessionStream};
+use multiview_control::{AppState, Command, OperationId, SessionStream};
 use multiview_engine::EnginePublisher;
 use multiview_events::{
     Alert, AlertSeverity, Event, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase,
 };
+use serde_json::json;
+use support::{body_json, post_json, seeded_keys, send, OPERATOR_TOKEN};
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
 
@@ -216,4 +220,64 @@ async fn corr_registry_preserves_lagged_skip_isolation() {
         recovery, None,
         "a far-behind client observes a lagged-skip recovery, not back-pressure"
     );
+}
+
+/// End-to-end: a `POST /api/v1/commands/start` that returns `202` + an op id
+/// records that op into the live `AppState` correlation registry, so the
+/// realtime projection — built over the SAME registry — stamps it as `corr` on
+/// the start's `OutputStatus{Running}` outcome event. This exercises the live
+/// route → registry → realtime wiring, not just the seam in isolation.
+#[tokio::test]
+async fn posted_start_command_correlates_its_realtime_outcome() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let (commands, _rx) = multiview_control::command_bus(8);
+    let state = AppState::new(
+        Arc::clone(&engine),
+        commands,
+        Arc::new(multiview_control::InMemoryRepository::new()),
+        Arc::new(seeded_keys()),
+    );
+    // Hold the live registry the router will record into.
+    let corr = Arc::clone(&state.corr);
+    let router = multiview_control::router(state);
+
+    // A genuine operator POST: 202 Accepted + an operation id.
+    let resp = send(
+        &router,
+        post_json("/api/v1/commands/start", OPERATOR_TOKEN, &json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+    let op = body_json(resp).await["operation_id"]
+        .as_str()
+        .expect("operation_id present")
+        .to_owned();
+    assert!(!op.is_empty());
+
+    // The realtime projection over the same registry stamps the recorded op onto
+    // the start's outcome event.
+    let sub = engine.subscribe();
+    let mut session = SessionStream::new(sub, "sess-e2e", None).with_corr_registry(corr);
+    engine.publish_event(Event::OutputStatus(OutputStatus {
+        state: OutputRunState::Running,
+        bitrate_bps: None,
+        clients: None,
+    }));
+
+    let delta = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("the start outcome is delivered");
+    assert_eq!(
+        delta.envelope.corr.as_deref(),
+        Some(op.as_str()),
+        "the posted start's op id must echo as corr on its realtime outcome"
+    );
+
+    // The wire form carries `corr` as the same id.
+    let text = delta.to_json().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["corr"], op, "the JSON envelope carries corr == op");
+    assert_eq!(parsed["t"], "output.status");
 }

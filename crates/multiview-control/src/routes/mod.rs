@@ -259,6 +259,11 @@ pub(crate) fn submit_accepted(
         Reservation::Fresh(op) => {
             let command = build(op.clone());
             let kind = command.kind().to_owned();
+            // The command-outcome correlation key (if any) — computed from the
+            // command before it is submitted (and moved). Commands with a single,
+            // unambiguous outcome event (start/stop, named salvo arm/take/cancel)
+            // are keyed; others yield no key and ride the stream uncorrelated.
+            let corr_key = crate::realtime::CorrKey::for_command(&command);
             // Non-blocking submit: a full bus sheds load (503) rather than
             // blocking the engine (invariant #10). If the submit is shed, the
             // command never reached the engine, so we MUST release the
@@ -269,6 +274,17 @@ pub(crate) fn submit_accepted(
             if let Err(_shed) = state.commands.try_submit(command) {
                 state.idempotency.release(idem.0.as_deref(), &op);
                 return Err(ControlError::EngineBusy);
+            }
+            // The command is enqueued: record its outcome correlation so the
+            // realtime projection echoes this op id as `corr` on the matching
+            // outcome event (ADR-W008). Recorded only on the success path, so a
+            // shed command leaves no orphan correlation. The engine drains on its
+            // own tick cadence (never synchronously here), and the realtime
+            // projection runs on separate per-client tasks, so the correlation is
+            // recorded before any outcome can be delivered. The registry is
+            // bounded drop-oldest and never on the engine hot loop (invariant #10).
+            if let Some(key) = corr_key {
+                state.corr.record(key, op.clone());
             }
             let body = AcceptedBody {
                 operation_id: op.to_string(),

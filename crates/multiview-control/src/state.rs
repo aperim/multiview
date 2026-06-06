@@ -257,6 +257,12 @@ pub struct AppState {
     pub config_versions: Arc<dyn ConfigVersionStore>,
     /// The `Idempotency-Key` deduplication store.
     pub idempotency: Arc<IdempotencyStore>,
+    /// The command-outcome correlation registry: pairs each accepted command's
+    /// [`OperationId`](crate::command::OperationId) with the realtime outcome
+    /// event it will produce, so the outcome's envelope echoes the op id as
+    /// `corr` (ADR-W008). Bounded, control-plane-only, drop-oldest — it can
+    /// never back-pressure the engine (invariant #10).
+    pub corr: Arc<crate::realtime::CorrRegistry>,
     /// The clock used to stamp alarm acknowledgements **and** audit entries.
     pub ack_clock: AckClock,
     /// The live-preview provider (program + per-input JPEG stills). The default
@@ -311,6 +317,11 @@ impl AppState {
             audit: Arc::new(InMemoryAuditLog::new()),
             config_versions: Arc::new(InMemoryConfigVersionStore::new()),
             idempotency: Arc::new(IdempotencyStore::new()),
+            // Bound the in-flight correlations: a generous ceiling for pending
+            // command outcomes (drop-oldest beyond it, invariant #10). A backlog
+            // this deep means outcomes are not being consumed; the oldest
+            // correlation is dropped and its outcome simply rides uncorrelated.
+            corr: Arc::new(crate::realtime::CorrRegistry::new(256)),
             ack_clock: Arc::new(system_ack_clock),
             preview: crate::preview::no_preview(),
             whep: crate::preview::no_whep(),
