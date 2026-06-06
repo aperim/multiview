@@ -325,6 +325,65 @@ mod tests {
     }
 
     #[test]
+    fn suspend_refuses_new_focus_even_with_headroom() {
+        // PRV-4 / ADR-P001: preview is the FIRST rung the degradation ladder
+        // sheds. `suspend()` is the hook the ladder drives — while suspended,
+        // NEW focus is refused with `FocusDenied::Suspended` regardless of cap
+        // headroom (the existing `503 fallback` shape), so the operator sheds to
+        // the always-available JPEG transport.
+        let gate: FocusGate<String> = FocusGate::new(FocusCaps::new(4, 4));
+        assert!(!gate.is_suspended());
+        gate.suspend();
+        assert!(gate.is_suspended());
+        // Plenty of headroom, but suspended: refused as Suspended (not a cap).
+        assert_eq!(
+            gate.try_acquire("program".to_owned()).err(),
+            Some(FocusDenied::Suspended)
+        );
+        assert_eq!(gate.active(), 0, "no slot is reserved while suspended");
+    }
+
+    #[test]
+    fn resume_restores_admission_after_load_clears() {
+        // When sustained overload clears, the ladder recovers the preview rung
+        // and calls `resume()`; focus is admissible again (load-clears restore).
+        let gate: FocusGate<String> = FocusGate::new(FocusCaps::new(1, 1));
+        gate.suspend();
+        assert!(gate.try_acquire("program".to_owned()).is_err());
+        gate.resume();
+        assert!(!gate.is_suspended());
+        let _lease = gate
+            .try_acquire("program".to_owned())
+            .expect("admission restored once load clears");
+        assert_eq!(gate.active(), 1);
+    }
+
+    #[test]
+    fn suspend_is_idempotent_and_does_not_drop_held_leases() {
+        // Suspending does not retroactively invalidate a lease already held (the
+        // ladder driver tears those sessions down out-of-band); it only refuses
+        // NEW admissions. Repeated suspend/resume is idempotent (no flapping of
+        // the flag itself), mirroring the ladder's hysteresis.
+        let gate: FocusGate<String> = FocusGate::new(FocusCaps::new(2, 2));
+        let held = gate.try_acquire("program".to_owned()).expect("admitted");
+        gate.suspend();
+        gate.suspend();
+        assert!(gate.is_suspended());
+        // The previously-held lease still counts; new focus is refused.
+        assert_eq!(gate.active(), 1);
+        assert_eq!(
+            gate.try_acquire("input:cam-1".to_owned()).err(),
+            Some(FocusDenied::Suspended)
+        );
+        // Dropping the held lease still frees its slot while suspended.
+        drop(held);
+        assert_eq!(gate.active(), 0);
+        gate.resume();
+        gate.resume();
+        assert!(!gate.is_suspended());
+    }
+
+    #[test]
     fn concurrent_acquire_release_never_exceeds_the_cap() {
         // A real concurrency stress (std threads, no proptest dep): many workers
         // hammer acquire/release; the live count must NEVER exceed the cap and

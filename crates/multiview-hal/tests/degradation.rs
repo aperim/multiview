@@ -14,9 +14,18 @@ use multiview_hal::{CostBudget, Planner};
 #[test]
 fn ladder_is_cheapest_impact_first_and_in_documented_order() {
     use DegradationAction::*;
+    // The five PREVIEW rungs are topmost (cheapest to shed), in the exact order
+    // preview-subsystem.md §8 mandates — shed focus WHEP, then grid fps, then
+    // grid res, then off-air cue decoders, then suspend preview entirely — ALL
+    // before any program tile/output lever moves (PRV-4, ADR-P001).
     assert_eq!(
         DegradationAction::LADDER,
         [
+            ShedFocusWhep,
+            DropPreviewGridFps,
+            DropPreviewGridRes,
+            DropOffAirCueDecoders,
+            SuspendPreviewEntirely,
             DropTileResolution,
             DropTileFps,
             SimplerScaler,
@@ -37,12 +46,13 @@ fn ladder_is_cheapest_impact_first_and_in_documented_order() {
 fn tile_levers_come_before_program_levers() {
     // Every action before FasterEncoderPreset must NOT affect the program;
     // FasterEncoderPreset onward MUST. This encodes invariant #9's ordering:
-    // shed low-priority tiles/shared resources before the program everyone sees.
+    // shed preview, then low-priority tiles/shared resources, before the program
+    // everyone sees. (Preview rungs and tile levers are both pre-program.)
     for action in DegradationAction::LADDER {
         if action.rung() < DegradationAction::FasterEncoderPreset.rung() {
             assert!(
                 !action.affects_program(),
-                "{action:?} should be a pre-program tile lever"
+                "{action:?} should be a pre-program (preview or tile) lever"
             );
         } else {
             assert!(
@@ -61,21 +71,117 @@ fn tile_levers_come_before_program_levers() {
 #[test]
 fn actions_at_level_is_cumulative_and_clamped() {
     assert!(actions_at_level(0).is_empty());
-    assert_eq!(
-        actions_at_level(1),
-        &[DegradationAction::DropTileResolution]
-    );
+    // Level 1 sheds the single cheapest rung — preview focus WHEP, not a tile.
+    assert_eq!(actions_at_level(1), &[DegradationAction::ShedFocusWhep]);
     assert_eq!(
         actions_at_level(3),
         &[
-            DegradationAction::DropTileResolution,
-            DegradationAction::DropTileFps,
-            DegradationAction::SimplerScaler,
+            DegradationAction::ShedFocusWhep,
+            DegradationAction::DropPreviewGridFps,
+            DegradationAction::DropPreviewGridRes,
         ]
     );
     assert_eq!(actions_at_level(MAX_LEVEL).len(), MAX_LEVEL);
     // Over-clamping is saturating, never a panic / index error.
     assert_eq!(actions_at_level(MAX_LEVEL + 99).len(), MAX_LEVEL);
+}
+
+#[test]
+fn preview_rungs_are_the_topmost_cheapest_rungs() {
+    use DegradationAction::*;
+    // The five preview rungs occupy levels 0..5 — strictly below every other
+    // rung. `affects_preview()` distinguishes them; `is_preview` and the helper
+    // `first_non_preview_level()` agree on the boundary.
+    let preview = [
+        ShedFocusWhep,
+        DropPreviewGridFps,
+        DropPreviewGridRes,
+        DropOffAirCueDecoders,
+        SuspendPreviewEntirely,
+    ];
+    for (level, action) in preview.iter().enumerate() {
+        assert_eq!(action.rung(), level, "{action:?} must be rung {level}");
+        assert!(action.affects_preview(), "{action:?} must be a preview rung");
+    }
+    // The boundary helper points at the first NON-preview rung.
+    assert_eq!(
+        DegradationAction::first_non_preview_level(),
+        preview.len(),
+        "the first non-preview rung sits right after the preview block"
+    );
+    assert_eq!(
+        DegradationAction::LADDER[DegradationAction::first_non_preview_level()],
+        DropTileResolution,
+        "the first non-preview rung is the cheapest tile lever"
+    );
+}
+
+#[test]
+fn preview_rungs_are_below_every_program_rung_and_never_affect_program() {
+    // PRV-4 / ADR-P001: preview is shed BEFORE any program lever moves. Every
+    // preview rung must precede every program-affecting rung AND must itself be
+    // non-program-affecting.
+    for action in DegradationAction::LADDER {
+        if action.affects_preview() {
+            assert!(
+                !action.affects_program(),
+                "{action:?} is preview — it must never touch the program output"
+            );
+            assert!(
+                action.rung() < DegradationAction::first_program_level(),
+                "preview rung {action:?} must sit below the first program rung"
+            );
+        }
+    }
+    // Every program-affecting rung sits at or above the first program level.
+    for action in DegradationAction::LADDER {
+        if action.affects_program() {
+            assert!(action.rung() >= DegradationAction::first_program_level());
+        }
+    }
+}
+
+#[test]
+fn climbing_pressure_sheds_all_preview_before_any_tile_or_program_lever() {
+    // The whole point of PRV-4: under sustained overload the ladder sheds EVERY
+    // preview rung before it touches a single tile/program lever. Drive the
+    // controller up one rung per tick and assert the order.
+    let mut h = Hysteresis::new(config());
+    let first_non_preview = DegradationAction::first_non_preview_level();
+
+    // Shedding the preview block: each Down move applies one preview rung, and
+    // while preview rungs remain the program output is never touched.
+    for _ in 0..first_non_preview {
+        assert_eq!(h.observe(0.99), LadderMove::Down);
+        let newest = *actions_at_level(h.level())
+            .last()
+            .expect("a rung was just applied");
+        assert!(
+            newest.affects_preview(),
+            "rung {} ({newest:?}) must be a preview shed",
+            h.level()
+        );
+        assert!(
+            !actions_at_level(h.level())
+                .iter()
+                .any(|a| a.affects_program()),
+            "no program rung may be active while preview rungs are still being shed"
+        );
+    }
+    // Exactly the five preview rungs were shed, none program-affecting yet.
+    assert_eq!(h.level(), first_non_preview);
+    assert!(actions_at_level(h.level())
+        .iter()
+        .all(DegradationAction::affects_preview));
+
+    // The NEXT step finally reaches the first tile lever (still pre-program).
+    assert_eq!(h.observe(0.99), LadderMove::Down);
+    let newest = *actions_at_level(h.level())
+        .last()
+        .expect("a rung was just applied");
+    assert_eq!(newest, DegradationAction::DropTileResolution);
+    assert!(!newest.affects_preview());
+    assert!(!newest.affects_program());
 }
 
 fn config() -> HysteresisConfig {
