@@ -957,6 +957,14 @@ impl Pipeline {
             self.background,
         )
         .map_err(|e| PipelineError::Engine(e.to_string()))?;
+        // Under the opt-in `gpu` feature the run PREFERS the wgpu GPU
+        // compositor; `RunBackend::select(true)` uses it only if an adapter
+        // initializes and otherwise transparently falls back to the CPU
+        // reference (invariant #1: a missing/failed GPU never stalls or crashes
+        // the run). Without the feature the drive keeps its default CPU backend,
+        // so the default build path is byte-for-byte unchanged.
+        #[cfg(feature = "gpu")]
+        let drive = drive.with_backend(multiview_compositor::backend::RunBackend::select(true));
 
         let ts: Arc<dyn TimeSource> = time;
         // The engine's outbound publisher is supplied by the caller so the

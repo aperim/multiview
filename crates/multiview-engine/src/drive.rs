@@ -9,8 +9,11 @@
 //!    yields its held/placeholder frame.
 //! 2. **Assembles** the composite request from the active [`Layout`], mapping
 //!    each cell's normalized rectangle to canvas pixels.
-//! 3. **Invokes** the pure-Rust CPU reference [`multiview_compositor::composite`]
-//!    to produce exactly one tagged output [`Nv12Image`] for the tick.
+//! 3. **Invokes** the configured compositor backend
+//!    ([`multiview_compositor::backend::RunBackend`] — the pure-Rust CPU
+//!    reference by default, or the GPU compositor with CPU fallback when a run
+//!    prefers the GPU) to produce exactly one tagged output [`Nv12Image`] for
+//!    the tick.
 //!
 //! The result is one valid composited frame per tick, on time, forever —
 //! regardless of input health. The loop holds no locks an input could hold and
@@ -19,8 +22,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use multiview_compositor::backend::{RunBackend, RunBackendKind};
 use multiview_compositor::blend::LinearRgba;
-use multiview_compositor::pipeline::{composite, CanvasColor, Nv12Image, Tile};
+use multiview_compositor::pipeline::{CanvasColor, Nv12Image, Tile};
 use multiview_core::layout::Layout;
 use multiview_core::time::MediaTime;
 use multiview_core::traits::SourceState;
@@ -55,20 +59,21 @@ impl CompositedFrame {
     }
 }
 
-/// Drives the CPU reference compositor once per output tick over a fixed set of
-/// per-source [`TileStore`]s and a (hot-swappable) [`Layout`].
+/// Drives the configured compositor backend once per output tick over a fixed
+/// set of per-source [`TileStore`]s and a (hot-swappable) [`Layout`].
 ///
 /// The drive loop owns shared [`Arc`] handles to each source's frame store; the
 /// decoders publish into the *same* stores concurrently. Reading is lock-free
 /// and never blocks (the framestore guarantees a definite answer every time), so
 /// the loop upholds invariant #1 even when every input is absent.
 ///
-/// The payload `T` is the per-tile frame type the stores hold. The pure-Rust
-/// default ([`CompositorDrive<Nv12Image>::compose`]) holds [`Nv12Image`]
-/// directly and runs the CPU reference compositor; a GPU path (out of scope
-/// here) would specialize over a native-surface payload and sample on-device
-/// instead. State sampling ([`CompositorDrive::sample_states`]) is available for
-/// any `T`.
+/// The payload `T` is the per-tile frame type the stores hold. The default
+/// [`CompositorDrive<Nv12Image>::compose`] holds [`Nv12Image`] directly and
+/// dispatches the composite through the configured
+/// [`RunBackend`](multiview_compositor::backend::RunBackend) — the CPU
+/// reference by default, or the wgpu GPU compositor (with CPU fallback) when a
+/// run injects a GPU-preferred backend via [`CompositorDrive::with_backend`].
+/// State sampling ([`CompositorDrive::sample_states`]) is available for any `T`.
 pub struct CompositorDrive<T> {
     /// Per-source last-good-frame stores, keyed by source id.
     stores: HashMap<String, Arc<TileStore<T>>>,
@@ -80,6 +85,14 @@ pub struct CompositorDrive<T> {
     nosignal_card: Arc<Nv12Image>,
     /// The canvas background (linear canvas-gamut), shown where no tile covers.
     background: LinearRgba,
+    /// The compositor backend the per-tick composite dispatches through.
+    ///
+    /// Defaults to the CPU reference ([`RunBackend::cpu`]) so an unconfigured
+    /// drive is byte-for-byte the prior behaviour. A run that prefers the GPU
+    /// injects a GPU-or-CPU-fallback backend via [`CompositorDrive::with_backend`]
+    /// (the GPU is degradation-safe: a missing/failed adapter falls back to the
+    /// CPU reference, never stalling the output clock — invariant #1).
+    backend: RunBackend,
 }
 
 impl<T> CompositorDrive<T> {
@@ -108,7 +121,29 @@ impl<T> CompositorDrive<T> {
             canvas_color,
             nosignal_card: Arc::new(nosignal_card),
             background,
+            backend: RunBackend::cpu(),
         })
+    }
+
+    /// Replace the compositor backend the per-tick composite dispatches through.
+    ///
+    /// A run that prefers the GPU passes [`RunBackend::select(true)`](RunBackend::select):
+    /// the GPU is used if an adapter initializes, else it transparently falls
+    /// back to the CPU reference (invariant #1 — a missing/failed GPU never
+    /// stalls or crashes the run). The default backend is the CPU reference, so
+    /// callers that never call this keep the prior behaviour exactly.
+    #[must_use]
+    pub fn with_backend(mut self, backend: RunBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// The kind of compositor backend this drive composites through
+    /// ([`RunBackendKind::Cpu`] or, under `wgpu` with a live adapter,
+    /// [`RunBackendKind::Gpu`]). For telemetry / introspection.
+    #[must_use]
+    pub const fn backend_kind(&self) -> RunBackendKind {
+        self.backend.kind()
     }
 
     /// The active layout.
@@ -171,8 +206,9 @@ impl CompositorDrive<Nv12Image> {
     /// Produce exactly one composited frame for `tick` (invariant #1).
     ///
     /// Samples each cell's source store at `tick.pts` (last-good / `NoSignal`
-    /// card), maps cells to canvas pixels, and runs the CPU reference
-    /// compositor. **Never blocks and never awaits an input.** A tile with no
+    /// card), maps cells to canvas pixels, and runs the configured compositor
+    /// backend (CPU reference by default; GPU-with-CPU-fallback when a run
+    /// prefers the GPU). **Never blocks and never awaits an input.** A tile with no
     /// usable frame contributes the `NoSignal` slate, so the canvas is always
     /// valid and on time.
     ///
@@ -230,14 +266,22 @@ impl CompositorDrive<Nv12Image> {
             })
             .collect();
 
-        let canvas_image = composite(
-            canvas.width,
-            canvas.height,
-            self.canvas_color,
-            self.background,
-            &tiles,
-        )
-        .map_err(|e| Error::Canvas(e.to_string()))?;
+        // Dispatch the composite through the selected backend (CPU reference by
+        // default; GPU-with-CPU-fallback when a run prefers the GPU). The call
+        // is synchronous and never blocks on an input or a client; on the GPU
+        // path a submit/readback failure surfaces as a typed error here, which
+        // becomes `Error::Canvas` — the drive returns rather than stalling the
+        // clock, and the caller holds last-good (safety rule §3, invariant #1).
+        let canvas_image = self
+            .backend
+            .composite(
+                canvas.width,
+                canvas.height,
+                self.canvas_color,
+                self.background,
+                &tiles,
+            )
+            .map_err(|e| Error::Canvas(e.to_string()))?;
 
         Ok(CompositedFrame {
             tick,
