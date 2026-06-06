@@ -43,7 +43,7 @@ use ffmpeg_next::util::frame::Video;
 use ffmpeg_next::ChannelLayout;
 use multiview_core::time::{rescale, MediaTime, Rational};
 use multiview_ffmpeg::{
-    AudioEncodeTarget, DecodedVideoFrame, EncodedPacket, Muxer, ScaleSpec, Scaler,
+    AudioEncodeTarget, AudioEncoder, DecodedVideoFrame, EncodedPacket, Muxer, ScaleSpec, Scaler,
     StreamCodecParameters, StreamKind, VideoEncodeTarget, VideoEncoder,
 };
 
@@ -401,6 +401,28 @@ impl FrameConverter {
 /// sink (inv #10). The codec is fixed for the run, so the
 /// [`StreamCodecParameters`] each muxer seeds its stream from is snapshotted once
 /// at construction.
+/// The optional program-audio encode state owned by a [`ProgramEncoder`]
+/// (AUD-4): one AAC encoder plus the per-channel sample FIFO that rebuffers the
+/// program bus's variable-size blocks (~1600 samples/tick at 48 kHz/30 fps) into
+/// the encoder's fixed `frame_size` (1024) frames, and the running audio sample
+/// counter that stamps each frame's PTS.
+struct AudioState {
+    encoder: AudioEncoder,
+    /// Codec-params snapshot a mux sink registers its audio stream from.
+    params: StreamCodecParameters,
+    /// The audio encoder time-base (`1/sample_rate`).
+    time_base: Rational,
+    /// Samples per encoder frame (1024 for AAC); the FIFO emits in this unit.
+    frame_size: usize,
+    /// One pending-sample queue per channel; full `frame_size` chunks are popped
+    /// off the front and encoded, the remainder carried to the next block.
+    fifo: Vec<Vec<f32>>,
+    /// `audio_pts = Σ samples emitted` — the audio analogue of `out_pts = tick`
+    /// (invariant #3); every encoded frame is stamped from this, never input PTS.
+    audio_pts: i64,
+}
+
+/// The single **encode-once** program producer.
 pub struct ProgramEncoder {
     /// The single video encoder (the one encode of invariant #7).
     encoder: VideoEncoder,
@@ -411,6 +433,9 @@ pub struct ProgramEncoder {
     params: StreamCodecParameters,
     /// The encoder time-base packets are stamped in (reciprocal of the cadence).
     time_base: Rational,
+    /// The optional program-audio encoder + rebuffer (AUD-4). `None` for a
+    /// video-only run, so the existing single-stream path is unchanged.
+    audio: Option<AudioState>,
     /// The monotonic output tick; each [`encode_frame`](Self::encode_frame)
     /// stamps the frame's PTS with it, then advances it by one.
     tick: i64,
@@ -431,14 +456,60 @@ impl ProgramEncoder {
         let encoder = VideoEncoder::new(&config.target()).map_err(ff)?;
         let params = StreamCodecParameters::from_encoder(&encoder);
         let time_base = encoder.time_base();
+        let audio = match &config.audio {
+            Some(audio_cfg) => Some(AudioState::open(audio_cfg)?),
+            None => None,
+        };
         Ok(Self {
             encoder,
             converter: FrameConverter::new(config.format),
             params,
             time_base,
+            audio,
             tick: 0,
             finished: false,
         })
+    }
+
+    /// The program-audio codec parameters a mux sink registers its audio stream
+    /// from (AUD-4), or `None` for a video-only run.
+    #[must_use]
+    pub fn audio_codec_params(&self) -> Option<&StreamCodecParameters> {
+        self.audio.as_ref().map(|a| &a.params)
+    }
+
+    /// The program-audio encoder time-base (`1/sample_rate`), or `None` for a
+    /// video-only run.
+    #[must_use]
+    pub fn audio_time_base(&self) -> Option<Rational> {
+        self.audio.as_ref().map(|a| a.time_base)
+    }
+
+    /// Encode one program-bus audio block: `planes` is one planar-f32 slice per
+    /// channel, each carrying `samples` samples. The samples are appended to the
+    /// per-channel FIFO and every full `frame_size` chunk is encoded into
+    /// [`StreamKind::Audio`]-tagged packets, each stamped from the running sample
+    /// counter (the audio analogue of `out_pts = f(tick)`, inv #3). A partial
+    /// remainder is carried to the next call. A no-op (empty) for a video-only
+    /// run, so the consumer can call it unconditionally.
+    ///
+    /// # Errors
+    /// Returns [`Error::Output`] if the channel count mismatches the encoder, a
+    /// plane is shorter than `samples`, or the encode fails.
+    pub fn encode_audio(
+        &mut self,
+        planes: &[&[f32]],
+        samples: usize,
+    ) -> Result<Vec<EncodedPacket>> {
+        if self.finished {
+            return Err(Error::Output(
+                "ProgramEncoder::encode_audio called after finish".to_owned(),
+            ));
+        }
+        match self.audio.as_mut() {
+            Some(state) => state.encode(planes, samples),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The codec parameters each [`PacketMuxSink`] seeds its muxer stream from.
@@ -488,8 +559,15 @@ impl ProgramEncoder {
             return Ok(Vec::new());
         }
         self.finished = true;
+        // Flush audio first (drain its FIFO remainder + EOF), then video; the
+        // caller routes each tagged packet to its stream, so order is moot.
+        let mut out = match self.audio.as_mut() {
+            Some(state) => state.finish()?,
+            None => Vec::new(),
+        };
         self.encoder.send_eof().map_err(ff)?;
-        self.drain()
+        out.append(&mut self.drain()?);
+        Ok(out)
     }
 
     /// Drain every packet currently available from the encoder into owned
@@ -498,6 +576,94 @@ impl ProgramEncoder {
         let mut out = Vec::new();
         while let Some(packet) = self.encoder.receive_packet().map_err(ff)? {
             out.push(EncodedPacket::from_packet(packet));
+        }
+        Ok(out)
+    }
+}
+
+impl AudioState {
+    /// Open the AAC encoder for `config` and seed an empty per-channel FIFO.
+    fn open(config: &AudioEncodeConfig) -> Result<Self> {
+        let encoder = AudioEncoder::new(&config.audio_target()).map_err(ff)?;
+        let params = StreamCodecParameters::from_audio_encoder(&encoder);
+        let time_base = encoder.time_base();
+        // The encoder's required samples-per-frame; 0 means it accepts any size,
+        // in which case we still batch in a sensible fixed unit.
+        let frame_size = match encoder.frame_size() {
+            0 => 1024,
+            n => usize::try_from(n).unwrap_or(1024),
+        };
+        let channels = encoder.channels();
+        Ok(Self {
+            encoder,
+            params,
+            time_base,
+            frame_size,
+            fifo: vec![Vec::new(); channels],
+            audio_pts: 0,
+        })
+    }
+
+    /// Append a block to the FIFO and encode every full `frame_size` chunk.
+    fn encode(&mut self, planes: &[&[f32]], samples: usize) -> Result<Vec<EncodedPacket>> {
+        if planes.len() != self.fifo.len() {
+            return Err(Error::Output(
+                "program audio block channel count does not match the encoder layout".to_owned(),
+            ));
+        }
+        for (queue, plane) in self.fifo.iter_mut().zip(planes.iter()) {
+            let src = plane.get(..samples).ok_or_else(|| {
+                Error::Output("program audio plane shorter than the sample count".to_owned())
+            })?;
+            queue.extend_from_slice(src);
+        }
+        self.drain_full_frames()
+    }
+
+    /// Encode every complete `frame_size` chunk currently buffered across all
+    /// channels, returning the audio-tagged packets produced.
+    fn drain_full_frames(&mut self) -> Result<Vec<EncodedPacket>> {
+        let mut out = Vec::new();
+        while self.fifo.iter().all(|queue| queue.len() >= self.frame_size) {
+            self.encode_one_frame(self.frame_size, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Pop `count` samples (≤ a frame) off the front of each channel queue, send
+    /// them as one frame stamped from the sample counter, and collect packets.
+    fn encode_one_frame(&mut self, count: usize, out: &mut Vec<EncodedPacket>) -> Result<()> {
+        // Pop `count` from the front of every channel into contiguous buffers.
+        let mut frames: Vec<Vec<f32>> = Vec::with_capacity(self.fifo.len());
+        for queue in &mut self.fifo {
+            let remainder = queue.split_off(count.min(queue.len()));
+            let frame = std::mem::replace(queue, remainder);
+            frames.push(frame);
+        }
+        let slices: Vec<&[f32]> = frames.iter().map(Vec::as_slice).collect();
+        self.encoder
+            .send_planar_f32(&slices, count, self.audio_pts)
+            .map_err(ff)?;
+        self.audio_pts = self
+            .audio_pts
+            .saturating_add(i64::try_from(count).unwrap_or(0));
+        while let Some(packet) = self.encoder.receive_packet().map_err(ff)? {
+            out.push(EncodedPacket::from_audio_packet(packet));
+        }
+        Ok(())
+    }
+
+    /// Flush the audio encoder: send any partial remainder as a final frame
+    /// (AAC permits a short last frame), signal EOF, and drain trailing packets.
+    fn finish(&mut self) -> Result<Vec<EncodedPacket>> {
+        let mut out = Vec::new();
+        let remainder = self.fifo.first().map_or(0, Vec::len);
+        if remainder > 0 {
+            self.encode_one_frame(remainder, &mut out)?;
+        }
+        self.encoder.send_eof().map_err(ff)?;
+        while let Some(packet) = self.encoder.receive_packet().map_err(ff)? {
+            out.push(EncodedPacket::from_audio_packet(packet));
         }
         Ok(out)
     }
