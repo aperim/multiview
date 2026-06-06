@@ -396,3 +396,115 @@ async fn clean_stop_closes_sinks_for_finalisation() {
         "the sink must observe a clean channel close (end-of-program) so it can finalise"
     );
 }
+
+/// (5) ENG-1 / inv #1 — bounded teardown: a sink that **wedges** during
+/// finalisation (e.g. a push muxer blocked writing its trailer to a dead peer)
+/// must NOT hang `stop` forever. The egress join is bounded by a deadline: the
+/// wedged sink is reported and its thread detached so teardown always completes,
+/// while a healthy co-sink still finalises normally.
+///
+/// This is a plain (non-tokio) test with a **watchdog on the test thread**: the
+/// drive runs on its own OS thread, and the test thread waits for it with a
+/// `recv_timeout`. A `tokio::time::timeout` would NOT work here — the hang is a
+/// synchronous `JoinHandle::join()` that blocks the runtime thread, so the timer
+/// could never fire. RED today: `StreamEgress::join` plain-joins every sink, so
+/// the wedged sink blocks teardown forever and the watchdog `recv_timeout` fires
+/// (the test fails) instead of hanging the whole suite.
+#[test]
+fn wedged_sink_does_not_hang_teardown() {
+    const TICKS: u64 = 30;
+
+    // Shared with the sink closures so the assertions can observe them.
+    let healthy_count = Arc::new(AtomicUsize::new(0));
+    let reached_wedge = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let healthy_in = Arc::clone(&healthy_count);
+    let reached_in = Arc::clone(&reached_wedge);
+
+    // Run the whole drive on its own OS thread; the test thread is the watchdog.
+    type DriveResult = Result<
+        multiview_cli::pipeline::StreamTestResult,
+        multiview_cli::pipeline::PipelineError,
+    >;
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<DriveResult>();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let result = rt.block_on(async move {
+            let mut pipeline = build_pipeline();
+
+            // Sink A — healthy: drains every packet, returns cleanly on EOF.
+            let healthy = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
+                let mut n = 0_usize;
+                while rx.recv().is_ok() {
+                    n += 1;
+                }
+                healthy_in.store(n, Ordering::Release);
+                TestSinkOutcome { frames: n }
+            };
+            // Sink B — WEDGED: drains every packet (so the consumer is NEVER
+            // blocked on a full channel), sees end-of-program, then never returns
+            // — simulating a muxer wedged in its trailer/finalise.
+            let wedged = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
+                while rx.recv().is_ok() {}
+                reached_in.store(true, Ordering::Release);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                }
+            };
+
+            let clock = Arc::new(ManualTimeSource::new());
+            let stop = StopSignal::new();
+            let driver_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            spawn_clock_driver(Arc::clone(&clock), Arc::clone(&driver_stop));
+            let ts: Arc<dyn TimeSource> = clock;
+
+            let out = pipeline
+                .drive_streaming_for_test(
+                    StreamTestParams {
+                        time: ts,
+                        pacer: CooperativePacer,
+                        max_ticks: Some(TICKS),
+                        policy: SendPolicy::BlockForExact,
+                        runners: vec![Box::new(healthy), Box::new(wedged)],
+                        hot_tick_observer: None,
+                    },
+                    &stop,
+                )
+                .await;
+            driver_stop.store(true, Ordering::Release);
+            out
+        });
+        let _ = done_tx.send(result);
+    });
+
+    // Watchdog: the drive (run + BOUNDED teardown) must report back well within
+    // this budget; without the bounded join it never would.
+    let result = done_rx
+        .recv_timeout(std::time::Duration::from_secs(8))
+        .expect("teardown must complete within the bound — a wedged sink must NOT hang stop (inv #1)")
+        .expect("drive streaming");
+
+    assert!(
+        reached_wedge.load(Ordering::Acquire),
+        "the wedged sink must have drained to end-of-program before wedging"
+    );
+    // It is REPORTED (not silently dropped): a per-sink report line names it.
+    assert!(
+        result
+            .report
+            .outputs
+            .iter()
+            .any(|line| line.to_ascii_uppercase().contains("WEDGED")),
+        "the wedged sink must be reported in the run outputs, got {:?}",
+        result.report.outputs
+    );
+    // The healthy co-sink still received and finalised all N packets.
+    assert_eq!(
+        healthy_count.load(Ordering::Acquire),
+        usize::try_from(TICKS).unwrap(),
+        "the healthy sink must finalise all N packets despite a wedged co-sink"
+    );
+}
