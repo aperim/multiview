@@ -260,4 +260,81 @@ mod tests {
         let t1 = src.now().unix_seconds();
         assert_eq!(t1 - t0, 37, "now() must track the advancing injected clock");
     }
+
+    // ENG-3b — the measured system reference: `ref_from_query` reads the kernel
+    // NTP discipline (via the engine `sysref` classifier) and maps it onto the
+    // overlay badge. Driven here by a FAKE `NtpQuery` so the mapping + the
+    // read-unavailable fallback are tested without the live `adjtimex` syscall.
+    use multiview_engine::ptp::LockState;
+    use multiview_engine::sysref::{
+        NtpClockState, NtpQuery, NtpReading, NtpStatusFlags, SystemRefConfig,
+    };
+
+    use super::ref_from_query;
+
+    struct FakeNtp(Option<NtpReading>);
+    impl NtpQuery for FakeNtp {
+        fn read(&mut self) -> Option<NtpReading> {
+            self.0
+        }
+    }
+
+    fn synced_reading(est_error_ns: i64) -> NtpReading {
+        NtpReading {
+            status: NtpStatusFlags::from_bits(0), // synchronised (no STA_UNSYNC)
+            clock_state: NtpClockState::Ok,
+            est_error_ns,
+            max_error_ns: est_error_ns,
+            offset_ns: 0,
+        }
+    }
+
+    #[test]
+    fn measured_ref_reports_sys_locked_when_synced_within_tolerance() {
+        // A synchronised kernel clock with a tiny estimated error reads LOCKED on
+        // the SYS badge (the default tolerance is 100 us).
+        let mut q = FakeNtp(Some(synced_reading(1_000)));
+        let r = ref_from_query(&mut q, &SystemRefConfig::default());
+        assert_eq!(r.source, RefSource::System);
+        assert_eq!(r.status, RefStatus::Locked);
+    }
+
+    #[test]
+    fn measured_ref_reports_holdover_when_synced_but_over_tolerance() {
+        // Synchronised but the estimated error is well past tolerance ⇒ HOLDOVER.
+        let mut q = FakeNtp(Some(synced_reading(10_000_000)));
+        let r = ref_from_query(&mut q, &SystemRefConfig::default());
+        assert_eq!(r.status, RefStatus::Holdover);
+    }
+
+    #[test]
+    fn measured_ref_reports_freerun_when_unsynchronized() {
+        // STA_UNSYNC set ⇒ the clock is free-running, honestly reported.
+        let mut reading = synced_reading(0);
+        reading.status = NtpStatusFlags::from_bits(NtpStatusFlags::STA_UNSYNC);
+        let r = ref_from_query(&mut FakeNtp(Some(reading)), &SystemRefConfig::default());
+        assert_eq!(r.status, RefStatus::Freerun);
+    }
+
+    #[test]
+    fn measured_ref_falls_back_to_assumed_when_read_unavailable() {
+        // No reading (denied / non-Linux): honest fallback to the configured
+        // assumed state — Locked on a host known to be disciplined, Freerun if not.
+        let locked = SystemRefConfig {
+            est_error_tolerance_ns: 100_000,
+            assumed_when_unavailable: LockState::Locked,
+        };
+        let freerun = SystemRefConfig {
+            est_error_tolerance_ns: 100_000,
+            assumed_when_unavailable: LockState::Freerun,
+        };
+        assert_eq!(
+            ref_from_query(&mut FakeNtp(None), &locked).status,
+            RefStatus::Locked
+        );
+        assert_eq!(
+            ref_from_query(&mut FakeNtp(None), &freerun).status,
+            RefStatus::Freerun
+        );
+    }
 }
