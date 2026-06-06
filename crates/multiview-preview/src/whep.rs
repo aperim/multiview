@@ -35,6 +35,7 @@ use std::fmt::Write as _;
 
 use crate::token::AccessScope;
 
+pub mod program;
 pub mod transport;
 
 use transport::{SessionState, TransportAnswer};

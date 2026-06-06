@@ -107,7 +107,7 @@ async fn program_focus_pumps_canvas_through_encode_into_drop_oldest_feed() {
     // Publish two canvas frames; pump them through the encoder into the feed.
     canvas.publish(frame(0));
     canvas.publish(frame(900));
-    let n = source.pump_available().await;
+    let n = source.pump_available();
     assert_eq!(n, 2, "both sampled frames are encoded into the feed");
 
     let s0 = feed.pop().expect("first encoded sample");
@@ -145,9 +145,12 @@ async fn program_focus_feed_drops_oldest_never_blocks_on_slow_transport() {
 
     // Pump everything available; the feed stays bounded at its depth and reports
     // drops (it never grows, never blocks).
-    let _ = source.pump_available().await;
+    let _ = source.pump_available();
     assert!(feed.buffered() <= 2, "feed stays bounded at its depth");
-    assert!(feed.dropped() > 0, "a lagging feed drops the oldest samples");
+    assert!(
+        feed.dropped() > 0,
+        "a lagging feed drops the oldest samples"
+    );
 }
 
 #[tokio::test]

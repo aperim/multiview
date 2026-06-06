@@ -46,12 +46,18 @@
 //!   [`whep::transport`] seam — the [`whep::transport::WhepTransport`] trait, the
 //!   session lifecycle state machine, the transport-supplied SDP answer
 //!   attributes, and the bounded **drop-oldest** [`whep::transport::SampleFeed`]
-//!   the preview encoder pushes through (invariant #10). The seam is socket-free
-//!   and pulls **no** native dependency, so this feature build stays pure Rust;
-//!   a native (str0m) ICE/DTLS/SRTP implementation of the seam lands behind a
-//!   *further* gate (it needs UDP/STUN + DTLS certificates). The default build
-//!   is the MJPEG/snapshot model plus signed tokens, with no native or GPU
-//!   dependency.
+//!   the preview encoder pushes through (invariant #10) — **and** the
+//!   [`whep::program`] PROGRAM-output focus path: the conditional
+//!   [`whep::program::ProgramTap`] (no downscale blit until the first subscriber,
+//!   ADR-P003), the [`whep::program::PreviewEncoder`] NV12 → sample seam, the
+//!   [`whep::program::ProgramFocusSource`] tap→encode→feed wiring, and the
+//!   [`whep::program::ProgramFocusSession`] lifecycle (always labeled
+//!   [`whep::program::FidelityLabel::PreEncodeCanvasApprox`] per ADR-P005). The
+//!   seam is socket-free and pulls **no** native dependency, so this feature build
+//!   stays pure Rust; a native (str0m) ICE/DTLS/SRTP transport **and** the real
+//!   GPU downscale blit + low-latency H.264 encode lands behind a *further* gate
+//!   (it needs UDP/STUN + DTLS certificates and a GPU). The default build is the
+//!   MJPEG/snapshot model plus signed tokens, with no native or GPU dependency.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
