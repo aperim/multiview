@@ -137,6 +137,10 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         tracing::info!(file = %subs.display(), cues = track.len(), "burning in subtitles");
         pipeline = pipeline.with_subtitles(track);
     }
+    if args.program_audio {
+        tracing::info!("program audio enabled: muxing an AAC program-audio stream");
+        pipeline.enable_program_audio();
+    }
     let cadence = pipeline.cadence();
     tracing::info!(
         sources = pipeline.source_count(),
@@ -254,6 +258,9 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         tracing::warn!(
             "--subtitles needs the `ffmpeg`+`overlay` features (full pipeline); ignoring"
         );
+    }
+    if args.program_audio {
+        tracing::warn!("--program-audio needs the `ffmpeg` feature (full pipeline); ignoring");
     }
     let engine = SoftwareEngine::build(config)?;
     println!(

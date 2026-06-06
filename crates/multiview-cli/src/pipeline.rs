@@ -699,6 +699,22 @@ impl Pipeline {
         &self.encoder.name
     }
 
+    /// Opt this run into **program audio** (AUD-4): the single bake consumer
+    /// builds a [`multiview_audio::program::ProgramBus`] from the same cadence and
+    /// mixes one block per tick, the [`ProgramEncoder`] gains a second (AAC)
+    /// elementary stream, and every mux sink registers a video **and** audio
+    /// stream. Default OFF — with this never called, `encode_cfg.audio` stays
+    /// `None` and the run is byte-identical to the video-only path (no bus, no
+    /// audio packets, `run_av` delegates to the old single-stream `run`).
+    ///
+    /// The program bus carries **silence** until per-source audio decode is wired
+    /// in a later slice; silence is a valid AAC stream, so this still produces a
+    /// real dual-stream container. The AAC encoder runs at 48 kHz stereo / 128
+    /// kbps (the canonical program format).
+    pub fn enable_program_audio(&mut self) {
+        self.encode_cfg.audio = Some(multiview_output::AudioEncodeConfig::aac(48_000, 2, 128_000));
+    }
+
     /// Run the engine for exactly `max_ticks` ticks under the realtime pacer,
     /// then encode the composited program once and fan it out to every
     /// configured sink.
@@ -812,8 +828,8 @@ impl Pipeline {
         outputs
             .into_iter()
             .map(|output| -> SinkRunner {
-                Box::new(move |rx, params, time_base| {
-                    run_one_output(output, rx, &params, time_base)
+                Box::new(move |rx, params, time_base, audio| {
+                    run_one_output(output, rx, &params, time_base, audio.as_ref())
                 })
             })
             .collect()
@@ -855,8 +871,9 @@ impl Pipeline {
             .into_iter()
             .map(|r| -> SinkRunner {
                 // The fake sink consumes the coded-packet fan-out channel; it does
-                // not mux, so the seeded codec params + time-base are unused.
-                Box::new(move |rx, _params, _time_base| {
+                // not mux, so the seeded codec params + time-base (and the audio
+                // params + time-base) are unused.
+                Box::new(move |rx, _params, _time_base, _audio| {
                     let outcome = r(rx);
                     Ok(SinkRunOutcome {
                         line: format!("test sink: {} packet(s)", outcome.frames),
@@ -977,6 +994,21 @@ impl Pipeline {
             reason: e.to_string(),
         })?;
 
+        // The program-audio bus (AUD-4): built ONLY when this run opted into audio
+        // (`encode_cfg.audio` is `Some`). It mixes one block per output tick at the
+        // audio config's sample rate + channel layout, paced by the pipeline
+        // cadence. No sources are routed onto it in this slice — program audio is
+        // SILENCE until per-source decode loops are wired (a valid AAC stream, and
+        // the correct behaviour here). The bus moves into the bake consumer (it is
+        // `Send`); it is ticked off the hot path, never on the output-clock loop.
+        // `None` (audio off) means the consumer encodes no audio at all, so the run
+        // is byte-identical to the video-only path.
+        let audio_bus = self
+            .encode_cfg
+            .audio
+            .as_ref()
+            .map(|cfg| program_audio_bus(cfg, self.cadence));
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -984,7 +1016,7 @@ impl Pipeline {
         // overlay baker from it, plus the single `ProgramEncoder`; the bake +
         // encode math moved off the hot loop, never onto it.
         let bake_ctx = self.bake_context();
-        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder);
+        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder, audio_bus);
 
         // Build the runtime now (post-prime): `EngineRuntime::new` reads the seed
         // from `ts` here, so tick 0 is due at this instant — the prime delay sits
@@ -1493,6 +1525,7 @@ type SinkRunner = Box<
             Receiver<EncodedPacket>,
             StreamCodecParameters,
             Rational,
+            Option<(StreamCodecParameters, Rational)>,
         ) -> Result<SinkRunOutcome, PipelineError>
         + Send,
 >;
@@ -1620,6 +1653,7 @@ impl StreamEgress {
         runners: Vec<SinkRunner>,
         policy: SendPolicy,
         encoder: ProgramEncoder,
+        audio_bus: Option<multiview_audio::program::ProgramBus>,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -1629,6 +1663,16 @@ impl StreamEgress {
         // itself moves into the bake consumer below to do the one encode.
         let params = encoder.codec_params().clone();
         let time_base = encoder.time_base();
+        // The program-audio stream's params + time-base, snapshotted the same way
+        // when (and only when) the encoder carries an audio encoder (AUD-4). Paired
+        // SAFELY (no unwrap) by `zip`: `Some` only when BOTH the params and the
+        // time-base are present, which the encoder guarantees together. `None` for
+        // a video-only run, so every sink registers a single video stream exactly
+        // as before. Cloned per runner below, like `params`.
+        let audio: Option<(StreamCodecParameters, Rational)> = encoder
+            .audio_codec_params()
+            .cloned()
+            .zip(encoder.audio_time_base());
 
         // One bounded fan-out channel of coded packets + thread per sink. The sink
         // thread drives `PacketMuxSink::run` (or a test fake) over a
@@ -1641,7 +1685,8 @@ impl StreamEgress {
             sink_txs.push(tx);
             let builder = std::thread::Builder::new().name(format!("multiview-sink-{i}"));
             let params = params.clone();
-            match builder.spawn(move || runner(rx, params, time_base)) {
+            let audio = audio.clone();
+            match builder.spawn(move || runner(rx, params, time_base, audio)) {
                 Ok(handle) => sinks.push(handle),
                 Err(e) => {
                     // A sink thread that cannot spawn is a real failure (we cannot
@@ -1658,7 +1703,16 @@ impl StreamEgress {
         let consumer_in_flight = Arc::clone(&in_flight);
         let builder = std::thread::Builder::new().name("multiview-bake-consumer".to_owned());
         let consumer = builder
-            .spawn(move || consumer_main(ctx, &hot_rx, sink_txs, encoder, &consumer_in_flight))
+            .spawn(move || {
+                consumer_main(
+                    ctx,
+                    &hot_rx,
+                    sink_txs,
+                    encoder,
+                    audio_bus,
+                    &consumer_in_flight,
+                )
+            })
             .unwrap_or_else(|_| {
                 // Spawning the consumer failed: fall back to a thread that does
                 // nothing. The `hot_rx`/`sink_txs` moved into the failed closure
@@ -1757,6 +1811,24 @@ fn spawn_failed_sink(reason: String) -> JoinHandle<Result<SinkRunOutcome, Pipeli
     })
 }
 
+/// Build the program-audio bus (AUD-4) from the run's [`AudioEncodeConfig`] and
+/// the pipeline cadence: an [`AudioFormat`](multiview_audio::AudioFormat) at the
+/// config's sample rate + channel layout, paced by `cadence`. The channel count
+/// selects mono/stereo, falling back to stereo for any other count (the program
+/// bus mixes mono or stereo today). No sources are routed: the bus is silence
+/// until per-source decode is wired (a later slice).
+fn program_audio_bus(
+    cfg: &multiview_output::AudioEncodeConfig,
+    cadence: Rational,
+) -> multiview_audio::program::ProgramBus {
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    let format = multiview_audio::AudioFormat::new(cfg.sample_rate, layout);
+    multiview_audio::program::ProgramBus::new(format, cadence)
+}
+
 /// The single bake-consumer thread body (encode-once-mux-many, invariant #7):
 /// build the [`StreamBaker`] from the owned [`BakeContext`] and own the single
 /// [`ProgramEncoder`], then loop receiving [`StreamItem`]s — bake each into an
@@ -1781,6 +1853,7 @@ fn consumer_main(
     hot_rx: &Receiver<StreamItem>,
     sink_txs: Vec<SyncSender<EncodedPacket>>,
     mut encoder: ProgramEncoder,
+    mut audio_bus: Option<multiview_audio::program::ProgramBus>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -1803,6 +1876,22 @@ fn consumer_main(
                 reason: e.to_string(),
             })?;
         fan_packets(&sink_txs, &mut live, packets);
+        // Program audio (AUD-4), OFF the engine hot loop: when the bus is present,
+        // mix exactly one tick of program audio (silence until per-source decode is
+        // wired) and encode it into AAC packets, fanned to the SAME sinks as the
+        // video. `tick()` does no I/O and cannot block (inv #1/#10); the encode
+        // runs here on the bake consumer, never on the output-clock loop. `None`
+        // (audio off) skips this entirely — the run is video-only as before.
+        if let Some(bus) = audio_bus.as_mut() {
+            let block = bus.tick();
+            let audio_packets = encoder
+                .encode_audio_interleaved(block.interleaved(), block.frame_count())
+                .map_err(|e| PipelineError::Output {
+                    kind: "encode-audio",
+                    reason: e.to_string(),
+                })?;
+            fan_packets(&sink_txs, &mut live, audio_packets);
+        }
     }
     // End-of-program: flush the encoder and fan its trailing packets, then drop
     // the sink senders so each sink sees end-of-program and finalises.
@@ -1817,10 +1906,14 @@ fn consumer_main(
 
 /// Fan each coded packet to every still-live sink as an independently-owned copy
 /// (so each muxer's in-place stream-index set + rescale is sound even though the
-/// same packet feeds many muxers — invariant #7). A blocking send paces the
-/// CONSUMER to the slowest sink, never the engine (the engine already handed the
-/// frame off); a hung-up receiver (the sink ended) marks that sink dead for the
-/// rest of the run.
+/// same packet feeds many muxers — invariant #7). The copy **preserves the
+/// packet's [`StreamKind`]** (cloning the [`EncodedPacket`] wrapper, not
+/// re-wrapping the raw packet) so an audio packet stays tagged audio and routes
+/// to the muxer's audio stream — AUD-4; a video-default re-wrap mis-routed audio
+/// onto the video stream, corrupting its DTS. A blocking send paces the CONSUMER
+/// to the slowest sink, never the engine (the engine already handed the frame
+/// off); a hung-up receiver (the sink ended) marks that sink dead for the rest
+/// of the run.
 fn fan_packets(
     sink_txs: &[SyncSender<EncodedPacket>],
     live: &mut [bool],
@@ -1836,7 +1929,9 @@ fn fan_packets(
             // stopped draining for `SINK_WEDGE_GRACE` marks the sink dead for the
             // rest of the run, so a wedged sink can never stall the consumer
             // forever (ENG-1, inv #1).
-            if !send_bounded(tx, EncodedPacket::from_packet(packet.to_owned_packet())) {
+            // `packet.clone()` is a ref-counted, independently-writable copy that
+            // KEEPS the kind tag (unlike `from_packet`, which forces video).
+            if !send_bounded(tx, packet.clone()) {
                 if let Some(flag) = live.get_mut(i) {
                     *flag = false;
                 }
@@ -1886,16 +1981,22 @@ fn run_one_output(
     rx: Receiver<EncodedPacket>,
     params: &StreamCodecParameters,
     time_base: Rational,
+    audio: Option<&(StreamCodecParameters, Rational)>,
 ) -> Result<SinkRunOutcome, PipelineError> {
     match output {
         RunnableOutput::File { sink, path } => {
             let mut source = StreamingPacketSource::new(rx);
-            let outcome =
-                sink.run(&mut source, params, time_base)
-                    .map_err(|e| PipelineError::Output {
-                        kind: "file",
-                        reason: e.to_string(),
-                    })?;
+            let audio_mux = audio.map(|(p, tb)| multiview_output::MuxStream::new(p, *tb));
+            let outcome = sink
+                .run_av(
+                    &mut source,
+                    multiview_output::MuxStream::new(params, time_base),
+                    audio_mux,
+                )
+                .map_err(|e| PipelineError::Output {
+                    kind: "file",
+                    reason: e.to_string(),
+                })?;
             let (packets, keyframes) = match &outcome {
                 PacketMuxOutcome::Single(s) => (s.packets, s.keyframes),
                 PacketMuxOutcome::Segment(s) => (s.stats.packets, s.stats.keyframes),
@@ -1914,12 +2015,17 @@ fn run_one_output(
             playlist_path,
         } => {
             let mut source = StreamingPacketSource::new(rx);
-            let outcome =
-                sink.run(&mut source, params, time_base)
-                    .map_err(|e| PipelineError::Output {
-                        kind: "hls",
-                        reason: e.to_string(),
-                    })?;
+            let audio_mux = audio.map(|(p, tb)| multiview_output::MuxStream::new(p, *tb));
+            let outcome = sink
+                .run_av(
+                    &mut source,
+                    multiview_output::MuxStream::new(params, time_base),
+                    audio_mux,
+                )
+                .map_err(|e| PipelineError::Output {
+                    kind: "hls",
+                    reason: e.to_string(),
+                })?;
             match outcome {
                 PacketMuxOutcome::Segment(result) => {
                     let playlist_text = result.playlist.render();
@@ -1948,9 +2054,9 @@ fn run_one_output(
                 }),
             }
         }
-        RunnableOutput::Push { sink, label, url } => {
-            Ok(run_push_output(&sink, label, &url, rx, params, time_base))
-        }
+        RunnableOutput::Push { sink, label, url } => Ok(run_push_output(
+            &sink, label, &url, rx, params, time_base, audio,
+        )),
     }
 }
 
@@ -1974,9 +2080,15 @@ fn run_push_output(
     rx: Receiver<EncodedPacket>,
     params: &StreamCodecParameters,
     time_base: Rational,
+    audio: Option<&(StreamCodecParameters, Rational)>,
 ) -> SinkRunOutcome {
     let mut source = StreamingPacketSource::new(rx);
-    match sink.run(&mut source, params, time_base) {
+    let audio_mux = audio.map(|(p, tb)| multiview_output::MuxStream::new(p, *tb));
+    match sink.run_av(
+        &mut source,
+        multiview_output::MuxStream::new(params, time_base),
+        audio_mux,
+    ) {
         Ok(outcome) => {
             let (packets, keyframes) = match &outcome {
                 PacketMuxOutcome::Single(s) => (s.packets, s.keyframes),

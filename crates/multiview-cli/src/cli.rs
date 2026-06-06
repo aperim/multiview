@@ -102,6 +102,15 @@ pub struct RunArgs {
     /// The format is chosen by the file extension (`.vtt` ⇒ `WebVTT`, else SRT).
     #[arg(long, value_name = "FILE")]
     pub subtitles: Option<PathBuf>,
+
+    /// Mux a **program-audio** elementary stream alongside the video (AUD-4): the
+    /// output container gains a second (AAC) stream carrying the mixed program
+    /// bus. Default OFF — without this flag the output is video-only and
+    /// byte-identical to before. The program audio is silence until per-source
+    /// audio decode is wired (a later slice), but it is a real AAC stream.
+    /// Requires the `ffmpeg` feature; ignored otherwise.
+    #[arg(long)]
+    pub program_audio: bool,
 }
 
 impl RunArgs {
