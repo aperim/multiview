@@ -172,7 +172,267 @@ pub fn command_drain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_control::{command_bus, Command, OperationId};
+    use multiview_engine::EnginePublisher;
+    use multiview_events::{Event, OutputRunState};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A two-source, two-cell config carrying one salvo whose source recall
+    /// rebinds `cell_a` from its config-default `in_a` to `in_b`.
+    const TWO_CELL_DOC: &str = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "in_a"
+kind = "rtsp"
+url = "rtsp://x/a"
+[[sources]]
+id = "in_b"
+kind = "rtsp"
+url = "rtsp://x/b"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[salvos]]
+id = "salvo_one"
+[[salvos.sources]]
+cell = "cell_a"
+input_id = "in_b"
+"##;
+
+    fn test_config() -> MultiviewConfig {
+        MultiviewConfig::load_from_toml(TWO_CELL_DOC).expect("parse two-cell config")
+    }
+
+    /// Build a real `CompositorDrive` over the test config's solved layout, with
+    /// no frame stores (every tile shows the slate — irrelevant to these tests,
+    /// which only assert layout/event effects of the drain).
+    fn test_drive(config: &MultiviewConfig) -> CompositorDrive<Nv12Image> {
+        let layout = config.solve_layout().expect("solve layout");
+        let canvas_color = CanvasColor::default();
+        let nosignal = Nv12Image::solid(
+            config.canvas.width,
+            config.canvas.height,
+            16,
+            128,
+            128,
+            canvas_color.output_tag(),
+        )
+        .expect("nosignal card");
+        CompositorDrive::new(
+            Arc::new(layout),
+            std::collections::HashMap::new(),
+            nosignal,
+            canvas_color,
+            LinearRgba::opaque(0.0, 0.0, 0.0),
+        )
+        .expect("build drive")
+    }
+
+    /// The core-cell index whose source binding is `want`, if any.
+    fn cell_index_bound_to(drive: &CompositorDrive<Nv12Image>, want: &str) -> Option<usize> {
+        drive
+            .layout()
+            .cells
+            .iter()
+            .position(|c| c.source.as_deref() == Some(want))
+    }
+
+    #[test]
+    fn start_then_stop_emits_output_status() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut sub = publisher.subscribe();
+        let mut drain = command_drain(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        sender
+            .try_submit(Command::Start {
+                op: OperationId::new(),
+            })
+            .expect("submit start");
+        sender
+            .try_submit(Command::Stop {
+                op: OperationId::new(),
+            })
+            .expect("submit stop");
+        drain(&mut drive);
+
+        let first = sub.try_recv().expect("first event present");
+        match first.event.as_ref() {
+            Event::OutputStatus(s) => assert_eq!(s.state, OutputRunState::Running),
+            other => panic!("expected Running OutputStatus, got {other:?}"),
+        }
+        let second = sub.try_recv().expect("second event present");
+        match second.event.as_ref() {
+            Event::OutputStatus(s) => assert_eq!(s.state, OutputRunState::Idle),
+            other => panic!("expected Idle OutputStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_layout_swaps_active_layout() {
+        let config = test_config();
+        let working_name = config.solve_layout().expect("solve").name;
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = command_drain(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        // Applying the working layout name re-solves and re-applies successfully:
+        // the active layout keeps its (stable) name and is unchanged.
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: working_name.clone(),
+            })
+            .expect("submit apply-layout");
+        drain(&mut drive);
+
+        assert_eq!(drive.layout().name, working_name);
+        assert_eq!(drive.layout().cells.len(), 2);
+    }
+
+    #[test]
+    fn unknown_layout_emits_failure_not_panic() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut sub = publisher.subscribe();
+        let mut drain = command_drain(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+        let before = drive.layout().name.clone();
+
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "no_such_layout".to_owned(),
+            })
+            .expect("submit apply-layout");
+        // Must not panic.
+        drain(&mut drive);
+
+        // The active layout is untouched by an unknown layout id.
+        assert_eq!(drive.layout().name, before);
+        // No spurious success: no `OutputStatus` (a successful apply does not emit
+        // one anyway) and specifically no salvo/tally event is emitted here. The
+        // only thing on the stream, if anything, must not claim success — assert
+        // there is no event at all.
+        assert!(
+            matches!(sub.try_recv(), Err(_)),
+            "an unknown layout must not emit a success event"
+        );
+    }
+
+    #[test]
+    fn salvo_take_applies_armed_layout() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut sub = publisher.subscribe();
+        let mut drain = command_drain(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        // Before: cell_a (index 0) is bound to in_a; cell_b (index 1) to in_b.
+        assert_eq!(drive.layout().cells.first().and_then(|c| c.source.clone()), Some("in_a".to_owned()));
+
+        sender
+            .try_submit(Command::ArmSalvo {
+                op: OperationId::new(),
+                salvo: "salvo_one".to_owned(),
+                head: None,
+            })
+            .expect("submit arm");
+        sender
+            .try_submit(Command::TakeSalvo {
+                op: OperationId::new(),
+                salvo: None,
+                head: None,
+            })
+            .expect("submit take");
+        drain(&mut drive);
+
+        // The salvo rebinds cell_a's source to in_b; both cells now show in_b.
+        assert_eq!(
+            drive.layout().cells.first().and_then(|c| c.source.clone()),
+            Some("in_b".to_owned()),
+            "salvo take must rebind cell_a to in_b"
+        );
+        // Both cell indices are now bound to in_b (cell_b already was).
+        assert!(cell_index_bound_to(&drive, "in_a").is_none());
+
+        // Arm and Take each emit their salvo lifecycle event.
+        let armed = sub.try_recv().expect("armed event");
+        assert!(
+            matches!(armed.event.as_ref(), Event::SalvoArmed(e) if e.salvo == "salvo_one"),
+            "expected SalvoArmed, got {:?}",
+            armed.event
+        );
+        let taken = sub.try_recv().expect("taken event");
+        assert!(
+            matches!(taken.event.as_ref(), Event::SalvoTaken(e) if e.salvo == "salvo_one"),
+            "expected SalvoTaken, got {:?}",
+            taken.event
+        );
+    }
+
+    #[test]
+    fn drain_is_bounded_and_never_awaits() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+        let (sender, command_rx) = command_bus(64);
+        let mut drain = command_drain(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        // Flood the bus with a mix of accepted commands.
+        for _ in 0..16 {
+            sender
+                .try_submit(Command::Start {
+                    op: OperationId::new(),
+                })
+                .expect("submit start");
+            sender
+                .try_submit(Command::SwapSource {
+                    op: OperationId::new(),
+                    tile: "cell_a".to_owned(),
+                    source: "in_b".to_owned(),
+                })
+                .expect("submit swap");
+        }
+
+        // The drain is a synchronous `FnMut`: calling it processes every pending
+        // command in O(pending) and returns without awaiting anything. A second
+        // call over the now-empty bus is a no-op and also returns.
+        drain(&mut drive);
+        drain(&mut drive);
+
+        // The swaps took effect (cell_a now bound to in_b) — proof the loop ran
+        // to completion rather than blocking.
+        assert_eq!(
+            drive.layout().cells.first().and_then(|c| c.source.clone()),
+            Some("in_b".to_owned())
+        );
+    }
 
     #[test]
     fn state_snapshot_is_compact_and_tagged() {
