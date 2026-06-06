@@ -16,6 +16,11 @@
 //!   / v5.0): pure typed label/tally messages → on-wire bytes, the egress mirror
 //!   of `multiview-input::tsl`. Socket-free (a later integration) and off the engine
 //!   hot path.
+//! - [`rtsp`] — the OUT-1 RTSP-egress **sidecar baseline** seam (ADR-0006): the
+//!   pure publish-URL builder ([`rtsp::RtspPublishTarget`]) that derives a libav
+//!   RTSP ANNOUNCE/RECORD publish URL from a base + mount for the existing
+//!   `PushProtocol::Rtsp` push path. No native dependency; the in-process
+//!   `gst-rtsp-server` is OUT-2 (a separate feature).
 //!
 //! The transports themselves (RTSP via `gst-rtsp-server`, the CMAF segmenter +
 //! LL-HLS HTTP origin, NDI, RTMP/SRT) are feature-gated (`ffmpeg`, `ndi`, …) so
@@ -37,6 +42,7 @@
 pub mod error;
 pub mod fanout;
 pub mod hls;
+pub mod rtsp;
 pub mod tsl;
 
 /// Real encode-once-mux-many output sinks (file + HLS segmenter), built on
@@ -55,6 +61,7 @@ pub mod sink;
 pub mod ndi;
 
 pub use error::{Error, Result};
+pub use rtsp::{RtspPublishError, RtspPublishTarget};
 
 #[cfg(feature = "ffmpeg")]
 pub use sink::{
