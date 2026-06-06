@@ -126,7 +126,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 ### IN — Inputs (NDI · ST 2110 · WebRTC · YouTube)
 
 - [x] **IN-1** `M` — ST 2110 receive: frame assembler over the depacketizers  ·  _deps: —_  · _pure SRD/line reassembler (marker/seq/timestamp) tested; pgroup→NV12 unpack + `ProducedFrame` adaptation belong with IN-2_
-- [ ] **IN-2** `L` — ST 2110 receive: wire `RtpReceiver`/`DualPathReceiver` into a `FrameProducer` + PTP timing  ·  _deps: IN-1_
+- [x] **IN-2** `L` — ST 2110 receive: wire `RtpReceiver`/`DualPathReceiver` into a `FrameProducer` + PTP timing  ·  _deps: IN-1_  · _`549b971`: `St2110Producer: FrameProducer` over the IN-1 assembler + 90 kHz→ns rebase (`WrapBits::Rtp32`, float-free, monotonic) + 2022-7 `DualPathPacketSource` dedup + bounded async→sync bridge; injected-packet tested, live NIC/PTP gated. cli wiring = IN-3_
 - [ ] **IN-3** `XL` — NDI ingest: runtime-loaded SDK → `FrameProducer` + CLI wiring  ·  _deps: IN-2_
 - [x] **IN-4** `M` — YouTube live: pure resolver core over `yt-dlp -J`  ·  _deps: —_
 - [ ] **IN-5** `L` — YouTube live: wire to HLS ingest + re-resolution loop  ·  _deps: IN-4_
@@ -146,13 +146,13 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 - [~] **PRV-1** `XL` — Native ICE/DTLS/SRTP transport behind a `WhepTransport` seam (str0m, in-process default)  ·  _deps: —_  · _SEAM landed `befefb2` (trait + SDP offer/answer glue + session lifecycle + bounded drop-oldest feed, fake-transport tested); native str0m ICE/DTLS/SRTP impl is **PRV-1b** below_
 - [x] **PRV-2** `L` — Wire WHEP focus routes into `multiview-control` (POST/DELETE per scope) with token-gated Focus + transport seam  ·  _deps: PRV-1_  · _`daedd1d`: POST/DELETE `/preview/{program,inputs/{id},outputs/{id}}/whep` over a codec-free `WhepProvider` seam (offer→201+sdp answer; 401/403 token-gated; 404/415/503-fallback RFC9457); openapi-documented; 7 route tests. Binary adapter bridging to preview's `WhepTransport` = PRV-1b glue_
-- [ ] **PRV-3** `M` — Concurrent-focus session caps + isolation enforcement (the `FocusGate`)  ·  _deps: PRV-2_
+- [x] **PRV-3** `M` — Concurrent-focus session caps + isolation enforcement (the `FocusGate`)  ·  _deps: PRV-2_  · _`a67dc24`: `FocusGate` (global + per-scope caps, fail-closed, `FocusLease` Drop frees) + `GatedWhep` decorator admitting before delegate → existing `503 fallback` shed shape; 5+4 tests. HAL cost-budget hook = PRV-4_
 - [ ] **PRV-4** `M` — Make preview the topmost (cheapest-to-shed) degradation rung  ·  _deps: PRV-3_
 - [ ] **PRV-5** `L` — Sub-second WebRTC OUTPUT (program) focus: program-canvas tap → preview encode → WHEP  ·  _deps: PRV-1, PRV-2, PRV-3_
 
 ### ENG — Engine timing & resilience
 
-- [ ] **ENG-1** `M` — Bounded teardown join for a wedged sink (task #50)  ·  _deps: —_
+- [x] **ENG-1** `M` — Bounded teardown join for a wedged sink (task #50)  ·  _deps: —_  · _`5ca8eab`: `StreamEgress::join` waits ≤`SINK_WEDGE_GRACE` (2s) per sink via `is_finished()`, then reports+detaches a wedged sink (never a `join()` that can't return); consumer fan-out uses a bounded `send_bounded` (try_send poll) so a never-draining sink can't stall it either. Watchdog-thread TDD test (RED hung at 8s → GREEN ~2s)_
 - [ ] **ENG-2** `XL` — Input PTS normalizer + pacer reroute (ADR-0021 points 1-3)  ·  _deps: —_
 - [~] **ENG-3** `M` — NTP/PTP lock auto-detect for the wall-clock badge (task #37)  ·  _deps: ENG-5_  · _`d87b69d`: `sysref` classifier + `ReferenceSelector` (NTP/SYS vs PTP) pure-tested + new `multiview-ntpsys` FFI leaf crate owning the one read-only `adjtimex` unsafe (deny+SAFETY, libc, `ntp` feature) + gated live read; wiring it into the cli `SystemWallClock::reference()` badge = **ENG-3b**_
 - [x] **ENG-4** `L` — Linux i915/amdgpu GPU load probe  ·  _deps: —_  · _sysfs busy%+VRAM probe (`SysfsLoadProbe`, PCI-bus keyed) + pure parsers tested; per-engine enc/dec via `/proc/pid/fdinfo` walk + i915 PMU (needs unsafe) are follow-up slices_
@@ -186,7 +186,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [x] **GPU-5b** `L` — GPU-5 remainder: off-hot-path placement controller in `multiview-engine` (EWMA sustained-overload SHED-vs-MIGRATE, make-before-break) + config policy fields + telemetry counters  ·  _deps: GPU-5_  · _`250034b`: `PlacementController::observe→{Hold,Shed,Migrate,Split}` (pure, reuses `Hysteresis`, anti-storm cooldown/budget/min-gain, 11 tests) + `multiview-config` `PlacementConfig`/`DevicePin`/`gpu_pin` + `multiview-telemetry` placement counters. Wiring proposals into the supervisor execution (make-before-break swap) = **GPU-5c**_
 - [x] **ENG-4b** `M` — GPU load probe remainder: live `/proc/<pid>/fdinfo` enc/dec-util walk (sum own PIDs) + telemetry gauge registration  ·  _deps: ENG-4_  · _`4152955`: `FdinfoMediaTracker` two-snapshot diff → `DeviceLoad.enc/dec_util_frac` (pure parser tested on fixtures, live `/proc` walk gated); the existing ENG-4 gauges consume it. i915 PMU `perf_event_open` (needs unsafe → FFI shim) = **ENG-4c**_
 - [ ] **GPU-5c** `L` — Wire `PlacementController` (GPU-5b) into the engine runtime: a `LoadPoller` poll thread publishing the `arc_swap` `Vec<DeviceLoad>` snapshot, execute `Migrate`/`Split` proposals through the make-before-break supervisor + scene-swap, call `PlacementCounters::record_*`, resolve config `DevicePin`→`multiview_hal::DeviceId`. Touches the protected output core.  ·  _deps: GPU-5b_
-- [ ] **ENG-4c** `S` — i915 PMU `perf_event_open` GPU-busy path behind a tiny FFI-shim leaf crate (deny+SAFETY, like `multiview-ntpsys`), feeding the same `DeviceLoad` enc/dec fields on Intel where fdinfo is unavailable  ·  _deps: ENG-4b_
+- [x] **ENG-4c** `S` — i915 PMU `perf_event_open` GPU-busy path behind a tiny FFI-shim leaf crate (deny+SAFETY, like `multiview-ntpsys`), feeding the same `DeviceLoad` enc/dec fields on Intel where fdinfo is unavailable  ·  _deps: ENG-4b_  · _`4a45c46`: NEW `multiview-i915pmu` FFI crate — 3 `// SAFETY:` `unsafe` syscalls (`perf_event_open`/`read`/`close`) + a hand-rolled correct `PERF_ATTR_SIZE_VER1` (72-byte) `perf_event_attr`; hal `i915-pmu` feature folds busy-ns→frac into `DeviceLoad`. Pure diff tested; live `perf_event_open` gated. Poller call = ENG-4 infra_
 - [x] **GPU-1b** `L` — Wire the `ProgramEncoder` into the cli bake consumer (encode-once-mux-many)  ·  _deps: GPU-1_  · _`a1af76c`: consumer owns one `ProgramEncoder`; `RunnableOutput`/`build_outputs`/`run_one_output`→`PacketMuxSink`; `StreamingPacketSource`; test seam evolved frame→packet (no assertion weakened); per-sink encoders retired; aspirational comments fixed. Completes GPU-1 / inv #7_
 
 
