@@ -82,18 +82,19 @@ RUN ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
 #
 # Native NDI (the off-by-default `ndi` feature) runtime-LOADS libndi via
 # NDIlib_v6_load at run time and is NEVER build-linked or vendored into the repo
-# (ADR-0008). Two things still come from Audinate's NDI SDK: the NDIlib v6
-# HEADER (to declare the FFI ABI in `multiview-ndi-sys` as original binding work)
-# and the libndi RUNTIME (for the gated loopback test). Downloading the SDK
-# REQUIRES ACCEPTING AUDINATE'S LICENCE, so this stage is gated on an explicit
-# operator opt-in and installs into the IMAGE ONLY (never the git repo).
+# (ADR-0008). Two things still come from the NDI SDK (NDI is a NewTek/Vizrt
+# product — Vizrt NDI AB; NOT Audinate, which makes Dante): the NDIlib v6 HEADER
+# (to declare the FFI ABI in `multiview-ndi-sys` as original binding work) and
+# the libndi RUNTIME (for the gated loopback test). Downloading the SDK REQUIRES
+# ACCEPTING THE NDI SDK (NewTek/Vizrt) LICENCE, so this stage is gated on an
+# explicit operator opt-in and installs into the IMAGE ONLY (never the git repo).
 #
 # Default OFF: with NDI_SDK_ACCEPT_LICENSE unset this is a no-op and the image
 # stays proprietary-free / LGPL-clean. To enable, an operator who attests they
 # hold an NDI SDK licence rebuilds with:
 #   --build-arg NDI_SDK_ACCEPT_LICENSE=1 \
 #   --build-arg NDI_SDK_URL=<URL of their NDI SDK for Linux tarball>
-# (Audinate gates the SDK download behind a registration form, so there is no
+# (Vizrt gates the SDK download behind a registration form, so there is no
 # stable public URL to hardcode — the operator supplies it. Self-extracting
 # `.sh` SDK installers need their own EULA-accept flags; the tarball path below
 # is the clean case and may need tuning to the exact SDK package layout.)
