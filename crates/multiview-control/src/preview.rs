@@ -56,3 +56,147 @@ pub type SharedPreview = Arc<dyn PreviewProvider>;
 pub fn no_preview() -> SharedPreview {
     Arc::new(NoPreview)
 }
+
+/// The entity a WHEP focus session is opened against (preview brief §5).
+///
+/// Click-to-focus promotes exactly one entity from the cheap JPEG grid to a
+/// single low-latency WebRTC preview encode. The scope is the routing key the
+/// transport uses to find the right engine tap; control carries it opaquely so
+/// it stays codec- and pixel-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WhepScope {
+    /// The composited program canvas (the multiview output).
+    Program,
+    /// One ingest input, by its source id.
+    Input(String),
+    /// One program output/rendition, by its output id.
+    Output(String),
+}
+
+impl WhepScope {
+    /// A short, stable label for logs/audit (never carries a secret).
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Program => "program".to_owned(),
+            Self::Input(id) => format!("input:{id}"),
+            Self::Output(id) => format!("output:{id}"),
+        }
+    }
+}
+
+/// A negotiated WHEP focus answer: the transport-minted session id and the SDP
+/// answer body the `201 Created` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhepAnswer {
+    /// The transport's session id; also the trailing segment of the WHEP
+    /// resource URL the client `DELETE`s to release the session.
+    pub session_id: String,
+    /// The SDP **answer** body (`application/sdp`).
+    pub sdp: String,
+}
+
+/// Why a WHEP focus negotiation was refused.
+///
+/// The route layer maps each variant onto an RFC 9457 `application/problem+json`
+/// response. A refusal is *operator-visible preview back-pressure*; it never
+/// reflects or affects the protected engine output (invariant #10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WhepReject {
+    /// The SDP offer was not well-formed enough to negotiate (`400`).
+    Malformed(String),
+    /// The offer advertised no video codec this build can preview-encode
+    /// (`415 Unsupported Media Type`).
+    UnsupportedCodec,
+    /// The addressed entity (input/output id) is not one this deployment can
+    /// focus — unknown id or a non-allowlisted scheme (`404`).
+    UnknownEntity,
+    /// The concurrent-focus cap is hit or no preview-encode budget is available,
+    /// so the focus is shed with a `fallback` transport hint (`503`).
+    CapacityExceeded {
+        /// The transport the client should fall back to (e.g. `"ws-jpeg"`,
+        /// `"llhls"`), surfaced in the problem body so the UI degrades honestly.
+        fallback: String,
+    },
+}
+
+/// The WHEP focus transport seam — the codec-free boundary the control plane
+/// delegates focus negotiation/teardown to.
+///
+/// The control plane stays free of any WebRTC/native dependency: it carries the
+/// SDP offer string and the [`WhepScope`] in, and hands back a [`WhepAnswer`] or
+/// a [`WhepReject`]. The binary (`multiview-cli`) implements this over the
+/// `multiview-preview` `WhepTransport` seam (str0m or a MediaMTX sidecar behind a
+/// further gate); the in-memory fake used in tests proves the route wiring.
+///
+/// ## Isolation (invariant #10)
+///
+/// A focus session is strictly a *preview* consumer. An implementation must read
+/// engine taps lossily (drop-oldest) and must never hold a handle the engine
+/// awaits, never publish onto the protected output path, and never block the
+/// engine or the encoder feeding it. Both methods are synchronous and must not
+/// block on the engine: control never `.await`s a focus negotiation against the
+/// data plane.
+pub trait WhepProvider: Send + Sync {
+    /// Negotiate a focus session for `scope` from the browser's SDP `offer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`WhepReject`] when the offer is malformed, advertises no
+    /// supported codec, addresses an unknown entity, or the focus cap / encode
+    /// budget is exhausted. Every refusal is preview-only; it never affects the
+    /// engine.
+    fn negotiate(&self, scope: &WhepScope, offer: &str) -> Result<WhepAnswer, WhepReject>;
+
+    /// Release the focus session `session_id` previously opened for `scope`.
+    ///
+    /// Returns `true` if a matching live session was found and torn down,
+    /// `false` if it was unknown or already released (so the route answers `204`
+    /// for the idempotent teardown and `404` for an unknown session). Idempotent:
+    /// releasing twice is not an error.
+    fn release(&self, scope: &WhepScope, session_id: &str) -> bool;
+
+    /// The number of live focus sessions (for the descriptor / isolation tests).
+    ///
+    /// Best-effort and preview-only; never reflects engine state.
+    fn active_sessions(&self) -> usize;
+}
+
+/// The default WHEP provider used when the binary wires no focus transport (the
+/// negotiation-only / pure build): every focus negotiation is refused as
+/// unsupported and there are never any live sessions.
+///
+/// This keeps the routes present and authz-enforced even on a build without a
+/// WebRTC transport — a `View` token still gets `403` and a valid `Focus` offer
+/// gets an honest `503 fallback: ws-jpeg`, never a `404`/panic.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoWhep;
+
+impl WhepProvider for NoWhep {
+    fn negotiate(&self, _scope: &WhepScope, _offer: &str) -> Result<WhepAnswer, WhepReject> {
+        // No transport is wired: the focus cannot be served, so shed honestly to
+        // the always-available JPEG transport rather than pretending success.
+        Err(WhepReject::CapacityExceeded {
+            fallback: "ws-jpeg".to_owned(),
+        })
+    }
+
+    fn release(&self, _scope: &WhepScope, _session_id: &str) -> bool {
+        false
+    }
+
+    fn active_sessions(&self) -> usize {
+        0
+    }
+}
+
+/// A shared [`WhepProvider`] handle, as stored in [`crate::AppState`].
+pub type SharedWhep = Arc<dyn WhepProvider>;
+
+/// The default shared WHEP provider ([`NoWhep`]).
+#[must_use]
+pub fn no_whep() -> SharedWhep {
+    Arc::new(NoWhep)
+}

@@ -117,6 +117,13 @@ pub struct AppState {
     /// ([`NoPreview`](crate::preview::NoPreview)) yields no frames; the binary
     /// swaps in an engine-backed provider. Isolation-safe (invariant #10).
     pub preview: crate::preview::SharedPreview,
+    /// The WHEP focus transport seam (sub-second WebRTC focus per scope). The
+    /// default ([`NoWhep`](crate::preview::NoWhep)) refuses every focus with an
+    /// honest `503 fallback`; the binary swaps in a transport-backed provider
+    /// (str0m / sidecar) behind a further gate. Isolation-safe (invariant #10):
+    /// a focus session is a best-effort preview consumer that can never
+    /// back-pressure the engine.
+    pub whep: crate::preview::SharedWhep,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -160,6 +167,7 @@ impl AppState {
             idempotency: Arc::new(IdempotencyStore::new()),
             ack_clock: Arc::new(system_ack_clock),
             preview: crate::preview::no_preview(),
+            whep: crate::preview::no_whep(),
         }
     }
 
@@ -168,6 +176,14 @@ impl AppState {
     #[must_use]
     pub fn with_preview(mut self, preview: crate::preview::SharedPreview) -> Self {
         self.preview = preview;
+        self
+    }
+
+    /// Replace the WHEP focus transport provider (the binary wires a
+    /// transport-backed one; the default refuses every focus with a `fallback`).
+    #[must_use]
+    pub fn with_whep(mut self, whep: crate::preview::SharedWhep) -> Self {
+        self.whep = whep;
         self
     }
 
