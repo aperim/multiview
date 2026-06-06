@@ -34,6 +34,7 @@ multiview-control = { path = "crates/multiview-control" }
 multiview-preview = { path = "crates/multiview-preview" }
 multiview-telemetry = { path = "crates/multiview-telemetry" }
 multiview-ntpsys = { path = "crates/multiview-ntpsys" }
+multiview-i915pmu = { path = "crates/multiview-i915pmu" }
 multiview-cli = { path = "crates/multiview-cli" }
 
 [profile.release]

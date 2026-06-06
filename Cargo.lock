@@ -2118,6 +2118,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiview-i915pmu"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "multiview-input"
 version = "0.1.0"
 dependencies = [
