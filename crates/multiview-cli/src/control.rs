@@ -21,7 +21,7 @@ use multiview_control::{
     InMemoryRepository, SharedPreview,
 };
 use multiview_engine::{CompositorDrive, EnginePublisher};
-use multiview_events::Event;
+use multiview_events::{Event, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -122,56 +122,264 @@ fn apply_swap_source(config: &mut MultiviewConfig, tile: &str, source: &str) -> 
     true
 }
 
+/// Re-solve the working `config` and hot-swap it onto `drive`, returning `true`
+/// on a successful apply.
+///
+/// Mirrors the existing [`Command::SwapSource`] apply path: a re-solve failure or
+/// a compositor rejection logs `tracing::warn!` and keeps the last-good layout
+/// (`set_layout` retains it on error), so the output clock never adopts a bad one
+/// and never stalls (invariants #1 + #10). Panic-free: no `unwrap`/indexing.
+fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12Image>) -> bool {
+    match config.solve_layout() {
+        Ok(layout) => match drive.set_layout(Arc::new(layout)) {
+            Ok(()) => true,
+            Err(e) => {
+                // The compositor rejected the re-solved layout; keep the
+                // last-good one (set_layout retains it on error) and log.
+                tracing::warn!(error = %e, "rejected a control-plane layout swap");
+                false
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "control-plane command produced an invalid layout; ignored");
+            false
+        }
+    }
+}
+
+/// Apply a salvo's source recalls to the working `config` in place, returning
+/// `true` if at least one cell was rebound (so the caller re-solves + applies).
+///
+/// Honest scope: of a [`Salvo`](multiview_config::Salvo)'s four sub-recalls, this
+/// applies **only** `sources` (the cell→input rebindings). The `layout` preset is
+/// not applied because the software engine has no named-layout library (the
+/// config carries a single working layout, named `schema_v{N}`), and `tally`/`umd`
+/// are not applied because there is no tally arbiter / UMD renderer wired into the
+/// software engine yet. Those are a follow-up (CTL-5 / the tally arbiter). An
+/// unknown cell in a recall is ignored (no effect), never an error.
+fn apply_salvo_sources(config: &mut MultiviewConfig, salvo: &multiview_config::Salvo) -> bool {
+    let mut changed = false;
+    for recall in &salvo.sources {
+        if apply_swap_source(config, &recall.cell, &recall.input_id) {
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Build the engine's per-tick control hook that drains the command bus and
-/// applies operational commands to the running compositor at the frame boundary.
+/// applies operational commands to the running compositor at the frame boundary,
+/// emitting each command's outcome on the realtime event stream.
 ///
-/// Returned as an `FnMut(&mut CompositorDrive<Nv12Image>)` for
-/// [`EngineRuntime::run_with_control`](multiview_engine::EngineRuntime::run_with_control):
-/// each tick it [`try_drain`](CommandReceiver::try_drain)s the **non-blocking**
-/// queue (usually empty — O(pending), never awaits) and, for each command it can
-/// apply, mutates the working [`MultiviewConfig`], re-solves the layout, and
-/// hot-swaps it via [`CompositorDrive::set_layout`]. A command that does not map
-/// to a layout change (start/stop/salvo/tally) is left for the realtime/mirror
-/// path and skipped here. Applying at the frame boundary, non-blocking, is what
-/// keeps the output clock unstalled (invariants #1 + #10).
+/// Returned as an `FnMut(&mut CompositorDrive<Nv12Image>)` for the engine's
+/// per-tick control drain: each tick it [`try_drain`](CommandReceiver::try_drain)s
+/// the **non-blocking** queue (usually empty — O(pending), never awaits) and, for
+/// each command, mutates the working [`MultiviewConfig`], re-solves + hot-swaps
+/// the layout where applicable via [`CompositorDrive::set_layout`], and publishes
+/// an outcome [`Event`] via [`EnginePublisher::publish_event`] — which is
+/// **drop-oldest and never awaits a client**, so emitting an outcome can never
+/// back-pressure the engine (invariant #10). Applying at the frame boundary keeps
+/// the output clock unstalled (invariant #1): the drain only mutates the active
+/// layout and emits drop-oldest events; it never blocks.
 ///
-/// Currently handles [`Command::SwapSource`] (rebind a tile's source). The other
-/// operational commands and the per-command outcome events are a follow-up.
+/// Per command:
+/// * [`Command::Start`]/[`Command::Stop`] flip the closure's `running` flag and
+///   emit an [`Event::OutputStatus`] (`Running` / `Idle`). There is no output
+///   server wired in the software engine yet, so this is the running-state echo,
+///   not a measured sink status.
+/// * [`Command::SwapSource`] rebinds a tile and re-applies the layout (the prior
+///   behaviour). No dedicated swap event exists in [`Event`], so the observable
+///   outcome is the layout change plus a `tracing` log — deliberately **not** an
+///   invented event variant.
+/// * [`Command::ApplyLayout`] re-applies the working layout iff `layout` matches
+///   the solved working layout's name; any other id is a failure (there is no
+///   named-layout library yet) — logged via `tracing::warn!`, never a panic.
+/// * [`Command::ArmSalvo`] stages a named salvo's source recalls and emits
+///   [`Event::SalvoArmed`]; [`Command::TakeSalvo`] applies the named-or-armed
+///   salvo's source recalls + re-applies the layout and emits
+///   [`Event::SalvoTaken`]; [`Command::CancelSalvo`] discards the staged salvo and
+///   emits [`Event::SalvoCancelled`]. Only the salvo's `sources` are applied (see
+///   [`apply_salvo_sources`]); the layout/tally/umd sub-recalls are a follow-up.
+/// * [`Command::SetTallyOverride`] has no tally arbiter in the software engine
+///   yet, so it emits an [`Event::TallyState`] echo (the forced colour, or the
+///   `Off`/default state when cleared) rather than silently no-op'ing.
+///
+/// Every arm is panic-free: no `unwrap`/`expect`/indexing. An unknown layout or
+/// salvo logs `tracing::warn!` and emits nothing (or a tally echo), never panics.
 pub fn command_drain(
     mut commands: CommandReceiver,
     mut config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    // Closure-captured state across ticks: whether program output is "running",
+    // and the id of the currently-armed salvo (its source recalls are read from
+    // `config` when the take applies). Bounded, allocation-light, touched only on
+    // the (usually empty) per-tick drain.
+    let mut state = DrainState::default();
+
     move |drive: &mut CompositorDrive<Nv12Image>| {
         for command in commands.try_drain() {
-            let changed = match command {
-                Command::SwapSource { tile, source, .. } => {
-                    apply_swap_source(&mut config, &tile, &source)
-                }
-                // Other commands don't (yet) drive a layout swap from here.
-                _ => false,
-            };
-            if !changed {
-                continue;
-            }
-            match config.solve_layout() {
-                Ok(layout) => {
-                    if let Err(e) = drive.set_layout(Arc::new(layout)) {
-                        // The compositor rejected the re-solved layout; keep the
-                        // last-good one (set_layout retains it on error) and log.
-                        tracing::warn!(error = %e, "rejected a control-plane layout swap");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "control-plane command produced an invalid layout; ignored");
-                }
+            apply_command(command, &mut state, &mut config, &publisher, drive);
+        }
+    }
+}
+
+/// Per-tick command-drain state retained across ticks.
+#[derive(Debug, Default)]
+struct DrainState {
+    /// Whether program output is "running" (flipped by Start/Stop). Observed via
+    /// the emitted `OutputStatus` events; retained so a future periodic-status
+    /// republish can read it without re-deriving.
+    running: bool,
+    /// The id of the currently-armed salvo awaiting a take, if any.
+    armed_salvo: Option<String>,
+}
+
+/// Apply one drained command to the working config + active layout and emit its
+/// outcome event. Panic-free (no `unwrap`/`expect`/indexing); an unknown
+/// layout/salvo logs `tracing::warn!` and emits nothing (or a tally echo).
+fn apply_command(
+    command: Command,
+    state: &mut DrainState,
+    config: &mut MultiviewConfig,
+    publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+    drive: &mut CompositorDrive<Nv12Image>,
+) {
+    match command {
+        Command::Start { .. } => {
+            state.running = true;
+            publish_output_status(publisher, OutputRunState::Running);
+        }
+        Command::Stop { .. } => {
+            state.running = false;
+            publish_output_status(publisher, OutputRunState::Idle);
+        }
+        Command::SwapSource { tile, source, .. } => {
+            if apply_swap_source(config, &tile, &source) {
+                // No dedicated swap event exists; the observable outcome is the
+                // re-applied layout (and the warn log on rejection).
+                let _ = resolve_and_apply(config, drive);
+            } else {
+                tracing::warn!(tile = %tile, "swap_source: no such tile; ignored");
             }
         }
+        Command::ApplyLayout { layout, .. } => {
+            // There is no named-layout library in the software engine: the working
+            // config carries a single solved layout named `schema_v{N}`. Applying
+            // that name (the only valid id) re-solves + re-applies the working
+            // layout; any other id is a failure (no panic).
+            // FOLLOW-UP (CTL-4/CTL-2): resolve `layout` against a real layout
+            // library once one exists.
+            let working = config.solve_layout().ok().map(|l| l.name);
+            if working.as_deref() == Some(layout.as_str()) {
+                let _ = resolve_and_apply(config, drive);
+            } else {
+                tracing::warn!(
+                    layout = %layout,
+                    "apply_layout: unknown layout id (no named-layout library yet); ignored"
+                );
+            }
+        }
+        Command::ArmSalvo { salvo, head, .. } => {
+            if config.salvos.iter().any(|s| s.id == salvo) {
+                // Stage the salvo: its source recalls are read from `config` at
+                // take time, so staging is just remembering the id.
+                state.armed_salvo = Some(salvo.clone());
+                publisher.publish_event(Event::SalvoArmed(salvo_event(
+                    salvo,
+                    SalvoPhase::Armed,
+                    head,
+                )));
+            } else {
+                tracing::warn!(salvo = %salvo, "arm_salvo: no such salvo; ignored");
+            }
+        }
+        Command::TakeSalvo { salvo, head, .. } => {
+            // Take the named salvo, else the currently-armed one.
+            let Some(target) = salvo.or_else(|| state.armed_salvo.clone()) else {
+                tracing::warn!("take_salvo: no salvo named and none armed; ignored");
+                return;
+            };
+            // Clone the matched salvo out so the immutable borrow of `config` ends
+            // before the in-place mutation below (avoids aliasing).
+            let Some(recalled) = config.salvos.iter().find(|s| s.id == target).cloned() else {
+                tracing::warn!(salvo = %target, "take_salvo: no such salvo; ignored");
+                return;
+            };
+            if apply_salvo_sources(config, &recalled) {
+                let _ = resolve_and_apply(config, drive);
+            }
+            state.armed_salvo = None;
+            publisher.publish_event(Event::SalvoTaken(salvo_event(
+                target,
+                SalvoPhase::Taken,
+                head,
+            )));
+        }
+        Command::CancelSalvo { salvo, head, .. } => {
+            // Cancel the named salvo, else the currently-armed one.
+            let target = salvo.or_else(|| state.armed_salvo.clone());
+            state.armed_salvo = None;
+            let Some(target) = target else {
+                tracing::warn!("cancel_salvo: no salvo named and none armed; ignored");
+                return;
+            };
+            publisher.publish_event(Event::SalvoCancelled(salvo_event(
+                target,
+                SalvoPhase::Cancelled,
+                head,
+            )));
+        }
+        Command::SetTallyOverride { target, color, .. } => {
+            // No tally arbiter is wired into the software engine yet, so this emits
+            // a TallyState echo rather than silently no-op'ing: a forced colour maps
+            // to a program-bus lamp of that colour at the default brightness; a
+            // cleared override (`None`) maps to the unlit default state.
+            // FOLLOW-UP: route through the real arbiter once it exists.
+            let state = match color {
+                Some(color) => multiview_core::tally::TallyState {
+                    color,
+                    ..multiview_core::tally::TallyState::default()
+                },
+                None => multiview_core::tally::TallyState::default(),
+            };
+            publisher.publish_event(Event::TallyState(TallyEvent { target, state }));
+        }
+        // `Command` is `#[non_exhaustive]`: a future variant this build does not
+        // know about is logged and skipped, never panicked on.
+        ref other => {
+            tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
+        }
+    }
+}
+
+/// Emit an `OutputStatus` event with no measured bitrate/client count (the
+/// software engine has no output server wired in yet — this is the running-state
+/// echo, not a measured sink status).
+fn publish_output_status(
+    publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+    run_state: OutputRunState,
+) {
+    publisher.publish_event(Event::OutputStatus(OutputStatus {
+        state: run_state,
+        bitrate_bps: None,
+        clients: None,
+    }));
+}
+
+/// Build a `SalvoEvent` for `salvo` entering `phase`, scoped to `head` if given.
+fn salvo_event(salvo: String, phase: SalvoPhase, head: Option<String>) -> SalvoEvent {
+    let event = SalvoEvent::new(salvo, phase);
+    match head {
+        Some(head) => event.with_head(head),
+        None => event,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use multiview_compositor::blend::LinearRgba;
     use multiview_compositor::pipeline::CanvasColor;
     use multiview_control::{command_bus, Command, OperationId};
     use multiview_engine::EnginePublisher;
@@ -339,7 +547,7 @@ input_id = "in_b"
         // only thing on the stream, if anything, must not claim success — assert
         // there is no event at all.
         assert!(
-            matches!(sub.try_recv(), Err(_)),
+            sub.try_recv().is_err(),
             "an unknown layout must not emit a success event"
         );
     }
@@ -354,7 +562,10 @@ input_id = "in_b"
         let mut drive = test_drive(&test_config());
 
         // Before: cell_a (index 0) is bound to in_a; cell_b (index 1) to in_b.
-        assert_eq!(drive.layout().cells.first().and_then(|c| c.source.clone()), Some("in_a".to_owned()));
+        assert_eq!(
+            drive.layout().cells.first().and_then(|c| c.source.clone()),
+            Some("in_a".to_owned())
+        );
 
         sender
             .try_submit(Command::ArmSalvo {

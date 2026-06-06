@@ -116,11 +116,16 @@ fn swap_source_command_drain_rebinds_the_tile_on_the_compositor() {
     use multiview_cli::control::command_drain;
     use multiview_compositor::blend::LinearRgba;
     use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
-    use multiview_control::{command_bus, Command, OperationId};
+    use multiview_control::{command_bus, Command, EngineStateSnapshot, OperationId};
     use multiview_core::color::ColorInfo;
-    use multiview_engine::CompositorDrive;
+    use multiview_engine::{CompositorDrive, EnginePublisher};
+    use multiview_events::Event;
     use multiview_framestore::TileStore;
     use std::collections::HashMap;
+
+    // A drop-oldest outcome publisher; the swap path emits no event, so it is only
+    // here to satisfy the drain signature (its events are ignored in this test).
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(8));
 
     let cfg = small_config();
     let (w, h) = (cfg.canvas.width, cfg.canvas.height);
@@ -167,7 +172,7 @@ fn swap_source_command_drain_rebinds_the_tile_on_the_compositor() {
         source: "in_d".to_owned(),
     })
     .expect("submit swap");
-    let mut drain = command_drain(rx, cfg.clone());
+    let mut drain = command_drain(rx, cfg.clone(), Arc::clone(&publisher));
     drain(&mut drive);
 
     // The hot set_layout took effect: cell_a now also binds in_d, and in_a is no
@@ -191,7 +196,7 @@ fn swap_source_command_drain_rebinds_the_tile_on_the_compositor() {
         source: "in_b".to_owned(),
     })
     .expect("submit swap");
-    let mut drain2 = command_drain(rx2, cfg);
+    let mut drain2 = command_drain(rx2, cfg, Arc::clone(&publisher));
     drain2(&mut drive);
     assert_eq!(
         count_bound_to(&drive, "in_d"),

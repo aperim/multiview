@@ -92,6 +92,8 @@ pub struct AudioMeter {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OutputRunState {
+    /// Not running — program output is stopped/idle.
+    Idle,
     /// Coming up.
     Starting,
     /// Serving program output.

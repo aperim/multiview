@@ -203,7 +203,11 @@ async fn run_pipeline_until_ctrl_c(
         tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
         (
             Some(handle),
-            Box::new(control::command_drain(command_rx, config.clone())),
+            Box::new(control::command_drain(
+                command_rx,
+                config.clone(),
+                Arc::clone(&publisher),
+            )),
         )
     } else {
         drop(shutdown_rx);
@@ -309,7 +313,11 @@ async fn run_software_until_ctrl_c(
         tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
         (
             Some(handle),
-            Box::new(control::command_drain(command_rx, config.clone())),
+            Box::new(control::command_drain(
+                command_rx,
+                config.clone(),
+                Arc::clone(&publisher),
+            )),
         )
     } else {
         drop(shutdown_rx);
