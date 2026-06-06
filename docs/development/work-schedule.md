@@ -120,7 +120,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 - [ ] **OUT-1** `M` — RTSP egress decision spike + sidecar baseline (MediaMTX) wired as a Push target  ·  _deps: —_
 - [ ] **OUT-2** `XL` — In-process RTSP server via `gst-rtsp-server`, fed pre-encoded NALs (`PacketSink`)  ·  _deps: OUT-1_
-- [ ] **OUT-3** `L` — NDI dynamic-load backend (`NDIlib_v6_load`) + feature/license scaffolding  ·  _deps: —_
+- [x] **OUT-3** `L` — NDI dynamic-load backend (`NDIlib_v6_load`) + feature/license scaffolding  ·  _deps: —_  · _`407056a`: NEW `multiview-ndi-sys` FFI crate (deny+SAFETY dlopen/dlsym/NDIlib_v6_load via libloading ISC, opaque NonNull table — no SDK vendored, no build-time link) + `multiview-output::ndi` (loader path-search, runtime license gate, attribution constants, `NdiOutput` sink seam over a fake API). multiview-output stays forbid(unsafe). Live send over the real SDK table + cli `RunnableOutput::Ndi`/NV12→UYVY/`[system.ndi]` license config = OUT-4 + cli glue (gated)_
 - [ ] **OUT-4** `L` — NDI output Sender wired as a Sink (host-memory copy from canvas)  ·  _deps: OUT-3_
 
 ### IN — Inputs (NDI · ST 2110 · WebRTC · YouTube)
@@ -174,7 +174,8 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [x] **SUR-1** `M` — IS-05 scheduled activation (absolute + relative)  ·  _deps: —_
 - [x] **SUR-2** `L` — IS-07 MQTT broker transport  ·  _deps: SUR-1_  · _codec+topics+bounded drop-oldest queue (always-built) + live `rumqttc` client behind `is07-mqtt`; round-trip exercised against an in-process `rumqttd` broker_
 - [~] **SUR-3** `XL` — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT  ·  _deps: —_  · _`734e693`: native TEXT-caption decode to `CaptionCue::Text` proven via real LGPL libav decoders (SubRip/SRT, WebVTT-in-container w/ markup-strip, MOV_TEXT/tx3g) + ns rebase + empty/invalid-UTF-8 fail-safe; `decode_bytes_for_window`. CEA-608/708 (cc_dec + A53_CC side-data) + ASS + cli reader-wiring = **SUR-3b**_
-  - [ ] **SUR-3b** `L` — Caption decode remainder: CEA-608/708 (`cc_dec` over `AV_FRAME_DATA_A53_CC` side-data, needs a video-decode fixture) + ASS text path test, in multiview-ffmpeg; then the cli caption-reader/PMT/HLS-SUBTITLES wiring  ·  _deps: SUR-3_
+  - [x] **SUR-3b** `L` — Caption decode remainder: CEA-608/708 (`cc_dec` over `AV_FRAME_DATA_A53_CC` side-data) + ASS, in multiview-ffmpeg  ·  _deps: SUR-3_  · _`b49bbc8`: `extract_a53_cc` (safe `frame.side_data(A53CC)`, before NV12 — swscale drops side-data) + `decode_video_frame` with `cc_dec real_time=1` (REAL bug found: cc_dec buffers to flush otherwise) → `CaptionCue::Text`; A53 fixture generator + tests (608 CC1; 708-service untested). cli caption-reader/PMT/HLS-SUBTITLES wiring = **SUR-3c** (cli, CORE)_
+  - [ ] **SUR-3c** `M` — cli caption-reader wiring for the broadened decoders: route in-container A53/text/ASS caption packets (PMT-walk discovery, HLS SUBTITLES-group resolve) through `decode_video_frame`/`decode_bytes_for_window` into the per-tile `CueStore`  ·  _deps: SUR-3b_
 - [x] **SUR-4** `M` — OpenAPI: annotate the layout/resource write ops so they enter the spec  ·  _deps: —_
 - [x] **SUR-5** `M` — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes  ·  _deps: SUR-4_  · _generated openapi-fetch client; create/update/delete wired; tsc+eslint+build+76 tests green_
 - [~] **SUR-6** `XL` — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope)  ·  _deps: SUR-4_  · _`bd1bd68`: AsyncAPI 3.0 generator + `xtask gen-asyncapi` + generated TS types (additive, idempotent, tested); envelope SWAP + serve `/asyncapi.json` + CI AsyncAPI-CLI validation are **SUR-6b** below_
