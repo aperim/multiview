@@ -200,3 +200,99 @@ pub type SharedWhep = Arc<dyn WhepProvider>;
 pub fn no_whep() -> SharedWhep {
     Arc::new(NoWhep)
 }
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub use multiview_preview::focus::FocusCaps;
+use multiview_preview::focus::{FocusGate, FocusLease};
+
+/// A [`WhepProvider`] decorator that enforces the **concurrent-focus caps** in
+/// front of any inner transport (PRV-3).
+///
+/// Click-to-focus is the one expensive preview transport (a real preview-encode
+/// session), so the number of concurrent focus sessions must be bounded
+/// deterministically — a server-wide cap plus an independent per-scope cap
+/// (brief §3 "CAP CONCURRENCY", ADR-P002). `GatedWhep` wraps the inner
+/// [`WhepProvider`] with a [`FocusGate`]:
+///
+/// * **Admission on `POST`.** [`Self::negotiate`] acquires a [`FocusLease`]
+///   *before* delegating to the inner transport. When a cap is full the focus is
+///   **rejected** with [`WhepReject::CapacityExceeded`] carrying the configured
+///   `fallback` transport hint (the existing `503 fallback: ws-jpeg` shape) — it
+///   is never queued and never able to starve or stall the engine (invariant
+///   #10). If the inner transport then refuses the (admitted) offer, the lease is
+///   dropped so the slot is freed immediately.
+/// * **Release on `DELETE`/expiry.** [`Self::release`] drops the lease keyed by
+///   the freed `session_id`, returning the slot to the gate.
+///
+/// ## Isolation (invariant #10)
+///
+/// The gate and the session→lease map are **the decorator's own counters only**,
+/// behind short-lived `Mutex`es the engine never touches. `GatedWhep` holds no
+/// engine handle and no command bus; an unadmitted or released focus changes
+/// nothing on the protected output path.
+pub struct GatedWhep {
+    inner: SharedWhep,
+    gate: FocusGate<String>,
+    /// The transport the client should fall back to when a cap is full (the
+    /// honest `503` hint; e.g. `"ws-jpeg"`).
+    fallback: String,
+    /// Live focus leases keyed by the inner transport's `session_id`, so a
+    /// `DELETE`/expiry frees exactly the right slot. The decorator's own state.
+    leases: Mutex<HashMap<String, FocusLease<String>>>,
+}
+
+impl std::fmt::Debug for GatedWhep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatedWhep")
+            .field("active", &self.gate.active())
+            .field("fallback", &self.fallback)
+            .finish()
+    }
+}
+
+impl GatedWhep {
+    /// Wrap `inner` with the concurrent-focus `caps`, shedding to `fallback` when
+    /// a cap is full.
+    #[must_use]
+    pub fn new(inner: SharedWhep, caps: FocusCaps, fallback: impl Into<String>) -> Self {
+        Self {
+            inner,
+            gate: FocusGate::new(caps),
+            fallback: fallback.into(),
+            leases: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Wrap `inner` with conservative default caps ([`FocusCaps::default`] — one
+    /// focus server-wide and per scope) and the `ws-jpeg` fallback hint.
+    #[must_use]
+    pub fn with_defaults(inner: SharedWhep) -> Self {
+        Self::new(inner, FocusCaps::default(), "ws-jpeg")
+    }
+}
+
+impl WhepProvider for GatedWhep {
+    fn negotiate(&self, scope: &WhepScope, offer: &str) -> Result<WhepAnswer, WhepReject> {
+        // RED STUB: this initial implementation delegates straight through,
+        // ignoring the gate, so the cap-enforcement tests FAIL until the green
+        // implementation admits against the `FocusGate` first.
+        self.inner.negotiate(scope, offer)
+    }
+
+    fn release(&self, scope: &WhepScope, session_id: &str) -> bool {
+        let freed = self.inner.release(scope, session_id);
+        if freed {
+            if let Ok(mut leases) = self.leases.lock() {
+                // Dropping the lease returns the slot to the gate.
+                leases.remove(session_id);
+            }
+        }
+        freed
+    }
+
+    fn active_sessions(&self) -> usize {
+        self.gate.active()
+    }
+}

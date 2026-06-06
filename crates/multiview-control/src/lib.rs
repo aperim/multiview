@@ -108,8 +108,8 @@ pub use notify::email::{EmailEnvelope, EmailMessage};
 pub use notify::webhook::{WebhookPayload, WebhookRequest};
 pub use notify::{AlarmTransitionKind, Destination, RoutingRule, SeverityRouter};
 pub use preview::{
-    no_preview, no_whep, NoPreview, NoWhep, PreviewProvider, SharedPreview, SharedWhep, WhepAnswer,
-    WhepProvider, WhepReject, WhepScope,
+    no_preview, no_whep, FocusCaps, GatedWhep, NoPreview, NoWhep, PreviewProvider, SharedPreview,
+    SharedWhep, WhepAnswer, WhepProvider, WhepReject, WhepScope,
 };
 pub use problem::{Problem, PROBLEM_JSON};
 pub use realtime::{RealtimeFrame, SessionStream};

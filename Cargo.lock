@@ -2013,6 +2013,7 @@ dependencies = [
  "multiview-core",
  "multiview-engine",
  "multiview-events",
+ "multiview-preview",
  "multiview-telemetry",
  "proptest",
  "rumqttc",

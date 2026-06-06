@@ -32,6 +32,12 @@
 //!   [`Nv12JpegEncoder`] is a real pure-Rust encoder (NV12 → packed `YCbCr` →
 //!   baseline JPEG via the dependency-free `jpeg-encoder` crate), with a
 //!   [`StubJpegEncoder`] kept for codec-free framing/refcount tests.
+//! * [`FocusGate`] — a hard, deterministic cap on concurrent WHEP **focus**
+//!   sessions (a server-wide cap + an independent per-scope cap, conservative
+//!   defaults, config-driven). A focus that cannot be admitted is *rejected* so
+//!   the operator sheds to the always-available JPEG transport — never queued,
+//!   never able to back-pressure the engine (invariant #10). [`FocusLease`]'s
+//!   `Drop` frees the slot, mirroring [`TapLease`].
 //!
 //! ## Feature flags
 //!
@@ -51,6 +57,7 @@
 
 pub mod encode;
 pub mod error;
+pub mod focus;
 pub mod framing;
 pub mod tap;
 pub mod token;
@@ -59,6 +66,7 @@ pub mod whep;
 
 pub use encode::Nv12JpegEncoder;
 pub use error::{Error, Result};
+pub use focus::{FocusCaps, FocusDenied, FocusGate, FocusLease};
 pub use framing::{JpegEncoder, JpegError, MjpegStream, Snapshot, StubJpegEncoder, ThumbnailPlan};
 pub use tap::{TapError, TapLease, TapRegistry};
 pub use token::{
