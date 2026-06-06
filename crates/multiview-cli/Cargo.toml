@@ -179,6 +179,20 @@ ffmpeg = [
 # never vendored or linked.
 youtube = ["ffmpeg", "multiview-input/youtube"]
 
+# NDI® ingest (ADR-0008 / IN-3): wire a `ndi` source into the ingest path via
+# `multiview-input`'s off-by-default, license-isolating `ndi` feature (the
+# runtime-load `multiview-ndi-sys` seam — the proprietary SDK is never vendored or
+# linked at build time). OFF by default: it pulls a proprietary runtime-load
+# obligation and the real receive needs the NDI runtime + a live NDI network (no CI
+# network), so the default build neither contains nor requires it. NDI ingest
+# bypasses libav entirely (it is a host-memory receive), so it does NOT imply
+# `ffmpeg`. The CLI itself adds NO `unsafe` and NO native deps (it stays
+# `unsafe_code = forbid`); all NDI FFI is owned by `multiview-ndi-sys`. `cargo deny`
+# runs with `all-features = false` so this opt-in obligation never enters the
+# default LGPL-clean deny graph. LGPL-clean: the SDK is dynamically loaded at run
+# time, not linked.
+ndi = ["multiview-input/ndi"]
+
 # License-escalating: forwards the GPL software encoders (libx264/libx265) so a
 # `run --features ffmpeg,gpl-codecs` may target H.264/H.265. Enabling this makes
 # the whole build GPL; it is NEVER pulled in by `ffmpeg` alone and never enters
@@ -234,7 +248,9 @@ full = [
     "multiview-hal/videotoolbox",
     "multiview-compositor/metal",
     "multiview-overlay/libass",
-    "multiview-input/ndi",
+    # NDI I/O: the cli `ndi` feature wires NDI *ingest* (and forwards
+    # `multiview-input/ndi`); `multiview-output/ndi` adds the NDI *output* sink.
+    "ndi",
     "multiview-output/ndi",
     "multiview-control/embed-web",
     "multiview-control/openapi",

@@ -57,6 +57,14 @@
 //!   `TestPatternSource`) over `multiview-ffmpeg`'s **safe** wrappers, implementing
 //!   [`source::FrameProducer`]. All FFI is owned by `multiview-ffmpeg`; this crate
 //!   stays `unsafe_code = forbid`.
+//! * `ndi` *(feature `ndi`)* — **NDI®** ingest (ADR-0008, IN-3): the pure
+//!   UYVY/BGRA → NV12 host conversion plus an [`ndi::NdiProducer`] that samples a
+//!   receive seam ([`ndi::NdiReceiver`]) into the IN-2 ingest pump. Sampled, never
+//!   pacing (invariants #1/#2/#10). The runtime is dynamically loaded via the
+//!   `multiview-ndi-sys` FFI leaf crate (which owns the `unsafe` `dlopen`), so this
+//!   crate stays `unsafe_code = forbid`; the real receive needs the proprietary
+//!   runtime + a live NDI network and is gated behind an `#[ignore]`d test. NDI® is
+//!   a registered trademark of Vizrt NDI AB.
 //! * `youtube` *(feature `youtube`)* — `YouTube` live resolver (ADR-0015): a
 //!   pure `yt-dlp -J` info-dict parser (manifest extraction, live-status
 //!   classification, `expire`-deadline parsing — no network/subprocess) plus a
@@ -92,6 +100,9 @@ pub mod webrtc;
 
 #[cfg(feature = "ffmpeg")]
 pub mod libav;
+
+#[cfg(feature = "ndi")]
+pub mod ndi;
 
 #[cfg(feature = "youtube")]
 pub mod youtube;

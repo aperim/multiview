@@ -2134,6 +2134,7 @@ dependencies = [
  "multiview-core",
  "multiview-ffmpeg",
  "multiview-framestore",
+ "multiview-ndi-sys",
  "proptest",
  "serde",
  "serde_json",

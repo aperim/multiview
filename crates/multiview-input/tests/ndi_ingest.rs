@@ -1,4 +1,4 @@
-//! IN-3 — NDI ingest receive→NV12 conversion + the `NdiProducer` FrameProducer
+//! IN-3 — NDI ingest receive→NV12 conversion + the `NdiProducer` `FrameProducer`
 //! adapter, exercised over a deterministic injected fake receiver (no SDK).
 //!
 //! These tests are gated to the off-by-default `ndi` feature (the only feature
@@ -16,13 +16,13 @@
     clippy::panic
 )]
 
-use multiview_input::ndi::convert::{bgra_to_nv12, uyvy_to_nv12, ReceivedVideoFrame};
-use multiview_input::ndi::receiver::{FakeNdiReceiver, NdiRecvFourCc, NdiReceiver, ReceivedFrame};
-use multiview_input::ndi::NdiProducer;
-use multiview_input::source::{FrameProducer, IngestConfig, IngestPump};
 use multiview_core::time::MediaTime;
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+use multiview_input::ndi::convert::{bgra_to_nv12, uyvy_to_nv12, ReceivedVideoFrame};
+use multiview_input::ndi::receiver::{FakeNdiReceiver, NdiRecvFourCc, ReceivedFrame};
+use multiview_input::ndi::NdiProducer;
 use multiview_input::normalize::WrapBits;
+use multiview_input::source::{FrameProducer, IngestConfig, IngestPump};
 
 /// A 2x2 UYVY frame: two UYVY groups (one per row), `U Y0 V Y1` per group.
 /// Row 0: U=100, Y0=10, V=200, Y1=20. Row 1: U=110, Y0=30, V=210, Y1=40.
@@ -76,7 +76,11 @@ fn bgra_to_nv12_white_and_black_extremes() {
     assert_eq!(nv12.y_plane().len(), 4);
     assert_eq!(nv12.uv_plane().len(), 2);
     // BT.709 limited-range: white ≈ 235, black ≈ 16.
-    assert!(nv12.y_plane()[0] > 200, "white luma {} too low", nv12.y_plane()[0]);
+    assert!(
+        nv12.y_plane()[0] > 200,
+        "white luma {} too low",
+        nv12.y_plane()[0]
+    );
     assert_eq!(nv12.y_plane()[1], 16, "black luma must be the 16 floor");
     assert_eq!(nv12.y_plane()[3], 16);
 }
@@ -132,13 +136,24 @@ fn producer_drives_the_ingest_pump_into_last_good_store() {
         ReceivedFrame::Video(uyvy_2x2()),
     ]);
     let mut producer = NdiProducer::new(Box::new(recv));
-    let store: TileStore<multiview_input::source::StoredFrame> =
-        TileStore::new("ndi-test", TileThresholds::default(), NoSignalPolicy::HoldForever);
+    let store: TileStore<multiview_input::source::StoredFrame> = TileStore::new(
+        "ndi-test",
+        TileThresholds::default(),
+        NoSignalPolicy::HoldForever,
+    );
     let mut pump = IngestPump::new(&producer, IngestConfig::default());
-    let published = pump.run_to_end(&mut producer, &store, MediaTime::ZERO).unwrap();
-    assert_eq!(published, 2, "both sampled frames reach the last-good store");
+    let published = pump
+        .run_to_end(&mut producer, &store, MediaTime::ZERO)
+        .unwrap();
+    assert_eq!(
+        published, 2,
+        "both sampled frames reach the last-good store"
+    );
     let stored = store.read_at(MediaTime::from_nanos(i64::MAX));
-    assert!(stored.frame().is_some(), "the store holds the last-good frame");
+    assert!(
+        stored.frame().is_some(),
+        "the store holds the last-good frame"
+    );
 }
 
 #[test]

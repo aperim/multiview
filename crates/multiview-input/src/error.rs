@@ -82,6 +82,20 @@ pub enum Error {
     /// underlying [`crate::webrtc::WebRtcError`].
     #[error("webrtc: {0}")]
     WebRtc(#[from] crate::webrtc::WebRtcError),
+
+    /// An NDI received frame could not be converted to NV12 (geometry, stride, or
+    /// an unsupported `FourCC`). Carries the underlying
+    /// [`crate::ndi::NdiConvertError`]. Only constructed under the `ndi` feature.
+    #[cfg(feature = "ndi")]
+    #[error("ndi convert: {0}")]
+    NdiConvert(#[from] crate::ndi::NdiConvertError),
+
+    /// An NDI receive faulted (connect failed / source disconnected). Carries the
+    /// underlying [`crate::ndi::NdiRecvError`]. The supervisor treats this as a
+    /// connection fault and reconnects. Only constructed under the `ndi` feature.
+    #[cfg(feature = "ndi")]
+    #[error("ndi receive: {0}")]
+    NdiRecv(#[from] crate::ndi::NdiRecvError),
 }
 
 #[cfg(feature = "ffmpeg")]

@@ -3143,10 +3143,21 @@ fn ingest_plan_for(
             },
             true,
         ),
+        // An NDI source (ADR-0008 / IN-3) is bound by its NDI source NAME and
+        // received from host memory via `multiview-input`'s runtime-loaded NDI seam
+        // — it bypasses libav. It is `live` so the ingest loop reconnects forever; a
+        // receive fault or an absent/unlicensed runtime degrades the tile on the
+        // ingest thread, never failing the build (invariants #1/#10). Only wired
+        // under the off-by-default `ndi` feature.
+        #[cfg(feature = "ndi")]
+        SourceKind::Ndi { name } => (SourceLocation::Ndi { name: name.clone() }, true),
+        // With the `ndi` feature OFF the NDI runtime-load obligation is not built
+        // in, so an NDI source is an honest typed refusal (not a silent skip).
+        #[cfg(not(feature = "ndi"))]
         SourceKind::Ndi { .. } => {
             return Err(PipelineError::Ingest {
                 id: source.id.clone(),
-                reason: "NDI ingest is not wired in the CLI yet".to_owned(),
+                reason: "NDI ingest requires the `ndi` feature (off by default)".to_owned(),
             })
         }
         // `SourceKind` is `#[non_exhaustive]`; a future kind is unsupported here
@@ -3249,6 +3260,10 @@ fn resolve_dvbsub_route(
         SourceLocation::Url(_) | SourceLocation::Synthetic(_) => return None,
         #[cfg(feature = "youtube")]
         SourceLocation::Youtube { .. } => return None,
+        // NDI ingest carries no in-container DVB-sub stream (it is a raw
+        // host-memory video receive); there is no container to open here.
+        #[cfg(feature = "ndi")]
+        SourceLocation::Ndi { .. } => return None,
     };
     let demux = match Demuxer::open(path) {
         Ok(d) => d,
@@ -3306,6 +3321,17 @@ enum SourceLocation {
     Youtube {
         /// The `YouTube` watch/live/channel URL bound by the config.
         watch_url: String,
+    },
+    /// An **NDI®** source (ADR-0008 / IN-3), bound by its NDI source **name** (the
+    /// name other NDI tools discover, e.g. `STUDIO (CAM 1)`). NDI ingest is a
+    /// host-memory receive that bypasses libav entirely: the ingest loop routes it
+    /// to an NDI-specific drive ([`crate::pipeline::drive_ndi`]) over
+    /// `multiview-input`'s runtime-loaded receive seam, not [`open_and_stream`].
+    /// Only wired under the off-by-default `ndi` feature.
+    #[cfg(feature = "ndi")]
+    Ndi {
+        /// The NDI source name bound by the config.
+        name: String,
     },
 }
 
@@ -3440,6 +3466,10 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
         SourceLocation::Url(_) => true,
         #[cfg(feature = "youtube")]
         SourceLocation::Youtube { .. } => true,
+        // NDI bypasses libav entirely (a host-memory receive), so it never opens a
+        // libav input and gets no libav options.
+        #[cfg(feature = "ndi")]
+        SourceLocation::Ndi { .. } => false,
         SourceLocation::Path(_) | SourceLocation::Synthetic(_) => false,
     };
     if is_network {
@@ -3479,6 +3509,16 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
         );
         return;
     }
+    // NDI ingest is a host-memory receive that bypasses libav: route it to its own
+    // supervised drive loop (over `multiview-input`'s runtime-loaded receive seam),
+    // not `open_and_stream`. Like every ingest path it only writes the last-good
+    // store and reconnects on fault — it never paces or stalls the output clock
+    // (invariants #1/#2/#10). Only under the off-by-default `ndi` feature.
+    #[cfg(feature = "ndi")]
+    if let SourceLocation::Ndi { name } = &plan.location {
+        drive_ndi(plan, name, stop);
+        return;
+    }
     let tag = CanvasColor::default().output_tag();
     let mut attempt: u32 = 0;
     let mut jitter = JitterRng::seeded(&plan.id);
@@ -3512,6 +3552,164 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
         tracing::debug!(source = %plan.id, attempt, ?nap, "reconnecting live source after backoff");
         sleep_interruptible(nap, stop);
     }
+}
+
+/// Drive an NDI source: a host-memory receive that bypasses libav (ADR-0008 /
+/// IN-3).
+///
+/// Probes the runtime-loaded NDI seam ([`multiview_input::ndi::NdiCapability`]).
+/// When the runtime is **absent** (the default/CI case) or a receiver cannot be
+/// connected, the tile is **degraded, never hung**: this returns promptly so the
+/// tile rides its `NO_SIGNAL` placeholder via the store policy and the startup
+/// prime-wait is never extended (invariant #1's hard upper bound at
+/// [`PRIME_WAIT_BUDGET`]). When a receiver **is** available, each received frame is
+/// converted to NV12 and published into the last-good store via the
+/// [`NdiProducer`](multiview_input::ndi::NdiProducer); the supervised-reconnect
+/// bracket re-enters on a receive fault. The loop only ever *writes* the lock-free
+/// store, so it can neither pace nor stall the output clock (invariant #1) nor
+/// back-pressure the engine (invariant #10).
+///
+/// HONEST SCOPE: binding a live SDK-backed
+/// [`NdiReceiver`](multiview_input::ndi::NdiReceiver) onto the resolved
+/// `multiview-ndi-sys` function table is a **live-only** concern (it needs the
+/// proprietary SDK ABI + a running NDI network, neither in CI) and is the deferred
+/// half — [`connect_ndi_receiver`] reports the runtime status and returns no live
+/// receiver yet, so an NDI tile currently degrades to `NO_SIGNAL` rather than
+/// streaming. The pure receive→NV12 conversion + the `NdiProducer` drive shape are
+/// fully unit-tested in `multiview-input` over an injected fake receiver.
+#[cfg(feature = "ndi")]
+fn drive_ndi(plan: &IngestPlan, name: &str, stop: &AtomicBool) {
+    let mut attempt: u32 = 0;
+    let mut jitter = JitterRng::seeded(&plan.id);
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let started = Instant::now();
+        match connect_ndi_receiver(name) {
+            Ok(receiver) => {
+                let mut producer = multiview_input::ndi::NdiProducer::new(receiver);
+                drive_ndi_producer(plan, &mut producer, stop);
+            }
+            Err(status) => {
+                // Runtime absent / unusable / no live receiver yet: log once and let
+                // the tile degrade. We do NOT spin — the reconnect backoff below
+                // bounds retry frequency, and `stop`/prime-wait are never blocked.
+                tracing::warn!(
+                    source = %plan.id,
+                    ndi_source = name,
+                    ?status,
+                    "ndi receive unavailable; tile will degrade (LIVE->...->NO_SIGNAL)"
+                );
+            }
+        }
+        let ran_for = started.elapsed();
+        if !plan.live || stop.load(Ordering::Acquire) {
+            return;
+        }
+        attempt = next_reconnect_attempt(attempt, ran_for);
+        let nap = reconnect_backoff(attempt, jitter.next_unit());
+        tracing::debug!(source = %plan.id, attempt, ?nap, "reconnecting ndi source after backoff");
+        sleep_interruptible(nap, stop);
+    }
+}
+
+/// Pump an [`NdiProducer`](multiview_input::ndi::NdiProducer) into `plan.store`
+/// until the receiver faults, signals end-of-stream, or `stop` is raised.
+///
+/// Each received frame is sampled (non-blocking), converted to an [`Nv12Image`],
+/// and published into the last-good store stamped with a wall-clock-relative
+/// instant (NDI carries no output cadence; the engine's output clock paces
+/// emission — inputs are sampled, never pacing, invariants #1/#2). A quiet sample
+/// (`Ok(None)`: no frame this instant) yields briefly and re-polls rather than
+/// spinning. A receive fault returns so the supervised-reconnect bracket re-enters.
+#[cfg(feature = "ndi")]
+fn drive_ndi_producer(
+    plan: &IngestPlan,
+    producer: &mut multiview_input::ndi::NdiProducer,
+    stop: &AtomicBool,
+) {
+    use multiview_input::source::FrameProducer;
+
+    let start = Instant::now();
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        match producer.next_frame() {
+            Ok(Some(frame)) => {
+                let Some(image) = ndi_host_to_image(&frame, plan) else {
+                    // A malformed frame is dropped (never panics, never stalls); the
+                    // tile holds its last-good frame.
+                    continue;
+                };
+                // NDI frames arrive in real time; stamp publish with the
+                // wall-clock-relative elapsed instant so the latch-on-tick read
+                // advances. The output clock — not this stamp — paces emission.
+                let at = MediaTime::from_nanos(
+                    i64::try_from(start.elapsed().as_nanos()).unwrap_or(i64::MAX),
+                );
+                plan.store.publish(image, at);
+            }
+            // No frame ready this sample: re-poll after a short, `stop`-aware nap so
+            // the loop never busy-spins on a quiet source.
+            Ok(None) => {
+                sleep_interruptible(Duration::from_millis(5), stop);
+            }
+            Err(err) => {
+                tracing::warn!(source = %plan.id, error = %err, "ndi receive faulted");
+                return;
+            }
+        }
+    }
+}
+
+/// Bridge one NDI-received [`ProducedFrame`](multiview_input::source::ProducedFrame)
+/// (NV12 host bytes: a `w*h` Y plane followed by a `w*h/2` interleaved Cb,Cr
+/// plane) into the CLI's [`Nv12Image`] store payload, splitting the concatenated
+/// bytes back into the two planes. Returns `None` (panic-free) if the geometry or
+/// plane lengths are inconsistent — the caller drops the frame.
+#[cfg(feature = "ndi")]
+fn ndi_host_to_image(
+    frame: &multiview_input::source::ProducedFrame,
+    _plan: &IngestPlan,
+) -> Option<Nv12Image> {
+    let w = frame.meta.width;
+    let h = frame.meta.height;
+    let y_len = usize::try_from(w)
+        .ok()?
+        .checked_mul(usize::try_from(h).ok()?)?;
+    let uv_len = y_len / 2;
+    let total = y_len.checked_add(uv_len)?;
+    if frame.pixels.len() != total {
+        return None;
+    }
+    let (y_plane, uv_plane) = frame.pixels.split_at(y_len);
+    Nv12Image::new(w, h, y_plane.to_vec(), uv_plane.to_vec(), frame.meta.color).ok()
+}
+
+/// Attempt to connect a live NDI receiver for source `name`.
+///
+/// HONEST SCOPE (live-only deferred half): binding a real
+/// [`NdiReceiver`](multiview_input::ndi::NdiReceiver) onto the resolved
+/// `multiview-ndi-sys` function table needs the proprietary SDK ABI + a running NDI
+/// network — neither exists in CI — so this currently probes the runtime and
+/// returns the typed status without a live receiver. With the runtime absent (the
+/// default case) it reports the unavailable status so the tile degrades; even with
+/// the runtime present, the live receiver binding is not yet wired (the converter +
+/// `NdiProducer` drive shape that *consume* a receiver are complete and tested in
+/// `multiview-input`). It never panics or blocks.
+#[cfg(feature = "ndi")]
+fn connect_ndi_receiver(
+    _name: &str,
+) -> Result<Box<dyn multiview_input::ndi::NdiReceiver + Send>, multiview_input::ndi::NdiLoadStatus>
+{
+    let status = multiview_input::ndi::NdiCapability::probe();
+    // Whether available or not, the live SDK-backed receiver binding is the
+    // deferred half. Surface the probe status (RuntimeNotFound when absent, or
+    // Available when present) so the drive loop logs the honest reason and the tile
+    // degrades rather than streaming a non-existent receiver.
+    Err(status)
 }
 
 /// Map one decoded frame onto the timeline the store is stamped with.
@@ -3622,6 +3820,13 @@ fn open_and_stream(
         // before opening any media. Guarded so the match stays exhaustive.
         SourceLocation::Synthetic(_) => {
             return Err("synthetic source has no media to open".to_owned())
+        }
+        // Unreachable: `ingest_loop` routes NDI sources to `drive_ndi` (a
+        // host-memory receive) before reaching `open_and_stream`. Guarded so the
+        // match stays exhaustive.
+        #[cfg(feature = "ndi")]
+        SourceLocation::Ndi { .. } => {
+            return Err("ndi source has no libav media to open".to_owned())
         }
     };
 
