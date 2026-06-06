@@ -44,7 +44,7 @@ use ffmpeg_next::ChannelLayout;
 use multiview_core::time::{rescale, MediaTime, Rational};
 use multiview_ffmpeg::{
     AudioEncodeTarget, DecodedVideoFrame, EncodedPacket, Muxer, ScaleSpec, Scaler,
-    StreamCodecParameters, VideoEncodeTarget, VideoEncoder,
+    StreamCodecParameters, StreamKind, VideoEncodeTarget, VideoEncoder,
 };
 
 use crate::error::{Error, Result};
@@ -128,6 +128,55 @@ pub trait PacketSource {
     /// # Errors
     /// Returns an [`Error`] if the upstream packet feed failed.
     fn next_packet(&mut self) -> Result<Option<EncodedPacket>>;
+}
+
+/// One muxer stream's registration: the `Send` codec-params snapshot it is
+/// seeded from plus the encoder time-base its packets rescale out of.
+///
+/// A mux-only sink registers each `MuxStream` (the program video, and — under
+/// AUD-4 — the optional program audio) **before** writing the container header;
+/// the stream layout is then pinned for the session (ADR-R005 §3.3). The
+/// kind-tagged packets a [`PacketSource`] yields route to the matching stream
+/// (video packets to the video stream, audio packets to the audio stream).
+#[derive(Clone, Copy)]
+pub struct MuxStream<'a> {
+    params: &'a StreamCodecParameters,
+    time_base: Rational,
+}
+
+impl<'a> MuxStream<'a> {
+    /// A stream registered from `params`, whose packets rescale out of
+    /// `time_base` (the encoder time-base the packets were stamped in).
+    #[must_use]
+    pub fn new(params: &'a StreamCodecParameters, time_base: Rational) -> Self {
+        Self { params, time_base }
+    }
+}
+
+/// Resolve the muxer stream index a kind-tagged packet writes to.
+///
+/// An audio packet arriving at a sink with no registered audio stream is a
+/// wiring bug (the fan-out produced audio for a video-only mux), surfaced as an
+/// error rather than silently mis-routed onto the video stream.
+fn stream_index_for(
+    kind: StreamKind,
+    video_index: usize,
+    audio_index: Option<usize>,
+) -> Result<usize> {
+    match kind {
+        StreamKind::Video => Ok(video_index),
+        StreamKind::Audio => audio_index.ok_or_else(|| {
+            Error::Output(
+                "audio packet routed to a video-only mux sink (no audio stream registered)"
+                    .to_owned(),
+            )
+        }),
+        // `StreamKind` is `#[non_exhaustive]`: a future elementary-stream kind
+        // this sink registers no stream for is an error, not a mis-route.
+        _ => Err(Error::Output(
+            "unsupported stream kind for this mux sink".to_owned(),
+        )),
+    }
 }
 
 /// Map a `multiview-ffmpeg` error onto this crate's output error taxonomy.
@@ -620,25 +669,32 @@ fn drive_to_single_muxer<S: VideoFrameSource>(
 }
 
 /// Drive a single-container mux from a [`PacketSource`]: pull each pre-encoded
-/// packet and write its own owned copy to `muxer` on `stream_index` (no encode
-/// — the canvas was encoded once upstream, invariant #7). The caller writes the
-/// header before and the trailer after.
+/// packet, route it to the matching stream by its [`StreamKind`] (video packets
+/// to `video_index`, audio packets to `audio_index`), and write its own owned
+/// copy to `muxer` (no encode — the canvas was encoded once upstream,
+/// invariant #7). The caller registers both streams + writes the header before,
+/// and the trailer after. `audio_index` is `None` for a video-only sink.
 ///
 /// The packet-fed twin of [`drive_to_single_muxer`], shared by the
 /// [`PacketMuxSink`] file and push flavours.
 fn drive_packets_to_single_muxer<P: PacketSource>(
     muxer: &mut Muxer,
-    stream_index: usize,
+    video_index: usize,
+    audio_index: Option<usize>,
     source: &mut P,
 ) -> Result<EncodeStats> {
     let mut stats = EncodeStats::default();
     while let Some(packet) = source.next_packet()? {
-        record(&mut stats, packet.is_keyframe());
+        let index = stream_index_for(packet.kind(), video_index, audio_index)?;
+        // Keyframe stats track the VIDEO GOP only; AAC packets are all flagged
+        // key, which would otherwise inflate the count.
+        let is_key = matches!(packet.kind(), StreamKind::Video) && packet.is_keyframe();
+        record(&mut stats, is_key);
         // Each muxer gets its OWN owned packet, so write_packet's in-place
         // set_stream + rescale_ts is sound even when the same packet fans to
         // many muxers (invariant #7).
         muxer
-            .write_packet(stream_index, packet.into_owned_packet())
+            .write_packet(index, packet.into_owned_packet())
             .map_err(ff)?;
     }
     Ok(stats)
@@ -709,9 +765,12 @@ impl SegmentSink {
         let mut converter = FrameConverter::new(self.config.format);
         let mut state = SegmentState::new(
             StreamSeed::Encoder(&seed),
+            time_base,
+            // The encoder-fed SegmentSink is video-only; the audio path runs
+            // through the packet-fed PacketMuxSink (AUD-4).
+            None,
             &self.dir,
             &self.prefix,
-            time_base,
         );
 
         // Drive the encode/segment loop, capturing any mid-run failure so the
@@ -975,23 +1034,59 @@ impl PacketMuxSink {
         codec_params: &StreamCodecParameters,
         time_base: Rational,
     ) -> Result<PacketMuxOutcome> {
+        self.run_av(source, MuxStream::new(codec_params, time_base), None)
+    }
+
+    /// Mux a kind-tagged `source` carrying program **video and (optionally)
+    /// audio** (AUD-4). Registers the `video` stream — and the `audio` stream if
+    /// present — **before** writing the header (ADR-R005 §3.3 header-pinning),
+    /// then routes each packet to its stream by [`StreamKind`].
+    ///
+    /// [`run`](Self::run) is the video-only convenience over this (audio `None`),
+    /// so every existing single-stream sink/test is unchanged.
+    ///
+    /// # Errors
+    /// As [`run`](Self::run); additionally returns [`Error::Output`] if an audio
+    /// packet arrives with no audio stream registered (a fan-out wiring bug).
+    pub fn run_av<P: PacketSource>(
+        &self,
+        source: &mut P,
+        video: MuxStream<'_>,
+        audio: Option<MuxStream<'_>>,
+    ) -> Result<PacketMuxOutcome> {
         match &self.kind {
             PacketMuxKind::Single(target) => {
                 let mut muxer = target.open()?;
-                let stream_index = muxer
-                    .add_stream_from_parameters(codec_params, time_base)
+                // Register video first, then audio, BEFORE the header — the
+                // stream layout is immutable once written (ADR-R005 §3.3).
+                let video_index = muxer
+                    .add_stream_from_parameters(video.params, video.time_base)
                     .map_err(ff)?;
+                let audio_index = match audio {
+                    Some(a) => Some(
+                        muxer
+                            .add_stream_from_parameters(a.params, a.time_base)
+                            .map_err(ff)?,
+                    ),
+                    None => None,
+                };
                 muxer.write_header().map_err(ff)?;
-                let driven = drive_packets_to_single_muxer(&mut muxer, stream_index, source);
+                let driven =
+                    drive_packets_to_single_muxer(&mut muxer, video_index, audio_index, source);
                 // Finalize-on-error: always write the trailer best-effort so a
                 // mid-stream failure still leaves a structurally valid container.
                 finalize_or_propagate(&mut muxer, driven).map(PacketMuxOutcome::Single)
             }
             PacketMuxKind::Segment { dir, prefix } => {
-                let mut state =
-                    SegmentState::new(StreamSeed::Params(codec_params), dir, prefix, time_base);
+                let mut state = SegmentState::new(
+                    StreamSeed::Params(video.params),
+                    video.time_base,
+                    audio,
+                    dir,
+                    prefix,
+                );
                 let driven = state.drive_from_packets(source);
-                finish_segments(state, driven, time_base)
+                finish_segments(state, driven, video.time_base)
                     .map(|result| PacketMuxOutcome::Segment(Box::new(result)))
             }
         }
@@ -1034,6 +1129,11 @@ struct SegmentState<'a> {
     /// copies the same codec parameters from this; the codec is fixed across the
     /// encode (invariant #7), so the seed is borrowed once — never per segment.
     seed: StreamSeed<'a>,
+    /// The optional program-audio stream registered into every segment muxer
+    /// alongside the video (AUD-4). `None` for the encoder-fed (video-only)
+    /// [`SegmentSink`]; the codec is fixed for the run so this too is borrowed
+    /// once and reused per segment.
+    audio: Option<MuxStream<'a>>,
     current: Option<OpenSegment>,
     /// Completed `(path, duration_seconds)` in order.
     done: Vec<(PathBuf, f64)>,
@@ -1047,6 +1147,9 @@ struct SegmentState<'a> {
 struct OpenSegment {
     muxer: Muxer,
     stream_index: usize,
+    /// The audio stream index registered on this segment muxer, if the run
+    /// carries program audio (AUD-4); `None` for a video-only run.
+    audio_index: Option<usize>,
     path: PathBuf,
     start_pts: MediaTime,
 }
@@ -1056,12 +1159,19 @@ impl<'a> SegmentState<'a> {
     /// seed (invariant #7: one fixed codec for the whole run). The caller owns
     /// the seed (a [`VideoEncoder`] or a [`StreamCodecParameters`]) and borrows
     /// it in for the duration of the run.
-    fn new(seed: StreamSeed<'a>, dir: &'a Path, prefix: &'a str, time_base: Rational) -> Self {
+    fn new(
+        seed: StreamSeed<'a>,
+        time_base: Rational,
+        audio: Option<MuxStream<'a>>,
+        dir: &'a Path,
+        prefix: &'a str,
+    ) -> Self {
         Self {
             dir,
             prefix,
             time_base,
             seed,
+            audio,
             current: None,
             done: Vec::new(),
             last_pts: MediaTime::ZERO,
@@ -1116,15 +1226,39 @@ impl<'a> SegmentState<'a> {
     /// File and a Segment sink fed the SAME packets produce the SAME media.
     fn drive_from_packets<P: PacketSource>(&mut self, source: &mut P) -> Result<()> {
         while let Some(packet) = source.next_packet()? {
-            let is_key = packet.is_keyframe();
             let pts = pts_from_packet(packet.pts(), self.stats.packets, self.time_base);
-            if is_key {
-                self.start_segment(pts)?;
+            match packet.kind() {
+                StreamKind::Video => {
+                    // Only a VIDEO keyframe rotates a segment (the GOP boundary —
+                    // invariant #7); the first packet is always a keyframe.
+                    let is_key = packet.is_keyframe();
+                    if is_key {
+                        self.start_segment(pts)?;
+                    }
+                    let owned = packet.into_owned_packet();
+                    let (muxer, index) = self.current_muxer()?;
+                    muxer.write_packet(index, owned).map_err(ff)?;
+                    self.record(is_key, pts);
+                }
+                StreamKind::Audio => {
+                    // Audio never rotates a segment — it joins the current one.
+                    // Audio that arrives before the first video keyframe (no
+                    // segment open yet) or for a video-only run (no audio stream
+                    // registered) is skipped rather than mis-routed.
+                    let audio_index = self.current.as_ref().and_then(|s| s.audio_index);
+                    let Some(audio_index) = audio_index else {
+                        continue;
+                    };
+                    let owned = packet.into_owned_packet();
+                    if let Some(segment) = self.current.as_mut() {
+                        segment.muxer.write_packet(audio_index, owned).map_err(ff)?;
+                    }
+                    self.record(false, pts);
+                }
+                // `StreamKind` is `#[non_exhaustive]`: skip a future kind this
+                // segmenter registers no stream for rather than mis-route it.
+                _ => {}
             }
-            let owned = packet.into_owned_packet();
-            let (muxer, index) = self.current_muxer()?;
-            muxer.write_packet(index, owned).map_err(ff)?;
-            self.record(is_key, pts);
         }
         Ok(())
     }
@@ -1159,11 +1293,22 @@ impl<'a> SegmentState<'a> {
         // its own self-contained MPEG-TS container. The seed is reused for every
         // segment — never rebuilt per segment.
         let mut muxer = Muxer::create_as(&path, "mpegts").map_err(ff)?;
+        // Register video then audio BEFORE the header — every segment carries the
+        // same pinned two-stream layout (ADR-R005 §3.3, AUD-4).
         let stream_index = self.seed.add_stream(&mut muxer, self.time_base)?;
+        let audio_index = match self.audio {
+            Some(a) => Some(
+                muxer
+                    .add_stream_from_parameters(a.params, a.time_base)
+                    .map_err(ff)?,
+            ),
+            None => None,
+        };
         muxer.write_header().map_err(ff)?;
         self.current = Some(OpenSegment {
             muxer,
             stream_index,
+            audio_index,
             path,
             start_pts,
         });
