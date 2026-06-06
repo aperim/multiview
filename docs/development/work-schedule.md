@@ -131,7 +131,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [x] **IN-4** `M` — YouTube live: pure resolver core over `yt-dlp -J`  ·  _deps: —_
 - [ ] **IN-5** `L` — YouTube live: wire to HLS ingest + re-resolution loop  ·  _deps: IN-4_
 - [~] **IN-6** `XL` — WebRTC ingest: ICE/DTLS/SRTP transport behind an application-layer media engine  ·  _deps: IN-1_  · _`831e3af`: testable core landed behind `webrtc` — session lifecycle + `MediaEngine` seam + RFC-6184 H264 depacketizer (keyframe-gated, bounded) + `WebRtcProducer: FrameProducer`, fake-driven tests; live ICE/DTLS/SRTP engine (str0m) + cli wiring + Opus/VP8 = **IN-6b**_
-- [ ] **IN-7** `S` — CI strategy: feature-gated compile + integration gating for the wired transports  ·  _deps: IN-2, IN-3, IN-6_
+- [x] **IN-7** `S` — CI strategy: feature-gated compile + integration gating for the wired transports  ·  _deps: IN-2, IN-3, IN-6_  · _`871db84`: `.github/workflows/ci.yml` `feature-clippy` matrix (9 legs: st2110/webrtc/youtube/ptp/cluster/ntp/is07-mqtt/nmos/i915-pmu, all -D) + `asyncapi-validate` job (SUR-6b CI tail); commands verified locally. NDI(IN-3) excluded (no feature yet — needs an SDK-fetch Docker lane)_
 
 ### CTL — Control plane → engine
 
@@ -147,7 +147,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [~] **PRV-1** `XL` — Native ICE/DTLS/SRTP transport behind a `WhepTransport` seam (str0m, in-process default)  ·  _deps: —_  · _SEAM landed `befefb2` (trait + SDP offer/answer glue + session lifecycle + bounded drop-oldest feed, fake-transport tested); native str0m ICE/DTLS/SRTP impl is **PRV-1b** below_
 - [x] **PRV-2** `L` — Wire WHEP focus routes into `multiview-control` (POST/DELETE per scope) with token-gated Focus + transport seam  ·  _deps: PRV-1_  · _`daedd1d`: POST/DELETE `/preview/{program,inputs/{id},outputs/{id}}/whep` over a codec-free `WhepProvider` seam (offer→201+sdp answer; 401/403 token-gated; 404/415/503-fallback RFC9457); openapi-documented; 7 route tests. Binary adapter bridging to preview's `WhepTransport` = PRV-1b glue_
 - [x] **PRV-3** `M` — Concurrent-focus session caps + isolation enforcement (the `FocusGate`)  ·  _deps: PRV-2_  · _`a67dc24`: `FocusGate` (global + per-scope caps, fail-closed, `FocusLease` Drop frees) + `GatedWhep` decorator admitting before delegate → existing `503 fallback` shed shape; 5+4 tests. HAL cost-budget hook = PRV-4_
-- [ ] **PRV-4** `M` — Make preview the topmost (cheapest-to-shed) degradation rung  ·  _deps: PRV-3_
+- [x] **PRV-4** `M` — Make preview the topmost (cheapest-to-shed) degradation rung  ·  _deps: PRV-3_  · _`a6023db`: 5 preview rungs prepended ABOVE every tile/program rung in `multiview-hal::degradation` (13-rung ladder, `affects_preview()`/`first_program_level()`) + `FocusGate::suspend()/resume()` hook refusing new focus while degraded (503-fallback); 14 hal + preview tests prove preview is fully shed before any program lever. The cli degradation-loop glue that observes `Hysteresis` and calls `suspend()/resume()` (+ tracing) is **PRV-4b**_
 - [ ] **PRV-5** `L` — Sub-second WebRTC OUTPUT (program) focus: program-canvas tap → preview encode → WHEP  ·  _deps: PRV-1, PRV-2, PRV-3_
 
 ### ENG — Engine timing & resilience
@@ -178,7 +178,10 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [~] **SUR-6** `XL` — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope)  ·  _deps: SUR-4_  · _`bd1bd68`: AsyncAPI 3.0 generator + `xtask gen-asyncapi` + generated TS types (additive, idempotent, tested); envelope SWAP + serve `/asyncapi.json` + CI AsyncAPI-CLI validation are **SUR-6b** below_
 
 #### Discovered follow-on slices (added during shipping — keep the plan complete)
-- [ ] **GPU-4b** `M` — Wire the overlay-image GPU dispatch into the compositor `composite()` (upload image cache layers + bind group + `OverlaySubpass` between composite and encode) + the GPU-vs-CPU SSIM/PSNR parity test (GPU-tagged runner)  ·  _deps: GPU-4_
+- [x] **GPU-4b** `M` — Wire the overlay-image GPU dispatch into the compositor `composite()` (upload image cache layers + bind group + `OverlaySubpass` between composite and encode) + the GPU-vs-CPU SSIM/PSNR parity test (GPU-tagged runner)  ·  _deps: GPU-4_  · _`0cdd9bd`: `composite_with_overlays` uploads-once to a persistent Rgba8Unorm layer-array, binds binding-5, dispatches `OverlaySubpass` (premultiplied-over in linear, inv #8); `plan_image_uploads` seam + 4 CPU tests; SSIM/PSNR parity test `#[ignore]`-gated (Y SSIM≥0.98/PSNR≥38dB, GPU-runner-only). no-overlay path byte-unchanged. (GPU-4 stays [~] until real-GPU parity runs)_
+
+#### Discovered follow-on slices (batch-8)
+- [ ] **PRV-4b** `S` — cli degradation-loop glue: observe `Hysteresis`/the ladder and call `FocusGate::suspend()/resume()` on the preview rungs + `tracing` each preview adaptation (ADR-P003)  ·  _deps: PRV-4_
 - [ ] **PRV-1b** `XL` — Native str0m `WhepTransport` impl: real ICE/DTLS/SRTP behind a `webrtc-native` feature + env-gated DTLS-SRTP loopback test + ffprobe egress check; add str0m/ring to `deny.toml`  ·  _deps: PRV-1_
 - [x] **SUR-6b** `M` — Swap web realtime consumers (`connection.ts`/`useEngineEvents.ts`) onto the generated envelope types + serve `/asyncapi.json` on the axum router  ·  _deps: SUR-6_  · _`7b9fd90`: GET /asyncapi.json served (embedded, route-tested) + web `LifecycleState`/`TileState` now from generated-types (91 web tests); the AsyncAPI-CLI **CI** validation step is a separate `.github` follow-on (fold into IN-7's CI work)_
 - [ ] **IN-6b** `XL` — WebRTC ingest native engine: a concrete str0m-backed ICE/DTLS/SRTP `MediaEngine` behind a `webrtc-native` feature + env-gated loopback test + wire `WebRtcProducer` into the cli; Opus/VP8 depacketizers; add str0m/ring to `deny.toml`  ·  _deps: IN-6_
