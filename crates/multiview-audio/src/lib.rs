@@ -61,6 +61,7 @@ pub mod loudness;
 pub mod meterdata;
 pub mod mixer;
 pub mod probe;
+pub mod program;
 pub mod store;
 pub mod truepeak;
 
