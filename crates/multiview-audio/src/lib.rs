@@ -48,6 +48,7 @@
 #![warn(missing_docs)]
 
 pub mod ballistics;
+pub mod cadence;
 pub mod capability;
 pub mod chanmap;
 pub mod correlation;
