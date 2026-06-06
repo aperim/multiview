@@ -4615,6 +4615,71 @@ mod youtube_tests {
     }
 }
 
+/// Tests for the NDI ingest seam (IN-3): under the `ndi` feature a `ndi` source
+/// plans as a live ingest location bound by its source **name**, never erroring
+/// the build (the receive→NV12 conversion + the `NdiProducer` are unit-proven in
+/// `multiview-input`; here we pin only the CLI plan mapping). With the feature
+/// OFF the source is an honest typed refusal. No NDI runtime/network is touched.
+#[cfg(test)]
+#[cfg(feature = "ndi")]
+mod ndi_tests {
+    #![allow(
+        // reason: a unit test module; the strict workspace lints are relaxed for
+        // test code per CLAUDE.md (these inner `#[allow]`s mirror the surrounding
+        // `tests` modules in this file).
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_config::Source;
+    use multiview_core::time::Rational;
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    use super::{ingest_plan_for, SourceLocation};
+
+    /// Build an `ndi` `Source` via serde (the kind is `#[non_exhaustive]`, so a
+    /// struct literal is not available cross-crate; config is deserialized anyway).
+    fn ndi_source(id: &str, name: &str) -> Source {
+        let json = serde_json::json!({
+            "id": id,
+            "kind": "ndi",
+            "name": name,
+        });
+        serde_json::from_value(json).expect("ndi source deserializes")
+    }
+
+    #[test]
+    fn ndi_source_plans_as_a_live_named_source() {
+        // The hard "NDI ingest is not wired" error is replaced under the feature by
+        // a real plan: bound by the NDI source NAME, `live` so the ingest loop
+        // reconnects forever. It must never fail the build (invariants #1/#10).
+        let source = ndi_source("cam-1", "STUDIO (CAM 1)");
+        let store = Arc::new(TileStore::new(
+            source.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = ingest_plan_for(
+            &source,
+            320,
+            180,
+            Arc::clone(&store),
+            CanvasColor::default(),
+            Rational::new(30, 1),
+        )
+        .expect("ndi source plans without failing the build");
+
+        let SourceLocation::Ndi { name } = &plan.location else {
+            panic!("expected an Ndi location for an ndi source");
+        };
+        assert_eq!(name, "STUDIO (CAM 1)");
+        assert!(plan.live, "an ndi source must be live (reconnects)");
+    }
+}
+
 #[cfg(test)]
 mod eng2_timeline_tests {
     //! ENG-2: the ingest publish timeline must be the *normalized* one — raw
