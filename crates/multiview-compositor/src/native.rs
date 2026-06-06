@@ -110,8 +110,10 @@ pub enum NativeRejection {
     /// The decode source is software (host memory) — there is no native device
     /// island to composite on.
     NotADeviceIsland,
-    /// The portable compositor (`wgpu`, or Metal requested as the portable
-    /// backend) was requested explicitly; this is not a vendor native path.
+    /// The portable `wgpu` compositor was requested explicitly; this is not a
+    /// vendor native path. (`Metal` is treated as a *native* vendor by
+    /// [`is_native_vendor`], not as the portable backend — wgpu-on-Metal is a
+    /// wgpu concern, not `BackendKind::Metal`.)
     PortableRequested,
 }
 
