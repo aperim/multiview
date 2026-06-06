@@ -184,14 +184,17 @@ youtube = ["ffmpeg", "multiview-input/youtube"]
 # runtime-load `multiview-ndi-sys` seam — the proprietary SDK is never vendored or
 # linked at build time). OFF by default: it pulls a proprietary runtime-load
 # obligation and the real receive needs the NDI runtime + a live NDI network (no CI
-# network), so the default build neither contains nor requires it. NDI ingest
-# bypasses libav entirely (it is a host-memory receive), so it does NOT imply
-# `ffmpeg`. The CLI itself adds NO `unsafe` and NO native deps (it stays
+# network), so the default build neither contains nor requires it. The NDI
+# *receive* in `multiview-input` bypasses libav (host-memory), but the CLI's NDI
+# run path lives in the `ffmpeg`-gated `pipeline` module (it feeds the same
+# compositor + encode/mux fan-out as every other source), so the CLI `ndi` feature
+# implies `ffmpeg` — otherwise the NDI wiring would not compile into a runnable
+# binary. The CLI itself adds NO `unsafe` and NO native deps (it stays
 # `unsafe_code = forbid`); all NDI FFI is owned by `multiview-ndi-sys`. `cargo deny`
 # runs with `all-features = false` so this opt-in obligation never enters the
 # default LGPL-clean deny graph. LGPL-clean: the SDK is dynamically loaded at run
 # time, not linked.
-ndi = ["multiview-input/ndi"]
+ndi = ["multiview-input/ndi", "ffmpeg"]
 
 # License-escalating: forwards the GPL software encoders (libx264/libx265) so a
 # `run --features ffmpeg,gpl-codecs` may target H.264/H.265. Enabling this makes

@@ -76,6 +76,10 @@ fn os_unix_seconds() -> i64 {
 /// draw time, so it can neither pace nor stall the engine output clock (inv #1).
 /// There is no holdover-dwell hysteresis here (a tracked refinement); the badge
 /// reflects the instantaneous measured discipline.
+// Exercised by the mapping tests below (which run without `ntp`) and called by the
+// `#[cfg(feature = "ntp")]` measured clock; in an `overlay`-without-`ntp` *lib*
+// build its only non-test caller is gated out, so the lib alone sees it as dead.
+#[cfg_attr(not(feature = "ntp"), allow(dead_code))]
 fn ref_from_query<Q: NtpQuery>(query: &mut Q, config: &SystemRefConfig) -> TimeRef {
     let (state, offset_ns) = match query.read() {
         Some(reading) => (classify_system(&reading, config), reading.offset_ns),

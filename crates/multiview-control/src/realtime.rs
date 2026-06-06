@@ -159,9 +159,10 @@ impl CorrKey {
 /// [`OperationId`] its outcome event must echo as `corr` (ADR-W008).
 ///
 /// The command surface records `(key, op)` at 202 time ([`CorrRegistry::record`]);
-/// the realtime projection pops it when the matching outcome event is delivered
-/// ([`CorrRegistry::take`]). Correlations are consumed **once** (FIFO per key),
-/// so a re-emitted event after the outcome carries no stale corr.
+/// the realtime projection resolves it when the matching outcome event is
+/// delivered ([`CorrRegistry::resolve`]), memoized **once per engine sequence
+/// number** so every fanned-out subscriber stamps the same corr while a
+/// re-emitted outcome (a different seq) carries no stale corr.
 ///
 /// **Isolation (invariant #10).** This is ordinary control-plane state behind a
 /// short-held `Mutex` that the engine never touches: `record` runs on the HTTP
