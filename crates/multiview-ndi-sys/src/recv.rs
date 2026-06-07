@@ -171,6 +171,44 @@ impl NdiReceiver {
             Ok(None)
         }
     }
+
+    /// Sample the next **audio** frame (planar f32 / `FLTP`), waiting at most
+    /// `timeout_ms`. Returns `Some` on an audio frame, `None` on timeout or a
+    /// non-audio frame type. Video + metadata are skipped (null sinks), so only
+    /// audio is ever allocated (and freed).
+    ///
+    /// # Errors
+    /// Currently infallible at the FFI boundary (a fault surfaces as `None`); the
+    /// `Result` mirrors [`Self::capture_video`] for forward compatibility.
+    // reason: the FFI capture call — pass out-params the SDK fills (// SAFETY below).
+    #[allow(unsafe_code)]
+    pub fn capture_audio(&self, timeout_ms: u32) -> Result<Option<RecvAudioFrame<'_>>, NdiError> {
+        let mut audio = MaybeUninit::<ffi::NDIlib_audio_frame_v3_t>::zeroed();
+        // SAFETY: `recv_capture_v3` is the resolved capture fn pointer; `self.instance`
+        // is the live receiver. We pass a NULL video sink, a writable audio out-param,
+        // and a NULL metadata sink (so the SDK delivers only audio and allocates
+        // nothing else). On an audio frame it fills `audio` with an SDK-owned buffer
+        // we free via `RecvAudioFrame::drop`.
+        let frame_type = unsafe {
+            (self.table.recv_capture_v3)(
+                self.instance,
+                std::ptr::null_mut(),
+                audio.as_mut_ptr(),
+                std::ptr::null_mut(),
+                timeout_ms,
+            )
+        };
+        if frame_type == ffi::NDIlib_frame_type_audio {
+            // SAFETY: the SDK reported an audio frame, so it fully initialised `audio`.
+            let frame = unsafe { audio.assume_init() };
+            Ok(Some(RecvAudioFrame {
+                receiver: self,
+                frame,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl std::fmt::Debug for NdiReceiver {
@@ -287,6 +325,109 @@ impl std::fmt::Debug for RecvVideoFrame<'_> {
             .field("height", &self.height())
             .field("stride", &self.stride())
             .field("fourcc", &self.fourcc())
+            .finish_non_exhaustive()
+    }
+}
+
+/// An owned, SDK-allocated received **audio** frame (planar 32-bit float / `FLTP`)
+/// that frees on `Drop`.
+///
+/// Like [`RecvVideoFrame`] it borrows its [`NdiReceiver`] (`&'r`) so the free
+/// target is alive by construction. Copy the samples out via
+/// [`RecvAudioFrame::data_bytes`] before it drops.
+pub struct RecvAudioFrame<'r> {
+    receiver: &'r NdiReceiver,
+    frame: ffi::NDIlib_audio_frame_v3_t,
+}
+
+impl RecvAudioFrame<'_> {
+    /// Sample rate in Hz (the SDK `sample_rate`), clamped to `>= 0`.
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        u32::try_from(self.frame.sample_rate).unwrap_or(0)
+    }
+
+    /// Channel count (`no_channels`), clamped to `>= 0`.
+    #[must_use]
+    pub fn channels(&self) -> u32 {
+        u32::try_from(self.frame.no_channels).unwrap_or(0)
+    }
+
+    /// Samples per channel (`no_samples`), clamped to `>= 0`.
+    #[must_use]
+    pub fn samples(&self) -> u32 {
+        u32::try_from(self.frame.no_samples).unwrap_or(0)
+    }
+
+    /// Bytes between the start of each channel plane (`channel_stride_in_bytes`).
+    #[must_use]
+    pub fn channel_stride_bytes(&self) -> u32 {
+        // SAFETY note: for audio frames this union member is `channel_stride_in_bytes`
+        // (the `data_size_in_bytes` member is for compressed audio we do not use).
+        #[allow(unsafe_code)]
+        let stride = unsafe { self.frame.__bindgen_anon_1.channel_stride_in_bytes };
+        u32::try_from(stride).unwrap_or(0)
+    }
+
+    /// The NDI per-frame timecode in 100 ns units.
+    #[must_use]
+    pub fn timecode(&self) -> i64 {
+        self.frame.timecode
+    }
+
+    /// Whether the frame is planar 32-bit float (`FLTP`) — the only layout this
+    /// receiver requests.
+    #[must_use]
+    pub fn is_fltp(&self) -> bool {
+        self.frame.FourCC == ffi::NDIlib_FourCC_audio_type_FLTP
+    }
+
+    /// The received planar host bytes (`channels * channel_stride_bytes`). Empty if
+    /// the SDK gave a null buffer. Borrows SDK-owned memory valid only until this
+    /// frame drops — copy out before then. Read individual `f32` samples with
+    /// `f32::from_ne_bytes` at `plane * channel_stride_bytes + sample * 4`.
+    #[must_use]
+    pub fn data_bytes(&self) -> &[u8] {
+        if self.frame.p_data.is_null() {
+            return &[];
+        }
+        let len = u64::from(self.channels()).saturating_mul(u64::from(self.channel_stride_bytes()));
+        let Ok(len) = usize::try_from(len) else {
+            return &[];
+        };
+        // SAFETY: `p_data` is non-null SDK-owned planar memory; `len = channels *
+        // channel_stride` is the byte count the SDK allocated. The slice borrows
+        // `self`, so it cannot outlive the frame (and thus the SDK allocation).
+        #[allow(unsafe_code)]
+        unsafe {
+            std::slice::from_raw_parts(self.frame.p_data, len)
+        }
+    }
+}
+
+impl Drop for RecvAudioFrame<'_> {
+    // reason: free the SDK-owned audio buffer exactly once.
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: `self.frame` is the SDK-allocated audio frame from this receiver's
+        // `capture_audio`; we free it exactly once through the same (still-live, by
+        // the `&'r` borrow) receiver instance. The borrow checker guarantees no
+        // `data_bytes()` slice outlives `self`.
+        unsafe {
+            (self.receiver.table.recv_free_audio_v3)(
+                self.receiver.instance,
+                std::ptr::from_ref(&self.frame),
+            );
+        }
+    }
+}
+
+impl std::fmt::Debug for RecvAudioFrame<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecvAudioFrame")
+            .field("sample_rate", &self.sample_rate())
+            .field("channels", &self.channels())
+            .field("samples", &self.samples())
             .finish_non_exhaustive()
     }
 }

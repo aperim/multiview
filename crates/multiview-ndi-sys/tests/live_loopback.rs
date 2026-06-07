@@ -131,7 +131,7 @@ fn live_loopback_send_discover_receive() {
             std::thread::sleep(Duration::from_millis(200));
         }
         let source =
-            source.ok_or_else(|| "the local sender was not discovered in 15s".to_string())?;
+            source.ok_or_else(|| "the local sender was not discovered in 15s".to_owned())?;
         println!("discovered NDI source: {}", source.as_str());
 
         let receiver = NdiReceiver::create(
@@ -153,7 +153,7 @@ fn live_loopback_send_discover_receive() {
                 ));
             }
         }
-        Err("no video frame arrived in 10s".to_string())
+        Err("no video frame arrived in 10s".to_owned())
     })();
 
     // Always stop + join before asserting / dropping the runtime.
@@ -173,6 +173,115 @@ fn live_loopback_send_discover_receive() {
     assert!(
         (80.0..=175.0).contains(&luma),
         "received luma {luma:.1} reflects the sent gradient (not black/white)"
+    );
+}
+
+/// Audio summary copied out before the SDK frame drops: rate, channels, FLTP?,
+/// first sample value (a content proxy), and samples-this-frame.
+type AudioSummary = (u32, u32, bool, f32, u32);
+
+const A_RATE: u32 = 48_000;
+const A_CHANNELS: u32 = 2;
+const A_SAMPLES: u32 = 480; // 10 ms @ 48 kHz
+const A_AMPLITUDE: f32 = 0.5;
+
+/// Planar FLTP buffer: `A_CHANNELS` planes of `A_SAMPLES` f32, all `A_AMPLITUDE`.
+fn constant_fltp() -> Vec<f32> {
+    vec![A_AMPLITUDE; (A_CHANNELS * A_SAMPLES) as usize]
+}
+
+#[test]
+#[ignore = "needs a resolvable NDI runtime + discovery (mDNS or NDI discovery server)"]
+fn live_loopback_audio_round_trips() {
+    const AUDIO_SOURCE: &str = "Multiview NDI-L1 Audio Loopback";
+    let runtime = NdiRuntimeHandle::load();
+
+    // Sender sends both a video keep-alive (discoverability) and the audio under test.
+    let sender = NdiSender::create(runtime.table(), AUDIO_SOURCE, false, false)
+        .expect("the runtime should create a sender");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_tx = Arc::clone(&stop);
+    let send_thread = std::thread::spawn(move || {
+        let video = gradient_uyvy();
+        let audio = constant_fltp();
+        let mut tick = 0i64;
+        while !stop_tx.load(Ordering::Relaxed) {
+            let _ = sender.send_video(
+                W,
+                H,
+                W * 2,
+                NdiVideoFourCc::Uyvy,
+                30_000,
+                1_001,
+                tick * 33_366,
+                &video,
+            );
+            let _ = sender.send_audio(A_RATE, A_CHANNELS, A_SAMPLES, tick * 33_366, &audio);
+            tick += 1;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let outcome: Result<AudioSummary, String> = (|| {
+        let finder = NdiFinder::create(runtime.table(), true).map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut source = None;
+        while Instant::now() < deadline {
+            if let Some(src) = finder
+                .current_sources()
+                .iter()
+                .find(|s| s.as_str().contains(AUDIO_SOURCE))
+            {
+                source = Some(src.clone());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let source = source.ok_or_else(|| "audio sender not discovered in 15s".to_owned())?;
+        println!("discovered NDI source: {}", source.as_str());
+
+        let receiver = NdiReceiver::create(
+            runtime.table(),
+            &source.as_str(),
+            Some("Multiview Audio Recv"),
+        )
+        .map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Some(frame) = receiver.capture_audio(200).map_err(|e| e.to_string())? {
+                let bytes = frame.data_bytes();
+                // First f32 of plane 0 (channel 0) — native-endian per the SDK.
+                let first = bytes
+                    .get(0..4)
+                    .map_or(f32::NAN, |b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]));
+                return Ok((
+                    frame.sample_rate(),
+                    frame.channels(),
+                    frame.is_fltp(),
+                    first,
+                    frame.samples(),
+                ));
+            }
+        }
+        Err("no audio frame arrived in 10s".to_owned())
+    })();
+
+    stop.store(true, Ordering::Relaxed);
+    send_thread.join().expect("sender thread joins");
+
+    let (rate, channels, fltp, first, samples) = match outcome {
+        Ok(s) => s,
+        Err(e) => panic!("NDI audio loopback failed: {e}"),
+    };
+    println!("received audio: {rate} Hz, {channels} ch, fltp={fltp}, samples={samples}, first={first:.4}");
+    assert_eq!(rate, A_RATE, "sample rate round-trips");
+    assert_eq!(channels, A_CHANNELS, "channel count round-trips");
+    assert!(fltp, "NDI delivers planar float (FLTP)");
+    assert!(samples > 0, "a non-empty audio frame");
+    // NDI Full audio is lossless float, so the constant amplitude round-trips closely.
+    assert!(
+        (first - A_AMPLITUDE).abs() < 0.01,
+        "received sample {first:.4} ~= sent {A_AMPLITUDE}"
     );
 }
 

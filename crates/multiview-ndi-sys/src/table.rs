@@ -54,6 +54,8 @@ pub(crate) struct NdiV6 {
         unsafe extern "C" fn(SendInstance, *const ffi::NDIlib_video_frame_v2_t),
     pub(crate) send_send_video_async_v2:
         unsafe extern "C" fn(SendInstance, *const ffi::NDIlib_video_frame_v2_t),
+    pub(crate) send_send_audio_v3:
+        unsafe extern "C" fn(SendInstance, *const ffi::NDIlib_audio_frame_v3_t),
     pub(crate) send_destroy: unsafe extern "C" fn(SendInstance),
 
     pub(crate) recv_create_v3:
@@ -67,6 +69,8 @@ pub(crate) struct NdiV6 {
     ) -> ffi::NDIlib_frame_type_e,
     pub(crate) recv_free_video_v2:
         unsafe extern "C" fn(RecvInstance, *const ffi::NDIlib_video_frame_v2_t),
+    pub(crate) recv_free_audio_v3:
+        unsafe extern "C" fn(RecvInstance, *const ffi::NDIlib_audio_frame_v3_t),
     pub(crate) recv_destroy: unsafe extern "C" fn(RecvInstance),
 }
 
@@ -115,10 +119,12 @@ impl NdiV6 {
                 send_create: t.__bindgen_anon_9.send_create,
                 send_send_video_v2: t.__bindgen_anon_51.send_send_video_v2,
                 send_send_video_async_v2: t.__bindgen_anon_52.send_send_video_async_v2,
+                send_send_audio_v3: t.__bindgen_anon_97.send_send_audio_v3,
                 send_destroy: t.__bindgen_anon_10.send_destroy,
                 recv_create_v3: t.__bindgen_anon_85.recv_create_v3,
                 recv_capture_v3: t.__bindgen_anon_102.recv_capture_v3,
                 recv_free_video_v2: t.__bindgen_anon_48.recv_free_video_v2,
+                recv_free_audio_v3: t.__bindgen_anon_103.recv_free_audio_v3,
                 recv_destroy: t.__bindgen_anon_24.recv_destroy,
             }
         };
@@ -137,10 +143,12 @@ impl NdiV6 {
                 slots.send_send_video_async_v2,
                 "send_send_video_async_v2",
             )?,
+            send_send_audio_v3: req(slots.send_send_audio_v3, "send_send_audio_v3")?,
             send_destroy: req(slots.send_destroy, "send_destroy")?,
             recv_create_v3: req(slots.recv_create_v3, "recv_create_v3")?,
             recv_capture_v3: req(slots.recv_capture_v3, "recv_capture_v3")?,
             recv_free_video_v2: req(slots.recv_free_video_v2, "recv_free_video_v2")?,
+            recv_free_audio_v3: req(slots.recv_free_audio_v3, "recv_free_audio_v3")?,
             recv_destroy: req(slots.recv_destroy, "recv_destroy")?,
         })
     }
@@ -160,6 +168,8 @@ struct Slots {
         Option<unsafe extern "C" fn(SendInstance, *const ffi::NDIlib_video_frame_v2_t)>,
     send_send_video_async_v2:
         Option<unsafe extern "C" fn(SendInstance, *const ffi::NDIlib_video_frame_v2_t)>,
+    send_send_audio_v3:
+        Option<unsafe extern "C" fn(SendInstance, *const ffi::NDIlib_audio_frame_v3_t)>,
     send_destroy: Option<unsafe extern "C" fn(SendInstance)>,
     recv_create_v3:
         Option<unsafe extern "C" fn(*const ffi::NDIlib_recv_create_v3_t) -> RecvInstance>,
@@ -174,6 +184,8 @@ struct Slots {
     >,
     recv_free_video_v2:
         Option<unsafe extern "C" fn(RecvInstance, *const ffi::NDIlib_video_frame_v2_t)>,
+    recv_free_audio_v3:
+        Option<unsafe extern "C" fn(RecvInstance, *const ffi::NDIlib_audio_frame_v3_t)>,
     recv_destroy: Option<unsafe extern "C" fn(RecvInstance)>,
 }
 

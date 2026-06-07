@@ -210,6 +210,65 @@ impl NdiSender {
         }
         Ok(())
     }
+
+    /// Send one frame of **planar 32-bit float** (`FLTP`) audio synchronously.
+    ///
+    /// `data` is `no_channels` contiguous planes of `no_samples` `f32` each (plane
+    /// 0 then plane 1 …), the canonical NDI audio layout. `timecode` is in NDI
+    /// 100 ns units, re-stamped from the tick upstream (inv #3). The SDK copies the
+    /// buffer before returning, so `data` need only outlive this call.
+    ///
+    /// # Errors
+    /// [`NdiError::ShortBuffer`] if `data` is smaller than `no_channels *
+    /// no_samples`; [`NdiError::FieldOutOfRange`] if a count exceeds the SDK's C
+    /// `int` (or the channel stride overflows).
+    // reason: the FFI audio-send call — deref the resolved fn pointer and pass the
+    // audio descriptor (// SAFETY below). The descriptor build is safe.
+    #[allow(unsafe_code)]
+    pub fn send_audio(
+        &self,
+        sample_rate: u32,
+        no_channels: u32,
+        no_samples: u32,
+        timecode: i64,
+        data: &[f32],
+    ) -> Result<(), NdiError> {
+        let need = u64::from(no_channels).saturating_mul(u64::from(no_samples));
+        let have = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        if have < need {
+            return Err(NdiError::ShortBuffer {
+                have: data.len(),
+                need: usize::try_from(need).unwrap_or(usize::MAX),
+            });
+        }
+        // FLTP planes are tightly packed: stride = no_samples * 4 bytes.
+        let stride_bytes = no_samples.checked_mul(4).ok_or(NdiError::FieldOutOfRange {
+            field: "audio channel stride",
+        })?;
+        let frame = ffi::NDIlib_audio_frame_v3_t {
+            sample_rate: to_cint(sample_rate, "sample_rate")?,
+            no_channels: to_cint(no_channels, "no_channels")?,
+            no_samples: to_cint(no_samples, "no_samples")?,
+            timecode,
+            FourCC: ffi::NDIlib_FourCC_audio_type_FLTP,
+            // The SDK reads (and copies) this planar-f32 buffer during the send.
+            p_data: data.as_ptr().cast::<u8>().cast_mut(),
+            __bindgen_anon_1: ffi::NDIlib_audio_frame_v3_t__bindgen_ty_1 {
+                channel_stride_in_bytes: to_cint(stride_bytes, "channel_stride")?,
+            },
+            p_metadata: std::ptr::null(),
+            timestamp: 0,
+        };
+        // SAFETY: `self.table.send_send_audio_v3` is the resolved synchronous
+        // audio-send fn pointer; `self.instance` is the live sender. `frame` is
+        // fully initialised and its `p_data` points at `data`, whose length we
+        // checked covers `no_channels * no_samples` f32. The send copies the buffer
+        // before returning, so the borrowed `data` outlives the SDK's read.
+        unsafe {
+            (self.table.send_send_audio_v3)(self.instance, std::ptr::from_ref(&frame));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for NdiSender {

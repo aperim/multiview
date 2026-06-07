@@ -99,7 +99,7 @@ pub use send::{NdiSender, NdiVideoFourCc};
 #[cfg(feature = "bindings")]
 pub mod recv;
 #[cfg(feature = "bindings")]
-pub use recv::{NdiReceiver, RecvFourCc, RecvVideoFrame};
+pub use recv::{NdiReceiver, RecvAudioFrame, RecvFourCc, RecvVideoFrame};
 
 /// The safe NDI **finder** handle (ADR-0028 §3): discover NDI sources by name.
 #[cfg(feature = "bindings")]
