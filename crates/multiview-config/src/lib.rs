@@ -34,6 +34,7 @@ pub mod error;
 pub mod grid;
 pub mod placement;
 pub mod probe;
+pub mod routing;
 pub mod salvo;
 pub mod schema;
 pub mod tally;
@@ -44,6 +45,7 @@ use std::collections::HashSet;
 use multiview_core::layout::{
     Canvas as CoreCanvas, Cell as CoreCell, FitMode, Layout as CoreLayout,
 };
+use multiview_core::stream::StreamKind as CoreStreamKind;
 
 use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
 pub use audio::{
@@ -52,6 +54,10 @@ pub use audio::{
 pub use error::ConfigError;
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
+pub use routing::{
+    AudioCrosspoint, OutputCrosspoint, RoutingRefs, RoutingTable, StreamRef, StreamSelector,
+    SubtitleCrosspoint, VideoCrosspoint, MAIN_PROGRAM,
+};
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
     Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride, Fps,
@@ -131,6 +137,15 @@ pub struct MultiviewConfig {
     /// that consumes these routes is `multiview-audio` + the engine (AUD-3/AUD-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioRouting>,
+    /// The per-stream decoupled-routing crosspoint table (ADR-0034 / RT-4): the
+    /// broadcast router/multiviewer model where inputs, layouts and outputs are
+    /// independent resources wired by per-stream crosspoints. **Absent ⇒ the
+    /// legacy single-program path** — the equivalent crosspoints are derived
+    /// from the existing `cells`/`audio`/`outputs` fields by
+    /// [`MultiviewConfig::routing_table`] (the desugar), so a v1/v2 document and
+    /// its desugared v3 form route identically. Schema v3 introduces this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingTable>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -247,6 +262,7 @@ impl MultiviewConfig {
         self.validate_walls()?;
         self.validate_control()?;
         self.validate_placement()?;
+        self.validate_routing()?;
 
         // Solving + the core structural check covers geometry (rects in 0..1,
         // positive extent, valid cadence) and grid wiring (areas resolve).
@@ -525,10 +541,7 @@ impl MultiviewConfig {
     fn validate_audio(&self) -> Result<(), ConfigError> {
         // The selectable-track universe: the program bus is always available;
         // named discrete tracks come from the routing block (if any).
-        let selectable: Vec<&str> = match &self.audio {
-            Some(routing) => routing.declared_tracks(),
-            None => vec![PROGRAM_TRACK_NAME],
-        };
+        let selectable: Vec<&str> = self.selectable_tracks();
 
         if let Some(routing) = &self.audio {
             let source_ids: Vec<&str> = self.sources.iter().map(|s| s.id.as_str()).collect();
@@ -538,6 +551,156 @@ impl MultiviewConfig {
         for output in &self.outputs {
             if let Some(selection) = output.audio() {
                 selection.validate(&output.label(), &selectable)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The document-wide **selectable audio tracks**: the program bus (always
+    /// available) plus every named discrete track the `[audio]` block declares.
+    /// Shared by audio-selection validation and the audio-routing desugar.
+    fn selectable_tracks(&self) -> Vec<&str> {
+        match &self.audio {
+            Some(routing) => routing.declared_tracks(),
+            None => vec![PROGRAM_TRACK_NAME],
+        }
+    }
+
+    /// The declared **subtitle layer** ids a subtitle crosspoint may target.
+    ///
+    /// Subtitle layers are overlay layers today; until a dedicated subtitle-layer
+    /// model lands, every declared overlay id is an addressable layer. The
+    /// desugar derives no subtitle crosspoints (legacy captions are per-source,
+    /// not per-layer), so this set only gates an **explicit** routing table.
+    fn subtitle_layers(&self) -> HashSet<&str> {
+        self.overlays.iter().map(|o| o.id.as_str()).collect()
+    }
+
+    /// The declared **output labels** an output crosspoint may target.
+    ///
+    /// Outputs carry no operator id yet (RT-12 adds one), so each is addressed by
+    /// its stable [`Output::label`] — the same string the desugar emits.
+    fn output_labels(&self) -> Vec<String> {
+        self.outputs.iter().map(Output::label).collect()
+    }
+
+    /// The decoupled-routing **crosspoint table** for this document (ADR-0034 /
+    /// RT-4): the explicit `[routing]` table when present, otherwise the
+    /// equivalent table **desugared** from the legacy `cells`/`audio`/`outputs`
+    /// fields.
+    ///
+    /// The desugar is the load-bearing back-compat guarantee: a v1/v2 document
+    /// (no `[routing]`) and its desugared v3 form solve to **identical** routing
+    /// — each `[[cells]]` with a `source.input_id` becomes a
+    /// [`VideoCrosspoint`]`{cell, StreamRef{input_id, Video, Best}}`; each
+    /// `[audio].routes` entry an [`AudioCrosspoint`]; each `[[outputs]]` an
+    /// [`OutputCrosspoint`]`{output, program:"main"}`.
+    #[must_use]
+    pub fn routing_table(&self) -> RoutingTable {
+        match &self.routing {
+            Some(table) => table.clone(),
+            None => self.desugared_routing_table(),
+        }
+    }
+
+    /// Derive the equivalent [`RoutingTable`] from the legacy fields (the
+    /// desugar). See [`MultiviewConfig::routing_table`].
+    fn desugared_routing_table(&self) -> RoutingTable {
+        let mut table = RoutingTable::default();
+
+        // VIDEO: each cell with a managed input_id → a Video/Best crosspoint.
+        // A cell with only an inline (`kind`) source has no managed input id to
+        // address, so it carries no crosspoint (it is not a router source).
+        for cell in &self.cells {
+            if let Some(input_id) = &cell.source.input_id {
+                table.video.push(VideoCrosspoint {
+                    cell: cell.id.clone(),
+                    source: StreamRef::best(input_id.clone(), CoreStreamKind::Video),
+                });
+            }
+        }
+
+        // AUDIO: each declared route → an audio crosspoint, keyed by its
+        // destination (the named discrete track, or the program bus when the
+        // route names none), carrying the route's gain/mute. This composes with
+        // the `[audio]` block (ADR-R005) — it is the per-stream view of the same
+        // routing, not a second model.
+        if let Some(routing) = &self.audio {
+            for route in &routing.routes {
+                let target = route
+                    .target_track
+                    .clone()
+                    .unwrap_or_else(|| PROGRAM_TRACK_NAME.to_owned());
+                table.audio.push(AudioCrosspoint {
+                    target,
+                    source: StreamRef::best(route.input_id.clone(), CoreStreamKind::Audio),
+                    gain_db: route.gain_db,
+                    mute: route.mute,
+                });
+            }
+        }
+
+        // OUTPUT: each declared output → an output crosspoint on the single
+        // "main" program (until ADR-0030's ProgramSet lands).
+        for output in &self.outputs {
+            table.output.push(OutputCrosspoint {
+                output: output.label(),
+                program: MAIN_PROGRAM.to_owned(),
+            });
+        }
+
+        // SUBTITLE: legacy captions are per-source (CaptionSelector), not
+        // per-layer crosspoints, so the desugar derives none. An explicit
+        // routing table is where per-layer subtitle breakaway is expressed.
+
+        table
+    }
+
+    /// Validate the decoupled-routing crosspoint table (ADR-0034 / RT-4).
+    ///
+    /// When an explicit `[routing]` table is present it is validated against the
+    /// document's declared sources/cells/tracks/layers/outputs (structural
+    /// references only — `Language`/`Index` selector resolution is deferred to
+    /// admission, so an unresolved language is **not** a config error), and it is
+    /// checked for **consistency** with the legacy cell-bindings: a video
+    /// crosspoint may not contradict a `[[cells]]` binding of the same cell
+    /// (mirroring ADR-0030's rejection of an inconsistent both-populated
+    /// document). An absent table desugars and is trivially consistent.
+    fn validate_routing(&self) -> Result<(), ConfigError> {
+        let Some(table) = &self.routing else {
+            return Ok(());
+        };
+
+        let tracks = self.selectable_tracks();
+        let output_labels = self.output_labels();
+        let refs = RoutingRefs {
+            sources: self.sources.iter().map(|s| s.id.as_str()).collect(),
+            cells: self.cell_ids(),
+            tracks: tracks.iter().copied().collect(),
+            layers: self.subtitle_layers(),
+            outputs: output_labels.iter().map(String::as_str).collect(),
+        };
+        table.validate(&refs)?;
+
+        // Consistency with the legacy cell-bindings: where BOTH a `[[cells]]`
+        // binding and an explicit video crosspoint name the same cell, they must
+        // agree on the source input. A contradiction is the inconsistent
+        // both-populated case ADR-0030 rejects.
+        for xp in &table.video {
+            for cell in &self.cells {
+                if cell.id == xp.cell {
+                    if let Some(legacy_input) = &cell.source.input_id {
+                        if legacy_input != &xp.source.input_id {
+                            return Err(ConfigError::Validation(format!(
+                                "cell {:?} is bound to source {legacy_input:?} by [[cells]] but to \
+                                 {:?} by an explicit routing crosspoint (inconsistent \
+                                 both-populated document)",
+                                xp.cell, xp.source.input_id
+                            )));
+                        }
+                    }
+                }
             }
         }
 
