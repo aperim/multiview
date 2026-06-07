@@ -33,6 +33,8 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
+use crate::time::Rational;
+
 /// The kind of **data** carried by a non-AV elementary stream.
 ///
 /// These are passthrough kinds — discovered and routed, never decoded into
@@ -527,5 +529,258 @@ impl StableStreamId {
 impl fmt::Display for StableStreamId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.kind_scope, self.key)
+    }
+}
+
+/// Kind-specific detail for one elementary stream, carried alongside the coarse
+/// [`StreamKind`] in a [`StreamDescriptor`].
+///
+/// The detail is **adjacently tagged** (`#[serde(tag = "detail", content =
+/// "params")]`, `snake_case`) so it serialises unambiguously across TOML and JSON
+/// and never relies on `untagged` (ADR-0010 / repo conventions). Each variant
+/// carries only the fields that kind has to offer from a container probe; a
+/// non-AV passthrough stream (SCTE-35 / KLV / timecode) carries no extra detail
+/// and is modelled as [`StreamDetail::Passthrough`].
+///
+/// `#[non_exhaustive]` so future kinds can grow detail fields without a breaking
+/// change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "detail", content = "params", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamDetail {
+    /// Video-stream geometry + cadence, as probed from the container.
+    Video {
+        /// Coded width in pixels (`0` if the container did not declare it).
+        width: u32,
+        /// Coded height in pixels (`0` if the container did not declare it).
+        height: u32,
+        /// The container's declared average frame rate, if any (an exact
+        /// rational — **never** a float fps, invariant #3).
+        frame_rate: Option<Rational>,
+    },
+    /// Audio-track layout, as probed from the container.
+    Audio {
+        /// Channel count (`0` if the container did not declare it).
+        channels: u16,
+        /// Sample rate in Hz (`0` if the container did not declare it).
+        sample_rate: u32,
+    },
+    /// Subtitle / caption track flags.
+    Subtitle {
+        /// Whether the track is flagged "forced" (narrative subtitles shown even
+        /// when subtitles are otherwise off).
+        forced: bool,
+    },
+    /// A passthrough stream (SCTE-35 / KLV data, or a timecode track) that
+    /// carries no kind-specific AV detail.
+    Passthrough,
+}
+
+impl StreamDetail {
+    /// The coded geometry `(width, height)` for a [`StreamDetail::Video`] stream,
+    /// or [`None`] for any other detail.
+    #[must_use]
+    pub const fn video_geometry(&self) -> Option<(u32, u32)> {
+        if let Self::Video { width, height, .. } = *self {
+            Some((width, height))
+        } else {
+            None
+        }
+    }
+
+    /// The `(channels, sample_rate)` for a [`StreamDetail::Audio`] stream, or
+    /// [`None`] for any other detail.
+    #[must_use]
+    pub const fn audio_layout(&self) -> Option<(u16, u32)> {
+        if let Self::Audio {
+            channels,
+            sample_rate,
+        } = *self
+        {
+            Some((channels, sample_rate))
+        } else {
+            None
+        }
+    }
+}
+
+/// A typed, owned, `Send` record describing **one** elementary stream an input
+/// offers — the unit of the [`StreamInventory`] the router matrix consumes.
+///
+/// This is the canonical model surface (it lives in `multiview-core` so config /
+/// control / web can consume it without depending on `multiview-ffmpeg`). The
+/// libav / TS / HLS discovery paths each build a `Vec<StreamDescriptor>` and wrap
+/// it in a [`StreamInventory`]; nothing here is FFI or I/O.
+///
+/// Serialises with the [`StreamKind`] flattened (so a descriptor carries a single
+/// `kind` / `payload` tag pair) plus an adjacently-tagged [`StreamDetail`]; no
+/// field is `untagged`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StreamDescriptor {
+    /// The stable, kind-scoped identity a crosspoint binds to (survives a
+    /// re-probe / PMT-version bump / rendition reorder; see [`StableStreamId`]).
+    pub id: StableStreamId,
+    /// The canonical media kind of this elementary stream.
+    #[serde(flatten)]
+    pub kind: StreamKind,
+    /// The validated language tag, if the container declared a usable one
+    /// (unparseable / `und` tags are dropped to `None`, never failed).
+    pub language: Option<Bcp47>,
+    /// The codec descriptor name as reported by the container (e.g. `"h264"`,
+    /// `"aac"`, `"dvbsub"`).
+    pub codec: String,
+    /// The track title / handler name, if the container declared one.
+    pub title: Option<String>,
+    /// Whether the container flags this stream as a default for its kind.
+    pub default: bool,
+    /// The kind-specific detail (geometry / layout / flags / passthrough).
+    pub detail: StreamDetail,
+}
+
+impl StreamDescriptor {
+    /// Construct a descriptor for one elementary stream.
+    ///
+    /// `language`, `title`, and `default` start empty / `false`; set them with
+    /// the builder methods.
+    #[must_use]
+    pub fn new(
+        id: StableStreamId,
+        kind: StreamKind,
+        codec: impl Into<String>,
+        detail: StreamDetail,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            language: None,
+            codec: codec.into(),
+            title: None,
+            default: false,
+            detail,
+        }
+    }
+
+    /// Set the validated language tag (builder style).
+    #[must_use]
+    pub fn with_language(mut self, language: Option<Bcp47>) -> Self {
+        self.language = language;
+        self
+    }
+
+    /// Set the track title (builder style).
+    #[must_use]
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title = title;
+        self
+    }
+
+    /// Set the default flag (builder style).
+    #[must_use]
+    pub fn with_default(mut self, default: bool) -> Self {
+        self.default = default;
+        self
+    }
+}
+
+/// The full, typed inventory of every elementary stream an input offers.
+///
+/// This is what RT-1 surfaces: the libav demux already enumerates **all** streams
+/// (with language), but the ingest path historically kept only the best video
+/// stream. The inventory keeps every row — addressable by [`StreamKind`] and by
+/// [`StableStreamId`] — so audio tracks, subtitle tracks, and SCTE-35 / KLV /
+/// timecode data streams survive discovery (the decoupled-routing crosspoint
+/// model, ADR-0034).
+///
+/// Pure data: no engine, no I/O. Serialises cleanly (every field tagged, never
+/// `untagged`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StreamInventory {
+    /// The owning input's id, if known (the discovery layer often probes a
+    /// container before it is bound to a configured input id).
+    pub input_id: Option<String>,
+    /// Every elementary stream the input offers, in container order.
+    pub streams: Vec<StreamDescriptor>,
+}
+
+impl StreamInventory {
+    /// An empty inventory with no owning input id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build an inventory from a stream list, with no owning input id yet.
+    #[must_use]
+    pub fn from_streams(streams: Vec<StreamDescriptor>) -> Self {
+        Self {
+            input_id: None,
+            streams,
+        }
+    }
+
+    /// Set the owning input id (builder style).
+    #[must_use]
+    pub fn with_input_id(mut self, input_id: impl Into<String>) -> Self {
+        self.input_id = Some(input_id.into());
+        self
+    }
+
+    /// Every descriptor whose [`StreamKind`] matches `predicate`, in container
+    /// order.
+    ///
+    /// `StreamKind` carries a payload for [`StreamKind::Data`] /
+    /// [`StreamKind::Timecode`], so this takes a predicate rather than an
+    /// equality target — callers can match a coarse family (`StreamKind::is_audio`)
+    /// or an exact kind (`|k| k == StreamKind::Data(DataKind::Scte35)`).
+    pub fn by_kind<'a>(
+        &'a self,
+        predicate: impl Fn(StreamKind) -> bool + 'a,
+    ) -> impl Iterator<Item = &'a StreamDescriptor> + 'a {
+        self.streams.iter().filter(move |s| predicate(s.kind))
+    }
+
+    /// Every video stream, in container order.
+    pub fn video(&self) -> impl Iterator<Item = &StreamDescriptor> {
+        self.by_kind(StreamKind::is_video)
+    }
+
+    /// Every audio track, in container order.
+    pub fn audio_tracks(&self) -> impl Iterator<Item = &StreamDescriptor> {
+        self.by_kind(StreamKind::is_audio)
+    }
+
+    /// Every subtitle / caption track, in container order.
+    pub fn subtitle_tracks(&self) -> impl Iterator<Item = &StreamDescriptor> {
+        self.by_kind(StreamKind::is_subtitle)
+    }
+
+    /// Every data (SCTE-35 / KLV) stream, in container order.
+    pub fn data(&self) -> impl Iterator<Item = &StreamDescriptor> {
+        self.by_kind(StreamKind::is_data)
+    }
+
+    /// Every timecode stream, in container order.
+    pub fn timecode(&self) -> impl Iterator<Item = &StreamDescriptor> {
+        self.by_kind(StreamKind::is_timecode)
+    }
+
+    /// The default stream for a kind family, if any: the first descriptor of that
+    /// family flagged `default`, else the first of that family at all (the
+    /// container-order fallback — there is always *a* sensible default when the
+    /// family is non-empty).
+    #[must_use]
+    pub fn default_for(&self, predicate: impl Fn(StreamKind) -> bool) -> Option<&StreamDescriptor> {
+        let mut first = None;
+        for s in self.streams.iter().filter(|s| predicate(s.kind)) {
+            if s.default {
+                return Some(s);
+            }
+            if first.is_none() {
+                first = Some(s);
+            }
+        }
+        first
     }
 }

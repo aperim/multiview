@@ -39,6 +39,7 @@ use std::process::Command;
 use multiview_core::color::ColorInfo;
 use multiview_core::frame::FrameMeta;
 use multiview_core::pixel::PixelFormat;
+use multiview_core::stream::StreamInventory;
 use multiview_core::time::{MediaTime, Rational};
 
 use multiview_ffmpeg::{pixel_to_multiview, Demuxer, MediaKind, VideoDecoder};
@@ -55,9 +56,11 @@ const DEFAULT_CADENCE: Rational = Rational::FPS_25;
 /// A file / URL ingest source over `multiview-ffmpeg`'s safe demux + decode.
 ///
 /// Holds an open [`Demuxer`] reading the video stream's packets, plus the
-/// decoded-frame geometry/format/color resolved by decoding the first frame.
-/// `Send`, not `Sync` (the demuxer wraps a libav context that must not be shared
-/// across threads unsynchronized — it is driven from one decode task).
+/// decoded-frame geometry/format/color resolved by decoding the first frame, plus
+/// the full typed [`StreamInventory`] of every elementary stream the input offers
+/// (RT-1, ADR-0034). `Send`, not `Sync` (the demuxer wraps a libav context that
+/// must not be shared across threads unsynchronized — it is driven from one
+/// decode task).
 pub struct FileSource {
     demuxer: Demuxer,
     video_index: usize,
@@ -68,6 +71,10 @@ pub struct FileSource {
     height: u32,
     format: PixelFormat,
     color: ColorInfo,
+    /// The full inventory of every elementary stream this input offers, probed
+    /// once at open. **Additive** — the video decode path still picks best-video;
+    /// this no longer throws away the audio/subtitle/data rows (RT-1).
+    inventory: StreamInventory,
 }
 
 impl FileSource {
@@ -87,6 +94,12 @@ impl FileSource {
         };
 
         let demuxer = Demuxer::open(path)?;
+
+        // RT-1: capture the FULL typed inventory of every elementary stream the
+        // input offers (audio tracks + languages, subtitles, data) — additive,
+        // probed before any packet read. The video-selection below is unchanged.
+        let inventory = demuxer.inventory();
+
         let video_index = demuxer
             .best_stream(MediaKind::Video)
             .ok_or(Error::Ingest("no video stream in input".to_owned()))?;
@@ -119,7 +132,20 @@ impl FileSource {
             height: info.height,
             format,
             color: ColorInfo::default(),
+            inventory,
         })
+    }
+
+    /// The full typed [`StreamInventory`] of every elementary stream this input
+    /// offers — every audio track (with BCP-47 language + channel layout), every
+    /// subtitle track, and every non-AV data stream (RT-1, ADR-0034 §3).
+    ///
+    /// This is **additive**: opening a `FileSource` still selects the best video
+    /// stream for decode exactly as before, but the previously-discarded rows now
+    /// survive here so they can be routed by later RT slices.
+    #[must_use]
+    pub const fn inventory(&self) -> &StreamInventory {
+        &self.inventory
     }
 
     /// The resolved decoded-frame width in pixels.

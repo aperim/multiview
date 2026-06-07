@@ -32,11 +32,7 @@ const SECONDS: u32 = 1;
 /// and 1 languaged subtitle (`subrip`, fra) into `dir`.
 fn generate_multi_stream_clip(dir: &Path) -> PathBuf {
     let srt = dir.join("sub.srt");
-    std::fs::write(
-        &srt,
-        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n",
-    )
-    .expect("write srt");
+    std::fs::write(&srt, "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n").expect("write srt");
 
     let out = dir.join("multi.mkv");
     let status = Command::new("ffmpeg")
@@ -149,7 +145,11 @@ fn inventory_carries_the_right_languages_on_the_audio_tracks() {
         .language
         .as_ref()
         .map(|l| l.as_str().to_owned());
-    assert_eq!(sub_lang, Some("fra".to_owned()), "subtitle language survives");
+    assert_eq!(
+        sub_lang,
+        Some("fra".to_owned()),
+        "subtitle language survives"
+    );
 }
 
 #[test]

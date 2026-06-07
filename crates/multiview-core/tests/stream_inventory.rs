@@ -71,13 +71,7 @@ fn fixture() -> StreamInventory {
     .with_language(Some(fra));
 
     let scte = StreamDescriptor::new(
-        StableStreamId::from_general(
-            StreamKind::Data(DataKind::Scte35),
-            0,
-            "scte_35",
-            None,
-            None,
-        ),
+        StableStreamId::from_general(StreamKind::Data(DataKind::Scte35), 0, "scte_35", None, None),
         StreamKind::Data(DataKind::Scte35),
         "scte_35",
         StreamDetail::Passthrough,
@@ -156,7 +150,9 @@ fn default_for_prefers_flagged_then_falls_back_to_first() {
     let inv = fixture();
 
     // audio0 is flagged default → it is chosen even though audio1 also exists.
-    let a = inv.default_for(StreamKind::is_audio).expect("a default audio");
+    let a = inv
+        .default_for(StreamKind::is_audio)
+        .expect("a default audio");
     assert_eq!(
         a.language.as_ref().map(Bcp47::as_str),
         Some("eng"),
@@ -201,7 +197,10 @@ fn inventory_serde_round_trips_with_tagged_kind_and_detail() {
     let json = serde_json::to_string(&inv).expect("serialise inventory");
     // The wire form must never be `untagged`: the kind tag + detail tag must be
     // present and unambiguous.
-    assert!(json.contains("\"kind\":\"video\""), "video kind tag present");
+    assert!(
+        json.contains("\"kind\":\"video\""),
+        "video kind tag present"
+    );
     assert!(
         json.contains("\"detail\":\"video\""),
         "video detail tag present"
@@ -223,4 +222,49 @@ fn empty_inventory_helpers_are_total() {
     assert_eq!(inv.audio_tracks().count(), 0);
     assert!(inv.default_for(StreamKind::is_video).is_none());
     assert!(inv.input_id.is_none());
+}
+
+#[test]
+fn other_codec_rows_classify_into_data_or_timecode_descriptors() {
+    use multiview_core::stream::CoarseMediaKind;
+
+    // A real in-container SCTE-35 / KLV fixture is infeasible via the LGPL CLI
+    // (the demux test cannot mux one), so the `kind = Other` → routing-kind
+    // refinement that the libav inventory path applies is covered here as a pure
+    // unit test over the same classifier (`from_coarse_and_codec`, RT-0) feeding
+    // an RT-1 descriptor with passthrough detail.
+    let cases = [
+        ("scte_35", StreamKind::Data(DataKind::Scte35)),
+        ("smpte_klv", StreamKind::Data(DataKind::Klv)),
+        ("klv", StreamKind::Data(DataKind::Klv)),
+        ("timed_id3", StreamKind::Timecode(TcSourceKind::AtcRp188)),
+        // Unknown data essence stays routable as a generic Data passthrough,
+        // never dropped (the as-built `best_stream` returned None for Other).
+        ("bin_data", StreamKind::Data(DataKind::Klv)),
+    ];
+    for (codec, want_kind) in cases {
+        let kind = StreamKind::from_coarse_and_codec(CoarseMediaKind::Other, codec);
+        assert_eq!(kind, want_kind, "codec {codec:?} classifies wrong");
+
+        let desc = StreamDescriptor::new(
+            StableStreamId::from_general(kind, 0, codec, None, None),
+            kind,
+            codec,
+            StreamDetail::Passthrough,
+        );
+        // A non-AV passthrough descriptor carries no AV detail.
+        assert_eq!(desc.detail, StreamDetail::Passthrough);
+        assert!(desc.detail.video_geometry().is_none());
+        assert!(desc.detail.audio_layout().is_none());
+
+        // And it lands in the right inventory bucket (data vs timecode).
+        let inv = StreamInventory::from_streams(vec![desc]);
+        if want_kind.is_timecode() {
+            assert_eq!(inv.timecode().count(), 1);
+            assert_eq!(inv.data().count(), 0);
+        } else {
+            assert_eq!(inv.data().count(), 1);
+            assert_eq!(inv.timecode().count(), 0);
+        }
+    }
 }
