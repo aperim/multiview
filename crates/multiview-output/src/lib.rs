@@ -49,6 +49,14 @@
 pub mod error;
 pub mod fanout;
 pub mod hls;
+
+/// GP-6 — the per-stream monotonic clamp+offset packet re-stamp (ADR-0030 §4
+/// "Re-stamp rule (#3 for the copy path)"). The COPY-path invariant-#3
+/// primitive a guarded passthrough uses to re-stamp copied input + spliced-slate
+/// packets so the muxer's interleaved write never aborts on non-monotonic DTS
+/// while B-frame reorder is preserved — distinct from the encoder path's
+/// `out_pts = f(tick)`. Pure `i64` arithmetic; always compiled (no `ffmpeg`).
+pub mod restamp;
 pub mod rtsp;
 pub mod rtsp_server;
 pub mod tsl;
@@ -78,6 +86,7 @@ pub mod slate;
 pub mod ndi;
 
 pub use error::{Error, Result};
+pub use restamp::RestampAccumulator;
 pub use rtsp::{RtspPublishError, RtspPublishTarget};
 pub use rtsp_server::{
     units_to_nanos, BoundedPacketQueue, RtspCapsError, RtspCodec, RtspMount, RtspMountError,
