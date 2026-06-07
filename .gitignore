@@ -8,6 +8,11 @@
 # Build working dir (transient research/build artifacts — not part of the product)
 /.multiview-build/
 
+# Proprietary NDI SDK drop-spot (NewTek/Vizrt; NEVER vendored/committed — ADR-0008).
+# The operator places the licensed SDK tarball here; it is extracted into the
+# image/container at build time and never enters git history.
+/.ndi-sdk/
+
 # Web / Node
 web/node_modules/
 web/dist/
