@@ -1085,17 +1085,25 @@ MP-6/MP-8 fan out once MP-2 lands.
   *Re-verify:* #5/#6 (one decode, supremum res, in-shader downscale), #10 (registry
   lifecycle off the hot path — design-note + no `Drop` in async destructor).
 
-- **MP-3 — Passthrough (remux) kind.**
-  `PacketCopyFanout` consuming `Demuxer::read_packet` (`demux.rs:196`) →
-  `add_stream_from_parameters` (`mux.rs:136`) → existing `PacketMuxSink`s, with the
-  monotonic DTS clamp + `avoid_negative_ts=make_zero` + discontinuity re-anchor; lazy
-  coded-packet facet on the registry (no decode). Build-time codec/container compat gate +
-  `PassthroughFallback`.
+- **MP-3 — Guarded passthrough kind (→ GP-0…GP-12, ADR-0030 §4).**
+  *Superseded:* the old "remux + honest `NO_SIGNAL`" plan VIOLATED the operator's
+  fail-to-slate rule, so this is now the **guarded passthrough** ladder, broken into
+  GP-0…GP-12 (see ADR-0030). `GuardedPacketSource` consumes `Demuxer::read_packet`
+  (`demux.rs:196`) on a dedicated egress thread, emitting copied input packets **or** a
+  **pre-baked param-matched slate** (black/SMPTE + 1 kHz/silence, encoded once, no held
+  session) into the existing encoder-less `PacketMuxSink`s; a degenerate compositor-less
+  `EngineRuntime` paces the per-tick liveness decision (watchdog). Prerequisite gaps:
+  `Demuxer` `AVIOInterruptCB`+`rw_timeout` (GP-0), strict-IDR `is_idr` classifier (GP-1),
+  in-band-PS/Annex-B BSF stage (GP-3). Capability ladder: matched-slate-splice →
+  container-discontinuity → full-transcode (`robustness_floor`, default `SlateOnLoss`;
+  `PassthroughFallback` removed).
   *Acceptance:* an RTSP H.264 source remuxes to an SRT/MP4 output with **zero** decode/
-  encode (assert no decoder/encoder instantiated); on source loss the program goes
-  `NO_SIGNAL` + reconnects, never fabricates.
-  *Re-verify:* **#1 sanctioned exception documented** (honest NO_SIGNAL), efficiency
-  (0 decode/encode), #3 (timestamp clamp, no tick re-stamp).
+  encode while healthy (assert no decoder/encoder instantiated); on source loss the program
+  emits the pre-baked BLACK/SMPTE+1 kHz slate within `splice_threshold` (≤ ~150 ms) and
+  recovers on the next true input IDR — never `is_key`.
+  *Re-verify:* **#1 PRESERVED, not excepted** (slate on loss), efficiency (0 decode/encode +
+  0 NVENC session at rungs 1–2), #3 (per-stream monotonic clamp+offset, no tick re-stamp),
+  #10 (dedicated egress thread + drop-oldest/`SINK_WEDGE_GRACE` detach; two-vector chaos gate).
 
 - **MP-4 — Transcode kind.**
   One source (shared decode from MP-2) → optional scale → `ProgramEncoder` →

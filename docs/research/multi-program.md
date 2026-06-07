@@ -19,15 +19,17 @@ The operator now needs the engine to run **several concurrent output pipelines**
 independently startable/stoppable, where each *program* is one of:
 
 - **(A) Multiview** — composite many sources into a canvas (today's behaviour).
-- **(B) Passthrough** — one source straight to an output, **remux with no re-encode**
-  where codecs allow (maximal efficiency: no decode, no encode, no composite).
+- **(B) Guarded passthrough** — one source straight to an output, **remux with no re-encode
+  while healthy** (no decode, no encode, no composite), but **fails to a pre-baked BLACK /
+  SMPTE-bars + 1 kHz-tone slate on any disruption** (invariant #1 preserved — §3, ADR-0030 §4).
 - **(C) Transcode** — one source decoded then re-encoded to a different
   codec/res/bitrate/container.
 
 Multiple may run at once: a 3×3 multiview→HLS, a direct RTSP→SRT passthrough, and a
 720p RTMP transcode of one camera — simultaneously, on commodity hardware. **Efficiency
 is the product**: a source used by several programs/tiles is decoded **once**
-(decode-once-use-many); a passthrough does **zero** decode/encode.
+(decode-once-use-many); a **healthy** passthrough does **zero** decode/encode (failing to a
+pre-baked slate on loss, at packet-copy steady-state cost — §3).
 
 ## 1. The unified Program model
 
@@ -40,7 +42,7 @@ Modelled as a tagged enum over three kinds, all sharing a process-global source 
 |------|----------------|---------------|---------|---------|
 | **A Multiview** | sample shared `TileStore`s → `CompositorDrive::compose(tick)` → `ProgramEncoder` → `StreamEgress` fan-out | **Yes** — own `OutputClock` at the program's fps | once / canvas | shared, per source |
 | **C Transcode** | shared decoded source → [scale to target] → `ProgramEncoder` → `StreamEgress` fan-out | **Yes** — own `OutputClock`; PTS re-stamped from tick (#3) | once / rendition | **shared** with any tile of the same source |
-| **B Passthrough** | own `Demuxer` → [bitstream filter] → packet-copy fan-out → mux sinks | **No** — source-paced byte copy (sanctioned #1 exception, §3) | **none** | **none** |
+| **B Guarded passthrough** | own `Demuxer` → `GuardedPacketSource` (copy ∥ pre-baked slate) → mux sinks | **Yes (degenerate)** — compositor-less clock paces the liveness decision; copy is source-paced (§3) | **none** while healthy (slate baked once at start) | **none** while healthy |
 
 Kinds A and C share the **identical encode tail** (`ProgramEncoder` → `StreamEgress` → N
 `PacketMuxSink`s) that is already built and tested (`pipeline.rs:1027`, fan-out at
@@ -123,30 +125,57 @@ relationship): **wedge program B's egress and assert program A's `ticks_emitted`
 per-program and already `DropOnOverload`, this isolation falls out of the
 per-program-egress design — the gate proves it.
 
-## 3. Passthrough and invariant #1 (the sanctioned exception)
+## 3. Guarded passthrough and invariant #1 (PRESERVING, not excepting)
 
-A passthrough remux has **no canvas to hold-last-good and no tick to emit on** — it
-copies coded access units. Invariant #1 ("one valid frame per tick, forever, never
-stalls") is the contract of the **clock-driven program core (A/C)**, not of a raw byte
-copy. **Decision (confidence: high):**
+A naive remux has no encoder, so on input loss it can fabricate nothing — which is why
+**naive packet-copy is rejected as a floor** (it would violate the operator's hard rule:
+*any disruption fails to BLACK or SMPTE-bars + 1 kHz tone*). **Guarded passthrough makes
+the byte copy invariant-#1-PRESERVING** without paying a steady-state encode. The full,
+adversarially-verified design (12 load-bearing claims, 8 held / 4 refined) is in
+**ADR-0030 §4 + the robustness ladder**; the essentials:
 
-> **Passthrough does NOT promise frame-perpetuity; it promises *bounded, honest*
-> behaviour on source loss.** It is paced by its input's PTS (invariant #4 — the input
-> pacer, not `-re`) with a bounded jitter buffer. It re-stamps **only** with the
-> monotonic clamp `dts = max(dts, last_dts+1)`, `pts = max(pts, dts)`, sets
-> `avoid_negative_ts=make_zero` + a small `max_interleave_delta` (the muxer aborts on
-> non-monotonic DTS — `streaming-gotchas.md:130`), and **never re-stamps from a tick**
-> (that would corrupt B-frame DTS reorder). On a discontinuity (TS discont / `|jump|>10s`)
-> it re-anchors with an offset, it does not pass the jump through.
+> **A passthrough is a degenerate, compositor-less `EngineRuntime`** ticking at the
+> program's cadence, gated only on its own `pacer.wait_until` `.await` — **never on the
+> demuxer**. The byte copy runs on a **separate** egress thread. It is **source-paced for
+> DATA, clock-paced for the LIVENESS DECISION**: each tick a `PacketLiveness` watchdog
+> (video + audio independent) `classify()`s an `AtomicI64 last_packet_at_ns` the copy
+> thread Release-stamps from the shared `TimeSource` (arrival instant, not packet PTS).
+> The clock thread flips a copy-vs-splice `AtomicU8`; the egress thread Acquire-reads it.
+> A stale read **fails safe** (biases toward splice). So #1 holds per program: a valid
+> coded AU — input packet **or** a pre-baked IDR-led slate AU — is emitted every tick.
 
-On source loss a passthrough **MUST NOT fabricate** coded frames (it has no encoder).
-Default `on_incompatible/on_loss = reject/down`: finalize the muxer trailer, mark the
-program `NO_SIGNAL`, supervised-reconnect with backoff. Opt-in `slate`/`transcode`:
-promote to a degenerate transcode that decodes last-good and re-encodes a slate at the
-negotiated params (reuses kind C). The ADR **must** state this explicitly so no one later
-"fixes" passthrough to pretend #1 — that would force the decode+encode the operator
-deliberately avoided. Cross-program isolation still holds: a passthrough runs on its own
-task with its own pacer, so it stalling never stalls program A's clock.
+- **Pre-bake-once slate.** Probe the input's coded params at program start; encode **once**
+  (encoder then released — **no held NVENC session**) a short IDR-led, closed-GOP, B-free
+  black/SMPTE + 1 kHz/silence loop in **bit-identical** params (SPS/PPS/VPS copied from the
+  input's extradata, in-band before the slate IDR). Cache as `Arc<[EncodedPacket]>`,
+  CRF/CQ, < 5 MB, O(1) in outage length. Failover replays inert bytes through the existing
+  encoder-less `PacketMuxSink` → zero scarce sessions at rungs 1–2.
+- **Re-stamp (#3 for the copy path).** Per-stream monotonic clamp+offset: `dts' =
+  max(raw+offset, last_dts+1)`, `pts' = max(raw+offset, dts')`; **the clamp — not any
+  FFmpeg flag — is what prevents `av_interleaved_write_frame`'s non-monotonic abort**.
+  `avoid_negative_ts=make_zero` is a one-shot leading shift; `max_interleave_delta` is an
+  interleave-flush knob, **not** an abort guard (don't set it "small"). Never `out_pts=f(tick)`
+  (collapses B-frame reorder). Pathological timestamps → drop down the ladder.
+- **Recovery gates on a TRUE IDR, not `is_key`.** FFmpeg flags HEVC CRA / H.264
+  recovery-point I-frames as "key"; re-anchoring there decodes garbage. A strict-IDR header
+  classifier (`is_idr`: H.264 nal==5; HEVC 19/20, reject CRA/BLA; AV1 KEY+show_frame+!show_existing+tid0+seq-hdr)
+  discards input until a clean RAP; no-IDR inputs (GDR/open-GOP) descend the ladder.
+- **The robustness ladder (cheapest valid rung first):** **(1) matched-slate-splice** (0
+  encode, 0 session; TS/SRT/RTSP/RTMP-matched + fMP4-matched, splices silently) → **(2)
+  container-discontinuity** (`EXT-X-DISCONTINUITY`+new `EXT-X-MAP` / TS `discontinuity_indicator`+PMT
+  `version++`; still 0 encode) → **(3) full-transcode** (the only rung that holds a session;
+  auto-selected for unstable params, inexpressible discontinuity, build-time codec/container
+  incompatibility, or guaranteed click-free audio). Each program declares a `robustness_floor`
+  (default `SlateOnLoss`); marginal cases fall through to rung 3 automatically.
+- **Three prerequisite code gaps** (not optional): `Demuxer` `AVIOInterruptCB`+`rw_timeout`
+  (recovery teardown); the `is_idr` classifier; a `dump_extra(freq=keyframes)`/Annex-B framing
+  BSF stage so PS repeat in-band at both seams. Isolation (#10): the egress
+  pull+`write_packet` runs on a dedicated thread wrapped in drop-oldest + `SINK_WEDGE_GRACE`
+  detach, so a wedged push peer is shed, never back-pressures the watchdog.
+
+Cross-program isolation holds: a passthrough runs on its own task with its own clock, so it
+stalling never stalls program A. Audio failover is **video-clean / soft-step, not pop-free**
+(coded-domain AAC seam transient); sample-accurate click-free ⇒ the transcode floor.
 
 **Compatibility is a build-time gate, not a run-time surprise.** Validate
 codec/profile-vs-container (e.g. HEVC into FLV/RTMP is illegal) during `build_programs`;
@@ -258,7 +287,8 @@ Add `#[serde(default)] programs: Vec<Program>` to `MultiviewConfig` (`lib.rs:89`
 `ProgramKind` (`#[serde(tag = "kind")]`, never untagged — conventions §5, ADR-0010), and
 its own `outputs: Vec<Output>` (reusing the existing `Output` enum + `gpu_pin` +
 per-output `audio` verbatim). `ProgramKind::Multiview { canvas, layout, cells, overlays }`
-(own fps → per-program cadence), `Passthrough { input_id, on_incompatible }`,
+(own fps → per-program cadence), `Passthrough { input_id, robustness_floor }`
+(default `SlateOnLoss`; never a `Reject` — the engine descends the ladder, ADR-0030 §1/§4),
 `Transcode { input_id, encode }`.
 
 **Backward compat (mandatory):** the existing top-level `canvas`/`layout`/`cells`/
@@ -319,8 +349,9 @@ name, **kind badge** (multiview/passthrough/transcode), run-state badge (from
 `program.state`), output count, start/stop (fires the 202 lifecycle POST + shows op-id
 progress); `usePrograms` via `makeListHook('programs', …)` (`queries.ts:142`).
 **Kind-switched editor:** Multiview → the existing `LayoutEditorPage` parameterized by
-program id; Passthrough → source + outputs + `on_incompatible`, with a computed
-"remux, no re-encode" vs "will transcode" badge (the efficiency contract made visible);
+program id; Passthrough → source + outputs + `robustness_floor`, with a computed
+**rung badge** ("will splice (remux)" / "will splice (discontinuity)" / "will transcode")
+plus "video-clean / audio soft-step" — the efficiency-and-robustness contract made visible;
 Transcode → source + `TranscodeSpec` + outputs. **Before any apply**, call `…/plan` and
 show the Class-1 (seamless) vs Class-2 ("resets N outputs / consumers reconnect") badge +
 confirm. The dashboard becomes a multi-program overview (one card per program).
@@ -329,7 +360,7 @@ confirm. The dashboard becomes a multi-program overview (one card per program).
 
 | # | Holds because |
 |---|---------------|
-| **#1** | Each clocked program (A/C) owns an independent `OutputClock`+`EngineRuntime` that awaits only its own pacer (`runtime.rs:405`); passthrough (B) is the sanctioned, explicitly-documented exception (§3) — honest best-effort, never fabricates. |
+| **#1** | Each program owns an independent `OutputClock`+`EngineRuntime` that awaits only its own pacer (`runtime.rs:405`); passthrough (B) runs a **degenerate, compositor-less clock** that fails to a pre-baked slate on loss (§3) — **#1-preserving, not an exception**: a valid coded AU is emitted every tick. |
 | **#5/#6** | One shared decoded NV12 store per source (`SourceRegistry`), decoded at the supremum consuming resolution, scaled per consumer in-shader. |
 | **#7** | Per-program-per-rendition encode (two canvases = two encodes, correctly); within a program, `StreamEgress` encodes once and fans out (`pipeline.rs:1659`). |
 | **#9** | Cross-program cheapest-impact-first shed with operator priority; per-program bounded `DropOnOverload` queues (`pipeline.rs:113,148`); union admission credits shared decode once. |
