@@ -58,6 +58,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-0030](ADR-0030.md) — Multiple active programs: a `Program` actor (multiview/passthrough/transcode) under a `ProgramSet` supervisor with per-program output clocks + shared time source, decode-once-use-many source registry, admission control + per-program degradation *(Proposed)*
 - [ADR-0031](ADR-0031.md) — Build our own pinned FFmpeg (reject jellyfin/PPA): LGPL-clean `--disable-everything` allowlist + separated GPL variant, reproducible multi-arch builder, FFmpeg 7.1.4 first (binding pin) then gated 8.1.1; shrink FFmpeg to codec+hwaccel only *(Proposed)*
 - [ADR-0032](ADR-0032.md) — HLS/LL-HLS delivery: tier the serving boundary (static-frontable master/segments/init for any CDN vs Multiview's own async blocking-reload origin for the live LL-HLS playlist + byte-range parts); CMAF/fMP4 default container; rolling-playlist + DVR + atomic-publish + deferred-unlink-pruning foundation; configurable locations/`base_url`; Cache-Control/CORS header contract + reference nginx/traefik config; HLS-0..14 backlog *(Proposed)*
+- [ADR-0033](ADR-0033.md) — AES67 / ST 2110-30 audio I/O (open-interop-first, no proprietary SDK): L16/L24 PCM-over-RTP send+receive; PTP/ST 2059-2 media-clock as a REFERENCE not a pacer (slave the audio sample clock, keep the video output clock free-running, inv #1) + boundary resampler; SDP+SAP discovery, NMOS IS-04/05 optional; receive reuses the existing st2110 depacketizer; bounded fail-honest on loss; AES67-0..N backlog *(Proposed)*
 
 ## Color
 
