@@ -21,11 +21,16 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
-# Real demux/decode lives entirely behind multiview-ffmpeg's SAFE wrappers; pulled
-# in only when THIS crate's `ffmpeg` feature is enabled, so the default build
-# stays pure-Rust / native-dep-free. multiview-input never links libav directly
-# (it forbids `unsafe`); it only calls multiview-ffmpeg's safe API.
-multiview-ffmpeg = { workspace = true, optional = true }
+# multiview-ffmpeg is pulled in UNCONDITIONALLY but with NO features: its DEFAULT
+# build is pure-Rust / native-dep-free (the libav* `ffmpeg-next` link is opt-in
+# behind ITS `ffmpeg` feature, off here by default), so the default multiview-input
+# build stays pure-Rust and LGPL-clean. We depend on it for the always-compiled,
+# libav-free GP-1 byte-parser types (`idr::{CodecKind, NalFraming}`) that the GP-2
+# pure parameter-set probe (`param_probe`) reuses instead of reinventing bitstream
+# framing. The real demux/decode SAFE wrappers stay gated: THIS crate's `ffmpeg`
+# feature turns on multiview-ffmpeg's `ffmpeg` feature. multiview-input never links
+# libav directly (it forbids `unsafe`); it only calls multiview-ffmpeg's safe API.
+multiview-ffmpeg = { workspace = true }
 
 # JSON info-dict parser + derive for the YouTube resolver (the `youtube`
 # feature). Pulled in only behind that off-by-default feature; the default build
@@ -57,10 +62,11 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 
 [features]
 "default" = []
-# Enable real libav ingest. Pulls multiview-ffmpeg's `ffmpeg` feature; multiview-input
-# itself adds NO native deps and stays `unsafe_code = forbid` — all FFI is owned
-# by multiview-ffmpeg.
-"ffmpeg" = ["dep:multiview-ffmpeg", "multiview-ffmpeg/ffmpeg"]
+# Enable real libav ingest. Pulls multiview-ffmpeg's `ffmpeg` feature; multiview-ffmpeg
+# is always a (pure-Rust, feature-free) dependency, so this only escalates its
+# feature set. multiview-input itself adds NO native deps and stays
+# `unsafe_code = forbid` — all FFI is owned by multiview-ffmpeg.
+"ffmpeg" = ["multiview-ffmpeg/ffmpeg"]
 # NDI® ingest (ADR-0008 / IN-3). OFF by default and **license-isolating**: it
 # pulls the runtime-load FFI leaf crate `multiview-ndi-sys` (the OUT-3 seam), which
 # `dlopen`s the operator-provided NDI runtime at RUN time — the proprietary SDK is
