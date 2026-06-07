@@ -37,6 +37,7 @@ pub mod cli;
 pub mod control;
 pub mod preview;
 pub mod run;
+pub mod system_metrics;
 pub mod validate;
 
 /// The overlay draw-data baker (feature `overlay`): builds the per-frame overlay
