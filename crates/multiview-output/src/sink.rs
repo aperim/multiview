@@ -48,7 +48,7 @@ use multiview_ffmpeg::{
 };
 
 use crate::error::{Error, Result};
-use crate::hls::{MediaPlaylist, Segment, SegmentType};
+use crate::hls::{LivePlaylist, MediaPlaylist, Segment, SegmentType};
 
 /// Nanoseconds in one second (the internal timeline unit, invariant #3).
 const NANOS_PER_SEC: i64 = 1_000_000_000;
@@ -1198,7 +1198,23 @@ enum PacketMuxKind {
     /// Single-container mux (file or live push).
     Single(SingleTarget),
     /// GOP-segmented MPEG-TS mux with an HLS playlist (`dir`, segment `prefix`).
+    ///
+    /// **Batch** flavour: every segment is accumulated and the playlist is
+    /// rendered once at finalize (the historical model). `live` is `None`.
     Segment { dir: PathBuf, prefix: String },
+    /// GOP-segmented MPEG-TS mux driven as a **rolling live** playlist (HLS-0/1,
+    /// ADR-0032): on each closed segment the windowed `.m3u8` is atomically
+    /// re-published and the evicted `.ts` pruned, so an infinite live run writes
+    /// (and bounds) the playlist + segments instead of only at a finalize that
+    /// never comes.
+    SegmentLive {
+        dir: PathBuf,
+        prefix: String,
+        /// Where the rolling `.m3u8` is published on every close.
+        playlist_path: PathBuf,
+        /// The bounded segment window (playlist length + on-disk segment count).
+        window: usize,
+    },
 }
 
 impl PacketMuxSink {
@@ -1225,12 +1241,45 @@ impl PacketMuxSink {
 
     /// A segmented (HLS) sink writing `prefix{n}.ts` MPEG-TS segments into `dir`
     /// and producing the referencing media playlist.
+    ///
+    /// **Batch** flavour: the playlist is built and returned at finalize. Suitable
+    /// for finite (VOD) runs; for an infinite live run use
+    /// [`segment_live`](Self::segment_live), which publishes a rolling playlist and
+    /// bounds the segment window on disk.
     #[must_use]
     pub fn segment(dir: impl Into<PathBuf>, prefix: impl Into<String>) -> Self {
         Self {
             kind: PacketMuxKind::Segment {
                 dir: dir.into(),
                 prefix: prefix.into(),
+            },
+        }
+    }
+
+    /// A **rolling live** segmented (HLS) sink (HLS-0/1, ADR-0032): like
+    /// [`segment`](Self::segment), but on **each** closed segment it atomically
+    /// re-publishes a windowed `.m3u8` to `playlist_path` and prunes the segment
+    /// that ages out of `window` from disk — so an infinite live run writes (and
+    /// bounds) both the playlist and the segment set instead of accumulating
+    /// forever and only rendering the playlist at a finalize that never arrives.
+    ///
+    /// The rendered manifest omits `#EXT-X-ENDLIST` while the run is live; it is
+    /// added once when [`run`](Self::run)/[`run_av`](Self::run_av) finalizes on a
+    /// clean stop. The segment muxing is atomic (mux to `<seg>.tmp`, rename after
+    /// `Muxer::finish`).
+    #[must_use]
+    pub fn segment_live(
+        dir: impl Into<PathBuf>,
+        prefix: impl Into<String>,
+        playlist_path: impl Into<PathBuf>,
+        window: usize,
+    ) -> Self {
+        Self {
+            kind: PacketMuxKind::SegmentLive {
+                dir: dir.into(),
+                prefix: prefix.into(),
+                playlist_path: playlist_path.into(),
+                window,
             },
         }
     }
@@ -1310,6 +1359,26 @@ impl PacketMuxSink {
                 finish_segments(state, driven, video.time_base)
                     .map(|result| PacketMuxOutcome::Segment(Box::new(result)))
             }
+            PacketMuxKind::SegmentLive {
+                dir,
+                prefix,
+                playlist_path,
+                window,
+            } => {
+                let mut state = SegmentState::new(
+                    StreamSeed::Params(video.params),
+                    video.time_base,
+                    audio,
+                    dir,
+                    prefix,
+                );
+                // The rolling-live driver: each closed segment is published into a
+                // windowed `.m3u8` on disk (atomic) and the evicted `.ts` pruned.
+                state.live = Some(LivePlaylist::new(playlist_path.clone(), *window));
+                let driven = state.drive_from_packets(source);
+                finish_segments(state, driven, video.time_base)
+                    .map(|result| PacketMuxOutcome::Segment(Box::new(result)))
+            }
         }
     }
 }
@@ -1356,11 +1425,27 @@ struct SegmentState<'a> {
     /// once and reused per segment.
     audio: Option<MuxStream<'a>>,
     current: Option<OpenSegment>,
-    /// Completed `(path, duration_seconds)` in order.
+    /// Completed `(path, duration_seconds)` in order. For the batch flavour this
+    /// is the playlist source built at finalize; for the live flavour each entry
+    /// is also published into [`Self::live`] as it is closed (and the file
+    /// renamed into place), so this remains the full ordered record of segments
+    /// written during the run.
     done: Vec<(PathBuf, f64)>,
     /// PTS of the most recently written packet (the running segment edge).
     last_pts: MediaTime,
     stats: EncodeStats,
+    /// The optional rolling **live** playlist driver (HLS-0/1, ADR-0032). `None`
+    /// is the historical **batch** behaviour: segments mux in place and the
+    /// playlist is rendered once at finalize (byte-identical to before this
+    /// field existed). `Some` switches to rolling publish + bounded window +
+    /// atomic segment muxing.
+    live: Option<LivePlaylist>,
+    /// Monotonic segment index for **live**-flavour filenames. Unlike
+    /// `done.len()`, this never reuses an index even though older segments are
+    /// pruned from disk — so a recycled name can never collide with a still-listed
+    /// segment. Unused (and stays `0`) for the batch flavour, which keeps its
+    /// historical `done.len()`-derived names.
+    seg_index: u64,
 }
 
 /// An in-progress segment: its muxer, registered stream index, file path, and
@@ -1371,7 +1456,14 @@ struct OpenSegment {
     /// The audio stream index registered on this segment muxer, if the run
     /// carries program audio (AUD-4); `None` for a video-only run.
     audio_index: Option<usize>,
+    /// The **final** path the closed segment is published under (referenced by
+    /// the playlist).
     path: PathBuf,
+    /// The path the muxer actually writes to while the segment is open. For the
+    /// **live** flavour this is a same-directory `<path>.tmp` that is renamed onto
+    /// `path` only after `Muxer::finish` (HLS-1 atomic publish); for the batch
+    /// flavour it equals `path` (mux in place, byte-identical to before).
+    write_path: PathBuf,
     start_pts: MediaTime,
 }
 
@@ -1397,6 +1489,8 @@ impl<'a> SegmentState<'a> {
             done: Vec::new(),
             last_pts: MediaTime::ZERO,
             stats: EncodeStats::default(),
+            live: None,
+            seg_index: 0,
         }
     }
 
@@ -1506,14 +1600,37 @@ impl<'a> SegmentState<'a> {
     /// GOP-aligned and each begins on a keyframe.
     fn start_segment(&mut self, start_pts: MediaTime) -> Result<()> {
         self.close_current(start_pts)?;
-        let index = self.done.len();
+        // Filename index: the live flavour uses a monotonic counter (so a name is
+        // never reused even though older segments are pruned from the window),
+        // while the batch flavour keeps its historical `done.len()` (byte-identical
+        // to before — `done` only grows in batch). The two cannot be conflated:
+        // under live, `done.len()` would recycle an index onto a still-listed
+        // segment.
+        let index = if self.live.is_some() {
+            let i = self.seg_index;
+            self.seg_index = self.seg_index.saturating_add(1);
+            i
+        } else {
+            // `done.len()` (a `usize`) widened to `u64` for a uniform format; the
+            // batch path historically formatted the `usize` directly, which prints
+            // identically.
+            u64::try_from(self.done.len()).unwrap_or(u64::MAX)
+        };
         let path = self.dir.join(format!("{}{index}.ts", self.prefix));
+        // Atomic publish (HLS-1, live only): the muxer writes to a same-directory
+        // `<seg>.tmp` and is renamed onto `path` after `Muxer::finish`. The batch
+        // flavour muxes in place (`write_path == path`), unchanged.
+        let write_path = if self.live.is_some() {
+            segment_temp_path(&path)
+        } else {
+            path.clone()
+        };
         // The run's single seed encoder only seeds the muxer stream's codec
         // parameters; the actual packets all come from the shared encoder in the
         // drive loop (one *encode* — invariant #7), while each segment file is
         // its own self-contained MPEG-TS container. The seed is reused for every
         // segment — never rebuilt per segment.
-        let mut muxer = Muxer::create_as(&path, "mpegts").map_err(ff)?;
+        let mut muxer = Muxer::create_as(&write_path, "mpegts").map_err(ff)?;
         // Register video then audio BEFORE the header — every segment carries the
         // same pinned two-stream layout (ADR-R005 §3.3, AUD-4).
         let stream_index = self.seed.add_stream(&mut muxer, self.time_base)?;
@@ -1531,6 +1648,7 @@ impl<'a> SegmentState<'a> {
             stream_index,
             audio_index,
             path,
+            write_path,
             start_pts,
         });
         Ok(())
@@ -1561,6 +1679,14 @@ impl<'a> SegmentState<'a> {
 
     /// Finalize the current segment (if any), recording its duration as the gap
     /// from its start PTS to `end_pts`, bounded below by one frame.
+    ///
+    /// For the **live** flavour this is also where atomic publish happens: after
+    /// `Muxer::finish` writes the trailer, the `<seg>.tmp` is renamed onto its
+    /// final path (so a fronting server never sees a half-written segment), then
+    /// the closed segment is pushed into the rolling [`LivePlaylist`] (which
+    /// re-publishes the windowed `.m3u8` atomically and prunes the evicted `.ts`).
+    /// The batch flavour leaves the muxed-in-place file untouched and only records
+    /// it for the finalize-time playlist render — byte-identical to before.
     fn close_current(&mut self, end_pts: MediaTime) -> Result<()> {
         let Some(mut segment) = self.current.take() else {
             return Ok(());
@@ -1572,11 +1698,35 @@ impl<'a> SegmentState<'a> {
             .saturating_sub(segment.start_pts.as_nanos());
         let frame_ns = rescale(1, self.time_base, Rational::new(1, NANOS_PER_SEC));
         let duration = seconds_from_ns(span_ns.max(frame_ns));
+        // Live atomic publish: the muxer wrote to `<seg>.tmp`; rename it onto its
+        // final path now that the trailer is durable, then roll the playlist.
+        if let Some(live) = self.live.as_mut() {
+            if segment.write_path != segment.path {
+                std::fs::rename(&segment.write_path, &segment.path).map_err(|e| {
+                    Error::Output(format!(
+                        "renaming segment {} -> {}: {e}",
+                        segment.write_path.display(),
+                        segment.path.display()
+                    ))
+                })?;
+            }
+            let uri = segment
+                .path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .ok_or_else(|| Error::Output("segment path has no file name".to_owned()))?;
+            live.push_closed_segment(uri.to_owned(), segment.path.clone(), duration)?;
+        }
         self.done.push((segment.path, duration));
         Ok(())
     }
 
     /// Finalize the final open segment and append every segment to `playlist`.
+    ///
+    /// For the **live** flavour this also finalizes the on-disk rolling playlist
+    /// (`#EXT-X-ENDLIST` + a last atomic publish): the `LivePlaylist` owns the
+    /// authoritative on-disk `.m3u8`, so the caller does not write the returned
+    /// `playlist` to disk for a live sink (it is built only for the run report).
     fn finish(&mut self, playlist: &mut MediaPlaylist, frame_ns: i64) -> Result<()> {
         let end = self
             .last_pts
@@ -1589,12 +1739,34 @@ impl<'a> SegmentState<'a> {
                 .ok_or_else(|| Error::Output("segment path has no file name".to_owned()))?;
             playlist.push_segment(Segment::new(uri.to_owned(), *duration));
         }
+        // Live: stamp the on-disk rolling playlist with EXT-X-ENDLIST and publish
+        // it one last time. The batch flavour's playlist is finalized by the
+        // caller (`finish_segments`).
+        if let Some(live) = self.live.as_mut() {
+            live.finalize()?;
+        }
         Ok(())
     }
 
     /// Consume the state, yielding the ordered list of segment paths written.
     fn into_segment_paths(self) -> Vec<PathBuf> {
         self.done.into_iter().map(|(path, _)| path).collect()
+    }
+}
+
+/// Derive the same-directory temp path a live segment is muxed to before being
+/// renamed into place (HLS-1 atomic publish): `seg3.ts` -> `seg3.ts.tmp`. The
+/// temp sits beside the final file so the subsequent `rename(2)` is atomic and
+/// `EXDEV`-free.
+fn segment_temp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("segment"),
+        std::ffi::OsStr::to_os_string,
+    );
+    name.push(".tmp");
+    match path.parent() {
+        Some(parent) => parent.join(name),
+        None => PathBuf::from(name),
     }
 }
 
