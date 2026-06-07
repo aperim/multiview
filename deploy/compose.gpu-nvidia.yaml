@@ -20,6 +20,19 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
       NVIDIA_VISIBLE_DEVICES: all
     # ---------------------------------------------------------------------------
+    # Per-process GPU attribution ("ours vs total" in the System monitor):
+    # NVML keys per-process counters (encode sessions, VRAM, SM/NVENC util) by the
+    # HOST-namespace PID, but a PID-namespaced container only knows its own local
+    # PID — so on a GPU SHARED with co-tenant processes (e.g. an NVR), Multiview
+    # cannot tell which sessions are ITS own. Sharing the host PID namespace makes
+    # `getpid()` == the NVML host PID, so the monitor can separate our load from
+    # the pre-existing load. OPT-IN (it lets the container see host process names —
+    # a small isolation trade-off); WITHOUT it the poller degrades gracefully to
+    # device-wide totals only (the `self_*` GPU fields stay absent — never a false
+    # zero). Uncomment to enable:
+    #
+    # pid: "host"
+    # ---------------------------------------------------------------------------
     # Legacy alternative (pre-CDI, with nvidia-container-runtime as the default
     # docker runtime). Comment out the `devices:` block above and uncomment this:
     #
