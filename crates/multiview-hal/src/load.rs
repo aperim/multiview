@@ -235,6 +235,130 @@ impl DeviceLoad {
     }
 }
 
+/// Our-process share of one device's load (monitoring v2: "ours vs total").
+///
+/// A [`DeviceLoad`] carries the **device-wide** totals across every consumer of a
+/// shared GPU (e.g. a co-tenant NVR). A `SelfShare` carries the portion attributed
+/// to **this** process (and its in-process libav NVENC/NVDEC contexts), keyed by
+/// the same stable [`DeviceId`], so the UI can render "ours vs total". Every
+/// signal is `Option`: present only where the platform exposes a per-process
+/// counter (NVIDIA via NVML per-process queries) and we are actually resident;
+/// `None` is the honest unknown, **never** a fabricated zero.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SelfShare {
+    /// The device this share describes (same stable identity as the matching
+    /// [`DeviceLoad`]).
+    pub device_id: DeviceId,
+    /// Our process's compute (SM) busy fraction (`0.0..=1.0`) on this device,
+    /// where the platform exposes a per-process SM counter.
+    pub compute_util: Option<f32>,
+    /// Our process's encoder (NVENC) busy fraction (`0.0..=1.0`), where exposed.
+    pub encoder_util: Option<f32>,
+    /// Our process's decoder (NVDEC) busy fraction (`0.0..=1.0`), where exposed.
+    pub decoder_util: Option<f32>,
+    /// VRAM (bytes) attributed to our process on this device, summed across our
+    /// graphics + compute contexts, where exposed.
+    pub mem_used_bytes: Option<u64>,
+    /// Concurrent NVENC encode sessions owned by our process on this device. A
+    /// `Some(0)` is an honest "we queried and own none"; `None` is "not queried /
+    /// unavailable".
+    pub encoder_sessions: Option<u32>,
+}
+
+impl SelfShare {
+    /// Construct an all-unknown self-share for `device_id` — every signal `None`.
+    ///
+    /// The honest starting point before any per-process counter is read (or on a
+    /// platform that exposes none): the wire `self_*` fields then stay absent.
+    #[must_use]
+    pub const fn unknown(device_id: DeviceId) -> Self {
+        Self {
+            device_id,
+            compute_util: None,
+            encoder_util: None,
+            decoder_util: None,
+            mem_used_bytes: None,
+            encoder_sessions: None,
+        }
+    }
+}
+
+/// Sum the VRAM bytes attributed to `our_pid` across a device's running-process
+/// list, given as `(pid, used_bytes)` pairs (a `None` value is a driver
+/// "unavailable" for that entry).
+///
+/// Returns `Some(total)` only when at least one entry is ours **and** carries a
+/// known byte count; `None` when we are not resident on the device or the driver
+/// reports our memory as unavailable — the honest unknown, never a false zero. A
+/// process may appear more than once (a graphics + a compute context); those sum.
+///
+/// Pure + GPU-free so it is unit-tested in the default build; consumed by the
+/// `cuda`-gated NVML per-process pass, hence gated to where it is referenced
+/// (`cuda` or `test`) to stay dead-code-clean under `-D warnings`.
+#[cfg(any(feature = "cuda", test))]
+#[must_use]
+fn self_mem_from_processes(processes: &[(u32, Option<u64>)], our_pid: u32) -> Option<u64> {
+    let mut total: Option<u64> = None;
+    for &(pid, used) in processes {
+        if pid != our_pid {
+            continue;
+        }
+        if let Some(bytes) = used {
+            total = Some(total.unwrap_or(0).saturating_add(bytes));
+        }
+    }
+    total
+}
+
+/// Count the encode sessions owned by `our_pid` from a device's session-owner pid
+/// list.
+///
+/// We always queried (the caller only calls this when the session list was read),
+/// so a count of `0` is an honest "we own none of the active sessions", distinct
+/// from "not queried" (which the caller represents as `None`).
+///
+/// Pure + GPU-free (unit-tested in the default build); gated to where it is
+/// referenced (`cuda` or `test`) to stay dead-code-clean under `-D warnings`.
+#[cfg(any(feature = "cuda", test))]
+#[must_use]
+fn self_sessions_from(session_owner_pids: &[u32], our_pid: u32) -> u32 {
+    let count = session_owner_pids
+        .iter()
+        .filter(|&&pid| pid == our_pid)
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// Average the utilisation rows belonging to `our_pid`, given as `(pid, percent)`
+/// pairs (NVML reports per-process SM/enc/dec utilisation as 0-100 integers), and
+/// map the mean to a clamped `0.0..=1.0` fraction.
+///
+/// Returns `None` when no row is ours (idle, or the driver returned no
+/// per-process sample for us) — the honest unknown, never a fabricated `0.0`.
+///
+/// Pure + GPU-free (unit-tested in the default build); gated to where it is
+/// referenced (`cuda` or `test`) to stay dead-code-clean under `-D warnings`.
+#[cfg(any(feature = "cuda", test))]
+#[must_use]
+fn self_util_avg_from_samples(samples: &[(u32, u32)], our_pid: u32) -> Option<f32> {
+    let mut sum: u64 = 0;
+    let mut count: u64 = 0;
+    for &(pid, percent) in samples {
+        if pid != our_pid {
+            continue;
+        }
+        sum = sum.saturating_add(u64::from(percent.min(100)));
+        count = count.saturating_add(1);
+    }
+    if count == 0 {
+        return None;
+    }
+    // mean percent in 0..=100; divide to a unit fraction via lossless widening.
+    let mean = u64_to_f64(sum) / u64_to_f64(count);
+    Some(f64_to_f32_saturating((mean / 100.0).clamp(0.0, 1.0)))
+}
+
 /// `used / total` as an `f32` fraction clamped to `0.0..=1.0`, computed via
 /// lossless `u64 -> f64` widening (no `as` casts).
 ///
@@ -481,6 +605,20 @@ pub trait LoadSource {
     /// Returns an empty vector cleanly when no accelerator is visible (the
     /// no-GPU host) — never a panic, never a fabricated device.
     fn poll(&self) -> Vec<DeviceLoad>;
+
+    /// Take one **our-process share** pass over every visible device (monitoring
+    /// v2: "ours vs total").
+    ///
+    /// [`poll`](Self::poll) reports the device-wide totals across every consumer of
+    /// a shared GPU; this reports the portion attributed to *this* process via the
+    /// platform's per-process counters (NVIDIA NVML), keyed by the same stable
+    /// [`DeviceId`]. The default returns an empty vector — a source with no
+    /// per-process signal (the [`NullLoadPoller`], a vendor that exposes none)
+    /// honestly attributes nothing, never a fabricated zero. The same off-hot-path
+    /// / non-blocking contract as [`poll`](Self::poll) applies.
+    fn poll_self_share(&self) -> Vec<SelfShare> {
+        Vec::new()
+    }
 }
 
 impl<P: LoadProbe> LoadSource for LoadPoller<P> {
@@ -573,8 +711,10 @@ pub use self::nvml::{NvmlLoadPoller, NvmlLoadProbe};
 #[cfg(feature = "cuda")]
 mod nvml {
     use super::{
-        DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, PollInterval, Vendor,
+        self_mem_from_processes, self_sessions_from, self_util_avg_from_samples, DeviceId,
+        DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, PollInterval, SelfShare, Vendor,
     };
+    use nvml_wrapper::enums::device::UsedGpuMemory;
 
     /// NVIDIA live-load probe via NVML (`nvml-wrapper`, runtime-loaded through
     /// `libloading`).
@@ -609,6 +749,102 @@ mod nvml {
                     None
                 }
             }
+        }
+
+        /// Compute **our process's** share of one device's load (monitoring v2).
+        ///
+        /// Attributes to `our_pid` (this Multiview process — it owns the in-process
+        /// libav NVENC/NVDEC sessions) via NVML's per-process queries:
+        /// * VRAM: `running_graphics_processes` + `running_compute_processes`
+        ///   (`ProcessInfo.used_gpu_memory`), summed across our contexts.
+        /// * Encode sessions: `encoder_sessions` filtered to our pid (count).
+        /// * SM/enc/dec utilisation: `process_utilization_stats` rows for our pid,
+        ///   averaged (a sampling window the driver may not always populate — then
+        ///   `None`, never a false zero).
+        ///
+        /// Returns `None` only when the device handle is unavailable or its identity
+        /// changed under us; otherwise a `SelfShare` whose individual fields are
+        /// `None` exactly where NVML did not expose that per-process signal.
+        #[must_use]
+        pub fn self_share(&self, device: &DeviceId, our_pid: u32) -> Option<SelfShare> {
+            let handle = self.nvml.device_by_index(device.index()).ok()?;
+            // Guard against a handle reordering: if the UUID changed, don't mislabel.
+            if handle.uuid().map_or(true, |u| u != device.stable_id()) {
+                return None;
+            }
+
+            // VRAM attributed to us: sum our graphics + compute contexts. A driver
+            // that reports memory as `Unavailable` for an entry contributes `None`
+            // for that entry (collapsed by the pure summer to "unknown", not zero).
+            let mut mem_pairs: Vec<(u32, Option<u64>)> = Vec::new();
+            let mut saw_process_list = false;
+            if let Ok(graphics) = handle.running_graphics_processes() {
+                saw_process_list = true;
+                mem_pairs.extend(
+                    graphics
+                        .iter()
+                        .map(|p| (p.pid, used_bytes(&p.used_gpu_memory))),
+                );
+            }
+            if let Ok(compute) = handle.running_compute_processes() {
+                saw_process_list = true;
+                mem_pairs.extend(
+                    compute
+                        .iter()
+                        .map(|p| (p.pid, used_bytes(&p.used_gpu_memory))),
+                );
+            }
+            let mem_used_bytes = if saw_process_list {
+                self_mem_from_processes(&mem_pairs, our_pid)
+            } else {
+                None
+            };
+
+            // Encode sessions we own: a count (Some(0) is "we own none", distinct
+            // from None = "the session list was unavailable").
+            let encoder_sessions = handle.encoder_sessions().ok().map(|sessions| {
+                let owners: Vec<u32> = sessions.into_iter().map(|s| s.pid).collect();
+                self_sessions_from(&owners, our_pid)
+            });
+
+            // Per-process SM/enc/dec utilisation: the most recent sampling window.
+            // Passing 0 as last_seen_timestamp asks for all available samples; the
+            // driver may return none (no recent window) -> each util stays None.
+            let (compute_util, encoder_util, decoder_util) = match handle
+                .process_utilization_stats(None)
+            {
+                Ok(samples) => {
+                    let sm: Vec<(u32, u32)> = samples.iter().map(|s| (s.pid, s.sm_util)).collect();
+                    let enc: Vec<(u32, u32)> =
+                        samples.iter().map(|s| (s.pid, s.enc_util)).collect();
+                    let dec: Vec<(u32, u32)> =
+                        samples.iter().map(|s| (s.pid, s.dec_util)).collect();
+                    (
+                        self_util_avg_from_samples(&sm, our_pid),
+                        self_util_avg_from_samples(&enc, our_pid),
+                        self_util_avg_from_samples(&dec, our_pid),
+                    )
+                }
+                Err(_) => (None, None, None),
+            };
+
+            Some(SelfShare {
+                device_id: device.clone(),
+                compute_util,
+                encoder_util,
+                decoder_util,
+                mem_used_bytes,
+                encoder_sessions,
+            })
+        }
+    }
+
+    /// Extract the byte count from an NVML [`UsedGpuMemory`], mapping the WDDM /
+    /// not-available variant to `None` (the honest unknown, never a false zero).
+    fn used_bytes(used: &UsedGpuMemory) -> Option<u64> {
+        match *used {
+            UsedGpuMemory::Used(bytes) => Some(bytes),
+            UsedGpuMemory::Unavailable => None,
         }
     }
 
@@ -708,6 +944,19 @@ mod nvml {
     impl LoadSource for NvmlLoadPoller {
         fn poll(&self) -> Vec<DeviceLoad> {
             self.inner.poll()
+        }
+
+        fn poll_self_share(&self) -> Vec<SelfShare> {
+            // Our pid owns the in-process libav NVENC/NVDEC contexts; attribute the
+            // per-process counters to it. One bounded pass over every visible
+            // device, the same off-hot-path contract as `poll`.
+            let our_pid = std::process::id();
+            let probe = self.inner.probe();
+            probe
+                .devices()
+                .iter()
+                .filter_map(|device| probe.self_share(device, our_pid))
+                .collect()
         }
     }
 }
@@ -1611,6 +1860,98 @@ mod tests {
         let loads = via_source.poll();
         assert_eq!(loads.len(), 1);
         assert_eq!(loads.first().map(|l| l.gpu_busy_frac), Some(Some(0.5)));
+    }
+
+    #[test]
+    fn poll_self_share_defaults_to_empty_for_the_null_source() {
+        // The always-compiled no-GPU source attributes no per-process share: a
+        // `LoadSource` with no per-process signal returns an empty share list (the
+        // default-method contract), never a fabricated zero.
+        let poller = NullLoadPoller::new();
+        let dynamic: &dyn LoadSource = &poller;
+        assert!(
+            dynamic.poll_self_share().is_empty(),
+            "the null source must report no per-process share"
+        );
+    }
+
+    #[test]
+    fn self_mem_sums_only_our_processes() {
+        // Given a device's running-process list as (pid, used_bytes) pairs, our
+        // share is the sum of the entries whose pid is ours; a co-tenant NVR pid is
+        // excluded. Two of our contexts (graphics + compute) sum.
+        let procs = [
+            (1000_u32, Some(2_000_000_000_u64)), // ours (graphics)
+            (1000_u32, Some(1_000_000_000_u64)), // ours (compute)
+            (4242_u32, Some(8_000_000_000_u64)), // co-tenant NVR — excluded
+        ];
+        assert_eq!(
+            self_mem_from_processes(&procs, 1000),
+            Some(3_000_000_000),
+            "our VRAM is the sum of OUR contexts, never the co-tenant's"
+        );
+    }
+
+    #[test]
+    fn self_mem_is_none_when_we_are_not_resident_or_mem_unknown() {
+        // Not resident on this device => honest None (never a false zero).
+        let procs = [(4242_u32, Some(8_000_000_000_u64))];
+        assert_eq!(self_mem_from_processes(&procs, 1000), None);
+        // Resident but the driver reports our memory as Unavailable (None) => None.
+        let unknown = [(1000_u32, None)];
+        assert_eq!(self_mem_from_processes(&unknown, 1000), None);
+        // No processes at all => None.
+        assert_eq!(self_mem_from_processes(&[], 1000), None);
+    }
+
+    #[test]
+    fn self_sessions_counts_only_ours() {
+        // Encoder-session owners as pids; our session count is how many are ours.
+        let owners = [4242_u32, 1000, 1000, 9999];
+        assert_eq!(
+            self_sessions_from(&owners, 1000),
+            2,
+            "two of the four active encode sessions are ours"
+        );
+        // None of ours => an honest zero count (we DID query; we own none).
+        assert_eq!(self_sessions_from(&[4242, 9999], 1000), 0);
+    }
+
+    #[test]
+    fn self_util_averages_our_samples_as_a_fraction() {
+        // process_utilization_stats yields (pid, percent) rows; our utilisation is
+        // the mean of OUR rows, mapped 0-100% -> 0.0..=1.0. 40% and 60% -> 0.5.
+        let samples = [(1000_u32, 40_u32), (1000_u32, 60_u32), (4242_u32, 90_u32)];
+        let frac = self_util_avg_from_samples(&samples, 1000).expect("our rows present");
+        assert!(
+            (frac - 0.5).abs() < 1e-4,
+            "mean of 40%+60% is 0.5, got {frac}"
+        );
+        // A >100% reading clamps; a single 100% row -> 1.0.
+        let hot = [(1000_u32, 150_u32)];
+        assert_eq!(self_util_avg_from_samples(&hot, 1000), Some(1.0));
+    }
+
+    #[test]
+    fn self_util_is_none_when_we_have_no_samples() {
+        // No row for our pid (idle / driver gave no per-process sample) => None,
+        // never a fabricated 0.0.
+        let samples = [(4242_u32, 90_u32)];
+        assert_eq!(self_util_avg_from_samples(&samples, 1000), None);
+        assert_eq!(self_util_avg_from_samples(&[], 1000), None);
+    }
+
+    #[test]
+    fn self_share_unknown_is_all_none() {
+        // The honest starting point: a `SelfShare` carries the device identity and
+        // every per-process signal `None` until populated.
+        let share = SelfShare::unknown(nv("GPU-x", 0));
+        assert_eq!(share.device_id, nv("GPU-x", 0));
+        assert!(share.compute_util.is_none());
+        assert!(share.encoder_util.is_none());
+        assert!(share.decoder_util.is_none());
+        assert!(share.mem_used_bytes.is_none());
+        assert!(share.encoder_sessions.is_none());
     }
 
     #[test]
