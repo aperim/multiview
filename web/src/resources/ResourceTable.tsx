@@ -3,6 +3,7 @@
 // Keeps the Sources/Outputs/Overlays views DRY: pass the typed rows + columns
 // and it renders an accessible table with an empty state. Row-level actions
 // (edit/delete) live in an `actions` column the caller supplies.
+import { useMemo } from 'react';
 import type { JSX } from 'react';
 import {
   flexRender,
@@ -40,9 +41,17 @@ export function ResourceTable<T>({
   caption,
   emptyMessage,
 }: ResourceTableProps<T>): JSX.Element {
+  // TanStack Table REQUIRES a referentially-stable `data` reference. Passing a
+  // fresh array every render (`[...rows]`) drove `useReactTable` into an
+  // UNBOUNDED re-render loop that OOM-killed the renderer the moment any sibling
+  // (e.g. an open create/edit Dialog) re-rendered this page. `rows` is stable
+  // across renders (it comes straight from the React Query cache), so memoizing
+  // the spread on `[rows]` gives the table a stable identity and the loop is
+  // gone. Verified with a headless-browser repro across every resource dialog.
+  const data = useMemo<T[]>(() => [...rows], [rows]);
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table instance is a leaf; see LayoutsPage note.
   const table = useReactTable<T>({
-    data: [...rows],
+    data,
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
