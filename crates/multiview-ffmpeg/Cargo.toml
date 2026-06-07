@@ -27,10 +27,16 @@ tracing = { workspace = true }
 # (public-domain-equivalent, permissive) — acceptable for an opt-in feature; the
 # default `cargo deny check` runs with all-features=false so it never sees this.
 ffmpeg-next = { version = "8.1", optional = true }
+# C ABI scalar types (`c_int`/`c_void`) for the GP-0 `AVIOInterruptCB` callback,
+# whose libav-bound signature is `extern "C" fn(*mut libc::c_void) -> libc::c_int`
+# (ffmpeg-sys-next's bindings use `libc::*`). Only pulled in with `ffmpeg`; it is
+# already in the dependency tree via `ffmpeg-sys-next`, so this adds no new
+# native/license surface. MIT OR Apache-2.0.
+libc = { version = "0.2", optional = true }
 
 [features]
 "default" = []
-"ffmpeg" = ["dep:ffmpeg-next"]
+"ffmpeg" = ["dep:ffmpeg-next", "dep:libc"]
 "gpl-codecs" = []
 # NVENC hardware-encoder selection (h264_nvenc / hevc_nvenc). Compile-only here:
 # the NVENC encoders live in the linked libavcodec, so this gates only which

@@ -2800,6 +2800,7 @@ name = "multiview-ffmpeg"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
+ "libc",
  "multiview-core",
  "serde",
  "serde_json",

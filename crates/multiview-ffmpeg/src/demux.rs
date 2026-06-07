@@ -13,6 +13,8 @@
 //! untouched.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use ffmpeg::codec::Parameters;
 use ffmpeg::media::Type;
@@ -23,6 +25,7 @@ use multiview_core::time::Rational;
 use crate::convert::{from_ff_rational, MediaKind};
 use crate::decode::ensure_initialized;
 use crate::error::{FfmpegError, Result};
+use crate::idr::{is_idr, CodecKind, NalFraming};
 
 /// A pure, owned snapshot of one stream's parameters.
 ///
@@ -85,9 +88,132 @@ impl ReadPacket {
     }
 
     /// Whether the packet is flagged as a keyframe.
+    ///
+    /// **Not** an IDR test (GP-1, ADR-0030): `FFmpeg` sets `AV_PKT_FLAG_KEY` for
+    /// HEVC CRA / open-GOP and H.264 recovery-point-SEI I-frames too, whose
+    /// leading pictures reference now-absent frames. For passthrough recovery
+    /// re-anchoring use [`ReadPacket::is_idr`], the strict random-access test.
     #[must_use]
     pub fn is_key(&self) -> bool {
         self.packet.is_key()
+    }
+
+    /// Whether this access unit is a **strict** IDR / clean random-access point
+    /// for `(codec, framing)` — the gate for re-anchoring a guarded passthrough
+    /// on recovery (GP-1, ADR-0030 boundary 2).
+    ///
+    /// Unlike [`ReadPacket::is_key`] this inspects the coded NAL/OBU bytes:
+    /// H.264 `nal_unit_type == 5`; HEVC `IDR_W_RADL (19)` / `IDR_N_LP (20)`
+    /// (rejecting CRA / BLA); AV1 a KEY frame in a temporal unit carrying a
+    /// sequence header. It returns `false` for an empty packet or any input it
+    /// cannot positively classify (a missed IDR only delays recovery; a false
+    /// IDR would splice garbage). Derive `(codec, framing)` once per stream with
+    /// [`Demuxer::stream_idr_framing`].
+    #[must_use]
+    pub fn is_idr(&self, codec: CodecKind, framing: NalFraming) -> bool {
+        self.packet
+            .data()
+            .is_some_and(|bytes| is_idr(bytes, codec, framing))
+    }
+}
+
+/// Sentinel meaning "no deadline is armed" in [`ReadDeadline`].
+const DEADLINE_DISARMED: u64 = 0;
+
+/// Shared, lock-free read-deadline state read by the `AVIOInterruptCB` callback.
+///
+/// The callback runs on a **foreign / libav I/O thread** while a read is blocked
+/// (GP-0, ADR-0030). It must be allocation-light and must never let a Rust panic
+/// unwind across the FFI boundary, so it does nothing but compare two integers:
+/// an `AtomicU64` deadline (nanoseconds since `base`, or [`DEADLINE_DISARMED`])
+/// against the elapsed time. The owning [`Demuxer`] keeps this `Box` alive for
+/// the whole life of the context and frees it in `Drop` (no leak, unlike
+/// `ffmpeg_next::format::input_with_interrupt`, which leaks the closure).
+struct ReadDeadline {
+    /// Monotonic base captured at construction; the deadline is relative to it.
+    base: Instant,
+    /// Nanoseconds-since-`base` past which a blocked read must abort, or
+    /// [`DEADLINE_DISARMED`] when no deadline is armed.
+    deadline_ns: AtomicU64,
+}
+
+impl ReadDeadline {
+    /// A fresh, disarmed deadline anchored at `now`.
+    fn new() -> Self {
+        Self {
+            base: Instant::now(),
+            deadline_ns: AtomicU64::new(DEADLINE_DISARMED),
+        }
+    }
+
+    /// Arm the deadline to `timeout` from now (saturating into the `base`
+    /// timeline; clamped away from the disarmed sentinel).
+    fn arm(&self, timeout: Duration) {
+        let elapsed = self.base.elapsed();
+        let at = elapsed.saturating_add(timeout);
+        let ns = u64::try_from(at.as_nanos()).unwrap_or(u64::MAX);
+        // Never store the disarmed sentinel for a real deadline.
+        self.deadline_ns
+            .store(ns.max(DEADLINE_DISARMED + 1), Ordering::Release);
+    }
+
+    /// Disarm the deadline (no read in progress).
+    fn disarm(&self) {
+        self.deadline_ns.store(DEADLINE_DISARMED, Ordering::Release);
+    }
+
+    /// Whether a blocked read should abort *now*.
+    fn expired(&self) -> bool {
+        let deadline = self.deadline_ns.load(Ordering::Acquire);
+        let now_ns = u64::try_from(self.base.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        should_interrupt(now_ns, deadline)
+    }
+}
+
+/// Pure interrupt-decision: abort iff a deadline is armed and `now_ns` reached it.
+///
+/// A `deadline_ns` of [`DEADLINE_DISARMED`] means "no deadline" → never interrupt.
+/// Split out so the decision is exhaustively unit-testable with no libav and no
+/// clock (GP-0). The callback only ever calls this with monotonic values.
+#[must_use]
+fn should_interrupt(now_ns: u64, deadline_ns: u64) -> bool {
+    deadline_ns != DEADLINE_DISARMED && now_ns >= deadline_ns
+}
+
+/// Options for [`Demuxer::open_with_interrupt`] (GP-0, ADR-0030).
+///
+/// A live passthrough opens its demuxer with a read/write timeout so a stalled
+/// TCP/RTSP/SRT/UDP read aborts within `rw_timeout` (via both the libav
+/// `rw_timeout` option **and** the injected `AVIOInterruptCB`) instead of
+/// blocking forever, letting recovery tear the wedged demuxer down.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct DemuxOptions {
+    /// The read/write timeout. `None` opens with no timeout (like
+    /// [`Demuxer::open`]); the interrupt callback is still installed but stays
+    /// disarmed, so behaviour matches a bare open.
+    rw_timeout: Option<Duration>,
+}
+
+impl DemuxOptions {
+    /// A fresh option set with no timeout.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the read/write timeout: a blocked open or read aborts within roughly
+    /// this duration.
+    #[must_use]
+    pub fn with_rw_timeout(mut self, timeout: Duration) -> Self {
+        self.rw_timeout = Some(timeout);
+        self
+    }
+
+    /// The configured read/write timeout, if any.
+    #[must_use]
+    pub fn rw_timeout(&self) -> Option<Duration> {
+        self.rw_timeout
     }
 }
 
@@ -98,6 +224,16 @@ impl ReadPacket {
 /// thread that drives it.
 pub struct Demuxer {
     input: ffmpeg::format::context::Input,
+    /// The read-deadline state the injected `AVIOInterruptCB` reads. Boxed so its
+    /// address is stable for the raw pointer libav holds; `None` for a bare
+    /// [`Demuxer::open`] (no interrupt callback installed). The box outlives the
+    /// `AVFormatContext`: `input` (and so the callback) is dropped before this
+    /// field in declaration order.
+    deadline: Option<Box<ReadDeadline>>,
+    /// The configured read timeout, replayed to arm the deadline per read.
+    rw_timeout: Option<Duration>,
+    /// The opened path/URL, for timeout error reporting.
+    source: String,
 }
 
 impl Demuxer {
@@ -112,7 +248,52 @@ impl Demuxer {
             path: path.display().to_string(),
             source,
         })?;
-        Ok(Self { input })
+        Ok(Self {
+            input,
+            deadline: None,
+            rw_timeout: None,
+            source: path.display().to_string(),
+        })
+    }
+
+    /// Open `path` with an injected `AVIOInterruptCB` + `rw_timeout` (GP-0,
+    /// ADR-0030 recovery teardown).
+    ///
+    /// Unlike [`Demuxer::open`], a blocked open or [`Demuxer::read_packet`] on a
+    /// stalled live input aborts within `options.rw_timeout` instead of hanging:
+    /// the timeout is handed to libav as the `rw_timeout` `AVOption` **and** an
+    /// owned [`ReadDeadline`] is wired into the context's `interrupt_callback`,
+    /// so a wedged read returns control and the demuxer can be torn down. With no
+    /// `rw_timeout` set, this behaves like [`Demuxer::open`] (callback installed
+    /// but never armed).
+    ///
+    /// # Errors
+    /// * [`FfmpegError::Init`] — global libav init failed.
+    /// * [`FfmpegError::ReadTimeout`] — the open exceeded `rw_timeout` (the input
+    ///   never delivered a header; the wedged context was aborted).
+    /// * [`FfmpegError::OpenInput`] — the container could not be opened/probed.
+    pub fn open_with_interrupt(path: &Path, options: DemuxOptions) -> Result<Self> {
+        ensure_initialized()?;
+        let source = path.display().to_string();
+        let rw_timeout = options.rw_timeout();
+
+        // The deadline box must outlive the AVFormatContext: libav stores a raw
+        // pointer to it in `interrupt_callback`. We keep ownership here and arm
+        // it for the duration of the (potentially blocking) open.
+        let deadline = Box::new(ReadDeadline::new());
+        if let Some(timeout) = rw_timeout {
+            deadline.arm(timeout);
+        }
+
+        let input = open_input_with_interrupt(path, deadline.as_ref(), rw_timeout)?;
+        deadline.disarm();
+
+        Ok(Self {
+            input,
+            deadline: Some(deadline),
+            rw_timeout,
+            source,
+        })
     }
 
     /// Snapshot every stream's parameters.
@@ -189,13 +370,58 @@ impl Demuxer {
         self.input.stream(index).map(|s| s.parameters())
     }
 
+    /// Derive the `(codec, framing)` pair to pass to
+    /// [`ReadPacket::is_idr`] for the stream at `index` (GP-1, ADR-0030).
+    ///
+    /// The codec comes from the stream's codec id; the framing is read from the
+    /// stream's extradata — an avcC/hvcC config record (first byte `0x01`) means
+    /// length-prefixed NALs with `nal_length_size = (extradata[4] & 3) + 1`,
+    /// otherwise the elementary stream is Annex-B (start codes), and AV1 is always
+    /// the OBU stream. Returns [`None`] for a non-existent stream or a codec whose
+    /// random-access structure this classifier does not model.
+    #[must_use]
+    pub fn stream_idr_framing(&self, index: usize) -> Option<(CodecKind, NalFraming)> {
+        let params = self.input.stream(index)?.parameters();
+        let codec = match params.id() {
+            ffmpeg::codec::Id::H264 => CodecKind::H264,
+            ffmpeg::codec::Id::HEVC => CodecKind::Hevc,
+            ffmpeg::codec::Id::AV1 => CodecKind::Av1,
+            _ => return None,
+        };
+        let framing = match codec {
+            // AV1 is carried as the low-overhead OBU stream.
+            CodecKind::Av1 => NalFraming::Obu,
+            // H.264 / HEVC: avcC/hvcC extradata ⇒ length-prefixed; else Annex-B.
+            CodecKind::H264 | CodecKind::Hevc => nal_framing_from_extradata(&params),
+            CodecKind::Other => return None,
+        };
+        Some((codec, framing))
+    }
+
     /// Read the next coded packet from any stream, or [`None`] at end-of-stream.
     ///
+    /// When opened via [`Demuxer::open_with_interrupt`] with a `rw_timeout`, a
+    /// read stalled on a wedged live input aborts within the timeout and returns
+    /// [`FfmpegError::ReadTimeout`] (rather than blocking forever) so recovery can
+    /// tear the demuxer down (GP-0, ADR-0030).
+    ///
     /// # Errors
-    /// Returns [`FfmpegError::Decode`] for a read error other than clean EOF.
+    /// * [`FfmpegError::ReadTimeout`] — the read exceeded the configured timeout.
+    /// * [`FfmpegError::Decode`] — a read error other than clean EOF / timeout.
     pub fn read_packet(&mut self) -> Result<Option<ReadPacket>> {
+        // Arm the per-read deadline so the interrupt callback aborts a blocked
+        // read; disarm it again whatever the outcome.
+        if let (Some(deadline), Some(timeout)) = (self.deadline.as_ref(), self.rw_timeout) {
+            deadline.arm(timeout);
+        }
         let mut packet = ffmpeg::codec::packet::Packet::empty();
-        match packet.read(&mut self.input) {
+        let outcome = packet.read(&mut self.input);
+        let expired = self.deadline.as_ref().is_some_and(|d| d.expired());
+        if let Some(deadline) = self.deadline.as_ref() {
+            deadline.disarm();
+        }
+
+        match outcome {
             Ok(()) => {
                 let stream_index = packet.stream();
                 Ok(Some(ReadPacket {
@@ -204,7 +430,20 @@ impl Demuxer {
                 }))
             }
             Err(ffmpeg::Error::Eof) => Ok(None),
-            Err(other) => Err(FfmpegError::Decode(other)),
+            // A read aborted by the interrupt callback surfaces as a libav error;
+            // disambiguate it from a real decode error by the armed deadline.
+            Err(other) => {
+                if expired {
+                    Err(FfmpegError::ReadTimeout {
+                        path: self.source.clone(),
+                        timeout_ms: self
+                            .rw_timeout
+                            .map_or(0, |t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX)),
+                    })
+                } else {
+                    Err(FfmpegError::Decode(other))
+                }
+            }
         }
     }
 
@@ -251,5 +490,254 @@ fn rate_opt(rate: ffmpeg::Rational) -> Option<Rational> {
         None
     } else {
         Some(from_ff_rational(rate))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GP-0 FFI: interrupt callback + rw_timeout open (ADR-0030 recovery teardown).
+//
+// reason: combining an `AVIOInterruptCB` with a `rw_timeout` option dict on the
+// open has no safe `ffmpeg_next` wrapper (`input_with_interrupt` installs no
+// options and leaks the closure; `input_with_dictionary` installs no callback),
+// so the open path below drives the raw libav FFI directly. The crate is
+// `unsafe_code = deny`; every `unsafe` operation carries a `// SAFETY:` note and
+// is bounded to libav objects we own. The interrupt callback never allocates and
+// never unwinds across the FFI boundary.
+#[allow(unsafe_code)]
+mod ffi_open {
+    use std::ffi::CString;
+    use std::ptr;
+    use std::time::Duration;
+
+    use ffmpeg::ffi;
+    use ffmpeg_next as ffmpeg;
+    use libc::{c_int, c_void};
+
+    use super::ReadDeadline;
+    use crate::error::{FfmpegError, Result};
+
+    /// `extern "C"` interrupt callback libav polls while a read is blocked.
+    ///
+    /// `opaque` is the `*const ReadDeadline` we installed. The body only reads two
+    /// atomics + a monotonic clock and returns `1` to abort or `0` to continue —
+    /// no allocation, no `panic!`, no unwinding across FFI (every operation here
+    /// is panic-free, so no `catch_unwind` is needed).
+    extern "C" fn interrupt_cb(opaque: *mut c_void) -> c_int {
+        if opaque.is_null() {
+            return 0;
+        }
+        // SAFETY: `opaque` is the `&ReadDeadline` pointer installed in
+        // `open_with_interrupt`; the owning `Box<ReadDeadline>` lives in the
+        // `Demuxer` for at least as long as the `AVFormatContext` that holds this
+        // callback (the context is closed in `Demuxer::drop` before the box is
+        // freed, by field declaration order), so the reference is valid here.
+        let deadline: &ReadDeadline = unsafe { &*opaque.cast::<ReadDeadline>() };
+        c_int::from(deadline.expired())
+    }
+
+    /// Open `path` with the interrupt callback wired to `deadline` and, if set,
+    /// the `rw_timeout` `AVOption`, returning a wrapped [`Input`](ffmpeg::format::context::Input).
+    ///
+    /// `deadline` must outlive the returned context (the caller keeps the owning
+    /// `Box` alive in the `Demuxer`).
+    pub(super) fn open_input_with_interrupt(
+        path: &std::path::Path,
+        deadline: &ReadDeadline,
+        rw_timeout: Option<Duration>,
+    ) -> Result<ffmpeg::format::context::Input> {
+        let source = path.display().to_string();
+        let curl = CString::new(source.as_str())
+            .map_err(|_| open_err(&source, "path has an interior NUL"))?;
+
+        // SAFETY: avformat_alloc_context returns an owned context or null. We
+        // install the interrupt callback on it, hand it to avformat_open_input
+        // (which adopts it on success and frees + nulls it on failure), and free
+        // it ourselves on every early-return path before the open.
+        let mut ps_io = unsafe { ffi::avformat_alloc_context() };
+        if ps_io.is_null() {
+            return Err(open_err(&source, "avformat_alloc_context returned null"));
+        }
+        // SAFETY: `ps_io` is the freshly-allocated context; `deadline` is a valid
+        // reference whose owning `Box` outlives the context. We point the
+        // interrupt callback's opaque at it.
+        unsafe {
+            (*ps_io).interrupt_callback = ffi::AVIOInterruptCB {
+                callback: Some(interrupt_cb),
+                opaque: ptr::from_ref(deadline).cast::<c_void>().cast_mut(),
+            };
+        }
+
+        // Build the rw_timeout option dict (microseconds), if requested. On any
+        // setup failure we must free the context we still own.
+        let mut opts: *mut ffi::AVDictionary = ptr::null_mut();
+        if let Some(timeout) = rw_timeout {
+            let micros = u64::try_from(timeout.as_micros()).unwrap_or(u64::MAX);
+            let set = build_timeout_dict(&mut opts, micros);
+            if set.is_err() {
+                // SAFETY: frees the partial dict and the allocated-but-unopened
+                // context (both owned by us; close_input handles a non-opened ctx).
+                unsafe {
+                    ffi::av_dict_free(&raw mut opts);
+                    ffi::avformat_close_input(&raw mut ps_io);
+                }
+                return Err(open_err(&source, "av_dict_set(rw_timeout) failed"));
+            }
+        }
+
+        // SAFETY: `ps_io` is our allocated context; `curl` is a valid CString for
+        // the call; `opts` is our live dict (or null). On success libav adopts
+        // the context (we wrap it); on failure it frees and nulls it.
+        let open = unsafe {
+            ffi::avformat_open_input(&raw mut ps_io, curl.as_ptr(), ptr::null(), &raw mut opts)
+        };
+        // SAFETY: av_dict_free is null-safe; frees any entries open_input left.
+        unsafe { ffi::av_dict_free(&raw mut opts) };
+        if open < 0 {
+            // avformat_open_input already freed + nulled the context on error.
+            return Err(FfmpegError::OpenInput {
+                path: source,
+                source: ffmpeg::Error::from(open),
+            });
+        }
+
+        // SAFETY: `ps_io` is the opened context; find_stream_info probes it.
+        let info = unsafe { ffi::avformat_find_stream_info(ps_io, ptr::null_mut()) };
+        if info < 0 {
+            // SAFETY: close the opened context we still own before returning.
+            unsafe { ffi::avformat_close_input(&raw mut ps_io) };
+            return Err(FfmpegError::OpenInput {
+                path: source,
+                source: ffmpeg::Error::from(info),
+            });
+        }
+
+        // SAFETY: `ps_io` is a valid, opened input context; `Input::wrap` adopts
+        // it and frees it via `avformat_close_input` in its destructor.
+        Ok(unsafe { ffmpeg::format::context::Input::wrap(ps_io) })
+    }
+
+    /// Set the `rw_timeout` (microseconds) `AVOption` into the `opts` dict.
+    ///
+    /// `opts` must point at a (possibly-null) dictionary slot owned by the caller,
+    /// who frees it on every path. Returns `Err(())` if the key/value held an
+    /// interior NUL or `av_dict_set` failed.
+    fn build_timeout_dict(
+        opts: &mut *mut ffi::AVDictionary,
+        micros: u64,
+    ) -> core::result::Result<(), ()> {
+        let to_key = CString::new("rw_timeout").map_err(|_| ())?;
+        let to_val = CString::new(micros.to_string()).map_err(|_| ())?;
+        // SAFETY: `opts` is the caller's dict slot (null or live); av_dict_set
+        // allocates/links the entry. The caller frees the dict on every path.
+        let r = unsafe { ffi::av_dict_set(opts, to_key.as_ptr(), to_val.as_ptr(), 0) };
+        if r < 0 {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Build a [`FfmpegError::OpenInput`]-shaped error for a setup failure that
+    /// prevented the open from starting (interior NUL, allocation failure), as an
+    /// EINVAL-wrapped libav error.
+    fn open_err(source: &str, _reason: &'static str) -> FfmpegError {
+        FfmpegError::OpenInput {
+            path: source.to_owned(),
+            source: ffmpeg::Error::from(ffi::AVERROR(libc::EINVAL)),
+        }
+    }
+}
+
+use ffi_open::open_input_with_interrupt;
+
+/// Read the NAL framing of an H.264 / HEVC stream from its codec extradata.
+///
+/// avcC / hvcC config records begin with `configurationVersion == 1`; their
+/// `lengthSizeMinusOne` lives in `extradata[4] & 0x03`, so each NAL is preceded
+/// by `(that + 1)` big-endian length bytes. Anything else (no extradata, or a
+/// leading `0x00 0x00 0x01` start code) is the Annex-B elementary stream.
+#[allow(unsafe_code)]
+fn nal_framing_from_extradata(params: &Parameters) -> NalFraming {
+    // SAFETY: `params.as_ptr()` is a valid `AVCodecParameters` for the lifetime
+    // of the borrow. `extradata`/`extradata_size` are plain fields; we read the
+    // pointer + length and build a bounded slice (or treat absent/short as
+    // Annex-B). We never write through the pointer or outlive `params`.
+    let extradata: &[u8] = unsafe {
+        let raw = params.as_ptr();
+        let ptr = (*raw).extradata;
+        let len = usize::try_from((*raw).extradata_size).unwrap_or(0);
+        if ptr.is_null() || len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(ptr, len)
+        }
+    };
+    match (extradata.first(), extradata.get(4)) {
+        // avcC / hvcC: version byte 0x01, length-size in the low 2 bits of byte 4.
+        (Some(&0x01), Some(&size_byte)) => NalFraming::LengthPrefixed {
+            nal_length_size: (size_byte & 0x03) + 1,
+        },
+        _ => NalFraming::AnnexB,
+    }
+}
+
+#[cfg(test)]
+mod interrupt_logic_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::time::Duration;
+
+    use super::{should_interrupt, DemuxOptions, ReadDeadline, DEADLINE_DISARMED};
+
+    #[test]
+    fn disarmed_deadline_never_interrupts() {
+        // The sentinel (no deadline armed) must never abort a read, no matter how
+        // large the elapsed time — a healthy read must run to completion.
+        assert!(!should_interrupt(0, DEADLINE_DISARMED));
+        assert!(!should_interrupt(u64::MAX, DEADLINE_DISARMED));
+    }
+
+    #[test]
+    fn armed_deadline_interrupts_only_at_or_past_the_deadline() {
+        // Before the deadline: keep reading. At/after it: abort.
+        assert!(!should_interrupt(99, 100));
+        assert!(should_interrupt(100, 100));
+        assert!(should_interrupt(101, 100));
+    }
+
+    #[test]
+    fn arm_then_expire_via_a_zero_timeout_fires_immediately() {
+        // Arming a zero (or tiny) timeout means a blocked read aborts at once.
+        let d = ReadDeadline::new();
+        assert!(!d.expired(), "a fresh deadline is disarmed");
+        d.arm(Duration::from_nanos(0));
+        // Any nonzero elapsed time is already >= a now+0 deadline.
+        assert!(d.expired(), "a zero-timeout deadline expires immediately");
+    }
+
+    #[test]
+    fn arm_with_a_large_timeout_does_not_expire_immediately() {
+        let d = ReadDeadline::new();
+        d.arm(Duration::from_secs(3600));
+        assert!(
+            !d.expired(),
+            "a one-hour deadline must not be already expired"
+        );
+    }
+
+    #[test]
+    fn disarm_clears_an_armed_deadline() {
+        let d = ReadDeadline::new();
+        d.arm(Duration::from_nanos(0));
+        assert!(d.expired());
+        d.disarm();
+        assert!(!d.expired(), "disarm must stop the interrupt firing");
+    }
+
+    #[test]
+    fn options_round_trip_the_timeout() {
+        assert_eq!(DemuxOptions::new().rw_timeout(), None);
+        let opts = DemuxOptions::new().with_rw_timeout(Duration::from_millis(250));
+        assert_eq!(opts.rw_timeout(), Some(Duration::from_millis(250)));
     }
 }

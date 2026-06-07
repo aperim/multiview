@@ -31,6 +31,20 @@ pub enum FfmpegError {
         source: ffmpeg_next::Error,
     },
 
+    /// A blocked open/read on a live input was aborted by the injected
+    /// `AVIOInterruptCB` / `rw_timeout` because the configured deadline elapsed
+    /// (GP-0, ADR-0030). This is the recovery-teardown signal: the demuxer is
+    /// wedged on a stalled TCP/RTSP/SRT/UDP read and must be torn down and
+    /// reconnected, rather than blocking forever.
+    #[cfg(feature = "ffmpeg")]
+    #[error("input {path:?} timed out after {timeout_ms} ms (read interrupted)")]
+    ReadTimeout {
+        /// The input path or URL whose read was interrupted.
+        path: String,
+        /// The configured read/write timeout in milliseconds.
+        timeout_ms: u64,
+    },
+
     /// A small text resource (an HLS caption master/rendition playlist) could
     /// not be fetched over libav I/O — a disallowed scheme, an open/read error,
     /// an oversize body, or a non-UTF-8 body.
