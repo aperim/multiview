@@ -68,4 +68,44 @@ describe('Sparkline', () => {
     expect(screen.getByRole('img', { name: 'empty trend' })).toBeInTheDocument();
     expect(container.querySelector('polyline')).toBeNull();
   });
+
+  it('draws the optional overlay as a SECOND, DASHED polyline (colour-independent)', () => {
+    const { container } = render(
+      <Sparkline
+        values={[0.2, 0.4, 0.6]}
+        overlay={[0.1, 0.2, 0.3]}
+        ariaLabel="trend"
+      />,
+    );
+    const lines = container.querySelectorAll('polyline');
+    // Two lines: the solid total + one dashed overlay run.
+    expect(lines).toHaveLength(2);
+    const solid = lines[0];
+    const dashed = lines[1];
+    expect(solid?.getAttribute('stroke-dasharray')).toBeNull();
+    expect(dashed?.getAttribute('stroke-dasharray')).toBe('2 2');
+  });
+
+  it('breaks the overlay at undefined gaps so an unattributed tick is not 0', () => {
+    const { container } = render(
+      <Sparkline
+        values={[0.2, 0.4, 0.6, 0.8]}
+        overlay={[0.1, undefined, 0.3, 0.4]}
+        ariaLabel="trend"
+      />,
+    );
+    const dashed = Array.from(container.querySelectorAll('polyline')).filter(
+      (p) => p.getAttribute('stroke-dasharray') === '2 2',
+    );
+    // The undefined splits the overlay into two runs: [0.1] and [0.3, 0.4].
+    expect(dashed).toHaveLength(2);
+  });
+
+  it('omits the overlay entirely when not provided', () => {
+    const { container } = render(
+      <Sparkline values={[0.2, 0.4]} ariaLabel="trend" />,
+    );
+    const dashed = container.querySelectorAll('polyline[stroke-dasharray]');
+    expect(dashed).toHaveLength(0);
+  });
 });
