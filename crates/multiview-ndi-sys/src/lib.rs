@@ -81,6 +81,19 @@ pub(crate) mod table;
 #[cfg(feature = "bindings")]
 pub use table::TableError;
 
+/// Operational errors from the safe NDI handles (ADR-0028 §3).
+#[cfg(feature = "bindings")]
+pub mod error;
+#[cfg(feature = "bindings")]
+pub use error::NdiError;
+
+/// The safe NDI **sender** handle (ADR-0028 §2/§3): the only way the workspace
+/// pushes frames to NDI; all `unsafe` is confined behind it.
+#[cfg(feature = "bindings")]
+pub mod send;
+#[cfg(feature = "bindings")]
+pub use send::{NdiSender, NdiVideoFourCc};
+
 /// The NDI 6 dynamic-load entry-point symbol, NUL-terminated for `dlsym`. NDI 6
 /// uses **`NDIlib_v6_load`** (not the v5 symbol); it returns a pointer to the SDK
 /// function table.

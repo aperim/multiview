@@ -31,6 +31,13 @@ pub(crate) type FindInstance = ffi::NDIlib_find_instance_t;
 ///
 /// Field signatures are copied verbatim from the `bindgen`-generated ABI (derived
 /// from the licensed header), so they cannot drift from the real SDK.
+///
+/// `Copy`: every field is a bare `fn` pointer (itself `Copy`), so the resolved
+/// table is a cheap value the safe handles ([`crate::send`]/`recv`/`find`) each
+/// hold by value — no shared ownership or lifetime threading needed. The pointers
+/// stay valid only while the owning [`crate::NdiRuntime`] (the loaded `Library`)
+/// is alive; each handle documents that it must not outlive that runtime.
+#[derive(Clone, Copy)]
 pub(crate) struct NdiV6 {
     pub(crate) version: unsafe extern "C" fn() -> *const std::os::raw::c_char,
     pub(crate) initialize: unsafe extern "C" fn() -> bool,
