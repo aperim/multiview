@@ -86,6 +86,13 @@ pub fn map_gpu(load: &DeviceLoad) -> GpuMetrics {
         decoder_util: load.dec_util_frac,
         encoder_sessions: load.nvenc_session_count,
         encoder_session_ceiling: None,
+        // Our-process share is populated by the NVML per-process pass (monitoring
+        // v2); `DeviceLoad` carries only device-wide totals today, so honestly None.
+        self_compute_util: None,
+        self_encoder_util: None,
+        self_decoder_util: None,
+        self_mem_used_bytes: None,
+        self_encoder_sessions: None,
     }
 }
 
@@ -116,6 +123,10 @@ pub fn assemble_metrics(
         cpu_util: cpu.clamp(0.0, 1.0),
         mem_used_bytes,
         mem_total_bytes,
+        // Populated by the per-process pass (monitoring v2: /proc/self/stat CPU +
+        // VmRSS); the pure assembler does not read /proc, so None here.
+        self_cpu_util: None,
+        self_mem_used_bytes: None,
         gpus: loads.iter().map(map_gpu).collect(),
         program_fps: fps,
         sampled_hz: hz,

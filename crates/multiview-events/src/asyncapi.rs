@@ -627,8 +627,13 @@ fn gpu_metrics_schema() -> Value {
             "mem_total_bytes": { "type": "integer", "format": "uint64", "description": "Total VRAM (bytes)." },
             "encoder_util": { "type": "number", "format": "float", "description": "Encoder (NVENC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent)." },
             "decoder_util": { "type": "number", "format": "float", "description": "Decoder (NVDEC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent)." },
-            "encoder_sessions": { "type": "integer", "format": "uint32", "description": "Active concurrent hardware encode sessions (NVIDIA)." },
-            "encoder_session_ceiling": { "type": "integer", "format": "uint32", "description": "Runtime-discovered concurrent encode-session ceiling (NVIDIA)." }
+            "encoder_sessions": { "type": "integer", "format": "uint32", "description": "DEVICE-WIDE active concurrent encode sessions (NVIDIA) across all processes." },
+            "encoder_session_ceiling": { "type": "integer", "format": "uint32", "description": "Runtime-discovered concurrent encode-session ceiling (NVIDIA)." },
+            "self_compute_util": { "type": "number", "format": "float", "description": "Our process's compute (SM) utilisation on this GPU, 0.0-1.0." },
+            "self_encoder_util": { "type": "number", "format": "float", "description": "Our process's encoder (NVENC) utilisation, 0.0-1.0." },
+            "self_decoder_util": { "type": "number", "format": "float", "description": "Our process's decoder (NVDEC) utilisation, 0.0-1.0." },
+            "self_mem_used_bytes": { "type": "integer", "format": "uint64", "description": "VRAM (bytes) attributed to our process on this GPU." },
+            "self_encoder_sessions": { "type": "integer", "format": "uint32", "description": "Encode sessions owned by our process on this GPU." }
         }
     })
 }

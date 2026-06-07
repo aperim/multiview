@@ -279,6 +279,8 @@ fn system_metrics_event_is_high_rate_conflated_and_roundtrips() {
         cpu_util: 0.41,
         mem_used_bytes: Some(8_000_000_000),
         mem_total_bytes: Some(32_000_000_000),
+        self_cpu_util: Some(0.12),
+        self_mem_used_bytes: Some(900_000_000),
         gpus: vec![GpuMetrics {
             id: "GPU-abc".to_owned(),
             vendor: GpuVendor::Nvidia,
@@ -288,8 +290,14 @@ fn system_metrics_event_is_high_rate_conflated_and_roundtrips() {
             mem_total_bytes: 12_000_000_000,
             encoder_util: Some(0.15),
             decoder_util: Some(0.0),
-            encoder_sessions: Some(2),
+            encoder_sessions: Some(6),
             encoder_session_ceiling: Some(8),
+            // Our share of the device-wide totals (the GPU is shared with a co-tenant).
+            self_compute_util: Some(0.18),
+            self_encoder_util: Some(0.05),
+            self_decoder_util: Some(0.0),
+            self_mem_used_bytes: Some(1_200_000_000),
+            self_encoder_sessions: Some(2),
         }],
         program_fps: Some(50.0),
         sampled_hz: 2,
@@ -310,8 +318,14 @@ fn system_metrics_event_is_high_rate_conflated_and_roundtrips() {
         .as_object()
         .unwrap();
     assert_eq!(gpu.get("vendor").unwrap(), &json!("nvidia"));
-    assert_eq!(gpu.get("encoder_sessions").unwrap(), &json!(2));
+    // Device-wide totals vs our-process share both ride the wire (integer fields
+    // compared exactly; the f32 util fields are covered by the full round-trip
+    // below — f32→JSON→f32 is lossless, but f32 0.18 ≠ f64 0.18 widened).
+    assert_eq!(gpu.get("encoder_sessions").unwrap(), &json!(6));
     assert_eq!(gpu.get("encoder_session_ceiling").unwrap(), &json!(8));
+    assert_eq!(gpu.get("self_encoder_sessions").unwrap(), &json!(2));
+    assert!(gpu.contains_key("self_compute_util"));
+    assert!(data.contains_key("self_cpu_util"));
 
     // Round-trip preserves the f32 utilisations exactly (f32→JSON→f32 is lossless).
     let back: Event = serde_json::from_value(v).unwrap();
@@ -326,6 +340,8 @@ fn system_metrics_gpu_free_host_omits_empty_collections() {
         cpu_util: 0.12,
         mem_used_bytes: None,
         mem_total_bytes: None,
+        self_cpu_util: None,
+        self_mem_used_bytes: None,
         gpus: vec![],
         program_fps: None,
         sampled_hz: 1,

@@ -765,6 +765,8 @@ mod topic_routing_tests {
             cpu_util: 0.4,
             mem_used_bytes: None,
             mem_total_bytes: None,
+            self_cpu_util: None,
+            self_mem_used_bytes: None,
             gpus: vec![],
             program_fps: None,
             sampled_hz: 1,

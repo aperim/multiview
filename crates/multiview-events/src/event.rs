@@ -129,12 +129,36 @@ pub struct GpuMetrics {
     /// Decoder (NVDEC/QSV) ASIC utilisation, 0.0–1.0, where the vendor exposes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoder_util: Option<f32>,
-    /// Active concurrent hardware encode sessions (NVIDIA), if known.
+    /// Active concurrent hardware encode sessions (NVIDIA), if known. This is the
+    /// DEVICE-WIDE count across every process sharing the GPU (e.g. a co-tenant
+    /// NVR), not just ours — see `self_encoder_sessions` for our share.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_sessions: Option<u32>,
     /// The runtime-discovered concurrent encode-session ceiling (NVIDIA), if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_session_ceiling: Option<u32>,
+
+    // ---- Our-process share (vs the device-wide totals above) ----
+    // The GPU is frequently SHARED with co-tenant processes (an NVR, another
+    // encoder); these `self_*` fields attribute the portion driven by THIS
+    // Multiview process (and its children), so the UI can show "ours vs total".
+    // All optional: present only where the platform exposes per-process counters
+    // (NVIDIA via NVML per-process queries) and our process is actually resident.
+    /// Our process's compute (SM) utilisation on this GPU, 0.0–1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_compute_util: Option<f32>,
+    /// Our process's encoder (NVENC) utilisation on this GPU, 0.0–1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_encoder_util: Option<f32>,
+    /// Our process's decoder (NVDEC) utilisation on this GPU, 0.0–1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_decoder_util: Option<f32>,
+    /// VRAM (bytes) attributed to our process on this GPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_mem_used_bytes: Option<u64>,
+    /// Concurrent hardware encode sessions owned by our process on this GPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_encoder_sessions: Option<u32>,
 }
 
 /// A high-rate whole-system metrics sample (numeric only — never a screenshot).
@@ -144,7 +168,8 @@ pub struct GpuMetrics {
 /// of a per-second value is the wrong shape; only cold historic windows are REST).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemMetrics {
-    /// Whole-system CPU utilisation, 0.0–1.0 (from `/proc/stat` on Linux).
+    /// Whole-system CPU utilisation, 0.0–1.0 (from `/proc/stat` on Linux) — the
+    /// WHOLE host, including co-tenant processes; see `self_cpu_util` for our share.
     pub cpu_util: f32,
     /// Host memory in use (bytes), where known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,6 +177,14 @@ pub struct SystemMetrics {
     /// Total host memory (bytes), where known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_total_bytes: Option<u64>,
+    /// Our process's CPU utilisation, 0.0–1.0 (from `/proc/self/stat`), as a
+    /// fraction of total host CPU capacity — so it composes with `cpu_util` on the
+    /// same scale ("we use X of the host's Y total"). `None` off Linux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_cpu_util: Option<f32>,
+    /// Resident memory (bytes) of our process (`/proc/self/status` `VmRSS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_mem_used_bytes: Option<u64>,
     /// Per-GPU utilisation samples; empty on a GPU-free host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpus: Vec<GpuMetrics>,
