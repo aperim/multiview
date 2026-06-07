@@ -69,6 +69,14 @@ pub mod codec;
 
 pub mod error;
 
+/// Strict-IDR classifier (GP-1, ADR-0030). A cheap header inspection over a
+/// coded access unit that reports a true random-access point — distinct from
+/// FFmpeg's `AV_PKT_FLAG_KEY`, which also flags HEVC CRA / open-GOP and H.264
+/// recovery-point I-frames. The [`idr::is_idr`] byte parser is pure (always
+/// compiled, unit-tested, libav-free); the feature-gated
+/// `demux::ReadPacket::is_idr` wires it to a demuxed packet.
+pub mod idr;
+
 /// Host-side hardware-decode planning. The [`hwdecode::HwDeviceKind`] enum, the
 /// per-backend decode-resize strategy, the content-sized surface-pool geometry,
 /// and the logical-codec -> `*_cuvid` name mapping are pure (always compiled,
@@ -99,6 +107,8 @@ pub use codec::{select_audio_encoder, select_encoder};
 pub use avio_fetch::fetch_url_text;
 
 pub use error::{FfmpegError, Result};
+
+pub use idr::{is_idr, CodecKind, NalFraming};
 
 pub use hwdecode::{
     cuvid_decoder, decode_surface_pool, plan_decode_resize, DecodeResizeStrategy,
@@ -191,7 +201,7 @@ pub use decode_stream::{
 };
 
 #[cfg(feature = "ffmpeg")]
-pub use demux::{Demuxer, ReadPacket, StreamParams};
+pub use demux::{DemuxOptions, Demuxer, ReadPacket, StreamParams};
 
 #[cfg(feature = "ffmpeg")]
 pub use encode::{AudioEncodeTarget, AudioEncoder, VideoEncodeTarget, VideoEncoder};
