@@ -34,6 +34,7 @@
 pub mod cat;
 pub mod crc;
 pub mod descriptor;
+pub mod inventory;
 pub mod nit;
 pub mod pat;
 pub mod pmt;
@@ -44,7 +45,11 @@ pub mod tdt;
 pub mod tot;
 
 pub use cat::Cat;
-pub use descriptor::{Descriptor, Descriptors};
+pub use descriptor::{
+    AudioType, Descriptor, Descriptors, IsoLanguageDescriptor, IsoLanguageEntry,
+    SubtitlingDescriptor, SubtitlingEntry, TeletextDescriptor, TeletextEntry,
+};
+pub use inventory::{pmt_inventory, reconcile_scte35};
 pub use nit::{Nit, TransportStreamInfo};
 pub use pat::{Pat, ProgramAssociation};
 pub use pmt::{ElementaryStream, Pmt, StreamType};

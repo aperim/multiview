@@ -13,6 +13,9 @@
 //! needs (`#EXT-X-MEDIA` and `#EXT-X-STREAM-INF`). The HTTP fetch reuses the
 //! existing ingest.
 
+use multiview_core::stream::{
+    Bcp47, StableStreamId, StreamDescriptor, StreamDetail, StreamInventory, StreamKind,
+};
 use thiserror::Error;
 
 /// Upper bound on lines scanned, so a pathological input cannot make the parser
@@ -34,7 +37,7 @@ pub enum HlsError {
 }
 
 /// The media type of an `#EXT-X-MEDIA` rendition (RFC 8216 §4.3.4.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MediaType {
     /// `TYPE=AUDIO`.
@@ -193,6 +196,110 @@ impl MasterPlaylist {
             .find(|r| r.default)
             .or_else(|| with_uri().find(|r| r.autoselect))
             .or_else(|| with_uri().next())
+    }
+
+    /// Fold the master playlist's AUDIO + SUBTITLES alternate renditions into a
+    /// typed [`StreamInventory`] (RT-2, ADR-0034 §3).
+    ///
+    /// libav opens an HLS URL as a single program and does **not** surface the
+    /// master's separate AUDIO / SUBTITLES renditions as decodable streams, so
+    /// these would otherwise be invisible to the router. This fold-in makes each
+    /// one an addressable [`StreamDescriptor`]:
+    ///
+    /// * keyed by a **hard** [`StableStreamId::from_hls`]`(group_id, name)` (RFC
+    ///   8216 keys a rendition by group + name; these survive a rendition
+    ///   reorder). HLS requires a non-empty `NAME`, but real playlists omit it —
+    ///   a **deterministic, non-empty** name is synthesised from `group_id` + the
+    ///   rendition's ordinal within its `(media_type, group_id)` so two name-less
+    ///   renditions in one group get **distinct, stable** ids rather than
+    ///   colliding on the empty name;
+    /// * carrying the rendition's validated [`Bcp47`] language, `DEFAULT` flag,
+    ///   and (for subtitles) the `FORCED` flag.
+    ///
+    /// `CLOSED-CAPTIONS` renditions (no separate media playlist) and `VIDEO`
+    /// renditions (the variant the libav path already decodes) are not folded in
+    /// here. The owning input id is left unset (the ingest binder fills it).
+    #[must_use]
+    pub fn stream_inventory(&self) -> StreamInventory {
+        // Per-(media_type, group_id) ordinal so a synthesised name is stable and
+        // unique within its group; iterate in document order so the ordinal is
+        // deterministic across a re-parse.
+        let mut ordinals: std::collections::HashMap<(MediaType, String), u32> =
+            std::collections::HashMap::new();
+        let mut streams = Vec::new();
+        for rendition in &self.renditions {
+            let kind = match rendition.media_type {
+                MediaType::Audio => StreamKind::Audio,
+                MediaType::Subtitles => StreamKind::Subtitle,
+                // VIDEO renditions are the libav-decoded variant; CLOSED-CAPTIONS
+                // and any other type are not separate routable renditions here.
+                MediaType::Video | MediaType::ClosedCaptions | MediaType::Other => continue,
+            };
+            let key = (rendition.media_type, rendition.group_id.clone());
+            let ordinal = ordinals.entry(key).or_insert(0);
+            let this_ordinal = *ordinal;
+            *ordinal = ordinal.saturating_add(1);
+            streams.push(rendition_descriptor(rendition, kind, this_ordinal));
+        }
+        StreamInventory::from_streams(streams)
+    }
+}
+
+/// The shared resolver that turns one AUDIO/SUBTITLES [`MediaRendition`] into a
+/// [`StreamDescriptor`] — used for both rendition families so audio and subtitle
+/// fold-in stay consistent (RT-2 §3).
+///
+/// `ordinal` is the rendition's position within its `(media_type, group_id)`,
+/// used only to synthesise a non-empty `NAME` when the playlist omits one.
+fn rendition_descriptor(
+    rendition: &MediaRendition,
+    kind: StreamKind,
+    ordinal: u32,
+) -> StreamDescriptor {
+    let name = synthesised_name(&rendition.group_id, &rendition.name, ordinal);
+    let id = StableStreamId::from_hls(kind, &rendition.group_id, &name);
+    let language = rendition
+        .language
+        .as_deref()
+        .and_then(|l| Bcp47::parse(l).ok());
+    let detail = match kind {
+        StreamKind::Subtitle => StreamDetail::Subtitle {
+            forced: rendition.forced,
+        },
+        // An HLS master rendition carries no channel layout / sample rate (that
+        // needs decoding the media playlist's segments); the audio detail is the
+        // zero-valued shape, refined by a later decode probe.
+        _ => StreamDetail::Audio {
+            channels: 0,
+            sample_rate: 0,
+        },
+    };
+    // The rendition's NAME is the natural title; for a synthesised name there is
+    // no operator-facing title, so leave it unset.
+    let title = if rendition.name.trim().is_empty() {
+        None
+    } else {
+        Some(rendition.name.clone())
+    };
+    StreamDescriptor::new(id, kind, "hls", detail)
+        .with_language(language)
+        .with_title(title)
+        .with_default(rendition.default)
+}
+
+/// Synthesise a **non-empty, deterministic** rendition name.
+///
+/// RFC 8216 requires `#EXT-X-MEDIA:NAME` to be present and unique within its
+/// group, but real playlists omit it. An empty name would make two renditions in
+/// one group collide on the same `(group_id, "")` [`StableStreamId`]. When `name`
+/// is empty (or whitespace-only) this returns a stable `"{group_id}#{ordinal}"`
+/// so the ids are distinct and survive a re-parse (the ordinal is the rendition's
+/// deterministic document-order position within its group).
+fn synthesised_name(group_id: &str, name: &str, ordinal: u32) -> String {
+    if name.trim().is_empty() {
+        format!("{group_id}#{ordinal}")
+    } else {
+        name.to_owned()
     }
 }
 
