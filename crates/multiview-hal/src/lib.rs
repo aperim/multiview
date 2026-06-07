@@ -68,7 +68,7 @@ pub use error::{Error, Result};
 pub use load::NvmlLoadPoller;
 pub use load::{
     DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, NullLoadPoller,
-    PollInterval, Vendor,
+    PollInterval, SelfShare, Vendor,
 };
 pub use planner::{Admission, Plan, Planner, StageUsage};
 pub use probe::{
