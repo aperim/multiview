@@ -40,12 +40,18 @@ pub mod convert;
 pub mod license;
 pub mod loader;
 pub mod output;
+/// The live `NdiApi` over the SDK function table (ADR-0028 §3); only compiled with
+/// the `ndi-bindings` feature (build-time `bindgen` over the licensed SDK header).
+#[cfg(feature = "ndi-bindings")]
+pub mod sdk;
 
 pub use api::{FakeNdiApi, NdiApi, NdiFourCc, NdiSendError, NdiVideoFrame};
 pub use convert::{nv12_to_uyvy, Nv12Canvas};
 pub use license::{NdiLicense, NdiLicenseError};
 pub use loader::{NdiCapability, NdiLoadStatus};
 pub use output::NdiOutput;
+#[cfg(feature = "ndi-bindings")]
+pub use sdk::SdkNdiApi;
 
 /// The mandatory NDI® trademark attribution notice for the About box / NOTICE.
 ///

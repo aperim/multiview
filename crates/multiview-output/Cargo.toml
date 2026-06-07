@@ -94,6 +94,14 @@ multiview-input = { workspace = true }
 # I/O additionally stays inert until an operator accepts the runtime license gate
 # (see `crate::ndi::NdiLicense`).
 "ndi" = ["dep:multiview-ndi-sys"]
+# The LIVE NDI binding (ADR-0028): turns on multiview-ndi-sys's `bindings` feature
+# (bindgen over the licensed SDK header at BUILD time) and compiles the real
+# `SdkNdiApi` that delegates to the safe `NdiSender`. OFF by default and NOT in any
+# preset: it requires the operator-provided NDI SDK header present at build time
+# (NDI_SDK_INCLUDE_DIR / /opt/ndi/include), so plain `--features ndi` stays
+# SDK-free and CI-buildable while `--features ndi-bindings` is a box/operator
+# concern. Implies `ndi`. The default build remains LGPL-clean (nothing linked).
+"ndi-bindings" = ["ndi", "multiview-ndi-sys/bindings"]
 # In-process RTSP server (OUT-2 / ADR-0006 primary path). OFF by default: it pulls
 # the GStreamer/GLib C stack (a GLib main loop) via the SAFE `gst-rtsp-server`
 # Rust bindings. The bindings are MIT/Apache-2.0 and the C libraries are LGPL-2.1,
