@@ -3,6 +3,7 @@
 import { createBrowserRouter } from "react-router-dom";
 
 import { AppLayout } from "./AppLayout";
+import { RequireAuth } from "../auth/RequireAuth";
 import { DashboardPage } from "../pages/DashboardPage";
 import { LayoutsPage } from "../pages/LayoutsPage";
 import { LayoutEditorPage } from "../pages/LayoutEditorPage";
@@ -30,7 +31,11 @@ import { OverviewPage } from "../pages/docs/OverviewPage";
 export const router = createBrowserRouter([
   {
     path: "/",
-    element: <AppLayout />,
+    element: (
+      <RequireAuth>
+        <AppLayout />
+      </RequireAuth>
+    ),
     children: [
       { index: true, element: <DashboardPage /> },
       { path: "layouts", element: <LayoutsPage /> },
