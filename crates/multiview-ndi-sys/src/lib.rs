@@ -311,6 +311,16 @@ pub struct NdiRuntime {
     _lib: Library,
 }
 
+// SAFETY: `NdiRuntime` is `!Send` only because `NdiApiTable` wraps a `NonNull`.
+// The pointed-at table is the process-lifetime, immutable SDK function table, and
+// the `Library` field is itself `Send + Sync`. Moving the whole runtime to another
+// thread moves the `Library` with it (so the table stays mapped) and only ever
+// reads the immutable table — sound. We assert `Send` (so a live receiver/sender
+// built from it can move onto an ingest/output thread) but deliberately NOT `Sync`:
+// the runtime is owned, never shared by reference across threads.
+#[allow(unsafe_code)]
+unsafe impl Send for NdiRuntime {}
+
 // The NDI loader entry point: `extern "C" fn() -> *const NDIlib_v5`. We treat
 // the returned table as opaque (see `NdiApiTable`).
 type NdiLoadFn = unsafe extern "C" fn() -> *const std::ffi::c_void;

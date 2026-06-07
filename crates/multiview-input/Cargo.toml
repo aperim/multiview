@@ -73,6 +73,15 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 # `unsafe_code = forbid`. A runtime license gate refuses NDI ingest until an
 # operator accepts the SDK license (audited who/when).
 "ndi" = ["dep:multiview-ndi-sys"]
+# The LIVE NDI receive binding (ADR-0028): turns on multiview-ndi-sys's `bindings`
+# feature (build-time `bindgen` over the licensed SDK header) and compiles the real
+# `SdkNdiReceiver` that delegates to the safe `NdiReceiver`. OFF by default and NOT
+# in any preset: it needs the operator-provided NDI SDK header at build time
+# (NDI_SDK_INCLUDE_DIR / /opt/ndi/include), so plain `--features ndi` stays SDK-free
+# and CI-buildable while `--features ndi-bindings` is a box/operator concern.
+# Implies `ndi`; the default build stays LGPL-clean. multiview-input adds NO
+# `unsafe` — all FFI is owned by multiview-ndi-sys.
+"ndi-bindings" = ["ndi", "multiview-ndi-sys/bindings"]
 # SMPTE ST 2110 UDP/RTP receive transport. OFF by default: it needs a real
 # ST 2110 network + PTP-disciplined NIC, so it is compile-verified only here.
 # The PURE depacketizers (rtp/v20/v30/v40) and the ST 2022-7 reconstructor are

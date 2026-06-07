@@ -50,12 +50,18 @@ pub mod license;
 pub mod loader;
 pub mod producer;
 pub mod receiver;
+/// The live `NdiReceiver` over the SDK function table (ADR-0028 §3); only compiled
+/// with the `ndi-bindings` feature (build-time `bindgen` over the licensed header).
+#[cfg(feature = "ndi-bindings")]
+pub mod sdk;
 
 pub use convert::{bgra_to_nv12, uyvy_to_nv12, HostNv12, NdiConvertError, ReceivedVideoFrame};
 pub use license::{LicenseAcceptance, NdiLicense, NdiLicenseError};
 pub use loader::{NdiCapability, NdiLoadStatus};
 pub use producer::NdiProducer;
 pub use receiver::{FakeNdiReceiver, NdiReceiver, NdiRecvError, NdiRecvFourCc, ReceivedFrame};
+#[cfg(feature = "ndi-bindings")]
+pub use sdk::SdkNdiReceiver;
 
 /// The mandatory NDI® trademark attribution notice for the About box / NOTICE.
 ///
