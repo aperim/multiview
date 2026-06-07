@@ -23,6 +23,18 @@ msgstr "(opens in a new tab)"
 msgid "{0} cell(s) · {1} bound to a source"
 msgstr "{0} cell(s) · {1} bound to a source"
 
+#: src/components/SystemFooter.tsx:147
+msgid "{short} compute utilisation {computeTotal} (device total)"
+msgstr "{short} compute utilisation {computeTotal} (device total)"
+
+#: src/components/SystemFooter.tsx:148
+msgid "{short} compute utilisation: ours {computeSelf} of {computeTotal} device total"
+msgstr "{short} compute utilisation: ours {computeSelf} of {computeTotal} device total"
+
+#: src/components/SystemFooter.tsx:174
+msgid "{short} NVENC encode sessions trend"
+msgstr "{short} NVENC encode sessions trend"
+
 #: src/pages/SimplePages.tsx:578
 msgid "/media/clip.mp4"
 msgstr "/media/clip.mp4"
@@ -203,7 +215,7 @@ msgstr "Active and cleared"
 msgid "Active and historical faults the engine raised. Acknowledge an alarm to record that an operator has seen it."
 msgstr "Active and historical faults the engine raised. Acknowledge an alarm to record that an operator has seen it."
 
-#: src/pages/SystemPage.tsx:124
+#: src/pages/SystemPage.tsx:207
 msgid "Active NVENC sessions out of the discovered ceiling"
 msgstr "Active NVENC sessions out of the discovered ceiling"
 
@@ -278,7 +290,7 @@ msgstr "All endpoints live under <0>/api/v1</0>."
 msgid "Amber"
 msgstr "Amber"
 
-#: src/pages/SystemPage.tsx:63
+#: src/pages/SystemPage.tsx:91
 msgid "AMD"
 msgstr "AMD"
 
@@ -338,7 +350,7 @@ msgstr "Appearance"
 msgid "Appearance and language preferences."
 msgstr "Appearance and language preferences."
 
-#: src/pages/SystemPage.tsx:65
+#: src/pages/SystemPage.tsx:93
 msgid "Apple"
 msgstr "Apple"
 
@@ -518,9 +530,17 @@ msgstr "Compose reference"
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 
-#: src/pages/SystemPage.tsx:94
+#: src/pages/SystemPage.tsx:145
 msgid "Compute"
 msgstr "Compute"
+
+#: src/pages/SystemPage.tsx:153
+msgid "Compute utilisation (device total)"
+msgstr "Compute utilisation (device total)"
+
+#: src/pages/SystemPage.tsx:154
+msgid "Compute utilisation: ours over device total"
+msgstr "Compute utilisation: ours over device total"
 
 #: src/pages/docs/ConfigPage.tsx:22
 #: src/pages/docs/docsNav.tsx:66
@@ -639,15 +659,24 @@ msgstr "Could not save layout"
 msgid "Could not save salvo"
 msgstr "Could not save salvo"
 
-#: src/components/SystemFooter.tsx:128
-#: src/pages/SystemPage.tsx:165
+#: src/components/SystemFooter.tsx:230
+#: src/pages/SystemPage.tsx:253
 msgid "CPU"
 msgstr "CPU"
 
 #: src/components/SystemFooter.tsx:131
 #: src/pages/SystemPage.tsx:174
-msgid "CPU utilisation trend"
-msgstr "CPU utilisation trend"
+#~ msgid "CPU utilisation trend"
+#~ msgstr "CPU utilisation trend"
+
+#: src/components/SystemFooter.tsx:236
+msgid "CPU utilisation trend (host total)"
+msgstr "CPU utilisation trend (host total)"
+
+#: src/components/SystemFooter.tsx:237
+#: src/pages/SystemPage.tsx:268
+msgid "CPU utilisation trend: ours over host total"
+msgstr "CPU utilisation trend: ours over host total"
 
 #: src/pages/SimplePages.tsx:402
 msgid "Create"
@@ -679,12 +708,20 @@ msgid "Dashboard"
 msgstr "Dashboard"
 
 #: src/components/SystemFooter.tsx:153
-msgid "DEC"
-msgstr "DEC"
+#~ msgid "DEC"
+#~ msgstr "DEC"
 
-#: src/pages/SystemPage.tsx:112
+#: src/pages/SystemPage.tsx:185
 msgid "Decoder"
 msgstr "Decoder"
+
+#: src/pages/SystemPage.tsx:193
+msgid "Decoder utilisation (device total)"
+msgstr "Decoder utilisation (device total)"
+
+#: src/pages/SystemPage.tsx:194
+msgid "Decoder utilisation: ours over device total"
+msgstr "Decoder utilisation: ours over device total"
 
 #: src/pages/docs/ContainerPage.tsx:43
 msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
@@ -889,9 +926,17 @@ msgstr "Element name"
 #~ msgid "Enabled"
 #~ msgstr "Enabled"
 
-#: src/pages/SystemPage.tsx:105
+#: src/pages/SystemPage.tsx:170
 msgid "Encoder"
 msgstr "Encoder"
+
+#: src/pages/SystemPage.tsx:178
+msgid "Encoder utilisation (device total)"
+msgstr "Encoder utilisation (device total)"
+
+#: src/pages/SystemPage.tsx:179
+msgid "Encoder utilisation: ours over device total"
+msgstr "Encoder utilisation: ours over device total"
 
 #: src/pages/TallyPage.tsx:131
 msgid "Enter a valid target"
@@ -966,17 +1011,21 @@ msgstr "Frame rate must be an exact rational like 30000/1001 — not a decimal."
 msgid "Getting started"
 msgstr "Getting started"
 
+#: src/components/SystemFooter.tsx:242
+msgid "GPU"
+msgstr "GPU"
+
 #: src/components/SystemFooter.tsx:137
-msgid "GPU 0 compute utilisation trend"
-msgstr "GPU 0 compute utilisation trend"
+#~ msgid "GPU 0 compute utilisation trend"
+#~ msgstr "GPU 0 compute utilisation trend"
 
 #: src/components/SystemFooter.tsx:156
-msgid "GPU 0 decoder utilisation trend"
-msgstr "GPU 0 decoder utilisation trend"
+#~ msgid "GPU 0 decoder utilisation trend"
+#~ msgstr "GPU 0 decoder utilisation trend"
 
 #: src/components/SystemFooter.tsx:143
-msgid "GPU 0 VRAM usage trend"
-msgstr "GPU 0 VRAM usage trend"
+#~ msgid "GPU 0 VRAM usage trend"
+#~ msgstr "GPU 0 VRAM usage trend"
 
 #: src/pages/docs/ContainerPage.tsx:85
 msgid "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
@@ -991,10 +1040,10 @@ msgid "GPU overlays"
 msgstr "GPU overlays"
 
 #: src/components/SystemFooter.tsx:134
-msgid "GPU0"
-msgstr "GPU0"
+#~ msgid "GPU0"
+#~ msgstr "GPU0"
 
-#: src/pages/SystemPage.tsx:235
+#: src/pages/SystemPage.tsx:342
 msgid "GPUs"
 msgstr "GPUs"
 
@@ -1010,9 +1059,17 @@ msgstr "Healthcheck"
 msgid "Height (%)"
 msgstr "Height (%)"
 
-#: src/pages/SystemPage.tsx:159
+#: src/pages/SystemPage.tsx:247
 msgid "Host"
 msgstr "Host"
+
+#: src/pages/SystemPage.tsx:303
+msgid "Host memory used of total"
+msgstr "Host memory used of total"
+
+#: src/pages/SystemPage.tsx:304
+msgid "Host memory: ours / used / total"
+msgstr "Host memory: ours / used / total"
 
 #: src/pages/docs/OverviewPage.tsx:19
 msgid "How Multiview works, how to run it, and how to drive it from config-as-code or the API."
@@ -1056,7 +1113,7 @@ msgstr "Inputs"
 msgid "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
 msgstr "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
 
-#: src/pages/SystemPage.tsx:61
+#: src/pages/SystemPage.tsx:89
 msgid "Intel"
 msgstr "Intel"
 
@@ -1125,7 +1182,7 @@ msgstr "Leave empty for all objects"
 msgid "Left (%)"
 msgstr "Left (%)"
 
-#: src/components/SystemFooter.tsx:23
+#: src/components/SystemFooter.tsx:27
 #: src/components/TileStateBadge.tsx:29
 msgid "Live"
 msgstr "Live"
@@ -1138,7 +1195,7 @@ msgstr "Live API playground"
 msgid "Live engine status at a glance."
 msgstr "Live engine status at a glance."
 
-#: src/pages/SystemPage.tsx:150
+#: src/pages/SystemPage.tsx:238
 msgid "Live host and accelerator utilisation streaming from the engine."
 msgstr "Live host and accelerator utilisation streaming from the engine."
 
@@ -1234,7 +1291,7 @@ msgstr "Manual override"
 msgid "Media time"
 msgstr "Media time"
 
-#: src/pages/SystemPage.tsx:185
+#: src/pages/SystemPage.tsx:279
 msgid "Memory"
 msgstr "Memory"
 
@@ -1349,11 +1406,15 @@ msgstr "No drop target."
 msgid "No frame-rate sample."
 msgstr "No frame-rate sample."
 
-#: src/pages/SystemPage.tsx:243
+#: src/components/SystemFooter.tsx:245
+msgid "No GPU reported"
+msgstr "No GPU reported"
+
+#: src/pages/SystemPage.tsx:350
 msgid "No GPUs are reported on this host."
 msgstr "No GPUs are reported on this host."
 
-#: src/pages/SystemPage.tsx:202
+#: src/pages/SystemPage.tsx:309
 msgid "No host-memory sample."
 msgstr "No host-memory sample."
 
@@ -1409,20 +1470,20 @@ msgstr "None"
 msgid "Notifications"
 msgstr "Notifications"
 
-#: src/components/SystemFooter.tsx:146
+#: src/components/SystemFooter.tsx:160
 msgid "NVENC"
 msgstr "NVENC"
 
 #: src/components/SystemFooter.tsx:150
-msgid "NVENC encode sessions trend"
-msgstr "NVENC encode sessions trend"
+#~ msgid "NVENC encode sessions trend"
+#~ msgstr "NVENC encode sessions trend"
 
-#: src/pages/SystemPage.tsx:120
+#: src/pages/SystemPage.tsx:201
 msgid "NVENC sessions"
 msgstr "NVENC sessions"
 
 #: src/pages/docs/ContainerPage.tsx:93
-#: src/pages/SystemPage.tsx:59
+#: src/pages/SystemPage.tsx:87
 msgid "NVIDIA"
 msgstr "NVIDIA"
 
@@ -1434,7 +1495,7 @@ msgstr "Object"
 msgid "Off"
 msgstr "Off"
 
-#: src/components/SystemFooter.tsx:23
+#: src/components/SystemFooter.tsx:27
 msgid "Offline"
 msgstr "Offline"
 
@@ -1446,7 +1507,7 @@ msgstr "Open navigation"
 msgid "Open the API playground"
 msgstr "Open the API playground"
 
-#: src/components/SystemFooter.tsx:123
+#: src/components/SystemFooter.tsx:225
 msgid "Open the system metrics page"
 msgstr "Open the system metrics page"
 
@@ -1463,9 +1524,17 @@ msgstr "Optimistic concurrency"
 msgid "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
 msgstr "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
 
-#: src/pages/SystemPage.tsx:67
+#: src/pages/SystemPage.tsx:95
 msgid "Other"
 msgstr "Other"
+
+#: src/pages/SystemPage.tsx:208
+msgid "Our NVENC sessions / device-wide sessions / ceiling"
+msgstr "Our NVENC sessions / device-wide sessions / ceiling"
+
+#: src/pages/SystemPage.tsx:256
+msgid "Ours of host total"
+msgstr "Ours of host total"
 
 #: src/pages/docs/ConfigPage.tsx:79
 msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
@@ -1548,7 +1617,7 @@ msgstr "Profile deleted"
 msgid "Profiles"
 msgstr "Profiles"
 
-#: src/components/SystemFooter.tsx:159
+#: src/components/SystemFooter.tsx:258
 msgid "PROG"
 msgstr "PROG"
 
@@ -1556,12 +1625,12 @@ msgstr "PROG"
 msgid "Program"
 msgstr "Program"
 
-#: src/pages/SystemPage.tsx:211
+#: src/pages/SystemPage.tsx:318
 msgid "Program output"
 msgstr "Program output"
 
-#: src/components/SystemFooter.tsx:163
-#: src/pages/SystemPage.tsx:223
+#: src/components/SystemFooter.tsx:262
+#: src/pages/SystemPage.tsx:330
 msgid "Program output frame rate trend"
 msgstr "Program output frame rate trend"
 
@@ -1763,7 +1832,7 @@ msgid "Switch the interface language and text direction."
 msgstr "Switch the interface language and text direction."
 
 #: src/app/navigation.tsx:43
-#: src/pages/SystemPage.tsx:148
+#: src/pages/SystemPage.tsx:236
 msgid "System"
 msgstr "System"
 
@@ -2009,7 +2078,7 @@ msgstr "Two image families are published. The default image is LGPL-clean and so
 msgid "Unacknowledged"
 msgstr "Unacknowledged"
 
-#: src/pages/SystemPage.tsx:192
+#: src/pages/SystemPage.tsx:286
 msgid "Used"
 msgstr "Used"
 
@@ -2021,16 +2090,23 @@ msgstr "Validation and import / export"
 msgid "Volumes"
 msgstr "Volumes"
 
-#: src/components/SystemFooter.tsx:140
-#: src/pages/SystemPage.tsx:99
+#: src/pages/SystemPage.tsx:158
 msgid "VRAM"
 msgstr "VRAM"
+
+#: src/pages/SystemPage.tsx:164
+msgid "VRAM used of total"
+msgstr "VRAM used of total"
+
+#: src/pages/SystemPage.tsx:165
+msgid "VRAM: ours / device used / device total"
+msgstr "VRAM: ours / device used / device total"
 
 #: src/pages/MonitoringPage.tsx:122
 msgid "Waiting for a frame…"
 msgstr "Waiting for a frame…"
 
-#: src/pages/SystemPage.tsx:239
+#: src/pages/SystemPage.tsx:346
 msgid "Waiting for the first metrics sample…"
 msgstr "Waiting for the first metrics sample…"
 

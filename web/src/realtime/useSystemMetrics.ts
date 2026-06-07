@@ -47,14 +47,37 @@ export interface GpuMetrics {
   readonly encoder_sessions?: number;
   /** Runtime-discovered concurrent encode-session ceiling (NVIDIA), if known. */
   readonly encoder_session_ceiling?: number;
+  /**
+   * OUR process's share of {@link compute_util} (0..1), where the platform can
+   * attribute it. The device is shared with co-tenant processes, so the
+   * device-wide totals are not all ours; this is the portion we drive. Absent
+   * when the platform cannot attribute per-process compute.
+   */
+  readonly self_compute_util?: number;
+  /** OUR process's share of {@link encoder_util} (0..1), where attributable. */
+  readonly self_encoder_util?: number;
+  /** OUR process's share of {@link decoder_util} (0..1), where attributable. */
+  readonly self_decoder_util?: number;
+  /** OUR process's VRAM use (bytes) — the portion of {@link mem_used_bytes} ours. */
+  readonly self_mem_used_bytes?: number;
+  /** OUR active encode sessions — the portion of {@link encoder_sessions} ours. */
+  readonly self_encoder_sessions?: number;
 }
 
 /** A whole-system metrics sample (mirrors the Rust `SystemMetrics`). */
 export interface SystemMetrics {
   /** Whole-system CPU utilisation, 0..1. */
   readonly cpu_util: number;
+  /**
+   * OUR process's share of the host CPU (0..1), where known. The host is shared
+   * with co-tenant processes, so {@link cpu_util} is not all ours; this is the
+   * portion we drive. Absent when not attributable.
+   */
+  readonly self_cpu_util?: number;
   /** Host memory in use (bytes), where known. */
   readonly mem_used_bytes?: number;
+  /** OUR process's resident host memory (bytes), the portion of mem_used_bytes. */
+  readonly self_mem_used_bytes?: number;
   /** Total host memory (bytes), where known. */
   readonly mem_total_bytes?: number;
   /** Per-GPU utilisation samples; empty on a GPU-free host. */
@@ -114,6 +137,11 @@ function parseGpu(value: unknown): GpuMetrics | undefined {
     decoder_util?: number;
     encoder_sessions?: number;
     encoder_session_ceiling?: number;
+    self_compute_util?: number;
+    self_encoder_util?: number;
+    self_decoder_util?: number;
+    self_mem_used_bytes?: number;
+    self_encoder_sessions?: number;
   } = {
     id,
     vendor: vendorFrom(value.vendor),
@@ -140,6 +168,29 @@ function parseGpu(value: unknown): GpuMetrics | undefined {
   if (ceiling !== undefined) {
     gpu.encoder_session_ceiling = ceiling;
   }
+  // Our-process share fields: present only when the platform can attribute them;
+  // a missing/mistyped value stays undefined (never a false 0) so the UI can
+  // omit the "ours" part rather than imply we used nothing.
+  const selfCompute = num(value.self_compute_util);
+  if (selfCompute !== undefined) {
+    gpu.self_compute_util = selfCompute;
+  }
+  const selfEncUtil = num(value.self_encoder_util);
+  if (selfEncUtil !== undefined) {
+    gpu.self_encoder_util = selfEncUtil;
+  }
+  const selfDecUtil = num(value.self_decoder_util);
+  if (selfDecUtil !== undefined) {
+    gpu.self_decoder_util = selfDecUtil;
+  }
+  const selfMemUsed = num(value.self_mem_used_bytes);
+  if (selfMemUsed !== undefined) {
+    gpu.self_mem_used_bytes = selfMemUsed;
+  }
+  const selfSessions = num(value.self_encoder_sessions);
+  if (selfSessions !== undefined) {
+    gpu.self_encoder_sessions = selfSessions;
+  }
   return gpu;
 }
 
@@ -164,15 +215,25 @@ export function parseSystemMetrics(data: unknown): SystemMetrics | undefined {
   }
   const metrics: {
     cpu_util: number;
+    self_cpu_util?: number;
     mem_used_bytes?: number;
+    self_mem_used_bytes?: number;
     mem_total_bytes?: number;
     gpus: GpuMetrics[];
     program_fps?: number;
     sampled_hz: number;
   } = { cpu_util: cpu, gpus, sampled_hz: sampledHz };
+  const selfCpu = num(data.self_cpu_util);
+  if (selfCpu !== undefined) {
+    metrics.self_cpu_util = selfCpu;
+  }
   const memUsed = num(data.mem_used_bytes);
   if (memUsed !== undefined) {
     metrics.mem_used_bytes = memUsed;
+  }
+  const selfMemUsed = num(data.self_mem_used_bytes);
+  if (selfMemUsed !== undefined) {
+    metrics.self_mem_used_bytes = selfMemUsed;
   }
   const memTotal = num(data.mem_total_bytes);
   if (memTotal !== undefined) {
@@ -189,6 +250,8 @@ export function parseSystemMetrics(data: unknown): SystemMetrics | undefined {
 export interface SystemMetricsSeries {
   /** Whole-system CPU utilisation, 0..1. */
   readonly cpu: number[];
+  /** OUR-process CPU share, 0..1; `undefined` per tick where not attributed. */
+  readonly selfCpu: (number | undefined)[];
   /** First-GPU compute utilisation, 0..1 (0 when no GPU is present). */
   readonly gpu0Util: number[];
   /** First-GPU VRAM used fraction, 0..1 (0 when no GPU is present). */
@@ -201,12 +264,43 @@ export interface SystemMetricsSeries {
   readonly fps: number[];
 }
 
+/**
+ * The per-GPU sparkline series, keyed by stable device id, so the footer/page
+ * can plot EVERY GPU (not just the first). Each array is the same length as the
+ * retained ring and aligned in arrival order. `total` channels carry the
+ * device-wide value (0 where the GPU was absent that tick, so the series stays
+ * aligned); `self*` channels carry OUR-process share and hold `undefined` for
+ * any tick the platform did not attribute it (never a false 0).
+ */
+export interface GpuSeries {
+  /** Stable device identity this series belongs to. */
+  readonly id: string;
+  /** Device-wide compute utilisation, 0..1 (0 where the GPU was absent). */
+  readonly compute: number[];
+  /** OUR-process compute share, 0..1; `undefined` where not attributed. */
+  readonly selfCompute: (number | undefined)[];
+  /** Device-wide VRAM used fraction, 0..1 (0 where the GPU was absent). */
+  readonly vram: number[];
+  /** OUR-process VRAM fraction of total, 0..1; `undefined` where not attributed. */
+  readonly selfVram: (number | undefined)[];
+  /** Device-wide active NVENC sessions (0 where absent/unreported). */
+  readonly nvenc: number[];
+  /** OUR-process NVENC sessions; `undefined` where not attributed. */
+  readonly selfNvenc: (number | undefined)[];
+  /** Device-wide decoder utilisation, 0..1 (0 where absent/unreported). */
+  readonly dec: number[];
+  /** OUR-process decoder share, 0..1; `undefined` where not attributed. */
+  readonly selfDec: (number | undefined)[];
+}
+
 /** A point-in-time view of the ring: the latest sample + the parallel series. */
 export interface SystemMetricsSnapshot {
   /** The most recent sample (conflated), or `undefined` before the first. */
   readonly current: SystemMetrics | undefined;
   /** The retained series, oldest first. */
   readonly series: SystemMetricsSeries;
+  /** One sparkline series per GPU ever seen in the ring, in first-seen order. */
+  readonly gpuSeries: GpuSeries[];
 }
 
 function vramFraction(gpu: GpuMetrics | undefined): number {
@@ -214,6 +308,52 @@ function vramFraction(gpu: GpuMetrics | undefined): number {
     return 0;
   }
   return gpu.mem_used_bytes / gpu.mem_total_bytes;
+}
+
+/** OUR-process VRAM as a fraction of the device total, or `undefined` if absent. */
+function selfVramFraction(gpu: GpuMetrics | undefined): number | undefined {
+  const selfUsed = gpu?.self_mem_used_bytes;
+  if (gpu === undefined || selfUsed === undefined || gpu.mem_total_bytes <= 0) {
+    return undefined;
+  }
+  return selfUsed / gpu.mem_total_bytes;
+}
+
+/**
+ * The stable, first-seen-ordered list of GPU ids across every retained sample,
+ * so a per-GPU series exists even for a GPU that blinks out for a tick.
+ */
+function gpuIdsAcross(samples: readonly SystemMetrics[]): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const s of samples) {
+    for (const gpu of s.gpus) {
+      if (!seen.has(gpu.id)) {
+        seen.add(gpu.id);
+        ids.push(gpu.id);
+      }
+    }
+  }
+  return ids;
+}
+
+/** Build one aligned {@link GpuSeries} for `id` across the retained `samples`. */
+function gpuSeriesFor(id: string, samples: readonly SystemMetrics[]): GpuSeries {
+  const at = (s: SystemMetrics): GpuMetrics | undefined =>
+    s.gpus.find((g) => g.id === id);
+  return {
+    id,
+    // Device-wide channels: 0 for a tick the GPU was absent so series stay aligned.
+    compute: samples.map((s) => at(s)?.compute_util ?? 0),
+    vram: samples.map((s) => vramFraction(at(s))),
+    nvenc: samples.map((s) => at(s)?.encoder_sessions ?? 0),
+    dec: samples.map((s) => at(s)?.decoder_util ?? 0),
+    // Our-share channels: undefined where unattributed/absent (never a false 0).
+    selfCompute: samples.map((s) => at(s)?.self_compute_util),
+    selfVram: samples.map((s) => selfVramFraction(at(s))),
+    selfNvenc: samples.map((s) => at(s)?.self_encoder_sessions),
+    selfDec: samples.map((s) => at(s)?.self_decoder_util),
+  };
 }
 
 /**
@@ -242,13 +382,17 @@ export class SystemMetricsRing {
     const samples = this.#samples;
     const series: SystemMetricsSeries = {
       cpu: samples.map((s) => s.cpu_util),
+      selfCpu: samples.map((s) => s.self_cpu_util),
       gpu0Util: samples.map((s) => s.gpus[0]?.compute_util ?? 0),
       vram: samples.map((s) => vramFraction(s.gpus[0])),
       nvenc: samples.map((s) => s.gpus[0]?.encoder_sessions ?? 0),
       dec: samples.map((s) => s.gpus[0]?.decoder_util ?? 0),
       fps: samples.map((s) => s.program_fps ?? 0),
     };
-    return { current: samples[samples.length - 1], series };
+    const gpuSeries = gpuIdsAcross(samples).map((id) =>
+      gpuSeriesFor(id, samples),
+    );
+    return { current: samples[samples.length - 1], series, gpuSeries };
   }
 }
 
@@ -282,7 +426,16 @@ export function useSystemMetrics(): SystemMetricsState {
   const [status, setStatus] = useState<RealtimeStatus>("connecting");
   const [snapshot, setSnapshot] = useState<SystemMetricsSnapshot>({
     current: undefined,
-    series: { cpu: [], gpu0Util: [], vram: [], nvenc: [], dec: [], fps: [] },
+    series: {
+      cpu: [],
+      selfCpu: [],
+      gpu0Util: [],
+      vram: [],
+      nvenc: [],
+      dec: [],
+      fps: [],
+    },
+    gpuSeries: [],
   });
 
   useEffect(() => {
@@ -310,5 +463,10 @@ export function useSystemMetrics(): SystemMetricsState {
     };
   }, []);
 
-  return { status, current: snapshot.current, series: snapshot.series };
+  return {
+    status,
+    current: snapshot.current,
+    series: snapshot.series,
+    gpuSeries: snapshot.gpuSeries,
+  };
 }
