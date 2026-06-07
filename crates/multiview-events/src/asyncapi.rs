@@ -285,6 +285,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/AudioMeter" }
     }));
+    map.insert("SystemMetrics".to_owned(), system_metrics_message());
     map.insert("OutputStatus".to_owned(), json!({
         "name": "OutputStatus",
         "title": "Output sink status update",
@@ -472,6 +473,9 @@ fn build_schemas() -> Value {
         "LifecycleState": lifecycle_state_schema(),
         "TileState": tile_state_schema(),
         "AudioMeter": audio_meter_schema(),
+        "SystemMetrics": system_metrics_schema(),
+        "GpuMetrics": gpu_metrics_schema(),
+        "GpuVendor": gpu_vendor_schema(),
         "OutputRunState": output_run_state_schema(),
         "OutputStatus": output_status_schema(),
         "AlertSeverity": alert_severity_schema(),
@@ -566,6 +570,74 @@ fn audio_meter_schema() -> Value {
                 "description": "Effective wire cadence (Hz)."
             }
         }
+    })
+}
+
+fn system_metrics_message() -> Value {
+    json!({
+        "name": "SystemMetrics",
+        "title": "High-rate whole-system metrics sample",
+        "summary": "CPU / GPU / encoder-decoder utilisation sample (numeric only).",
+        "description": concat!(
+            "Emitted on topic `system`. A high-rate conflated lane like `audio.meters`: ",
+            "samples are latest-only at ~1-2 Hz on the wire and excluded from the lossless ",
+            "replay ring. PUSHED, never polled — a slow UI loses only its own samples and the ",
+            "engine never back-pressures (inv #10). Live values only; historic windows (the ",
+            "data decisions are made from) are a separate cold REST query.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/SystemMetrics" }
+    })
+}
+
+fn system_metrics_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of the `system.metrics` event: a high-rate whole-system sample ",
+            "(cpu / gpu / encoder-decoder). Numeric only; conflated at ~1-2 Hz (high-rate lane).",
+        ),
+        "required": ["cpu_util", "sampled_hz"],
+        "properties": {
+            "cpu_util": { "type": "number", "format": "float", "description": "Whole-system CPU utilisation, 0.0-1.0." },
+            "mem_used_bytes": { "type": "integer", "format": "uint64", "description": "Host memory in use (bytes), if known." },
+            "mem_total_bytes": { "type": "integer", "format": "uint64", "description": "Total host memory (bytes), if known." },
+            "gpus": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/GpuMetrics" },
+                "description": "Per-GPU utilisation samples; empty on a GPU-free host."
+            },
+            "program_fps": { "type": "number", "format": "float", "description": "Aggregate program output rate (fps), if running." },
+            "sampled_hz": { "type": "integer", "format": "uint32", "description": "Effective wire sampling cadence (Hz)." }
+        }
+    })
+}
+
+fn gpu_metrics_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "A per-GPU utilisation sample. Optional fields are absent where the vendor does not expose that signal.",
+        "required": ["id", "vendor", "compute_util", "mem_used_bytes", "mem_total_bytes"],
+        "properties": {
+            "id": { "type": "string", "description": "Stable device identity (UUID where available, else an index)." },
+            "vendor": { "$ref": "#/components/schemas/GpuVendor" },
+            "name": { "type": "string", "description": "Human-readable device name, if known." },
+            "compute_util": { "type": "number", "format": "float", "description": "Compute (graphics/CUDA) utilisation, 0.0-1.0." },
+            "mem_used_bytes": { "type": "integer", "format": "uint64", "description": "VRAM in use (bytes)." },
+            "mem_total_bytes": { "type": "integer", "format": "uint64", "description": "Total VRAM (bytes)." },
+            "encoder_util": { "type": "number", "format": "float", "description": "Encoder (NVENC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent)." },
+            "decoder_util": { "type": "number", "format": "float", "description": "Decoder (NVDEC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent)." },
+            "encoder_sessions": { "type": "integer", "format": "uint32", "description": "Active concurrent hardware encode sessions (NVIDIA)." },
+            "encoder_session_ceiling": { "type": "integer", "format": "uint32", "description": "Runtime-discovered concurrent encode-session ceiling (NVIDIA)." }
+        }
+    })
+}
+
+fn gpu_vendor_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "GPU/accelerator hardware vendor (selects which per-engine signals to expect).",
+        "enum": ["nvidia", "intel", "amd", "apple", "other"]
     })
 }
 

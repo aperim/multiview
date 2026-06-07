@@ -19,7 +19,10 @@ use multiview_core::tally::{Brightness, BusSource, TallyColor, TallyState};
 use multiview_core::time::MediaTime;
 use multiview_events::event::{AlarmTransition, SalvoEvent, SalvoPhase, TallyEvent, TallyTarget};
 use multiview_events::ordering::Accepted;
-use multiview_events::{Envelope, Event, EventEnvelope, FrameKind, Seq, Topic, TopicCursor};
+use multiview_events::{
+    Envelope, Event, EventEnvelope, FrameKind, GpuMetrics, GpuVendor, Seq, SystemMetrics, Topic,
+    TopicCursor,
+};
 use serde_json::{json, Value};
 
 fn ts() -> MediaTime {
@@ -262,6 +265,80 @@ fn alarms_topic_obeys_snapshot_then_delta_with_resume() {
         cur.accept(FrameKind::Snapshot, Seq::new(1)).unwrap(),
         Accepted::SnapshotBaseline { seq: Seq::new(1) }
     );
+}
+
+#[test]
+fn system_metrics_event_is_high_rate_conflated_and_roundtrips() {
+    // `system` is a high-rate conflated lane (cpu/gpu/encoder telemetry): latest-
+    // only, excluded from the lossless replay ring — pushed, never polled (#10).
+    assert_eq!(Topic::System.as_str(), "system");
+    assert!(Topic::System.is_high_rate());
+    assert!(!Topic::System.is_control());
+
+    let event = Event::SystemMetrics(SystemMetrics {
+        cpu_util: 0.41,
+        mem_used_bytes: Some(8_000_000_000),
+        mem_total_bytes: Some(32_000_000_000),
+        gpus: vec![GpuMetrics {
+            id: "GPU-abc".to_owned(),
+            vendor: GpuVendor::Nvidia,
+            name: Some("NVIDIA GeForce RTX 4060".to_owned()),
+            compute_util: 0.63,
+            mem_used_bytes: 4_100_000_000,
+            mem_total_bytes: 12_000_000_000,
+            encoder_util: Some(0.15),
+            decoder_util: Some(0.0),
+            encoder_sessions: Some(2),
+            encoder_session_ceiling: Some(8),
+        }],
+        program_fps: Some(50.0),
+        sampled_hz: 2,
+    });
+
+    assert_eq!(event.type_tag(), "system.metrics");
+    assert!(
+        !event.is_control(),
+        "system.metrics is a data event, not control"
+    );
+
+    // Internally-tagged (`t`/`data`); the vendor enum is snake_case; the NVENC
+    // session counts (exact integers) render under their wire names.
+    let v = serde_json::to_value(&event).unwrap();
+    assert_eq!(v.get("t").unwrap(), &json!("system.metrics"));
+    let data = v.get("data").unwrap().as_object().unwrap();
+    let gpu = data.get("gpus").unwrap().as_array().unwrap()[0]
+        .as_object()
+        .unwrap();
+    assert_eq!(gpu.get("vendor").unwrap(), &json!("nvidia"));
+    assert_eq!(gpu.get("encoder_sessions").unwrap(), &json!(2));
+    assert_eq!(gpu.get("encoder_session_ceiling").unwrap(), &json!(8));
+
+    // Round-trip preserves the f32 utilisations exactly (f32→JSON→f32 is lossless).
+    let back: Event = serde_json::from_value(v).unwrap();
+    assert_eq!(back, event, "system.metrics must survive a JSON round-trip");
+}
+
+#[test]
+fn system_metrics_gpu_free_host_omits_empty_collections() {
+    // A GPU-free host: `gpus` is empty (skipped on the wire) and the optional
+    // host-memory + fps fields are absent. Still a valid, round-tripping sample.
+    let event = Event::SystemMetrics(SystemMetrics {
+        cpu_util: 0.12,
+        mem_used_bytes: None,
+        mem_total_bytes: None,
+        gpus: vec![],
+        program_fps: None,
+        sampled_hz: 1,
+    });
+    let v = serde_json::to_value(&event).unwrap();
+    let data = v.get("data").unwrap().as_object().unwrap();
+    assert!(
+        !data.contains_key("gpus"),
+        "an empty gpus list must be skipped on the wire"
+    );
+    assert!(!data.contains_key("program_fps"));
+    let back: Event = serde_json::from_value(v).unwrap();
+    assert_eq!(back, event);
 }
 
 #[test]

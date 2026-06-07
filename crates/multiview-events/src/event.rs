@@ -87,6 +87,81 @@ pub struct AudioMeter {
     pub sampled_hz: u32,
 }
 
+/// The hardware vendor of a GPU/accelerator (for telemetry display + which
+/// per-engine signals to expect). `#[non_exhaustive]` so a future vendor does
+/// not break the wire enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GpuVendor {
+    /// NVIDIA — exposes compute, encoder/decoder util, and NVENC session counts.
+    Nvidia,
+    /// Intel — exposes compute + encoder/decoder util.
+    Intel,
+    /// AMD — exposes compute + a combined media-engine util.
+    Amd,
+    /// Apple — exposes compute; no per-engine util.
+    Apple,
+    /// A vendor the control plane did not classify.
+    Other,
+}
+
+/// A high-rate per-GPU utilisation sample (numeric only). Optional fields are
+/// absent where the vendor does not expose that signal (see [`GpuVendor`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuMetrics {
+    /// Stable device identity (UUID where available, else an index string).
+    pub id: String,
+    /// The hardware vendor.
+    pub vendor: GpuVendor,
+    /// Human-readable device name, if known (e.g. `NVIDIA GeForce RTX 4060`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Compute (graphics/CUDA) utilisation, 0.0–1.0.
+    pub compute_util: f32,
+    /// VRAM in use (bytes).
+    pub mem_used_bytes: u64,
+    /// Total VRAM (bytes).
+    pub mem_total_bytes: u64,
+    /// Encoder (NVENC/QSV) ASIC utilisation, 0.0–1.0, where the vendor exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_util: Option<f32>,
+    /// Decoder (NVDEC/QSV) ASIC utilisation, 0.0–1.0, where the vendor exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_util: Option<f32>,
+    /// Active concurrent hardware encode sessions (NVIDIA), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_sessions: Option<u32>,
+    /// The runtime-discovered concurrent encode-session ceiling (NVIDIA), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_session_ceiling: Option<u32>,
+}
+
+/// A high-rate whole-system metrics sample (numeric only — never a screenshot).
+/// Pushed on topic [`crate::topic::Topic::System`], **conflated + drop-oldest**
+/// like [`AudioMeter`] (inv #10): the engine never blocks on a client, and a slow
+/// UI simply skips samples. The UI subscribes — it never polls these (a REST poll
+/// of a per-second value is the wrong shape; only cold historic windows are REST).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemMetrics {
+    /// Whole-system CPU utilisation, 0.0–1.0 (from `/proc/stat` on Linux).
+    pub cpu_util: f32,
+    /// Host memory in use (bytes), where known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_used_bytes: Option<u64>,
+    /// Total host memory (bytes), where known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total_bytes: Option<u64>,
+    /// Per-GPU utilisation samples; empty on a GPU-free host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpus: Vec<GpuMetrics>,
+    /// Aggregate program output rate across active programs (fps), if running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_fps: Option<f32>,
+    /// The effective sampling cadence on the wire (Hz).
+    pub sampled_hz: u32,
+}
+
 /// The running state of an output sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -329,6 +404,10 @@ pub enum Event {
     /// High-rate audio meter sample (topic `audio.meters`).
     #[serde(rename = "audio.meter")]
     AudioMeter(AudioMeter),
+    /// High-rate whole-system metrics sample (topic `system`): cpu / gpu /
+    /// encoder-decoder. Conflated + drop-oldest; pushed, never polled.
+    #[serde(rename = "system.metrics")]
+    SystemMetrics(SystemMetrics),
     /// Output sink status (topic `outputs`).
     #[serde(rename = "output.status")]
     OutputStatus(OutputStatus),
@@ -391,6 +470,7 @@ impl Event {
             Self::Error(_) => "$error",
             Self::TileState(_) => "tile.state",
             Self::AudioMeter(_) => "audio.meter",
+            Self::SystemMetrics(_) => "system.metrics",
             Self::OutputStatus(_) => "output.status",
             Self::AlertRaised(_) => "alert.raised",
             Self::AlertCleared(_) => "alert.cleared",
