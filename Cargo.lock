@@ -452,6 +452,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -2840,6 +2842,7 @@ dependencies = [
 name = "multiview-ndi-sys"
 version = "0.1.0"
 dependencies = [
+ "bindgen",
  "libloading",
  "tempfile",
 ]

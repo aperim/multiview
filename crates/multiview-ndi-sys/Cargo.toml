@@ -23,6 +23,21 @@ description = "Minimal safe runtime-load wrapper over the proprietary NDI® SDK 
 # `unsafe` boundary so `multiview-output` can stay `forbid(unsafe_code)`.
 libloading = { workspace = true }
 
+[features]
+# Generate the typed NDIlib v6 ABI (the function table + frame/source structs)
+# from the **licensed** SDK header at build time via `bindgen`. OFF by default;
+# the consumers' `ndi` feature pulls it. The header is located at build time
+# (NDI_SDK_INCLUDE_DIR, else /opt/ndi/include, else the workspace `.ndi-sdk/include`
+# drop-spot) and is NEVER vendored or committed (ADR-0008); the runtime `.so` is
+# still `dlopen`-loaded, never linked. With this feature OFF the crate is exactly
+# the pure runtime-loader and needs no SDK present.
+bindings = ["dep:bindgen"]
+
+[build-dependencies]
+# Only compiled when the `bindings` feature is on (optional). Pinned to the
+# version already resolved in the workspace lockfile.
+bindgen = { version = "0.70", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 
