@@ -19,3 +19,4 @@ Deep, verification-hardened design records that back the Multiview implementatio
 - [Web App + API Stack](web-api-stack.md) — Web/API Stack
 - [Dev Container Design](devcontainer-design.md) — Dev Container
 - [ACME/TLS (DNS-01 only)](acme-tls.md) — Web/API Stack (automatic TLS for the control plane: instant-acme + rustls, pluggable `DnsProvider` trait with Cloudflare first; drives ADR-0029)
+- [Multiple active programs](multi-program.md) — Core Engine (N concurrent output programs: multiview/passthrough/transcode under one `ProgramSet`; per-program clocks + decode-once-use-many + admission control; drives ADR-0030)

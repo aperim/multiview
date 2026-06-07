@@ -55,6 +55,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-0027](ADR-0027.md) — Synthetic sources are first-class: bars/solid/clock as in-process `SourceKind`s through the one uniform ingest path (`test` kept as a `bars` alias) *(Proposed)*
 - [ADR-0028](ADR-0028.md) — Native NDI FFI binding data design: resolve-once flat `NdiV6` fn-pointer table, RAII safe handles, all `unsafe` confined to `multiview-ndi-sys` *(Accepted)*
 - [ADR-0029](ADR-0029.md) — ACME/TLS for the control plane: DNS-01 only, rustls (no openssl), pluggable `DnsProvider` trait with Cloudflare first, fail-soft renewal off the engine path (inv #10) *(Proposed)*
+- [ADR-0030](ADR-0030.md) — Multiple active programs: a `Program` actor (multiview/passthrough/transcode) under a `ProgramSet` supervisor with per-program output clocks + shared time source, decode-once-use-many source registry, admission control + per-program degradation *(Proposed)*
 
 ## Color
 

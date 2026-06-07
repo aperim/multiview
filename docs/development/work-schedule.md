@@ -1046,3 +1046,106 @@ is the first and (for now) only DNS provider. Dependency-ordered; each phase com
 - **Acceptance:** isolation soak passes (output never stalls under ACME fault injection); mutation/property
   tests green on the renewal + cleanup logic; `cargo deny check` green with `--features tls,acme`; default
   build still plain-HTTP + openssl-free.
+
+
+---
+
+## Multi-program engine (ADR-0030) — phased backlog
+
+Dependency-ordered. Each phase ships TDD-first (failing test committed separately) and
+**re-verifies** the named invariants. MP-0→MP-2 are the serial spine; MP-3/MP-4 and
+MP-6/MP-8 fan out once MP-2 lands.
+
+- **MP-0 — Program abstraction + single-program-as-one-Program refactor.**
+  Introduce `Program`/`ProgramKind` (engine) + `ProgramSpec` (config types only, no schema
+  root change yet); refactor `Pipeline::drive_streaming` body (`pipeline.rs:930–1192`) into
+  `MultiviewProgram` owning its clock/drive/egress/stop — a **move**. Add `ProgramId`
+  context to `PipelineError`.
+  *Acceptance:* existing single-program run + all current invariant tests pass unchanged
+  with the run path going through one `MultiviewProgram`.
+  *Re-verify:* #1, #7, #10 (no behavioural change).
+
+- **MP-1 — `ProgramSet` supervisor + N independent clocks.**
+  `ProgramSet` owns the `ProgramId→ProgramHandle` map + one shared `Arc<dyn TimeSource>`;
+  `impl Actor for Program`; `start`/`stop` spawn/stop one task. CLI `main` builds a
+  `ProgramSet` instead of one `Pipeline`.
+  *Acceptance:* two `Multiview` programs at 25 and 60 fps run concurrently; each
+  `ticks_emitted` advances on its own cadence; stopping one leaves the other ticking.
+  *Re-verify:* **#1 per program** (independent clocks), **#10** (NEW chaos gate: wedge
+  program A's egress, assert program B's `ticks_emitted` keeps advancing on cadence).
+
+- **MP-2 — Decode-once shared `SourceRegistry`.**
+  Hoist `stores`+`ingest_plans` (`pipeline.rs:425`) into a process-global ref-counted
+  registry keyed by source identity; consumers hold `Arc<TileStore>` clones; ingest
+  lifecycle moves to process scope (start on first ref, teardown on last). Decode at the
+  supremum requested resolution across consumers.
+  *Acceptance:* one source referenced by two programs spins **one** decode actor (assert a
+  single ingest task / single decode count); both programs sample last-good lock-free; last
+  release tears the source down.
+  *Re-verify:* #5/#6 (one decode, supremum res, in-shader downscale), #10 (registry
+  lifecycle off the hot path — design-note + no `Drop` in async destructor).
+
+- **MP-3 — Passthrough (remux) kind.**
+  `PacketCopyFanout` consuming `Demuxer::read_packet` (`demux.rs:196`) →
+  `add_stream_from_parameters` (`mux.rs:136`) → existing `PacketMuxSink`s, with the
+  monotonic DTS clamp + `avoid_negative_ts=make_zero` + discontinuity re-anchor; lazy
+  coded-packet facet on the registry (no decode). Build-time codec/container compat gate +
+  `PassthroughFallback`.
+  *Acceptance:* an RTSP H.264 source remuxes to an SRT/MP4 output with **zero** decode/
+  encode (assert no decoder/encoder instantiated); on source loss the program goes
+  `NO_SIGNAL` + reconnects, never fabricates.
+  *Re-verify:* **#1 sanctioned exception documented** (honest NO_SIGNAL), efficiency
+  (0 decode/encode), #3 (timestamp clamp, no tick re-stamp).
+
+- **MP-4 — Transcode kind.**
+  One source (shared decode from MP-2) → optional scale → `ProgramEncoder` →
+  `StreamEgress`; own `OutputClock`, PTS re-stamped from tick. Passthrough→transcode
+  fallback path reuses this.
+  *Acceptance:* a camera that is both a 3×3 tile **and** a 720p transcode is decoded
+  **once** (assert single decode) and produces both outputs; transcode output PTS derives
+  from its own tick.
+  *Re-verify:* #1 (own clock), #3 (re-stamp from tick), #5/#6 (shared decode, in-shader
+  scale), #7 (the transcode rendition is one distinct encode).
+
+- **MP-5 — `[[programs]]` config + backward compat.**
+  Add `programs: Vec<Program>` to `MultiviewConfig`; legacy block desugars to one
+  `Multiview` program (`id="main"`) via `into_programs()`; `validate()` rejects both-populated;
+  `schema_version`→2; cross-program checks (unique ids, unique output labels across programs,
+  `input_id` resolves). Round-trip TOML↔JSON.
+  *Acceptance:* every existing v1 config parses and produces one `Multiview` program; a new
+  3-program config (multiview+passthrough+transcode) validates and round-trips losslessly;
+  a config with both legacy + `[[programs]]` is rejected.
+  *Re-verify:* config invariants only (no engine change); #7 (per-program outputs).
+
+- **MP-6 — Programs API + realtime.**
+  `PROGRAM_KIND` + `routes/programs.rs` CRUD (ETag/If-Match→412, Idempotency-Key, RFC 9457);
+  `StartProgram`/`StopProgram`/`ApplyProgram` commands (+ `program` field on `SwapSource`/
+  `ApplyLayout`); `…/plan` classification; `Topic::Programs` + `program.state` event;
+  `OutputStatus`/`TileState` scoped by `Envelope.id`; snapshot + `CorrKey` extend.
+  *Acceptance:* start/stop a single program by id over the API (202+op-id) without affecting
+  others; client sees per-program `program.state` (incl. `Migrating` on a Class-2 kind
+  change) and a complete snapshot on connect.
+  *Re-verify:* **#10** (lifecycle rides the bounded bus, sheds-to-503, never back-pressures
+  the engine), #11 (`…/plan` returns Class-1/Class-2; kind change = Class-2).
+
+- **MP-7 — Admission control + global degradation.**
+  Union admission crediting shared decode once (de-dup `TileLoad`/source at supremum res)
+  through `Planner::admit` + `select_device`; same-source co-location affinity term; add the
+  host-IO/bandwidth budget dimension for passthrough; cross-program cheapest-impact shed with
+  per-program `priority`.
+  *Acceptance:* admitting a program that shares a source does **not** double-count its
+  decode; a box at the NVENC ceiling rejects a new transcode with a capability error naming
+  the binding resource; under global pressure the low-priority program sheds before the
+  primary multiview, and no running program's clock stalls.
+  *Re-verify:* **#9** (cross-program shed, bounded drop-never-grow), #1 (shed never stalls a
+  running program), ADR-0017/0018 placement gates.
+
+- **MP-8 — UI program list/editor.**
+  `programs` nav + routes; `ProgramsPage` (TanStack-Table: kind badge, run-state from
+  `program.state`, output count, start/stop→202+job); `usePrograms`; kind-switched editor
+  (Multiview = parameterized `LayoutEditorPage`; Passthrough form with remux/transcode
+  badge; Transcode form); pre-apply Class-1/Class-2 confirm; multi-program dashboard.
+  *Acceptance:* operator creates/starts/stops/edits each of the three program kinds from the
+  WebUI; the passthrough editor shows "remux, no re-encode" vs "will transcode"; an A↔B↔C
+  kind change shows the Class-2 reset warning before apply.
+  *Re-verify:* #11 (live-apply class surfaced before apply); WCAG 2.1 AA.
