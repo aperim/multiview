@@ -74,6 +74,13 @@ pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/ndi_bindings.rs"));
 }
 
+/// The resolve-once flat v6 function table (ADR-0028 §1): the one place that
+/// reads the `bindgen` anonymous-union slots, so nothing else does.
+#[cfg(feature = "bindings")]
+pub(crate) mod table;
+#[cfg(feature = "bindings")]
+pub use table::TableError;
+
 /// The NDI 6 dynamic-load entry-point symbol, NUL-terminated for `dlsym`. NDI 6
 /// uses **`NDIlib_v6_load`** (not the v5 symbol); it returns a pointer to the SDK
 /// function table.
