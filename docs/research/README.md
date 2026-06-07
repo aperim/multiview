@@ -18,3 +18,4 @@ Deep, verification-hardened design records that back the Multiview implementatio
 - [Management Capability Matrix](management-capability-matrix.md) — Management
 - [Web App + API Stack](web-api-stack.md) — Web/API Stack
 - [Dev Container Design](devcontainer-design.md) — Dev Container
+- [ACME/TLS (DNS-01 only)](acme-tls.md) — Web/API Stack (automatic TLS for the control plane: instant-acme + rustls, pluggable `DnsProvider` trait with Cloudflare first; drives ADR-0029)

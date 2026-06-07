@@ -981,3 +981,68 @@ SUR-4 → SUR-5 (web layouts swap) form the shortest grounded win. SUR-1 and SUR
 - /workspaces/mosaic/crates/multiview-control/src/routes/mod.rs
 - /workspaces/mosaic/web/src/api/layouts.ts
 - /workspaces/mosaic/web/src/realtime/envelope.ts
+
+
+---
+
+## TLS / ACME (DNS-01) for the control plane — phased backlog
+
+Subsystem: `multiview-control` (+ `multiview-config`, `multiview-cli`). Design: ADR-0029, brief
+[acme-tls](../research/acme-tls.md). Off-by-default Cargo features `tls` (→ `axum-server/tls-rustls`)
+and `acme` (→ `instant-acme` + `reqwest/rustls-tls`), wired into `multiview-cli` aggregates. Cloudflare
+is the first and (for now) only DNS provider. Dependency-ordered; each phase commits failing tests first
+(TDD), keeps default `cargo check` plain-HTTP + LGPL-clean + `cargo deny check` green.
+
+### TLS-0 — static-cert rustls termination (the floor; no ACME)
+- New `tls` feature; `serve_tls()` sibling of `serve()` using `axum_server::from_tcp_rustls` over the
+  existing bound listener (`tokio::TcpListener` → `.into_std()`), `RustlsConfig::from_pem_file`,
+  `axum_server::Handle` for graceful shutdown. Config `[control.tls] mode="static"` +
+  `cert_file`/`key_file`. Pure serving glue, no network.
+- **Acceptance:** with `mode="static"` and an operator cert, the SPA/REST/WS are served over HTTPS on
+  the bound listener; `mode` absent ⇒ unchanged plain HTTP; default build pulls no openssl
+  (`cargo deny check` green).
+
+### TLS-1 — ACME core: account + order + DNS-01 flow (provider stubbed)
+- New `acme` feature; integrate `instant-acme` 0.8.5: `Account::create`/`from_credentials` with
+  `AccountCredentials` persisted `0600` under `/var/lib/multiview/acme/account.<env>.json`; `new_order`
+  → walk authorizations → `Dns01` → `key_authorization().dns_value()`; bounded-backoff order polling +
+  finalize (`rcgen` CSR) + `certificate()`. DNS publish behind a `DnsProvider` trait whose test impl is
+  an in-memory fake. Directory URL config-driven, default **staging**; CI uses Pebble.
+- **Acceptance:** against Pebble/staging with the fake provider, a full issue cycle yields a valid cert
+  chain + key on disk (`0600`); account creds persist and are reused on a second run (no re-register).
+
+### TLS-2 — `DnsProvider` trait + Cloudflare implementation
+- Finalise the object-safe `async_trait` `DnsProvider` (`create_txt_record` → `TxtRecordHandle` newtype,
+  idempotent `delete_txt_record`, `wait_for_propagation(deadline)`). Cloudflare impl over
+  `reqwest` (rustls-tls, no default features): `POST`/`DELETE /zones/{zone_id}/dns_records`, Bearer
+  token, `ttl:60`, optional `GET /zones?name=` when `zone_id` unset. `wait_for_propagation` polls the
+  zone's **authoritative** NS for the TXT until present or deadline. Mandatory TXT cleanup on success
+  and on failed orders.
+- **Acceptance:** an end-to-end DNS-01 issuance against staging using a real single-zone
+  **Zone.DNS:Edit** token publishes then deletes the `_acme-challenge` TXT (no residue) and installs a
+  trusted leaf with the requested SAN/wildcard.
+
+### TLS-3 — config schema + hot-reload renewal task
+- Extend `ControlConfig` (`#[non_exhaustive]`): `Option<TlsConfig>` with adjacently-tagged `mode`
+  (`static`|`acme`) and `provider` enums (never `untagged`); `[control.tls.acme]` (`directory`,
+  `contact_email`, `domains`, `state_dir`, optional `renewal_lead`) + `[control.tls.acme.cloudflare]`
+  (`zone_id`, `api_token_ref = "env:…"|"file:…"|"op://…"` — never the literal token). Validation: exactly
+  one of static/acme per `mode`, non-empty `domains`, parseable directory URL, known provider, token ref
+  present; reject a literal-looking token. Detached `tokio::spawn` renewal task: renew at
+  ⅓-remaining-lifetime + jitter, `RustlsConfig::reload_from_pem` hot-swap, **fail-soft** (warn +
+  telemetry + bounded backoff, keep serving existing cert). Metrics
+  `multiview_tls_cert_expiry_seconds`, `multiview_tls_renewal_failures_total`.
+- **Acceptance:** a config-driven `mode="acme"` run issues at boot and hot-swaps a renewed cert with no
+  listener restart and no dropped connections; a forced renewal failure leaves the existing cert serving
+  and emits the failure metric; the token is sourced from env/1Password, never logged.
+
+### TLS-4 — hardening, isolation soak, and tests
+- Chaos/isolation gate assertion: a stalled/failing ACME order or killed renewal task leaves **program
+  output and the existing TLS listener unaffected** (invariant #10 soak). Property/idempotency tests on
+  `delete_txt_record` and the renewal scheduler (no duplicate orders on transient failure). Atomic cert
+  install (temp+fsync+mode+rename) test; `0600`/uid-10001 permission test. Operator docs: CAA + RFC 8657
+  `accounturi`, single-zone token + IP filter, CT-log monitoring, staging→prod promotion runbook,
+  account-key/token rotation runbook. Confirm `reqwest` resolves to rustls in `Cargo.lock`.
+- **Acceptance:** isolation soak passes (output never stalls under ACME fault injection); mutation/property
+  tests green on the renewal + cleanup logic; `cargo deny check` green with `--features tls,acme`; default
+  build still plain-HTTP + openssl-free.
