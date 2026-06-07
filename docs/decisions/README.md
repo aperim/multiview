@@ -56,6 +56,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-0028](ADR-0028.md) — Native NDI FFI binding data design: resolve-once flat `NdiV6` fn-pointer table, RAII safe handles, all `unsafe` confined to `multiview-ndi-sys` *(Accepted)*
 - [ADR-0029](ADR-0029.md) — ACME/TLS for the control plane: DNS-01 only, rustls (no openssl), pluggable `DnsProvider` trait with Cloudflare first, fail-soft renewal off the engine path (inv #10) *(Proposed)*
 - [ADR-0030](ADR-0030.md) — Multiple active programs: a `Program` actor (multiview/passthrough/transcode) under a `ProgramSet` supervisor with per-program output clocks + shared time source, decode-once-use-many source registry, admission control + per-program degradation *(Proposed)*
+- [ADR-0031](ADR-0031.md) — Build our own pinned FFmpeg (reject jellyfin/PPA): LGPL-clean `--disable-everything` allowlist + separated GPL variant, reproducible multi-arch builder, FFmpeg 7.1.4 first (binding pin) then gated 8.1.1; shrink FFmpeg to codec+hwaccel only *(Proposed)*
 
 ## Color
 
