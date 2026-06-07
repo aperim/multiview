@@ -492,6 +492,9 @@ pub fn topic_for_event(event: &Event) -> Topic {
     match event {
         Event::TileState(_) => Topic::Tiles,
         Event::AudioMeter(_) => Topic::AudioMeters,
+        // High-rate whole-system metrics (cpu/gpu/encoder) ride the conflated
+        // `system` lane the footer subscribes to — NOT the control firehose.
+        Event::SystemMetrics(_) => Topic::System,
         Event::OutputStatus(_) => Topic::Outputs,
         Event::AlertRaised(_) | Event::AlertCleared(_) => Topic::Alerts,
         Event::InputConnection(_) => Topic::Inputs,
@@ -742,4 +745,32 @@ pub async fn sse_handler(
 /// Mint a fresh session id.
 fn uuid_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod topic_routing_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::topic_for_event;
+    use multiview_events::{Event, SystemMetrics, Topic};
+
+    /// High-rate whole-system metrics MUST route to the conflated `system` lane
+    /// the footer subscribes to — never the `$control` catch-all. (Regression:
+    /// `SystemMetrics` previously fell through to `_ => Topic::Control`, so the
+    /// pushed samples never reached the `system` topic and the footer stayed
+    /// empty.)
+    #[test]
+    fn system_metrics_routes_to_the_system_topic() {
+        let event = Event::SystemMetrics(SystemMetrics {
+            cpu_util: 0.4,
+            mem_used_bytes: None,
+            mem_total_bytes: None,
+            gpus: vec![],
+            program_fps: None,
+            sampled_hz: 1,
+        });
+        assert_eq!(topic_for_event(&event), Topic::System);
+        // And `system` is a high-rate conflated lane (pushed, never polled).
+        assert!(Topic::System.is_high_rate());
+    }
 }
