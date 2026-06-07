@@ -48,10 +48,12 @@
 
 pub mod error;
 pub mod latest;
+pub mod liveness;
 pub mod state;
 pub mod tile;
 
 pub use error::{Error, Result};
 pub use latest::LatestSlot;
+pub use liveness::{PacketLiveness, PacketLivenessState, PacketLivenessThresholds};
 pub use state::{classify, TileThresholds};
 pub use tile::{NoSignalPolicy, TileRead, TileStore};
