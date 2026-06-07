@@ -147,7 +147,10 @@ pub use versioning::{
 pub fn router(state: AppState) -> Router {
     let api = routes::api_router()
         .route("/ws", get(realtime::ws_handler))
-        .route("/events", get(realtime::sse_handler));
+        .route("/events", get(realtime::sse_handler))
+        // Unauthenticated auth-mode discovery: the SPA reads this before it has a
+        // token, to decide whether to show a login gate (and to validate a key).
+        .route("/auth/status", get(realtime::auth_status_handler));
 
     let app = Router::new()
         .nest("/api/v1", api)

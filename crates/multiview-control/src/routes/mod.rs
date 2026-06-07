@@ -405,6 +405,11 @@ impl axum::extract::FromRequestParts<AppState> for Principal {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Auth disabled (explicit trusted-network mode): every request is a local
+        // admin, no credential required.
+        if state.auth_disabled {
+            return Ok(Principal::local_admin());
+        }
         let header = header_value(&parts.headers, header::AUTHORIZATION);
         // Primary: native API key. If that fails and a JWT validator is
         // configured, fall back to OAuth2/JWT (the alternative authn path).

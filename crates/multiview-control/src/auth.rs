@@ -128,6 +128,21 @@ impl Principal {
     pub fn is_output_scoped(&self) -> bool {
         self.scoped_output_ids.is_some()
     }
+
+    /// The full-access principal used when authentication is **disabled** (an
+    /// explicit, opt-in deployment mode for trusted/local networks). It carries
+    /// [`Role::Admin`] and no object/output scoping, so every request is treated
+    /// as a local administrator. Reachable only when the operator turned auth off
+    /// — the default build still requires a verified API key.
+    #[must_use]
+    pub fn local_admin() -> Self {
+        Self {
+            key_id: "local-admin".to_owned(),
+            role: Role::Admin,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+        }
+    }
 }
 
 /// Per-object authorization (BOLA defense, ADR-W005 / OWASP API1).

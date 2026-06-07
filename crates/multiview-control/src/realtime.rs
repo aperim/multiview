@@ -601,6 +601,11 @@ fn resolve_principal(
     headers: &HeaderMap,
     access_token: Option<&str>,
 ) -> Result<Principal, crate::error::ControlError> {
+    // Auth disabled (explicit trusted-network mode): the realtime stream is open
+    // as a local admin, matching the REST `Principal` extractor.
+    if state.auth_disabled {
+        return Ok(Principal::local_admin());
+    }
     let header = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
@@ -614,6 +619,36 @@ fn resolve_principal(
         return state.api_keys.verify(token);
     }
     Err(crate::error::ControlError::Unauthenticated)
+}
+
+/// The body of `GET /api/v1/auth/status` — the **unauthenticated** discovery
+/// endpoint the SPA reads to decide whether to prompt for an API key (and to
+/// validate one).
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct AuthStatus {
+    /// Whether a verified credential is required to reach privileged routes
+    /// (`false` only when the operator explicitly disabled auth).
+    pub auth_required: bool,
+    /// Whether the credential presented on THIS request authenticates — so the SPA
+    /// can validate an entered key by calling this endpoint with it. Always `true`
+    /// when auth is disabled.
+    pub authenticated: bool,
+}
+
+/// `GET /api/v1/auth/status` — report whether authentication is required and
+/// whether the presented credential (header `Bearer` or `?access_token=`)
+/// authenticates. Deliberately **unauthenticated**: the SPA must reach it before
+/// it holds a token. It leaks nothing beyond the two booleans.
+pub async fn auth_status_handler(
+    State(state): State<AppState>,
+    Query(access): Query<AccessTokenQuery>,
+    headers: HeaderMap,
+) -> axum::Json<AuthStatus> {
+    let authenticated = resolve_principal(&state, &headers, access.access_token.as_deref()).is_ok();
+    axum::Json(AuthStatus {
+        auth_required: state.auth_required(),
+        authenticated,
+    })
 }
 
 /// Run one upgraded WebSocket session to completion.

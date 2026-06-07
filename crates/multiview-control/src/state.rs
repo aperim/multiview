@@ -276,6 +276,14 @@ pub struct AppState {
     /// a focus session is a best-effort preview consumer that can never
     /// back-pressure the engine.
     pub whep: crate::preview::SharedWhep,
+    /// Whether authentication is **disabled** (every request runs as a local
+    /// admin). Off by default — the control plane requires a verified API key.
+    /// An operator turns this on **explicitly** (config/env) for a trusted/local
+    /// deployment; the binary logs a loud warning when it does. When `true`, the
+    /// `Principal` extractor and the realtime `resolve_principal` short-circuit to
+    /// [`Principal::local_admin`](crate::auth::Principal::local_admin) without a
+    /// token, so the whole API + WS/SSE are open.
+    pub auth_disabled: bool,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -325,6 +333,9 @@ impl AppState {
             ack_clock: Arc::new(system_ack_clock),
             preview: crate::preview::no_preview(),
             whep: crate::preview::no_whep(),
+            // Secure default: authentication is REQUIRED. An operator opts out
+            // explicitly via `with_auth_disabled` (config/env), never silently.
+            auth_disabled: false,
         }
     }
 
@@ -355,6 +366,25 @@ impl AppState {
         self.jwt = Some(validator);
         self.jwt_api_name = api_name.into();
         self
+    }
+
+    /// **Disable** authentication (every request runs as a local admin). This is
+    /// an explicit, opt-in trusted-network mode; the secure default keeps auth on.
+    /// The binary calls this only when the operator set it via config/env, and
+    /// logs a loud warning when it does.
+    #[must_use]
+    pub fn with_auth_disabled(mut self, disabled: bool) -> Self {
+        self.auth_disabled = disabled;
+        self
+    }
+
+    /// Whether a verified credential is required to reach privileged routes
+    /// (`true` in the default secure mode; `false` when auth is disabled). Surfaced
+    /// unauthenticated via `GET /api/v1/auth/status` so the SPA can decide whether
+    /// to prompt for a key.
+    #[must_use]
+    pub fn auth_required(&self) -> bool {
+        !self.auth_disabled
     }
 
     /// Replace the audit log (e.g. to share one store with a test or a

@@ -91,6 +91,26 @@ where
         tracing::info!("control admin key provisioned from MULTIVIEW_CONTROL_TOKEN");
     }
 
+    // Optional, explicit, opt-in auth-disable for trusted/local deployments.
+    // `MULTIVIEW_CONTROL_AUTH=disabled|off|none|0` opens the whole API + WS as a
+    // local admin (no token). Secure default: anything else (incl. unset) keeps
+    // auth ON. A loud warning is logged whenever it is off.
+    let auth_disabled = std::env::var("MULTIVIEW_CONTROL_AUTH")
+        .ok()
+        .is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "disabled" | "off" | "none" | "false" | "0"
+            )
+        });
+    if auth_disabled {
+        tracing::warn!(
+            "MULTIVIEW_CONTROL_AUTH disables authentication — the control plane API \
+             and realtime stream are OPEN (local-admin, no token). Use ONLY on a \
+             trusted/local network; never expose this listener publicly"
+        );
+    }
+
     let state = AppState::new(
         publisher,
         commands,
@@ -98,7 +118,8 @@ where
         Arc::new(api_keys),
     )
     .with_seeded_resources(seeded)
-    .with_preview(preview);
+    .with_preview(preview)
+    .with_auth_disabled(auth_disabled);
     let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
     Ok((addr, handle))
 }
