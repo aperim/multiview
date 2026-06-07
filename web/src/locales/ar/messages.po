@@ -203,6 +203,10 @@ msgstr ""
 msgid "Active and historical faults the engine raised. Acknowledge an alarm to record that an operator has seen it."
 msgstr ""
 
+#: src/pages/SystemPage.tsx:124
+msgid "Active NVENC sessions out of the discovered ceiling"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:191
 msgid "Active only"
 msgstr ""
@@ -244,7 +248,7 @@ msgstr ""
 msgid "Alarm acknowledged"
 msgstr ""
 
-#: src/app/navigation.tsx:41
+#: src/app/navigation.tsx:42
 #: src/pages/AlarmsPage.tsx:152
 #: src/pages/docs/FeaturesPage.tsx:134
 msgid "Alarms"
@@ -272,6 +276,10 @@ msgstr ""
 
 #: src/components/TallyLampBadge.tsx:42
 msgid "Amber"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:63
+msgid "AMD"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:668
@@ -330,6 +338,10 @@ msgstr ""
 msgid "Appearance and language preferences."
 msgstr ""
 
+#: src/pages/SystemPage.tsx:65
+msgid "Apple"
+msgstr ""
+
 #: src/pages/AuditPage.tsx:86
 msgid "Apply filter"
 msgstr ""
@@ -342,7 +354,7 @@ msgstr ""
 msgid "Arm salvo"
 msgstr ""
 
-#: src/app/navigation.tsx:42
+#: src/app/navigation.tsx:44
 #: src/pages/AuditPage.tsx:55
 msgid "Audit"
 msgstr ""
@@ -506,6 +518,10 @@ msgstr ""
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr ""
 
+#: src/pages/SystemPage.tsx:94
+msgid "Compute"
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:22
 #: src/pages/docs/docsNav.tsx:66
 msgid "Config-as-code"
@@ -623,6 +639,16 @@ msgstr ""
 msgid "Could not save salvo"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:128
+#: src/pages/SystemPage.tsx:165
+msgid "CPU"
+msgstr ""
+
+#: src/components/SystemFooter.tsx:131
+#: src/pages/SystemPage.tsx:174
+msgid "CPU utilisation trend"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:402
 msgid "Create"
 msgstr ""
@@ -647,10 +673,18 @@ msgstr ""
 msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 msgstr ""
 
-#: src/app/navigation.tsx:33
+#: src/app/navigation.tsx:34
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "لوحة القيادة"
+
+#: src/components/SystemFooter.tsx:153
+msgid "DEC"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:112
+msgid "Decoder"
+msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:43
 msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
@@ -747,7 +781,7 @@ msgstr ""
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr ""
 
-#: src/app/navigation.tsx:43
+#: src/app/navigation.tsx:45
 msgid "Docs"
 msgstr ""
 
@@ -855,6 +889,10 @@ msgstr ""
 #~ msgid "Enabled"
 #~ msgstr ""
 
+#: src/pages/SystemPage.tsx:105
+msgid "Encoder"
+msgstr ""
+
 #: src/pages/TallyPage.tsx:131
 msgid "Enter a valid target"
 msgstr ""
@@ -928,6 +966,18 @@ msgstr ""
 msgid "Getting started"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:137
+msgid "GPU 0 compute utilisation trend"
+msgstr ""
+
+#: src/components/SystemFooter.tsx:156
+msgid "GPU 0 decoder utilisation trend"
+msgstr ""
+
+#: src/components/SystemFooter.tsx:143
+msgid "GPU 0 VRAM usage trend"
+msgstr ""
+
 #: src/pages/docs/ContainerPage.tsx:85
 msgid "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
 msgstr ""
@@ -940,6 +990,14 @@ msgstr ""
 msgid "GPU overlays"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:134
+msgid "GPU0"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:235
+msgid "GPUs"
+msgstr ""
+
 #: src/components/TallyLampBadge.tsx:36
 msgid "Green"
 msgstr ""
@@ -950,6 +1008,10 @@ msgstr ""
 
 #: src/layout/components/CellsForm.tsx:365
 msgid "Height (%)"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:159
+msgid "Host"
 msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:19
@@ -992,6 +1054,10 @@ msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:38
 msgid "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
+msgstr ""
+
+#: src/pages/SystemPage.tsx:61
+msgid "Intel"
 msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:112
@@ -1040,7 +1106,7 @@ msgstr ""
 msgid "Layout saved"
 msgstr ""
 
-#: src/app/navigation.tsx:34
+#: src/app/navigation.tsx:35
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:23
 #: src/pages/LayoutsPage.tsx:154
@@ -1059,6 +1125,7 @@ msgstr ""
 msgid "Left (%)"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:23
 #: src/components/TileStateBadge.tsx:29
 msgid "Live"
 msgstr ""
@@ -1069,6 +1136,10 @@ msgstr ""
 
 #: src/pages/DashboardPage.tsx:51
 msgid "Live engine status at a glance."
+msgstr ""
+
+#: src/pages/SystemPage.tsx:150
+msgid "Live host and accelerator utilisation streaming from the engine."
 msgstr ""
 
 #: src/pages/MonitoringPage.tsx:157
@@ -1163,11 +1234,15 @@ msgstr ""
 msgid "Media time"
 msgstr ""
 
+#: src/pages/SystemPage.tsx:185
+msgid "Memory"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:164
 msgid "Minimum severity"
 msgstr ""
 
-#: src/app/navigation.tsx:38
+#: src/app/navigation.tsx:39
 #: src/pages/MonitoringPage.tsx:140
 msgid "Monitoring"
 msgstr ""
@@ -1216,7 +1291,7 @@ msgstr ""
 msgid "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 msgstr ""
 
-#: src/app/AppLayout.tsx:66
+#: src/app/AppLayout.tsx:67
 msgid "Navigation"
 msgstr ""
 
@@ -1274,6 +1349,14 @@ msgstr ""
 msgid "No frame-rate sample."
 msgstr ""
 
+#: src/pages/SystemPage.tsx:243
+msgid "No GPUs are reported on this host."
+msgstr ""
+
+#: src/pages/SystemPage.tsx:202
+msgid "No host-memory sample."
+msgstr ""
+
 #: src/pages/MonitoringPage.tsx:169
 msgid "No inputs are available to preview."
 msgstr ""
@@ -1326,7 +1409,20 @@ msgstr ""
 msgid "Notifications"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:146
+msgid "NVENC"
+msgstr ""
+
+#: src/components/SystemFooter.tsx:150
+msgid "NVENC encode sessions trend"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:120
+msgid "NVENC sessions"
+msgstr ""
+
 #: src/pages/docs/ContainerPage.tsx:93
+#: src/pages/SystemPage.tsx:59
 msgid "NVIDIA"
 msgstr ""
 
@@ -1338,12 +1434,20 @@ msgstr ""
 msgid "Off"
 msgstr ""
 
-#: src/app/AppLayout.tsx:60
+#: src/components/SystemFooter.tsx:23
+msgid "Offline"
+msgstr ""
+
+#: src/app/AppLayout.tsx:61
 msgid "Open navigation"
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:50
 msgid "Open the API playground"
+msgstr ""
+
+#: src/components/SystemFooter.tsx:123
+msgid "Open the system metrics page"
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:154
@@ -1359,6 +1463,10 @@ msgstr ""
 msgid "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
 msgstr ""
 
+#: src/pages/SystemPage.tsx:67
+msgid "Other"
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:79
 msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
 msgstr ""
@@ -1367,7 +1475,7 @@ msgstr ""
 msgid "Output path"
 msgstr ""
 
-#: src/app/navigation.tsx:36
+#: src/app/navigation.tsx:37
 #: src/pages/docs/ConfigPage.tsx:242
 #: src/pages/docs/FeaturesPage.tsx:54
 #: src/pages/SimplePages.tsx:900
@@ -1378,7 +1486,7 @@ msgstr "المخرجات"
 msgid "Over the layout drop zone."
 msgstr ""
 
-#: src/app/navigation.tsx:37
+#: src/app/navigation.tsx:38
 #: src/layout/components/SourcePalette.tsx:224
 #: src/pages/docs/ConfigPage.tsx:220
 #: src/pages/docs/FeaturesPage.tsx:98
@@ -1440,8 +1548,21 @@ msgstr ""
 msgid "Profiles"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:159
+msgid "PROG"
+msgstr ""
+
 #: src/pages/MonitoringPage.tsx:152
 msgid "Program"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:211
+msgid "Program output"
+msgstr ""
+
+#: src/components/SystemFooter.tsx:163
+#: src/pages/SystemPage.tsx:223
+msgid "Program output frame rate trend"
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:278
@@ -1531,7 +1652,7 @@ msgstr ""
 msgid "Salvo saved"
 msgstr ""
 
-#: src/app/navigation.tsx:40
+#: src/app/navigation.tsx:41
 #: src/pages/docs/FeaturesPage.tsx:122
 #: src/pages/SalvosPage.tsx:171
 msgid "Salvos"
@@ -1571,7 +1692,7 @@ msgstr ""
 msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr ""
 
-#: src/app/navigation.tsx:44
+#: src/app/navigation.tsx:46
 #: src/pages/SettingsPage.tsx:46
 msgid "Settings"
 msgstr "الإعدادات"
@@ -1589,7 +1710,7 @@ msgstr ""
 msgid "Sign in"
 msgstr ""
 
-#: src/app/AppLayout.tsx:43
+#: src/app/AppLayout.tsx:44
 msgid "Skip to content"
 msgstr ""
 
@@ -1601,7 +1722,7 @@ msgstr ""
 msgid "Source"
 msgstr ""
 
-#: src/app/navigation.tsx:35
+#: src/app/navigation.tsx:36
 #: src/layout/components/SourcePalette.tsx:203
 #: src/pages/docs/ConfigPage.tsx:135
 #: src/pages/docs/FeaturesPage.tsx:36
@@ -1641,6 +1762,11 @@ msgstr ""
 msgid "Switch the interface language and text direction."
 msgstr ""
 
+#: src/app/navigation.tsx:43
+#: src/pages/SystemPage.tsx:148
+msgid "System"
+msgstr ""
+
 #: src/pages/SalvosPage.tsx:269
 msgid "Take"
 msgstr ""
@@ -1649,7 +1775,7 @@ msgstr ""
 msgid "Take salvo"
 msgstr ""
 
-#: src/app/navigation.tsx:39
+#: src/app/navigation.tsx:40
 #: src/pages/docs/FeaturesPage.tsx:109
 #: src/pages/TallyPage.tsx:178
 msgid "Tally"
@@ -1883,6 +2009,10 @@ msgstr ""
 msgid "Unacknowledged"
 msgstr ""
 
+#: src/pages/SystemPage.tsx:192
+msgid "Used"
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:295
 msgid "Validation and import / export"
 msgstr ""
@@ -1891,8 +2021,17 @@ msgstr ""
 msgid "Volumes"
 msgstr ""
 
+#: src/components/SystemFooter.tsx:140
+#: src/pages/SystemPage.tsx:99
+msgid "VRAM"
+msgstr ""
+
 #: src/pages/MonitoringPage.tsx:122
 msgid "Waiting for a frame…"
+msgstr ""
+
+#: src/pages/SystemPage.tsx:239
+msgid "Waiting for the first metrics sample…"
 msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:27

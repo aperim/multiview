@@ -9,6 +9,7 @@ import { Outlet, useLocation } from "react-router-dom";
 
 import { ConnectionStatus } from "../components/ConnectionStatus";
 import { LocaleSwitcher } from "../components/LocaleSwitcher";
+import { SystemFooter } from "../components/SystemFooter";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { Button } from "../components/ui/button";
 import {
@@ -89,6 +90,9 @@ export function AppLayout(): JSX.Element {
           >
             <Outlet />
           </main>
+
+          {/* The live system-metrics status bar (desktop-only). */}
+          <SystemFooter />
         </div>
       </div>
     </div>

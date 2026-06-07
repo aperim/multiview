@@ -13,6 +13,7 @@ import { TallyPage } from "../pages/TallyPage";
 import { SalvosPage } from "../pages/SalvosPage";
 import { AlarmsPage } from "../pages/AlarmsPage";
 import { AuditPage } from "../pages/AuditPage";
+import { SystemPage } from "../pages/SystemPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import {
   OutputsPage,
@@ -48,6 +49,7 @@ export const router = createBrowserRouter([
       { path: "tally", element: <TallyPage /> },
       { path: "salvos", element: <SalvosPage /> },
       { path: "alarms", element: <AlarmsPage /> },
+      { path: "system", element: <SystemPage /> },
       { path: "audit", element: <AuditPage /> },
       { path: "settings", element: <SettingsPage /> },
       // In-app documentation under /help. (/docs is the backend Scalar API

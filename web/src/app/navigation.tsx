@@ -3,6 +3,7 @@
 import type { JSX } from "react";
 import { Trans } from "@lingui/react/macro";
 import {
+  Activity,
   BookOpen,
   LayoutDashboard,
   LayoutGrid,
@@ -39,6 +40,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { path: "/tally", label: <Trans>Tally</Trans>, Icon: CircleDot },
   { path: "/salvos", label: <Trans>Salvos</Trans>, Icon: Zap },
   { path: "/alarms", label: <Trans>Alarms</Trans>, Icon: Bell },
+  { path: "/system", label: <Trans>System</Trans>, Icon: Activity },
   { path: "/audit", label: <Trans>Audit</Trans>, Icon: ScrollText },
   { path: "/help", label: <Trans>Docs</Trans>, Icon: BookOpen },
   { path: "/settings", label: <Trans>Settings</Trans>, Icon: Settings },

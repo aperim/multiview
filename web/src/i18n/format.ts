@@ -96,6 +96,39 @@ export function formatFps(locale: string, value: number): string {
   return `${number} fps`;
 }
 
+/**
+ * Format a 0..1 ratio as a locale percentage (e.g. `42%`). Values outside the
+ * unit interval are passed through (the caller decides whether to clamp).
+ */
+export function formatPercent(locale: string, ratio: number): string {
+  return numberFormatter(locale, {
+    style: "percent",
+    maximumFractionDigits: 0,
+  }).format(ratio);
+}
+
+/**
+ * Format a byte count for the active locale, choosing GB/MB/KB by magnitude via
+ * the CLDR `*byte` units (decimal, 1 fraction digit). Used for VRAM/host memory.
+ */
+export function formatBytes(locale: string, bytes: number): string {
+  const abs = Math.abs(bytes);
+  const [value, unit]: [number, "gigabyte" | "megabyte" | "kilobyte" | "byte"] =
+    abs >= 1e9
+      ? [bytes / 1e9, "gigabyte"]
+      : abs >= 1e6
+        ? [bytes / 1e6, "megabyte"]
+        : abs >= 1e3
+          ? [bytes / 1e3, "kilobyte"]
+          : [bytes, "byte"];
+  return numberFormatter(locale, {
+    style: "unit",
+    unit,
+    unitDisplay: "short",
+    maximumFractionDigits: unit === "byte" ? 0 : 1,
+  }).format(value);
+}
+
 /** Format a bitrate via the compact CLDR `*-per-second` unit. */
 export function formatBitrate(locale: string, kilobitsPerSecond: number): string {
   return numberFormatter(locale, {

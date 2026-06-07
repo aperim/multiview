@@ -203,6 +203,10 @@ msgstr "Active and cleared"
 msgid "Active and historical faults the engine raised. Acknowledge an alarm to record that an operator has seen it."
 msgstr "Active and historical faults the engine raised. Acknowledge an alarm to record that an operator has seen it."
 
+#: src/pages/SystemPage.tsx:124
+msgid "Active NVENC sessions out of the discovered ceiling"
+msgstr "Active NVENC sessions out of the discovered ceiling"
+
 #: src/pages/AlarmsPage.tsx:191
 msgid "Active only"
 msgstr "Active only"
@@ -244,7 +248,7 @@ msgstr "Advertise the canvas as an NDI source by <0>name</0>."
 msgid "Alarm acknowledged"
 msgstr "Alarm acknowledged"
 
-#: src/app/navigation.tsx:41
+#: src/app/navigation.tsx:42
 #: src/pages/AlarmsPage.tsx:152
 #: src/pages/docs/FeaturesPage.tsx:134
 msgid "Alarms"
@@ -273,6 +277,10 @@ msgstr "All endpoints live under <0>/api/v1</0>."
 #: src/components/TallyLampBadge.tsx:42
 msgid "Amber"
 msgstr "Amber"
+
+#: src/pages/SystemPage.tsx:63
+msgid "AMD"
+msgstr "AMD"
 
 #: src/pages/SimplePages.tsx:668
 #: src/pages/SimplePages.tsx:936
@@ -330,6 +338,10 @@ msgstr "Appearance"
 msgid "Appearance and language preferences."
 msgstr "Appearance and language preferences."
 
+#: src/pages/SystemPage.tsx:65
+msgid "Apple"
+msgstr "Apple"
+
 #: src/pages/AuditPage.tsx:86
 msgid "Apply filter"
 msgstr "Apply filter"
@@ -342,7 +354,7 @@ msgstr "Arm"
 msgid "Arm salvo"
 msgstr "Arm salvo"
 
-#: src/app/navigation.tsx:42
+#: src/app/navigation.tsx:44
 #: src/pages/AuditPage.tsx:55
 msgid "Audit"
 msgstr "Audit"
@@ -506,6 +518,10 @@ msgstr "Compose reference"
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 
+#: src/pages/SystemPage.tsx:94
+msgid "Compute"
+msgstr "Compute"
+
 #: src/pages/docs/ConfigPage.tsx:22
 #: src/pages/docs/docsNav.tsx:66
 msgid "Config-as-code"
@@ -623,6 +639,16 @@ msgstr "Could not save layout"
 msgid "Could not save salvo"
 msgstr "Could not save salvo"
 
+#: src/components/SystemFooter.tsx:128
+#: src/pages/SystemPage.tsx:165
+msgid "CPU"
+msgstr "CPU"
+
+#: src/components/SystemFooter.tsx:131
+#: src/pages/SystemPage.tsx:174
+msgid "CPU utilisation trend"
+msgstr "CPU utilisation trend"
+
 #: src/pages/SimplePages.tsx:402
 msgid "Create"
 msgstr "Create"
@@ -647,10 +673,18 @@ msgstr "Credentials are referenced, never inlined: <0>auth</0> holds a <1>secret
 msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 msgstr "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 
-#: src/app/navigation.tsx:33
+#: src/app/navigation.tsx:34
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "Dashboard"
+
+#: src/components/SystemFooter.tsx:153
+msgid "DEC"
+msgstr "DEC"
+
+#: src/pages/SystemPage.tsx:112
+msgid "Decoder"
+msgstr "Decoder"
 
 #: src/pages/docs/ContainerPage.tsx:43
 msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
@@ -747,7 +781,7 @@ msgstr "docker run"
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 
-#: src/app/navigation.tsx:43
+#: src/app/navigation.tsx:45
 msgid "Docs"
 msgstr "Docs"
 
@@ -855,6 +889,10 @@ msgstr "Element name"
 #~ msgid "Enabled"
 #~ msgstr "Enabled"
 
+#: src/pages/SystemPage.tsx:105
+msgid "Encoder"
+msgstr "Encoder"
+
 #: src/pages/TallyPage.tsx:131
 msgid "Enter a valid target"
 msgstr "Enter a valid target"
@@ -928,6 +966,18 @@ msgstr "Frame rate must be an exact rational like 30000/1001 — not a decimal."
 msgid "Getting started"
 msgstr "Getting started"
 
+#: src/components/SystemFooter.tsx:137
+msgid "GPU 0 compute utilisation trend"
+msgstr "GPU 0 compute utilisation trend"
+
+#: src/components/SystemFooter.tsx:156
+msgid "GPU 0 decoder utilisation trend"
+msgstr "GPU 0 decoder utilisation trend"
+
+#: src/components/SystemFooter.tsx:143
+msgid "GPU 0 VRAM usage trend"
+msgstr "GPU 0 VRAM usage trend"
+
 #: src/pages/docs/ContainerPage.tsx:85
 msgid "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
 msgstr "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
@@ -940,6 +990,14 @@ msgstr "GPU access"
 msgid "GPU overlays"
 msgstr "GPU overlays"
 
+#: src/components/SystemFooter.tsx:134
+msgid "GPU0"
+msgstr "GPU0"
+
+#: src/pages/SystemPage.tsx:235
+msgid "GPUs"
+msgstr "GPUs"
+
 #: src/components/TallyLampBadge.tsx:36
 msgid "Green"
 msgstr "Green"
@@ -951,6 +1009,10 @@ msgstr "Healthcheck"
 #: src/layout/components/CellsForm.tsx:365
 msgid "Height (%)"
 msgstr "Height (%)"
+
+#: src/pages/SystemPage.tsx:159
+msgid "Host"
+msgstr "Host"
 
 #: src/pages/docs/OverviewPage.tsx:19
 msgid "How Multiview works, how to run it, and how to drive it from config-as-code or the API."
@@ -993,6 +1055,10 @@ msgstr "Inputs"
 #: src/pages/docs/OverviewPage.tsx:38
 msgid "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
 msgstr "Inputs are sampled, never trusted to pace the output. A single fixed-cadence clock emits exactly one frame per tick. When a source drops, its tile holds its last good frame and shows a clear state while the engine reconnects in the background — the rest of the wall keeps running."
+
+#: src/pages/SystemPage.tsx:61
+msgid "Intel"
+msgstr "Intel"
 
 #: src/pages/docs/ContainerPage.tsx:112
 msgid "Intel / AMD (VAAPI)"
@@ -1040,7 +1106,7 @@ msgstr "Layout or preset name (optional)"
 msgid "Layout saved"
 msgstr "Layout saved"
 
-#: src/app/navigation.tsx:34
+#: src/app/navigation.tsx:35
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:23
 #: src/pages/LayoutsPage.tsx:154
@@ -1059,6 +1125,7 @@ msgstr "Leave empty for all objects"
 msgid "Left (%)"
 msgstr "Left (%)"
 
+#: src/components/SystemFooter.tsx:23
 #: src/components/TileStateBadge.tsx:29
 msgid "Live"
 msgstr "Live"
@@ -1070,6 +1137,10 @@ msgstr "Live API playground"
 #: src/pages/DashboardPage.tsx:51
 msgid "Live engine status at a glance."
 msgstr "Live engine status at a glance."
+
+#: src/pages/SystemPage.tsx:150
+msgid "Live host and accelerator utilisation streaming from the engine."
+msgstr "Live host and accelerator utilisation streaming from the engine."
 
 #: src/pages/MonitoringPage.tsx:157
 msgid "Live program output"
@@ -1163,11 +1234,15 @@ msgstr "Manual override"
 msgid "Media time"
 msgstr "Media time"
 
+#: src/pages/SystemPage.tsx:185
+msgid "Memory"
+msgstr "Memory"
+
 #: src/pages/AlarmsPage.tsx:164
 msgid "Minimum severity"
 msgstr "Minimum severity"
 
-#: src/app/navigation.tsx:38
+#: src/app/navigation.tsx:39
 #: src/pages/MonitoringPage.tsx:140
 msgid "Monitoring"
 msgstr "Monitoring"
@@ -1216,7 +1291,7 @@ msgstr "Name"
 msgid "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 msgstr "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 
-#: src/app/AppLayout.tsx:66
+#: src/app/AppLayout.tsx:67
 msgid "Navigation"
 msgstr "Navigation"
 
@@ -1274,6 +1349,14 @@ msgstr "No drop target."
 msgid "No frame-rate sample."
 msgstr "No frame-rate sample."
 
+#: src/pages/SystemPage.tsx:243
+msgid "No GPUs are reported on this host."
+msgstr "No GPUs are reported on this host."
+
+#: src/pages/SystemPage.tsx:202
+msgid "No host-memory sample."
+msgstr "No host-memory sample."
+
 #: src/pages/MonitoringPage.tsx:169
 msgid "No inputs are available to preview."
 msgstr "No inputs are available to preview."
@@ -1326,7 +1409,20 @@ msgstr "None"
 msgid "Notifications"
 msgstr "Notifications"
 
+#: src/components/SystemFooter.tsx:146
+msgid "NVENC"
+msgstr "NVENC"
+
+#: src/components/SystemFooter.tsx:150
+msgid "NVENC encode sessions trend"
+msgstr "NVENC encode sessions trend"
+
+#: src/pages/SystemPage.tsx:120
+msgid "NVENC sessions"
+msgstr "NVENC sessions"
+
 #: src/pages/docs/ContainerPage.tsx:93
+#: src/pages/SystemPage.tsx:59
 msgid "NVIDIA"
 msgstr "NVIDIA"
 
@@ -1338,13 +1434,21 @@ msgstr "Object"
 msgid "Off"
 msgstr "Off"
 
-#: src/app/AppLayout.tsx:60
+#: src/components/SystemFooter.tsx:23
+msgid "Offline"
+msgstr "Offline"
+
+#: src/app/AppLayout.tsx:61
 msgid "Open navigation"
 msgstr "Open navigation"
 
 #: src/pages/docs/ApiPage.tsx:50
 msgid "Open the API playground"
 msgstr "Open the API playground"
+
+#: src/components/SystemFooter.tsx:123
+msgid "Open the system metrics page"
+msgstr "Open the system metrics page"
 
 #: src/pages/SalvosPage.tsx:154
 #: src/pages/TallyPage.tsx:142
@@ -1359,6 +1463,10 @@ msgstr "Optimistic concurrency"
 msgid "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
 msgstr "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
 
+#: src/pages/SystemPage.tsx:67
+msgid "Other"
+msgstr "Other"
+
 #: src/pages/docs/ConfigPage.tsx:79
 msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
 msgstr "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
@@ -1367,7 +1475,7 @@ msgstr "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\
 msgid "Output path"
 msgstr "Output path"
 
-#: src/app/navigation.tsx:36
+#: src/app/navigation.tsx:37
 #: src/pages/docs/ConfigPage.tsx:242
 #: src/pages/docs/FeaturesPage.tsx:54
 #: src/pages/SimplePages.tsx:900
@@ -1378,7 +1486,7 @@ msgstr "Outputs"
 msgid "Over the layout drop zone."
 msgstr "Over the layout drop zone."
 
-#: src/app/navigation.tsx:37
+#: src/app/navigation.tsx:38
 #: src/layout/components/SourcePalette.tsx:224
 #: src/pages/docs/ConfigPage.tsx:220
 #: src/pages/docs/FeaturesPage.tsx:98
@@ -1440,9 +1548,22 @@ msgstr "Profile deleted"
 msgid "Profiles"
 msgstr "Profiles"
 
+#: src/components/SystemFooter.tsx:159
+msgid "PROG"
+msgstr "PROG"
+
 #: src/pages/MonitoringPage.tsx:152
 msgid "Program"
 msgstr "Program"
+
+#: src/pages/SystemPage.tsx:211
+msgid "Program output"
+msgstr "Program output"
+
+#: src/components/SystemFooter.tsx:163
+#: src/pages/SystemPage.tsx:223
+msgid "Program output frame rate trend"
+msgstr "Program output frame rate trend"
 
 #: src/pages/docs/ConfigPage.tsx:278
 msgid "Push the encoded stream to a destination <0>url</0>."
@@ -1531,7 +1652,7 @@ msgstr "Salvo deleted"
 msgid "Salvo saved"
 msgstr "Salvo saved"
 
-#: src/app/navigation.tsx:40
+#: src/app/navigation.tsx:41
 #: src/pages/docs/FeaturesPage.tsx:122
 #: src/pages/SalvosPage.tsx:171
 msgid "Salvos"
@@ -1571,7 +1692,7 @@ msgstr "Send backward"
 msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 
-#: src/app/navigation.tsx:44
+#: src/app/navigation.tsx:46
 #: src/pages/SettingsPage.tsx:46
 msgid "Settings"
 msgstr "Settings"
@@ -1589,7 +1710,7 @@ msgstr "Show a test notification"
 msgid "Sign in"
 msgstr "Sign in"
 
-#: src/app/AppLayout.tsx:43
+#: src/app/AppLayout.tsx:44
 msgid "Skip to content"
 msgstr "Skip to content"
 
@@ -1601,7 +1722,7 @@ msgstr "Snap to grid"
 msgid "Source"
 msgstr "Source"
 
-#: src/app/navigation.tsx:35
+#: src/app/navigation.tsx:36
 #: src/layout/components/SourcePalette.tsx:203
 #: src/pages/docs/ConfigPage.tsx:135
 #: src/pages/docs/FeaturesPage.tsx:36
@@ -1641,6 +1762,11 @@ msgstr "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, 
 msgid "Switch the interface language and text direction."
 msgstr "Switch the interface language and text direction."
 
+#: src/app/navigation.tsx:43
+#: src/pages/SystemPage.tsx:148
+msgid "System"
+msgstr "System"
+
 #: src/pages/SalvosPage.tsx:269
 msgid "Take"
 msgstr "Take"
@@ -1649,7 +1775,7 @@ msgstr "Take"
 msgid "Take salvo"
 msgstr "Take salvo"
 
-#: src/app/navigation.tsx:39
+#: src/app/navigation.tsx:40
 #: src/pages/docs/FeaturesPage.tsx:109
 #: src/pages/TallyPage.tsx:178
 msgid "Tally"
@@ -1883,6 +2009,10 @@ msgstr "Two image families are published. The default image is LGPL-clean and so
 msgid "Unacknowledged"
 msgstr "Unacknowledged"
 
+#: src/pages/SystemPage.tsx:192
+msgid "Used"
+msgstr "Used"
+
 #: src/pages/docs/ConfigPage.tsx:295
 msgid "Validation and import / export"
 msgstr "Validation and import / export"
@@ -1891,9 +2021,18 @@ msgstr "Validation and import / export"
 msgid "Volumes"
 msgstr "Volumes"
 
+#: src/components/SystemFooter.tsx:140
+#: src/pages/SystemPage.tsx:99
+msgid "VRAM"
+msgstr "VRAM"
+
 #: src/pages/MonitoringPage.tsx:122
 msgid "Waiting for a frame…"
 msgstr "Waiting for a frame…"
+
+#: src/pages/SystemPage.tsx:239
+msgid "Waiting for the first metrics sample…"
+msgstr "Waiting for the first metrics sample…"
 
 #: src/pages/docs/OverviewPage.tsx:27
 msgid "What Multiview is"
