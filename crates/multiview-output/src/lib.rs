@@ -59,6 +59,15 @@ pub mod tsl;
 #[cfg(feature = "ffmpeg")]
 pub mod sink;
 
+/// GP-4 — the one-time pre-baked slate baker (ADR-0030 §4 "Pre-bake-once
+/// slate"). Encodes **once** an IDR-led, closed-GOP, B-free loop of black /
+/// SMPTE-bars video (+ optional AAC tone / silence) into a shared
+/// [`slate::BakedSlate`] for a guarded passthrough to splice in on input loss,
+/// then releases the encoder (no held session). Behind the off-by-default
+/// `ffmpeg` feature; reuses [`sink::ProgramEncoder`] (no new FFI).
+#[cfg(feature = "ffmpeg")]
+pub mod slate;
+
 /// Proprietary NDI® output (ADR-0008): the runtime-load scaffolding (locate +
 /// `dlopen` the NDI runtime via `NDIlib_v6_load`), the runtime license gate, the
 /// mandatory attribution constants, and the safe `NdiOutput` sink seam over the
