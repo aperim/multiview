@@ -45,7 +45,7 @@ pub mod output;
 #[cfg(feature = "ndi-bindings")]
 pub mod sdk;
 
-pub use api::{FakeNdiApi, NdiApi, NdiFourCc, NdiSendError, NdiVideoFrame};
+pub use api::{FakeNdiApi, NdiApi, NdiAudioFrame, NdiFourCc, NdiSendError, NdiVideoFrame};
 pub use convert::{nv12_to_uyvy, Nv12Canvas};
 pub use license::{NdiLicense, NdiLicenseError};
 pub use loader::{NdiCapability, NdiLoadStatus};

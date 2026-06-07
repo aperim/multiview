@@ -45,13 +45,21 @@ fn live_ndi_output_publishes_nv12_canvases() {
         .collect();
     let canvas = Nv12Canvas::new(w, h, &y_plane, &uv_plane).expect("valid NV12 geometry");
 
-    // Publish 30 frames at 30000/1001 with tick-derived timecodes (inv #3).
+    // 10 ms of planar-float (FLTP) program audio: 48 kHz, 2 ch, 480 samples.
+    let audio = vec![0.5f32; 2 * 480];
+
+    // Publish 30 frames at 30000/1001 with tick-derived timecodes (inv #3),
+    // interleaving video + audio through the same NDI source.
     for tick in 0..30i64 {
+        let tc = tick * 33_366;
         output
-            .send_canvas(&canvas, tick * 33_366, 30_000, 1_001)
+            .send_canvas(&canvas, tc, 30_000, 1_001)
             .expect("each NV12 canvas should convert + send");
+        output
+            .send_audio_planar(48_000, 2, 480, tc, &audio)
+            .expect("each audio chunk should send");
     }
-    println!("published 30 NV12 canvases through the live NDI output ({w}x{h})");
+    println!("published 30 NV12 canvases + FLTP audio through the live NDI output ({w}x{h})");
 
     output.close();
     assert!(!output.is_open());

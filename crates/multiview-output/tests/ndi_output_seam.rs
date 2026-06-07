@@ -91,3 +91,51 @@ fn fourcc_tags_are_the_on_wire_bytes() {
     assert_eq!(&NdiFourCc::P216.tag(), b"P216");
     assert_eq!(&NdiFourCc::Bgra.tag(), b"BGRA");
 }
+
+#[test]
+fn drives_planar_audio_with_tick_restamped_timecode() {
+    let mut out = NdiOutput::new(accepted(), FakeNdiApi::new(), "OUT").unwrap();
+    // 2 channels × 4 samples of planar f32.
+    let audio = vec![0.25f32; 2 * 4];
+    for tick in 0..3i64 {
+        let tc = tick * 333_667;
+        out.send_audio_planar(48_000, 2, 4, tc, &audio)
+            .expect("audio send ok");
+    }
+    let sent = &out.api().sent_audio;
+    assert_eq!(sent.len(), 3);
+    // (sample_rate, channels, samples, timecode) recorded exactly, in order.
+    assert_eq!(sent[0], (48_000, 2, 4, 0));
+    assert_eq!(
+        sent.iter().map(|a| a.3).collect::<Vec<_>>(),
+        vec![0, 333_667, 667_334]
+    );
+}
+
+#[test]
+fn invalid_audio_is_rejected_not_panicked() {
+    let mut out = NdiOutput::new(accepted(), FakeNdiApi::new(), "OUT").unwrap();
+    // Buffer too short for channels*samples (need 8, have 3).
+    let tiny = vec![0.0f32; 3];
+    let err = out
+        .send_audio_planar(48_000, 2, 4, 0, &tiny)
+        .expect_err("short audio buffer must be refused");
+    assert!(matches!(err, NdiSendError::InvalidFrame { .. }));
+    // Zero geometry is likewise a typed refusal.
+    let err = out
+        .send_audio_planar(48_000, 0, 4, 0, &tiny)
+        .expect_err("zero channels must be refused");
+    assert!(matches!(err, NdiSendError::InvalidFrame { .. }));
+    assert!(out.api().sent_audio.is_empty());
+}
+
+#[test]
+fn audio_after_close_is_typed_closed_error() {
+    let mut out = NdiOutput::new(accepted(), FakeNdiApi::new(), "OUT").unwrap();
+    out.close();
+    let audio = vec![0.0f32; 8];
+    let err = out
+        .send_audio_planar(48_000, 2, 4, 0, &audio)
+        .expect_err("closed");
+    assert!(matches!(err, NdiSendError::Closed));
+}

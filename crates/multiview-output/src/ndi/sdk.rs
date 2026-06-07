@@ -15,7 +15,7 @@
 
 use multiview_ndi_sys::{NdiSender, NdiVideoFourCc};
 
-use super::api::{NdiApi, NdiFourCc, NdiSendError, NdiVideoFrame};
+use super::api::{NdiApi, NdiAudioFrame, NdiFourCc, NdiSendError, NdiVideoFrame};
 use super::loader::NdiCapability;
 
 /// A live [`NdiApi`] backed by the SDK function table via [`NdiSender`].
@@ -82,6 +82,24 @@ impl NdiApi for SdkNdiApi {
                 map_fourcc(frame.fourcc),
                 frame.frame_rate_n,
                 frame.frame_rate_d,
+                frame.timecode,
+                frame.data,
+            )
+            .map_err(|err| NdiSendError::InvalidFrame {
+                detail: err.to_string(),
+            })
+    }
+
+    fn send_audio(&mut self, frame: &NdiAudioFrame<'_>) -> Result<(), NdiSendError> {
+        let Some(sender) = self.sender.as_ref() else {
+            return Err(NdiSendError::Closed);
+        };
+        frame.validate()?;
+        sender
+            .send_audio(
+                frame.sample_rate,
+                frame.channels,
+                frame.samples,
                 frame.timecode,
                 frame.data,
             )

@@ -11,7 +11,7 @@
 //! conversion that feeds it are OUT-4 / live-only; here the seam is exercised over
 //! the deterministic [`super::api::FakeNdiApi`].
 
-use super::api::{NdiApi, NdiSendError, NdiVideoFrame};
+use super::api::{NdiApi, NdiAudioFrame, NdiSendError, NdiVideoFrame};
 use super::convert::{nv12_to_uyvy, Nv12Canvas};
 use super::license::NdiLicense;
 
@@ -112,6 +112,50 @@ impl<A: NdiApi> NdiOutput<A> {
         let uyvy = nv12_to_uyvy(canvas);
         let frame = canvas.to_uyvy_frame(timecode, frame_rate_n, frame_rate_d, &uyvy)?;
         self.api.send_video(&frame)
+    }
+
+    /// Push one host-memory audio frame to the NDI sender.
+    ///
+    /// `timecode` is expected to already be re-stamped from the tick counter
+    /// (invariant #3). A send after [`Self::close`] is a typed
+    /// [`NdiSendError::Closed`], never a panic.
+    ///
+    /// # Errors
+    /// [`NdiSendError`] if the sender is closed or the frame is invalid.
+    pub fn send_audio(&mut self, frame: &NdiAudioFrame<'_>) -> Result<(), NdiSendError> {
+        if !self.open {
+            return Err(NdiSendError::Closed);
+        }
+        self.api.send_audio(frame)
+    }
+
+    /// Publish one chunk of **planar float** (`FLTP`) program audio as an NDI audio
+    /// frame, alongside the video the NDI source carries.
+    ///
+    /// `data` is `channels` contiguous planes of `samples` `f32` each. `timecode`
+    /// is the tick-derived NDI 100 ns instant (invariant #3). A malformed buffer is
+    /// a typed refusal, never a panic — so audio can never threaten the output
+    /// clock (invariant #1).
+    ///
+    /// # Errors
+    /// [`NdiSendError::Closed`] if the sender is closed;
+    /// [`NdiSendError::InvalidFrame`] if the audio geometry/buffer is inconsistent.
+    pub fn send_audio_planar(
+        &mut self,
+        sample_rate: u32,
+        channels: u32,
+        samples: u32,
+        timecode: i64,
+        data: &[f32],
+    ) -> Result<(), NdiSendError> {
+        let frame = NdiAudioFrame {
+            sample_rate,
+            channels,
+            samples,
+            timecode,
+            data,
+        };
+        self.send_audio(&frame)
     }
 
     /// Close the sender, destroying the SDK handle. Idempotent.

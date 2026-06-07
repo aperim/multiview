@@ -121,6 +121,57 @@ impl NdiVideoFrame<'_> {
     }
 }
 
+/// A host-memory **audio** frame handed to an NDI sender.
+///
+/// NDI carries audio as **planar 32-bit float** (`FLTP`): `channels` contiguous
+/// planes of `samples` `f32` each (plane 0 then plane 1 …). Borrows the host
+/// buffer for the duration of the send. `timecode` is re-stamped from the tick
+/// counter upstream (invariant #3), in NDI's 100 ns units, never raw input PTS.
+#[derive(Debug, Clone, Copy)]
+pub struct NdiAudioFrame<'a> {
+    /// Sample rate in Hz (e.g. 48000).
+    pub sample_rate: u32,
+    /// Channel count (the number of planes).
+    pub channels: u32,
+    /// Samples per channel in this frame.
+    pub samples: u32,
+    /// Timecode in NDI 100 ns units, re-stamped from the tick counter.
+    pub timecode: i64,
+    /// The borrowed planar-float buffer (`channels * samples` f32).
+    pub data: &'a [f32],
+}
+
+impl NdiAudioFrame<'_> {
+    /// Validate the descriptor's internal consistency before a send.
+    ///
+    /// Catches zero rate/channels/samples and a buffer shorter than
+    /// `channels * samples` — a typed [`NdiSendError`], never a panic.
+    ///
+    /// # Errors
+    /// [`NdiSendError::InvalidFrame`] on any inconsistency.
+    pub fn validate(&self) -> Result<(), NdiSendError> {
+        if self.sample_rate == 0 || self.channels == 0 || self.samples == 0 {
+            return Err(NdiSendError::InvalidFrame {
+                detail: format!(
+                    "zero audio geometry ({} Hz, {} ch, {} samples)",
+                    self.sample_rate, self.channels, self.samples
+                ),
+            });
+        }
+        let needed = u64::from(self.channels).saturating_mul(u64::from(self.samples));
+        let have = u64::try_from(self.data.len()).unwrap_or(u64::MAX);
+        if have < needed {
+            return Err(NdiSendError::InvalidFrame {
+                detail: format!(
+                    "audio buffer {} samples < required {needed}",
+                    self.data.len()
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// A failure from the NDI sender seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -172,6 +223,12 @@ pub trait NdiApi {
     /// [`NdiSendError`] if the sender is closed or the frame is invalid.
     fn send_video(&mut self, frame: &NdiVideoFrame<'_>) -> Result<(), NdiSendError>;
 
+    /// Push one host-memory **audio** frame (planar float) to the sender.
+    ///
+    /// # Errors
+    /// [`NdiSendError`] if the sender is closed or the frame is invalid.
+    fn send_audio(&mut self, frame: &NdiAudioFrame<'_>) -> Result<(), NdiSendError>;
+
     /// Destroy the sender, releasing the SDK handle.
     fn destroy_sender(&mut self);
 }
@@ -190,6 +247,9 @@ pub struct FakeNdiApi {
     pub open: bool,
     /// One record per accepted frame: `(width, height, fourcc, timecode)`.
     pub sent: Vec<(u32, u32, NdiFourCc, i64)>,
+    /// One record per accepted audio frame: `(sample_rate, channels, samples,
+    /// timecode)`.
+    pub sent_audio: Vec<(u32, u32, u32, i64)>,
     /// If set, [`NdiApi::create_sender`] returns this error instead of succeeding
     /// (to test the create-failure path).
     pub fail_create: Option<String>,
@@ -229,6 +289,20 @@ impl NdiApi for FakeNdiApi {
         frame.validate()?;
         self.sent
             .push((frame.width, frame.height, frame.fourcc, frame.timecode));
+        Ok(())
+    }
+
+    fn send_audio(&mut self, frame: &NdiAudioFrame<'_>) -> Result<(), NdiSendError> {
+        if !self.open {
+            return Err(NdiSendError::Closed);
+        }
+        frame.validate()?;
+        self.sent_audio.push((
+            frame.sample_rate,
+            frame.channels,
+            frame.samples,
+            frame.timecode,
+        ));
         Ok(())
     }
 
