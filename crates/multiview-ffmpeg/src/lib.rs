@@ -98,6 +98,13 @@ pub mod hwdecode;
 /// `ffmpeg` feature.
 pub mod jpegxs;
 
+/// Typed, libav-free muxer-`AVOption` surface (GP-6 Piece B, ADR-0030 §4). The
+/// pure [`mux_options::MuxOptions`] model — the `avoid_negative_ts` /
+/// `max_interleave_delta` knobs a guarded passthrough sets before
+/// `write_header`, with up-front interior-NUL validation — is always compiled
+/// and unit-tested; the feature-gated [`Muxer::create_with_options`] consumes it.
+pub mod mux_options;
+
 pub use caption::{
     strip_ass_event, CaptionCue, CueAnchor, CueBitmap, CueError, CueRect, CueRegion, CueText,
 };
@@ -135,6 +142,8 @@ pub use hwdecode::select_decoder;
 pub use jpegxs::{
     resolve_availability, select_codec_name, JpegXsAvailability, JpegXsRole, JPEGXS_CODEC_NAMES,
 };
+
+pub use mux_options::{MuxOptionError, MuxOptions};
 
 #[cfg(feature = "ffmpeg")]
 pub use jpegxs::{is_available as jpegxs_is_available, probe as jpegxs_probe};

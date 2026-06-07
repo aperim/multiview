@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use ffmpeg::{codec, format};
+use ffmpeg::{codec, format, Dictionary};
 use ffmpeg_next as ffmpeg;
 
 use multiview_core::time::Rational;
@@ -25,6 +25,7 @@ use multiview_core::time::Rational;
 use crate::convert::{from_ff_rational, to_ff_rational};
 use crate::decode::ensure_initialized;
 use crate::error::{FfmpegError, Result};
+use crate::mux_options::MuxOptions;
 
 /// A registered output stream: its index and the encoder time-base whose
 /// packets feed it (the source side of the rescale into stream time-base).
@@ -41,6 +42,12 @@ struct StreamInfo {
 pub struct Muxer {
     output: format::context::Output,
     streams: Vec<StreamInfo>,
+    /// Muxer `AVOption`s to apply at [`write_header`](Muxer::write_header)
+    /// (GP-6 Piece B, ADR-0030 §4): e.g. `avoid_negative_ts=make_zero`,
+    /// `max_interleave_delta=<n>`. Empty for [`create`](Muxer::create) /
+    /// [`create_as`](Muxer::create_as) — those keep the legacy
+    /// no-option behaviour unchanged.
+    options: MuxOptions,
     header_written: bool,
     trailer_written: bool,
 }
@@ -57,6 +64,7 @@ impl Muxer {
         Ok(Self {
             output,
             streams: Vec::new(),
+            options: MuxOptions::new(),
             header_written: false,
             trailer_written: false,
         })
@@ -73,6 +81,48 @@ impl Muxer {
         Ok(Self {
             output,
             streams: Vec::new(),
+            options: MuxOptions::new(),
+            header_written: false,
+            trailer_written: false,
+        })
+    }
+
+    /// Allocate an output container for `path` forcing a specific muxer by name
+    /// (as [`create_as`](Muxer::create_as)) **and** record the `AVOption`s to
+    /// apply at [`write_header`](Muxer::write_header).
+    ///
+    /// This is the additive GP-6 (ADR-0030 §4) sibling of
+    /// [`create_as`](Muxer::create_as): a **guarded passthrough** sets
+    /// `avoid_negative_ts=make_zero` (a **one-shot leading shift** that lands the
+    /// first packets at 0 — not a mid-stream monotonicity fix) and, when it needs
+    /// to bound interleave buffering, `max_interleave_delta=<n>` (an
+    /// **interleave-flush** knob — **NOT** the abort guard; the abort guard is the
+    /// per-stream `last_dts + 1` clamp in
+    /// `multiview-output`'s `RestampAccumulator`). Passing an empty `options`
+    /// slice is exactly equivalent to [`create_as`](Muxer::create_as).
+    ///
+    /// The options are validated up front (no interior NUL) and stashed; they are
+    /// stuffed into a libav `AVDictionary` and handed to `avformat_write_header`
+    /// only at [`write_header`](Muxer::write_header) — and any option libav does
+    /// **not** consume there surfaces as a typed error (a misspelled key never
+    /// passes silently).
+    ///
+    /// # Errors
+    /// * [`FfmpegError::Mux`] — the container cannot be allocated/opened, or an
+    ///   option key/value carries an interior NUL byte.
+    pub fn create_with_options(
+        path: &Path,
+        format_name: &str,
+        options: &[(&str, &str)],
+    ) -> Result<Self> {
+        ensure_initialized()?;
+        let options = MuxOptions::from_pairs(options)
+            .map_err(|_| FfmpegError::Mux(ffmpeg::Error::InvalidData))?;
+        let output = format::output_as(&path, format_name).map_err(FfmpegError::Mux)?;
+        Ok(Self {
+            output,
+            streams: Vec::new(),
+            options,
             header_written: false,
             trailer_written: false,
         })
@@ -165,13 +215,41 @@ impl Muxer {
 
     /// Write the container header. Call once, after all streams are added.
     ///
+    /// If this muxer was built with [`create_with_options`](Muxer::create_with_options),
+    /// the recorded `AVOption`s are stuffed into a libav dictionary and passed to
+    /// `avformat_write_header`. Any option libav does **not** consume (a
+    /// misspelled key) comes back in the leftover dictionary and is treated as a
+    /// typed error — options never pass silently.
+    ///
     /// # Errors
-    /// Returns [`FfmpegError::Mux`] if the header cannot be written.
+    /// Returns [`FfmpegError::Mux`] if the header cannot be written or an option
+    /// was not accepted by the muxer.
     pub fn write_header(&mut self) -> Result<()> {
         if self.header_written {
             return Ok(());
         }
-        self.output.write_header().map_err(FfmpegError::Mux)?;
+        if self.options.is_empty() {
+            self.output.write_header().map_err(FfmpegError::Mux)?;
+        } else {
+            // Build a libav option dictionary from the validated pairs and hand
+            // it to `avformat_write_header` (via ffmpeg-next's safe
+            // `write_header_with`, which RAII-frees the dict). The returned
+            // dictionary holds whatever options the muxer did NOT recognise; a
+            // non-empty leftover means a bad/unsupported key, which we surface as
+            // a typed error rather than swallow.
+            let mut dict = Dictionary::new();
+            for (key, value) in self.options.as_pairs() {
+                dict.set(key, value);
+            }
+            let leftover = self
+                .output
+                .write_header_with(dict)
+                .map_err(FfmpegError::Mux)?;
+            let unconsumed = leftover.iter().next().is_some();
+            if unconsumed {
+                return Err(FfmpegError::Mux(ffmpeg::Error::OptionNotFound));
+            }
+        }
         self.header_written = true;
         // Refresh each stream's (possibly muxer-adjusted) time-base so the
         // packet rescale targets the real value libav will use.
