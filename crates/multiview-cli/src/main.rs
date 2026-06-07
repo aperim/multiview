@@ -227,10 +227,26 @@ async fn run_pipeline_until_ctrl_c(
         }
     });
 
+    // Sample CPU/host-memory/per-GPU load at ~1.3 Hz and PUSH `Event::SystemMetrics`
+    // onto the SAME outbound publisher the control plane forwards to the WebUI
+    // footer (the full-pipeline path serves the control plane, so the poller must
+    // live here too — not only in the software-only run). The publish never
+    // awaits/blocks a slow subscriber (inv #10); the task self-stops on `stop`.
+    let metrics_task = multiview_cli::system_metrics::spawn(
+        Arc::clone(&publisher),
+        multiview_cli::system_metrics::default_load_source(),
+        stop.clone(),
+        None,
+    );
+
     let report = pipeline
         .run_until_serving(&stop, publisher.as_ref(), &preview_slot, drain)
         .await
         .context("pipeline run until Ctrl-C")?;
+
+    // The pipeline loop returned; stop the metrics poller (it also self-stops on
+    // the StopSignal within one sample period).
+    metrics_task.abort();
 
     let _ = shutdown_tx.send(());
     if let Some(handle) = server {
