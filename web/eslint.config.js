@@ -27,6 +27,10 @@ export default tseslint.config(
       // outside the typed `src/` TS project, so the type-aware lint rules can't
       // apply to it.
       'scripts/**',
+      // Playwright e2e specs + config live outside the typed `src/` project and
+      // are transpiled by Playwright's own runner, not the app TS program.
+      'e2e/**',
+      'playwright.config.ts',
     ],
   },
 
