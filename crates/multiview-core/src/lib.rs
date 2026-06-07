@@ -12,6 +12,7 @@ pub mod error;
 pub mod frame;
 pub mod layout;
 pub mod pixel;
+pub mod stream;
 pub mod tally;
 pub mod time;
 pub mod traits;
