@@ -47,7 +47,15 @@
 //!   (pure).
 //! * [`mpegts`] — MPEG-2 Transport Stream **PSI/SI** section parsers (PAT, PMT,
 //!   NIT, SDT, CAT, TDT, TOT) with CRC-32/MPEG-2 validation, plus an MPTS
-//!   program-selection model. Pure, golden-vector + property tested.
+//!   program-selection model, typed ES-descriptor decoders (ISO-639 / subtitling
+//!   / teletext / AC-3), and a PMT → [`multiview_core::stream::StreamInventory`]
+//!   fold-in with SCTE-35 reconciliation (RT-2). Pure, golden-vector + property
+//!   tested.
+//! * [`inventory`] — the container-agnostic [`multiview_core::stream::StreamInventory`]
+//!   **merge** (RT-2, ADR-0034 §3): overlay the MPEG-TS PMT's language/role +
+//!   SCTE-35 PIDs, or fold an HLS master's AUDIO/SUBTITLES renditions, onto the
+//!   general-demux base so a consumer gets **one** unified inventory regardless of
+//!   container.
 //! * [`scte`] — **SCTE-35** `splice_info_section` and **SCTE-104 / ST 2010**
 //!   parsers emitting typed splice/cue events (pure, golden-vector tested).
 //! * [`dash`] — **MPEG-DASH** (ISO/IEC 23009-1) MPD manifest model + a pure
@@ -90,6 +98,7 @@ pub mod caption_store;
 pub mod dash;
 pub mod error;
 pub mod hls;
+pub mod inventory;
 pub mod jitter;
 pub mod mpegts;
 pub mod normalize;

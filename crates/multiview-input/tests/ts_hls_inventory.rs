@@ -21,9 +21,11 @@
 )]
 
 use multiview_core::stream::{
-    Bcp47, DataKind, StabilityTier, StableStreamId, StreamKind,
+    Bcp47, DataKind, StabilityTier, StableStreamId, StreamDescriptor, StreamDetail,
+    StreamInventory, StreamKind,
 };
 use multiview_input::hls::MasterPlaylist;
+use multiview_input::inventory::{merge_hls, merge_ts};
 use multiview_input::mpegts::crc::crc32_mpeg2;
 use multiview_input::mpegts::descriptor::{AudioType, Descriptors};
 use multiview_input::mpegts::inventory::{pmt_inventory, reconcile_scte35};
@@ -64,14 +66,14 @@ fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// An ISO_639_language_descriptor (tag 0x0A): `[lang(3), audio_type(1)]*`.
+/// An `ISO_639_language_descriptor` (tag 0x0A): `[lang(3), audio_type(1)]*`.
 fn iso639(lang: &str, audio_type: u8) -> Vec<u8> {
     let mut payload = lang.as_bytes()[..3].to_vec();
     payload.push(audio_type);
     descriptor(0x0A, &payload)
 }
 
-/// A subtitling_descriptor (tag 0x59): `[lang(3), type(1), comp_page(2), anc_page(2)]*`.
+/// A `subtitling_descriptor` (tag 0x59): `[lang(3), type(1), comp_page(2), anc_page(2)]*`.
 fn subtitling(lang: &str, sub_type: u8, comp: u16, anc: u16) -> Vec<u8> {
     let mut payload = lang.as_bytes()[..3].to_vec();
     payload.push(sub_type);
@@ -80,7 +82,7 @@ fn subtitling(lang: &str, sub_type: u8, comp: u16, anc: u16) -> Vec<u8> {
     descriptor(0x59, &payload)
 }
 
-/// A teletext_descriptor (tag 0x56): `[lang(3), type5|mag3(1), page(1)]*`.
+/// A `teletext_descriptor` (tag 0x56): `[lang(3), type5|mag3(1), page(1)]*`.
 fn teletext(lang: &str, tele_type: u8, magazine: u8, page: u8) -> Vec<u8> {
     let mut payload = lang.as_bytes()[..3].to_vec();
     // teletext_type (5 bits) << 3 | magazine_number (3 bits)
@@ -195,18 +197,21 @@ fn pmt_inventory_fills_audio_language_and_role_from_descriptors() {
 
     let inv = pmt_inventory(&pmt).expect("fold PMT into inventory");
 
-    // Audio languages came from the ISO-639 descriptors (libav often misses these).
+    // Audio languages came from the ISO-639 descriptors (libav often misses
+    // these). `Bcp47` validates the ISO-639-2 code as-is — it does not down-map
+    // alpha-3 to alpha-2 (a lossy conversion it does not perform), so "eng"/"deu"
+    // are the normalised tags.
     let mut audio_langs: Vec<String> = inv
         .audio_tracks()
         .filter_map(|s| s.language.as_ref().map(|l| l.as_str().to_owned()))
         .collect();
     audio_langs.sort();
-    assert_eq!(audio_langs, vec!["de".to_owned(), "en".to_owned()]);
+    assert_eq!(audio_langs, vec!["deu".to_owned(), "eng".to_owned()]);
 
     // The hearing-impaired German track is flagged via title role.
     let deu = inv
         .audio_tracks()
-        .find(|s| s.language.as_ref().map(Bcp47::as_str) == Some("de"))
+        .find(|s| s.language.as_ref().map(Bcp47::as_str) == Some("deu"))
         .expect("german audio");
     assert_eq!(
         deu.title.as_deref(),
@@ -216,20 +221,19 @@ fn pmt_inventory_fills_audio_language_and_role_from_descriptors() {
 
     // The subtitle's language came from the subtitling descriptor.
     let sub = inv.subtitle_tracks().next().expect("a subtitle stream");
-    assert_eq!(sub.language.as_ref().map(Bcp47::as_str), Some("es"));
+    assert_eq!(sub.language.as_ref().map(Bcp47::as_str), Some("spa"));
     assert!(sub.kind.is_subtitle());
 
     // Every TS descriptor is PID-keyed (hard tier), so the ids survive a
     // PMT-version bump / reorder.
     assert!(
-        inv.streams.iter().all(|s| s.id.tier() == StabilityTier::Hard),
+        inv.streams
+            .iter()
+            .all(|s| s.id.tier() == StabilityTier::Hard),
         "TS PMT ids are PID-keyed hard ids"
     );
     let v = inv.video().next().expect("video");
-    assert_eq!(
-        v.id,
-        StableStreamId::from_ts_pid(StreamKind::Video, 0x0100)
-    );
+    assert_eq!(v.id, StableStreamId::from_ts_pid(StreamKind::Video, 0x0100));
 }
 
 #[test]
@@ -237,10 +241,7 @@ fn pmt_inventory_classifies_scte35_as_data() {
     // Video + an SCTE-35 PID (stream_type 0x86).
     let body = pmt_body(
         0x0100,
-        &[
-            (0x1B, 0x0100, Vec::new()),
-            (0x86, 0x01F0, Vec::new()),
-        ],
+        &[(0x1B, 0x0100, Vec::new()), (0x86, 0x01F0, Vec::new())],
     );
     let pmt = Pmt::parse(&long_section(0x02, 0x0001, 1, &body)).expect("PMT");
     let inv = pmt_inventory(&pmt).expect("fold");
@@ -267,10 +268,7 @@ fn scte35_reconciliation_dedupes_against_general_demux_row() {
     // (no double-list) and keep it under the stable PID-keyed id.
     let pmt_body_bytes = pmt_body(
         0x0100,
-        &[
-            (0x1B, 0x0100, Vec::new()),
-            (0x86, 0x01F0, Vec::new()),
-        ],
+        &[(0x1B, 0x0100, Vec::new()), (0x86, 0x01F0, Vec::new())],
     );
     let pmt = Pmt::parse(&long_section(0x02, 0x0001, 1, &pmt_body_bytes)).expect("PMT");
     let base = pmt_inventory(&pmt).expect("fold");
@@ -389,7 +387,9 @@ fn hls_rendition_ids_are_hard_group_plus_name() {
     let master = MasterPlaylist::parse(HLS_MASTER).expect("parse");
     let inv = master.stream_inventory();
     assert!(
-        inv.streams.iter().all(|s| s.id.tier() == StabilityTier::Hard),
+        inv.streams
+            .iter()
+            .all(|s| s.id.tier() == StabilityTier::Hard),
         "HLS ids are group+name hard ids"
     );
     let en_audio = inv
@@ -428,6 +428,117 @@ fn hls_empty_name_renditions_get_non_colliding_synthesised_ids() {
     );
     // Both remain HARD-tier hls ids.
     assert!(audio.iter().all(|s| s.id.tier() == StabilityTier::Hard));
+}
+
+// ===========================================================================
+// (4) ONE unified StreamInventory through the same merge surface, whether the
+//     container is TS/SRT (PMT enrichment) or HLS (rendition fold-in).
+// ===========================================================================
+
+/// A minimal general-demux base inventory: a soft-keyed audio row that LACKS a
+/// language (the exact thing libav's TS metadata misses), to be enriched by the
+/// PMT merge.
+fn general_base_audio_no_lang() -> StreamInventory {
+    let id = StableStreamId::from_general(StreamKind::Audio, 0, "aac", None, None);
+    StreamInventory::from_streams(vec![StreamDescriptor::new(
+        id,
+        StreamKind::Audio,
+        "aac",
+        StreamDetail::Audio {
+            channels: 2,
+            sample_rate: 48_000,
+        },
+    )])
+}
+
+#[test]
+fn ts_merge_enriches_base_audio_language_and_reconciles_scte() {
+    // A general-demux base (a language-less audio row, decoded channel layout)
+    // plus the PMT (which carries the ISO-639 language + an SCTE-35 PID). The
+    // unified TS surface overlays the language WITHOUT losing the decoded detail,
+    // and reconciles the SCTE PID to exactly one Data(Scte35).
+    let body = pmt_body(
+        0x0100,
+        &[
+            (0x1B, 0x0100, Vec::new()),
+            (0x0F, 0x0101, iso639("fra", 0x00)),
+            (0x86, 0x01F0, Vec::new()),
+        ],
+    );
+    let pmt = Pmt::parse(&long_section(0x02, 0x0001, 1, &body)).expect("PMT");
+
+    let unified = merge_ts(general_base_audio_no_lang(), &pmt);
+
+    // The base audio row gained the PMT language but kept its decoded layout.
+    let audio = unified.audio_tracks().next().expect("audio");
+    assert_eq!(audio.language.as_ref().map(Bcp47::as_str), Some("fra"));
+    assert_eq!(audio.detail.audio_layout(), Some((2, 48_000)));
+
+    // Exactly one SCTE-35 data stream, PID-keyed.
+    let scte: Vec<_> = unified
+        .by_kind(|k| k == StreamKind::Data(DataKind::Scte35))
+        .collect();
+    assert_eq!(scte.len(), 1);
+    assert_eq!(
+        scte[0].id,
+        StableStreamId::from_ts_pid(StreamKind::Data(DataKind::Scte35), 0x01F0)
+    );
+}
+
+#[test]
+fn ts_merge_dedupes_scte_against_a_general_demux_scte_row() {
+    // The base ALREADY carries a soft general-demux SCTE-35 row (libav saw the
+    // scte_35 codec) for the same physical PID the PMT reports. The unified TS
+    // surface must NOT double-list it: exactly one Data(Scte35) survives.
+    let soft_scte = StreamDescriptor::new(
+        StableStreamId::from_general(StreamKind::Data(DataKind::Scte35), 0, "scte_35", None, None),
+        StreamKind::Data(DataKind::Scte35),
+        "scte_35",
+        StreamDetail::Passthrough,
+    );
+    let mut base = general_base_audio_no_lang();
+    base.streams.push(soft_scte);
+
+    let body = pmt_body(
+        0x0100,
+        &[(0x1B, 0x0100, Vec::new()), (0x86, 0x01F0, Vec::new())],
+    );
+    let pmt = Pmt::parse(&long_section(0x02, 0x0001, 1, &body)).expect("PMT");
+    let unified = merge_ts(base, &pmt);
+
+    let scte: Vec<_> = unified
+        .by_kind(|k| k == StreamKind::Data(DataKind::Scte35))
+        .collect();
+    assert_eq!(
+        scte.len(),
+        1,
+        "the soft general SCTE row and the PSI PID reconcile to ONE"
+    );
+    assert_eq!(
+        scte[0].id,
+        StableStreamId::from_ts_pid(StreamKind::Data(DataKind::Scte35), 0x01F0),
+        "kept under the stable hard PID id, not the soft general id"
+    );
+}
+
+#[test]
+fn hls_merge_appends_renditions_onto_the_base() {
+    // The general-demux base (the variant's muxed video+audio) plus the master's
+    // alternate AUDIO/SUBTITLES renditions → one unified inventory carrying them
+    // all, through the SAME merge surface as the TS path.
+    let base = general_base_audio_no_lang();
+    let master = MasterPlaylist::parse(HLS_MASTER).expect("parse");
+    let unified = merge_hls(base, &master);
+
+    // The base audio plus the two AUDIO renditions = 3 audio rows; the 2 subs.
+    assert_eq!(unified.audio_tracks().count(), 3, "base + 2 HLS audio");
+    assert_eq!(unified.subtitle_tracks().count(), 2, "2 HLS subtitle");
+    // The HLS-sourced rows are hard group+name ids.
+    let hls_audio = unified
+        .audio_tracks()
+        .find(|s| s.language.as_ref().map(Bcp47::as_str) == Some("es"))
+        .expect("spanish HLS audio");
+    assert_eq!(hls_audio.id.tier(), StabilityTier::Hard);
 }
 
 #[test]
