@@ -59,6 +59,36 @@ describe('parseSystemMetrics', () => {
     expect(parsed?.program_fps).toBe(50);
   });
 
+  it('parses our-process self_* host fields when present', () => {
+    const parsed = parseSystemMetrics({
+      cpu_util: 0.5,
+      self_cpu_util: 0.2,
+      mem_used_bytes: 4000,
+      self_mem_used_bytes: 1500,
+      mem_total_bytes: 8000,
+      sampled_hz: 2,
+    });
+    expect(parsed?.self_cpu_util).toBe(0.2);
+    expect(parsed?.self_mem_used_bytes).toBe(1500);
+  });
+
+  it('leaves self_* host fields undefined when absent (never a false 0)', () => {
+    const parsed = parseSystemMetrics({ cpu_util: 0.5, sampled_hz: 2 });
+    expect(parsed?.self_cpu_util).toBeUndefined();
+    expect(parsed?.self_mem_used_bytes).toBeUndefined();
+  });
+
+  it('ignores a mistyped self_* host field (undefined, not 0)', () => {
+    const parsed = parseSystemMetrics({
+      cpu_util: 0.5,
+      self_cpu_util: 'lots',
+      self_mem_used_bytes: null,
+      sampled_hz: 2,
+    });
+    expect(parsed?.self_cpu_util).toBeUndefined();
+    expect(parsed?.self_mem_used_bytes).toBeUndefined();
+  });
+
   it('parses a GPU entry and drops malformed ones', () => {
     const parsed = parseSystemMetrics({
       cpu_util: 0.5,
@@ -87,6 +117,58 @@ describe('parseSystemMetrics', () => {
     expect(gpu?.compute_util).toBe(0.8);
     expect(gpu?.encoder_sessions).toBe(3);
     expect(gpu?.encoder_session_ceiling).toBe(5);
+  });
+
+  it('parses our-process self_* GPU fields when present', () => {
+    const parsed = parseSystemMetrics({
+      cpu_util: 0.5,
+      sampled_hz: 2,
+      gpus: [
+        {
+          id: 'gpu-0',
+          vendor: 'nvidia',
+          compute_util: 0.8,
+          self_compute_util: 0.3,
+          mem_used_bytes: 6_000,
+          self_mem_used_bytes: 2_000,
+          mem_total_bytes: 8_000,
+          encoder_util: 0.4,
+          self_encoder_util: 0.2,
+          decoder_util: 0.1,
+          self_decoder_util: 0.05,
+          encoder_sessions: 6,
+          self_encoder_sessions: 2,
+        },
+      ],
+    });
+    const gpu = parsed?.gpus[0];
+    expect(gpu?.self_compute_util).toBe(0.3);
+    expect(gpu?.self_mem_used_bytes).toBe(2_000);
+    expect(gpu?.self_encoder_util).toBe(0.2);
+    expect(gpu?.self_decoder_util).toBe(0.05);
+    expect(gpu?.self_encoder_sessions).toBe(2);
+  });
+
+  it('leaves self_* GPU fields undefined when absent (never a false 0)', () => {
+    const parsed = parseSystemMetrics({
+      cpu_util: 0.5,
+      sampled_hz: 2,
+      gpus: [
+        {
+          id: 'gpu-0',
+          vendor: 'nvidia',
+          compute_util: 0.8,
+          mem_used_bytes: 6_000,
+          mem_total_bytes: 8_000,
+        },
+      ],
+    });
+    const gpu = parsed?.gpus[0];
+    expect(gpu?.self_compute_util).toBeUndefined();
+    expect(gpu?.self_mem_used_bytes).toBeUndefined();
+    expect(gpu?.self_encoder_util).toBeUndefined();
+    expect(gpu?.self_decoder_util).toBeUndefined();
+    expect(gpu?.self_encoder_sessions).toBeUndefined();
   });
 
   it('coerces an unknown vendor string to "other"', () => {
@@ -149,6 +231,65 @@ describe('SystemMetricsRing', () => {
     expect(series.vram).toEqual([0.25]);
     expect(series.nvenc).toEqual([4]);
     expect(series.dec).toEqual([0.3]);
+  });
+
+  it('builds a per-GPU series keyed by device id for every GPU', () => {
+    const ring = new SystemMetricsRing();
+    ring.push(
+      sample({
+        gpus: [
+          {
+            id: 'g0',
+            vendor: 'nvidia',
+            compute_util: 0.5,
+            self_compute_util: 0.2,
+            mem_used_bytes: 2_000,
+            mem_total_bytes: 8_000,
+            encoder_sessions: 6,
+            self_encoder_sessions: 2,
+            decoder_util: 0.3,
+          },
+          {
+            id: 'g1',
+            vendor: 'nvidia',
+            compute_util: 0.9,
+            mem_used_bytes: 4_000,
+            mem_total_bytes: 8_000,
+          },
+        ],
+      }),
+    );
+    const { gpuSeries } = ring.snapshot();
+    expect(gpuSeries).toHaveLength(2);
+    const [s0, s1] = gpuSeries;
+    expect(s0?.id).toBe('g0');
+    expect(s0?.compute).toEqual([0.5]);
+    expect(s0?.selfCompute).toEqual([0.2]);
+    expect(s0?.nvenc).toEqual([6]);
+    expect(s0?.selfNvenc).toEqual([2]);
+    expect(s1?.id).toBe('g1');
+    expect(s1?.compute).toEqual([0.9]);
+    // No self_* on g1: the self series carry undefined gaps, never a false 0.
+    expect(s1?.selfCompute).toEqual([undefined]);
+    expect(s1?.selfNvenc).toEqual([undefined]);
+  });
+
+  it('aligns a per-GPU series across samples even if a GPU disappears for one tick', () => {
+    const ring = new SystemMetricsRing();
+    const gpu = (id: string, compute: number): SystemMetrics['gpus'][number] => ({
+      id,
+      vendor: 'nvidia',
+      compute_util: compute,
+      mem_used_bytes: 1,
+      mem_total_bytes: 2,
+    });
+    ring.push(sample({ gpus: [gpu('g0', 0.1), gpu('g1', 0.2)] }));
+    ring.push(sample({ gpus: [gpu('g0', 0.3)] })); // g1 missing this tick
+    ring.push(sample({ gpus: [gpu('g0', 0.4), gpu('g1', 0.5)] }));
+    const { gpuSeries } = ring.snapshot();
+    const g1 = gpuSeries.find((s) => s.id === 'g1');
+    // g1's compute series stays length-3 and aligned, with a 0 where it was absent.
+    expect(g1?.compute).toEqual([0.2, 0, 0.5]);
   });
 
   it('substitutes 0 for an absent metric so series stay aligned', () => {
