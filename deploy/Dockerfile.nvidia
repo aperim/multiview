@@ -80,20 +80,33 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Ubuntu 24.04 apt ships FFmpeg 6.1; pull the FFmpeg 7.x runtime sonames
-# (libav*61) from the maintained ubuntuhandbook1/ffmpeg7 PPA, then assert the
-# soname major is 61 (FFmpeg 7.x) so a silent regression to 6.x fails the build.
+# multiview links libavcodec.so.61 (FFmpeg 7.x). The stock Ubuntu/PPA FFmpeg is a
+# minimal LGPL build with NO h264_nvenc (and no libx264), so the NVENC GPU-encode
+# path is unreachable — `select_encoder(H264)` probes the linked libav at run time
+# and falls back to mpeg2video. jellyfin-ffmpeg7 is a self-contained FFmpeg 7.x
+# built with `--enable-nvenc` + `--enable-libx264` (and bundles its own libav*61),
+# purpose-made for container hardware transcode. We install it and point the loader
+# at its lib dir so multiview selects `h264_nvenc` (the driver's libnvidia-encode
+# is injected at RUN time by the NVIDIA Container Toolkit). Assert the soname so a
+# layout change fails the build, not the demo.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates software-properties-common gnupg \
- && add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg7 \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu noble main" \
+      > /etc/apt/sources.list.d/jellyfin.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends \
-      libavcodec61 libavformat61 libavutil59 libavfilter10 \
-      libavdevice61 libswscale8 libswresample5 \
- && ldconfig -p | grep -q 'libavcodec.so.61' \
- && apt-get purge -y software-properties-common gnupg \
+ && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 \
+ && test -e /usr/lib/jellyfin-ffmpeg/lib/libavcodec.so.61 \
+ && apt-get purge -y curl gnupg \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+
+# Load jellyfin-ffmpeg's nvenc/x264-enabled libav* (it bundles the full set:
+# libavcodec/format/util/filter/device + libsw{scale,resample}). Prepended, so the
+# system CUDA/Vulkan libs the compositor needs are still found.
+ENV LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib
 
 # Make CUDA expose the video (NVENC/NVDEC) capability in addition to compute.
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
