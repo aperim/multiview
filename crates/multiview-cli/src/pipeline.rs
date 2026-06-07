@@ -118,6 +118,14 @@ const LIVE_QUEUE_CAP: usize = 4;
 /// slow sink paces the consumer rather than dropping a baked frame.
 const SINK_QUEUE_CAP: usize = 4;
 
+/// The rolling HLS live-playlist segment window (HLS-0/1, ADR-0032): how many
+/// most-recent segments the live `.m3u8` lists and the sink keeps on disk. Six
+/// 1-GOP segments is a small DVR depth that keeps reload-at-live-edge cheap while
+/// bounding disk; older segments are pruned as they age out (a one-refresh-behind
+/// client may 404 the just-evicted segment — acceptable until the HLS-2 grace
+/// reaper). The proper grace-period / configurable DVR is a later slice.
+const HLS_LIVE_WINDOW: usize = 6;
+
 /// The grace a wedged sink is given before it is detached so teardown stays
 /// bounded (ENG-1, invariant #1 — `stop` always completes). It bounds BOTH the
 /// consumer's per-packet fan-out `send_timeout` (so a sink that never drains
@@ -347,11 +355,16 @@ enum RunnableOutput {
         /// Where the container is written (for the run report).
         path: PathBuf,
     },
-    /// An HLS segmenter writing `seg*.ts` + a media playlist into a directory.
+    /// An HLS segmenter writing `seg*.ts` + a **rolling live** media playlist into
+    /// a directory (HLS-0/1, ADR-0032). The sink publishes the windowed `.m3u8`
+    /// on disk on every closed segment and prunes the evicted `.ts`, so an
+    /// infinite live run writes (and bounds) the playlist + segment set instead of
+    /// rendering once at a finalize that never arrives.
     Hls {
-        /// The packet-fed GOP-segment muxer.
+        /// The packet-fed GOP-segment muxer (live flavour).
         sink: PacketMuxSink,
-        /// Where the `.m3u8` playlist is written.
+        /// Where the `.m3u8` playlist is published (owned + written by the live
+        /// sink itself — recorded here only for the run report).
         playlist_path: PathBuf,
     },
     /// A live push transport (RTMP / SRT) muxing the same packets to a remote
@@ -727,10 +740,11 @@ impl Pipeline {
     pub async fn run_for(&mut self, max_ticks: u64) -> Result<PipelineReport, PipelineError> {
         let time: Arc<dyn TimeSource> = Arc::new(MonotonicTimeSource::new());
         let stop = StopSignal::new();
-        // Offline render: block-for-exact so every tick is encoded (exact N).
+        // Offline render: block-for-exact so every tick is encoded (exact N). The
+        // finite run also writes the bounded self-contained `program.ts` anchor.
         let plan = StreamPlan {
             policy: SendPolicy::BlockForExact,
-            runners: self.build_sink_runners(),
+            runners: self.build_sink_runners(false),
             hot_tick_observer: None,
         };
         // Offline render serves no UI: a throwaway publisher/preview + no-op
@@ -787,10 +801,12 @@ impl Pipeline {
     {
         let time: Arc<dyn TimeSource> = Arc::new(MonotonicTimeSource::new());
         // Live daemon: drop-on-overload so a wedged encoder can never stall the
-        // output clock (inv #1) or back-pressure the engine (inv #10).
+        // output clock (inv #1) or back-pressure the engine (inv #10). A live run
+        // suppresses the `program.ts` anchor (HLS-2): the rolling HLS window is the
+        // bounded on-disk artifact — an ever-growing `program.ts` is not written.
         let plan = StreamPlan {
             policy: SendPolicy::DropOnOverload,
-            runners: self.build_sink_runners(),
+            runners: self.build_sink_runners(true),
             hot_tick_observer: None,
         };
         let out = self
@@ -823,8 +839,14 @@ impl Pipeline {
     /// outputs by value here moves them out of `self`, so a second
     /// `drive_streaming` call simply has no sinks (the run produces no further
     /// artifacts) rather than double-running a sink.
-    fn build_sink_runners(&mut self) -> Vec<SinkRunner> {
-        let outputs = std::mem::take(&mut self.outputs);
+    ///
+    /// `live` selects whether the self-contained `program.ts` anchor is added: a
+    /// finite/offline render (`false`) prepends it (bounded, a single playable
+    /// container), a live run (`true`) suppresses it so the run never writes an
+    /// ever-growing `program.ts` (HLS-2, ADR-0032) — the rolling HLS window is the
+    /// bounded on-disk artifact instead.
+    fn build_sink_runners(&mut self, live: bool) -> Vec<SinkRunner> {
+        let outputs = maybe_prepend_program_ts(std::mem::take(&mut self.outputs), live);
         outputs
             .into_iter()
             .map(|output| -> SinkRunner {
@@ -2036,7 +2058,11 @@ fn run_one_output(
                 })?;
             match outcome {
                 PacketMuxOutcome::Segment(result) => {
-                    let playlist_text = result.playlist.render();
+                    // The live sink already published (and finalized, with
+                    // EXT-X-ENDLIST) the on-disk `.m3u8` atomically on each closed
+                    // segment — the `LivePlaylist` owns that file. Do NOT write it
+                    // again here (`playlist: None`), or we would race/clobber the
+                    // sink's atomic publish with a stale second write (HLS-0/1).
                     Ok(SinkRunOutcome {
                         line: format!(
                             "hls {} + {} segment(s) ({} packet(s))",
@@ -2044,7 +2070,7 @@ fn run_one_output(
                             result.segments.len(),
                             result.stats.packets
                         ),
-                        playlist: Some((playlist_path, playlist_text)),
+                        playlist: None,
                         frames: source.delivered,
                     })
                 }
@@ -2995,8 +3021,18 @@ fn build_outputs(outputs: &[Output]) -> Result<Vec<RunnableOutput>, PipelineErro
                     kind: "hls",
                     reason: format!("creating {}: {e}", dir.display()),
                 })?;
+                // Live rolling playlist (HLS-0/1, ADR-0032): the sink publishes the
+                // windowed `.m3u8` on every closed segment and prunes the evicted
+                // `.ts` — so a live (infinite) run keeps `multiview.m3u8` current
+                // and disk bounded, instead of 404ing until a finalize that never
+                // comes. A 6-segment window is the rolling DVR depth.
                 runnable.push(RunnableOutput::Hls {
-                    sink: PacketMuxSink::segment(dir, prefix),
+                    sink: PacketMuxSink::segment_live(
+                        dir,
+                        prefix,
+                        playlist_path.clone(),
+                        HLS_LIVE_WINDOW,
+                    ),
                     playlist_path,
                 });
             }
@@ -3033,17 +3069,26 @@ fn build_outputs(outputs: &[Output]) -> Result<Vec<RunnableOutput>, PipelineErro
             }
         }
     }
-    // The config schema has no `file` output kind; a single-file artifact is
-    // derived from the FIRST HLS output's directory (program.<ext>) so the run
-    // always writes a self-contained playable container alongside the segments.
-    // If no HLS output exists, there is nothing runnable.
-    Ok(prepend_file_sink(runnable))
+    // The single-file `program.ts` anchor is NOT derived here: it depends on the
+    // run mode (offline vs live), which is only known when the run starts. A LIVE
+    // HLS run must not also write an ever-growing `program.ts` (HLS-2, ADR-0032),
+    // while a finite/offline render still wants the self-contained container — so
+    // the anchor is prepended at run time by `maybe_prepend_program_ts`, not here.
+    Ok(runnable)
 }
 
-/// Derive a single-file container sink from the first HLS output (fed the same
-/// one encode), so a `run` always produces a self-contained playable file in
-/// addition to the segmented playlist (encode-once-mux-many — invariant #7).
-fn prepend_file_sink(mut runnable: Vec<RunnableOutput>) -> Vec<RunnableOutput> {
+/// Optionally derive a single-file `program.ts` container sink from the first HLS
+/// output (fed the same one encode, invariant #7) and prepend it to the runnable
+/// outputs. The anchor is added **only for an offline/finite render** (`live ==
+/// false`), where the file is bounded by the fixed tick count and a single
+/// self-contained playable container is wanted. It is **suppressed for a live
+/// run** (HLS-2, ADR-0032): an infinite live run must not also write an
+/// ever-growing `program.ts` — the rolling segment window (the live `.m3u8` +
+/// pruned `seg*.ts`) is the bounded on-disk artifact instead.
+fn maybe_prepend_program_ts(mut runnable: Vec<RunnableOutput>, live: bool) -> Vec<RunnableOutput> {
+    if live {
+        return runnable;
+    }
     let file_path = runnable.iter().find_map(|r| match r {
         RunnableOutput::Hls { playlist_path, .. } => {
             Some(playlist_path.with_file_name("program.ts"))

@@ -331,6 +331,135 @@ fn segment_packet_sink_splits_on_keyframes_and_writes_a_playlist() {
 }
 
 #[test]
+fn segment_live_publishes_rolling_playlist_bounded_window_and_prunes() {
+    // HLS-0/1 (ADR-0032): the LIVE segment sink writes the `.m3u8` on disk on
+    // every closed segment (not once-at-finalize), bounds the segment window, and
+    // prunes the evicted `.ts` files. This drives the full encoded-packet → live
+    // segment-muxer → rolling-playlist path end to end (the `LivePlaylist` unit
+    // test covers the pure driver; this proves the wiring through the real muxer +
+    // atomic rename).
+    const WINDOW: usize = 4;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src.ts");
+    // 6s @ 30fps, 1s GOP => ~6 keyframes => ~6 GOP-aligned segments, comfortably
+    // more than the window so eviction + pruning are exercised.
+    generate_clip(&src, 6, 30);
+
+    let (packets, params, time_base) = encode_once(&src, 30, 30);
+    let total_segments = keyframe_count(&packets);
+    assert!(
+        total_segments > WINDOW,
+        "test needs more keyframes ({total_segments}) than the window ({WINDOW}) to exercise eviction"
+    );
+
+    let playlist_path = dir.path().join("multiview.m3u8");
+    let sink = PacketMuxSink::segment_live(dir.path(), "seg", &playlist_path, WINDOW);
+    let mut source = VecPackets::new(packets);
+    let outcome = sink
+        .run(&mut source, &params, time_base)
+        .expect("live segment sink run");
+    let result = match outcome {
+        PacketMuxOutcome::Segment(result) => result,
+        PacketMuxOutcome::Single(_) => panic!("segment sink must return a Segment outcome"),
+    };
+
+    // The on-disk playlist exists (written by the rolling driver, not the cli's
+    // finalize-time write), and was published throughout the run.
+    assert!(
+        playlist_path.exists(),
+        "the live `.m3u8` must be written to disk by the rolling driver"
+    );
+    let text = std::fs::read_to_string(&playlist_path).expect("read live playlist");
+
+    // It lists exactly the window of most-recent segments. A segment URI is a
+    // non-empty, non-tag line (every directive starts with `#`).
+    let listed: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    assert_eq!(
+        listed.len(),
+        WINDOW,
+        "the live playlist must list exactly the window size; playlist was:\n{text}"
+    );
+
+    // EXT-X-MEDIA-SEQUENCE advanced as oldest segments were evicted.
+    let expected_msn = total_segments - WINDOW;
+    assert!(
+        text.contains(&format!("#EXT-X-MEDIA-SEQUENCE:{expected_msn}")),
+        "EXT-X-MEDIA-SEQUENCE must advance to N-window = {expected_msn}; playlist was:\n{text}"
+    );
+
+    // The run finished (finite source), so the finalized playlist carries ENDLIST.
+    assert!(
+        text.contains("#EXT-X-ENDLIST"),
+        "a finalized live run must carry #EXT-X-ENDLIST; playlist was:\n{text}"
+    );
+
+    // Disk is bounded: exactly `window` `seg*.ts` files remain (the rest pruned).
+    let on_disk: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().and_then(std::ffi::OsStr::to_str) == Some("ts")
+                && p.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|n| n.starts_with("seg"))
+        })
+        .collect();
+    assert_eq!(
+        on_disk.len(),
+        WINDOW,
+        "disk must be bounded to the window: {} seg*.ts files remain, expected {WINDOW}",
+        on_disk.len()
+    );
+
+    // No leftover `.tmp` files: every segment was renamed into place atomically.
+    let tmp_left = std::fs::read_dir(dir.path())
+        .expect("read dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .any(|p| p.extension().and_then(std::ffi::OsStr::to_str) == Some("tmp"));
+    assert!(
+        !tmp_left,
+        "no `.tmp` segment/playlist file must linger after atomic publish"
+    );
+
+    // The monotonic counter never reused an index: the last listed segment names a
+    // higher index than the window count (eviction did not recycle a name).
+    let last = listed.last().expect("a windowed segment");
+    let last_idx: usize = last
+        .trim_start_matches("seg")
+        .trim_end_matches(".ts")
+        .parse()
+        .expect("segment index parses");
+    assert_eq!(
+        last_idx,
+        total_segments - 1,
+        "the newest segment index must be monotonic (N-1), never recycled from the pruned set"
+    );
+
+    // Every still-listed segment file exists, is non-empty, and decodes.
+    for name in &listed {
+        let seg = dir.path().join(name);
+        assert!(
+            seg.exists() && seg.metadata().expect("stat").len() > 0,
+            "{name} present"
+        );
+    }
+    assert!(
+        decode_frame_count(&dir.path().join(listed[0])) > 0,
+        "a windowed segment must be independently decodable"
+    );
+    // Sanity: the run still reports the full segment set it produced.
+    assert_eq!(
+        result.segments.len(),
+        total_segments,
+        "the run report must record every segment produced, not just the windowed ones"
+    );
+}
+
+#[test]
 fn packet_sink_finalizes_mp4_when_source_errors_mid_stream() {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("src.ts");
