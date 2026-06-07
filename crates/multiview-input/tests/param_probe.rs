@@ -127,8 +127,16 @@ fn h264_changed_sps_profile_idc_is_drift() {
     let sps_v1: &[u8] = &[0x42, 0x00, 0x1F, 0xAB, 0xCD];
     let sps_v2: &[u8] = &[0x64, 0x00, 0x1F, 0xAB, 0xCD];
     let pps_body: &[u8] = &[0xCE, 0x3C, 0x80];
-    let au1 = annexb_au(&[(&[H264_SPS], sps_v1), (&[H264_PPS], pps_body), (&[H264_IDR], &[0xAA])]);
-    let au2 = annexb_au(&[(&[H264_SPS], sps_v2), (&[H264_PPS], pps_body), (&[H264_IDR], &[0xAA])]);
+    let au1 = annexb_au(&[
+        (&[H264_SPS], sps_v1),
+        (&[H264_PPS], pps_body),
+        (&[H264_IDR], &[0xAA]),
+    ]);
+    let au2 = annexb_au(&[
+        (&[H264_SPS], sps_v2),
+        (&[H264_PPS], pps_body),
+        (&[H264_IDR], &[0xAA]),
+    ]);
 
     let snap = StreamParamProbe::snapshot_from_au(&au1, CodecKind::H264, NalFraming::AnnexB)
         .expect("au1 carries an SPS");
@@ -169,7 +177,11 @@ fn h264_changed_pps_only_is_drift_naming_pps() {
 fn h264_au_with_no_parameter_sets_carries_forward_no_drift() {
     let sps_body: &[u8] = &[0x42, 0x00, 0x1F];
     let pps_body: &[u8] = &[0xCE, 0x3C, 0x80];
-    let au_with_ps = annexb_au(&[(&[H264_SPS], sps_body), (&[H264_PPS], pps_body), (&[H264_IDR], &[0x01])]);
+    let au_with_ps = annexb_au(&[
+        (&[H264_SPS], sps_body),
+        (&[H264_PPS], pps_body),
+        (&[H264_IDR], &[0x01]),
+    ]);
     // A plain inter AU: no SPS/PPS, just a non-IDR slice.
     let inter_au = annexb_au(&[(&[H264_NONIDR], &[0xDE, 0xAD, 0xBE, 0xEF])]);
 
@@ -191,8 +203,16 @@ fn h264_multiple_pps_ids_tracked_independently() {
     let pps0_v1: &[u8] = &[0x00, 0x3C, 0x80];
     let pps1_v1: &[u8] = &[0x01, 0x3C, 0x80];
     let pps1_v2: &[u8] = &[0x01, 0x3C, 0x81];
-    let au1 = annexb_au(&[(&[H264_SPS], sps_body), (&[H264_PPS], pps0_v1), (&[H264_PPS], pps1_v1)]);
-    let au2 = annexb_au(&[(&[H264_SPS], sps_body), (&[H264_PPS], pps0_v1), (&[H264_PPS], pps1_v2)]);
+    let au1 = annexb_au(&[
+        (&[H264_SPS], sps_body),
+        (&[H264_PPS], pps0_v1),
+        (&[H264_PPS], pps1_v1),
+    ]);
+    let au2 = annexb_au(&[
+        (&[H264_SPS], sps_body),
+        (&[H264_PPS], pps0_v1),
+        (&[H264_PPS], pps1_v2),
+    ]);
 
     let snap = StreamParamProbe::snapshot_from_au(&au1, CodecKind::H264, NalFraming::AnnexB)
         .expect("au1 carries SPS + 2 PPS");
@@ -209,8 +229,16 @@ fn h264_length_prefixed_framing_probes_the_same() {
     let sps_body: &[u8] = &[0x42, 0x00, 0x1F];
     let pps_body: &[u8] = &[0xCE, 0x3C, 0x80];
     let framing = NalFraming::LengthPrefixed { nal_length_size: 4 };
-    let au1 = length_prefixed_au(&[(&[H264_SPS], sps_body), (&[H264_PPS], pps_body), (&[H264_IDR], &[0x01])]);
-    let au2 = length_prefixed_au(&[(&[H264_SPS], sps_body), (&[H264_PPS], pps_body), (&[H264_IDR], &[0x02])]);
+    let au1 = length_prefixed_au(&[
+        (&[H264_SPS], sps_body),
+        (&[H264_PPS], pps_body),
+        (&[H264_IDR], &[0x01]),
+    ]);
+    let au2 = length_prefixed_au(&[
+        (&[H264_SPS], sps_body),
+        (&[H264_PPS], pps_body),
+        (&[H264_IDR], &[0x02]),
+    ]);
 
     let snap = StreamParamProbe::snapshot_from_au(&au1, CodecKind::H264, framing)
         .expect("avcC-framed au1 carries SPS+PPS");
@@ -340,7 +368,10 @@ fn av1_changed_sequence_header_is_drift() {
     let snap = StreamParamProbe::snapshot_from_au(&au1, CodecKind::Av1, NalFraming::Obu)
         .expect("au1 carries a sequence-header OBU");
     let drift = diff(&snap, &au2, CodecKind::Av1, NalFraming::Obu);
-    assert!(drift.changed, "a changed AV1 sequence header must report drift");
+    assert!(
+        drift.changed,
+        "a changed AV1 sequence header must report drift"
+    );
     assert!(
         drift.which.contains(&ParamSetClass::SequenceHeader),
         "the drift report must name the sequence header"
@@ -367,12 +398,12 @@ fn av1_au_with_no_sequence_header_is_no_drift() {
 /// Build an avcC config record (ISO 14496-15) carrying one SPS and one PPS.
 fn avcc_extradata(sps: &[u8], pps: &[u8]) -> Vec<u8> {
     let mut out = vec![
-        0x01, // configurationVersion
+        0x01,                                // configurationVersion
         sps.get(1).copied().unwrap_or(0x42), // AVCProfileIndication
-        0x00, // profile_compatibility
+        0x00,                                // profile_compatibility
         sps.get(3).copied().unwrap_or(0x1F), // AVCLevelIndication
-        0xFF, // 0b111111 | lengthSizeMinusOne(3) -> 4-byte lengths
-        0xE1, // 0b111 | numOfSequenceParameterSets(1)
+        0xFF,                                // 0b111111 | lengthSizeMinusOne(3) -> 4-byte lengths
+        0xE1,                                // 0b111 | numOfSequenceParameterSets(1)
     ];
     out.extend_from_slice(&u16::try_from(sps.len()).unwrap().to_be_bytes());
     out.extend_from_slice(sps);
@@ -423,8 +454,14 @@ fn extradata_snapshot_reports_present_classes() {
     let extradata = avcc_extradata(sps_nal, pps_nal);
     let snap = StreamParamProbe::from_extradata(CodecKind::H264, &extradata)
         .expect("avcC extradata carries an SPS + PPS");
-    assert!(snap.has(ParamSetClass::Sps), "snapshot must contain the SPS");
-    assert!(snap.has(ParamSetClass::Pps), "snapshot must contain the PPS");
+    assert!(
+        snap.has(ParamSetClass::Sps),
+        "snapshot must contain the SPS"
+    );
+    assert!(
+        snap.has(ParamSetClass::Pps),
+        "snapshot must contain the PPS"
+    );
 }
 
 // ---- robustness ----------------------------------------------------------
@@ -470,7 +507,12 @@ fn other_codec_never_drifts() {
 fn truncated_inputs_never_panic() {
     let snap = ParamSnapshot::empty(CodecKind::H264);
     // Truncated Annex-B (start code, no NAL).
-    let _ = diff(&snap, &[0x00, 0x00, 0x00, 0x01], CodecKind::H264, NalFraming::AnnexB);
+    let _ = diff(
+        &snap,
+        &[0x00, 0x00, 0x00, 0x01],
+        CodecKind::H264,
+        NalFraming::AnnexB,
+    );
     // Truncated length-prefix (claims 4 bytes, has 1).
     let _ = diff(
         &snap,
@@ -481,4 +523,89 @@ fn truncated_inputs_never_panic() {
     // Truncated extradata.
     assert!(StreamParamProbe::from_extradata(CodecKind::H264, &[0x01, 0x42]).is_none());
     assert!(StreamParamProbe::from_extradata(CodecKind::H264, &[]).is_none());
+}
+
+// ---- properties ----------------------------------------------------------
+
+mod properties {
+    use super::{annexb_au, H264_IDR, H264_NONIDR, H264_PPS, H264_SPS};
+    use multiview_ffmpeg::idr::{CodecKind, NalFraming};
+    use multiview_input::param_probe::{diff, ParamSnapshot, StreamParamProbe};
+    use proptest::prelude::*;
+
+    /// Build an H.264 Annex-B AU carrying an SPS + PPS with the given bodies, then
+    /// an IDR slice (so it is always a valid parameter-set-bearing AU).
+    fn h264_ps_au(sps_body: &[u8], pps_body: &[u8]) -> Vec<u8> {
+        annexb_au(&[
+            (&[H264_SPS], sps_body),
+            (&[H264_PPS], pps_body),
+            (&[H264_IDR], &[0x80]),
+        ])
+    }
+
+    proptest! {
+        /// Reflexivity: an AU diffed against the snapshot taken FROM THAT SAME AU
+        /// never drifts (a bit-identical parameter set is never a false positive).
+        /// Bodies end in a non-zero byte so the Annex-B trailing-zero trim that
+        /// strips start-code framing leaves the payload identical on both sides.
+        #[test]
+        fn snapshot_of_au_never_drifts_against_itself(
+            mut sps in proptest::collection::vec(any::<u8>(), 1..16),
+            mut pps in proptest::collection::vec(any::<u8>(), 1..16),
+        ) {
+            *sps.last_mut().unwrap() |= 0x01;
+            *pps.last_mut().unwrap() |= 0x01;
+            let au = h264_ps_au(&sps, &pps);
+            let snap = StreamParamProbe::snapshot_from_au(&au, CodecKind::H264, NalFraming::AnnexB)
+                .expect("the AU carries an SPS + PPS");
+            let drift = diff(&snap, &au, CodecKind::H264, NalFraming::AnnexB);
+            prop_assert!(!drift.changed, "an AU must not drift against its own snapshot");
+        }
+
+        /// Carry-forward: an AU carrying NO in-band parameter set (just an inter
+        /// slice) never reports drift, for ANY snapshot — no false positives.
+        #[test]
+        fn inter_only_au_never_drifts(
+            sps in proptest::collection::vec(any::<u8>(), 1..16),
+            slice in proptest::collection::vec(any::<u8>(), 1..32),
+        ) {
+            let snap_au = h264_ps_au(&sps, &[0x80]);
+            let snap = StreamParamProbe::snapshot_from_au(&snap_au, CodecKind::H264, NalFraming::AnnexB)
+                .expect("the snapshot AU carries parameter sets");
+            let inter = annexb_au(&[(&[H264_NONIDR], &slice)]);
+            let drift = diff(&snap, &inter, CodecKind::H264, NalFraming::AnnexB);
+            prop_assert!(
+                !drift.changed,
+                "an AU with no in-band parameter set must carry the snapshot forward"
+            );
+        }
+
+        /// Robustness: arbitrary bytes, codec, and framing never panic, and the
+        /// snapshot/diff are total. (`diff` against an empty snapshot may report a
+        /// fresh-set appearance — that is fine; we only assert it returns.)
+        #[test]
+        fn arbitrary_bytes_never_panic(
+            bytes in proptest::collection::vec(any::<u8>(), 0..256),
+            codec_sel in 0_u8..4,
+            length_size in 0_u8..6,
+            annexb in any::<bool>(),
+        ) {
+            let codec = match codec_sel {
+                0 => CodecKind::H264,
+                1 => CodecKind::Hevc,
+                2 => CodecKind::Av1,
+                _ => CodecKind::Other,
+            };
+            let framing = if annexb {
+                NalFraming::AnnexB
+            } else {
+                NalFraming::LengthPrefixed { nal_length_size: length_size }
+            };
+            let snap = ParamSnapshot::empty(codec);
+            let _ = StreamParamProbe::snapshot_from_au(&bytes, codec, framing);
+            let _ = StreamParamProbe::from_extradata(codec, &bytes);
+            let _ = diff(&snap, &bytes, codec, framing);
+            prop_assert!(true);
+        }
+    }
 }

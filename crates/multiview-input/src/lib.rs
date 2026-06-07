@@ -21,6 +21,12 @@
 //!   drops late packets, and drops-oldest at capacity (never grows).
 //! * [`pacer`] — the HLS / wall-clock input pacer with an injected clock
 //!   (invariant #4, [ADR-T004]).
+//! * [`param_probe`] — per-AU coded **parameter-set** probe + drift detection
+//!   (GP-2, ADR-0030 §4): snapshot the active SPS/PPS/VPS (H.264/HEVC) or
+//!   `sequence_header` OBU (AV1) from extradata or the first GOP, then report
+//!   when a later access unit's in-band parameter-set bytes change — the signal a
+//!   guarded passthrough uses to invalidate + re-bake its param-matched slate. A
+//!   pure, libav-free byte parser reusing the GP-1 codec/framing types.
 //! * [`reconnect`] — capped exponential backoff with full jitter for supervised
 //!   reconnect, with an injected jitter source.
 //! * [`source`] — the producer-agnostic ingest pipeline: an [`source::IngestPump`]
@@ -88,6 +94,7 @@ pub mod jitter;
 pub mod mpegts;
 pub mod normalize;
 pub mod pacer;
+pub mod param_probe;
 pub mod reconnect;
 pub mod scte;
 pub mod source;
