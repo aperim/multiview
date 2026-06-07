@@ -231,6 +231,7 @@ msgstr ""
 msgid "Add to layout"
 msgstr ""
 
+#: src/auth/LoginPage.tsx:89
 #: src/pages/SettingsPage.tsx:108
 msgid "admin.xxxxxxxx-xxxx-…"
 msgstr ""
@@ -302,6 +303,10 @@ msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:168
 msgid "API access token"
+msgstr ""
+
+#: src/auth/LoginPage.tsx:83
+msgid "API key"
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:102
@@ -443,6 +448,10 @@ msgstr ""
 msgid "Change log, newest first."
 msgstr ""
 
+#: src/auth/LoginPage.tsx:102
+msgid "Checking…"
+msgstr ""
+
 #: src/pages/SettingsPage.tsx:57
 msgid "Choose light, dark, or follow the system."
 msgstr ""
@@ -530,6 +539,10 @@ msgstr ""
 msgid "Connecting"
 msgstr ""
 
+#: src/auth/RequireAuth.tsx:39
+msgid "Connecting…"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:141
 msgid "Could not acknowledge alarm"
 msgstr ""
@@ -592,6 +605,10 @@ msgstr ""
 
 #: src/pages/AuditPage.tsx:96
 msgid "Could not load the audit log:"
+msgstr ""
+
+#: src/auth/LoginPage.tsx:53
+msgid "Could not reach the control plane. Is it running?"
 msgstr ""
 
 #: src/pages/SimplePages.tsx:306
@@ -840,6 +857,10 @@ msgstr ""
 
 #: src/pages/TallyPage.tsx:131
 msgid "Enter a valid target"
+msgstr ""
+
+#: src/auth/LoginPage.tsx:39
+msgid "Enter an API key."
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:86
@@ -1563,6 +1584,11 @@ msgstr ""
 msgid "Show a test notification"
 msgstr ""
 
+#: src/auth/LoginPage.tsx:64
+#: src/auth/LoginPage.tsx:102
+msgid "Sign in"
+msgstr ""
+
 #: src/app/AppLayout.tsx:43
 msgid "Skip to content"
 msgstr ""
@@ -1646,6 +1672,10 @@ msgstr ""
 
 #: src/pages/SettingsPage.tsx:148
 msgid "Test notification"
+msgstr ""
+
+#: src/auth/LoginPage.tsx:50
+msgid "That key was not accepted. Check it and try again."
 msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:92
@@ -1790,6 +1820,10 @@ msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:111
 msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+msgstr ""
+
+#: src/auth/LoginPage.tsx:67
+msgid "This Multiview control plane requires an API key. Paste your admin or operator key to continue."
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:244

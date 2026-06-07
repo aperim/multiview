@@ -231,6 +231,7 @@ msgstr "Add cell"
 msgid "Add to layout"
 msgstr "Add to layout"
 
+#: src/auth/LoginPage.tsx:89
 #: src/pages/SettingsPage.tsx:108
 msgid "admin.xxxxxxxx-xxxx-…"
 msgstr "admin.xxxxxxxx-xxxx-…"
@@ -303,6 +304,10 @@ msgstr "API access"
 #: src/pages/docs/ContainerPage.tsx:168
 msgid "API access token"
 msgstr "API access token"
+
+#: src/auth/LoginPage.tsx:83
+msgid "API key"
+msgstr "API key"
 
 #: src/pages/SettingsPage.tsx:102
 msgid "API token"
@@ -443,6 +448,10 @@ msgstr "Cells (accessible)"
 msgid "Change log, newest first."
 msgstr "Change log, newest first."
 
+#: src/auth/LoginPage.tsx:102
+msgid "Checking…"
+msgstr "Checking…"
+
 #: src/pages/SettingsPage.tsx:57
 msgid "Choose light, dark, or follow the system."
 msgstr "Choose light, dark, or follow the system."
@@ -530,6 +539,10 @@ msgstr "Connected"
 msgid "Connecting"
 msgstr "Connecting"
 
+#: src/auth/RequireAuth.tsx:39
+msgid "Connecting…"
+msgstr "Connecting…"
+
 #: src/pages/AlarmsPage.tsx:141
 msgid "Could not acknowledge alarm"
 msgstr "Could not acknowledge alarm"
@@ -593,6 +606,10 @@ msgstr "Could not load tally state:"
 #: src/pages/AuditPage.tsx:96
 msgid "Could not load the audit log:"
 msgstr "Could not load the audit log:"
+
+#: src/auth/LoginPage.tsx:53
+msgid "Could not reach the control plane. Is it running?"
+msgstr "Could not reach the control plane. Is it running?"
 
 #: src/pages/SimplePages.tsx:306
 msgid "Could not save"
@@ -841,6 +858,10 @@ msgstr "Element name"
 #: src/pages/TallyPage.tsx:131
 msgid "Enter a valid target"
 msgstr "Enter a valid target"
+
+#: src/auth/LoginPage.tsx:39
+msgid "Enter an API key."
+msgstr "Enter an API key."
 
 #: src/pages/docs/ApiPage.tsx:86
 msgid "Errors"
@@ -1563,6 +1584,11 @@ msgstr "Severity"
 msgid "Show a test notification"
 msgstr "Show a test notification"
 
+#: src/auth/LoginPage.tsx:64
+#: src/auth/LoginPage.tsx:102
+msgid "Sign in"
+msgstr "Sign in"
+
 #: src/app/AppLayout.tsx:43
 msgid "Skip to content"
 msgstr "Skip to content"
@@ -1647,6 +1673,10 @@ msgstr "Target"
 #: src/pages/SettingsPage.tsx:148
 msgid "Test notification"
 msgstr "Test notification"
+
+#: src/auth/LoginPage.tsx:50
+msgid "That key was not accepted. Check it and try again."
+msgstr "That key was not accepted. Check it and try again."
 
 #: src/pages/LayoutEditorPage.tsx:92
 msgid "That layout no longer exists."
@@ -1791,6 +1821,10 @@ msgstr "Theme: system. Switch to light."
 #: src/pages/LayoutEditorPage.tsx:111
 msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 msgstr "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+
+#: src/auth/LoginPage.tsx:67
+msgid "This Multiview control plane requires an API key. Paste your admin or operator key to continue."
+msgstr "This Multiview control plane requires an API key. Paste your admin or operator key to continue."
 
 #: src/pages/LayoutsPage.tsx:244
 msgid "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
