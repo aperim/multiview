@@ -100,6 +100,20 @@ pub enum FfmpegError {
     #[error("muxing operation failed: {0}")]
     Mux(#[source] ffmpeg_next::Error),
 
+    /// A bitstream-filter operation failed (GP-3, ADR-0030 §4 framing
+    /// prerequisite): allocating / configuring / initialising an `AVBSFContext`,
+    /// or sending/receiving a packet through it. `op` names the libav call that
+    /// failed and `code` is its return code (`0` for a non-libav setup failure
+    /// such as an interior NUL or a missing `priv_data`).
+    #[cfg(feature = "ffmpeg")]
+    #[error("bitstream-filter operation {op} failed (code {code})")]
+    Bsf {
+        /// The libav `av_bsf_*` / setup call that failed.
+        op: &'static str,
+        /// The libav return code, or `0` for a setup-side failure.
+        code: i64,
+    },
+
     /// Building a libswscale or libswresample conversion context failed, or a
     /// conversion call returned an error.
     #[cfg(feature = "ffmpeg")]

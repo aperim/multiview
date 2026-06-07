@@ -67,6 +67,13 @@ pub mod caption;
 /// lives behind the `ffmpeg` feature.
 pub mod codec;
 
+/// In-band parameter-set / Annex-B framing **filter selection** (GP-3,
+/// ADR-0030 §4 "Framing prerequisite"). Pure decision logic — the
+/// codec→filter-name selection and chain composition are always compiled and
+/// unit-tested (libav-free); the feature-gated [`bsf`](crate) module instantiates
+/// the chosen filters over the raw `av_bsf_*` FFI.
+pub mod bsf_select;
+
 pub mod error;
 
 /// Strict-IDR classifier (GP-1, ADR-0030). A cheap header inspection over a
@@ -106,6 +113,12 @@ pub use codec::{select_audio_encoder, select_encoder};
 #[cfg(feature = "ffmpeg")]
 pub use avio_fetch::fetch_url_text;
 
+pub use bsf_select::{
+    needs_keyframe_freq_option, plan_bsf_chain, BsfFraming, BsfPlan, InputFraming,
+    DUMP_EXTRA_FREQ_KEYFRAMES, FILTER_DUMP_EXTRA, FILTER_EXTRACT_EXTRADATA,
+    FILTER_H264_MP4TOANNEXB, FILTER_HEVC_MP4TOANNEXB, MAX_BSF_CHAIN,
+};
+
 pub use error::{FfmpegError, Result};
 
 pub use idr::{is_idr, CodecKind, NalFraming};
@@ -125,6 +138,15 @@ pub use jpegxs::{
 
 #[cfg(feature = "ffmpeg")]
 pub use jpegxs::{is_available as jpegxs_is_available, probe as jpegxs_probe};
+
+/// In-band parameter-set / Annex-B framing **bitstream-filter stage** (GP-3,
+/// ADR-0030 §4 "Framing prerequisite"). Safe RAII wrappers
+/// ([`bsf::BitstreamFilter`] / [`bsf::BsfChain`]) over the libav `av_bsf_*` FFI
+/// that repeat the active SPS/PPS(/VPS) in-band before every keyframe and
+/// normalise framing, so the copied-input side and the slate side reach the
+/// muxer identically. Behind the `ffmpeg` feature.
+#[cfg(feature = "ffmpeg")]
+pub mod bsf;
 
 #[cfg(feature = "ffmpeg")]
 pub mod audio_file;
@@ -183,6 +205,9 @@ pub mod test_fixtures;
 
 #[cfg(feature = "ffmpeg")]
 pub use audio_file::{AudioFileDecoder, AudioSamplesF32};
+
+#[cfg(feature = "ffmpeg")]
+pub use bsf::{BitstreamFilter, BsfChain, FilteredPacket};
 
 #[cfg(feature = "ffmpeg")]
 pub use caption_decode::{extract_a53_cc, CaptionDecoder, CaptionSource, CcChannel};
