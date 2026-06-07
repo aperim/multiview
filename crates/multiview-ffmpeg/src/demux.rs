@@ -12,14 +12,19 @@
 //! everything (invariants #1/#3). Nothing read here is forwarded to a muxer
 //! untouched.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use ffmpeg::codec::Parameters;
+use ffmpeg::format::stream::Disposition;
 use ffmpeg::media::Type;
 use ffmpeg_next as ffmpeg;
 
+use multiview_core::stream::{
+    Bcp47, StableStreamId, StreamDescriptor, StreamDetail, StreamInventory, StreamKind,
+};
 use multiview_core::time::Rational;
 
 use crate::convert::{from_ff_rational, MediaKind};
@@ -345,6 +350,80 @@ impl Demuxer {
             .collect()
     }
 
+    /// Build the **full typed [`StreamInventory`]** of every elementary stream
+    /// this container offers (RT-1, ADR-0034 §3).
+    ///
+    /// Unlike [`Demuxer::best_stream`] — which keeps only the single best stream
+    /// of one kind and discards the rest — this surfaces **every** row: each
+    /// audio track (with its BCP-47 language + channel layout), each subtitle
+    /// track, and each non-AV data stream. The coarse libav [`MediaKind`] is
+    /// lifted to the canonical [`StreamKind`]; a `kind = Other` row is refined by
+    /// codec name into [`StreamKind::Data`] (SCTE-35 / KLV) or
+    /// [`StreamKind::Timecode`] via `from_media_and_codec`, so a data essence is
+    /// classified rather than dropped.
+    ///
+    /// The container `language` tag is parsed leniently onto a [`Bcp47`]:
+    /// unparseable or `und` tags become `None` rather than failing the probe.
+    /// Each stream gets a soft-tier [`StableStreamId`] from its
+    /// `(kind, ordinal-within-kind, codec, language, title)` (the general/libav
+    /// key path); TS/HLS hard keys are folded in by later RT slices.
+    ///
+    /// This is the **discovery half** of RT-1; it does not route anything. The
+    /// owning input id is left `None` (the ingest layer that binds a configured
+    /// input fills it in).
+    #[must_use]
+    pub fn inventory(&self) -> StreamInventory {
+        // Geometry/audio params are resolved by `streams()` (it builds the
+        // throwaway codec context); zip that with a parallel pass over the libav
+        // streams for disposition + title, which `StreamParams` does not carry.
+        // Both iterate `self.input.streams()` in container order, so they align.
+        let params = self.streams();
+        // Per-kind ordinal counter (ordinal-within-kind for the soft id key).
+        let mut ordinals: HashMap<char, u32> = HashMap::new();
+
+        let streams = self
+            .input
+            .streams()
+            .zip(params)
+            .map(|(stream, p)| {
+                let kind = StreamKind::from_coarse_and_codec(p.kind.into(), &p.codec_name);
+                let disposition = stream.disposition();
+                let language = p.language.as_deref().and_then(parse_language);
+                // Bind the metadata ref once: `get` borrows it, so reading two
+                // keys off a temporary `DictionaryRef` would dangle.
+                let metadata = stream.metadata();
+                let title = metadata
+                    .get("title")
+                    .or_else(|| metadata.get("handler_name"))
+                    .map(str::to_owned);
+
+                // Ordinal within this kind's routing family (scope char), so two
+                // same-codec/same-language tracks get distinct soft ids.
+                let scope = kind_scope_char(kind);
+                let ordinal = ordinals.entry(scope).or_insert(0);
+                let this_ordinal = *ordinal;
+                *ordinal = ordinal.saturating_add(1);
+
+                let id = StableStreamId::from_general(
+                    kind,
+                    this_ordinal,
+                    &p.codec_name,
+                    language.as_ref(),
+                    title.as_deref(),
+                );
+
+                let detail = stream_detail(kind, &p, disposition);
+
+                StreamDescriptor::new(id, kind, p.codec_name.clone(), detail)
+                    .with_language(language)
+                    .with_title(title)
+                    .with_default(disposition.contains(Disposition::DEFAULT))
+            })
+            .collect();
+
+        StreamInventory::from_streams(streams)
+    }
+
     /// Index of the "best" stream of `kind`, per libav's heuristic.
     #[must_use]
     pub fn best_stream(&self, kind: MediaKind) -> Option<usize> {
@@ -490,6 +569,56 @@ fn rate_opt(rate: ffmpeg::Rational) -> Option<Rational> {
         None
     } else {
         Some(from_ff_rational(rate))
+    }
+}
+
+/// Parse a raw container `language` tag onto a [`Bcp47`], **leniently**: an
+/// unparseable or `und` (undetermined) tag becomes [`None`] rather than failing
+/// the probe (RT-1: discovery must never reject a stream over a bad language
+/// metadata value).
+fn parse_language(raw: &str) -> Option<Bcp47> {
+    Bcp47::parse(raw).ok()
+}
+
+/// The routing-family scope character a [`StreamKind`] belongs to, used only to
+/// key the per-kind ordinal counter for the soft [`StableStreamId`].
+///
+/// Mirrors `multiview-core`'s kind scoping (video `v` / audio `a` / subtitle `s`
+/// / data `d` / timecode `t`): two same-codec/same-language tracks of one family
+/// must get distinct ordinals so their soft ids do not collide.
+const fn kind_scope_char(kind: StreamKind) -> char {
+    match kind {
+        StreamKind::Video => 'v',
+        StreamKind::Audio => 'a',
+        StreamKind::Subtitle => 's',
+        StreamKind::Timecode(_) => 't',
+        // `StreamKind::Data(_)` plus the `#[non_exhaustive]` fallthrough: a data
+        // stream — and any future kind — defaults to the generic data scope so it
+        // still gets a stable per-family ordinal.
+        StreamKind::Data(_) | _ => 'd',
+    }
+}
+
+/// Build the kind-specific [`StreamDetail`] for one elementary stream from its
+/// probed [`StreamParams`] + libav disposition.
+fn stream_detail(kind: StreamKind, p: &StreamParams, disposition: Disposition) -> StreamDetail {
+    match kind {
+        StreamKind::Video => StreamDetail::Video {
+            width: p.width,
+            height: p.height,
+            frame_rate: p.avg_frame_rate,
+        },
+        StreamKind::Audio => StreamDetail::Audio {
+            channels: p.channels,
+            sample_rate: p.sample_rate,
+        },
+        StreamKind::Subtitle => StreamDetail::Subtitle {
+            forced: disposition.contains(Disposition::FORCED),
+        },
+        // Data (SCTE-35 / KLV) and timecode are passthrough: no AV detail to
+        // probe. `StreamKind` is `#[non_exhaustive]`; an unmodelled future kind
+        // is likewise carried as a passthrough rather than dropped.
+        StreamKind::Data(_) | StreamKind::Timecode(_) | _ => StreamDetail::Passthrough,
     }
 }
 
