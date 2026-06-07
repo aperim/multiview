@@ -94,6 +94,19 @@ pub mod send;
 #[cfg(feature = "bindings")]
 pub use send::{NdiSender, NdiVideoFourCc};
 
+/// The safe NDI **receiver** handle (ADR-0028 §2/§3): non-blocking video sampling
+/// with free-exactly-once RAII; the only way the workspace receives NDI.
+#[cfg(feature = "bindings")]
+pub mod recv;
+#[cfg(feature = "bindings")]
+pub use recv::{NdiReceiver, RecvFourCc, RecvVideoFrame};
+
+/// The safe NDI **finder** handle (ADR-0028 §3): discover NDI sources by name.
+#[cfg(feature = "bindings")]
+pub mod find;
+#[cfg(feature = "bindings")]
+pub use find::{NdiFinder, NdiSourceName};
+
 /// The NDI 6 dynamic-load entry-point symbol, NUL-terminated for `dlsym`. NDI 6
 /// uses **`NDIlib_v6_load`** (not the v5 symbol); it returns a pointer to the SDK
 /// function table.

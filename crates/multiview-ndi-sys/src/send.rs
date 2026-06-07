@@ -120,6 +120,8 @@ impl NdiSender {
         clock_audio: bool,
     ) -> Result<Self, NdiError> {
         let v6 = NdiV6::resolve(table)?;
+        // Initialise the runtime so the sender is advertised for discovery (mDNS).
+        let _ = v6.ensure_initialized();
         let c_name = CString::new(name).map_err(|_| NdiError::InvalidCString {
             field: "sender name",
         })?;

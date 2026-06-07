@@ -11,9 +11,10 @@
 //! changes (the single source of the anon-union index knowledge).
 
 // The whole resolved table is built up-front (ADR-0028 §1: read the anon-union
-// slots ONCE). The `NdiSender`/`NdiReceiver`/`NdiFinder` handles that consume
-// these fields land in the next NDI-L1 slice; until then the resolver + its
-// fields are intentionally unused, so dead-code is allowed for this module only.
+// slots ONCE). The send/recv/find handles consume most fields; `version` is read
+// only by the in-crate live test (so it is unused in a non-test build). Allowing
+// dead-code for this one module keeps the full resolved table intact without a
+// per-field attribute.
 #![allow(dead_code)]
 
 use crate::ffi;
@@ -70,6 +71,20 @@ pub(crate) struct NdiV6 {
 }
 
 impl NdiV6 {
+    /// Ensure the NDI runtime is initialised (idempotent; the SDK ref-counts
+    /// `initialize`/`destroy`). Returns whether this CPU is supported. Sending
+    /// works without it, but **discovery** (mDNS advertise/browse for sources)
+    /// requires it, so every safe handle calls it on construction.
+    // reason: one FFI call into the resolved `initialize` fn pointer (// SAFETY).
+    #[allow(unsafe_code)]
+    pub(crate) fn ensure_initialized(&self) -> bool {
+        // SAFETY: `self.initialize` is the resolved `NDIlib_initialize` fn pointer
+        // (process-lifetime). It takes no arguments, has no preconditions, and is
+        // safe to call repeatedly — the SDK ref-counts init/destroy. We leave it
+        // initialised for the process lifetime (the owning runtime lives that long).
+        unsafe { (self.initialize)() }
+    }
+
     /// Resolve the function table from the loaded [`NdiApiTable`].
     ///
     /// Reads each required `__bindgen_anon_N` slot exactly once and unwraps its
