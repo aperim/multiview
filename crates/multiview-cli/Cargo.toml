@@ -125,6 +125,13 @@ default = ["software"]
 # Software-only reference path (always available).
 software = []
 
+# NVIDIA live-load telemetry (NVML): select the real `NvmlLoadPoller`
+# (multiview-hal's `cuda` feature) as the per-GPU source the system-metrics task
+# polls, instead of the always-compiled `NullLoadPoller`. Runtime-loaded
+# (libnvidia-ml) so the build is GPU-free; OFF by default and implied by the
+# `nvidia` preset. Pure telemetry — pulls no codec/compositor backend on its own.
+cuda = ["multiview-hal/cuda"]
+
 # Embed + serve the built web UI from `multiview run` (same-origin with the API).
 # Pure Rust (rust-embed); requires the web build (`npm --prefix web run build`)
 # to have produced `web/dist` first. GPU-free and LGPL-clean, so a software
@@ -224,6 +231,8 @@ nvidia = [
     # forwarded the dependency crates' ffmpeg but not the cli's, so a `--features
     # nvidia` binary could not run a pipeline — surfaced by the on-hardware run).
     "ffmpeg",
+    # The cli's own `cuda` feature selects the NVML system-metrics poller.
+    "cuda",
     "multiview-hal/cuda",
     "multiview-compositor/cuda",
     "multiview-compositor/wgpu",

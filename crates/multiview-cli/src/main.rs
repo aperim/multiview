@@ -341,12 +341,29 @@ async fn run_software_until_ctrl_c(
         }
     });
 
+    // The off-hot-path system-metrics poller: samples whole-system CPU + host
+    // memory + per-GPU load at ~1.3 Hz and PUSHES `Event::SystemMetrics` onto the
+    // engine's outbound event stream (the same drop-oldest broadcast the control
+    // plane forwards to the WebUI footer). The publish never awaits/blocks a slow
+    // subscriber (invariant #10), and the task self-stops on the run's StopSignal.
+    // `program_fps` is left `None`: the software run exposes no live measured-fps
+    // counter to this task, and the configured cadence is a target — not a
+    // measured rate — so we do not fabricate one.
+    let metrics_task = multiview_cli::system_metrics::spawn(
+        Arc::clone(&publisher),
+        multiview_cli::system_metrics::default_load_source(),
+        stop.clone(),
+        None,
+    );
+
     let report = engine
         .run_until_stopped_with_control(&stop, publisher.as_ref(), drain)
         .await
         .context("headless run until Ctrl-C")?;
 
-    // The engine loop returned; bring the control server down gracefully.
+    // The engine loop returned; stop the metrics poller (it also self-stops on the
+    // StopSignal within one sample period) and bring the control server down.
+    metrics_task.abort();
     let _ = shutdown_tx.send(());
     if let Some(handle) = server {
         match handle.await {

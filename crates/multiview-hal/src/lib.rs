@@ -64,7 +64,12 @@ pub use degradation::{
     actions_at_level, DegradationAction, Hysteresis, HysteresisConfig, LadderMove, MAX_LEVEL,
 };
 pub use error::{Error, Result};
-pub use load::{DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, PollInterval, Vendor};
+#[cfg(feature = "cuda")]
+pub use load::NvmlLoadPoller;
+pub use load::{
+    DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, NullLoadPoller,
+    PollInterval, Vendor,
+};
 pub use planner::{Admission, Plan, Planner, StageUsage};
 pub use probe::{
     detect, software_capability, DeviceCaps, DeviceProbe, EnvProbe, HardwareKind, ProbeOutcome,

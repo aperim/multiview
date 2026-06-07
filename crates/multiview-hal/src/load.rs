@@ -464,6 +464,56 @@ impl<P: LoadProbe> LoadPoller<P> {
     }
 }
 
+/// An object-safe "where the live load comes from" seam.
+///
+/// [`LoadPoller`] is generic over its [`LoadProbe`], which is convenient at the
+/// engine seam but cannot be stored behind a `dyn` pointer. A consumer that
+/// merely needs *a* source of [`DeviceLoad`] snapshots at runtime — the
+/// `multiview-cli` system-metrics task, which selects an NVML-backed poller when
+/// the `cuda` feature is on and the always-compiled [`NullLoadPoller`] otherwise
+/// — injects a `Box<dyn LoadSource>` and calls [`LoadSource::poll`] once per
+/// metrics tick. The same off-hot-path / non-blocking contract as
+/// [`LoadPoller::poll`] applies: a `poll` does a bounded vendor query and never
+/// blocks the engine (it runs on the metrics task, not the output clock).
+pub trait LoadSource {
+    /// Take one snapshot pass over every visible device.
+    ///
+    /// Returns an empty vector cleanly when no accelerator is visible (the
+    /// no-GPU host) — never a panic, never a fabricated device.
+    fn poll(&self) -> Vec<DeviceLoad>;
+}
+
+impl<P: LoadProbe> LoadSource for LoadPoller<P> {
+    fn poll(&self) -> Vec<DeviceLoad> {
+        LoadPoller::poll(self)
+    }
+}
+
+/// The always-compiled no-GPU load source: every [`NullLoadPoller::poll`] yields
+/// zero devices.
+///
+/// This is the honest default a host with no accelerator (or a pure-Rust build
+/// with every vendor feature off) uses, so the `multiview-cli` system-metrics
+/// task always has a working [`LoadSource`] to inject — it simply publishes a
+/// `SystemMetrics` with an empty `gpus` list, never a fabricated GPU. It does no
+/// I/O, holds no state, and cannot fail.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NullLoadPoller;
+
+impl NullLoadPoller {
+    /// Construct the no-GPU load source.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl LoadSource for NullLoadPoller {
+    fn poll(&self) -> Vec<DeviceLoad> {
+        Vec::new()
+    }
+}
+
 /// A bounded poll cadence, in hertz, clamped to the ADR-0017 ~1-4 Hz envelope.
 ///
 /// A newtype so the cadence cannot be set to an unbounded value that would turn
@@ -518,11 +568,13 @@ impl Default for PollInterval {
 // ----------------------------------------------------------------------------
 
 #[cfg(feature = "cuda")]
-pub use self::nvml::NvmlLoadProbe;
+pub use self::nvml::{NvmlLoadPoller, NvmlLoadProbe};
 
 #[cfg(feature = "cuda")]
 mod nvml {
-    use super::{DeviceId, DeviceLoad, LoadProbe, LoadSample, Vendor};
+    use super::{
+        DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, PollInterval, Vendor,
+    };
 
     /// NVIDIA live-load probe via NVML (`nvml-wrapper`, runtime-loaded through
     /// `libloading`).
@@ -619,6 +671,44 @@ mod nvml {
         let clamped = percent.min(100);
         let hundredths = u16::try_from(clamped).map_or(100.0_f32, f32::from);
         hundredths / 100.0_f32
+    }
+
+    /// The concrete NVIDIA live-load poller: an [`NvmlLoadProbe`] wrapped in the
+    /// bounded off-hot-path [`LoadPoller`] envelope, exposed as the object-safe
+    /// [`LoadSource`] the `multiview-cli` system-metrics task injects.
+    ///
+    /// Construction is fallible-but-graceful ([`NvmlLoadPoller::try_init`]): it
+    /// returns `None` when NVML is unavailable (no driver, no device, library not
+    /// loadable), so the caller cleanly falls back to the always-compiled
+    /// [`super::NullLoadPoller`]. Once initialised, [`LoadSource::poll`] performs
+    /// one bounded NVML pass per metrics tick; every per-device query the hardware
+    /// cannot answer maps to an unknown field (`None`), never a fabricated zero
+    /// and never a panic.
+    #[derive(Debug)]
+    pub struct NvmlLoadPoller {
+        inner: LoadPoller<NvmlLoadProbe>,
+    }
+
+    impl NvmlLoadPoller {
+        /// Try to initialise NVML and wrap it in a poller at `interval`, returning
+        /// `None` when NVML is unavailable on this host (no driver/device).
+        ///
+        /// The interval is clamped into the ADR-0017 ~1-4 Hz envelope by
+        /// [`PollInterval`]; the system-metrics task drives `poll` at its own
+        /// (slower) cadence, so this only bounds the per-pass cost.
+        #[must_use]
+        pub fn try_init(interval: PollInterval) -> Option<Self> {
+            let probe = NvmlLoadProbe::try_init()?;
+            Some(Self {
+                inner: LoadPoller::new(probe, interval),
+            })
+        }
+    }
+
+    impl LoadSource for NvmlLoadPoller {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            self.inner.poll()
+        }
     }
 }
 
@@ -1480,6 +1570,47 @@ mod tests {
 
     fn nv(id: &str, index: u32) -> DeviceId {
         DeviceId::new(Vendor::Nvidia, id, index)
+    }
+
+    #[test]
+    fn null_poller_is_a_load_source_with_no_devices() {
+        // The always-compiled no-GPU poller: a working `LoadSource` that yields
+        // zero devices on every poll (the honest "no accelerator visible" state),
+        // so the pure-Rust default build has a real poller to inject.
+        let poller = NullLoadPoller::new();
+        let loads: Vec<DeviceLoad> = poller.poll();
+        assert!(
+            loads.is_empty(),
+            "the null poller must report no devices, got {}",
+            loads.len()
+        );
+        // Usable behind the object-safe `LoadSource` seam the CLI injects.
+        let dynamic: &dyn LoadSource = &poller;
+        assert!(dynamic.poll().is_empty());
+    }
+
+    #[test]
+    fn load_poller_is_a_load_source_over_its_probe() {
+        // A `LoadPoller<P>` (the existing probe-wrapping poller) is itself a
+        // `LoadSource`, so the same injection seam carries a real vendor probe.
+        // We drive it with a deterministic in-memory probe (no GPU): the
+        // `LoadSource::poll` must return exactly what the probe sees.
+        struct OneDeviceProbe(DeviceLoad);
+        impl LoadProbe for OneDeviceProbe {
+            fn devices(&self) -> Vec<DeviceId> {
+                vec![self.0.device_id.clone()]
+            }
+            fn sample(&self, _device: &DeviceId) -> LoadSample {
+                LoadSample::Ready(self.0.clone())
+            }
+        }
+        let mut load = DeviceLoad::unknown(nv("GPU-poll", 0));
+        load.gpu_busy_frac = Some(0.5);
+        let poller = LoadPoller::new(OneDeviceProbe(load.clone()), PollInterval::default());
+        let via_source: &dyn LoadSource = &poller;
+        let loads = via_source.poll();
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads.first().map(|l| l.gpu_busy_frac), Some(Some(0.5)));
     }
 
     #[test]
