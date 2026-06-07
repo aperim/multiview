@@ -20,6 +20,7 @@ use multiview_core::color::{
     ColorInfo, ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristic,
 };
 use multiview_core::pixel::PixelFormat;
+use multiview_core::stream::{CoarseMediaKind, StreamKind};
 use multiview_core::time::Rational;
 
 use crate::error::FfmpegError;
@@ -49,6 +50,54 @@ impl From<media::Type> for MediaKind {
             _ => Self::Other,
         }
     }
+}
+
+/// Bridge the libav [`MediaKind`] to the core-level [`CoarseMediaKind`] so the
+/// canonical [`StreamKind`] classification (which lives in `multiview-core`,
+/// dependency-free) can be reused without core depending on this crate.
+impl From<MediaKind> for CoarseMediaKind {
+    fn from(value: MediaKind) -> Self {
+        // `MediaKind` is `#[non_exhaustive]` but defined in this crate, so this
+        // match is exhaustive here; adding a future variant deliberately breaks
+        // compilation so a new libav media kind is classified, never silently
+        // dropped into `Other`.
+        match value {
+            MediaKind::Video => Self::Video,
+            MediaKind::Audio => Self::Audio,
+            MediaKind::Subtitle => Self::Subtitle,
+            MediaKind::Other => Self::Other,
+        }
+    }
+}
+
+/// Lift a libav [`MediaKind`] to the canonical [`StreamKind`], **without** a
+/// codec name.
+///
+/// `Video`/`Audio`/`Subtitle` lift 1:1; an `Other` stream becomes a generic
+/// [`StreamKind::Data`] passthrough (so it stays addressable rather than being
+/// dropped the way `best_stream` drops `Other`). Callers that have the codec
+/// name should prefer [`stream_kind_from_media_and_codec`] to refine `Other`
+/// into the SCTE-35 / KLV / timecode routing kinds.
+impl From<MediaKind> for StreamKind {
+    fn from(value: MediaKind) -> Self {
+        Self::from(CoarseMediaKind::from(value))
+    }
+}
+
+/// Classify an elementary stream into the canonical [`StreamKind`] from its
+/// already-available libav [`MediaKind`] **and** codec name — pure metadata
+/// classification, **no decode**.
+///
+/// This is the `from_media_and_codec` lift named in ADR-0034 §1. The codec name
+/// is the libav descriptor name (e.g. from `demux::codec_id_name`); it refines a
+/// `kind = Other` stream into [`StreamKind::Data`] (`scte_35` → `Scte35`,
+/// `klv`/`smpte_klv` → `Klv`) or [`StreamKind::Timecode`] (`timed_id3` /
+/// `timecode`). The actual mapping table lives in
+/// [`StreamKind::from_coarse_and_codec`] (`multiview-core`) so it is testable
+/// without the native layer; this function only bridges the libav kind.
+#[must_use]
+pub fn stream_kind_from_media_and_codec(kind: MediaKind, codec_name: &str) -> StreamKind {
+    StreamKind::from_coarse_and_codec(CoarseMediaKind::from(kind), codec_name)
 }
 
 /// Convert a libav [`Rational`](FfRational) (an `i32/i32` timebase or rate) into

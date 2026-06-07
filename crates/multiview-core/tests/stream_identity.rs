@@ -44,21 +44,33 @@ fn stream_kind_predicates_are_mutually_exclusive_and_match_variant() {
 }
 
 #[test]
-fn stream_kind_serialises_internally_tagged_never_untagged() {
-    // Internally tagged on `kind`, snake_case (ADR-0010: never untagged).
+fn stream_kind_serialises_adjacently_tagged_never_untagged() {
+    // Adjacently tagged on `kind` (+ `payload`), snake_case (ADR-0010: never
+    // untagged). A unit variant is just its tag.
     let v = serde_json::to_value(StreamKind::Video).unwrap();
     assert_eq!(v, serde_json::json!({ "kind": "video" }));
 
-    // Data carries its DataKind payload, also tagged.
+    // Data carries its DataKind payload unambiguously under `payload` — NOT
+    // flattened into a bare `{"kind":"scte35"}` (which would alias a hypothetical
+    // `scte35` stream kind).
     let scte = serde_json::to_value(StreamKind::Data(DataKind::Scte35)).unwrap();
     assert_eq!(
         scte,
-        serde_json::json!({ "kind": "data", "0": { "kind": "scte35" } })
+        serde_json::json!({ "kind": "data", "payload": "scte35" })
     );
 
-    // Round-trips.
+    // Timecode likewise carries its source family under `payload`.
+    let tc = serde_json::to_value(StreamKind::Timecode(TcSourceKind::Ltc)).unwrap();
+    assert_eq!(
+        tc,
+        serde_json::json!({ "kind": "timecode", "payload": "ltc" })
+    );
+
+    // Round-trips (the real guard: the wire form is unambiguous).
     let round: StreamKind = serde_json::from_value(scte).unwrap();
     assert_eq!(round, StreamKind::Data(DataKind::Scte35));
+    let round_tc: StreamKind = serde_json::from_value(tc).unwrap();
+    assert_eq!(round_tc, StreamKind::Timecode(TcSourceKind::Ltc));
 }
 
 #[test]
