@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use multiview_compositor::backend::{RunBackend, RunBackendKind};
+use multiview_compositor::backend::{GpuTarget, RunBackend, RunBackendKind};
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
 use multiview_core::color::ColorInfo;
@@ -109,7 +109,7 @@ fn gpu_preferred_backend_still_composes_a_valid_frame() {
     // On this GPU-free devcontainer, preferring the GPU must fall back to CPU
     // (RunBackend::select) and STILL produce one valid frame on time — a missing
     // GPU can never stall or crash the run (invariant #1).
-    let drive = make_drive(640, 480).with_backend(RunBackend::select(true));
+    let drive = make_drive(640, 480).with_backend(RunBackend::select(Some(GpuTarget::none())));
     let frame = drive.compose(tick_at(0)).unwrap();
     assert_eq!(frame.canvas.width(), 640);
     assert_eq!(frame.canvas.height(), 480);

@@ -102,14 +102,20 @@ impl GpuCompositor {
     /// Build a GPU compositor, acquiring a headless device and compiling both
     /// pipelines.
     ///
+    /// `target` is the load-aware admission decision (ADR-0035 Tier-1): `Some(t)`
+    /// pins the compositor to the specific adapter the placement engine chose;
+    /// `None` keeps the legacy `HighPerformance` adapter pick. See
+    /// [`GpuContext::new`].
+    ///
     /// # Errors
     ///
     /// - [`Error::NoAdapter`] / [`Error::DeviceRequest`] when no GPU is
-    ///   available (the graceful-degradation path — callers fall back / skip).
+    ///   available (the graceful-degradation path — callers fall back / skip), or
+    ///   when `target` names a device no enumerated adapter matches.
     /// - [`Error::ShaderParse`] / [`Error::ShaderValidation`] if a shader is
     ///   malformed (caught by the GPU-free validator too).
-    pub fn new() -> Result<Self> {
-        let ctx = GpuContext::new()?;
+    pub fn new(target: Option<&crate::backend::GpuTarget>) -> Result<Self> {
+        let ctx = GpuContext::new(target)?;
         Self::with_context(ctx)
     }
 

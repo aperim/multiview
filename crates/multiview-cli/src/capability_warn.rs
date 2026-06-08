@@ -79,7 +79,11 @@ pub fn read_compositor_adapter() -> Option<multiview_hal::AdapterReport> {
 
     // Acquiring the context fails (typed Err, never a panic) when there is no
     // usable adapter — exactly the silent-fallback trigger; map that to `None`.
-    let ctx = multiview_compositor::GpuContext::new().ok()?;
+    // The capability probe wants the DEFAULT (`HighPerformance`) adapter — it is
+    // asking "what would the compositor resolve to on this host?", not pinning a
+    // chosen device — so it passes `None` (the load-aware pick is a separate seam
+    // at pipeline build).
+    let ctx = multiview_compositor::GpuContext::new(None).ok()?;
     let info = ctx.adapter().get_info();
     let device_type = match info.device_type {
         wgpu::DeviceType::DiscreteGpu => AdapterDeviceType::DiscreteGpu,

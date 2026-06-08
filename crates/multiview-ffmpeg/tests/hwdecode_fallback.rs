@@ -100,9 +100,11 @@ fn prefers_hw_but_gracefully_falls_back_to_software_on_a_gpu_free_box() {
     // Ask for hardware decode. On this GPU-free runner the cuvid open (cuda
     // build) or the absent name (non-cuda build) means the hardware path is NOT
     // taken — but the call must STILL succeed with a working software decoder.
-    let (mut decoder, used_hw) =
-        StreamVideoDecoder::new_preferring_hw(params, time_base, /* want_hw */ true)
-            .expect("constructing a decoder must never fail when software is available");
+    // `cuda_device = None` is the no-admission-pick / default-device path.
+    let (mut decoder, used_hw) = StreamVideoDecoder::new_preferring_hw(
+        params, time_base, /* want_hw */ true, /* cuda_device */ None,
+    )
+    .expect("constructing a decoder must never fail when software is available");
 
     assert!(
         !used_hw,
@@ -158,9 +160,71 @@ fn want_hw_false_takes_software_directly_and_decodes() {
     let clip = generate_mpeg2_clip(dir.path());
     let (params, time_base, _vidx) = video_params(&clip);
 
-    let (decoder, used_hw) =
-        StreamVideoDecoder::new_preferring_hw(params, time_base, /* want_hw */ false)
-            .expect("software decoder must build");
+    let (decoder, used_hw) = StreamVideoDecoder::new_preferring_hw(
+        params, time_base, /* want_hw */ false, /* cuda_device */ None,
+    )
+    .expect("software decoder must build");
     assert!(!used_hw, "want_hw=false must never open the hardware path");
     assert!(!decoder.is_hardware());
+}
+
+#[test]
+fn a_pinned_cuda_ordinal_still_falls_back_gracefully_on_a_gpu_free_box() {
+    // The load-aware admission pick threads a CUDA ordinal (e.g. the chosen GPU's
+    // enumeration index) into `new_preferring_hw` so NVDEC opens on the SAME GPU
+    // as the compositor (affinity, ADR-0035 Tier-1 / the GPU-placement principle).
+    // On this GPU-free runner the pinned-ordinal cuvid open MUST still fail
+    // internally and degrade to a working software decoder — the ordinal reaching
+    // the hardware path must never turn a graceful fallback into an error or a
+    // panic (invariants #1/#2). This proves the ordinal is actually plumbed to the
+    // cuvid open (it reaches `HwDeviceContext::create(Cuda, Some(ordinal))`) while
+    // preserving the bulletproof fallback.
+    multiview_ffmpeg::ensure_initialized().expect("init libav");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clip = generate_mpeg2_clip(dir.path());
+    let (params, time_base, vidx) = video_params(&clip);
+
+    let (mut decoder, used_hw) = StreamVideoDecoder::new_preferring_hw(
+        params,
+        time_base,
+        /* want_hw */ true,
+        /* cuda_device */ Some("0"),
+    )
+    .expect("a pinned ordinal must never make the constructor fail when software is available");
+    assert!(
+        !used_hw,
+        "no GPU is present, so even a pinned ordinal must NOT open the hardware path"
+    );
+    assert!(
+        !decoder.is_hardware(),
+        "the decoder must report software after the pinned-ordinal cuvid open failed"
+    );
+
+    // And it must still decode real frames to NV12 — the pinned ordinal did not
+    // break the software fallback.
+    let mut demux = Demuxer::open(&clip).expect("open clip for demux");
+    let mut frames = 0u32;
+    while let Some(pkt) = demux.read_packet().expect("read packet") {
+        if pkt.stream_index != vidx {
+            continue;
+        }
+        decoder.send_packet(&pkt.packet).expect("send packet");
+        while let Some(decoded) = decoder.receive_frame().expect("receive frame") {
+            assert_eq!(
+                decoded.frame.format(),
+                Pixel::NV12,
+                "frame is NV12 (inv #5)"
+            );
+            frames += 1;
+        }
+    }
+    decoder.send_eof().expect("eof");
+    while let Some(decoded) = decoder.receive_frame().expect("drain") {
+        assert_eq!(decoded.frame.format(), Pixel::NV12, "drained frame is NV12");
+        frames += 1;
+    }
+    assert_eq!(
+        frames, EXPECTED_FRAMES,
+        "the software fallback must still decode every frame with a pinned ordinal"
+    );
 }

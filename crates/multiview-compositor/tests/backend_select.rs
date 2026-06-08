@@ -18,7 +18,7 @@
     clippy::indexing_slicing
 )]
 
-use multiview_compositor::backend::{RunBackend, RunBackendKind};
+use multiview_compositor::backend::{GpuTarget, RunBackend, RunBackendKind};
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{composite as cpu_composite, CanvasColor, Nv12Image, Tile};
 use multiview_core::color::{
@@ -51,9 +51,9 @@ fn default_backend_is_cpu() {
 
 #[test]
 fn select_without_gpu_preference_is_cpu() {
-    // Not preferring the GPU always yields the CPU reference, regardless of
-    // whether the `wgpu` feature is compiled in.
-    let backend = RunBackend::select(false);
+    // Not preferring the GPU (`None` target) always yields the CPU reference,
+    // regardless of whether the `wgpu` feature is compiled in.
+    let backend = RunBackend::select(None);
     assert_eq!(backend.kind(), RunBackendKind::Cpu);
 }
 
@@ -64,7 +64,9 @@ fn select_falls_back_to_cpu_when_no_gpu_adapter() {
     // CPU reference (GPU init returns `NoAdapter`, the selector falls back).
     // Without the `wgpu` feature there is no GPU variant at all, so this is also
     // CPU. Either way the selector returns a working backend, never an error.
-    let backend = RunBackend::select(true);
+    // `Some(GpuTarget::none())` is "prefer the GPU at the default adapter" (an
+    // inert pin) — the exact prefer-GPU semantics, with no specific device named.
+    let backend = RunBackend::select(Some(GpuTarget::none()));
 
     // We cannot assert *which* backend on hardware that has a GPU, but in THIS
     // environment there is no adapter, so it must be CPU. The crucial property

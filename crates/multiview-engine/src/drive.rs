@@ -280,11 +280,14 @@ impl<T> CompositorDrive<T> {
 
     /// Replace the compositor backend the per-tick composite dispatches through.
     ///
-    /// A run that prefers the GPU passes [`RunBackend::select(true)`](RunBackend::select):
-    /// the GPU is used if an adapter initializes, else it transparently falls
-    /// back to the CPU reference (invariant #1 — a missing/failed GPU never
-    /// stalls or crashes the run). The default backend is the CPU reference, so
-    /// callers that never call this keep the prior behaviour exactly.
+    /// A run that prefers the GPU passes
+    /// [`RunBackend::select(Some(target))`](RunBackend::select), where `target`
+    /// is the load-aware admission decision (the device the placement engine
+    /// chose, or `GpuTarget::none()` for the default adapter): the GPU is used if
+    /// an adapter initializes, else it transparently falls back to the CPU
+    /// reference (invariant #1 — a missing/failed GPU never stalls or crashes the
+    /// run). The default backend is the CPU reference, so callers that never call
+    /// this keep the prior behaviour exactly.
     #[must_use]
     pub fn with_backend(mut self, backend: RunBackend) -> Self {
         self.backend = backend;
