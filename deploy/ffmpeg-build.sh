@@ -136,14 +136,35 @@ CONFIGURE_ARGS=(
 case "${FF_HWACCEL}" in
   nvidia)
     # NVENC/NVDEC/cuvid via nv-codec-headers; scale_cuda via cuda-llvm (no SDK).
+    # --enable-nvenc/nvdec/cuvid turn on the CAPABILITY only; --disable-everything
+    # still strips the actual encoders/decoders/hwaccels/filters unless each is
+    # named in an allowlist below. All FFmpeg-8.1.1 names verified against the
+    # n8.1.1 source (libavcodec/allcodecs.c, libavcodec/hwaccels.h,
+    # libavfilter/allfilters.c). NVENC/NVDEC/cuvid/scale_cuda are all LGPL-clean.
+    # shellcheck disable=SC2054  # commas are FFmpeg list-value syntax (one word)
     CONFIGURE_ARGS+=(
       --enable-ffnvcodec --enable-nvenc --enable-nvdec --enable-cuvid
       --enable-cuda-llvm
+      --enable-encoder=h264_nvenc,hevc_nvenc
+      --enable-decoder=h264_cuvid,hevc_cuvid,av1_cuvid,vp9_cuvid,mpeg2_cuvid
+      --enable-hwaccel=h264_nvdec,hevc_nvdec,av1_nvdec,vp9_nvdec
+      --enable-filter=scale_cuda
     )
     ;;
   vaapi)
     # Intel/AMD on Linux. libvpl (Intel QSV via oneVPL) is amd64-only.
-    CONFIGURE_ARGS+=(--enable-vaapi --enable-libdrm)
+    # --enable-vaapi turns on the CAPABILITY only; --disable-everything still
+    # strips the VAAPI encoders/hwaccels/scale filter unless each is named in an
+    # allowlist below. Names verified against FFmpeg n8.1.1 source
+    # (libavcodec/allcodecs.c, libavcodec/hwaccels.h, libavfilter/allfilters.c).
+    # VAAPI encode/decode is LGPL-clean.
+    # shellcheck disable=SC2054  # commas are FFmpeg list-value syntax (one word)
+    CONFIGURE_ARGS+=(
+      --enable-vaapi --enable-libdrm
+      --enable-encoder=h264_vaapi,hevc_vaapi,mjpeg_vaapi
+      --enable-hwaccel=h264_vaapi,hevc_vaapi,av1_vaapi,vp9_vaapi
+      --enable-filter=scale_vaapi
+    )
     if [ "${TARGETARCH}" = "amd64" ]; then
       CONFIGURE_ARGS+=(--enable-libvpl)
     fi
