@@ -4,7 +4,7 @@
 //! splice (seamless or make-before-break), any SCTE-35 cue that rides the seam
 //! must have its 33-bit `pts_adjustment` shifted by the **same** offset, or
 //! downstream ad insertion misfires (SCTE-35 2023r1: "Modifying the
-//! pts_adjustment field is preferred"). These tests pin the pure primitive that
+//! `pts_adjustment` field is preferred"). These tests pin the pure primitive that
 //! rewrites `pts_adjustment` + recomputes the trailing CRC-32/MPEG-2, and the
 //! seam-offset helper, independent of the egress wiring (RT-14b).
 //!
@@ -17,7 +17,10 @@
     // reason: test fixtures hand-assemble byte vectors with small, statically
     // in-range length fields; `as` on those tiny constants cannot truncate.
     clippy::as_conversions,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    // reason: the fixture builders push each wire field with an explaining
+    // comment; a `vec![..]` literal would lose that field-by-field annotation.
+    clippy::vec_init_then_push
 )]
 
 use proptest::prelude::*;
@@ -172,7 +175,7 @@ fn reserialize_shifts_time_signal_by_delta() {
     let before = effective_splice_time(&section).expect("time_signal carries a splice time");
     let parsed = SpliceInfoSection::parse(&section).expect("time_signal parses");
 
-    let delta = 0xABCD_EF_u64;
+    let delta = 0x00AB_CDEF_u64;
     let new_adj = shift_pts_adjustment_90k(parsed.pts_adjustment, delta);
     let restamped = parsed
         .reserialize_with_pts_adjustment(new_adj)
@@ -226,7 +229,10 @@ fn reserialize_immediate_section_passes_through_with_zero_adjustment() {
     let restamped = parsed
         .reserialize_with_pts_adjustment(new_adj)
         .expect("round-trips");
-    assert_eq!(restamped, section, "zero-delta restamp is a byte-identical copy");
+    assert_eq!(
+        restamped, section,
+        "zero-delta restamp is a byte-identical copy"
+    );
 }
 
 // ---------------------------------------------------------------------------

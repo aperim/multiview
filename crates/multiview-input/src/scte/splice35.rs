@@ -124,7 +124,12 @@ pub enum SpliceCommand {
 }
 
 /// A parsed SCTE-35 `splice_info_section`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The exact section bytes the parser validated are retained so the section can
+/// be re-emitted byte-for-byte with only its `pts_adjustment` rewritten — see
+/// [`SpliceInfoSection::reserialize_with_pts_adjustment`]. Retaining the bytes
+/// makes the type `Clone` but not `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpliceInfoSection {
     /// The `pts_adjustment` (33-bit) added to all PTS in the section.
     pub pts_adjustment: u64,
@@ -132,6 +137,14 @@ pub struct SpliceInfoSection {
     pub command_type: u8,
     /// The decoded command.
     pub command: SpliceCommand,
+    /// The exact validated section bytes (header + body + trailing CRC), retained
+    /// so the section can be re-serialised with a rewritten `pts_adjustment` and a
+    /// fresh CRC without re-encoding every other field byte-by-byte.
+    raw: Box<[u8]>,
+    /// Whether the carried command body was flagged `encrypted_packet`. An
+    /// encrypted section's command fields were not decoded, so re-serialise
+    /// refuses it rather than emit a section it cannot vouch for.
+    encrypted: bool,
 }
 
 impl SpliceInfoSection {
@@ -208,6 +221,8 @@ impl SpliceInfoSection {
                 pts_adjustment,
                 command_type,
                 command: SpliceCommand::Other(command_type),
+                raw: Box::from(full),
+                encrypted: true,
             });
         }
 
@@ -225,6 +240,8 @@ impl SpliceInfoSection {
             pts_adjustment,
             command_type,
             command,
+            raw: Box::from(full),
+            encrypted: false,
         })
     }
 
@@ -264,10 +281,126 @@ impl SpliceInfoSection {
             SpliceCommand::Null | SpliceCommand::Other(_) => None,
         }
     }
+
+    /// Re-emit this `splice_info_section`'s bytes with the 33-bit `pts_adjustment`
+    /// field replaced by `new_adjustment` (masked to 33 bits) and the trailing
+    /// CRC-32/MPEG-2 recomputed over the rewritten section body.
+    ///
+    /// Every other field — `splice_command`, descriptors, `tier`, `cw_index`,
+    /// each reserved bit — is byte-identical to the section the parser validated:
+    /// only the five bytes that carry `pts_adjustment` (and the four CRC bytes)
+    /// change. This is the SCTE-35 2023r1 re-stamp primitive: when an output
+    /// splice rebases the program PTS timeline by a 90 kHz offset, the cue's
+    /// `pts_adjustment` must shift by the **same** offset
+    /// (see [`shift_pts_adjustment_90k`]) so downstream ad insertion stays
+    /// aligned. An *immediate* splice (no `pts_time`) carries nothing in
+    /// `pts_time` to shift, but its `pts_adjustment` field is still rewritten —
+    /// pass `new_adjustment == self.pts_adjustment` to round-trip it verbatim.
+    ///
+    /// # Errors
+    ///
+    /// * [`ScteError::Unsupported`] when the section's command body is
+    ///   `encrypted_packet` (its plaintext was never decoded, so the writer
+    ///   cannot vouch for a faithful re-emit) — the original bytes are never
+    ///   corrupted.
+    /// * [`ScteError::TooShort`] when the retained section is too short to hold
+    ///   the `pts_adjustment` field or the trailing CRC (a section the parser
+    ///   would itself have rejected; defended in depth).
+    pub fn reserialize_with_pts_adjustment(
+        &self,
+        new_adjustment: u64,
+    ) -> Result<Vec<u8>, ScteError> {
+        if self.encrypted {
+            return Err(ScteError::Unsupported(u16::from(self.command_type)));
+        }
+        let adj = new_adjustment & MASK_33;
+        let mut out = self.raw.to_vec();
+
+        // The retained section must hold at least the bytes carrying
+        // `pts_adjustment` (header bytes 0..=2, protocol_version byte 3, then the
+        // five bytes [`ADJ_HI_BYTE`..=`ADJ_LO_LAST`] carrying
+        // encrypted(1)/enc_alg(6)/pts_adjustment(33)) plus the four-byte trailing
+        // CRC. `ADJ_LO_LAST + 1 + CRC_LEN == 13`, a small constant.
+        if out.len() < ADJ_MIN_SECTION_LEN {
+            return Err(ScteError::TooShort {
+                need: ADJ_MIN_SECTION_LEN,
+                got: out.len(),
+            });
+        }
+
+        // The 33-bit field spans: bit 32 = low bit of `ADJ_HI_BYTE` (top 7 bits
+        // hold encrypted + enc_alg, preserved); bits 31..0 = the four big-endian
+        // bytes `ADJ_LO_FIRST..=ADJ_LO_LAST`.
+        let bit32 = u8::try_from((adj >> 32) & 0x01)
+            .map_err(|_e| ScteError::Syntax("pts_adjustment bit out of range"))?;
+        let low32 = u32::try_from(adj & 0xFFFF_FFFF)
+            .map_err(|_e| ScteError::Syntax("pts_adjustment low word out of range"))?;
+        let low_bytes = low32.to_be_bytes();
+
+        let hi = out.get_mut(ADJ_HI_BYTE).ok_or(ScteError::TooShort {
+            need: ADJ_MIN_SECTION_LEN,
+            got: 0,
+        })?;
+        *hi = (*hi & 0xFE) | bit32;
+
+        let low_slot = out
+            .get_mut(ADJ_LO_FIRST..=ADJ_LO_LAST)
+            .ok_or(ScteError::TooShort {
+                need: ADJ_MIN_SECTION_LEN,
+                got: 0,
+            })?;
+        low_slot.copy_from_slice(&low_bytes);
+
+        // Recompute the CRC-32/MPEG-2 over the rewritten body (everything except
+        // the trailing four CRC bytes) and overwrite the trailing CRC.
+        let body_len = out.len().saturating_sub(CRC_LEN);
+        let body = out.get(..body_len).ok_or(ScteError::TooShort {
+            need: CRC_LEN,
+            got: out.len(),
+        })?;
+        let crc = crate::mpegts::crc::crc32_mpeg2(body);
+        let crc_bytes = crc.to_be_bytes();
+        let tail = out.get_mut(body_len..).ok_or(ScteError::TooShort {
+            need: CRC_LEN,
+            got: 0,
+        })?;
+        tail.copy_from_slice(&crc_bytes);
+
+        Ok(out)
+    }
 }
 
 /// 33-bit mask for PTS values.
 const MASK_33: u64 = (1 << 33) - 1;
+
+/// Byte index whose low bit carries `pts_adjustment` bit 32 (top 7 bits hold
+/// `encrypted_packet` + `encryption_algorithm`). Header is bytes 0..=2 and
+/// `protocol_version` is byte 3.
+const ADJ_HI_BYTE: usize = 4;
+/// First of the four big-endian bytes carrying `pts_adjustment` bits 31..0.
+const ADJ_LO_FIRST: usize = 5;
+/// Last of the four big-endian bytes carrying `pts_adjustment` bits 7..0.
+const ADJ_LO_LAST: usize = 8;
+/// Length of the trailing CRC-32 that closes every SCTE-35 section.
+const CRC_LEN: usize = 4;
+/// Smallest section length that can hold the `pts_adjustment` field and a CRC
+/// (`ADJ_LO_LAST + 1` field bytes + `CRC_LEN`).
+const ADJ_MIN_SECTION_LEN: usize = ADJ_LO_LAST + 1 + CRC_LEN;
+
+/// Compute the seam-shifted `pts_adjustment` for an output splice: add the GP-6
+/// 90 kHz timeline offset to the existing `pts_adjustment` and wrap at 2³³.
+///
+/// This is the SCTE-35 2023r1 re-stamp rule: a device that re-stamps PCR/PTS/DTS
+/// and passes a cue message through should modify the `pts_adjustment` field by
+/// the same amount the program timeline moved, so the cue's *effective* splice
+/// time (`pts_time + pts_adjustment`) lands at the same program instant after the
+/// rebase. Both arguments are reduced to 33 bits and the sum wraps mod 2³³,
+/// matching the field's modular arithmetic. Pass `offset_90k == 0` to pass a cue
+/// through unchanged (e.g. an immediate splice riding a zero-offset seam).
+#[must_use]
+pub fn shift_pts_adjustment_90k(old_adjustment: u64, offset_90k: u64) -> u64 {
+    (old_adjustment.wrapping_add(offset_90k)) & MASK_33
+}
 
 /// Parse the `splice_insert` command body from the reader (positioned right after
 /// `splice_command_type`).
