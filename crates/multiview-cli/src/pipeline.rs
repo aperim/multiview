@@ -450,6 +450,17 @@ pub struct Pipeline {
     encode_cfg: EncodeConfig,
     /// The runnable outputs declared in the config.
     outputs: Vec<RunnableOutput>,
+    /// Per-input elementary-stream inventories, keyed (and id-sorted) by source
+    /// id (RT-3, ADR-0034 §9). Probed **once at build time** — off the
+    /// output-clock thread — from each path-backed source's demuxer (the
+    /// inventory is an open-time snapshot, `param_probe.rs`). Threaded into the
+    /// published `EngineStateSnapshot` (so the control plane's read-only
+    /// `GET /inputs/{id}/streams` surface can show every stream an input offers)
+    /// and emitted once as `input.streams` events at run start. Empty on the
+    /// synthetic / live-URL / no-`ffmpeg` paths (no container to probe); folding
+    /// an empty map leaves the snapshot unchanged (inv #10 — never on the hot
+    /// loop).
+    inventories: std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -647,11 +658,20 @@ impl Pipeline {
         #[cfg(feature = "overlay")]
         let sidecar_target = layout.cells.iter().find_map(|c| c.source.clone());
 
+        // Probe each path-backed source's full elementary-stream inventory ONCE,
+        // here at build time — off the output-clock thread (the clock has not
+        // started). The inventory is an open-time snapshot; threading it into the
+        // published snapshot is the RT-3 read-only discovery surface. Synthetic /
+        // live-URL / NDI sources (and the no-`ffmpeg` build) contribute nothing
+        // and simply ride an empty map (inv #10 — never on the hot loop).
+        let inventories = build_input_inventories(config);
+
         Ok(Self {
             layout,
             cadence,
             stores,
             ingest_plans,
+            inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
             #[cfg(feature = "overlay")]
@@ -1073,6 +1093,19 @@ impl Pipeline {
             self.meter_db_timelines.clone(),
             self.cadence,
         );
+        // RT-3 read-only stream-inventory discovery (off the hot loop, inv #10):
+        // the per-input inventories were probed ONCE at build time. Emit one
+        // `input.streams` event per input here — at run start, BEFORE the clock
+        // loop — so a connected client sees the inventory delta exactly once
+        // (the inventory is static after open; a re-probe would replace it and
+        // re-emit). The publish rides the wait-free drop-oldest broadcast, never
+        // a channel a client can fill. Then pre-build the `inputs` snapshot
+        // fragment ONCE so the per-tick projection only clones + inserts it
+        // (no inventory re-serialisation on the hot loop).
+        for event in crate::control::input_streams_events(&self.inventories) {
+            publisher.publish_event(event);
+        }
+        let input_fragment = crate::control::input_inventories_fragment(&self.inventories);
         // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
         // state (kept here on the hot loop — the bounded cue store holds only a
         // small live window, so it must be sampled now, not after the run), clones
@@ -1129,12 +1162,18 @@ impl Pipeline {
                     }
                 },
             }
-            crate::control::state_snapshot(
+            let mut snapshot = crate::control::state_snapshot(
                 frame.tick.index,
                 frame.pts().as_nanos(),
                 frame.canvas.width(),
                 frame.canvas.height(),
-            )
+            );
+            // Thread the per-input stream inventories into the conflated blob so
+            // the control plane's read-only `GET /inputs/{id}/streams` can show
+            // every stream (RT-3). The fragment is pre-built (a tiny static clone
+            // per tick); a `None` fragment (no inputs probed) is a no-op.
+            crate::control::insert_input_fragment(&mut snapshot, input_fragment.as_ref());
+            snapshot
         };
         // Sparse tile-state events: emit at most one `tile.state` change per tick
         // (seed each tile once, then on transitions), keyed by the source id, so
@@ -3253,6 +3292,62 @@ fn copy_plane(
         dst_row.copy_from_slice(src_row);
     }
     Ok(())
+}
+
+/// Probe each path-backed source's full elementary-stream [`StreamInventory`]
+/// (RT-3, ADR-0034 §9), keyed (id-sorted) by source id.
+///
+/// Runs **once at build time**, off the output-clock thread: it opens each local
+/// container's demuxer (an open-time snapshot, `param_probe.rs`) and reads its
+/// [`StreamInventory`] — every elementary stream (video / audio tracks /
+/// subtitles / SCTE-35 / KLV / timecode) the input offers, each with a stable
+/// kind-scoped id. The result is threaded into the published
+/// `EngineStateSnapshot` so the control plane's read-only
+/// `GET /inputs/{id}/streams` surface can show every stream, and emitted once as
+/// `input.streams` events at run start. **Off the hot loop** (inv #10): nothing
+/// here touches the data plane or the output clock.
+///
+/// Only local **file** sources are probed here (the demuxer opens a path);
+/// synthetic / live-URL / NDI sources contribute nothing and ride an empty map
+/// until their ingest thread surfaces an inventory in a later slice. A probe
+/// failure (unreadable container) is logged and skipped — it never fails the
+/// build of an otherwise-runnable source (invariants #1/#10).
+#[cfg(feature = "ffmpeg")]
+fn build_input_inventories(
+    config: &MultiviewConfig,
+) -> std::collections::BTreeMap<String, multiview_core::stream::StreamInventory> {
+    use multiview_ffmpeg::Demuxer;
+
+    let mut inventories = std::collections::BTreeMap::new();
+    for source in &config.sources {
+        let SourceKind::File { path } = &source.kind else {
+            continue;
+        };
+        match Demuxer::open(std::path::Path::new(path)) {
+            Ok(demux) => {
+                let inventory = demux.inventory().with_input_id(source.id.clone());
+                inventories.insert(source.id.clone(), inventory);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    source = %source.id,
+                    error = %err,
+                    "could not probe stream inventory for input (skipping discovery)"
+                );
+            }
+        }
+    }
+    inventories
+}
+
+/// The no-`ffmpeg` build has no demuxer to probe, so no inventory is discovered
+/// here (synthetic-only builds, and the GPU-free default). An empty map folds
+/// into the snapshot as a no-op, so the run output is unchanged (RT-3).
+#[cfg(not(feature = "ffmpeg"))]
+fn build_input_inventories(
+    _config: &MultiviewConfig,
+) -> std::collections::BTreeMap<String, multiview_core::stream::StreamInventory> {
+    std::collections::BTreeMap::new()
 }
 
 /// Resolve a config [`Source`] into a streaming [`IngestPlan`] (it does **not**

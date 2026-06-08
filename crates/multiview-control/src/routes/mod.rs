@@ -26,6 +26,7 @@ use crate::state::AppState;
 pub mod alarms;
 pub mod audit;
 pub mod config;
+pub mod inputs;
 pub mod outputs;
 pub mod overlays;
 pub mod preview;
@@ -451,6 +452,9 @@ pub fn api_router() -> Router<AppState> {
                 .put(sources::update_source)
                 .delete(sources::delete_source),
         )
+        // Read-only input elementary-stream inventory (RT-3): every stream an
+        // input offers, projected from the off-engine cached snapshot (inv #10).
+        .route("/inputs/{id}/streams", get(inputs::get_input_streams))
         // Outputs resource CRUD (managed sinks/servers), mirroring layouts.
         .route("/outputs", get(outputs::list_outputs))
         .route(

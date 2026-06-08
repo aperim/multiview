@@ -497,7 +497,10 @@ pub fn topic_for_event(event: &Event) -> Topic {
         Event::SystemMetrics(_) => Topic::System,
         Event::OutputStatus(_) => Topic::Outputs,
         Event::AlertRaised(_) | Event::AlertCleared(_) => Topic::Alerts,
-        Event::InputConnection(_) => Topic::Inputs,
+        // Both input connection state AND elementary-stream inventory deltas ride
+        // the existing `inputs` lane (RT-3: `input.streams` is a delta on
+        // re-probe / PMT-version bump, not a new topic).
+        Event::InputConnection(_) | Event::InputStreams(_) => Topic::Inputs,
         Event::JobProgress(_) => Topic::Jobs,
         // Broadcast monitoring/control events ride their own topics so a client
         // can subscribe to the alarm or tally firehose independently.
@@ -752,7 +755,24 @@ mod topic_routing_tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::topic_for_event;
-    use multiview_events::{Event, SystemMetrics, Topic};
+    use multiview_core::stream::StreamInventory;
+    use multiview_events::{Event, InputStreams, SystemMetrics, Topic};
+
+    /// The `input.streams` inventory-discovery event MUST ride the existing
+    /// `inputs` lane (RT-3) — a delta on re-probe / PMT-version bump, not a new
+    /// topic — so a client already subscribed to `inputs` sees it without a new
+    /// subscription.
+    #[test]
+    fn input_streams_routes_to_the_inputs_topic() {
+        let event = Event::InputStreams(InputStreams::new(
+            "cam1",
+            StreamInventory::new().with_input_id("cam1"),
+        ));
+        assert_eq!(topic_for_event(&event), Topic::Inputs);
+        // The inputs lane is lossless (NOT a high-rate conflated lane): an
+        // inventory delta must survive in the replay ring.
+        assert!(!Topic::Inputs.is_high_rate());
+    }
 
     /// High-rate whole-system metrics MUST route to the conflated `system` lane
     /// the footer subscribes to — never the `$control` catch-all. (Regression:

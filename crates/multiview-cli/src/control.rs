@@ -141,6 +141,103 @@ pub fn state_snapshot(tick: u64, pts_ns: i64, width: u32, height: u32) -> Engine
     })
 }
 
+/// Fold each input's [`StreamInventory`] into the conflated engine-state snapshot
+/// blob under `inputs.<id>.streams` (RT-3, ADR-0034 §9).
+///
+/// This is the **off-engine** publish path for the read-only stream-inventory
+/// discovery surface: the control plane's `GET /api/v1/inputs/{id}/streams`
+/// reads exactly this fragment out of the conflated snapshot (inv #10). The
+/// inventory is built by the ingest at `open()` — off the output-clock thread —
+/// so threading it here only serialises an already-computed, static-after-open
+/// value into the blob; it does **not** probe or block anything on the hot loop.
+///
+/// An empty `inventories` map leaves `snapshot` byte-identical (no `inputs` key
+/// is added), so the synthetic / no-probe path keeps the minimal base blob.
+///
+/// `snapshot` must be a JSON object (the base [`state_snapshot`] blob); a
+/// non-object value is left unchanged (defensive — the caller always passes the
+/// base blob).
+pub fn fold_input_inventories(
+    snapshot: &mut EngineStateSnapshot,
+    inventories: &std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
+) {
+    let Some(fragment) = input_inventories_fragment(inventories) else {
+        return;
+    };
+    if let Some(obj) = snapshot.as_object_mut() {
+        obj.insert("inputs".to_owned(), fragment);
+    }
+}
+
+/// Pre-serialise the per-input inventories into the `inputs` JSON fragment the
+/// snapshot carries (`{ "<id>": { "streams": <StreamInventory> }, … }`), or
+/// `None` when the map is empty.
+///
+/// Built **once** off the hot loop so the per-tick projection only has to
+/// clone-and-insert this immutable fragment rather than re-serialise every
+/// inventory each frame (the inventory is static after open). The control plane
+/// reads `inputs.<id>.streams` straight back out as a [`StreamInventory`].
+#[must_use]
+pub fn input_inventories_fragment(
+    inventories: &std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
+) -> Option<serde_json::Value> {
+    if inventories.is_empty() {
+        return None;
+    }
+    let mut inputs = serde_json::Map::with_capacity(inventories.len());
+    for (id, inventory) in inventories {
+        // `StreamInventory` is plain derived `Serialize` (no non-string map keys,
+        // no failing path); the guardrails forbid `unwrap`/`expect`, so a
+        // serialisation fault degrades to a `null` streams entry rather than
+        // panicking on the publish path. In practice this never fires.
+        let streams = serde_json::to_value(inventory).unwrap_or(serde_json::Value::Null);
+        inputs.insert(id.clone(), serde_json::json!({ "streams": streams }));
+    }
+    Some(serde_json::Value::Object(inputs))
+}
+
+/// Insert a **pre-built** [`input_inventories_fragment`] into a snapshot blob
+/// under `inputs` (the per-tick hot-loop projection path).
+///
+/// Cheaper than [`fold_input_inventories`] on the hot loop: the fragment is
+/// serialised once at build time and only **cloned + inserted** here, so the
+/// per-tick cost is one map clone of a tiny static value (no inventory
+/// re-serialisation). A `None` fragment (no inputs probed) is a no-op, leaving
+/// the blob unchanged (inv #10 — the publish never blocks anything).
+pub fn insert_input_fragment(
+    snapshot: &mut EngineStateSnapshot,
+    fragment: Option<&serde_json::Value>,
+) {
+    let (Some(fragment), Some(obj)) = (fragment, snapshot.as_object_mut()) else {
+        return;
+    };
+    obj.insert("inputs".to_owned(), fragment.clone());
+}
+
+/// Build one `input.streams` realtime event per input from its [`StreamInventory`]
+/// (RT-3): the delta clients see when an input's inventory first appears or
+/// changes on re-probe.
+///
+/// Deterministic order (the `BTreeMap` is id-sorted) and exactly one event per
+/// input — no duplicates. Each event rides the existing `inputs` topic
+/// ([`multiview_control::realtime::topic_for_event`]); the engine publishes them
+/// through the wait-free drop-oldest broadcast, never a channel a client can
+/// fill (inv #10).
+#[must_use]
+pub fn input_streams_events(
+    inventories: &std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
+) -> Vec<Event> {
+    inventories
+        .iter()
+        .map(|(id, inventory)| {
+            Event::InputStreams(multiview_events::InputStreams::new(
+                id.clone(),
+                inventory.clone(),
+            ))
+        })
+        .collect()
+}
+
 /// Rebind the cell identified by `tile` to source `source` in `config`, in place.
 ///
 /// Returns `true` if a cell with that id existed and was rebound (so the caller
@@ -943,6 +1040,133 @@ input_id = "in_b"
         assert_eq!(snap["pts_ns"], 233_333_333_i64);
         assert_eq!(snap["canvas"]["width"], 1920);
         assert_eq!(snap["canvas"]["height"], 1080);
+        // No inputs were folded in, so the snapshot stays minimal (no `inputs`
+        // key) — the base blob is unchanged for the synthetic/empty-probe path.
+        assert!(snap.get("inputs").is_none());
+    }
+
+    /// A tiny representative inventory (one video + one audio) for the fold-in /
+    /// event-projection tests.
+    fn fixture_inventory(input_id: &str) -> multiview_core::stream::StreamInventory {
+        use multiview_core::stream::{
+            StableStreamId, StreamDescriptor, StreamDetail, StreamInventory, StreamKind,
+        };
+        let video = StreamDescriptor::new(
+            StableStreamId::from_ts_pid(StreamKind::Video, 0x100),
+            StreamKind::Video,
+            "h264",
+            StreamDetail::Video {
+                width: 1920,
+                height: 1080,
+                frame_rate: None,
+            },
+        );
+        let audio = StreamDescriptor::new(
+            StableStreamId::from_general(StreamKind::Audio, 0, "aac", None, None),
+            StreamKind::Audio,
+            "aac",
+            StreamDetail::Audio {
+                channels: 2,
+                sample_rate: 48_000,
+            },
+        )
+        .with_default(true);
+        StreamInventory::from_streams(vec![video, audio]).with_input_id(input_id)
+    }
+
+    #[test]
+    fn folding_inventories_threads_them_into_the_snapshot_under_inputs() {
+        let mut inventories = std::collections::BTreeMap::new();
+        inventories.insert("cam1".to_owned(), fixture_inventory("cam1"));
+
+        let mut snap = state_snapshot(0, 0, 1920, 1080);
+        fold_input_inventories(&mut snap, &inventories);
+
+        // The inventory is folded into the conflated blob under
+        // `inputs.<id>.streams` — exactly the shape the control endpoint reads.
+        let streams = &snap["inputs"]["cam1"]["streams"];
+        assert_eq!(streams["input_id"], "cam1");
+        let arr = streams["streams"].as_array().expect("streams array");
+        assert_eq!(
+            arr.len(),
+            2,
+            "both elementary streams survive into the blob"
+        );
+        // The folded fragment round-trips back into a real StreamInventory (the
+        // control plane will deserialise it on read).
+        let back: multiview_core::stream::StreamInventory = serde_json::from_value(streams.clone())
+            .expect("the folded fragment is a valid inventory");
+        assert_eq!(back, fixture_inventory("cam1"));
+        // The base fields are untouched by the fold.
+        assert_eq!(snap["v"], 1);
+        assert_eq!(snap["canvas"]["width"], 1920);
+    }
+
+    #[test]
+    fn prebuilt_fragment_inserts_identically_to_a_direct_fold() {
+        // The hot-loop path (pre-build once + insert) must produce a snapshot
+        // byte-identical to the direct fold, so the cheaper per-tick path can't
+        // drift from the tested fold.
+        let mut inventories = std::collections::BTreeMap::new();
+        inventories.insert("cam1".to_owned(), fixture_inventory("cam1"));
+        inventories.insert("cam2".to_owned(), fixture_inventory("cam2"));
+
+        let fragment = input_inventories_fragment(&inventories);
+        assert!(fragment.is_some(), "a non-empty map yields a fragment");
+
+        let mut via_fold = state_snapshot(5, 1, 16, 16);
+        fold_input_inventories(&mut via_fold, &inventories);
+
+        let mut via_insert = state_snapshot(5, 1, 16, 16);
+        insert_input_fragment(&mut via_insert, fragment.as_ref());
+
+        assert_eq!(via_fold, via_insert);
+        // And an absent fragment is a no-op.
+        let mut untouched = state_snapshot(5, 1, 16, 16);
+        let before = untouched.clone();
+        insert_input_fragment(&mut untouched, None);
+        assert_eq!(untouched, before);
+        assert!(input_inventories_fragment(&std::collections::BTreeMap::new()).is_none());
+    }
+
+    #[test]
+    fn folding_empty_map_leaves_the_snapshot_unchanged() {
+        let inventories: std::collections::BTreeMap<
+            String,
+            multiview_core::stream::StreamInventory,
+        > = std::collections::BTreeMap::new();
+        let mut snap = state_snapshot(3, 9, 64, 64);
+        let before = snap.clone();
+        fold_input_inventories(&mut snap, &inventories);
+        assert_eq!(snap, before, "no inputs ⇒ no `inputs` key, blob unchanged");
+    }
+
+    #[test]
+    fn input_streams_events_are_one_per_input_tagged_and_routed() {
+        let mut inventories = std::collections::BTreeMap::new();
+        inventories.insert("cam1".to_owned(), fixture_inventory("cam1"));
+        inventories.insert("cam2".to_owned(), fixture_inventory("cam2"));
+
+        let events = input_streams_events(&inventories);
+        // Exactly one `input.streams` event per input (no duplicates), and BTreeMap
+        // order makes the projection deterministic.
+        assert_eq!(events.len(), 2);
+        for (event, expect_id) in events.iter().zip(["cam1", "cam2"]) {
+            match event {
+                Event::InputStreams(is) => {
+                    assert_eq!(is.input_id, expect_id);
+                    assert_eq!(is.inventory, fixture_inventory(expect_id));
+                }
+                other => panic!("expected Event::InputStreams, got {other:?}"),
+            }
+            // It must ride the existing `inputs` lane (RT-3), never the control
+            // catch-all.
+            assert_eq!(
+                multiview_control::realtime::topic_for_event(event),
+                multiview_events::Topic::Inputs
+            );
+            assert_eq!(event.type_tag(), "input.streams");
+        }
     }
 
     /// `bind_and_serve` binds a real loopback socket, serves the unauthenticated

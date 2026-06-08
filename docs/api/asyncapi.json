@@ -169,6 +169,101 @@
         ],
         "type": "object"
       },
+      "GpuMetrics": {
+        "description": "A per-GPU utilisation sample. Optional fields are absent where the vendor does not expose that signal.",
+        "properties": {
+          "compute_util": {
+            "description": "Compute (graphics/CUDA) utilisation, 0.0-1.0.",
+            "format": "float",
+            "type": "number"
+          },
+          "decoder_util": {
+            "description": "Decoder (NVDEC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent).",
+            "format": "float",
+            "type": "number"
+          },
+          "encoder_session_ceiling": {
+            "description": "Runtime-discovered concurrent encode-session ceiling (NVIDIA).",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "encoder_sessions": {
+            "description": "DEVICE-WIDE active concurrent encode sessions (NVIDIA) across all processes.",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "encoder_util": {
+            "description": "Encoder (NVENC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent).",
+            "format": "float",
+            "type": "number"
+          },
+          "id": {
+            "description": "Stable device identity (UUID where available, else an index).",
+            "type": "string"
+          },
+          "mem_total_bytes": {
+            "description": "Total VRAM (bytes).",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "mem_used_bytes": {
+            "description": "VRAM in use (bytes).",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Human-readable device name, if known.",
+            "type": "string"
+          },
+          "self_compute_util": {
+            "description": "Our process's compute (SM) utilisation on this GPU, 0.0-1.0.",
+            "format": "float",
+            "type": "number"
+          },
+          "self_decoder_util": {
+            "description": "Our process's decoder (NVDEC) utilisation, 0.0-1.0.",
+            "format": "float",
+            "type": "number"
+          },
+          "self_encoder_sessions": {
+            "description": "Encode sessions owned by our process on this GPU.",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "self_encoder_util": {
+            "description": "Our process's encoder (NVENC) utilisation, 0.0-1.0.",
+            "format": "float",
+            "type": "number"
+          },
+          "self_mem_used_bytes": {
+            "description": "VRAM (bytes) attributed to our process on this GPU.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "vendor": {
+            "$ref": "#/components/schemas/GpuVendor"
+          }
+        },
+        "required": [
+          "id",
+          "vendor",
+          "compute_util",
+          "mem_used_bytes",
+          "mem_total_bytes"
+        ],
+        "type": "object"
+      },
+      "GpuVendor": {
+        "description": "GPU/accelerator hardware vendor (selects which per-engine signals to expect).",
+        "enum": [
+          "nvidia",
+          "intel",
+          "amd",
+          "apple",
+          "other"
+        ],
+        "type": "string"
+      },
       "Hello": {
         "description": "Data body of `$hello`: the first server frame after auth.",
         "properties": {
@@ -235,6 +330,43 @@
         },
         "required": [
           "state"
+        ],
+        "type": "object"
+      },
+      "InputStreams": {
+        "description": "Data body of the `input.streams` event: an input's full elementary-stream inventory (RT-3).",
+        "properties": {
+          "input_id": {
+            "description": "The owning input's configured source id.",
+            "type": "string"
+          },
+          "inventory": {
+            "description": "The StreamInventory (multiview_core::stream::StreamInventory): every elementary stream the input offers.",
+            "properties": {
+              "input_id": {
+                "description": "The input id the inventory is bound to, if known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "streams": {
+                "description": "Every elementary stream, in container order.",
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "streams"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "input_id",
+          "inventory"
         ],
         "type": "object"
       },
@@ -505,6 +637,48 @@
         ],
         "type": "object"
       },
+      "SystemMetrics": {
+        "description": "Data body of the `system.metrics` event: a high-rate whole-system sample (cpu / gpu / encoder-decoder). Numeric only; conflated at ~1-2 Hz (high-rate lane).",
+        "properties": {
+          "cpu_util": {
+            "description": "Whole-system CPU utilisation, 0.0-1.0.",
+            "format": "float",
+            "type": "number"
+          },
+          "gpus": {
+            "description": "Per-GPU utilisation samples; empty on a GPU-free host.",
+            "items": {
+              "$ref": "#/components/schemas/GpuMetrics"
+            },
+            "type": "array"
+          },
+          "mem_total_bytes": {
+            "description": "Total host memory (bytes), if known.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "mem_used_bytes": {
+            "description": "Host memory in use (bytes), if known.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "program_fps": {
+            "description": "Aggregate program output rate (fps), if running.",
+            "format": "float",
+            "type": "number"
+          },
+          "sampled_hz": {
+            "description": "Effective wire sampling cadence (Hz).",
+            "format": "uint32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpu_util",
+          "sampled_hz"
+        ],
+        "type": "object"
+      },
       "TallyEvent": {
         "description": "Data body of `tally.state`: resolved tally lamp/UMD state for one element.",
         "properties": {
@@ -688,6 +862,9 @@
                 "$ref": "#/components/schemas/InputConnection"
               },
               {
+                "$ref": "#/components/schemas/InputStreams"
+              },
+              {
                 "$ref": "#/components/schemas/JobProgress"
               },
               {
@@ -807,6 +984,16 @@
       "summary": "An input source transitioned connection state (input.connection on topic `inputs`).",
       "title": "Input source connection state change"
     },
+    "InputStreams": {
+      "contentType": "application/json",
+      "description": "Read-only discovery: every elementary stream (video / audio tracks / subtitles / SCTE-35 / KLV / timecode) the input offers, each with a stable kind-scoped id. Emitted on first appearance and as a delta on re-probe / PMT-version bump.",
+      "name": "InputStreams",
+      "payload": {
+        "$ref": "#/components/schemas/InputStreams"
+      },
+      "summary": "An input's stream inventory appeared or changed on re-probe (input.streams on topic `inputs`).",
+      "title": "Input elementary-stream inventory"
+    },
     "JobProgress": {
       "contentType": "application/json",
       "name": "JobProgress",
@@ -843,6 +1030,16 @@
       },
       "summary": "Client requests subscription to one or more topics.",
       "title": "$subscribe control frame (client to server)"
+    },
+    "SystemMetrics": {
+      "contentType": "application/json",
+      "description": "Emitted on topic `system`. A high-rate conflated lane like `audio.meters`: samples are latest-only at ~1-2 Hz on the wire and excluded from the lossless replay ring. PUSHED, never polled — a slow UI loses only its own samples and the engine never back-pressures (inv #10). Live values only; historic windows (the data decisions are made from) are a separate cold REST query.",
+      "name": "SystemMetrics",
+      "payload": {
+        "$ref": "#/components/schemas/SystemMetrics"
+      },
+      "summary": "CPU / GPU / encoder-decoder utilisation sample (numeric only).",
+      "title": "High-rate whole-system metrics sample"
     },
     "TallyEvent": {
       "contentType": "application/json",

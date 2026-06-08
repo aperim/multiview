@@ -576,3 +576,172 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
     let _ = shutdown_tx.send(());
     let _ = server.await;
 }
+
+/// A 2x2 config with a single **file** source bound to a cell plus three
+/// synthetic `test` sources — so exactly one input (`in_file`) has a container
+/// to probe an inventory from (RT-3).
+fn inventory_config_text(clip: &Path, out_playlist: &Path) -> String {
+    format!(
+        r##"
+schema_version = 1
+
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr", "1fr"]
+areas = ["a b", "c d"]
+
+[[sources]]
+id = "in_file"
+kind = "file"
+path = "{clip}"
+[[sources]]
+id = "in_b"
+kind = "test"
+[[sources]]
+id = "in_c"
+kind = "test"
+[[sources]]
+id = "in_d"
+kind = "test"
+
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_file"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[cells]]
+id = "cell_c"
+area = "c"
+[cells.source]
+input_id = "in_c"
+[[cells]]
+id = "cell_d"
+area = "d"
+[cells.source]
+input_id = "in_d"
+
+[[outputs]]
+kind = "hls"
+path = "{playlist}"
+codec = "mpeg2video"
+segment_ms = 1000
+"##,
+        clip = clip.display(),
+        playlist = out_playlist.display(),
+    )
+}
+
+/// RT-3 end-to-end: a real `multiview run` of the libav\* pipeline probes each
+/// file source's elementary-stream inventory at build time (off the
+/// output-clock thread), threads it into the published `EngineStateSnapshot`
+/// (where the control plane's `GET /inputs/{id}/streams` reads it), and emits
+/// **exactly one** `input.streams` delta per probed input on the `inputs`
+/// realtime lane. Synthetic sources (no container) contribute no inventory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn pipeline_publishes_input_stream_inventory_and_one_delta() {
+    use std::sync::Arc;
+
+    use multiview_cli::preview::program_slot;
+    use multiview_compositor::pipeline::Nv12Image;
+    use multiview_control::EngineStateSnapshot;
+    use multiview_engine::{CompositorDrive, EnginePublisher, StopSignal, TryRecvError};
+    use multiview_events::Event;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clip = dir.path().join("in.ts");
+    generate_clip(&clip);
+    let out_dir = dir.path().join("out");
+    let playlist = out_dir.join("index.m3u8");
+    let toml = inventory_config_text(&clip, &playlist);
+    let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
+    config.validate().expect("config validates");
+
+    let mut pipeline = Pipeline::build(&config).expect("build pipeline");
+
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(256));
+    let preview_slot = program_slot();
+    // Subscribe BEFORE the run so the run-start `input.streams` deltas are
+    // captured (the engine publishes through the drop-oldest broadcast; a slow
+    // subscriber never back-pressures it — inv #10).
+    let mut sub = publisher.subscribe();
+
+    let stop = StopSignal::new();
+    // A bounded run: stop after the first batch of frames so the test is fast and
+    // deterministic. The inventory deltas are emitted at run start, well within
+    // this budget.
+    let stop_for_timer = stop.clone();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        stop_for_timer.stop();
+    });
+
+    // The SAME publisher the subscription watches is threaded through the run, so
+    // the run-start `input.streams` deltas land on `sub`.
+    let drain = |_: &mut CompositorDrive<Nv12Image>| {};
+    pipeline
+        .run_until_serving(&stop, publisher.as_ref(), &preview_slot, drain)
+        .await
+        .expect("pipeline serving run");
+    timer.await.unwrap();
+
+    // The published snapshot carries the file source's inventory under
+    // `inputs.in_file.streams`, and NOT the synthetic ones (no container).
+    let snap = publisher
+        .state
+        .latest()
+        .expect("the engine published a state snapshot");
+    let streams = &snap.as_ref()["inputs"]["in_file"]["streams"];
+    let inventory: multiview_core::stream::StreamInventory =
+        serde_json::from_value(streams.clone()).expect("a valid StreamInventory in the snapshot");
+    assert_eq!(inventory.input_id.as_deref(), Some("in_file"));
+    assert!(
+        inventory.video().count() >= 1,
+        "the probed inventory exposes the clip's video stream"
+    );
+    assert!(
+        snap.as_ref()["inputs"].get("in_b").is_none(),
+        "a synthetic source has no container, so no inventory is published"
+    );
+
+    // Exactly ONE `input.streams` delta was emitted for the one probed input.
+    let mut input_streams_for_file = 0usize;
+    loop {
+        match sub.try_recv() {
+            Ok(seq) => {
+                if let Event::InputStreams(is) = seq.event.as_ref() {
+                    if is.input_id == "in_file" {
+                        input_streams_for_file += 1;
+                        assert!(
+                            is.inventory.video().count() >= 1,
+                            "the delta carries the same video stream"
+                        );
+                    }
+                }
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            // A lag would mean drop-oldest overflow; the 256-deep buffer is far
+            // larger than the handful of events here, so this never fires — keep
+            // looping to drain whatever is still buffered.
+            Err(TryRecvError::Lagged(_)) => {}
+        }
+    }
+    assert_eq!(
+        input_streams_for_file, 1,
+        "exactly one input.streams delta per probed input (no duplicate re-emit)"
+    );
+}
