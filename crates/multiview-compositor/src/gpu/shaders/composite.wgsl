@@ -14,6 +14,9 @@
 struct TileParams {
     // x,y: destination top-left on canvas (pixels). z,w: source w,h (pixels).
     placement: vec4<u32>,
+    // x,y: destination rect w,h on canvas (pixels). z,w: padding. The source is
+    // scaled into this rect (scale-at-composite); equal to src w,h for a 1:1 tile.
+    dst_size: vec4<u32>,
     // x: opacity [0,1]. y: tile transfer id. z,w: padding.
     opacity_transfer: vec4<f32>,
     // Range expand: luma = (Y*255 - luma_off)/luma_scale,
@@ -73,13 +76,31 @@ fn composite_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dst = t.placement.xy;
         let src_w = t.placement.z;
         let src_h = t.placement.w;
+        // Destination rect extent (the source is scaled into it). A zero size
+        // (defensive) falls back to the source size = 1:1 placement.
+        var dst_w = t.dst_size.x;
+        var dst_h = t.dst_size.y;
+        if dst_w == 0u { dst_w = src_w; }
+        if dst_h == 0u { dst_h = src_h; }
         if px < dst.x || py < dst.y {
             continue;
         }
-        let sx = px - dst.x;
-        let sy = py - dst.y;
-        if sx >= src_w || sy >= src_h {
+        // Destination-rect-local offset.
+        let ddx = px - dst.x;
+        let ddy = py - dst.y;
+        if ddx >= dst_w || ddy >= dst_h {
             continue;
+        }
+        // Scale-at-composite: nearest-neighbour map of the destination offset to
+        // the source texel — floor(dd * src / dst), clamped to the last texel.
+        // Matches the CPU reference `map_axis` (identity when dst == src).
+        var sx = ddx;
+        var sy = ddy;
+        if dst_w != src_w {
+            sx = min((ddx * src_w) / dst_w, src_w - 1u);
+        }
+        if dst_h != src_h {
+            sy = min((ddy * src_h) / dst_h, src_h - 1u);
         }
 
         // 8-bit code values in [0,255] (textures deliver [0,1], scale up).

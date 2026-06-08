@@ -75,12 +75,7 @@ fn select_falls_back_to_cpu_when_no_gpu_adapter() {
     // The backend must actually composite a frame (proving it is wired, not a
     // dead placeholder) without blocking or erroring on a valid request.
     let tile_img = flat_tile(16, 16);
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     let out = backend
         .composite(
             16,
@@ -109,20 +104,7 @@ fn cpu_backend_matches_free_function_byte_for_byte() {
     let bg = LinearRgba::opaque(0.1, 0.2, 0.3);
     let a = flat_tile(16, 16);
     let b = flat_tile(8, 8);
-    let tiles = [
-        Tile {
-            image: &a,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        },
-        Tile {
-            image: &b,
-            dst_x: 4,
-            dst_y: 4,
-            opacity: 0.5,
-        },
-    ];
+    let tiles = [Tile::placed(&a, 0, 0, 1.0), Tile::placed(&b, 4, 4, 0.5)];
 
     let via_backend = RunBackend::cpu()
         .composite(16, 16, canvas, bg, &tiles)

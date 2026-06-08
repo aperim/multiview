@@ -248,12 +248,7 @@ mod gpu_parity {
         let (cw, ch) = (96u32, 64u32);
         let canvas = CanvasColor::default();
         let tile = grey_tile(cw, ch);
-        let tiles = [Tile {
-            image: &tile,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        }];
+        let tiles = [Tile::placed(&tile, 0, 0, 1.0)];
         let mut list = OverlayDrawList::new();
         list.push(ramp_cue());
 

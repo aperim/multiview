@@ -90,12 +90,7 @@ fn empty_band_has_no_covered_rows() {
 fn tile_disjoint_from_band_has_no_covered_rows() {
     // A tile entirely below the band contributes no covered rows.
     let img = varied_image(8, 8, 1, bt709_limited());
-    let tile = Tile {
-        image: &img,
-        dst_x: 0,
-        dst_y: 100,
-        opacity: 1.0,
-    };
+    let tile = Tile::placed(&img, 0, 100, 1.0);
     assert_eq!(covered_row_span(20, 0, &[tile]), None);
 }
 
@@ -105,12 +100,7 @@ fn single_tile_span_is_even_aligned_and_covers_tile() {
     // must cover those band-local rows and be even-aligned: start floored to 2,
     // end ceiled to 12.
     let img = varied_image(8, 8, 1, bt709_limited());
-    let tile = Tile {
-        image: &img,
-        dst_x: 0,
-        dst_y: 3,
-        opacity: 1.0,
-    };
+    let tile = Tile::placed(&img, 0, 3, 1.0);
     let (start, end) = covered_row_span(20, 0, &[tile]).expect("tile overlaps band");
     assert_eq!(start, 2, "start floored to even ≤ 3");
     assert_eq!(end, 12, "end ceiled to even ≥ 11");
@@ -123,12 +113,7 @@ fn span_clipped_to_top_edge() {
     // Tile starting above the band (negative band-local rows) clips to 0.
     let img = varied_image(8, 8, 1, bt709_limited());
     // Band covers global rows [10, 30); tile covers [5, 13) → band-local [0, 3).
-    let tile = Tile {
-        image: &img,
-        dst_x: 0,
-        dst_y: 5,
-        opacity: 1.0,
-    };
+    let tile = Tile::placed(&img, 0, 5, 1.0);
     let (start, end) = covered_row_span(20, 10, &[tile]).expect("tile overlaps band top");
     assert_eq!(start, 0, "clipped to band top");
     assert_eq!(end, 4, "ceiled to even ≥ band-local 3");
@@ -139,12 +124,7 @@ fn span_clipped_to_bottom_edge() {
     // Tile overhanging the band bottom clips end to band_rows (even canvas).
     let img = varied_image(8, 20, 1, bt709_limited());
     // Band has 12 rows; tile covers global [4, 24) → band-local [4, 12).
-    let tile = Tile {
-        image: &img,
-        dst_x: 0,
-        dst_y: 4,
-        opacity: 1.0,
-    };
+    let tile = Tile::placed(&img, 0, 4, 1.0);
     let (start, end) = covered_row_span(12, 0, &[tile]).expect("tile overlaps band bottom");
     assert_eq!(start, 4);
     assert_eq!(end, 12, "clipped to band_rows");
@@ -155,12 +135,7 @@ fn single_row_tile_yields_a_two_row_even_span() {
     // A 2-row tile placed at an odd start still produces an even-aligned span
     // that contains both its rows (no 2×2 chroma block may straddle the span).
     let img = varied_image(4, 2, 1, bt709_limited());
-    let tile = Tile {
-        image: &img,
-        dst_x: 0,
-        dst_y: 5, // global rows [5, 7)
-        opacity: 1.0,
-    };
+    let tile = Tile::placed(&img, 0, 5, 1.0); // global rows [5, 7)
     let (start, end) = covered_row_span(40, 0, &[tile]).expect("overlaps");
     assert!(start % 2 == 0 && end % 2 == 0, "even-aligned");
     assert!(start <= 5 && end >= 7, "covers the tile's rows [5,7)");
@@ -171,18 +146,8 @@ fn multiple_tiles_span_is_the_union() {
     let a = varied_image(8, 8, 1, bt709_limited());
     let b = varied_image(8, 8, 2, bt709_limited());
     let tiles = [
-        Tile {
-            image: &a,
-            dst_x: 0,
-            dst_y: 3, // [3, 11)
-            opacity: 1.0,
-        },
-        Tile {
-            image: &b,
-            dst_x: 0,
-            dst_y: 20, // [20, 28)
-            opacity: 1.0,
-        },
+        Tile::placed(&a, 0, 3, 1.0),  // [3, 11)
+        Tile::placed(&b, 0, 20, 1.0), // [20, 28)
     ];
     let (start, end) = covered_row_span(40, 0, &tiles).expect("overlaps");
     assert_eq!(start, 2, "min start floored even");
@@ -217,7 +182,7 @@ proptest! {
         let tiles: Vec<Tile<'_>> = images
             .iter()
             .zip(placements.iter())
-            .map(|(img, &(dy, _h))| Tile { image: img, dst_x: 0, dst_y: dy, opacity: 1.0 })
+            .map(|(img, &(dy, _h))| Tile::placed(img, 0, dy, 1.0))
             .collect();
 
         let band_top = i64::from(py_start);
@@ -299,12 +264,7 @@ fn assert_equivalent(
 #[test]
 fn tile_at_top_edge_matches_reference() {
     let img = varied_image(20, 12, 1, bt709_limited());
-    let tiles = [Tile {
-        image: &img,
-        dst_x: 4,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&img, 4, 0, 1.0)];
     assert_equivalent(
         48,
         32,
@@ -318,12 +278,7 @@ fn tile_at_top_edge_matches_reference() {
 fn tile_at_bottom_edge_matches_reference() {
     let img = varied_image(20, 12, 2, bt709_limited());
     // dst_y 20 + height 12 = 32 = canvas_h: hugs the bottom edge exactly.
-    let tiles = [Tile {
-        image: &img,
-        dst_x: 4,
-        dst_y: 20,
-        opacity: 0.6,
-    }];
+    let tiles = [Tile::placed(&img, 4, 20, 0.6)];
     assert_equivalent(
         48,
         32,
@@ -337,12 +292,7 @@ fn tile_at_bottom_edge_matches_reference() {
 fn full_cover_tile_matches_reference() {
     // A tile covering the whole canvas: accumulator span == full band.
     let img = varied_image(48, 32, 3, bt709_limited());
-    let tiles = [Tile {
-        image: &img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&img, 0, 0, 1.0)];
     assert_equivalent(
         48,
         32,
@@ -368,12 +318,7 @@ fn single_row_pair_band_matches_reference() {
     // A 2-tall tile (one chroma row-pair) at an even row: the span is a single
     // 2-row band — the tiniest accumulator the row-sizing can produce.
     let img = varied_image(8, 2, 5, bt709_limited());
-    let tiles = [Tile {
-        image: &img,
-        dst_x: 6,
-        dst_y: 14,
-        opacity: 0.9,
-    }];
+    let tiles = [Tile::placed(&img, 6, 14, 0.9)];
     assert_equivalent(
         32,
         32,
@@ -417,12 +362,7 @@ proptest! {
         let tiles: Vec<Tile<'_>> = images
             .iter()
             .zip(seeds.iter())
-            .map(|(img, &(_seed, x, y, _w, _h, op, _pq))| Tile {
-                image: img,
-                dst_x: x,
-                dst_y: y,
-                opacity: op,
-            })
+            .map(|(img, &(_seed, x, y, _w, _h, op, _pq))| Tile::placed(img, x, y, op))
             .collect();
 
         for &use_lut in &[true, false] {

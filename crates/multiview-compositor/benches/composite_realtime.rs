@@ -120,12 +120,7 @@ fn build_tiles(images: &[Nv12Image], n: usize) -> Vec<Tile<'_>> {
             let iu = u32::try_from(i).unwrap_or(0);
             let col = iu % cols;
             let row = iu / cols;
-            Tile {
-                image: img,
-                dst_x: (col * tile_w) & !1,
-                dst_y: (row * tile_h) & !1,
-                opacity: 1.0,
-            }
+            Tile::placed(img, (col * tile_w) & !1, (row * tile_h) & !1, 1.0)
         })
         .collect()
 }

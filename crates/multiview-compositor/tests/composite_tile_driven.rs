@@ -155,12 +155,7 @@ fn disjoint_opaque_grid_matches_reference() {
         .enumerate()
         .map(|(i, img)| {
             let iu = u32::try_from(i).unwrap_or(0);
-            Tile {
-                image: img,
-                dst_x: (iu % 3) * 20,
-                dst_y: (iu / 3) * 12,
-                opacity: 1.0,
-            }
+            Tile::placed(img, (iu % 3) * 20, (iu / 3) * 12, 1.0)
         })
         .collect();
     assert_equivalent(
@@ -180,24 +175,9 @@ fn overlapping_partial_opacity_matches_reference() {
     let b = varied_image(40, 30, 2, pq_bt2020());
     let c = varied_image(40, 30, 3, bt709_limited());
     let tiles = [
-        Tile {
-            image: &a,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 0.7,
-        },
-        Tile {
-            image: &b,
-            dst_x: 10,
-            dst_y: 8,
-            opacity: 0.4,
-        },
-        Tile {
-            image: &c,
-            dst_x: 18,
-            dst_y: 14,
-            opacity: 0.55,
-        },
+        Tile::placed(&a, 0, 0, 0.7),
+        Tile::placed(&b, 10, 8, 0.4),
+        Tile::placed(&c, 18, 14, 0.55),
     ];
     assert_equivalent(
         64,
@@ -217,26 +197,11 @@ fn off_canvas_and_clipped_tiles_match_reference() {
     let away = varied_image(10, 10, 7, bt709_limited());
     let tiles = [
         // Overhangs the right + bottom edges.
-        Tile {
-            image: &big,
-            dst_x: 30,
-            dst_y: 20,
-            opacity: 1.0,
-        },
+        Tile::placed(&big, 30, 20, 1.0),
         // Hugs the bottom-right corner, partly clipped.
-        Tile {
-            image: &edge,
-            dst_x: 56,
-            dst_y: 40,
-            opacity: 0.8,
-        },
+        Tile::placed(&edge, 56, 40, 0.8),
         // Entirely off-canvas (dst beyond canvas): contributes nothing.
-        Tile {
-            image: &away,
-            dst_x: 200,
-            dst_y: 200,
-            opacity: 1.0,
-        },
+        Tile::placed(&away, 200, 200, 1.0),
     ];
     assert_equivalent(
         64,
@@ -281,12 +246,7 @@ proptest! {
         let tiles: Vec<Tile<'_>> = images
             .iter()
             .zip(seeds.iter())
-            .map(|(img, &(_seed, x, y, _w, _h, op, _pq))| Tile {
-                image: img,
-                dst_x: x,
-                dst_y: y,
-                opacity: op,
-            })
+            .map(|(img, &(_seed, x, y, _w, _h, op, _pq))| Tile::placed(img, x, y, op))
             .collect();
 
         for &use_lut in &[true, false] {
@@ -340,12 +300,12 @@ fn nine_up_tiles(images: &[Nv12Image]) -> Vec<Tile<'_>> {
         .enumerate()
         .map(|(i, img)| {
             let iu = u32::try_from(i).unwrap_or(0);
-            Tile {
-                image: img,
-                dst_x: ((iu % cols) * tile_w) & !1,
-                dst_y: ((iu / cols) * tile_h) & !1,
-                opacity: 1.0,
-            }
+            Tile::placed(
+                img,
+                ((iu % cols) * tile_w) & !1,
+                ((iu / cols) * tile_h) & !1,
+                1.0,
+            )
         })
         .collect()
 }
@@ -427,12 +387,12 @@ fn tile_driven_scales_with_coverage_not_tile_count() {
         .enumerate()
         .map(|(i, img)| {
             let iu = u32::try_from(i).unwrap_or(0);
-            Tile {
-                image: img,
-                dst_x: ((iu % many_cols) * mw) & !1,
-                dst_y: ((iu / many_cols) * mh) & !1,
-                opacity: 1.0,
-            }
+            Tile::placed(
+                img,
+                ((iu % many_cols) * mw) & !1,
+                ((iu / many_cols) * mh) & !1,
+                1.0,
+            )
         })
         .collect();
     let _ = canvas;

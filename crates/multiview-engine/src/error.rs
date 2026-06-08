@@ -43,6 +43,12 @@ pub enum Error {
     #[error("compositor rejected canvas geometry: {0}")]
     Canvas(String),
 
+    /// A live cell re-point ([`crate::CompositorDrive::rebind_cell`]) targeted an
+    /// unknown cell id or an unknown/undeclared source. The binding is held
+    /// unchanged — never a panic, never a silent mis-route (RT-6 / ADR-0034).
+    #[error("cannot re-point cell: {0}")]
+    Rebind(String),
+
     /// A permanent HA cluster-transport fault while *submitting* a heartbeat or
     /// replication message for publication (a malformed-encoding or a hard
     /// socket fault — never a transient drop, which is silent and best-effort).

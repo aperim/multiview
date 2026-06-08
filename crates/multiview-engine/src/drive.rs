@@ -79,6 +79,17 @@ pub struct CompositorDrive<T> {
     stores: HashMap<String, Arc<TileStore<T>>>,
     /// The active layout (hot-swappable via [`CompositorDrive::set_layout`]).
     layout: Arc<Layout>,
+    /// Cell-id → layout cell index, populated via
+    /// [`CompositorDrive::with_cell_ids`] / [`CompositorDrive::set_cell_ids`].
+    ///
+    /// This is the O(1) lookup that makes [`CompositorDrive::rebind_cell`] a pure
+    /// pointer re-point: it resolves a cell id to its position in `layout.cells`
+    /// so the binding can be mutated in place **without** a full `solve_layout` /
+    /// `validate` re-solve (a pure source re-point leaves geometry unchanged, so
+    /// revalidation is unnecessary — RT-6 / ADR-0034). Empty when no ids were
+    /// supplied (the drive then has no addressable cells to re-point, and
+    /// `rebind_cell` is an honest error).
+    cell_index: HashMap<String, usize>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited by default).
     canvas_color: CanvasColor,
     /// The "no signal" slate card, composited for tiles with no usable frame.
@@ -118,11 +129,50 @@ impl<T> CompositorDrive<T> {
         Ok(Self {
             stores,
             layout,
+            cell_index: HashMap::new(),
             canvas_color,
             nosignal_card: Arc::new(nosignal_card),
             background,
             backend: RunBackend::cpu(),
         })
+    }
+
+    /// Attach the cell ids (in `layout.cells` order) so cells can be addressed by
+    /// id for a live re-point ([`CompositorDrive::rebind_cell`]).
+    ///
+    /// `ids[i]` is the id of `layout.cells[i]` (or [`None`] for an unnamed cell,
+    /// which is then not re-pointable). The shared [`Layout`] type carries no
+    /// per-cell id, so the drive holds this id → index map alongside it; the
+    /// caller (which solved the layout from a config that *does* carry cell ids)
+    /// supplies the parallel id list. Ids beyond the cell count are ignored;
+    /// builder form for ergonomic construction.
+    #[must_use]
+    pub fn with_cell_ids(mut self, ids: Vec<Option<String>>) -> Self {
+        self.set_cell_ids(ids);
+        self
+    }
+
+    /// Set (or replace) the cell-id → index map from `ids` (in `layout.cells`
+    /// order). See [`CompositorDrive::with_cell_ids`].
+    pub fn set_cell_ids(&mut self, ids: Vec<Option<String>>) {
+        self.cell_index.clear();
+        for (index, id) in ids.into_iter().enumerate() {
+            if index >= self.layout.cells.len() {
+                break;
+            }
+            if let Some(id) = id {
+                self.cell_index.insert(id, index);
+            }
+        }
+    }
+
+    /// The source id currently bound to the cell named `cell_id`, if that cell is
+    /// addressable and bound. Reflects any [`CompositorDrive::rebind_cell`] applied
+    /// so far (introspection / control-plane echo).
+    #[must_use]
+    pub fn effective_cell_source(&self, cell_id: &str) -> Option<String> {
+        let index = *self.cell_index.get(cell_id)?;
+        self.layout.cells.get(index).and_then(|c| c.source.clone())
     }
 
     /// Replace the compositor backend the per-tick composite dispatches through.
@@ -170,6 +220,56 @@ impl<T> CompositorDrive<T> {
     /// Register or replace a source's frame store.
     pub fn insert_store(&mut self, source_id: impl Into<String>, store: Arc<TileStore<T>>) {
         self.stores.insert(source_id.into(), store);
+    }
+
+    /// Re-point the cell named `cell_id` to sample source `source_id`, **LIVE** —
+    /// the O(1) crosspoint re-point (RT-6 / ADR-0034, instant VIDEO→cell switch).
+    ///
+    /// This is a pure source re-point: only which store the cell samples changes,
+    /// the cell's geometry/placement is untouched, so it **skips
+    /// `solve_layout`/`validate`** entirely. The next [`CompositorDrive::compose`]
+    /// tick draws the new source — applied at the frame boundary by the engine's
+    /// per-tick control hook, never blocking the output clock (invariant #1: this
+    /// is a binding mutation, not a wait on the new source). The compositor scales
+    /// the new source into the cell at composite time, so a source of any
+    /// geometry composites correctly (scale-at-composite — no clip/smear).
+    ///
+    /// The target `source_id` must have a registered [`TileStore`] (a declared,
+    /// decoding-or-primed source); the cell id must be addressable (supplied via
+    /// [`CompositorDrive::with_cell_ids`]). Either being absent is an honest
+    /// [`Error::Rebind`] and the prior binding is **held** unchanged — never a
+    /// panic, never a silent mis-route.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rebind`] if `cell_id` is unknown, has no addressable index, or
+    /// `source_id` has no registered store.
+    pub fn rebind_cell(&mut self, cell_id: &str, source_id: &str) -> Result<()> {
+        let Some(&index) = self.cell_index.get(cell_id) else {
+            return Err(Error::Rebind(format!("unknown cell id {cell_id:?}")));
+        };
+        if !self.stores.contains_key(source_id) {
+            return Err(Error::Rebind(format!(
+                "cell {cell_id:?}: target source {source_id:?} has no registered store"
+            )));
+        }
+        // Mutate ONLY the bound source of the addressed cell, in place. This is a
+        // copy-on-write of the small `Layout`/cell vector when the `Arc` is
+        // shared (it is not on the hot loop — `compose` borrows, never clones the
+        // `Arc`), and crucially it does NOT call `solve_layout` (which re-derives
+        // every cell from the config and allocates) nor `validate` (geometry is
+        // unchanged on a pure source re-point). The data-plane read in
+        // `sample_cell` then samples the new store on the next tick.
+        let layout = Arc::make_mut(&mut self.layout);
+        let Some(cell) = layout.cells.get_mut(index) else {
+            // The id map and layout disagree (cell removed without updating ids):
+            // hold rather than panic.
+            return Err(Error::Rebind(format!(
+                "cell {cell_id:?}: index {index} is out of range"
+            )));
+        };
+        cell.source = Some(source_id.to_owned());
+        Ok(())
     }
 }
 
@@ -240,28 +340,32 @@ impl CompositorDrive<Nv12Image> {
             if let Some(source) = &cell.source {
                 source_states.insert(source.clone(), state);
             }
-            let (dst_x, dst_y) = cell_origin_pixels(cell, canvas.width, canvas.height);
+            let (dst_x, dst_y, dst_w, dst_h) = cell_dst_rect(cell, canvas.width, canvas.height);
             held.push(Arc::clone(&image));
             placements.push(Placement {
                 image_index: held.len().saturating_sub(1),
                 dst_x,
                 dst_y,
+                dst_w,
+                dst_h,
                 opacity: cell.opacity,
             });
         }
 
-        // Borrow the held images for the compositor's `Tile` slice. The cell's
-        // per-tile opacity drives the compositor's premultiplied linear-light
-        // `over` blend (the compositor re-clamps to `[0, 1]`; the layout is
-        // validated to that interval at construction/swap).
+        // Borrow the held images for the compositor's `Tile` slice. Each tile
+        // carries its DESTINATION cell rect so the compositor scales the source
+        // into the cell at composite time (scale-at-composite, RT-6 / ADR-0034 /
+        // inv #6): a source decoded at any geometry — including one just
+        // re-pointed in — composites correctly into the cell, never clipped or
+        // smeared. When the source already matches the cell size (the steady
+        // state: decode-at-display-resolution) the scale is a no-op and the result
+        // is byte-for-byte the prior 1:1 placement. The cell's per-tile opacity
+        // drives the compositor's premultiplied linear-light `over` blend.
         let tiles: Vec<Tile<'_>> = placements
             .iter()
             .filter_map(|p| {
-                held.get(p.image_index).map(|img| Tile {
-                    image: img.as_ref(),
-                    dst_x: p.dst_x,
-                    dst_y: p.dst_y,
-                    opacity: p.opacity,
+                held.get(p.image_index).map(|img| {
+                    Tile::scaled(img.as_ref(), p.dst_x, p.dst_y, p.dst_w, p.dst_h, p.opacity)
                 })
             })
             .collect();
@@ -324,25 +428,46 @@ struct Placement {
     image_index: usize,
     dst_x: u32,
     dst_y: u32,
+    /// The cell's pixel width on the canvas (the destination the source scales
+    /// into; scale-at-composite).
+    dst_w: u32,
+    /// The cell's pixel height on the canvas.
+    dst_h: u32,
     /// The cell's per-tile opacity (straight alpha), carried to the compositor.
     opacity: f32,
 }
 
-/// Map a cell's normalized top-left origin to canvas pixel coordinates,
-/// saturating into range. The reference compositor places tiles 1:1 (no
-/// resampling), so only the origin is needed.
-fn cell_origin_pixels(
+/// Map a cell's normalized rectangle to a canvas **pixel rectangle**
+/// `(dst_x, dst_y, dst_w, dst_h)`, saturating into range.
+///
+/// Both the origin and the far corner are floored to integer pixels and the size
+/// is the difference (`right - left`, `bottom - top`), so adjacent cells whose
+/// fractional edges meet (`a.x + a.w == b.x`) tile **exactly** — no gap and no
+/// overlapping seam — and a full-canvas cell maps to the full canvas. The size is
+/// what the compositor scales the cell's source into (scale-at-composite); when
+/// the source is already decoded at this size the scale is a no-op (the prior
+/// 1:1 placement, byte-for-byte).
+fn cell_dst_rect(
     cell: &multiview_core::layout::Cell,
     canvas_w: u32,
     canvas_h: u32,
-) -> (u32, u32) {
-    let to_px = |frac: f32, extent: u32| -> u32 {
+) -> (u32, u32, u32, u32) {
+    let edge_px = |frac: f32, extent: u32| -> u32 {
         if !frac.is_finite() || frac <= 0.0 {
             return 0;
         }
         f64_floor_to_u32(f64::from(frac) * f64::from(extent), extent)
     };
-    (to_px(cell.x, canvas_w), to_px(cell.y, canvas_h))
+    let left = edge_px(cell.x, canvas_w);
+    let top = edge_px(cell.y, canvas_h);
+    let right = edge_px(cell.x + cell.w, canvas_w);
+    let bottom = edge_px(cell.y + cell.h, canvas_h);
+    // `right >= left` and `bottom >= top` because the fractions are monotone and
+    // floored identically; `saturating_sub` is defensive against a degenerate
+    // non-finite edge that `edge_px` floored to 0.
+    let dst_w = right.saturating_sub(left);
+    let dst_h = bottom.saturating_sub(top);
+    (left, top, dst_w, dst_h)
 }
 
 /// Floor a non-negative `f64` to a `u32`, clamped to `[0, max]`, with **no**

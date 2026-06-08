@@ -185,80 +185,217 @@ fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12I
     }
 }
 
-/// Apply a salvo's source recalls to the working `config` in place, returning
-/// `true` if at least one cell was rebound (so the caller re-solves + applies).
-///
-/// Honest scope: of a [`Salvo`](multiview_config::Salvo)'s four sub-recalls, this
-/// applies **only** `sources` (the cell→input rebindings). The `layout` preset is
-/// not applied because the software engine has no named-layout library (the
-/// config carries a single working layout, named `schema_v{N}`), and `tally`/`umd`
-/// are not applied because there is no tally arbiter / UMD renderer wired into the
-/// software engine yet. Those are a follow-up (CTL-5 / the tally arbiter). An
-/// unknown cell in a recall is ignored (no effect), never an error.
-fn apply_salvo_sources(config: &mut MultiviewConfig, salvo: &multiview_config::Salvo) -> bool {
-    let mut changed = false;
-    for recall in &salvo.sources {
-        if apply_swap_source(config, &recall.cell, &recall.input_id) {
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// Build the engine's per-tick control hook that drains the command bus and
 /// applies operational commands to the running compositor at the frame boundary,
 /// emitting each command's outcome on the realtime event stream.
 ///
-/// Returned as an `FnMut(&mut CompositorDrive<Nv12Image>)` for the engine's
-/// per-tick control drain: each tick it [`try_drain`](CommandReceiver::try_drain)s
-/// the **non-blocking** queue (usually empty — O(pending), never awaits) and, for
-/// each command, mutates the working [`MultiviewConfig`], re-solves + hot-swaps
-/// the layout where applicable via [`CompositorDrive::set_layout`], and publishes
-/// an outcome [`Event`] via [`EnginePublisher::publish_event`] — which is
-/// **drop-oldest and never awaits a client**, so emitting an outcome can never
-/// back-pressure the engine (invariant #10). Applying at the frame boundary keeps
-/// the output clock unstalled (invariant #1): the drain only mutates the active
-/// layout and emits drop-oldest events; it never blocks.
+/// Returned as an `FnMut(&mut CompositorDrive<Nv12Image>)` wrapping a
+/// [`CommandDrain`]: each tick it [`try_drain`](CommandReceiver::try_drain)s the
+/// **non-blocking** queue (usually empty — O(pending), never awaits), classifies
+/// each command, and publishes an outcome [`Event`] via
+/// [`EnginePublisher::publish_event`] — which is **drop-oldest and never awaits a
+/// client**, so emitting an outcome can never back-pressure the engine
+/// (invariant #10). Applying at the frame boundary keeps the output clock
+/// unstalled (invariant #1): the drain only mutates the active binding and emits
+/// drop-oldest events; it never blocks.
 ///
 /// Per command:
-/// * [`Command::Start`]/[`Command::Stop`] flip the closure's `running` flag and
-///   emit an [`Event::OutputStatus`] (`Running` / `Idle`). There is no output
-///   server wired in the software engine yet, so this is the running-state echo,
-///   not a measured sink status.
-/// * [`Command::SwapSource`] rebinds a tile and re-applies the layout (the prior
-///   behaviour). No dedicated swap event exists in [`Event`], so the observable
-///   outcome is the layout change plus a `tracing` log — deliberately **not** an
-///   invented event variant.
-/// * [`Command::ApplyLayout`] re-applies the working layout iff `layout` matches
-///   the solved working layout's name; any other id is a failure (there is no
-///   named-layout library yet) — logged via `tracing::warn!`, never a panic.
-/// * [`Command::ArmSalvo`] stages a named salvo's source recalls and emits
-///   [`Event::SalvoArmed`]; [`Command::TakeSalvo`] applies the named-or-armed
-///   salvo's source recalls + re-applies the layout and emits
+/// * [`Command::Start`]/[`Command::Stop`] flip the `running` flag and emit an
+///   [`Event::OutputStatus`] (`Running` / `Idle`). There is no output server wired
+///   in the software engine yet, so this is the running-state echo, not a measured
+///   sink status.
+/// * [`Command::SwapSource`] is a pure VIDEO→cell re-point: it goes through the
+///   **O(1)** [`CompositorDrive::rebind_cell`] path (no `solve_layout`/`validate`
+///   re-solve), coalesced + capped at [`MAX_REPOINTS_PER_TICK`] per tick. No
+///   dedicated swap event exists in [`Event`], so the observable outcome is the
+///   binding change plus a `tracing` log.
+/// * [`Command::ApplyLayout`] re-solves + re-applies the working layout iff
+///   `layout` matches the solved working layout's name (geometry CAN change, so it
+///   keeps the re-solve path); any other id is a failure (there is no named-layout
+///   library yet) — logged via `tracing::warn!`, never a panic.
+/// * [`Command::ArmSalvo`] stages a named salvo and emits [`Event::SalvoArmed`];
+///   [`Command::TakeSalvo`] enqueues the named-or-armed salvo's source recalls as
+///   coalesced re-points (one capped pass, O(1) each) and emits
 ///   [`Event::SalvoTaken`]; [`Command::CancelSalvo`] discards the staged salvo and
-///   emits [`Event::SalvoCancelled`]. Only the salvo's `sources` are applied (see
-///   [`apply_salvo_sources`]); the layout/tally/umd sub-recalls are a follow-up.
+///   emits [`Event::SalvoCancelled`]. Only the salvo's `sources` are applied; the
+///   layout/tally/umd sub-recalls are a follow-up.
 /// * [`Command::SetTallyOverride`] has no tally arbiter in the software engine
 ///   yet, so it emits an [`Event::TallyState`] echo (the forced colour, or the
 ///   `Off`/default state when cleared) rather than silently no-op'ing.
 ///
-/// Every arm is panic-free: no `unwrap`/`expect`/indexing. An unknown layout or
-/// salvo logs `tracing::warn!` and emits nothing (or a tally echo), never panics.
+/// Every arm is panic-free: no `unwrap`/`expect`/indexing. An unknown cell,
+/// layout, or salvo logs `tracing::warn!` and emits nothing (or a tally echo),
+/// never panics.
 pub fn command_drain(
-    mut commands: CommandReceiver,
-    mut config: MultiviewConfig,
+    commands: CommandReceiver,
+    config: MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
-    // Closure-captured state across ticks: whether program output is "running",
-    // and the id of the currently-armed salvo (its source recalls are read from
-    // `config` when the take applies). Bounded, allocation-light, touched only on
-    // the (usually empty) per-tick drain.
-    let mut state = DrainState::default();
-
+    let mut drain = CommandDrain::new(commands, config, publisher);
     move |drive: &mut CompositorDrive<Nv12Image>| {
-        for command in commands.try_drain() {
-            apply_command(command, &mut state, &mut config, &publisher, drive);
+        let _applied = drain.apply(drive);
+    }
+}
+
+/// The maximum number of VIDEO→cell re-points applied in **one** frame-boundary
+/// pass (RT-6 / ADR-0034 cap-per-tick).
+///
+/// A pathological salvo storm of K re-points cannot blow the per-tick budget: at
+/// most this many are applied per tick (each an O(1) `rebind_cell`), the rest
+/// stay in a bounded backlog and are applied on subsequent ticks (or dropped
+/// once the backlog itself is full — bounded memory, drop-oldest, never grows).
+/// Sized generously relative to any plausible single-tick operator action while
+/// still bounding the worst case.
+pub const MAX_REPOINTS_PER_TICK: usize = 32;
+
+/// Hard cap on the deferred-re-point backlog. Beyond this the **oldest** pending
+/// re-point is dropped (the newest binding for a cell is what the operator wants;
+/// an old superseded one being shed is harmless). Bounded data-plane-adjacent
+/// memory (safety rule §5: queues drop, never grow).
+const MAX_REPOINT_BACKLOG: usize = 256;
+
+/// The per-tick command-drain machine: it owns the non-blocking command bus, the
+/// working config, the outbound publisher, and the across-tick state, and applies
+/// drained commands to the running [`CompositorDrive`] at the frame boundary.
+///
+/// VIDEO→cell re-points (`SwapSource`, salvo `sources`) go through the **O(1)**
+/// [`CompositorDrive::rebind_cell`] path — no `solve_layout`/`validate` re-solve —
+/// and are **coalesced + capped**: a drained batch is applied as at most
+/// [`MAX_REPOINTS_PER_TICK`] re-points per tick, with the excess held in a bounded
+/// backlog (RT-6 / ADR-0034). Geometry-changing commands (`ApplyLayout`) still
+/// re-solve, exactly as before.
+pub struct CommandDrain {
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    state: DrainState,
+    /// Pending VIDEO→cell re-points awaiting application (bounded, drop-oldest).
+    pending: std::collections::VecDeque<RePoint>,
+    /// One-shot: the drive's cell-id → index map is established the first tick.
+    cell_ids_set: bool,
+    /// Test-only spy counting how many times this drain calls `solve_layout`.
+    #[cfg(test)]
+    resolve_spy: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+/// A queued VIDEO→cell re-point: which cell to re-point to which source.
+#[derive(Debug, Clone)]
+struct RePoint {
+    cell: String,
+    source: String,
+}
+
+impl CommandDrain {
+    /// Build a drain over `commands` for the working `config`, publishing outcomes
+    /// through `publisher`.
+    #[must_use]
+    pub fn new(
+        commands: CommandReceiver,
+        config: MultiviewConfig,
+        publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    ) -> Self {
+        Self {
+            commands,
+            config,
+            publisher,
+            state: DrainState::default(),
+            pending: std::collections::VecDeque::new(),
+            cell_ids_set: false,
+            #[cfg(test)]
+            resolve_spy: None,
         }
+    }
+
+    /// Attach a test spy that counts every `solve_layout` re-solve the drain does.
+    #[cfg(test)]
+    #[must_use]
+    fn with_resolve_spy(mut self, spy: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.resolve_spy = Some(Arc::clone(spy));
+        self
+    }
+
+    /// Apply one frame-boundary pass: drain the (non-blocking) bus, classify each
+    /// command, coalesce + cap the VIDEO→cell re-points, and apply them to the
+    /// running `drive`. Returns the number of re-points applied **this tick**
+    /// (bounded by [`MAX_REPOINTS_PER_TICK`]).
+    ///
+    /// Never blocks, never awaits — it drains a non-blocking queue (O(pending)),
+    /// applies O(1) re-points, and publishes drop-oldest events, so the output
+    /// clock is never stalled by control (invariants #1 + #10).
+    pub fn apply(&mut self, drive: &mut CompositorDrive<Nv12Image>) -> usize {
+        // First tick: hand the drive the cell ids (in config-cell order, which is
+        // exactly `solve_layout`'s core-cell order) so `rebind_cell` can address
+        // cells by id. One-shot, off the hot composite.
+        if !self.cell_ids_set {
+            let ids: Vec<Option<String>> = self
+                .config
+                .cells
+                .iter()
+                .map(|c| Some(c.id.clone()))
+                .collect();
+            drive.set_cell_ids(ids);
+            self.cell_ids_set = true;
+        }
+
+        // Drain the bus, routing commands. Re-points are enqueued (coalesced +
+        // bounded); every other command is applied immediately as before.
+        for command in self.commands.try_drain() {
+            self.route_command(command, drive);
+        }
+
+        // Apply at most the per-tick cap of pending re-points (the rest stay in
+        // the bounded backlog for the next tick). Each is an O(1) `rebind_cell`
+        // (no re-solve); a stale/superseded binding simply re-points again.
+        let mut applied = 0_usize;
+        while applied < MAX_REPOINTS_PER_TICK {
+            let Some(rp) = self.pending.pop_front() else {
+                break;
+            };
+            Self::apply_repoint(&rp, drive);
+            applied = applied.saturating_add(1);
+        }
+        applied
+    }
+
+    /// Enqueue a VIDEO→cell re-point, bounded drop-oldest (safety rule §5). The
+    /// working config is updated eagerly so introspection / a later re-solve sees
+    /// the binding.
+    fn enqueue_repoint(&mut self, cell: &str, source: &str) {
+        // Mirror into the working config (so `ApplyLayout`/export reflect it); an
+        // unknown cell id is ignored there, exactly as before.
+        let _ = apply_swap_source(&mut self.config, cell, source);
+        if self.pending.len() >= MAX_REPOINT_BACKLOG {
+            // Shed the oldest pending re-point: the newest binding wins, so an old
+            // superseded one being dropped never mis-routes.
+            let _ = self.pending.pop_front();
+        }
+        self.pending.push_back(RePoint {
+            cell: cell.to_owned(),
+            source: source.to_owned(),
+        });
+    }
+
+    /// Apply one queued re-point via the O(1) `rebind_cell`; an unknown cell or
+    /// source is logged and held (never a panic, never a re-solve).
+    fn apply_repoint(rp: &RePoint, drive: &mut CompositorDrive<Nv12Image>) {
+        if let Err(e) = drive.rebind_cell(&rp.cell, &rp.source) {
+            tracing::warn!(
+                cell = %rp.cell,
+                source = %rp.source,
+                error = %e,
+                "rebind_cell: re-point held (unknown cell/source)"
+            );
+        }
+    }
+
+    /// Re-solve the working config and hot-swap it onto `drive` (the geometry-
+    /// changing path: `ApplyLayout`). Counts the re-solve on the test spy.
+    fn resolve_and_apply(&self, drive: &mut CompositorDrive<Nv12Image>) -> bool {
+        #[cfg(test)]
+        if let Some(spy) = &self.resolve_spy {
+            spy.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        resolve_and_apply(&self.config, drive)
     }
 }
 
@@ -276,120 +413,127 @@ struct DrainState {
 /// Apply one drained command to the working config + active layout and emit its
 /// outcome event. Panic-free (no `unwrap`/`expect`/indexing); an unknown
 /// layout/salvo logs `tracing::warn!` and emits nothing (or a tally echo).
-fn apply_command(
-    command: Command,
-    state: &mut DrainState,
-    config: &mut MultiviewConfig,
-    publisher: &EnginePublisher<EngineStateSnapshot, Event>,
-    drive: &mut CompositorDrive<Nv12Image>,
-) {
-    match command {
-        Command::Start { .. } => {
-            state.running = true;
-            publish_output_status(publisher, OutputRunState::Running);
-        }
-        Command::Stop { .. } => {
-            state.running = false;
-            publish_output_status(publisher, OutputRunState::Idle);
-        }
-        Command::SwapSource { tile, source, .. } => {
-            if apply_swap_source(config, &tile, &source) {
-                // No dedicated swap event exists; the observable outcome is the
-                // re-applied layout (and the warn log on rejection).
-                let _ = resolve_and_apply(config, drive);
-            } else {
-                tracing::warn!(tile = %tile, "swap_source: no such tile; ignored");
+impl CommandDrain {
+    fn route_command(&mut self, command: Command, drive: &mut CompositorDrive<Nv12Image>) {
+        match command {
+            Command::Start { .. } => {
+                self.state.running = true;
+                publish_output_status(&self.publisher, OutputRunState::Running);
             }
-        }
-        Command::ApplyLayout { layout, .. } => {
-            // There is no named-layout library in the software engine: the working
-            // config carries a single solved layout named `schema_v{N}`. Applying
-            // that name (the only valid id) re-solves + re-applies the working
-            // layout; any other id is a failure (no panic).
-            // FOLLOW-UP (CTL-4/CTL-2): resolve `layout` against a real layout
-            // library once one exists.
-            let working = config.solve_layout().ok().map(|l| l.name);
-            if working.as_deref() == Some(layout.as_str()) {
-                let _ = resolve_and_apply(config, drive);
-            } else {
-                tracing::warn!(
-                    layout = %layout,
-                    "apply_layout: unknown layout id (no named-layout library yet); ignored"
-                );
+            Command::Stop { .. } => {
+                self.state.running = false;
+                publish_output_status(&self.publisher, OutputRunState::Idle);
             }
-        }
-        Command::ArmSalvo { salvo, head, .. } => {
-            if config.salvos.iter().any(|s| s.id == salvo) {
-                // Stage the salvo: its source recalls are read from `config` at
-                // take time, so staging is just remembering the id.
-                state.armed_salvo = Some(salvo.clone());
-                publisher.publish_event(Event::SalvoArmed(salvo_event(
-                    salvo,
-                    SalvoPhase::Armed,
+            Command::SwapSource { tile, source, .. } => {
+                // A pure VIDEO→cell re-point: enqueue it for the O(1) `rebind_cell`
+                // path (coalesced + capped per tick), NOT a full layout re-solve.
+                // An unknown tile id is ignored (no enqueue) with a warn, exactly
+                // as before; the binding only takes effect if the cell exists.
+                if self.config.cells.iter().any(|c| c.id == tile) {
+                    self.enqueue_repoint(&tile, &source);
+                } else {
+                    tracing::warn!(tile = %tile, "swap_source: no such tile; ignored");
+                }
+            }
+            Command::ApplyLayout { layout, .. } => {
+                // There is no named-layout library in the software engine: the
+                // working config carries a single solved layout named
+                // `schema_v{N}`. Applying that name (the only valid id) re-solves +
+                // re-applies the working layout; any other id is a failure (no
+                // panic). A layout change CAN alter geometry, so this keeps the
+                // re-solve path (counted by the test spy).
+                // FOLLOW-UP (CTL-4/CTL-2): resolve `layout` against a real layout
+                // library once one exists.
+                let working = self.config.solve_layout().ok().map(|l| l.name);
+                if working.as_deref() == Some(layout.as_str()) {
+                    let _ = self.resolve_and_apply(drive);
+                } else {
+                    tracing::warn!(
+                        layout = %layout,
+                        "apply_layout: unknown layout id (no named-layout library yet); ignored"
+                    );
+                }
+            }
+            Command::ArmSalvo { salvo, head, .. } => {
+                if self.config.salvos.iter().any(|s| s.id == salvo) {
+                    // Stage the salvo: its source recalls are read from `config` at
+                    // take time, so staging is just remembering the id.
+                    self.state.armed_salvo = Some(salvo.clone());
+                    self.publisher.publish_event(Event::SalvoArmed(salvo_event(
+                        salvo,
+                        SalvoPhase::Armed,
+                        head,
+                    )));
+                } else {
+                    tracing::warn!(salvo = %salvo, "arm_salvo: no such salvo; ignored");
+                }
+            }
+            Command::TakeSalvo { salvo, head, .. } => {
+                // Take the named salvo, else the currently-armed one.
+                let Some(target) = salvo.or_else(|| self.state.armed_salvo.clone()) else {
+                    tracing::warn!("take_salvo: no salvo named and none armed; ignored");
+                    return;
+                };
+                // Clone the matched salvo's recalls out so the immutable borrow of
+                // `config` ends before the mutations below.
+                let Some(recalled) = self.config.salvos.iter().find(|s| s.id == target).cloned()
+                else {
+                    tracing::warn!(salvo = %target, "take_salvo: no such salvo; ignored");
+                    return;
+                };
+                // Enqueue every source recall as a coalesced re-point — all the
+                // re-points of a salvo ride the same bounded, capped pass and are
+                // applied via the O(1) `rebind_cell`, NOT one re-solve per recall.
+                for recall in &recalled.sources {
+                    if self.config.cells.iter().any(|c| c.id == recall.cell) {
+                        self.enqueue_repoint(&recall.cell, &recall.input_id);
+                    }
+                }
+                self.state.armed_salvo = None;
+                self.publisher.publish_event(Event::SalvoTaken(salvo_event(
+                    target,
+                    SalvoPhase::Taken,
                     head,
                 )));
-            } else {
-                tracing::warn!(salvo = %salvo, "arm_salvo: no such salvo; ignored");
             }
-        }
-        Command::TakeSalvo { salvo, head, .. } => {
-            // Take the named salvo, else the currently-armed one.
-            let Some(target) = salvo.or_else(|| state.armed_salvo.clone()) else {
-                tracing::warn!("take_salvo: no salvo named and none armed; ignored");
-                return;
-            };
-            // Clone the matched salvo out so the immutable borrow of `config` ends
-            // before the in-place mutation below (avoids aliasing).
-            let Some(recalled) = config.salvos.iter().find(|s| s.id == target).cloned() else {
-                tracing::warn!(salvo = %target, "take_salvo: no such salvo; ignored");
-                return;
-            };
-            if apply_salvo_sources(config, &recalled) {
-                let _ = resolve_and_apply(config, drive);
+            Command::CancelSalvo { salvo, head, .. } => {
+                // Cancel the named salvo, else the currently-armed one.
+                let target = salvo.or_else(|| self.state.armed_salvo.clone());
+                self.state.armed_salvo = None;
+                let Some(target) = target else {
+                    tracing::warn!("cancel_salvo: no salvo named and none armed; ignored");
+                    return;
+                };
+                self.publisher
+                    .publish_event(Event::SalvoCancelled(salvo_event(
+                        target,
+                        SalvoPhase::Cancelled,
+                        head,
+                    )));
             }
-            state.armed_salvo = None;
-            publisher.publish_event(Event::SalvoTaken(salvo_event(
-                target,
-                SalvoPhase::Taken,
-                head,
-            )));
-        }
-        Command::CancelSalvo { salvo, head, .. } => {
-            // Cancel the named salvo, else the currently-armed one.
-            let target = salvo.or_else(|| state.armed_salvo.clone());
-            state.armed_salvo = None;
-            let Some(target) = target else {
-                tracing::warn!("cancel_salvo: no salvo named and none armed; ignored");
-                return;
-            };
-            publisher.publish_event(Event::SalvoCancelled(salvo_event(
-                target,
-                SalvoPhase::Cancelled,
-                head,
-            )));
-        }
-        Command::SetTallyOverride { target, color, .. } => {
-            // No tally arbiter is wired into the software engine yet, so this emits
-            // a TallyState echo rather than silently no-op'ing: a forced colour maps
-            // to a program-bus lamp of that colour at the default brightness; a
-            // cleared override (`None`) maps to the unlit default state.
-            // FOLLOW-UP: route through the real arbiter once it exists.
-            let tally_state = match color {
-                Some(color) => multiview_core::tally::TallyState {
-                    color,
-                    ..multiview_core::tally::TallyState::default()
-                },
-                None => multiview_core::tally::TallyState::default(),
-            };
-            publisher.publish_event(Event::TallyState(TallyEvent {
-                target,
-                state: tally_state,
-            }));
-        }
-        // `Command` is `#[non_exhaustive]`: a future variant this build does not
-        // know about is logged and skipped, never panicked on.
-        ref other => {
-            tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
+            Command::SetTallyOverride { target, color, .. } => {
+                // No tally arbiter is wired into the software engine yet, so this
+                // emits a TallyState echo rather than silently no-op'ing: a forced
+                // colour maps to a program-bus lamp of that colour at the default
+                // brightness; a cleared override (`None`) maps to the unlit default.
+                // FOLLOW-UP: route through the real arbiter once it exists.
+                let tally_state = match color {
+                    Some(color) => multiview_core::tally::TallyState {
+                        color,
+                        ..multiview_core::tally::TallyState::default()
+                    },
+                    None => multiview_core::tally::TallyState::default(),
+                };
+                self.publisher.publish_event(Event::TallyState(TallyEvent {
+                    target,
+                    state: tally_state,
+                }));
+            }
+            // `Command` is `#[non_exhaustive]`: a future variant this build does not
+            // know about is logged and skipped, never panicked on.
+            ref other => {
+                tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
+            }
         }
     }
 }
@@ -473,9 +617,13 @@ input_id = "in_b"
     }
 
     /// Build a real `CompositorDrive` over the test config's solved layout, with
-    /// no frame stores (every tile shows the slate — irrelevant to these tests,
-    /// which only assert layout/event effects of the drain).
+    /// a registered (empty) `TileStore` per declared source so a live re-point to
+    /// a declared source resolves (the engine refuses to bind a cell to a source
+    /// with no store — RT-6). The stores hold no frame, so every tile shows the
+    /// slate; these tests only assert the layout/binding + event effects of the
+    /// drain, not the pixels.
     fn test_drive(config: &MultiviewConfig) -> CompositorDrive<Nv12Image> {
+        use multiview_framestore::TileStore;
         let layout = config.solve_layout().expect("solve layout");
         let canvas_color = CanvasColor::default();
         let nosignal = Nv12Image::solid(
@@ -487,9 +635,16 @@ input_id = "in_b"
             canvas_color.output_tag(),
         )
         .expect("nosignal card");
+        let mut stores = std::collections::HashMap::new();
+        for source in &config.sources {
+            stores.insert(
+                source.id.clone(),
+                Arc::new(TileStore::<Nv12Image>::with_defaults(source.id.clone())),
+            );
+        }
         CompositorDrive::new(
             Arc::new(layout),
-            std::collections::HashMap::new(),
+            stores,
             nosignal,
             canvas_color,
             LinearRgba::opaque(0.0, 0.0, 0.0),
@@ -684,6 +839,100 @@ input_id = "in_b"
             drive.layout().cells.first().and_then(|c| c.source.clone()),
             Some("in_b".to_owned())
         );
+    }
+
+    /// A K-command salvo of pure source re-points must trigger **at most one**
+    /// `solve_layout` re-solve per tick (the coalesce gate) — and in fact zero,
+    /// because a pure source re-point goes through the O(1) `rebind_cell` path,
+    /// never the full layout re-solve. The spy counts every `solve_layout` call
+    /// the drain makes (RT-6 hard gate #1: no O(1) claim without removing
+    /// `solve_layout` from the re-point path).
+    #[test]
+    fn salvo_of_repoints_does_at_most_one_resolve() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+        let (sender, command_rx) = command_bus(64);
+        let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher))
+            .with_resolve_spy(&resolves);
+        let mut drive = test_drive(&test_config());
+
+        // A salvo storm: a batch of direct SwapSource re-points — all pure source
+        // re-points (no geometry change).
+        for _ in 0..32 {
+            sender
+                .try_submit(Command::SwapSource {
+                    op: OperationId::new(),
+                    tile: "cell_a".to_owned(),
+                    source: "in_b".to_owned(),
+                })
+                .expect("submit swap");
+        }
+        let _applied = drain.apply(&mut drive);
+
+        let count = resolves.load(std::sync::atomic::Ordering::Acquire);
+        assert!(
+            count <= 1,
+            "a K-command salvo of pure source re-points must do <=1 layout \
+             re-solve (got {count}); pure re-points use the O(1) rebind path"
+        );
+
+        // The re-point still took effect (the binding is live).
+        assert_eq!(
+            drive.effective_cell_source("cell_a"),
+            Some("in_b".to_owned()),
+            "the re-point must be applied via rebind_cell"
+        );
+    }
+
+    /// Under a command storm exceeding the per-tick cap, the drain applies at
+    /// most `MAX_REPOINTS_PER_TICK` re-points in a single tick and never blows
+    /// the tick budget (the bounded-drain gate, RT-6 hard gate test (c)). The
+    /// remaining re-points are deferred to later ticks (or shed), not applied in
+    /// one unbounded burst.
+    #[test]
+    fn repoint_storm_is_capped_per_tick() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(256));
+        let (sender, command_rx) = command_bus(256);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        // Far more re-points than the per-tick cap.
+        let storm = MAX_REPOINTS_PER_TICK.saturating_mul(8).max(64);
+        for i in 0..storm {
+            let source = if i % 2 == 0 { "in_b" } else { "in_a" };
+            sender
+                .try_submit(Command::SwapSource {
+                    op: OperationId::new(),
+                    tile: "cell_a".to_owned(),
+                    source: source.to_owned(),
+                })
+                .expect("submit swap");
+        }
+
+        // One drain must apply AT MOST the cap (bounded tick budget), reporting
+        // how many re-points it applied this tick.
+        let applied = drain.apply(&mut drive);
+        assert!(
+            applied <= MAX_REPOINTS_PER_TICK,
+            "a single tick must apply at most {MAX_REPOINTS_PER_TICK} re-points \
+             (applied {applied}); the storm must be capped, not applied in one burst"
+        );
+        assert!(
+            applied > 0,
+            "the drain must make progress (applied {applied})"
+        );
+
+        // Draining repeatedly drains the deferred backlog without ever exceeding
+        // the cap on any single tick — the budget holds across ticks.
+        for _ in 0..storm {
+            let n = drain.apply(&mut drive);
+            assert!(
+                n <= MAX_REPOINTS_PER_TICK,
+                "every tick stays within the cap (got {n})"
+            );
+        }
     }
 
     #[test]
