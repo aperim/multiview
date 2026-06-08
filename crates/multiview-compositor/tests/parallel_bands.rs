@@ -62,18 +62,9 @@ fn parallel_bands_are_byte_identical_to_single_thread() {
     let bg = vertical_ramp(canvas_w, canvas_h);
     let pip = vertical_ramp(40, 40);
     let tiles = [
-        Tile {
-            image: &bg,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        },
-        Tile {
-            image: &pip,
-            dst_x: 8,
-            dst_y: 50, // straddles a band boundary at common thread counts
-            opacity: 0.6,
-        },
+        Tile::placed(&bg, 0, 0, 1.0),
+        // straddles a band boundary at common thread counts
+        Tile::placed(&pip, 8, 50, 0.6),
     ];
     let canvas = CanvasColor::default();
     let background = LinearRgba::opaque(0.05, 0.05, 0.05);
@@ -105,12 +96,7 @@ fn parallel_oracle_path_also_byte_identical() {
     let canvas_w: u32 = 64;
     let canvas_h: u32 = 48;
     let src = vertical_ramp(canvas_w, canvas_h);
-    let tiles = [Tile {
-        image: &src,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&src, 0, 0, 1.0)];
     let canvas = CanvasColor::default();
     let bg = LinearRgba::TRANSPARENT;
 

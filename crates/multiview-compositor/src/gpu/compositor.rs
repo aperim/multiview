@@ -12,8 +12,11 @@
 //!    compress, writing an `R8` Y plane and a half-res `Rg8` interleaved UV
 //!    plane, read back as an [`Nv12Image`] (invariant #5: stays NV12).
 //!
-//! Tiles are placed 1:1 (no scaling) to match the CPU oracle bit-for-bit in
-//! geometry; the SSIM/PSNR check covers the GPU's f32 / transcendental drift.
+//! Tiles are scaled into their destination rect with the same nearest-neighbour
+//! mapping as the CPU reference (`Tile::scaled` / scale-at-composite, RT-6 /
+//! ADR-0034); a 1:1 tile (`dst` size == source size) reduces to the identity
+//! placement, matching the CPU oracle in geometry. The SSIM/PSNR check covers the
+//! GPU's f32 / transcendental drift.
 
 use std::num::NonZeroU64;
 
@@ -201,9 +204,10 @@ impl GpuCompositor {
     /// canvas_h` NV12 output, running the full fixed-order pipeline on the GPU.
     ///
     /// Semantics match [`crate::pipeline::composite`] (the CPU oracle): tiles
-    /// are placed 1:1 in slice order, clipped to the canvas; uncovered pixels
-    /// take `background` (a linear canvas-gamut color). The output carries the
-    /// canvas [`CanvasColor::output_tag`].
+    /// are scaled into their destination rect (scale-at-composite; 1:1 when the
+    /// `dst` size equals the source size) in slice order, clipped to the canvas;
+    /// uncovered pixels take `background` (a linear canvas-gamut color). The output
+    /// carries the canvas [`CanvasColor::output_tag`].
     ///
     /// # Errors
     ///
@@ -598,6 +602,8 @@ impl GpuCompositor {
             tile_params.push(TileParams::build(
                 tile.dst_x,
                 tile.dst_y,
+                tile.dst_w,
+                tile.dst_h,
                 img.width(),
                 img.height(),
                 tile.opacity,

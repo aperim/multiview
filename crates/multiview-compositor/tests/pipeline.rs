@@ -63,12 +63,7 @@ fn solid_opaque_tile_reproduces_itself_on_matching_canvas() {
     // canvas must reproduce its own code values across the whole frame
     // (golden: bit-stable to +/-1 from quantization).
     let tile_img = Nv12Image::solid(4, 4, 126, 128, 128, bt709_limited()).unwrap();
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     let out = composite(
         4,
         4,
@@ -89,12 +84,7 @@ fn solid_opaque_tile_reproduces_itself_on_matching_canvas() {
 #[test]
 fn output_is_tagged_with_canvas_color() {
     let tile_img = Nv12Image::solid(2, 2, 100, 128, 128, bt709_limited()).unwrap();
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     let out = composite(
         2,
         2,
@@ -115,12 +105,7 @@ fn uncovered_pixels_take_background() {
     // background. Bottom-right pixel must be white-ish (high luma), top-left
     // must be the dark tile.
     let tile_img = Nv12Image::solid(2, 2, 16, 128, 128, bt709_limited()).unwrap(); // black
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     let white_bg = LinearRgba::opaque(1.0, 1.0, 1.0);
     let out = composite(4, 4, CanvasColor::default(), white_bg, &tiles).unwrap();
     let w = 4_usize;
@@ -138,12 +123,7 @@ fn half_opacity_tile_blends_with_background_in_linear() {
     // limited Y = round(0.7492*219+16) ~ 180. (Gamma-space blending would give
     // ~0.5 gamma -> Y ~ 126, which is the WRONG answer this guards against.)
     let tile_img = Nv12Image::solid(2, 2, 235, 128, 128, bt709_limited()).unwrap(); // white
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 0.5,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 0.5)];
     let black_bg = LinearRgba::opaque(0.0, 0.0, 0.0);
     let out = composite(2, 2, CanvasColor::default(), black_bg, &tiles).unwrap();
     let luma = out.y_plane()[0];
@@ -167,12 +147,7 @@ fn nv12_geometry_is_validated() {
 #[test]
 fn composite_rejects_odd_canvas() {
     let tile_img = Nv12Image::solid(2, 2, 100, 128, 128, bt709_limited()).unwrap();
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     assert!(composite(
         3,
         2,
@@ -205,18 +180,8 @@ fn two_tile_golden_composite_places_each_tile() {
     let dark = Nv12Image::solid(2, 2, 40, 128, 128, bt709_limited()).unwrap();
     let bright = Nv12Image::solid(2, 2, 200, 128, 128, bt709_limited()).unwrap();
     let tiles = [
-        Tile {
-            image: &dark,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        },
-        Tile {
-            image: &bright,
-            dst_x: 2,
-            dst_y: 0,
-            opacity: 1.0,
-        },
+        Tile::placed(&dark, 0, 0, 1.0),
+        Tile::placed(&bright, 2, 0, 1.0),
     ];
     let out = composite(
         4,
@@ -258,12 +223,7 @@ fn neutral_gray_survives_cross_matrix_pipeline() {
         range: ColorRange::Limited,
     };
     let tile_img = Nv12Image::solid(2, 2, 150, 128, 128, sd_color).unwrap();
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     let out = composite(
         2,
         2,
@@ -324,12 +284,7 @@ fn full_canvas_tile_preserves_saturated_chroma() {
     let canvas_w: u32 = 64;
     let canvas_h: u32 = 36;
     let src = red_blue_split(canvas_w, canvas_h);
-    let tiles = [Tile {
-        image: &src,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&src, 0, 0, 1.0)];
     let out = composite(
         canvas_w,
         canvas_h,
@@ -394,12 +349,7 @@ fn full_canvas_chroma_matches_sub_region_tile() {
         16,
         CanvasColor::default(),
         LinearRgba::TRANSPARENT,
-        &[Tile {
-            image: &src,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        }],
+        &[Tile::placed(&src, 0, 0, 1.0)],
     )
     .unwrap();
 
@@ -410,12 +360,7 @@ fn full_canvas_chroma_matches_sub_region_tile() {
         32,
         CanvasColor::default(),
         LinearRgba::TRANSPARENT,
-        &[Tile {
-            image: &src,
-            dst_x: 16,
-            dst_y: 8,
-            opacity: 1.0,
-        }],
+        &[Tile::placed(&src, 16, 8, 1.0)],
     )
     .unwrap();
 

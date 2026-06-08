@@ -82,6 +82,10 @@ impl TransferId {
 pub struct TileParams {
     /// `[dst_x, dst_y, src_w, src_h]` in pixels.
     pub placement: [u32; 4],
+    /// `[dst_w, dst_h, 0, 0]` in pixels — the destination rect the source is
+    /// scaled into (scale-at-composite, RT-6 / ADR-0034). Equal to `src_w`/`src_h`
+    /// for a 1:1 tile (no scaling).
+    pub dst_size: [u32; 4],
     /// `[opacity, transfer_id, 0, 0]`.
     pub opacity_transfer: [f32; 4],
     /// `[luma_scale, luma_off, chroma_scale, 0]`.
@@ -249,9 +253,15 @@ impl TileParams {
     /// Returns [`Error::UnresolvedColor`] for an unspecified axis, or the
     /// `Unsupported*` variants when an axis has no shader implementation —
     /// exactly the errors the CPU reference raises.
+    #[allow(clippy::too_many_arguments)]
+    // reason: a tile uniform is the placement (dst origin + dst size + src size) +
+    // opacity + the resolved colour axes; grouping them into a struct here would
+    // just shift the same fields and obscure the 1:1-to-`Tile` mapping.
     pub fn build(
         dst_x: u32,
         dst_y: u32,
+        dst_w: u32,
+        dst_h: u32,
         src_w: u32,
         src_h: u32,
         opacity: f32,
@@ -271,8 +281,12 @@ impl TileParams {
         let yuv = yuv_to_rgb_matrix(tile.matrix)?;
         let prim = primaries_matrix(tile.primaries, canvas.primaries)?;
         let transfer = TransferId::from_transfer(tile.transfer)?;
+        // A zero destination size means "place 1:1" — fall back to the source size.
+        let dw = if dst_w == 0 { src_w } else { dst_w };
+        let dh = if dst_h == 0 { src_h } else { dst_h };
         Ok(Self {
             placement: [dst_x, dst_y, src_w, src_h],
+            dst_size: [dw, dh, 0, 0],
             opacity_transfer: [opacity.clamp(0.0, 1.0), transfer.as_f32(), 0.0, 0.0],
             range: expand_range_params(tile_range),
             yuv2rgb0: yuv[0],

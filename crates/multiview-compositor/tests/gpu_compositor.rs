@@ -174,13 +174,29 @@ fn gpu_matches_cpu_single_bt709_gradient_tile() {
     };
     let canvas = CanvasColor::default();
     let tile_img = gradient_tile(64, 64, bt709_limited());
-    let tiles = [Tile {
-        image: &tile_img,
-        dst_x: 0,
-        dst_y: 0,
-        opacity: 1.0,
-    }];
+    let tiles = [Tile::placed(&tile_img, 0, 0, 1.0)];
     assert_gpu_matches_cpu(&gpu, 64, 64, canvas, LinearRgba::TRANSPARENT, &tiles);
+}
+
+#[test]
+fn gpu_matches_cpu_cross_geometry_scaled_tiles() {
+    // RT-6 / ADR-0034 scale-at-composite parity: the GPU must scale a source into
+    // a differently-sized destination cell with the same nearest-neighbour mapping
+    // as the CPU reference. A DOWNSCALE (64x64 source -> 24x24 cell) and an
+    // UPSCALE (16x16 source -> 40x40 cell) together exercise both directions; the
+    // SSIM floor confirms the GPU resample tracks the CPU oracle.
+    let Some(gpu) = try_gpu() else {
+        return;
+    };
+    let canvas = CanvasColor::default();
+    let big = gradient_tile(64, 64, bt709_limited());
+    let small = gradient_tile(16, 16, bt709_limited());
+    let bg = LinearRgba::opaque(0.02, 0.02, 0.02);
+    let tiles = [
+        Tile::scaled(&big, 0, 0, 24, 24, 1.0), // downscale into a 24x24 cell
+        Tile::scaled(&small, 24, 24, 40, 40, 1.0), // upscale into a 40x40 cell
+    ];
+    assert_gpu_matches_cpu(&gpu, 64, 64, canvas, bg, &tiles);
 }
 
 #[test]
@@ -194,20 +210,7 @@ fn gpu_matches_cpu_mixed_colorspace_quad() {
     let a = gradient_tile(32, 32, bt709_limited());
     let b = gradient_tile(32, 32, bt601_limited_525());
     let bg = LinearRgba::opaque(0.05, 0.05, 0.05);
-    let tiles = [
-        Tile {
-            image: &a,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        },
-        Tile {
-            image: &b,
-            dst_x: 32,
-            dst_y: 32,
-            opacity: 1.0,
-        },
-    ];
+    let tiles = [Tile::placed(&a, 0, 0, 1.0), Tile::placed(&b, 32, 32, 1.0)];
     assert_gpu_matches_cpu(&gpu, 64, 64, canvas, bg, &tiles);
 }
 
@@ -224,18 +227,8 @@ fn gpu_matches_cpu_with_partial_opacity_overlap() {
     let top = gradient_tile(48, 48, bt709_limited());
     let bg = LinearRgba::opaque(0.1, 0.2, 0.3);
     let tiles = [
-        Tile {
-            image: &bottom,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        },
-        Tile {
-            image: &top,
-            dst_x: 16,
-            dst_y: 16,
-            opacity: 0.5,
-        },
+        Tile::placed(&bottom, 0, 0, 1.0),
+        Tile::placed(&top, 16, 16, 0.5),
     ];
     assert_gpu_matches_cpu(&gpu, 64, 64, canvas, bg, &tiles);
 }
@@ -247,12 +240,7 @@ fn gpu_rejects_too_many_tiles() {
     };
     let img = gradient_tile(4, 4, bt709_limited());
     let many: Vec<Tile<'_>> = (0..=(multiview_compositor::gpu::MAX_TILES as usize))
-        .map(|_| Tile {
-            image: &img,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        })
+        .map(|_| Tile::placed(&img, 0, 0, 1.0))
         .collect();
     let err = gpu
         .composite(8, 8, CanvasColor::default(), LinearRgba::TRANSPARENT, &many)

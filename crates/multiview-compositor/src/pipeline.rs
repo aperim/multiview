@@ -393,8 +393,22 @@ impl Nv12Image {
     }
 }
 
-/// One tile in the reference composite: a source image, where it lands on the
-/// canvas, and a uniform opacity.
+/// One tile in the reference composite: a source image, the **destination
+/// rectangle** it occupies on the canvas, and a uniform opacity.
+///
+/// The destination rectangle is `[dst_x, dst_x + dst_w) × [dst_y, dst_y + dst_h)`
+/// in canvas pixels. When `dst_w`/`dst_h` differ from the source image's own
+/// dimensions the compositor **scales-at-composite** (invariant #6: composite at
+/// tile/cell resolution), resampling the NV12 source into the destination rect —
+/// the cross-geometry router case (RT-6 / ADR-0034): a source decoded at a
+/// canonical size composites correctly into a differently-sized cell, never
+/// clipped or smeared. When they match, the placement is 1:1 (the prior
+/// behaviour, byte-for-byte). The resample stays in NV12 (invariant #5: no
+/// per-tile RGBA is materialised) and runs the identical fixed colour pipeline
+/// (invariant #8) on each destination pixel's resampled source sample.
+///
+/// Build with [`Tile::placed`] (1:1) or [`Tile::scaled`] (explicit destination
+/// size); the public fields remain accessible for direct construction.
 #[derive(Debug, Clone)]
 pub struct Tile<'a> {
     /// The source NV12 image (its own resolved color).
@@ -403,8 +417,115 @@ pub struct Tile<'a> {
     pub dst_x: u32,
     /// Destination y (pixels) of the tile's top-left on the canvas.
     pub dst_y: u32,
+    /// Destination width (pixels) of the tile on the canvas. The source is
+    /// scaled to this width when it differs from `image.width()`.
+    pub dst_w: u32,
+    /// Destination height (pixels) of the tile on the canvas. The source is
+    /// scaled to this height when it differs from `image.height()`.
+    pub dst_h: u32,
     /// Uniform tile opacity in `[0, 1]` (straight alpha).
     pub opacity: f32,
+}
+
+impl<'a> Tile<'a> {
+    /// A tile placed **1:1** at `(dst_x, dst_y)` — the destination rectangle is
+    /// exactly the source image's own size, so no resampling occurs. This is the
+    /// prior placement behaviour, byte-for-byte.
+    #[must_use]
+    pub const fn placed(image: &'a Nv12Image, dst_x: u32, dst_y: u32, opacity: f32) -> Self {
+        Self {
+            image,
+            dst_x,
+            dst_y,
+            dst_w: image.width,
+            dst_h: image.height,
+            opacity,
+        }
+    }
+
+    /// A tile **scaled** into the destination rectangle
+    /// `[dst_x, dst_x + dst_w) × [dst_y, dst_y + dst_h)`. When `dst_w`/`dst_h`
+    /// differ from the source dimensions the compositor resamples the NV12 source
+    /// into the rect at composite time (scale-at-composite; RT-6 / ADR-0034).
+    #[must_use]
+    pub const fn scaled(
+        image: &'a Nv12Image,
+        dst_x: u32,
+        dst_y: u32,
+        dst_w: u32,
+        dst_h: u32,
+        opacity: f32,
+    ) -> Self {
+        Self {
+            image,
+            dst_x,
+            dst_y,
+            dst_w,
+            dst_h,
+            opacity,
+        }
+    }
+
+    /// The destination width in pixels (the source is scaled to it). Falls back
+    /// to the source image width if `dst_w` was left zero (defensive; the
+    /// constructors always set it positive).
+    #[must_use]
+    const fn eff_dst_w(&self) -> u32 {
+        if self.dst_w == 0 {
+            self.image.width
+        } else {
+            self.dst_w
+        }
+    }
+
+    /// The destination height in pixels (the source is scaled to it). Falls back
+    /// to the source image height if `dst_h` was left zero (defensive).
+    #[must_use]
+    const fn eff_dst_h(&self) -> u32 {
+        if self.dst_h == 0 {
+            self.image.height
+        } else {
+            self.dst_h
+        }
+    }
+
+    /// Map a destination-rect pixel offset `(ddx, ddy)` (relative to the tile's
+    /// `dst_x`/`dst_y` top-left, both `< dst_w`/`dst_h`) to the source pixel it
+    /// samples, using **nearest-neighbour** scaling. When the destination size
+    /// equals the source size this is the identity (`ddx, ddy`), so a 1:1 tile is
+    /// byte-for-byte the prior behaviour.
+    ///
+    /// Nearest-neighbour keeps the reference compositor deterministic and panic-
+    /// free with no fractional-coordinate chroma siting to special-case; the GPU
+    /// fast path can use bilinear/box filtering within its SSIM/PSNR budget.
+    fn src_pixel_for(&self, ddx: u32, ddy: u32) -> (u32, u32) {
+        let dst_w = self.eff_dst_w();
+        let dst_h = self.eff_dst_h();
+        let src_w = self.image.width;
+        let src_h = self.image.height;
+        // `(ddx * src_w) / dst_w`, computed in u64 to avoid overflow, clamped to
+        // the last source column/row. No `as` casts (guardrail).
+        let sx = map_axis(ddx, src_w, dst_w);
+        let sy = map_axis(ddy, src_h, dst_h);
+        (sx, sy)
+    }
+}
+
+/// Nearest-neighbour map of a destination offset `d` in `[0, dst)` to a source
+/// index in `[0, src)`: `floor(d * src / dst)`, clamped to `src - 1`. Total and
+/// panic-free (u64 intermediate, no `as` cast). Returns `0` for a degenerate
+/// `dst == 0` or `src == 0`.
+fn map_axis(d: u32, src: u32, dst: u32) -> u32 {
+    if dst == 0 || src == 0 {
+        return 0;
+    }
+    if src == dst {
+        return d.min(src.saturating_sub(1));
+    }
+    let num = u64::from(d).saturating_mul(u64::from(src));
+    let idx = num / u64::from(dst);
+    let clamped = idx.min(u64::from(src.saturating_sub(1)));
+    u32::try_from(clamped).unwrap_or(src.saturating_sub(1))
 }
 
 /// Composite a back-to-front stack of [`Tile`]s onto a `canvas_w x canvas_h`
@@ -911,7 +1032,9 @@ pub fn covered_row_span(
     let mut max_local_excl: usize = 0;
     for tile in tiles {
         let ty0 = i64::from(tile.dst_y);
-        let ty1 = ty0.saturating_add(i64::from(tile.image.height()));
+        // The tile occupies its DESTINATION rect (scale-at-composite), so the
+        // covered rows span `dst_h`, not the source image height.
+        let ty1 = ty0.saturating_add(i64::from(tile.eff_dst_h()));
         // The tile's global row range ∩ the band.
         let lo = ty0.max(band_top);
         let hi = ty1.min(band_bottom);
@@ -968,8 +1091,11 @@ fn fold_tile_into_band(
 
     let dst_x = i64::from(tile.dst_x);
     let dst_y = i64::from(tile.dst_y);
-    let tile_w = i64::from(tile.image.width());
-    let tile_h = i64::from(tile.image.height());
+    // The tile occupies its DESTINATION rect; the source is scaled into it
+    // (scale-at-composite). The rect extent is `dst_w`/`dst_h`, not the source
+    // image size — they coincide for a 1:1 tile.
+    let tile_w = i64::from(tile.eff_dst_w());
+    let tile_h = i64::from(tile.eff_dst_h());
 
     // Global x range covered: [dst_x, dst_x + tile_w) ∩ [0, w).
     let gx0 = dst_x.max(0);
@@ -984,20 +1110,25 @@ fn fold_tile_into_band(
 
     let mut gy = gy0;
     while gy < gy1 {
-        // Accumulator-local + tile-local rows. Both ranges are derived from the
-        // same clip, so the conversions below are in-range by construction.
-        let (Ok(acc_row), Ok(src_y)) = (usize::try_from(gy - span_top), u32::try_from(gy - dst_y))
+        // Accumulator-local row + the destination-rect-local row offset `ddy`.
+        // Both ranges are derived from the same clip, so the conversions below
+        // are in-range by construction.
+        let (Ok(acc_row), Ok(ddy)) = (usize::try_from(gy - span_top), u32::try_from(gy - dst_y))
         else {
             break;
         };
         let row_base = acc_row.saturating_mul(w);
         let mut gx = gx0;
         while gx < gx1 {
-            // Bands split only rows, so the band-local column == global x.
-            let (Ok(col), Ok(src_x)) = (usize::try_from(gx), u32::try_from(gx - dst_x)) else {
+            // Bands split only rows, so the band-local column == global x; `ddx`
+            // is the destination-rect-local column offset.
+            let (Ok(col), Ok(ddx)) = (usize::try_from(gx), u32::try_from(gx - dst_x)) else {
                 gx += 1;
                 continue;
             };
+            // Scale-at-composite: map the destination-rect offset to the source
+            // pixel (nearest-neighbour; identity when dst size == src size).
+            let (src_x, src_y) = tile.src_pixel_for(ddx, ddy);
             if let Some((y8, cb8, cr8)) = tile.image.sample(src_x, src_y) {
                 let lin = match luts {
                     Some(lut) => {
@@ -1125,15 +1256,20 @@ fn fill_band_solid(
     }
 }
 
-/// Map a canvas pixel to the tile-local coordinate it samples, or [`None`] if
-/// the pixel is outside the tile's placed rectangle.
+/// Map a canvas pixel to the **source** coordinate the tile samples there, or
+/// [`None`] if the pixel is outside the tile's destination rectangle.
+///
+/// The destination rect is `[dst_x, dst_x + dst_w) × [dst_y, dst_y + dst_h)`; a
+/// pixel inside it maps to a source pixel via nearest-neighbour scaling
+/// ([`Tile::src_pixel_for`]). When `dst_w`/`dst_h` equal the source size this is
+/// the identity, so a 1:1 tile is byte-for-byte the prior behaviour.
 fn tile_local_coords(tile: &Tile<'_>, px: u32, py: u32) -> Option<(u32, u32)> {
-    let sx = px.checked_sub(tile.dst_x)?;
-    let sy = py.checked_sub(tile.dst_y)?;
-    if sx >= tile.image.width() || sy >= tile.image.height() {
+    let ddx = px.checked_sub(tile.dst_x)?;
+    let ddy = py.checked_sub(tile.dst_y)?;
+    if ddx >= tile.eff_dst_w() || ddy >= tile.eff_dst_h() {
         return None;
     }
-    Some((sx, sy))
+    Some(tile.src_pixel_for(ddx, ddy))
 }
 
 /// Write one output pixel's `(y, cb, cr)` into the NV12 planes. Chroma is

@@ -174,24 +174,9 @@ fn frame_level_lut_matches_oracle_within_one_code() {
     )
     .unwrap();
     let tiles = [
-        Tile {
-            image: &split,
-            dst_x: 0,
-            dst_y: 0,
-            opacity: 1.0,
-        },
-        Tile {
-            image: &gray601,
-            dst_x: 32,
-            dst_y: 0,
-            opacity: 0.75,
-        },
-        Tile {
-            image: &pq,
-            dst_x: 48,
-            dst_y: 0,
-            opacity: 1.0,
-        },
+        Tile::placed(&split, 0, 0, 1.0),
+        Tile::placed(&gray601, 32, 0, 0.75),
+        Tile::placed(&pq, 48, 0, 1.0),
     ];
     let canvas = CanvasColor::default();
     let bg = LinearRgba::opaque(0.1, 0.1, 0.1);
