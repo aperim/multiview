@@ -67,6 +67,9 @@ fn flat_tile(w: u32, h: u32) -> Nv12Image {
     Nv12Image::new(w, h, y, uv, bt709_limited()).expect("flat tile geometry")
 }
 
+/// Number of steady-state ticks driven after the one-time warmup.
+const TICKS: u32 = 32;
+
 #[test]
 fn steady_state_composite_does_not_allocate_per_tick() {
     let Some(gpu) = try_gpu() else {
@@ -76,10 +79,7 @@ fn steady_state_composite_does_not_allocate_per_tick() {
     let bg = LinearRgba::opaque(0.02, 0.02, 0.02);
     let a = flat_tile(64, 64);
     let b = flat_tile(32, 32);
-    let tiles = [
-        Tile::placed(&a, 0, 0, 1.0),
-        Tile::placed(&b, 64, 0, 1.0),
-    ];
+    let tiles = [Tile::placed(&a, 0, 0, 1.0), Tile::placed(&b, 64, 0, 1.0)];
 
     // First tick: one-time pool fill (allowed to allocate).
     gpu.composite(128, 64, canvas, bg, &tiles)
@@ -87,7 +87,6 @@ fn steady_state_composite_does_not_allocate_per_tick() {
     let after_warmup = gpu.gpu_allocation_count();
 
     // Drive many more ticks at the SAME geometry: steady state must reuse.
-    const TICKS: u32 = 32;
     for _ in 0..TICKS {
         gpu.composite(128, 64, canvas, bg, &tiles)
             .expect("steady composite");
@@ -117,11 +116,12 @@ fn allocation_count_is_bounded_not_proportional_to_ticks() {
     let runs = [4_u32, 40_u32];
     let mut totals = Vec::new();
     for &n in &runs {
-        let gpu2 = match GpuCompositor::new() {
-            Ok(g) => g,
-            Err(_) => return, // adapter vanished mid-test; skip
+        // A fresh compositor per run so the per-run total reflects exactly that
+        // run's allocations (the first `gpu` proved an adapter exists).
+        let Ok(gpu2) = GpuCompositor::new() else {
+            return; // adapter vanished mid-test; skip
         };
-        let _ = &gpu; // keep the first compositor alive for symmetry
+        let _ = &gpu;
         for _ in 0..n {
             gpu2.composite(96, 96, canvas, bg, &tiles)
                 .expect("composite");

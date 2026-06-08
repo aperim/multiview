@@ -78,6 +78,43 @@ pub(crate) struct Dim2 {
     pub height: u32,
 }
 
+/// A keyed cache slot: a cached `key` (the dims/size the resource was built for)
+/// paired with the GPU resource. The generic reuse core [`ensure_cached`]
+/// operates over this so the allocate-vs-reuse + counter logic is one place,
+/// unit-tested GPU-free with a dummy resource.
+pub(crate) trait Keyed {
+    /// The dimension/size key the slot is reused on.
+    type Key: Copy;
+    /// The cached key.
+    fn key(&self) -> Self::Key;
+}
+
+/// The shared allocate-vs-reuse core: if `slot` holds a resource whose key
+/// `reuse`s for `need`, keep it (no allocation); otherwise build a new one at
+/// `build_key` via `make`, bumping `counter` exactly once. This is the single
+/// authority for the allocation count the EFF-0 gate asserts is bounded.
+pub(crate) fn ensure_cached<'a, T, F, R>(
+    slot: &'a mut Option<T>,
+    counter: &AtomicU64,
+    need: T::Key,
+    build_key: T::Key,
+    reuse: R,
+    make: F,
+) -> &'a T
+where
+    T: Keyed,
+    F: FnOnce(T::Key) -> T,
+    R: Fn(T::Key, T::Key) -> bool,
+{
+    let hit = matches!(slot, Some(cached) if reuse(cached.key(), need));
+    if hit {
+        slot.get_or_insert_with(|| make(build_key))
+    } else {
+        counter.fetch_add(1, Ordering::Relaxed);
+        slot.insert(make(build_key))
+    }
+}
+
 /// A pooled texture cached with the extent it was allocated for.
 #[derive(Debug)]
 pub(crate) struct CachedTexture {
@@ -87,16 +124,30 @@ pub(crate) struct CachedTexture {
     pub texture: wgpu::Texture,
 }
 
-/// A pooled buffer cached with the byte size it was allocated for.
+impl Keyed for CachedTexture {
+    type Key = Dim3;
+    fn key(&self) -> Dim3 {
+        self.dim
+    }
+}
+
+/// A pooled buffer cached with the byte size it was allocated for. The padded
+/// bytes-per-row that strips the readback row padding is recomputed by the
+/// caller from the same geometry (it is a pure function of width × bytes/px),
+/// so it is not stored here.
 #[derive(Debug)]
 pub(crate) struct CachedBuffer {
-    /// The size in bytes the buffer was created at.
+    /// The size in bytes the buffer was created at (the reuse key).
     pub size: u64,
-    /// The padded bytes-per-row used to write into / read from it (readback
-    /// buffers only — `0` for storage/uniform buffers).
-    pub padded_bytes_per_row: u32,
     /// The buffer itself.
     pub buffer: wgpu::Buffer,
+}
+
+impl Keyed for CachedBuffer {
+    type Key = u64;
+    fn key(&self) -> u64 {
+        self.size
+    }
 }
 
 /// The run-stable GPU resource pool owned by the compositor. Every field is
@@ -105,8 +156,12 @@ pub(crate) struct CachedBuffer {
 #[derive(Debug, Default)]
 pub(crate) struct SurfacePool {
     /// Count of GPU `create_texture` + `create_buffer` calls the pool has made.
-    /// The EFF-0 gate asserts this stops growing once the pool is warm.
-    alloc_count: AtomicU64,
+    /// The EFF-0 gate asserts this stops growing once the pool is warm. Exposed
+    /// `pub(crate)` so the compositor can borrow it disjointly from the surface
+    /// slots (destructuring `*pool` yields `&alloc_count` alongside each
+    /// `&mut slot` in one statement, which a `self.counter()` accessor — aliasing
+    /// the whole pool — could not).
+    pub(crate) alloc_count: AtomicU64,
 
     // --- tile upload arrays (grow-only on dims, always MAX_TILES layers) -----
     /// Tile Y planes (`R8Unorm` texture-array).
@@ -118,6 +173,7 @@ pub(crate) struct SurfacePool {
     /// Linear `Rgba16Float` composite canvas.
     pub canvas_lin: Option<CachedTexture>,
     /// Linear `Rgba16Float` overlaid canvas (overlay path only).
+    #[cfg(feature = "overlay")]
     pub overlaid: Option<CachedTexture>,
     /// NV12 `R8Unorm` Y output plane.
     pub y_out: Option<CachedTexture>,
@@ -136,10 +192,13 @@ pub(crate) struct SurfacePool {
     /// Tile-params storage buffer, sized for [`MAX_TILES`] tiles.
     pub tile_buf: Option<wgpu::Buffer>,
     /// Overlay-pass uniform buffer.
+    #[cfg(feature = "overlay")]
     pub ov_uniform: Option<wgpu::Buffer>,
     /// Overlay-prim storage buffer, sized for [`MAX_OVERLAY_PRIMS`] prims.
+    #[cfg(feature = "overlay")]
     pub prim_buf: Option<wgpu::Buffer>,
     /// 1×1 placeholder glyph-atlas texture (the image dispatch never samples it).
+    #[cfg(feature = "overlay")]
     pub atlas: Option<wgpu::Texture>,
 }
 
@@ -160,10 +219,9 @@ impl SurfacePool {
     }
 
     /// Reuse-or-(re)create a **grow-only** texture-array slot: keep the cached
-    /// texture if it [`fits`] the request, otherwise build one at the requested
-    /// extent (growing past the old one) via `make`. Returns a borrow of the
-    /// resident texture. [`Option::insert`] guarantees a `Some` result, so there
-    /// is no unreachable branch.
+    /// texture if it [`fits`] the request, otherwise build one that grows past
+    /// the old extent in every dimension via `make` (so a later smaller tick
+    /// reuses rather than thrashing). Returns a borrow of the resident texture.
     pub(crate) fn grow_texture<'a, F>(
         slot: &'a mut Option<CachedTexture>,
         counter: &AtomicU64,
@@ -173,33 +231,23 @@ impl SurfacePool {
     where
         F: FnOnce(Dim3) -> wgpu::Texture,
     {
-        let reuse = matches!(slot, Some(cached) if fits(cached.dim, need));
-        let cached = if reuse {
-            slot.get_or_insert_with(|| CachedTexture {
-                dim: need,
-                texture: make(need),
-            })
-        } else {
-            // Grow to at least the request in every dimension so a subsequent
-            // smaller tick reuses rather than thrashing.
-            let grown = Dim3 {
-                width: slot
-                    .as_ref()
-                    .map_or(need.width, |c| c.dim.width.max(need.width)),
-                height: slot
-                    .as_ref()
-                    .map_or(need.height, |c| c.dim.height.max(need.height)),
-                layers: slot
-                    .as_ref()
-                    .map_or(need.layers, |c| c.dim.layers.max(need.layers)),
-            };
-            counter.fetch_add(1, Ordering::Relaxed);
-            slot.insert(CachedTexture {
-                dim: grown,
-                texture: make(grown),
-            })
+        // Grow to at least the request in every dimension if a realloc is needed.
+        let build = Dim3 {
+            width: slot
+                .as_ref()
+                .map_or(need.width, |c| c.dim.width.max(need.width)),
+            height: slot
+                .as_ref()
+                .map_or(need.height, |c| c.dim.height.max(need.height)),
+            layers: slot
+                .as_ref()
+                .map_or(need.layers, |c| c.dim.layers.max(need.layers)),
         };
-        &cached.texture
+        &ensure_cached(slot, counter, need, build, fits, |d| CachedTexture {
+            dim: d,
+            texture: make(d),
+        })
+        .texture
     }
 
     /// Reuse-or-recreate an **exact-match** canvas-sized texture slot: keep the
@@ -215,60 +263,55 @@ impl SurfacePool {
     where
         F: FnOnce(Dim2) -> wgpu::Texture,
     {
-        let dim3 = Dim3 {
+        let need3 = Dim3 {
             width: need.width,
             height: need.height,
             layers: 1,
         };
-        let reuse = matches!(
-            slot,
-            Some(cached) if exact(
-                Dim2 { width: cached.dim.width, height: cached.dim.height },
-                need,
+        let reuse = |have: Dim3, want: Dim3| {
+            exact(
+                Dim2 {
+                    width: have.width,
+                    height: have.height,
+                },
+                Dim2 {
+                    width: want.width,
+                    height: want.height,
+                },
             )
-        );
-        let cached = if reuse {
-            slot.get_or_insert_with(|| CachedTexture {
-                dim: dim3,
-                texture: make(need),
-            })
-        } else {
-            counter.fetch_add(1, Ordering::Relaxed);
-            slot.insert(CachedTexture {
-                dim: dim3,
-                texture: make(need),
-            })
         };
-        &cached.texture
+        &ensure_cached(slot, counter, need3, need3, reuse, |d| CachedTexture {
+            dim: d,
+            texture: make(Dim2 {
+                width: d.width,
+                height: d.height,
+            }),
+        })
+        .texture
     }
 
     /// Reuse-or-recreate an **exact-size** buffer slot (a readback buffer keyed
-    /// on its byte size + padded stride). Built via `make` on a size change.
+    /// on its byte size). Built via `make` on a size change.
     pub(crate) fn exact_buffer<'a, F>(
         slot: &'a mut Option<CachedBuffer>,
         counter: &AtomicU64,
         size: u64,
-        padded_bytes_per_row: u32,
         make: F,
     ) -> &'a CachedBuffer
     where
         F: FnOnce(u64) -> wgpu::Buffer,
     {
-        let reuse = matches!(slot, Some(cached) if cached.size == size);
-        if reuse {
-            slot.get_or_insert_with(|| CachedBuffer {
-                size,
-                padded_bytes_per_row,
-                buffer: make(size),
-            })
-        } else {
-            counter.fetch_add(1, Ordering::Relaxed);
-            slot.insert(CachedBuffer {
-                size,
-                padded_bytes_per_row,
-                buffer: make(size),
-            })
-        }
+        ensure_cached(
+            slot,
+            counter,
+            size,
+            size,
+            |have, want| have == want,
+            |sz| CachedBuffer {
+                size: sz,
+                buffer: make(sz),
+            },
+        )
     }
 
     /// Reuse-or-create a fixed-size buffer slot allocated once and refilled in
@@ -290,6 +333,7 @@ impl SurfacePool {
 
     /// Reuse-or-create a fixed-size texture slot allocated once (the 1×1 atlas
     /// placeholder). Built via `make` on first use only.
+    #[cfg(feature = "overlay")]
     pub(crate) fn fixed_texture<'a, F>(
         slot: &'a mut Option<wgpu::Texture>,
         counter: &AtomicU64,
@@ -302,13 +346,6 @@ impl SurfacePool {
             counter.fetch_add(1, Ordering::Relaxed);
         }
         slot.get_or_insert_with(make)
-    }
-
-    /// A handle to the internal allocation counter, so the per-slot helpers
-    /// (which take `&mut Option<..>` borrows that would otherwise conflict with
-    /// `&self`) can record allocations.
-    pub(crate) fn counter(&self) -> &AtomicU64 {
-        &self.alloc_count
     }
 
     /// Bump the counter for an allocation made outside the slot helpers.
@@ -335,6 +372,31 @@ pub(crate) fn comp_uniform_size() -> u64 {
 #[must_use]
 pub(crate) fn enc_uniform_size() -> u64 {
     u64::try_from(core::mem::size_of::<EncodeUniforms>()).unwrap_or(0)
+}
+
+/// The byte size of the overlay-pass uniform buffer.
+#[cfg(feature = "overlay")]
+#[must_use]
+pub(crate) fn ov_uniform_size() -> u64 {
+    u64::try_from(core::mem::size_of::<
+        crate::overlay::gpu_subpass::OverlayUniforms,
+    >())
+    .unwrap_or(0)
+}
+
+/// The byte size of the [`MAX_OVERLAY_PRIMS`]-sized overlay-prim storage buffer.
+/// The plan is already bounded to `MAX_OVERLAY_PRIMS` prims, so this fixed-size
+/// buffer always holds the whole packed list and the shader reads only the
+/// `count` entries actually written.
+#[cfg(feature = "overlay")]
+#[must_use]
+pub(crate) fn prim_buf_size() -> u64 {
+    let stride = u64::try_from(core::mem::size_of::<
+        crate::overlay::gpu_subpass::OverlayPrimGpu,
+    >())
+    .unwrap_or(0);
+    let max = u64::from(crate::overlay::gpu_subpass::MAX_OVERLAY_PRIMS.max(1));
+    stride.saturating_mul(max)
 }
 
 #[cfg(test)]
@@ -441,5 +503,134 @@ mod tests {
         pool.bump_for_test();
         pool.bump_for_test();
         assert_eq!(pool.alloc_count(), 2);
+    }
+
+    /// A GPU-free stand-in for a cached resource, so `ensure_cached` (the
+    /// allocate-vs-reuse + counter core the real textures/buffers route through)
+    /// can be unit-tested end-to-end without a wgpu device. `key` is the reuse
+    /// key; `built_at` records the key it was constructed with.
+    #[derive(Debug, Clone, Copy)]
+    struct DummyRes {
+        key: u32,
+        built_at: u32,
+    }
+
+    impl Keyed for DummyRes {
+        type Key = u32;
+        fn key(&self) -> u32 {
+            self.key
+        }
+    }
+
+    /// Exact-match reuse predicate for the dummy.
+    fn dummy_exact(have: u32, want: u32) -> bool {
+        have == want
+    }
+
+    /// Grow-only reuse predicate for the dummy (cache serves any equal-or-smaller
+    /// request).
+    fn dummy_fits(have: u32, want: u32) -> bool {
+        have >= want
+    }
+
+    #[test]
+    fn ensure_cached_allocates_once_then_reuses_at_same_key() {
+        let counter = AtomicU64::new(0);
+        let mut slot: Option<DummyRes> = None;
+        let mut builds = 0_u32;
+
+        // First call at key 100 → one allocation.
+        let first = *ensure_cached(&mut slot, &counter, 100, 100, dummy_exact, |k| {
+            builds += 1;
+            DummyRes {
+                key: k,
+                built_at: k,
+            }
+        });
+        assert_eq!(first.built_at, 100);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert_eq!(builds, 1);
+
+        // 50 more calls at the SAME key → ZERO further allocations (reuse).
+        for _ in 0..50 {
+            let r = *ensure_cached(&mut slot, &counter, 100, 100, dummy_exact, |k| {
+                builds += 1;
+                DummyRes {
+                    key: k,
+                    built_at: k,
+                }
+            });
+            assert_eq!(r.built_at, 100);
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "steady-state reuse must not allocate"
+        );
+        assert_eq!(builds, 1, "make must run exactly once for a stable key");
+    }
+
+    #[test]
+    fn ensure_cached_reallocates_on_a_key_change_then_reuses_again() {
+        let counter = AtomicU64::new(0);
+        let mut slot: Option<DummyRes> = None;
+        let mk = |k: u32| DummyRes {
+            key: k,
+            built_at: k,
+        };
+
+        // Warm at key A.
+        ensure_cached(&mut slot, &counter, 64, 64, dummy_exact, mk);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        // A genuine key change (a resize) reallocates exactly once.
+        ensure_cached(&mut slot, &counter, 256, 256, dummy_exact, mk);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "a resize allocates once"
+        );
+
+        // Steady state at the NEW key reuses again (no more allocations).
+        for _ in 0..16 {
+            ensure_cached(&mut slot, &counter, 256, 256, dummy_exact, mk);
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "reuse resumes after the resize"
+        );
+    }
+
+    #[test]
+    fn ensure_cached_grow_only_reuses_for_smaller_requests() {
+        let counter = AtomicU64::new(0);
+        let mut slot: Option<DummyRes> = None;
+        let mk = |k: u32| DummyRes {
+            key: k,
+            built_at: k,
+        };
+
+        // Build at 128.
+        ensure_cached(&mut slot, &counter, 128, 128, dummy_fits, mk);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        // Smaller requests fit the grown cache → no allocation.
+        for need in [64_u32, 32, 100, 128] {
+            ensure_cached(&mut slot, &counter, need, need.max(128), dummy_fits, mk);
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "grow-only cache serves smaller-or-equal requests without reallocating"
+        );
+
+        // A larger request grows once.
+        ensure_cached(&mut slot, &counter, 256, 256, dummy_fits, mk);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "a larger request grows once"
+        );
     }
 }

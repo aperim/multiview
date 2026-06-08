@@ -22,11 +22,11 @@ use std::num::NonZeroU64;
 
 use bytemuck::Zeroable;
 use multiview_core::traits::{BackendKind, Compositor};
-use wgpu::util::DeviceExt;
 
 use crate::blend::LinearRgba;
 use crate::error::{Error, Result};
 use crate::gpu::device::GpuContext;
+use crate::gpu::pool::{self, CachedBuffer, Dim2, Dim3, SurfacePool};
 use crate::gpu::shader::{composite_wgsl, encode_wgsl};
 use crate::gpu::uniforms::{CompositeUniforms, EncodeUniforms, TileParams};
 use crate::pipeline::{CanvasColor, Nv12Image, Tile};
@@ -53,9 +53,13 @@ pub const OVERLAY_IMAGE_MAX_DIM: u32 = 1024;
 /// A GPU-resident NV12 multiview compositor.
 ///
 /// Owns the device, the two compute pipelines, and their static bind-group
-/// layouts; per-composite it allocates transient textures/buffers sized to the
-/// request. Construct with [`GpuCompositor::new`], which fails gracefully (no
-/// panic) when there is no GPU.
+/// layouts. The run-stable per-tick surfaces (the linear canvas, tile arrays,
+/// NV12 output planes, readback + uniform/storage buffers) live in a
+/// [`SurfacePool`] allocated **once** at first-frame sizing and **reused** every
+/// tick — never freed and reallocated per frame (EFF-0, safety rule §5). A
+/// dimension change (a rare resize) recreates the affected surface; steady
+/// state allocates nothing. Construct with [`GpuCompositor::new`], which fails
+/// gracefully (no panic) when there is no GPU.
 #[derive(Debug)]
 pub struct GpuCompositor {
     ctx: GpuContext,
@@ -64,6 +68,13 @@ pub struct GpuCompositor {
     encode_pipeline_y: wgpu::ComputePipeline,
     encode_pipeline_uv: wgpu::ComputePipeline,
     encode_layout: wgpu::BindGroupLayout,
+    /// The run-stable surface pool (reused per tick, never reallocated per
+    /// frame). Behind a `Mutex` for interior mutability: `composite` takes
+    /// `&self` (so the trait object stays shareable), but the pool is mutated to
+    /// grow/refit a surface on the rare resize. The lock is held only for the
+    /// synchronous duration of one composite — never across an `.await` — so it
+    /// cannot back-pressure the engine (invariant #10).
+    pool: std::sync::Mutex<SurfacePool>,
     /// The overlay sub-pass + its content-keyed image-texture cache, compiled
     /// once and reused (the cache holds the upload-once bookkeeping across
     /// ticks). Present only with the `overlay` feature.
@@ -195,9 +206,24 @@ impl GpuCompositor {
             encode_pipeline_y,
             encode_pipeline_uv,
             encode_layout,
+            pool: std::sync::Mutex::new(SurfacePool::default()),
             #[cfg(feature = "overlay")]
             overlay,
         })
+    }
+
+    /// The number of GPU buffer/texture allocations the surface pool has made
+    /// since construction.
+    ///
+    /// Used by the EFF-0 allocation-count gate: once the pool is warm (first
+    /// frame at a given geometry), steady-state composite ticks must NOT
+    /// increase this — the pool reuses its surfaces rather than reallocating per
+    /// frame. A genuine resize (a rare dimension change) is the only thing that
+    /// bumps it thereafter. Returns `0` if the pool lock is momentarily
+    /// poisoned (never on the hot path).
+    #[must_use]
+    pub fn gpu_allocation_count(&self) -> u64 {
+        self.pool.lock().map_or(0, |p| p.alloc_count())
     }
 
     /// Composite a back-to-front stack of [`Tile`]s onto a `canvas_w x
@@ -227,13 +253,45 @@ impl GpuCompositor {
         // The no-overlay path: composite straight into the canvas the encode
         // pass reads, with no overlay sub-pass between (byte-for-byte the prior
         // behaviour). The overlay dispatch is `composite_with_overlays`.
+        //
+        // Lock the surface pool for the synchronous duration of this composite:
+        // its run-stable textures/buffers are reused in place (and grown only on
+        // a resize). The lock is never held across an `.await` — these methods
+        // are synchronous — so it cannot back-pressure the engine (invariant
+        // #10).
+        let mut pool = self
+            .pool
+            .lock()
+            .map_err(|_| Error::GpuRuntime("surface pool lock poisoned".to_owned()))?;
         let device = self.ctx.device();
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        let canvas_lin =
-            self.record_composite(&mut encoder, canvas_w, canvas_h, canvas, background, tiles)?;
-        let canvas_view = canvas_lin.create_view(&wgpu::TextureViewDescriptor::default());
-        self.encode_and_read(&mut encoder, &canvas_view, canvas_w, canvas_h, canvas)
+        // Run the composite pass into the pooled linear canvas, then encode +
+        // read back. The composite output texture is read in the same `pool`
+        // borrow, so derive its view before the encode borrows the pool again.
+        self.record_composite(
+            &mut pool,
+            &mut encoder,
+            canvas_w,
+            canvas_h,
+            canvas,
+            background,
+            tiles,
+        )?;
+        let canvas_view = pool
+            .canvas_lin
+            .as_ref()
+            .ok_or_else(|| Error::GpuRuntime("composite canvas missing".to_owned()))?
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.encode_and_read(
+            &mut pool,
+            &mut encoder,
+            &canvas_view,
+            canvas_w,
+            canvas_h,
+            canvas,
+        )
     }
 
     /// Composite the `tiles`, blend an overlay `list` over the linear canvas via
@@ -268,14 +326,37 @@ impl GpuCompositor {
         tiles: &[Tile<'_>],
         list: &crate::overlay::subpass::OverlayDrawList,
     ) -> Result<Nv12Image> {
+        // Lock the surface pool for the synchronous duration of this composite
+        // (consistent lock order: pool BEFORE overlay), then run the front half
+        // into the pooled linear canvas. The lock is never held across an
+        // `.await` (these methods are synchronous), so it cannot back-pressure
+        // the engine (invariant #10).
+        let mut pool = self
+            .pool
+            .lock()
+            .map_err(|_| Error::GpuRuntime("surface pool lock poisoned".to_owned()))?;
         let device = self.ctx.device();
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        // Front half: composite the tiles into the straight-alpha linear canvas.
-        let canvas_lin =
-            self.record_composite(&mut encoder, canvas_w, canvas_h, canvas, background, tiles)?;
-        let composite_view = canvas_lin.create_view(&wgpu::TextureViewDescriptor::default());
+        // Front half: composite the tiles into the pooled straight-alpha canvas.
+        self.record_composite(
+            &mut pool,
+            &mut encoder,
+            canvas_w,
+            canvas_h,
+            canvas,
+            background,
+            tiles,
+        )?;
+        // The view holds an internal (Arc) handle to the pooled texture, not a
+        // Rust borrow of `pool`, so `pool` can be re-borrowed below.
+        let composite_view = pool
+            .canvas_lin
+            .as_ref()
+            .ok_or_else(|| Error::GpuRuntime("composite canvas missing".to_owned()))?
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Plan the overlay uploads (upload-once content-keyed cache) under the
         // overlay lock; the cache state must persist across frames.
@@ -290,14 +371,22 @@ impl GpuCompositor {
             // No blendable overlay primitive: encode the composite canvas
             // directly (the no-overlay path — byte-for-byte `composite`).
             drop(guard);
-            return self.encode_and_read(&mut encoder, &composite_view, canvas_w, canvas_h, canvas);
+            return self.encode_and_read(
+                &mut pool,
+                &mut encoder,
+                &composite_view,
+                canvas_w,
+                canvas_h,
+                canvas,
+            );
         }
 
         // Middle: record the overlay sub-pass, blending `plan` over the canvas
-        // into a second linear canvas the encode pass then reads. Cues that
+        // into the pooled overlaid canvas the encode pass then reads. Cues that
         // still `needs_upload` are written into the PERSISTENT image array, so a
         // static caption is uploaded once and reused.
-        let overlaid = self.record_overlay(
+        self.record_overlay(
+            &mut pool,
             &mut encoder,
             resources,
             &composite_view,
@@ -306,10 +395,22 @@ impl GpuCompositor {
             &plan,
         )?;
         drop(guard);
-        let overlaid_view = overlaid.create_view(&wgpu::TextureViewDescriptor::default());
+        let overlaid_view = pool
+            .overlaid
+            .as_ref()
+            .ok_or_else(|| Error::GpuRuntime("overlaid canvas missing".to_owned()))?
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Back half: encode the overlaid canvas to NV12 and read it back.
-        self.encode_and_read(&mut encoder, &overlaid_view, canvas_w, canvas_h, canvas)
+        self.encode_and_read(
+            &mut pool,
+            &mut encoder,
+            &overlaid_view,
+            canvas_w,
+            canvas_h,
+            canvas,
+        )
     }
 
     /// Record the overlay sub-pass into `encoder`: upload each image cue's
@@ -327,22 +428,25 @@ impl GpuCompositor {
     ///
     /// [`Error::Geometry`] on a primitive-count or row-stride overflow.
     #[cfg(feature = "overlay")]
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     // reason: the overlay sub-pass is one linear resource-setup sequence (upload
     // the cues that changed -> pack the prim/uniform buffers -> build the bind
     // group with all six bindings -> record the dispatch); splitting it would
     // scatter the transient buffer/view lifetimes that must all outlive the
-    // recorded pass. Kept as one readable function with section comments,
-    // mirroring `record_composite`.
+    // recorded pass. The args are the pool + encoder + overlay resources +
+    // canvas geometry + plan; grouping them would just shift the same fields.
+    // Kept as one readable function with section comments, mirroring
+    // `record_composite`.
     fn record_overlay(
         &self,
+        pool: &mut SurfacePool,
         encoder: &mut wgpu::CommandEncoder,
         resources: &OverlayResources,
         composite_view: &wgpu::TextureView,
         canvas_w: u32,
         canvas_h: u32,
         plan: &crate::overlay::gpu_image::ImageUploadPlan<'_>,
-    ) -> Result<wgpu::Texture> {
+    ) -> Result<()> {
         use crate::overlay::gpu_subpass::{OverlayPrimGpu, OverlayUniforms};
 
         let device = self.ctx.device();
@@ -409,11 +513,6 @@ impl GpuCompositor {
         let ov_uniform = OverlayUniforms {
             canvas: [canvas_w, canvas_h, prim_count, 0],
         };
-        let ov_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("multiview overlay uniforms"),
-            contents: bytemuck::bytes_of(&ov_uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
         // The storage binding must be non-empty even with zero packed prims
         // (e.g. only-skipped glyphs); pad with one zeroed prim the shader's
         // `count == 0` loop never reads.
@@ -421,49 +520,78 @@ impl GpuCompositor {
         if prims.is_empty() {
             prims.push(OverlayPrimGpu::zeroed());
         }
-        let prim_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("multiview overlay prims"),
-            contents: bytemuck::cast_slice(&prims),
-            usage: wgpu::BufferUsages::STORAGE,
+
+        // Destructure the pool so the overlaid canvas, overlay uniform, prim
+        // storage, and atlas placeholder are each borrowed disjointly from the
+        // shared counter.
+        let SurfacePool {
+            alloc_count,
+            overlaid,
+            ov_uniform: ov_uniform_slot,
+            prim_buf: prim_buf_slot,
+            atlas: atlas_slot,
+            ..
+        } = pool;
+
+        // Refill the pooled overlay uniform in place.
+        let ov_uniform_buf = SurfacePool::fixed_buffer(ov_uniform_slot, alloc_count, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("multiview overlay uniforms"),
+                size: pool::ov_uniform_size(),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
+        queue.write_buffer(ov_uniform_buf, 0, bytemuck::bytes_of(&ov_uniform));
+
+        // Refill the pooled (MAX_OVERLAY_PRIMS-sized) prim storage buffer in
+        // place; the shader reads only the `prim_count` entries written.
+        let prim_buf = SurfacePool::fixed_buffer(prim_buf_slot, alloc_count, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("multiview overlay prims"),
+                size: pool::prim_buf_size(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        queue.write_buffer(prim_buf, 0, bytemuck::cast_slice(&prims));
 
         // The overlaid output canvas the encode pass reads (a distinct storage
-        // texture — `rgba16float` read-write is not portable in WebGPU core).
-        let overlaid = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview overlaid canvas"),
-            size: wgpu::Extent3d {
+        // texture — `rgba16float` read-write is not portable in WebGPU core),
+        // pooled exactly like the composite canvas.
+        let overlaid_view = SurfacePool::exact_texture(
+            overlaid,
+            alloc_count,
+            Dim2 {
                 width: canvas_w,
                 height: canvas_h,
-                depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+            |d| linear_canvas_texture(device, d),
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
 
         // A 1x1 placeholder glyph atlas (binding 2): glyphs are skipped by the
         // plan, so it is never sampled, but the bind group must be complete.
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview overlay atlas placeholder"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        // Allocated once and reused.
+        let atlas = SurfacePool::fixed_texture(atlas_slot, alloc_count, || {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("multiview overlay atlas placeholder"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
         });
 
         let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
         let images_view = images.create_view(&wgpu::TextureViewDescriptor::default());
-        let overlaid_view = overlaid.create_view(&wgpu::TextureViewDescriptor::default());
 
         let overlay_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("multiview overlay bind"),
@@ -506,30 +634,35 @@ impl GpuCompositor {
             pass.dispatch_workgroups(div_ceil(canvas_w, 8), div_ceil(canvas_h, 8), 1);
         }
 
-        Ok(overlaid)
+        Ok(())
     }
 
     /// Record the composite pass into `encoder`: upload the tiles and run the
-    /// front half of the fixed pipeline, returning the linear `Rgba16Float`
-    /// canvas texture (straight alpha) the encode (or overlay) pass then reads.
+    /// front half of the fixed pipeline into the pooled linear `Rgba16Float`
+    /// canvas (straight alpha) the encode (or overlay) pass then reads. The
+    /// surfaces come from `pool` — reused in place, grown only on a resize, never
+    /// reallocated per tick (EFF-0).
     ///
     /// # Errors
     ///
     /// Same as [`Self::composite`] (geometry, tile-count, color errors).
-    #[allow(clippy::too_many_lines)]
-    // reason: a GPU composite pass is one linear sequence (upload tiles ->
-    // record the composite dispatch); splitting it further would scatter the
-    // transient texture/buffer lifetimes and obscure the fixed pipeline order.
-    // Kept as one readable function with section comments.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    // reason: a GPU composite pass is one linear sequence (size/reuse the pooled
+    // surfaces -> upload tiles -> record the composite dispatch); splitting it
+    // further would scatter the borrows of the pooled textures/buffers and
+    // obscure the fixed pipeline order. The args are the pool (reused surfaces)
+    // + encoder + the canvas/background/tiles request; grouping them would just
+    // shift the same fields. Kept as one readable function with section comments.
     fn record_composite(
         &self,
+        pool: &mut SurfacePool,
         encoder: &mut wgpu::CommandEncoder,
         canvas_w: u32,
         canvas_h: u32,
         canvas: CanvasColor,
         background: LinearRgba,
         tiles: &[Tile<'_>],
-    ) -> Result<wgpu::Texture> {
+    ) -> Result<()> {
         require_even_positive(canvas_w, canvas_h, "canvas")?;
         let tile_count = u32::try_from(tiles.len())
             .map_err(|_| Error::GpuLimit(format!("tile count {} overflows u32", tiles.len())))?;
@@ -542,63 +675,14 @@ impl GpuCompositor {
         let device = self.ctx.device();
         let queue = self.ctx.queue();
 
-        // --- upload tiles into a texture array (max dims across tiles) --------
+        // Pack the per-tile params + compute the max tile extent BEFORE touching
+        // the pool, so a color/geometry error short-circuits without growing it.
         let max_w = tiles.iter().map(|t| t.image.width()).max().unwrap_or(2);
         let max_h = tiles.iter().map(|t| t.image.height()).max().unwrap_or(2);
-        let layers = tile_count.max(1);
-        let y_array = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview tile Y planes"),
-            size: wgpu::Extent3d {
-                width: max_w,
-                height: max_h,
-                depth_or_array_layers: layers,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let uv_array = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview tile UV planes"),
-            size: wgpu::Extent3d {
-                width: max_w / 2,
-                height: max_h / 2,
-                depth_or_array_layers: layers,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
         let mut tile_params: Vec<TileParams> = Vec::with_capacity(tiles.len());
-        for (layer, tile) in tiles.iter().enumerate() {
+        for tile in tiles {
             let img = tile.image;
             require_even_positive(img.width(), img.height(), "tile")?;
-            let layer_u32 = u32::try_from(layer)
-                .map_err(|_| Error::GpuLimit("tile layer overflows u32".to_owned()))?;
-            write_tile_plane(
-                queue,
-                &y_array,
-                layer_u32,
-                img.width(),
-                img.height(),
-                1,
-                img.y_plane(),
-            );
-            write_tile_plane(
-                queue,
-                &uv_array,
-                layer_u32,
-                img.width() / 2,
-                img.height() / 2,
-                2,
-                img.uv_plane(),
-            );
             tile_params.push(TileParams::build(
                 tile.dst_x,
                 tile.dst_y,
@@ -612,45 +696,119 @@ impl GpuCompositor {
             )?);
         }
         // The texture array must have at least one layer even with zero tiles;
-        // pad the params buffer so the storage binding is non-empty.
+        // pad the params buffer so the storage binding is non-empty (the shader
+        // reads only the `tile_count` entries either way).
         if tile_params.is_empty() {
             tile_params.push(TileParams::zeroed());
         }
 
-        // --- composite pass: tiles -> linear Rgba16Float canvas --------------
-        let canvas_lin = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview linear canvas"),
-            size: wgpu::Extent3d {
+        // Destructure the pool once so each surface slot is borrowed disjointly
+        // from the shared allocation counter (a `self.counter()` accessor would
+        // alias the whole pool and clash with a `&mut slot` borrow).
+        let SurfacePool {
+            alloc_count,
+            y_array,
+            uv_array,
+            canvas_lin,
+            comp_uniform,
+            tile_buf,
+            ..
+        } = pool;
+
+        // --- size / reuse the pooled tile texture arrays ---------------------
+        // Grow-only on the max tile extent; always MAX_TILES layers so the layer
+        // count never forces a realloc. The shader samples each layer only over
+        // that tile's freshly-written `src_w x src_h` region (textureLoad clamped
+        // to src dims), so an oversized array is byte-identical to a tight one.
+        let y_need = Dim3 {
+            width: max_w,
+            height: max_h,
+            layers: MAX_TILES,
+        };
+        let uv_need = Dim3 {
+            width: max_w / 2,
+            height: max_h / 2,
+            layers: MAX_TILES,
+        };
+        let y_tex = SurfacePool::grow_texture(y_array, alloc_count, y_need, |d| {
+            tile_plane_texture(
+                device,
+                "multiview tile Y planes",
+                d,
+                wgpu::TextureFormat::R8Unorm,
+            )
+        });
+        let y_array_view = y_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let uv_tex = SurfacePool::grow_texture(uv_array, alloc_count, uv_need, |d| {
+            tile_plane_texture(
+                device,
+                "multiview tile UV planes",
+                d,
+                wgpu::TextureFormat::Rg8Unorm,
+            )
+        });
+        let uv_array_view = uv_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- upload each tile's NV12 planes into its layer -------------------
+        for (layer, tile) in tiles.iter().enumerate() {
+            let img = tile.image;
+            let layer_u32 = u32::try_from(layer)
+                .map_err(|_| Error::GpuLimit("tile layer overflows u32".to_owned()))?;
+            write_tile_plane(
+                queue,
+                y_tex,
+                layer_u32,
+                img.width(),
+                img.height(),
+                1,
+                img.y_plane(),
+            );
+            write_tile_plane(
+                queue,
+                uv_tex,
+                layer_u32,
+                img.width() / 2,
+                img.height() / 2,
+                2,
+                img.uv_plane(),
+            );
+        }
+
+        // --- size / reuse the pooled linear canvas ---------------------------
+        let canvas_lin_view = SurfacePool::exact_texture(
+            canvas_lin,
+            alloc_count,
+            Dim2 {
                 width: canvas_w,
                 height: canvas_h,
-                depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+            |d| linear_canvas_texture(device, d),
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let comp_uniform = CompositeUniforms {
+        // --- refill the pooled uniform + tile-params buffers in place --------
+        let comp_uniform_data = CompositeUniforms {
             canvas: [canvas_w, canvas_h, tile_count, 0],
             background: [background.r, background.g, background.b, background.a],
         };
-        let comp_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("multiview composite uniforms"),
-            contents: bytemuck::bytes_of(&comp_uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
+        let comp_uniform_buf = SurfacePool::fixed_buffer(comp_uniform, alloc_count, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("multiview composite uniforms"),
+                size: pool::comp_uniform_size(),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
-        let tile_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("multiview tile params"),
-            contents: bytemuck::cast_slice(&tile_params),
-            usage: wgpu::BufferUsages::STORAGE,
+        queue.write_buffer(comp_uniform_buf, 0, bytemuck::bytes_of(&comp_uniform_data));
+        let tile_param_buf = SurfacePool::fixed_buffer(tile_buf, alloc_count, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("multiview tile params"),
+                size: pool::tile_buf_size(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
-
-        let y_array_view = y_array.create_view(&wgpu::TextureViewDescriptor::default());
-        let uv_array_view = uv_array.create_view(&wgpu::TextureViewDescriptor::default());
-        let canvas_lin_view = canvas_lin.create_view(&wgpu::TextureViewDescriptor::default());
+        queue.write_buffer(tile_param_buf, 0, bytemuck::cast_slice(&tile_params));
 
         let composite_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("multiview composite bind"),
@@ -662,7 +820,7 @@ impl GpuCompositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: tile_buf.as_entire_binding(),
+                    resource: tile_param_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -690,7 +848,7 @@ impl GpuCompositor {
             pass.dispatch_workgroups(div_ceil(canvas_w, 8), div_ceil(canvas_h, 8), 1);
         }
 
-        Ok(canvas_lin)
+        Ok(())
     }
 
     /// Record the encode pass against `canvas_view` (the straight-alpha linear
@@ -703,8 +861,16 @@ impl GpuCompositor {
     /// - The color `Unsupported*` / `UnresolvedColor` errors when an axis has no
     ///   shader implementation or is unresolved.
     /// - [`Error::GpuRuntime`] on a buffer-map / submission failure.
+    #[allow(clippy::too_many_lines)]
+    // reason: the encode pass is one linear sequence (size/reuse the pooled NV12
+    // output planes + encode uniform -> build the bind group -> record the two
+    // dispatches -> stage + map the pooled readback buffers -> assemble the
+    // Nv12Image); splitting it would scatter the pooled-resource borrows that
+    // must outlive the recorded pass. Kept as one readable function with section
+    // comments, mirroring `record_composite`.
     fn encode_and_read(
         &self,
+        pool: &mut SurfacePool,
         encoder: &mut wgpu::CommandEncoder,
         canvas_view: &wgpu::TextureView,
         canvas_w: u32,
@@ -714,45 +880,68 @@ impl GpuCompositor {
         let device = self.ctx.device();
         let queue = self.ctx.queue();
 
-        // --- encode pass: canvas -> NV12 planes ------------------------------
-        let y_out = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview NV12 Y out"),
-            size: wgpu::Extent3d {
+        // Build the encode uniform first so a color error short-circuits before
+        // any pool growth.
+        let enc_uniform = EncodeUniforms::build(canvas_w, canvas_h, canvas)?;
+
+        // Destructure the pool so the NV12 output planes, readback buffers, and
+        // encode uniform are each borrowed disjointly from the shared counter.
+        let SurfacePool {
+            alloc_count,
+            y_out,
+            uv_out,
+            y_readback,
+            uv_readback,
+            enc_uniform: enc_uniform_slot,
+            ..
+        } = pool;
+
+        // --- size / reuse the pooled NV12 output planes ----------------------
+        let y_out_tex = SurfacePool::exact_texture(
+            y_out,
+            alloc_count,
+            Dim2 {
                 width: canvas_w,
                 height: canvas_h,
-                depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let uv_out = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("multiview NV12 UV out"),
-            size: wgpu::Extent3d {
+            |d| {
+                nv12_out_texture(
+                    device,
+                    "multiview NV12 Y out",
+                    d,
+                    wgpu::TextureFormat::R8Unorm,
+                )
+            },
+        );
+        let y_out_view = y_out_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let uv_out_tex = SurfacePool::exact_texture(
+            uv_out,
+            alloc_count,
+            Dim2 {
                 width: canvas_w / 2,
                 height: canvas_h / 2,
-                depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+            |d| {
+                nv12_out_texture(
+                    device,
+                    "multiview NV12 UV out",
+                    d,
+                    wgpu::TextureFormat::Rg8Unorm,
+                )
+            },
+        );
+        let uv_out_view = uv_out_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let enc_uniform = EncodeUniforms::build(canvas_w, canvas_h, canvas)?;
-        let enc_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("multiview encode uniforms"),
-            contents: bytemuck::bytes_of(&enc_uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
+        // --- refill the pooled encode uniform in place -----------------------
+        let enc_uniform_buf = SurfacePool::fixed_buffer(enc_uniform_slot, alloc_count, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("multiview encode uniforms"),
+                size: pool::enc_uniform_size(),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
-
-        let y_out_view = y_out.create_view(&wgpu::TextureViewDescriptor::default());
-        let uv_out_view = uv_out.create_view(&wgpu::TextureViewDescriptor::default());
+        queue.write_buffer(enc_uniform_buf, 0, bytemuck::bytes_of(&enc_uniform));
 
         let encode_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("multiview encode bind"),
@@ -790,8 +979,25 @@ impl GpuCompositor {
             pass.dispatch_workgroups(div_ceil(canvas_w / 2, 8), div_ceil(canvas_h / 2, 8), 1);
         }
 
-        let y_plane = self.read_plane(encoder, &y_out, canvas_w, canvas_h, 1)?;
-        let uv_plane = self.read_plane(encoder, &uv_out, canvas_w / 2, canvas_h / 2, 2)?;
+        // Stage each plane's copy into its pooled, padded readback buffer.
+        let y_padded = self.stage_readback(
+            y_readback,
+            alloc_count,
+            encoder,
+            y_out_tex,
+            canvas_w,
+            canvas_h,
+            1,
+        )?;
+        let uv_padded = self.stage_readback(
+            uv_readback,
+            alloc_count,
+            encoder,
+            uv_out_tex,
+            canvas_w / 2,
+            canvas_h / 2,
+            2,
+        )?;
 
         // The encoder is consumed by the submit; create a fresh local move so the
         // caller's `&mut` borrow ends cleanly (we own the submission here).
@@ -802,22 +1008,32 @@ impl GpuCompositor {
         .finish();
         queue.submit(Some(finished));
 
-        let y_bytes = self.map_read(&y_plane, canvas_w, canvas_h, 1)?;
-        let uv_bytes = self.map_read(&uv_plane, canvas_w / 2, canvas_h / 2, 2)?;
+        let y_buf = pooled_buffer(y_readback.as_ref(), "Y readback")?;
+        let y_bytes = self.map_read(y_buf, y_padded, canvas_w, canvas_h, 1)?;
+        let uv_buf = pooled_buffer(uv_readback.as_ref(), "UV readback")?;
+        let uv_bytes = self.map_read(uv_buf, uv_padded, canvas_w / 2, canvas_h / 2, 2)?;
 
         Nv12Image::new(canvas_w, canvas_h, y_bytes, uv_bytes, canvas.output_tag())
     }
 
-    /// Stage a copy of a storage texture into a mapped-readback buffer (rows are
-    /// padded to `COPY_BYTES_PER_ROW_ALIGNMENT`).
-    fn read_plane(
+    /// Reuse-or-resize the pooled readback `slot` for a `width x height` plane,
+    /// then stage a copy of `texture` into it (rows padded to
+    /// `COPY_BYTES_PER_ROW_ALIGNMENT`). Returns the padded bytes-per-row so the
+    /// later map can strip the padding.
+    #[allow(clippy::too_many_arguments)]
+    // reason: a readback stage needs the pool slot + counter (disjoint borrows),
+    // the encoder, the source texture, and the plane geometry; grouping them
+    // would just shift the same fields and obscure the call site.
+    fn stage_readback(
         &self,
+        slot: &mut Option<CachedBuffer>,
+        counter: &std::sync::atomic::AtomicU64,
         encoder: &mut wgpu::CommandEncoder,
         texture: &wgpu::Texture,
         width: u32,
         height: u32,
         bytes_per_px: u32,
-    ) -> Result<ReadbackBuffer> {
+    ) -> Result<u32> {
         let unpadded = width
             .checked_mul(bytes_per_px)
             .ok_or_else(|| Error::Geometry("readback row overflow".to_owned()))?;
@@ -825,11 +1041,14 @@ impl GpuCompositor {
         let size = u64::from(padded)
             .checked_mul(u64::from(height))
             .ok_or_else(|| Error::Geometry("readback size overflow".to_owned()))?;
-        let buffer = self.ctx.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("multiview readback"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let device = self.ctx.device();
+        let buffer = SurfacePool::exact_buffer(slot, counter, size, |sz| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("multiview readback"),
+                size: sz,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -839,7 +1058,7 @@ impl GpuCompositor {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer: &buffer.buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded),
@@ -852,21 +1071,19 @@ impl GpuCompositor {
                 depth_or_array_layers: 1,
             },
         );
-        Ok(ReadbackBuffer {
-            buffer,
-            padded_bytes_per_row: padded,
-        })
+        Ok(padded)
     }
 
-    /// Map a readback buffer and copy out the unpadded plane bytes.
+    /// Map a pooled readback buffer and copy out the unpadded plane bytes.
     fn map_read(
         &self,
-        rb: &ReadbackBuffer,
+        buffer: &wgpu::Buffer,
+        padded_bytes_per_row: u32,
         width: u32,
         height: u32,
         bytes_per_px: u32,
     ) -> Result<Vec<u8>> {
-        let slice = rb.buffer.slice(..);
+        let slice = buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |res| {
             // The receiver may be gone if the device errored; ignore send error.
@@ -889,7 +1106,7 @@ impl GpuCompositor {
             .ok_or_else(|| Error::Geometry("plane row overflow".to_owned()))?;
         let rows = usize::try_from(height)
             .map_err(|_| Error::Geometry("plane height overflow".to_owned()))?;
-        let padded = usize::try_from(rb.padded_bytes_per_row)
+        let padded = usize::try_from(padded_bytes_per_row)
             .map_err(|_| Error::Geometry("padded stride overflow".to_owned()))?;
 
         let data = slice.get_mapped_range();
@@ -907,17 +1124,11 @@ impl GpuCompositor {
             out.extend_from_slice(chunk);
         }
         drop(data);
-        rb.buffer.unmap();
+        // Unmap so the pooled buffer can be reused (re-copied + re-mapped) next
+        // tick — the whole point of pooling the readback buffer.
+        buffer.unmap();
         Ok(out)
     }
-}
-
-/// A transient readback buffer plus the padded row stride needed to strip the
-/// `COPY_BYTES_PER_ROW_ALIGNMENT` padding on map.
-#[derive(Debug)]
-struct ReadbackBuffer {
-    buffer: wgpu::Buffer,
-    padded_bytes_per_row: u32,
 }
 
 impl Compositor for GpuCompositor {
@@ -959,6 +1170,81 @@ fn write_tile_plane(
             depth_or_array_layers: 1,
         },
     );
+}
+
+/// Build a pooled tile-plane texture-array (`R8Unorm` Y or `Rg8Unorm` UV) at
+/// `dim` — `TEXTURE_BINDING | COPY_DST`, [`pool::SurfacePool`]-owned.
+fn tile_plane_texture(
+    device: &wgpu::Device,
+    label: &str,
+    dim: Dim3,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: dim.width,
+            height: dim.height,
+            depth_or_array_layers: dim.layers.max(1),
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// Build the pooled linear `Rgba16Float` composite/overlaid canvas at `dim` —
+/// `STORAGE_BINDING | TEXTURE_BINDING`.
+fn linear_canvas_texture(device: &wgpu::Device, dim: Dim2) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("multiview linear canvas"),
+        size: wgpu::Extent3d {
+            width: dim.width,
+            height: dim.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
+/// Build a pooled NV12 output plane (`R8Unorm` Y or `Rg8Unorm` UV) at `dim` —
+/// `STORAGE_BINDING | COPY_SRC` (written by the encode shader, copied to the
+/// readback buffer).
+fn nv12_out_texture(
+    device: &wgpu::Device,
+    label: &str,
+    dim: Dim2,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: dim.width,
+            height: dim.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+/// Borrow a pooled readback buffer the surrounding logic just ensured is
+/// resident (typed error rather than panic on the impossible `None`).
+fn pooled_buffer<'a>(slot: Option<&'a CachedBuffer>, what: &str) -> Result<&'a wgpu::Buffer> {
+    slot.map(|c| &c.buffer)
+        .ok_or_else(|| Error::GpuRuntime(format!("pooled {what} missing")))
 }
 
 /// Validate even, positive dimensions (NV12 4:2:0 requires even).
