@@ -50,9 +50,9 @@ docker compose -f deploy/compose.yaml up -d
 
 Then open:
 
-- **Web UI** — <http://localhost:8080/> (manage the engine)
-- **API playground** — <http://localhost:8080/docs> (interactive OpenAPI / Scalar)
-- **The multiview** — `vlc http://localhost:8888/multiview.m3u8` (or any HLS player)
+- **Web UI** — <http://[::1]:8080/> (manage the engine)
+- **API playground** — <http://[::1]:8080/docs> (interactive OpenAPI / Scalar)
+- **The multiview** — `vlc http://[::1]:8888/multiview.m3u8` (or any HLS player)
 
 Edit [`deploy/config/multiview.toml`](deploy/config/multiview.toml) to point a tile at your own
 source and re-run `up -d`. Tear down with `docker compose -f deploy/compose.yaml down -v`.

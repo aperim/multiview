@@ -1168,8 +1168,8 @@
       "protocol": "http",
       "variables": {
         "host": {
-          "default": "localhost:8080",
-          "description": "Hostname and optional port of the Multiview daemon."
+          "default": "[::1]:8080",
+          "description": "Hostname and optional port of the Multiview daemon. IPv6-first: the default is the IPv6 loopback `[::1]`; override with your host."
         }
       }
     },
@@ -1180,8 +1180,8 @@
       "protocol": "ws",
       "variables": {
         "host": {
-          "default": "localhost:8080",
-          "description": "Hostname and optional port of the Multiview daemon."
+          "default": "[::1]:8080",
+          "description": "Hostname and optional port of the Multiview daemon. IPv6-first: the default is the IPv6 loopback `[::1]`; override with your host."
         }
       }
     }

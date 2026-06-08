@@ -32,9 +32,10 @@ fn srt_modes_roundtrip() {
 
 #[test]
 fn srt_encrypted_url_includes_key_and_passphrase() {
+    // IPv6-first: a listener binds the IPv6 wildcard `::` (bracketed in the URL).
     let cfg = SrtConfig {
         mode: SrtMode::Listener,
-        host: "0.0.0.0".to_owned(),
+        host: "::".to_owned(),
         port: 4200,
         key_length: KeyLength::Aes256,
         passphrase: Some("supersecretpass".to_owned()),
@@ -42,6 +43,11 @@ fn srt_encrypted_url_includes_key_and_passphrase() {
         ..SrtConfig::default()
     };
     let url = cfg.to_url().expect("url");
+    // The IPv6 host must be bracketed so the port is unambiguous.
+    assert!(
+        url.starts_with("srt://[::]:4200?"),
+        "IPv6 host must be bracketed: {url}"
+    );
     assert!(url.contains("mode=listener"));
     assert!(url.contains("pbkeylen=32"));
     assert!(url.contains("passphrase=supersecretpass"));
@@ -51,6 +57,56 @@ fn srt_encrypted_url_includes_key_and_passphrase() {
     assert!(redacted.contains("pbkeylen=32"));
     assert!(redacted.contains("passphrase=***"));
     assert!(!redacted.contains("supersecretpass"));
+}
+
+#[test]
+fn srt_url_brackets_ipv6_hosts_and_leaves_others_alone() {
+    // A bare IPv6 literal host is bracketed; a hostname / IPv4 / already-bracketed
+    // host is passed through verbatim (IPv6-first, but IPv4 still works).
+    let v6 = SrtConfig {
+        mode: SrtMode::Caller,
+        host: "2001:db8::1".to_owned(),
+        port: 9000,
+        ..SrtConfig::default()
+    };
+    assert!(
+        v6.to_url()
+            .expect("v6 url")
+            .starts_with("srt://[2001:db8::1]:9000?"),
+        "{:?}",
+        v6.to_url()
+    );
+
+    let already = SrtConfig {
+        host: "[::1]".to_owned(),
+        port: 9000,
+        ..SrtConfig::default()
+    };
+    assert!(already
+        .to_url()
+        .expect("bracketed url")
+        .starts_with("srt://[::1]:9000?"));
+
+    let name = SrtConfig {
+        host: "ingest.example.com".to_owned(),
+        port: 9000,
+        ..SrtConfig::default()
+    };
+    assert!(name
+        .to_url()
+        .expect("hostname url")
+        .starts_with("srt://ingest.example.com:9000?"));
+
+    // A user-supplied IPv4 host still works and is not bracketed.
+    let v4 = SrtConfig {
+        host: "203.0.113.7".to_owned(),
+        port: 9000,
+        ..SrtConfig::default()
+    };
+    assert!(v4
+        .to_url()
+        .expect("v4 url")
+        .starts_with("srt://203.0.113.7:9000?"));
 }
 
 #[test]

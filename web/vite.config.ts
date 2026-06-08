@@ -22,7 +22,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8080",
+      // IPv6-first (operator directive): proxy the API to the IPv6 loopback of
+      // the local `multiview run` daemon (its default control listener is
+      // `[::]:8080`). Override the target if your daemon binds elsewhere.
+      "/api": "http://[::1]:8080",
     },
   },
   build: {

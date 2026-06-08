@@ -177,3 +177,29 @@ fn empty_string_optional_field_is_treated_as_nil() {
         .app_name("");
     assert_eq!(msg.to_rfc5424(), "<134>1 - - - - - -");
 }
+
+/// IPv6-first transport: a `UdpSender` pointed at an **IPv6** loopback collector
+/// must bind an IPv6 ephemeral socket and deliver the datagram. The previous
+/// hard-coded `0.0.0.0:0` (IPv4) bind could not reach an `[::1]` collector, so
+/// this would have failed before the fix.
+#[cfg(feature = "syslog")]
+#[test]
+fn udp_sender_reaches_an_ipv6_collector() {
+    use multiview_telemetry::syslog::UdpSender;
+    use std::net::{Ipv6Addr, UdpSocket};
+
+    // A real IPv6 loopback receiver on an OS-assigned port.
+    let receiver = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind [::1]:0 receiver");
+    let collector = receiver.local_addr().expect("receiver local addr");
+    assert!(collector.is_ipv6(), "receiver must be IPv6 loopback");
+
+    let sender = UdpSender::connect(collector).expect("connect to [::1] collector");
+    let msg = SyslogMessage::new(Facility::Local0, Severity::Informational).message("ipv6-ok");
+    sender.send(&msg).expect("send over IPv6");
+
+    let mut buf = [0u8; 256];
+    let (n, from) = receiver.recv_from(&mut buf).expect("recv the datagram");
+    assert!(from.is_ipv6(), "datagram source must be IPv6, got {from}");
+    let wire = std::str::from_utf8(&buf[..n]).expect("utf-8 syslog wire");
+    assert_eq!(wire, msg.to_rfc5424());
+}

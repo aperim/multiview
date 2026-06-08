@@ -90,7 +90,7 @@ export function OverviewPage(): JSX.Element {
           <CodeBlock label="Shell command">
             {`docker compose -f deploy/compose.yaml up -d
 # then open the HLS playlist in a player:
-#   http://localhost:8888/multiview.m3u8`}
+#   http://[::1]:8888/multiview.m3u8`}
           </CodeBlock>
           <Prose>
             <Trans>

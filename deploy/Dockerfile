@@ -227,7 +227,8 @@ WORKDIR /var/lib/multiview
 # WebSocket at `/api/v1/ws`, SSE at `/api/v1/events`, OpenAPI at
 # `/api/v1/openapi.json`, and Scalar docs at `/docs`. `multiview run` binds this
 # when the config has a [control] section (the example config sets
-# `listen = "0.0.0.0:8080"`). The SPA serves because this image is built with the
+# `listen = "[::]:8080"` — IPv6-first, dual-stacks to IPv4-mapped clients on
+# Linux). The SPA serves because this image is built with the
 # `web` feature (see the builder stage); set MULTIVIEW_CONTROL_TOKEN to fix the
 # admin bearer secret (`admin.<secret>`), else one is generated + logged once.
 EXPOSE 8080

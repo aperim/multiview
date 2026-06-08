@@ -366,7 +366,7 @@ mod transport {
     //! returned to the caller (the telemetry/control plane), never propagated
     //! onto the engine's data plane.
     use std::io::Write as _;
-    use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 
     use super::SyslogMessage;
     use crate::error::{Result, TelemetryError};
@@ -384,15 +384,35 @@ mod transport {
     impl UdpSender {
         /// Bind an ephemeral local UDP socket and connect it to `collector`.
         ///
+        /// IPv6-first (operator directive): the ephemeral local socket is bound
+        /// in the address family of the resolved `collector` — `[::]:0` for an
+        /// IPv6 collector, `0.0.0.0:0` only when the collector resolves to IPv4
+        /// — so an IPv6 syslog collector is reachable. A user-supplied IPv4
+        /// collector still works; we never *default* to IPv4.
+        ///
         /// # Errors
         ///
-        /// Returns [`TelemetryError::Transport`] if the socket cannot be bound
-        /// or the collector address cannot be resolved/connected.
+        /// Returns [`TelemetryError::Transport`] if the collector address cannot
+        /// be resolved, the socket cannot be bound, or the connect fails.
         pub fn connect(collector: impl ToSocketAddrs) -> Result<Self> {
-            let socket = UdpSocket::bind("0.0.0.0:0")
-                .map_err(|e| TelemetryError::Transport(e.to_string()))?;
+            // Resolve first so the ephemeral local bind matches the collector's
+            // family (IPv6-first); `connect` is then a no-op family check.
+            let target = collector
+                .to_socket_addrs()
+                .map_err(|e| TelemetryError::Transport(e.to_string()))?
+                .next()
+                .ok_or_else(|| {
+                    TelemetryError::Transport("collector resolved to no address".to_owned())
+                })?;
+            let local: SocketAddr = if target.is_ipv6() {
+                (Ipv6Addr::UNSPECIFIED, 0).into()
+            } else {
+                (Ipv4Addr::UNSPECIFIED, 0).into()
+            };
+            let socket =
+                UdpSocket::bind(local).map_err(|e| TelemetryError::Transport(e.to_string()))?;
             socket
-                .connect(collector)
+                .connect(target)
                 .map_err(|e| TelemetryError::Transport(e.to_string()))?;
             Ok(Self { socket })
         }

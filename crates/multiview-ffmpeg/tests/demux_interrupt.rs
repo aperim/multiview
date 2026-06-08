@@ -28,9 +28,10 @@ use multiview_ffmpeg::demux::{DemuxOptions, Demuxer};
 
 /// Bind a localhost listener and accept-then-stall: the accept loop reads nothing
 /// and never writes, holding the connection open so the client's read blocks.
-/// Returns the bound `tcp://127.0.0.1:PORT` URL.
+/// IPv6-first: binds the IPv6 loopback `[::1]` and returns a bracketed
+/// `tcp://[::1]:PORT` URL (libav requires the brackets for an IPv6 literal).
 fn spawn_black_hole_server() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost ephemeral port");
+    let listener = TcpListener::bind("[::1]:0").expect("bind IPv6 loopback ephemeral port");
     let addr = listener.local_addr().expect("local addr");
     thread::spawn(move || {
         // Accept connections and hold them open without ever sending data.
@@ -44,7 +45,9 @@ fn spawn_black_hole_server() -> String {
             drop(s);
         }
     });
-    format!("tcp://{}:{}", addr.ip(), addr.port())
+    // `SocketAddr`'s Display already brackets an IPv6 host (`[::1]:PORT`), so the
+    // libav URL is well-formed for both families.
+    format!("tcp://{addr}")
 }
 
 #[test]

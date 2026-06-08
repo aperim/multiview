@@ -691,18 +691,37 @@ impl TrapSender {
     ///
     /// `community` is the `SNMPv2c` community string sent with every trap.
     ///
+    /// IPv6-first (operator directive): the ephemeral local socket is bound in
+    /// the address family of the resolved `collector` — `[::]:0` for an IPv6
+    /// collector, `0.0.0.0:0` only when the collector resolves to IPv4 — so an
+    /// IPv6 NMS is reachable (a hard-coded `0.0.0.0` socket cannot send to one).
+    /// A user-supplied IPv4 collector still works; we never *default* to IPv4.
+    ///
     /// # Errors
     ///
-    /// Returns [`SnmpError::Transport`] if the socket cannot be bound or the
-    /// collector address cannot be resolved/connected.
+    /// Returns [`SnmpError::Transport`] if the collector address cannot be
+    /// resolved, the socket cannot be bound, or the connect fails.
     pub fn connect(
         collector: impl std::net::ToSocketAddrs,
         community: impl Into<String>,
     ) -> Result<Self, SnmpError> {
-        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        // Resolve first so the ephemeral local bind matches the collector's
+        // family (IPv6-first). `connect` is then a no-op family check.
+        let mut addrs = collector
+            .to_socket_addrs()
             .map_err(|e| SnmpError::Transport(e.to_string()))?;
+        let target = addrs
+            .next()
+            .ok_or_else(|| SnmpError::Transport("collector resolved to no address".to_owned()))?;
+        let local: std::net::SocketAddr = if target.is_ipv6() {
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        } else {
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        };
+        let socket =
+            std::net::UdpSocket::bind(local).map_err(|e| SnmpError::Transport(e.to_string()))?;
         socket
-            .connect(collector)
+            .connect(target)
             .map_err(|e| SnmpError::Transport(e.to_string()))?;
         Ok(Self {
             socket,

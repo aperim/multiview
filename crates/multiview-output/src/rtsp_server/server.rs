@@ -41,7 +41,11 @@ use super::queue::BoundedPacketQueue;
 /// Configuration for one served RTSP mount.
 #[derive(Debug, Clone)]
 pub struct RtspServerConfig {
-    /// Bind address for the RTSP listener (e.g. `"0.0.0.0"` or `"127.0.0.1"`).
+    /// Bind address for the RTSP listener. IPv6-first (operator directive): use
+    /// `"[::]"` (all interfaces, dual-stack) or `"[::1]"` (loopback); an IPv6
+    /// literal must be bracketed so [`served_url`](RtspServerConfig::served_url)
+    /// interpolates it correctly. A user-supplied IPv4 host (`"127.0.0.1"`) still
+    /// works but is never the default.
     pub host: String,
     /// TCP port the RTSP listener binds (default RTSP `8554`).
     pub port: u16,

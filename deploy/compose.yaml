@@ -12,9 +12,9 @@
 #                 open the stream in a player.
 #
 # Bring it up:   docker compose -f deploy/compose.yaml up -d
-# Then open:     http://localhost:8080/             the web UI (manage the engine)
-#                http://localhost:8080/docs          the Scalar API playground
-#                http://localhost:8888/multiview.m3u8 the multiview (VLC / ffplay)
+# Then open:     http://[::1]:8080/              the web UI (manage the engine)
+#                http://[::1]:8080/docs          the Scalar API playground
+#                http://[::1]:8888/multiview.m3u8 the multiview (VLC / ffplay)
 # Tear it down:  docker compose -f deploy/compose.yaml down -v
 #
 # The web UI + /api/v1 + /docs are served because the published image is built
@@ -48,13 +48,16 @@ services:
         ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30
         -f lavfi -i sine=frequency=1000:sample_rate=48000
         -pix_fmt yuv420p -c:v libx264 -preset veryfast -tune zerolatency -g 60
-        -c:a aac -f rtsp rtsp://localhost:8554/test
+        -c:a aac -f rtsp rtsp://[::1]:8554/test
       MTX_PATHS_TEST_RUNONINITRESTART: "yes"
     ports:
-      # Exposed for host inspection (e.g. ffplay rtsp://localhost:8554/test).
-      - "8554:8554"
+      # Exposed for host inspection (e.g. ffplay rtsp://[::1]:8554/test).
+      # IPv6-first: the `[::]:` long-form host-IP makes Docker publish the port on
+      # the host's IPv6 wildcard (it still also serves IPv4 via the proxy).
+      - "[::]:8554:8554"
     healthcheck:
-      test: ["CMD", "sh", "-c", "nc -z localhost 8554 || exit 1"]
+      # `[::1]` (IPv6 loopback) — the container's own RTSP listener.
+      test: ["CMD", "sh", "-c", "nc -z ::1 8554 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -78,7 +81,8 @@ services:
       # The control plane: web UI at /, REST at /api/v1, OpenAPI at
       # /api/v1/openapi.json, Scalar docs at /docs. Served because the image is
       # built with the `web` feature and the config has a [control] listener.
-      - "8080:8080"
+      # IPv6-first `[::]:` host-IP form (publishes on the host IPv6 wildcard).
+      - "[::]:8080:8080"
     volumes:
       # The quick-start config (read-only) and the HLS output (named volume).
       - ./config/multiview.toml:/etc/multiview/multiview.toml:ro
@@ -107,7 +111,7 @@ services:
           memory: 1g
 
   hls:
-    # Serve the HLS output volume over HTTP. Open http://localhost:8888/multiview.m3u8
+    # Serve the HLS output volume over HTTP. Open http://[::1]:8888/multiview.m3u8
     # in VLC/ffplay. (The default LGPL image encodes mpeg2video — use VLC; for
     # browser/H.264 playback use the `-gpl` image, see the README.)
     image: nginx:1-alpine
@@ -117,7 +121,8 @@ services:
     volumes:
       - multiview-hls:/usr/share/nginx/html:ro
     ports:
-      - "8888:80"
+      # IPv6-first `[::]:` host-IP form (publishes on the host IPv6 wildcard).
+      - "[::]:8888:80"
 
 volumes:
   multiview-hls:

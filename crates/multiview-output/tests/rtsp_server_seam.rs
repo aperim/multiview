@@ -156,12 +156,10 @@ fn sink_fan_out_shares_packet_allocation() {
 
 #[test]
 fn mount_builds_served_url() {
+    // IPv6-first: a bracketed IPv6 loopback host interpolates into the served URL.
     let mount = RtspMount::new("program").unwrap();
     assert_eq!(mount.path(), "/program");
-    assert_eq!(
-        mount.served_url("127.0.0.1", 8554),
-        "rtsp://127.0.0.1:8554/program"
-    );
+    assert_eq!(mount.served_url("[::1]", 8554), "rtsp://[::1]:8554/program");
 }
 
 #[test]

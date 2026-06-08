@@ -32,9 +32,23 @@ fn target_builds_a_publish_url_from_base_and_mount() {
 #[test]
 fn default_base_is_the_mediamtx_loopback() {
     // ADR-0006 sidecar baseline: the default peer is a local MediaMTX on 8554.
-    assert_eq!(RtspPublishTarget::DEFAULT_BASE, "rtsp://127.0.0.1:8554");
+    // IPv6-first (operator directive): the default loopback is `[::1]`, not v4.
+    assert_eq!(RtspPublishTarget::DEFAULT_BASE, "rtsp://[::1]:8554");
     let target = RtspPublishTarget::with_default_base("cam1").unwrap();
-    assert_eq!(target.publish_url(), "rtsp://127.0.0.1:8554/cam1");
+    assert_eq!(target.publish_url(), "rtsp://[::1]:8554/cam1");
+}
+
+#[test]
+fn an_ipv6_bracketed_base_builds_a_publish_url() {
+    // A bracketed IPv6 authority (`[host]:port`) must build cleanly: the inner
+    // `:` of the address is not a path separator, so the mount still appends once.
+    let target = RtspPublishTarget::new("rtsp://[::1]:8554", "program").unwrap();
+    assert_eq!(target.publish_url(), "rtsp://[::1]:8554/program");
+    assert_eq!(target.mount(), "program");
+
+    // A global IPv6 literal works the same way.
+    let g = RtspPublishTarget::new("rtsp://[2001:db8::1]:8554", "studio/program").unwrap();
+    assert_eq!(g.publish_url(), "rtsp://[2001:db8::1]:8554/studio/program");
 }
 
 #[test]
@@ -216,7 +230,7 @@ fn rtsp_live_push_reaches_a_listening_sidecar() {
     }
 
     let base =
-        std::env::var("MULTIVIEW_RTSP_BASE").unwrap_or_else(|_| "rtsp://127.0.0.1:8554".to_owned());
+        std::env::var("MULTIVIEW_RTSP_BASE").unwrap_or_else(|_| "rtsp://[::1]:8554".to_owned());
     let target = RtspPublishTarget::new(&base, "multiview_out1").unwrap();
     assert_eq!(target.protocol(), PushProtocol::Rtsp);
 

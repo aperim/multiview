@@ -52,9 +52,11 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_binds_responds_and_shuts_down_gracefully() {
-    // Bind an ephemeral loopback port and learn the actual address.
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bind an ephemeral IPv6 loopback port and learn the actual address
+    // (IPv6-first: the control plane must serve over `[::1]`, not just IPv4).
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    assert!(addr.is_ipv6(), "control plane must bind IPv6 loopback");
 
     // Drive the control plane on its own task; resolve the shutdown future on a
     // oneshot so the test controls when graceful shutdown begins.

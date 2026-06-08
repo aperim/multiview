@@ -148,9 +148,9 @@ async fn pipeline_runs_a_push_output_and_an_unreachable_peer_does_not_break_the_
 
     let out_dir = dir.path().join("out");
     let playlist = out_dir.join("index.m3u8");
-    // Port 1 on loopback is reliably refused — the RTMP connect fails fast, so the
+    // Port 1 on the IPv6 loopback is reliably refused — the RTMP connect fails fast, so the
     // push sink returns promptly and the program's other outputs proceed.
-    let push_url = "rtmp://127.0.0.1:1/live/none";
+    let push_url = "rtmp://[::1]:1/live/none";
     let toml = config_text(&clip, &playlist, push_url);
 
     let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");
@@ -247,12 +247,12 @@ async fn a_push_only_config_is_runnable_now_that_push_is_wired() {
     let clip = dir.path().join("in.ts");
     generate_clip(&clip);
 
-    // An RTMP push to a refused loopback port: the TCP connect is refused fast (no
+    // An RTMP push to a refused IPv6-loopback port: the TCP connect is refused fast (no
     // peer), so the push sink returns promptly and the run ends — the point of THIS
     // test is only that the build/run path exists for a push, not that bytes were
     // delivered (delivery is covered, over UDP-TS, by multiview-output's
     // `push_udp_ffprobe.rs`).
-    let push_url = "rtmp://127.0.0.1:1/live/none";
+    let push_url = "rtmp://[::1]:1/live/none";
     let toml = push_only_config_text(&clip, push_url);
 
     let config = MultiviewConfig::load_from_toml(&toml).expect("parse config");

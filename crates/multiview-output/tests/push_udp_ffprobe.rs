@@ -187,7 +187,8 @@ fn ffprobe_frame_count(path: &Path) -> u64 {
 fn push_sink_streams_a_real_mpegts_over_udp_that_ffprobe_decodes() {
     // Bind the receiver FIRST (so no datagram is lost to a closed port), on an
     // OS-assigned free port, and drain it on a background thread into a buffer.
-    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp receiver");
+    // IPv6-first: receive on the IPv6 loopback `[::1]`.
+    let socket = UdpSocket::bind("[::1]:0").expect("bind udp receiver");
     socket
         .set_read_timeout(Some(Duration::from_millis(1500)))
         .expect("set recv timeout");
@@ -223,7 +224,7 @@ fn push_sink_streams_a_real_mpegts_over_udp_that_ffprobe_decodes() {
     // drive loop (PushSink::run -> drive_to_single_muxer) the wired RTMP/SRT push
     // uses; only the URL scheme + forced muxer (mpegts) differ. `pkt_size` keeps
     // each datagram inside a single MPEG-TS-friendly UDP packet.
-    let url = format!("udp://127.0.0.1:{port}?pkt_size=1316");
+    let url = format!("udp://[::1]:{port}?pkt_size=1316");
     let sink = PushSink::new(ts_config(25, 25), PushProtocol::UdpTs, url);
     let mut source = RampNv12Source::new(FRAMES);
     let stats = sink.run(&mut source).expect("udp-ts push run");
