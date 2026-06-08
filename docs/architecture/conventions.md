@@ -13,7 +13,7 @@ source of truth. All other docs, the agent-instruction files, and the workspace 
 - **Binary / daemon:** `multiview`
 - **Tagline:** Ingest many live sources → composite a templated multiview on the GPU → serve robustly. Built to run great on **commodity hardware**, with **bulletproof continuous output**.
 - **Edition / toolchain:** Rust edition **2021**, pinned via `rust-toolchain.toml` (stable). MSRV documented in the README.
-- **License:** Dual **MIT OR Apache-2.0** (project code). See §7 for the FFmpeg/NDI/codec licensing model.
+- **License:** Multiview's own code is **source-available, non-commercial** — the **Multiview Source-Available Non-Commercial License, Version 1.0** (© Aperim Pty Ltd). Free for genuine personal/home/non-commercial use plus three free exceptions; all other (commercial) use needs a paid Commercial License. **Not open source / not free software.** See §7 for the FFmpeg/NDI/codec dependency-linking model.
 - **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and macOS (Apple Silicon + Intel, native). **No Windows.**
 
 ---
@@ -25,7 +25,7 @@ multiview/
 ├── Cargo.toml                # workspace
 ├── rust-toolchain.toml
 ├── rustfmt.toml  .editorconfig  deny.toml  clippy.toml
-├── LICENSE-MIT  LICENSE-APACHE  README.md  CLAUDE.md  AGENTS.md  CONTRIBUTING.md  SECURITY.md
+├── LICENSE  LICENSE-COMMERCIAL.md  README.md  CLAUDE.md  AGENTS.md  CONTRIBUTING.md  SECURITY.md
 ├── crates/                   # all Rust crates (see §3)
 │   └── multiview-*/ ...
 ├── web/                      # the management SPA (React + TS + Vite)
@@ -119,7 +119,7 @@ These are load-bearing; every doc and implementation must respect them (see the 
 
 ## 7. Licensing model (build profiles)
 
-- **Project code:** dual **MIT OR Apache-2.0**.
+- **Project code:** the **Multiview Source-Available Non-Commercial License, Version 1.0** (© Aperim Pty Ltd; see `LICENSE`) — source-available, **not** open source / free software. Free for genuine personal/home/non-commercial use plus three free exceptions (First Nations owned broadcasters; community broadcasters under USD $1M sponsorship/yr; content creators under 55,000 subscribers summed across all channels); all other (commercial) use — business, education, government, productization/appliance, streamers/creators — requires a paid Commercial License (`licensing@aperim.com`, see `LICENSE-COMMERCIAL.md`). This governs **Multiview's own code only**; the FFmpeg/NDI/codec build-profile obligations below are unchanged.
 - **Default build = LGPL-clean & redistributable:** FFmpeg linked LGPL; NVENC/NVDEC via `nv-codec-headers` (MIT) need neither `--enable-gpl` nor `--enable-nonfree`; **no** libnpp/x264/x265 in the default build (compositing/scaling done in-house).
 - **`gpl-codecs` feature:** pulls x264/x265 etc. → the resulting build is **GPL**. Opt-in only.
 - **NDI:** the NDI SDK is **proprietary** (royalty-free, attribution required, redistribution restricted). It is **never vendored**; the `ndi` feature uses a runtime dynamic-load path, and the SDK/runtime is the user's responsibility. Document the EULA + attribution. NDI I/O is additionally **gated at runtime**: it stays inert until the operator explicitly confirms NDI license acceptance (`[system.ndi] accept_license`, audited), so even `ndi`-enabled builds carry no NDI obligations until a user accepts. Required trademark attribution is always preserved. See [io/ndi.md §7.5](../io/ndi.md).

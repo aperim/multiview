@@ -117,7 +117,7 @@ Design pillars (see the briefs for depth):
 - **Zero-copy islands per GPU vendor.** Cross-vendor on-GPU zero-copy does not exist on desktop; we
  budget an explicit copy at every vendor/NDI/CPU boundary.
 - **Bulletproof continuous output** on commodity hardware: the output never stalls, never falters.
-- **Edition:** Rust 2021 (pinned via `rust-toolchain.toml`). **License:** dual `MIT OR Apache-2.0`.
+- **Edition:** Rust 2021 (pinned via `rust-toolchain.toml`). **License:** source-available under the **Multiview Source-Available Non-Commercial License** (© Aperim Pty Ltd) — free for non-commercial/home use, commercial licence otherwise.
 - **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and
  macOS (Apple Silicon + Intel, native). **No Windows.**
 

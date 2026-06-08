@@ -82,7 +82,7 @@ multiview on the **GPU**, and serves the result robustly (RTSP, HLS/LL-HLS, NDI,
 - **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and
  macOS (Apple Silicon + Intel, native). **No Windows.**
 - **Edition / toolchain:** Rust **2021**, stable, pinned via `rust-toolchain.toml`.
-- **License:** project code is dual **MIT OR Apache-2.0**. See §7 for the build-profile licensing model.
+- **License:** project code is **source-available** under the **Multiview Source-Available Non-Commercial License** (© Aperim Pty Ltd) — free for non-commercial/home use, commercial licence otherwise. See §7 for the build-profile licensing model.
 
 The engine is a **hybrid**: FFmpeg/libav (via `rsmpeg`) for demux/decode/encode where libav is
 strongest, plus **custom Rust + GPU-native code** for the compositor and the serving/output side.
@@ -267,7 +267,7 @@ regression even if tests pass. Full statements: [conventions §5](docs/architect
 
 ## 7. Licensing model (build profiles)
 
-- **Project code:** dual **MIT OR Apache-2.0**.
+- **Project code:** **source-available** under the **Multiview Source-Available Non-Commercial License** (© Aperim Pty Ltd) — free for non-commercial/home use, paid Commercial License otherwise; not open-source/free-software.
 - **Default build = LGPL-clean & redistributable.** FFmpeg linked LGPL; NVENC/NVDEC via
  `nv-codec-headers` (MIT) need neither `--enable-gpl` nor `--enable-nonfree`; **no** libnpp /
  x264 / x265 in the default build (compositing/scaling done in-house with `scale_cuda`, not

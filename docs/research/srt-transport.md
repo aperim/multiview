@@ -122,7 +122,8 @@ which tier serves a link**.
   `srt-c-unittests` "do not pass yet" — so it is **gated behind a feature and validated
   per-endpoint against the FFmpeg/libsrt baseline** before it is trusted in production.
   License is **Apache-2.0 only** (verified — *not* dual MIT-OR-Apache), still compatible with
-  the project's outbound `MIT OR Apache-2.0` and the LGPL-clean default.
+  Multiview's own source-available license and the LGPL-clean default (we may use and redistribute the
+  Apache-2.0 dependency; Multiview's outbound license does not change that).
 - **Tier 2 — owned `multiview-srt-sys` libsrt FFI leaf (only-if-required, `srt-libsrt`
   feature).** Built **only when a hard requirement appears** that the other tiers cannot meet:
   **connection bonding** (broadcast/backup — exists *only* in libsrt ≥ 1.5 with
