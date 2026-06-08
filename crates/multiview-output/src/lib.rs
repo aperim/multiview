@@ -76,6 +76,17 @@ pub mod sink;
 #[cfg(feature = "ffmpeg")]
 pub mod slate;
 
+/// GP-7 — the guarded-passthrough splice seam (ADR-0030 §4 "The splice seam —
+/// `GuardedPacketSource`"). Assembles the GP-1/4/5/6 primitives into the live
+/// copy-vs-slate failover: a [`guarded::GuardedPacketSource`] that copies the
+/// live input while healthy and splices the pre-baked [`slate::BakedSlate`] on
+/// loss, re-stamped monotonic across both seams, recovery gated on a true
+/// strict-IDR (GP-1 `is_idr`, not `is_key`). The sole producer feeding
+/// [`sink::PacketMuxSink::run_av`]. Behind the off-by-default `ffmpeg` feature;
+/// reuses the GP-5 watchdog (pure-Rust `multiview-framestore`) + GP-6 restamp.
+#[cfg(feature = "ffmpeg")]
+pub mod guarded;
+
 /// Proprietary NDI® output (ADR-0008): the runtime-load scaffolding (locate +
 /// `dlopen` the NDI runtime via `NDIlib_v6_load`), the runtime license gate, the
 /// mandatory attribution constants, and the safe `NdiOutput` sink seam over the
@@ -93,6 +104,10 @@ pub use rtsp_server::{
     RtspServerSink,
 };
 
+#[cfg(feature = "ffmpeg")]
+pub use guarded::{
+    GuardMode, GuardedConfig, GuardedPacketSource, ManualClock, MonotonicClock, RealMonotonicClock,
+};
 #[cfg(feature = "ffmpeg")]
 pub use sink::{
     AudioEncodeConfig, EncodeConfig, EncodeStats, FileSink, MuxStream, PacketMuxOutcome,

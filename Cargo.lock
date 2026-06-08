@@ -2884,6 +2884,7 @@ dependencies = [
  "gstreamer-rtsp-server",
  "multiview-core",
  "multiview-ffmpeg",
+ "multiview-framestore",
  "multiview-input",
  "multiview-ndi-sys",
  "proptest",
