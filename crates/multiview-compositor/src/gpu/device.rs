@@ -64,7 +64,14 @@ impl GpuContext {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("multiview-compositor device"),
             required_features,
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            // Request the ADAPTER's real limits, not `downlevel_defaults()`
+            // (WebGL2 floor: max_texture_dimension_2d = 2048). A 4K canvas needs
+            // 3840+-wide tile/output textures ("Dimension X 3840 exceeds the limit
+            // of 2048"); desktop GPUs offer 16384. On a software/llvmpipe adapter
+            // these limits are still ≥ default, and the GPU path only runs when a
+            // real adapter was selected (else the CPU reference compositor carries
+            // the program), so this never over-asks.
+            required_limits: adapter.limits(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
