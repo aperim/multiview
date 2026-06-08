@@ -410,12 +410,12 @@ correctness; the budgets above validate efficiency.
 | Complex shaping engine | HarfRust (via `cosmic-text` 0.15+) | MIT/Apache | transitive; cargo-deny clean |
 | ASS/SSA subtitle raster | `libass` (≥ 0.17 + HarfBuzz + FriBidi + libunibreak) | ISC/GPL-compatible C lib | **off-by-default `libass` feature** (adds C toolchain, ADR-R007) |
 | SRT/VTT subtitle raster | `cosmic-text` (same as labels) | MIT/Apache | pure Rust, no native dep |
-| Vector chrome (rounded rects, meters, scopes, markers) | hand-written WGSL SDF / quad / line shaders in `multiview-compositor` | project (MIT OR Apache-2.0) | in-house; no dep |
+| Vector chrome (rounded rects, meters, scopes, markers) | hand-written WGSL SDF / quad / line shaders in `multiview-compositor` | project (Multiview Source-Available Non-Commercial License) | in-house; no dep |
 
 **Bundled font:** ship a permissively-licensed, broad-coverage default font so labels/clocks/UMD
 render with **no host-font dependency** and deterministic metrics across platforms. Candidates:
 **Noto Sans** family (OFL 1.1) for broad Unicode + a monospaced face for timecode, or **Inter**
-(OFL 1.1) for UI labels. OFL 1.1 is redistributable and compatible with the dual MIT OR Apache-2.0
+(OFL 1.1) for UI labels. OFL 1.1 is redistributable and compatible with Multiview's source-available
 project license (font licensed separately under OFL, attributed in `LICENSE`/`NOTICE`). The bundled
 font also guarantees the SIGNAL LOST / clock glyphs are available at the instant of failure. Operator
 fonts can be added via `fontdb` for i18n coverage, but the **bundle is the guaranteed floor**.

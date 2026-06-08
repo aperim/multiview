@@ -6,7 +6,7 @@ serves that wall out in the formats your facility already uses — engineered to
 ordinary hardware and to **never drop a frame**.
 
 <!-- badges: CI / license / container — kept minimal on purpose -->
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
+[![License: Source-Available Non-Commercial](https://img.shields.io/badge/license-Source--Available%20Non--Commercial-blue.svg)](#licensing)
 [![Container: GHCR](https://img.shields.io/badge/container-ghcr.io%2Faperim%2Fmultiview-2496ED.svg)](https://github.com/aperim/multiview/pkgs/container/multiview)
 
 > [!NOTE]
@@ -31,8 +31,9 @@ ordinary hardware and to **never drop a frame**.
   NDI, RTMP and SRT.
 - **Built to be operated.** Declarative TOML config, an embedded web UI, and a REST/WebSocket/SSE
   API with interactive OpenAPI docs — scriptable and automatable end to end.
-- **Open and license-clean.** Pure Rust, dual-licensed **MIT OR Apache-2.0**, with a default
-  build that is LGPL-clean and redistributable.
+- **Source-available and license-clean.** Pure Rust under the **Multiview Source-Available
+  Non-Commercial License** — free for genuine personal/home and other non-commercial use (a
+  commercial licence is required otherwise) — with a default build that is LGPL-clean.
 
 ---
 
@@ -116,8 +117,16 @@ with a universal software fallback. **No Windows.** Full matrix in
 
 ## Licensing
 
-Project code is dual-licensed **MIT OR Apache-2.0** — use either at your option. The **default
-build is LGPL-clean and redistributable** (FFmpeg linked LGPL; all scaling/compositing in-house).
+Project code is **source-available**, licensed under the **Multiview Source-Available
+Non-Commercial License** (see [`LICENSE`](LICENSE)) — © Aperim Pty Ltd. It is **free** for genuine
+personal, home, and other non-commercial use, plus three free exceptions (First Nations Owned
+Broadcasters; small Community Broadcasters; smaller Content Creators) defined in the License. All
+other use — businesses, education, government, productization/appliances, and streamers/creators —
+is Commercial Use and requires a paid Commercial License; see
+[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md) (licensing@aperim.com). This is a source-available
+licence, **not** an open-source or free-software licence.
+
+The **default build remains LGPL-clean** (FFmpeg linked LGPL; all scaling/compositing in-house).
 Two capabilities are strictly opt-in and change the licensing of the resulting build:
 
 - **`gpl-codecs`** — adds x264/x265 → the build becomes **GPL**.

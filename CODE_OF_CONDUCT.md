@@ -58,8 +58,8 @@ others' work. Contributors must **not**:
   documentation from any third party, product, or competitor.
 - Replicate a specific commercial product's distinctive **feature set, workflow, or branding**, or
   present **trademarked product/feature names** as our own.
-- Add code or assets whose **license is incompatible** with the project (MIT OR Apache-2.0), or that
-  you do not have the right to contribute.
+- Add code or assets whose **license is incompatible** with the project (the Multiview
+  Source-Available Non-Commercial License), or that you do not have the right to contribute.
 
 Instead:
 
@@ -72,7 +72,7 @@ Instead:
   or "exclude" specific commercial products — even mentioning them to exclude them is avoided.
 
 By contributing, you confirm the work is **yours to give** (or properly licensed and attributed) and
-complies with the project licenses and the [DCO](CONTRIBUTING.md). Raise suspected IP concerns
+complies with the project license and the [DCO](CONTRIBUTING.md). Raise suspected IP concerns
 privately with the maintainers rather than merging.
 
 ## Enforcement Responsibilities

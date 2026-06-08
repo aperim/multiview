@@ -18,6 +18,17 @@ corpus, the Architecture Decision Records, and the workspace skeleton are in pla
 functionality ships yet — this is the documentation-and-scaffolding foundation that the
 implementation will build against.
 
+### Changed
+
+- **Relicensed from `MIT OR Apache-2.0` to the Multiview Source-Available Non-Commercial License,
+  Version 1.0** (© Aperim Pty Ltd, ABN 46 150 699 737). Multiview is now **source-available**, not
+  open-source/free-software: free for genuine personal/home and other non-commercial use, plus three
+  free exceptions (First Nations Owned Broadcasters; small Community Broadcasters; smaller Content
+  Creators). All other use is Commercial Use and requires a paid Commercial License
+  (licensing@aperim.com). See [`LICENSE`](LICENSE) and [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+  The dependency-licensing posture is unchanged (FFmpeg linked LGPL; `gpl-codecs` → GPL opt-in; NDI
+  proprietary, runtime-loaded).
+
 ### Added
 
 #### Repository scaffold

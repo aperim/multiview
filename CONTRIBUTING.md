@@ -379,10 +379,25 @@ template):
 
 ### Project license
 
-Multiview is dual-licensed **MIT OR Apache-2.0** (see [`LICENSE-MIT`](LICENSE-MIT) and
-[`LICENSE-APACHE`](LICENSE-APACHE)). By contributing, you agree your contributions are
-licensed under those same terms. The dual license is deliberate: the Apache-2.0 patent
-grant plus MIT's GPLv2 compatibility matter for the `gpl-codecs` build profile.
+Multiview is **source-available, not open source**: it is published under the
+**Multiview Source-Available Non-Commercial License** (see [`LICENSE`](LICENSE)), with a
+paid path for commercial use (see [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)). The
+Licensor and copyright holder is **Aperim Pty Ltd** (ABN 46 150 699 737).
+
+### Contributor License Agreement (CLA) — required
+
+Because Multiview is dual-licensed (a free source-available licence **plus** a paid
+commercial/proprietary licence), every contribution must come with a **Contributor License
+Agreement (CLA)** before it can be merged. You keep the copyright in your contribution; the
+CLA grants Aperim Pty Ltd a broad, perpetual, irrevocable licence to use your contribution
+**and to relicense it under any terms — including commercial and proprietary terms**. This
+"inbound = outbound, plus the right to license under other terms" arrangement is what makes
+the dual-license model work: without it, your contribution could not be offered to
+commercial licensees.
+
+Read and agree to [`CONTRIBUTOR-LICENSE-AGREEMENT.md`](CONTRIBUTOR-LICENSE-AGREEMENT.md). The
+DCO sign-off below is still required on every commit, but it is **not** a substitute for the
+CLA — both are needed.
 
 ### Build profiles & redistributability
 

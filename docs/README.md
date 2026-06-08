@@ -26,7 +26,7 @@ For the implementation plan and per-feature status, see [ROADMAP.md](../ROADMAP.
 |---|---|
 | **Binary / daemon** | `multiview` |
 | **Language / edition** | Rust 2021 (stable, pinned via `rust-toolchain.toml`) |
-| **License (project)** | MIT OR Apache-2.0 — see [Licensing model](architecture/conventions.md#7-licensing-model-build-profiles) |
+| **License (project)** | Multiview Source-Available Non-Commercial License, Version 1.0 (source-available, **not** open source) — see [Licensing model](architecture/conventions.md#7-licensing-model-build-profiles) |
 | **Platforms** | Linux (x86_64 + aarch64; NVIDIA, Intel/AMD VAAPI) and macOS (Apple Silicon + Intel). **No Windows.** |
 | **GPU compositor** | Custom, wgpu baseline with vendor fast paths (see [pipeline](architecture/pipeline.md)) |
 | **Default build** | Pure-Rust, LGPL-clean, no native deps; GPU/codec/NDI behind opt-in features |

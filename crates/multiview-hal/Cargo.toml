@@ -3,7 +3,7 @@ name = "multiview-hal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 # Workspace-internal implementation crate; never published to crates.io

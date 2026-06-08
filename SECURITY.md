@@ -6,7 +6,8 @@ serves robust continuous output. Because it handles **source credentials**, expo
 first-class concern. This document explains how to report vulnerabilities and the
 security model of the management surface.
 
-> Multiview project code is dual-licensed **MIT OR Apache-2.0**. See the licensing notes in
+> Multiview project code is **source-available** under the **Multiview Source-Available
+> Non-Commercial License** (© Aperim Pty Ltd; see [`LICENSE`](LICENSE)). See the licensing notes in
 > [`docs/architecture/conventions.md`](docs/architecture/conventions.md) §7 for the
 > FFmpeg/NDI/codec build-profile model summarised below.
 
