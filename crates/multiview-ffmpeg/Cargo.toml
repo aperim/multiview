@@ -56,6 +56,10 @@ libc = { version = "0.2", optional = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"
+# Captures the records the libav→tracing bridge emits so the FFI integration
+# smoke test (`tests/log_bridge_ffi.rs`, `ffmpeg` feature) can assert routing +
+# rate-limiting actually happened. Already a workspace dependency.
+tracing-subscriber = { workspace = true }
 
 # FFI crate exception. The workspace forbids `unsafe_code`, and a `forbid` level
 # can never be relaxed by a downstream manifest or inner attribute — so this crate

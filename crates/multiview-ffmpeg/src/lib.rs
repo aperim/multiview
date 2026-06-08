@@ -76,6 +76,14 @@ pub mod bsf_select;
 
 pub mod error;
 
+/// libav → `tracing` log bridge with anti-flood rate limiting. The level
+/// mapping, the bounded-LRU repetition suppressor, and the rendered-line
+/// sanitiser are pure (always compiled, unit-tested, libav-free); only the
+/// `av_log_set_callback` installation and the `extern "C"` trampoline live
+/// behind the `ffmpeg` feature. Installed once from
+/// [`decode::ensure_initialized`] so a glitchy input never floods stderr.
+pub mod log_bridge;
+
 /// Strict-IDR classifier (GP-1, ADR-0030). A cheap header inspection over a
 /// coded access unit that reports a true random-access point — distinct from
 /// FFmpeg's `AV_PKT_FLAG_KEY`, which also flags HEVC CRA / open-GOP and H.264
@@ -127,6 +135,15 @@ pub use bsf_select::{
 };
 
 pub use error::{FfmpegError, Result};
+
+pub use log_bridge::{
+    map_av_level, sanitize_line, BridgeLevel, SuppressOutcome, Suppressor, AV_LOG_DEBUG,
+    AV_LOG_ERROR, AV_LOG_FATAL, AV_LOG_INFO, AV_LOG_PANIC, AV_LOG_TRACE, AV_LOG_VERBOSE,
+    AV_LOG_WARNING, MAX_LINE_LEN,
+};
+
+#[cfg(feature = "ffmpeg")]
+pub use log_bridge::install as install_log_bridge;
 
 pub use idr::{is_idr, CodecKind, NalFraming};
 
