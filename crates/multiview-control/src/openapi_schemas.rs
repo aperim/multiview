@@ -467,3 +467,52 @@ pub struct StreamInventoryDoc {
     /// Every elementary stream the input offers, in container order.
     pub streams: Vec<StreamDescriptorDoc>,
 }
+
+/// `OpenAPI` mirror of [`multiview_events::WarningSeverity`] (SA-0).
+///
+/// Serde-equivalent: a unit enum rendered as its `snake_case` variant name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WarningSeverityDoc {
+    /// Informational.
+    Info,
+    /// Degraded but operating.
+    Warning,
+    /// Operator action required.
+    Critical,
+}
+
+/// `OpenAPI` mirror of [`multiview_events::WarningCode`] (SA-0 catalog).
+///
+/// Serde-equivalent: a unit enum rendered as its `kebab-case` variant name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum WarningCodeDoc {
+    /// A GPU is present but the compositor resolved a software/CPU adapter.
+    GpuPresentNoVulkanAdapter,
+}
+
+/// `OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).
+///
+/// The body of `GET /api/v1/health`: an actionable health warning carrying a
+/// stable `code` + a `remediation`. A round-trip test (`tests/health.rs`) pins
+/// this shape to the real `multiview_events::HealthWarning` so they cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HealthWarningDoc {
+    /// The stable catalog code — the dedupe key the store + UI coalesce on.
+    pub code: WarningCodeDoc,
+    /// The severity.
+    pub severity: WarningSeverityDoc,
+    /// The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`).
+    pub subsystem: String,
+    /// A clear, human-readable description of the condition.
+    pub message: String,
+    /// The concrete remediation — what the operator must do to fix it.
+    pub remediation: String,
+    /// When the condition was first raised (engine monotonic nanoseconds).
+    pub since: i64,
+    /// Whether the condition is currently active.
+    pub active: bool,
+}

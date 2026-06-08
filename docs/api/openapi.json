@@ -298,6 +298,64 @@
         }
       }
     },
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "`GET /api/v1/health` — list the active health warnings (role: read).",
+        "operationId": "list_health",
+        "parameters": [
+          {
+            "name": "active",
+            "in": "query",
+            "description": "Keep only active (`true`, the default) or include cleared (`false`)\nwarnings.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active health warnings, code-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HealthWarningDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/inputs/{id}/streams": {
       "get": {
         "tags": [
@@ -3602,6 +3660,50 @@
           }
         }
       },
+      "HealthWarningDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).\n\nThe body of `GET /api/v1/health`: an actionable health warning carrying a\nstable `code` + a `remediation`. A round-trip test (`tests/health.rs`) pins\nthis shape to the real `multiview_events::HealthWarning` so they cannot drift.",
+        "required": [
+          "code",
+          "severity",
+          "subsystem",
+          "message",
+          "remediation",
+          "since",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the condition is currently active."
+          },
+          "code": {
+            "$ref": "#/components/schemas/WarningCodeDoc",
+            "description": "The stable catalog code — the dedupe key the store + UI coalesce on."
+          },
+          "message": {
+            "type": "string",
+            "description": "A clear, human-readable description of the condition."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "The concrete remediation — what the operator must do to fix it."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/WarningSeverityDoc",
+            "description": "The severity."
+          },
+          "since": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the condition was first raised (engine monotonic nanoseconds)."
+          },
+          "subsystem": {
+            "type": "string",
+            "description": "The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`)."
+          }
+        }
+      },
       "IndexCellDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::IndexCell`].",
@@ -4675,6 +4777,22 @@
             "description": "The label text to display."
           }
         }
+      },
+      "WarningCodeDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_events::WarningCode`] (SA-0 catalog).\n\nSerde-equivalent: a unit enum rendered as its `kebab-case` variant name.",
+        "enum": [
+          "gpu-present-no-vulkan-adapter"
+        ]
+      },
+      "WarningSeverityDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_events::WarningSeverity`] (SA-0).\n\nSerde-equivalent: a unit enum rendered as its `snake_case` variant name.",
+        "enum": [
+          "info",
+          "warning",
+          "critical"
+        ]
       }
     }
   },
@@ -4706,6 +4824,10 @@
     {
       "name": "alarms",
       "description": "Monitoring alarms: list + acknowledge"
+    },
+    {
+      "name": "health",
+      "description": "Health warnings: active capability mismatches + remediation (read-only)"
     },
     {
       "name": "salvos",

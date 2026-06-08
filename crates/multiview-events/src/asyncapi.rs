@@ -305,6 +305,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/Alert" }
     }));
+    map.insert("HealthWarning".to_owned(), health_warning_message());
     map.insert("InputConnection".to_owned(), json!({
         "name": "InputConnection",
         "title": "Input source connection state change",
@@ -354,6 +355,25 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         }),
     );
     map
+}
+
+/// The `health.warning.*` (SA-0) `AsyncAPI` message definition. Factored out so
+/// the data-events builder stays within the line budget.
+fn health_warning_message() -> Value {
+    json!({
+        "name": "HealthWarning",
+        "title": "Actionable health warning raised or cleared",
+        "summary": "A health warning was raised (health.warning.raised) or cleared (health.warning.cleared) on topic `alerts`.",
+        "description": concat!(
+            "A richer sibling of `Alert` carrying a stable `code`, the affected ",
+            "`subsystem`, and a concrete `remediation`. The `code` is the dedupe ",
+            "key: frames with the same code coalesce rather than stacking. ",
+            "Capability-mismatch codes (e.g. `gpu-present-no-vulkan-adapter`) are ",
+            "latched build-time facts — raised once, cleared on reconfigure/restart.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/HealthWarning" }
+    })
 }
 
 /// The `input.streams` (RT-3) `AsyncAPI` message definition. Factored out so the
@@ -465,6 +485,7 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/AudioMeter" },
         { "$ref": "#/components/schemas/OutputStatus" },
         { "$ref": "#/components/schemas/Alert" },
+        { "$ref": "#/components/schemas/HealthWarning" },
         { "$ref": "#/components/schemas/InputConnection" },
         { "$ref": "#/components/schemas/InputStreams" },
         { "$ref": "#/components/schemas/JobProgress" },
@@ -500,6 +521,9 @@ fn build_schemas() -> Value {
         "OutputStatus": output_status_schema(),
         "AlertSeverity": alert_severity_schema(),
         "Alert": alert_schema(),
+        "WarningSeverity": warning_severity_schema(),
+        "WarningCode": warning_code_schema(),
+        "HealthWarning": health_warning_schema(),
         "InputConnection": input_connection_schema(),
         "InputStreams": input_streams_schema(),
         "JobProgress": job_progress_schema(),
@@ -730,6 +754,64 @@ fn alert_schema() -> Value {
             "active": {
                 "type": "boolean",
                 "description": "Whether the condition is currently active."
+            }
+        }
+    })
+}
+
+fn warning_severity_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Severity of a health warning (sibling of AlertSeverity).",
+        "enum": ["info", "warning", "critical"]
+    })
+}
+
+fn warning_code_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": concat!(
+            "Stable catalog code of a health warning (kebab-case). ",
+            "`#[non_exhaustive]`: the catalog grows over time, so a client must ",
+            "treat an unknown code as a forward-compatible warning, not an error.",
+        ),
+        "enum": ["gpu-present-no-vulkan-adapter"]
+    })
+}
+
+fn health_warning_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `health.warning.raised` and `health.warning.cleared`. ",
+            "A richer sibling of `Alert`: the `code` is the stable dedupe key, and ",
+            "`remediation` carries the concrete fix. Capability-mismatch codes are ",
+            "latched build-time facts (raised once, cleared on reconfigure/restart).",
+        ),
+        "required": ["code", "severity", "subsystem", "message", "remediation", "since", "active"],
+        "properties": {
+            "code": { "$ref": "#/components/schemas/WarningCode" },
+            "severity": { "$ref": "#/components/schemas/WarningSeverity" },
+            "subsystem": {
+                "type": "string",
+                "description": "The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`)."
+            },
+            "message": {
+                "type": "string",
+                "description": "A clear, human-readable description of the condition."
+            },
+            "remediation": {
+                "type": "string",
+                "description": "The concrete remediation — what the operator must do to fix it."
+            },
+            "since": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the condition was first raised (engine monotonic nanoseconds)."
+            },
+            "active": {
+                "type": "boolean",
+                "description": "Whether the condition is currently active (raise vs clear)."
             }
         }
     })

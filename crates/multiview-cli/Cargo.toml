@@ -30,6 +30,15 @@ multiview-telemetry = { workspace = true }
 multiview-compositor = { workspace = true }
 multiview-framestore = { workspace = true }
 multiview-hal = { workspace = true }
+# wgpu types (DeviceType / Backend / AdapterInfo) for the SA-0 build-time
+# composite cross-check (ADR-0035): mapping `GpuContext::adapter().get_info()` into
+# the wgpu-free `multiview_hal::AdapterReport`. OFF by default, pulled in ONLY by
+# the `gpu` feature (the cli already links wgpu transitively via the compositor's
+# `wgpu` feature there), so the default pure-Rust build never sees it. `std` only —
+# no backend feature is needed to read the adapter-info enums.
+wgpu = { version = "29", default-features = false, features = [
+  "std",
+], optional = true }
 multiview-ffmpeg = { workspace = true }
 multiview-input = { workspace = true }
 multiview-output = { workspace = true }
@@ -155,7 +164,7 @@ overlay = ["multiview-compositor/overlay"]
 # baseline build stays pure-Rust, GPU-free, fast, and `cargo deny`-clean (deny
 # runs with `all-features = false`, so the wgpu graphics stack never enters the
 # default graph). Wires no FFI here; the CLI stays `unsafe_code = forbid`.
-gpu = ["multiview-compositor/wgpu"]
+gpu = ["multiview-compositor/wgpu", "dep:wgpu"]
 
 # Report the MEASURED kernel NTP/PTP discipline status on the wall-clock badge
 # (ENG-3b) instead of an assumed one. Off by default: it pulls the engine's `ntp`

@@ -256,6 +256,91 @@ pub struct Alert {
     pub active: bool,
 }
 
+/// Severity of a [`HealthWarning`] (mirrors [`AlertSeverity`]; a *sibling*, not a
+/// reuse, so the two wire enums can evolve independently).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WarningSeverity {
+    /// Informational (e.g. a degradation rung that does not yet affect program).
+    Info,
+    /// Degraded but operating (the default for a capability mismatch).
+    Warning,
+    /// Operator action required (program output is or will be affected).
+    Critical,
+}
+
+/// The stable catalog code of a [`HealthWarning`] (ADR-0035 §5.1).
+///
+/// Serialised as a **kebab-case** string (the wire-stable code an operator and
+/// the UI key on). `#[non_exhaustive]` so the catalog can grow (SA-1+ adds the
+/// decode/encode/metric codes) without a breaking wire change. SA-0 surfaces the
+/// single compositor-mismatch code; the deserialiser carries an explicit
+/// `Unknown` fall-through so a newer engine's code does not hard-fail an older
+/// client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum WarningCode {
+    /// A GPU is present (NVML/`DeviceLoad` or a presence probe) but the wgpu
+    /// compositor resolved a software/CPU-tier adapter — the silent CPU fallback.
+    /// Remediation: grant the `graphics` driver capability + install the Vulkan
+    /// loader/ICD. **Latched** (a build-time fact; raised once, cleared on
+    /// reconfigure/restart — it cannot flap).
+    GpuPresentNoVulkanAdapter,
+}
+
+/// An actionable health warning — a richer *sibling* of [`Alert`].
+///
+/// Reuses `Alert`'s dedupe-by-key (`code`) + raise/clear coalescing (`active`)
+/// shape, and **adds** the operator-actionable fields `Alert` lacks: a stable
+/// `code`, the affected `subsystem`, the `remediation` (the *fix*), and `since`
+/// (when it was first raised, engine monotonic nanoseconds). Carried by the
+/// [`Event::HealthWarningRaised`] / [`Event::HealthWarningCleared`] variants on
+/// [`crate::topic::Topic::Alerts`] (the existing operator-alert lane), emitted
+/// through the identical drop-oldest publisher as `SystemMetrics` (inv #10).
+///
+/// SA-0 surfaces the latched compositor-mismatch warning; the model is the
+/// copy-source for SA-1+'s richer catalog (current/expected etc. are added
+/// later — kept minimal here, per the SA-0 scope).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthWarning {
+    /// The stable catalog code — the dedupe key the store + UI coalesce on.
+    pub code: WarningCode,
+    /// The severity.
+    pub severity: WarningSeverity,
+    /// The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`).
+    pub subsystem: String,
+    /// A clear, human-readable description of the condition.
+    pub message: String,
+    /// The concrete remediation — what the operator must do to fix it.
+    pub remediation: String,
+    /// When the condition was first raised (engine monotonic nanoseconds).
+    pub since: i64,
+    /// Whether the condition is currently active (raise vs clear coalescing).
+    pub active: bool,
+}
+
+impl HealthWarning {
+    /// The stable dedupe key for this warning — its catalog [`WarningCode`] as
+    /// the kebab-case wire string. The store coalesces on this so a repeated
+    /// raise updates rather than stacks (latched build-time facts cannot flap).
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        self.code.as_str()
+    }
+}
+
+impl WarningCode {
+    /// The kebab-case wire string for this code (matches the `#[serde(rename)]`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GpuPresentNoVulkanAdapter => "gpu-present-no-vulkan-adapter",
+        }
+    }
+}
+
 /// An input source connection-state change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputConnection {
@@ -480,6 +565,16 @@ pub enum Event {
     /// An operator alert cleared (topic `alerts`).
     #[serde(rename = "alert.cleared")]
     AlertCleared(Alert),
+    /// An actionable health warning was raised (topic `alerts`): e.g. a GPU is
+    /// present but compositing fell back to CPU (ADR-0035 SA-0). A richer sibling
+    /// of `alert.raised` carrying a stable `code` + a `remediation`. Latched for
+    /// capability-mismatch codes (a build-time fact; raised once).
+    #[serde(rename = "health.warning.raised")]
+    HealthWarningRaised(HealthWarning),
+    /// A previously-raised health warning cleared (topic `alerts`): the carried
+    /// warning has `active = false`. Mirrors `alert.cleared`.
+    #[serde(rename = "health.warning.cleared")]
+    HealthWarningCleared(HealthWarning),
     /// Input source connection change (topic `inputs`).
     #[serde(rename = "input.connection")]
     InputConnection(InputConnection),
@@ -542,6 +637,8 @@ impl Event {
             Self::OutputStatus(_) => "output.status",
             Self::AlertRaised(_) => "alert.raised",
             Self::AlertCleared(_) => "alert.cleared",
+            Self::HealthWarningRaised(_) => "health.warning.raised",
+            Self::HealthWarningCleared(_) => "health.warning.cleared",
             Self::InputConnection(_) => "input.connection",
             Self::InputStreams(_) => "input.streams",
             Self::JobProgress(_) => "job.progress",

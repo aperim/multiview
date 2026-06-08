@@ -496,7 +496,12 @@ pub fn topic_for_event(event: &Event) -> Topic {
         // `system` lane the footer subscribes to — NOT the control firehose.
         Event::SystemMetrics(_) => Topic::System,
         Event::OutputStatus(_) => Topic::Outputs,
-        Event::AlertRaised(_) | Event::AlertCleared(_) => Topic::Alerts,
+        // Operator alerts AND health warnings (SA-0) ride the existing `alerts`
+        // lane — a health warning is a richer sibling of an alert (ADR-0035).
+        Event::AlertRaised(_)
+        | Event::AlertCleared(_)
+        | Event::HealthWarningRaised(_)
+        | Event::HealthWarningCleared(_) => Topic::Alerts,
         // Both input connection state AND elementary-stream inventory deltas ride
         // the existing `inputs` lane (RT-3: `input.streams` is a delta on
         // re-probe / PMT-version bump, not a new topic).

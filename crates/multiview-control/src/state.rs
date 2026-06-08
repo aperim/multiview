@@ -31,6 +31,7 @@ use crate::tally_state::{
     InMemoryProfileStore, OverrideRegistry, TallyMirror, TallyProfileRepository,
 };
 use crate::versioning::{ConfigVersionStore, InMemoryConfigVersionStore};
+use crate::warning_store::{InMemoryWarningStore, WarningRepository};
 
 /// A monotonic source of acknowledgement timestamps on the media timeline.
 ///
@@ -222,6 +223,10 @@ pub struct AppState {
     pub overlays: Arc<dyn ResourceRepository>,
     /// The alarm mirror store (versioned, fed from the engine event stream).
     pub alarms: Arc<dyn AlarmRepository>,
+    /// The health-warning mirror store (SA-0 / ADR-0035): active capability
+    /// mismatches (e.g. GPU present but compositing fell back to CPU) with their
+    /// remediation, fed from the engine event stream via `warning_ingest`.
+    pub warnings: Arc<dyn WarningRepository>,
     /// The salvo definition store (versioned CRUD over config-as-code salvos).
     pub salvos: Arc<dyn SalvoRepository>,
     /// The resolved-tally mirror (latest-wins, fed from the engine event stream).
@@ -313,6 +318,7 @@ impl AppState {
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
+            warnings: Arc::new(InMemoryWarningStore::new()),
             salvos: Arc::new(InMemorySalvoStore::new()),
             tally: Arc::new(TallyMirror::new()),
             tally_overrides: Arc::new(OverrideRegistry::new()),
@@ -428,6 +434,15 @@ impl AppState {
     #[must_use]
     pub fn with_alarm_store(mut self, alarms: Arc<dyn AlarmRepository>) -> Self {
         self.alarms = alarms;
+        self
+    }
+
+    /// Replace the health-warning store (e.g. to share one store with the
+    /// `warning_ingest` task so engine-emitted warnings surface over
+    /// `GET /api/v1/health`).
+    #[must_use]
+    pub fn with_warning_store(mut self, warnings: Arc<dyn WarningRepository>) -> Self {
+        self.warnings = warnings;
         self
     }
 

@@ -496,6 +496,10 @@ msgstr ""
 msgid "Cleared only"
 msgstr ""
 
+#: src/components/HealthBanner.tsx:68
+msgid "Code:"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:874
 #: src/pages/SimplePages.tsx:1007
 msgid "Codec"
@@ -696,6 +700,10 @@ msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:162
 msgid "Credentials are referenced, never inlined: <0>auth</0> holds a <1>secret_ref</1> pointer, not a plaintext secret."
+msgstr ""
+
+#: src/components/HealthBanner.tsx:29
+msgid "Critical"
 msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:50
@@ -1075,6 +1083,10 @@ msgstr ""
 msgid "How Multiview works, how to run it, and how to drive it from config-as-code or the API."
 msgstr ""
 
+#: src/components/HealthBanner.tsx:63
+msgid "How to fix:"
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:80
 msgid "Idempotency"
 msgstr ""
@@ -1348,7 +1360,7 @@ msgstr ""
 msgid "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 msgstr ""
 
-#: src/app/AppLayout.tsx:67
+#: src/app/AppLayout.tsx:68
 msgid "Navigation"
 msgstr ""
 
@@ -1466,6 +1478,10 @@ msgstr ""
 msgid "None"
 msgstr ""
 
+#: src/components/HealthBanner.tsx:41
+msgid "Notice"
+msgstr ""
+
 #: src/pages/SettingsPage.tsx:137
 msgid "Notifications"
 msgstr ""
@@ -1499,7 +1515,7 @@ msgstr ""
 msgid "Offline"
 msgstr ""
 
-#: src/app/AppLayout.tsx:61
+#: src/app/AppLayout.tsx:62
 msgid "Open navigation"
 msgstr ""
 
@@ -1779,7 +1795,7 @@ msgstr ""
 msgid "Sign in"
 msgstr ""
 
-#: src/app/AppLayout.tsx:44
+#: src/app/AppLayout.tsx:45
 msgid "Skip to content"
 msgstr ""
 
@@ -1825,6 +1841,10 @@ msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:197
 msgid "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
+msgstr ""
+
+#: src/components/HealthBanner.tsx:72
+msgid "Subsystem:"
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:74
@@ -2108,6 +2128,10 @@ msgstr ""
 
 #: src/pages/SystemPage.tsx:346
 msgid "Waiting for the first metrics sample…"
+msgstr ""
+
+#: src/components/HealthBanner.tsx:35
+msgid "Warning"
 msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:27

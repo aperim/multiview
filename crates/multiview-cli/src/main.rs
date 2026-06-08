@@ -239,6 +239,29 @@ async fn run_pipeline_until_ctrl_c(
         None,
     );
 
+    // SA-0 (ADR-0035): at build time, off the output-clock thread (the clock is
+    // not yet constructed → inv #1), cross-check the wgpu compositor adapter
+    // against discovered hardware. If a real GPU is present but compositing
+    // resolved a software/CPU adapter (the silent fallback), emit a latched,
+    // actionable `gpu-present-no-vulkan-adapter` warning through the SAME
+    // drop-oldest publisher (inv #10) so the operator sees a banner + a
+    // `GET /api/v1/health` entry instead of a silent CPU burn. Only under `gpu`
+    // (without it the CPU composite is the intentional choice → nothing emitted).
+    #[cfg(feature = "gpu")]
+    {
+        let since_nanos = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        )
+        .unwrap_or(i64::MAX);
+        let _ = multiview_cli::capability_warn::probe_and_emit(
+            publisher.as_ref(),
+            multiview_cli::system_metrics::default_load_source().as_ref(),
+            since_nanos,
+        );
+    }
+
     let report = pipeline
         .run_until_serving(&stop, publisher.as_ref(), &preview_slot, drain)
         .await

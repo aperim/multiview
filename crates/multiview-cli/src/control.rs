@@ -17,8 +17,9 @@ use std::sync::Arc;
 use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_control::{
-    provision_admin_keys, AppState, Command, CommandReceiver, CommandSender, EngineStateSnapshot,
-    InMemoryRepository, SharedPreview,
+    provision_admin_keys, run_warning_ingest, AppState, Command, CommandReceiver, CommandSender,
+    EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, SharedPreview,
+    WarningRepository,
 };
 use multiview_engine::{CompositorDrive, EnginePublisher};
 use multiview_events::{Event, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent};
@@ -111,6 +112,15 @@ where
         );
     }
 
+    // Mirror engine health warnings (SA-0 / ADR-0035) into a store the router
+    // reads over `GET /api/v1/health`. The ingest subscribes to the engine's
+    // drop-oldest event broadcast and only ever reads (lagged-skip on overflow),
+    // so it can never back-pressure the engine (invariant #10). Subscribe BEFORE
+    // the publisher is moved into the AppState.
+    let warnings: Arc<dyn WarningRepository> = Arc::new(InMemoryWarningStore::new());
+    let warning_sub = publisher.subscribe();
+    tokio::spawn(run_warning_ingest(warning_sub, Arc::clone(&warnings)));
+
     let state = AppState::new(
         publisher,
         commands,
@@ -119,6 +129,7 @@ where
     )
     .with_seeded_resources(seeded)
     .with_preview(preview)
+    .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);
     let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
     Ok((addr, handle))
