@@ -3,7 +3,7 @@
 //! heartbeat and replication bytes between peers, driving the already-tested pure
 //! `HaRunner`/`HaStateMachine`/`ReplicaApplier`.
 //!
-//! These are *live loopback* tests: two transports on `127.0.0.1` exchange real
+//! These are *live loopback* tests: two transports on `[::1]` exchange real
 //! UDP datagrams. They exercise failover (node B promotes when node A stops
 //! beating past the miss deadline), replication (a `LayoutSwap` delta replicates
 //! A->B and applies contiguously), the no-silent-divergence contract (a dropped
@@ -49,7 +49,7 @@ fn node(id: u32, prio: u32) -> HaNode {
 /// Bind a transport on an ephemeral loopback port, returning it plus its bound
 /// address (so the peer can be told where to send).
 fn bind_local() -> (UdpClusterTransport, SocketAddr) {
-    let t = UdpClusterTransport::bind("127.0.0.1:0", &[]).expect("bind loopback");
+    let t = UdpClusterTransport::bind("[::1]:0", &[]).expect("bind loopback");
     let addr = t.local_addr().expect("local addr");
     (t, addr)
 }
@@ -84,14 +84,16 @@ fn snapshot_v(v: u64, layout: &str) -> EngineSnapshot {
 #[test]
 fn local_addr_reports_the_bound_port() {
     let (_t, addr) = bind_local();
-    assert_eq!(addr.ip().to_string(), "127.0.0.1");
+    // IPv6-first: the cluster transport binds the IPv6 loopback `[::1]`.
+    assert!(addr.is_ipv6(), "cluster transport must bind IPv6 loopback");
+    assert_eq!(addr.ip().to_string(), "::1");
     assert_ne!(addr.port(), 0, "an ephemeral bind must resolve a real port");
 }
 
 #[test]
 fn a_published_heartbeat_round_trips_to_a_peer() {
     let (sender, _sender_addr) = bind_local();
-    let mut receiver = UdpClusterTransport::bind("127.0.0.1:0", &[]).expect("bind receiver");
+    let mut receiver = UdpClusterTransport::bind("[::1]:0", &[]).expect("bind receiver");
     // Point the sender at the receiver.
     let recv_addr = receiver.local_addr().expect("recv addr");
     let sender = sender.with_peers(&[recv_addr]);
@@ -231,7 +233,7 @@ fn a_layout_swap_delta_replicates_and_applies_contiguously() {
 #[test]
 fn a_replication_message_deserialises_to_the_right_variant() {
     let (sender, _) = bind_local();
-    let mut receiver = UdpClusterTransport::bind("127.0.0.1:0", &[]).expect("recv bind");
+    let mut receiver = UdpClusterTransport::bind("[::1]:0", &[]).expect("recv bind");
     let recv_addr = receiver.local_addr().expect("recv addr");
     let sender = sender.with_peers(&[recv_addr]);
 
@@ -250,11 +252,11 @@ fn a_replication_message_deserialises_to_the_right_variant() {
 
 #[test]
 fn a_malformed_datagram_is_dropped_not_panicked() {
-    let mut receiver = UdpClusterTransport::bind("127.0.0.1:0", &[]).expect("recv bind");
+    let mut receiver = UdpClusterTransport::bind("[::1]:0", &[]).expect("recv bind");
     let recv_addr = receiver.local_addr().expect("recv addr");
 
     // A raw, non-JSON datagram from an unrelated socket must be silently dropped.
-    let raw = UdpSocket::bind("127.0.0.1:0").expect("raw bind");
+    let raw = UdpSocket::bind("[::1]:0").expect("raw bind");
     raw.send_to(b"\xff\x00not-json\xfe", recv_addr)
         .expect("raw send");
 
@@ -276,8 +278,9 @@ fn publishing_to_a_black_holed_peer_never_blocks_the_publisher() {
     // Invariants #1 + #10: a peer that never receives (we point at an address
     // nobody is reading) must not make publish_heartbeat block. We publish far
     // more than any socket buffer and assert the whole burst returns promptly.
-    let blackhole: SocketAddr = "127.0.0.1:9".parse().expect("addr"); // discard-ish
-    let sender = UdpClusterTransport::bind("127.0.0.1:0", &[blackhole]).expect("bind");
+    // IPv6 discard-ish peer (same family as the IPv6 loopback bind below).
+    let blackhole: SocketAddr = "[::1]:9".parse().expect("addr");
+    let sender = UdpClusterTransport::bind("[::1]:0", &[blackhole]).expect("bind");
 
     let hb = Heartbeat {
         from: NodeId::new(1),

@@ -82,8 +82,11 @@ pub use wall::{HeadConfig, WallBezel, WallConfig};
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ControlConfig {
-    /// The socket address to bind, e.g. `"127.0.0.1:8080"` or `"0.0.0.0:8080"`.
-    /// Validated as a parseable [`std::net::SocketAddr`] by
+    /// The socket address to bind, e.g. `"[::]:8080"` (all interfaces, IPv6
+    /// dual-stack — accepts IPv4-mapped clients too) or `"[::1]:8080"`
+    /// (loopback). IPv6-first: prefer the `[::]`/`[::1]` forms; a user-supplied
+    /// IPv4 address (`"127.0.0.1:8080"`) still parses and binds, but is not the
+    /// default. Validated as a parseable [`std::net::SocketAddr`] by
     /// [`MultiviewConfig::validate`].
     pub listen: String,
 }

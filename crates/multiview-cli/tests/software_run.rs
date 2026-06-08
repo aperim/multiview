@@ -222,8 +222,9 @@ async fn software_run_serves_the_control_api_while_running() {
     let stop = StopSignal::new();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // IPv6-first: the serve path must bind the IPv6 loopback `[::1]`.
     let (addr, server) = control::bind_and_serve(
-        "127.0.0.1:0",
+        "[::1]:0",
         &cfg,
         Arc::clone(&publisher),
         commands,

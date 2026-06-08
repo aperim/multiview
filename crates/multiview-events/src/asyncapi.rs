@@ -107,8 +107,8 @@ fn build_servers() -> Value {
             "description": "WebSocket endpoint (bidirectional). Primary transport.",
             "variables": {
                 "host": {
-                    "description": "Hostname and optional port of the Multiview daemon.",
-                    "default": "localhost:8080"
+                    "description": "Hostname and optional port of the Multiview daemon. IPv6-first: the default is the IPv6 loopback `[::1]`; override with your host.",
+                    "default": "[::1]:8080"
                 }
             }
         },
@@ -119,8 +119,8 @@ fn build_servers() -> Value {
             "description": "Server-Sent Events endpoint (server→client only). Fallback transport.",
             "variables": {
                 "host": {
-                    "description": "Hostname and optional port of the Multiview daemon.",
-                    "default": "localhost:8080"
+                    "description": "Hostname and optional port of the Multiview daemon. IPv6-first: the default is the IPv6 loopback `[::1]`; override with your host.",
+                    "default": "[::1]:8080"
                 }
             }
         }

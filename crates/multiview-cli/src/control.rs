@@ -1382,8 +1382,9 @@ input_id = "in_b"
         let (commands, _rx) = multiview_control::command_bus(8);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
+        // IPv6-first: the CLI serve path must bind the IPv6 loopback `[::1]`.
         let (addr, handle) = bind_and_serve(
-            "127.0.0.1:0",
+            "[::1]:0",
             &test_config(),
             publisher,
             commands,
@@ -1394,6 +1395,7 @@ input_id = "in_b"
         )
         .await
         .expect("bind + serve should start");
+        assert!(addr.is_ipv6(), "CLI control plane must bind IPv6 loopback");
 
         // A genuine client hits the unauthenticated OpenAPI document (the control
         // plane's default `openapi` feature). HTTP/1.0 + close → read to EOF.

@@ -2,7 +2,7 @@
 // running `multiview run --features web` server.
 //
 // Usage:
-//   BASE=http://127.0.0.1:8099 TOKEN=admin.<secret> OUT=../demo-output/screens \
+//   BASE=http://[::1]:8099 TOKEN=admin.<secret> OUT=../demo-output/screens \
 //     node scripts/screenshots.mjs
 //
 // The token is seeded into localStorage before any page script runs, so every
@@ -10,7 +10,9 @@
 import { chromium } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 
-const BASE = process.env.BASE ?? "http://127.0.0.1:8099";
+// IPv6-first (operator directive): default to the IPv6 loopback of a local
+// `multiview run` daemon. Override BASE for a different host.
+const BASE = process.env.BASE ?? "http://[::1]:8099";
 const TOKEN = process.env.TOKEN ?? "";
 const OUT = process.env.OUT ?? "../demo-output/screens";
 

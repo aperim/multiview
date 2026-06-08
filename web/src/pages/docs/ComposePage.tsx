@@ -53,7 +53,7 @@ export function ComposePage(): JSX.Element {
               <Trans>
                 A tiny nginx that serves the HLS volume over HTTP so you can open
                 the stream in a player at{" "}
-                <Code>http://localhost:8888/multiview.m3u8</Code>.
+                <Code>http://[::1]:8888/multiview.m3u8</Code>.
               </Trans>
             </DocTerm>
           </DocDefinitions>
@@ -64,7 +64,7 @@ export function ComposePage(): JSX.Element {
             {`# start the stack in the background
 docker compose -f deploy/compose.yaml up -d
 
-# open http://localhost:8888/multiview.m3u8 in VLC or ffplay
+# open http://[::1]:8888/multiview.m3u8 in VLC or ffplay
 
 # stop it and remove the named volume
 docker compose -f deploy/compose.yaml down -v`}

@@ -234,8 +234,11 @@ impl Str0mWhepTransport {
     /// Returns [`WhepError::MalformedOffer`] (reused as the transport's
     /// socket-failure variant) if binding the loopback socket fails.
     pub fn bind_loopback() -> Result<Self, WhepError> {
-        let socket = UdpSocket::bind("127.0.0.1:0").map_err(|_| WhepError::MalformedOffer {
-            reason: "failed to bind loopback UDP socket",
+        // IPv6-first (operator directive): gather an IPv6 loopback host candidate.
+        let socket = UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0)).map_err(|_| {
+            WhepError::MalformedOffer {
+                reason: "failed to bind loopback UDP socket",
+            }
         })?;
         let addr = socket.local_addr().map_err(|_| WhepError::MalformedOffer {
             reason: "failed to read loopback socket address",

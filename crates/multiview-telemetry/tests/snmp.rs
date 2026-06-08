@@ -12,9 +12,10 @@
 
 use multiview_core::alarm::PerceivedSeverity;
 use multiview_telemetry::snmp::{
-    severity_index, Oid, SnmpError, Trap, VarBind, VarBindValue, ENTERPRISES_ARC,
+    severity_index, Oid, SnmpError, Trap, TrapSender, VarBind, VarBindValue, ENTERPRISES_ARC,
 };
 use serde_json::json;
+use std::net::{Ipv6Addr, UdpSocket};
 
 #[test]
 fn oid_rejects_empty_arc() {
@@ -100,4 +101,30 @@ fn trap_roundtrips_through_serde() {
     assert_eq!(trap, back);
     assert_eq!(back.sys_up_time, 4242);
     assert_eq!(back.bindings.len(), 1);
+}
+
+/// IPv6-first transport: a `TrapSender` pointed at an **IPv6** loopback NMS must
+/// bind an IPv6 ephemeral socket and deliver the trap datagram. A hard-coded
+/// `0.0.0.0:0` (IPv4) local bind could not reach an `[::1]` collector, so this
+/// would have failed before the IPv6-first fix.
+#[test]
+fn trap_sender_reaches_an_ipv6_collector() {
+    // A real IPv6 loopback receiver on an OS-assigned port.
+    let receiver = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind [::1]:0 receiver");
+    let collector = receiver.local_addr().expect("receiver local addr");
+    assert!(collector.is_ipv6(), "receiver must be IPv6 loopback");
+
+    let sender = TrapSender::connect(collector, "public").expect("connect to [::1] NMS");
+    let trap_oid = Oid::new(ENTERPRISES_ARC.to_vec())
+        .unwrap()
+        .child([99999, 0, 1]);
+    let trap = Trap::new(1, trap_oid, Vec::new());
+    sender.send(&trap).expect("send trap over IPv6");
+
+    let mut buf = [0u8; 1024];
+    let (n, from) = receiver
+        .recv_from(&mut buf)
+        .expect("recv the trap datagram");
+    assert!(from.is_ipv6(), "datagram source must be IPv6, got {from}");
+    assert!(n > 0, "a non-empty SNMPv2c datagram must arrive");
 }

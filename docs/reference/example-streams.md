@@ -85,7 +85,7 @@ many — pick any that is license-clean for your use.
 
 | Name | URL | Video | FPS | Color | Notes |
 |------|-----|-------|-----|-------|-------|
-| **Synthetic live (local)** | `http://127.0.0.1:8888/test/index.m3u8` | H.264 Main, ABR to 576p | 25 / 30 | untagged or tagged | Produced by pushing a lavfi source into a [local MediaMTX](#local-rtsp--srt--mpeg-ts-loopback-mediamtx) / packager. Reproducible, multivariant, no third party. |
+| **Synthetic live (local)** | `http://[::1]:8888/test/index.m3u8` | H.264 Main, ABR to 576p | 25 / 30 | untagged or tagged | Produced by pushing a lavfi source into a [local MediaMTX](#local-rtsp--srt--mpeg-ts-loopback-mediamtx) / packager. Reproducible, multivariant, no third party. |
 | **iptv-org** | `https://github.com/iptv-org/iptv` | — | — | — | Huge community M3U catalog of free FAST channels (thousands). Quality/uptime varies wildly — great for stress/fuzz testing ingest robustness. Check each channel's license/terms before use. |
 
 ### RTSP
@@ -95,7 +95,7 @@ many — pick any that is license-clean for your use.
 | **Example camera (placeholder)** | `rtsp://camera.example.net:8554/stream` | RFC-2606 example domain — stands in for an HEVC 1080p50 NVR camera. See [above](#3-example-rtsp-camera-hevc-1080p50--rtsp-live). Swap for your own camera. |
 | **Wowza RTSP test** | `https://www.wowza.com/developer/rtsp-stream-test` | Looping test clip. The actual `rtsp://…` URL is **per-session/dynamic** — copy it from that page at test time. |
 | **rtsp.stream** | `https://rtsp.stream/` | Free public RTSP test service (sign up for a key; provides stable looping `rtsp://…` URLs). |
-| **Local MediaMTX (recommended)** | `rtsp://127.0.0.1:8554/test` | Most reliable for CI/dev — run your own. See [synthetic sources](#local-rtsp--srt--mpeg-ts-loopback-mediamtx). |
+| **Local MediaMTX (recommended)** | `rtsp://[::1]:8554/test` | Most reliable for CI/dev — run your own. See [synthetic sources](#local-rtsp--srt--mpeg-ts-loopback-mediamtx). |
 
 > Public, internet-reachable RTSP endpoints are rare and flaky. For anything reproducible, run a
 > **local RTSP server** and push a synthetic source into it.
@@ -105,8 +105,8 @@ many — pick any that is license-clean for your use.
 Stable, public MPEG-TS-over-UDP/SRT endpoints essentially **do not exist** on the open internet
 (UDP/multicast is operator-LAN only; most SRT demos are ephemeral). Generate them locally:
 
-- **MPEG-TS over UDP:** `udp://127.0.0.1:1234?pkt_size=1316` (see recipes below)
-- **SRT (caller/listener):** `srt://127.0.0.1:9000?mode=listener` ↔ `srt://127.0.0.1:9000`
+- **MPEG-TS over UDP:** `udp://[::1]:1234?pkt_size=1316` (see recipes below)
+- **SRT (caller/listener):** `srt://[::1]:9000?mode=listener` ↔ `srt://[::1]:9000`
 - `iptv-org` contains some `udp://`/`.ts` entries, but they are typically only reachable inside the
   originating operator network.
 
@@ -162,29 +162,29 @@ bars; `sine` = audio tone.)
 ffmpeg -re -f lavfi -i "testsrc2=size=1024x576:rate=25" \
        -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
        -c:v libx264 -profile:v main -pix_fmt yuv420p -g 50 \
-       -c:a aac -ar 48000 -f mpegts "udp://127.0.0.1:1234?pkt_size=1316"
+       -c:a aac -ar 48000 -f mpegts "udp://[::1]:1234?pkt_size=1316"
 
 # 29.97 fps, correctly tagged BT.709 LIMITED (a steady reference tile)
 ffmpeg -re -f lavfi -i "smptebars=size=1280x720:rate=30000/1001" \
        -vf "format=yuv420p,scale=out_range=tv" \
        -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv \
-       -c:v libx264 -profile:v main -g 60 -f mpegts "udp://127.0.0.1:1235?pkt_size=1316"
+       -c:v libx264 -profile:v main -g 60 -f mpegts "udp://[::1]:1235?pkt_size=1316"
 
 # 30 fps tagged BT.601 (smpte170m) — deliberately DIFFERENT colorimetry to catch per-tile conversion bugs
 ffmpeg -re -f lavfi -i "testsrc2=size=720x576:rate=30" \
        -vf "format=yuv420p,scale=out_range=tv" \
        -color_primaries smpte170m -color_trc smpte170m -colorspace smpte170m -color_range tv \
-       -c:v libx264 -f mpegts "udp://127.0.0.1:1236?pkt_size=1316"
+       -c:v libx264 -f mpegts "udp://[::1]:1236?pkt_size=1316"
 
 # FULL-range source — catches limited<->full range handling (washed-out / crushed blacks)
 ffmpeg -re -f lavfi -i "smptebars=size=1280x720:rate=25" \
        -vf "format=yuv420p,scale=out_range=pc" \
        -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range pc \
-       -c:v libx264 -f mpegts "udp://127.0.0.1:1237?pkt_size=1316"
+       -c:v libx264 -f mpegts "udp://[::1]:1237?pkt_size=1316"
 
 # 50 fps HEVC 1080p (the example RTSP camera stand-in) — tests the HEVC path + downscale-on-decode
 ffmpeg -re -f lavfi -i "testsrc2=size=1920x1080:rate=50" \
-       -c:v libx265 -pix_fmt yuv420p -f mpegts "udp://127.0.0.1:1238?pkt_size=1316"
+       -c:v libx265 -pix_fmt yuv420p -f mpegts "udp://[::1]:1238?pkt_size=1316"
 ```
 
 ### Local RTSP / SRT / MPEG-TS loopback (MediaMTX)
@@ -200,12 +200,12 @@ docker run --rm -it --network=host bluenviron/mediamtx
 ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
        -f lavfi -i "sine=frequency=440:sample_rate=48000" \
        -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p \
-       -c:a aac -ar 48000 -f rtsp "rtsp://127.0.0.1:8554/test"
+       -c:a aac -ar 48000 -f rtsp "rtsp://[::1]:8554/test"
 
 # 3) Consume it as RTSP / SRT / HLS:
-#    rtsp://127.0.0.1:8554/test
-#    srt://127.0.0.1:8890?streamid=read:test
-#    http://127.0.0.1:8888/test/index.m3u8
+#    rtsp://[::1]:8554/test
+#    srt://[::1]:8890?streamid=read:test
+#    http://[::1]:8888/test/index.m3u8
 ```
 
 ### Reproducing the HLS "bursting" failure

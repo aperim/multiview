@@ -149,14 +149,37 @@ fn absent_control_section_is_none_and_valid() {
 
 #[test]
 fn control_listener_valid_addr_is_accepted() {
-    let with_control = format!("{BASE}\n[control]\nlisten = \"127.0.0.1:8080\"\n");
+    // IPv6-first (operator directive): the recommended listener is the IPv6
+    // wildcard `[::]:8080` (dual-stacks on Linux); it must parse + round-trip.
+    let with_control = format!("{BASE}\n[control]\nlisten = \"[::]:8080\"\n");
     let cfg = MultiviewConfig::load_from_toml(&with_control).unwrap();
     cfg.validate()
-        .expect("a parseable control.listen should validate");
+        .expect("a parseable IPv6 control.listen should validate");
+    assert_eq!(
+        cfg.control.as_ref().map(|c| c.listen.as_str()),
+        Some("[::]:8080"),
+        "the control listener address should round-trip from TOML"
+    );
+
+    // The IPv6 loopback form also validates.
+    let loopback = format!("{BASE}\n[control]\nlisten = \"[::1]:8080\"\n");
+    MultiviewConfig::load_from_toml(&loopback)
+        .unwrap()
+        .validate()
+        .expect("an IPv6 loopback control.listen should validate");
+}
+
+#[test]
+fn control_listener_user_supplied_ipv4_addr_still_accepted() {
+    // We are IPv6-first, but a user who *explicitly* supplies an IPv4 listener is
+    // never denied (directive: "if IPv4 works, great"); it just is not a default.
+    let with_v4 = format!("{BASE}\n[control]\nlisten = \"127.0.0.1:8080\"\n");
+    let cfg = MultiviewConfig::load_from_toml(&with_v4).unwrap();
+    cfg.validate()
+        .expect("an explicit IPv4 control.listen still validates");
     assert_eq!(
         cfg.control.as_ref().map(|c| c.listen.as_str()),
         Some("127.0.0.1:8080"),
-        "the control listener address should round-trip from TOML"
     );
 }
 
