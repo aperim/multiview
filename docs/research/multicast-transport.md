@@ -4,8 +4,18 @@
 foundation the **SAP** discovery layer ([sap-discovery](sap-discovery.md), ADR-0041) and
 AES67/ST 2110 sit **on top of** (SAP discovers; multicast carries). Consistent with
 [ADR-0031](../decisions/ADR-0031.md) (LGPL FFmpeg already enables `udp,rtp`),
-[ADR-0035](../decisions/ADR-0035.md) (the sense→detect→warn `HealthWarning` precedent), and
-[ADR-0030](../decisions/ADR-0030.md) (`AVIOInterruptCB`).
+[ADR-0035](../decisions/ADR-0035.md) (the sense→detect→warn `HealthWarning` precedent),
+[ADR-0030](../decisions/ADR-0030.md) (`AVIOInterruptCB`), and **[ADR-0042](../decisions/ADR-0042.md) /
+[conventions §10](../architecture/conventions.md) — IPv6-first.**
+
+> **IPv6-first ([ADR-0042](../decisions/ADR-0042.md)).** This subsystem is **IPv6-first**: the
+> primary multicast path is IPv6 (`ff00::/8`, SSM `FF3x::/32` via MLDv2), addresses bind/derive IPv6
+> (bracketed literals, e.g. `udp://@[ff3e::1]:5004`), and the IPv4 ranges (`239/8`/`232/8` + IGMPv3)
+> are the **legacy** peer. Where an example below shows an IPv4 address it is the legacy form; the
+> IPv6 form is primary. `MulticastGroup` is `IpAddr` (v6 or v4); the IPv6 join path
+> (`join_multicast_v6` / family-agnostic `MCAST_JOIN_SOURCE_GROUP`) is **required, not a follow-up**.
+> IPv6 multicast `c=` lines carry **no TTL** (scope is in the address) — `ttl` is an IPv4-only knob.
+
 **Question:** what is the implementation-ready architecture for **IP multicast as a
 first-class media transport — UDP-MPEG-TS and RTP/MP2T over IPv4/IPv6 multicast, ingest *and*
 egress** — and how does the engine **warn, bulletproofly and without false positives, when it
@@ -388,13 +398,16 @@ later) is feature-gated like `st2110`.
 **Config** (mirrors `RtspOptions`: an `Option<Opts>` beside `url`, default-skipped, internally
 tagged, back-compat):
 
+Examples lead with IPv6 (the primary path); the IPv4 forms are the **legacy** peer.
+
 ```toml
+# IPv6-first (primary): IPv6 admin-scoped (ff08::/org-local) + SSM (ff3e::/global) groups.
 [[sources]]
 id = "feed-a"
 kind = "udp"
-group = "239.255.1.10"
+group = "ff08::1:10"            # IPv6 multicast (no TTL — scope is in the address)
 port = 5004
-interface = "10.20.0.5"      # localaddr — the media NIC
+interface = "2001:db8:0:1::5"   # localaddr — the media NIC (IPv6)
 buffer_bytes = "24MiB"
 fifo_packets = 65536
 overrun_nonfatal = true
@@ -402,18 +415,22 @@ overrun_nonfatal = true
 [[sources]]
 id = "feed-b"
 kind = "rtp"
-group = "232.1.2.3"          # SSM → sources REQUIRED
+group = "ff3e::1:2:3"           # IPv6 SSM (FF3x::/32) → sources REQUIRED (MLDv2 INCLUDE)
 port = 5006
-sources = ["192.0.2.7"]
-interface = "10.20.0.5"
+sources = ["2001:db8:0:2::7"]
+interface = "2001:db8:0:1::5"
 
 [[outputs]]
 kind = "udp"
-group = "239.255.2.20"
+group = "ff08::2:20"            # IPv6 admin-scoped
 port = 5008
 codec = "h264"
-ttl = 1                      # contained plant
-pkt_size = 1316              # 7×188
+pkt_size = 1316                 # 7×188
+
+# Legacy IPv4 (legacy interop only; IPv4 is on a deprecation path — note ttl is IPv4-only):
+#   [[sources]] kind="udp" group="239.255.1.10" port=5004 interface="10.20.0.5"
+#   [[sources]] kind="rtp" group="232.1.2.3"    port=5006 sources=["192.0.2.7"]   # SSM
+#   [[outputs]] kind="udp" group="239.255.2.20" port=5008 ttl=1
 ```
 
 ---
@@ -444,9 +461,15 @@ pkt_size = 1316              # 7×188
 
 ## 11. Open questions
 
-- **IPv6 SSM parity in v1:** libav `sources=`/`block=` map to `MCAST_JOIN_SOURCE_GROUP` for IPv6
-  too; the manual `st2110` socket path is `join_multicast_v4` only. *Default:* delegate IPv6 SSM
-  to libav in v1; a manual IPv6 socket path is a follow-up.
+- **IPv6 multicast is the primary path (not a follow-up).** libav `sources=`/`block=` map to the
+  family-agnostic `MCAST_JOIN_SOURCE_GROUP` for IPv6 too (bracketed `udp://@[ff3e::…]`/`rtp://[…]`),
+  so the libav path is IPv6-capable now; the as-built manual `st2110` socket path is
+  `join_multicast_v4` **only**, so an owned `join_multicast_v6` / `MCAST_JOIN_SOURCE_GROUP` is
+  **required** (IPV6-first per [ADR-0042](../decisions/ADR-0042.md); tracked as IPV6-7 in
+  [ipv6-first-backlog](../development/ipv6-first-backlog.md)). Open sub-question: full manual IPv6
+  SSM fidelity vs delegating SSM joins to libav — *default:* derive bracketed IPv6 URLs and let
+  libav do the MLDv2 INCLUDE join for the single-path case; the owned `socket2` IPv6 SSM path is the
+  upgrade for the manual socket.
 - **`SO_RCVBUFFORCE` / `CAP_NET_ADMIN`:** raising `SO_RCVBUF` beyond `rmem_max` needs
   `CAP_NET_ADMIN`. *Default:* request + readback-warn + document raising `rmem_max` (no privileged
   syscall by default); `SO_RCVBUFFORCE` behind an opt-in is a follow-up.
