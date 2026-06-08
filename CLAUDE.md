@@ -40,6 +40,17 @@ done without parking it.
 - **Drive the loop to the stated finish.** Hold the whole agenda, fan out independent work, then
   integrate + gate + hardware-validate it **yourself**. Report a thing as done only when it is green
   and verified. Keep going until the operator's goal is actually met.
+- **NEVER defer, stub, scaffold, or partial-ship.** This is absolute. A thing is "done" only when it
+  is **wired end-to-end and working** — not when a "core" lands with the integration parked for
+  "a later wave", not a `todo!()`/placeholder, not "modelled but the real path isn't built", not
+  "honestly documented as a follow-up". Splitting a unit of work for *parallelism* (e.g. a crate-core
+  + its thin integration) is allowed **only if every part ships in the same push** — never "core now,
+  wiring later". When something required is identified: **(a)** if it is **not documented**, fan out
+  to write the brief/ADR + plan first, then ship it; **(b)** if it **is documented** and the pieces
+  can fan out, parallel-ship **all** of them (core **and** integration) together; **(c)** otherwise
+  ship it now, complete. Deferred/parked work is technical debt — we do not create it. If you
+  genuinely cannot finish a thing this turn (a real external blocker), say so explicitly and name the
+  blocker; "I'll wire it up later" is not a finish.
 
 ---
 
