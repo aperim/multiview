@@ -34,6 +34,7 @@ pub mod error;
 pub mod grid;
 pub mod placement;
 pub mod probe;
+pub mod program;
 pub mod routing;
 pub mod salvo;
 pub mod schema;
@@ -54,6 +55,7 @@ pub use audio::{
 pub use error::ConfigError;
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
+pub use program::{ProgramId, ProgramKind, ProgramSpec};
 pub use routing::{
     AudioCrosspoint, OutputCrosspoint, OutputRef, RoutingRefs, RoutingTable, StreamRef,
     StreamSelector, SubtitleCrosspoint, VideoCrosspoint, MAIN_PROGRAM,
