@@ -98,6 +98,7 @@ pub mod heads;
 pub mod isolation;
 pub mod placement;
 pub mod probe;
+pub mod program;
 pub mod ptp;
 pub mod runtime;
 pub mod salvo;
@@ -131,6 +132,7 @@ pub use probe::{
     BlackConfig, BlackProbe, DetectionZone, ExpectedFormat, FormatAxis, FormatMismatch,
     FormatProbe, FreezeConfig, FreezeProbe, LumaView, LumaViewError, ProbeObservation,
 };
+pub use program::{MultiviewProgram, ProgramId, ProgramKind};
 pub use ptp::{PtpSample, PtpServo, ServoConfig};
 pub use runtime::{
     CooperativePacer, EngineRuntime, Pacer, RealtimePacer, RunOutcome, RunStop, StopSignal,

@@ -82,7 +82,7 @@ use multiview_core::pixel::PixelFormat;
 use multiview_core::time::{MediaTime, Rational};
 use multiview_core::traits::SourceState;
 use multiview_engine::{
-    CompositedFrame, CompositorDrive, EnginePublisher, EngineRuntime, MonotonicTimeSource,
+    CompositedFrame, CompositorDrive, EnginePublisher, MonotonicTimeSource, MultiviewProgram,
     OutputClock, Pacer, RealtimePacer, StopSignal, TimeSource,
 };
 use multiview_events::Event;
@@ -198,6 +198,19 @@ pub enum PipelineError {
     /// The output clock rejected the canvas cadence.
     #[error("output clock: {0}")]
     Clock(String),
+    /// A program could not be assembled (ADR-0030 MP-0): the engine rejected the
+    /// per-program clock + compositor drive while building its
+    /// [`MultiviewProgram`](multiview_engine::MultiviewProgram) — e.g. a
+    /// clock/spec cadence mismatch. Carries the offending
+    /// [`ProgramId`](multiview_config::ProgramId) so the failure is attributable
+    /// per program once the engine runs several.
+    #[error("program {program}: {reason}")]
+    Program {
+        /// The id of the program that failed to assemble.
+        program: multiview_config::ProgramId,
+        /// The underlying reason (the engine error string).
+        reason: String,
+    },
     /// The engine drive/compositor rejected the canvas.
     #[error("engine: {0}")]
     Engine(String),
@@ -388,6 +401,15 @@ pub struct Pipeline {
     layout: Arc<Layout>,
     /// The fixed output cadence (exact rational).
     cadence: Rational,
+    /// The single program this pipeline runs (ADR-0030 MP-0). The legacy
+    /// top-level `canvas`/`layout`/`cells`/`overlays`/`outputs` block desugars
+    /// here into exactly one implicit `Multiview` program (`id = "main"`), and
+    /// [`Pipeline::drive_streaming`] constructs **one**
+    /// [`MultiviewProgram`](multiview_engine::MultiviewProgram) from it — the run
+    /// path flows through one `Program`. Its [`ProgramId`] also scopes the
+    /// per-program context [`PipelineError`] carries. The `programs: Vec<…>`
+    /// schema root + multi-program supervisor arrive in MP-1/MP-5.
+    program_spec: multiview_config::ProgramSpec,
     /// Per-source native caption cue stores, keyed by source id. Each store is
     /// written by an isolated caption reader thread (HLS `WebVTT` rendition demux)
     /// and **sampled** at each output tick by the overlay baker, which burns the
@@ -666,9 +688,24 @@ impl Pipeline {
         // and simply ride an empty map (inv #10 — never on the hot loop).
         let inventories = build_input_inventories(config);
 
+        // Desugar the legacy single-program config into one implicit `"main"`
+        // `Multiview` program (ADR-0030 §6 / MP-0). The run path is driven through
+        // one `MultiviewProgram` built from this spec; carrying the raw config
+        // block (not the solved layout) keeps the spec the authentic config-derived
+        // program identity the engine consumes. No `programs:` schema root yet
+        // (MP-5) — this is the single-program desugaring, used by the run path.
+        let program_spec = multiview_config::ProgramSpec::main_multiview(
+            config.canvas.clone(),
+            config.layout.clone(),
+            config.cells.clone(),
+            config.overlays.clone(),
+            config.outputs.clone(),
+        );
+
         Ok(Self {
             layout,
             cadence,
+            program_spec,
             stores,
             ingest_plans,
             inventories,
@@ -1068,10 +1105,22 @@ impl Pipeline {
         let bake_ctx = self.bake_context();
         let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder, audio_bus);
 
-        // Build the runtime now (post-prime): `EngineRuntime::new` reads the seed
-        // from `ts` here, so tick 0 is due at this instant — the prime delay sits
-        // before the epoch and is never paid back as a burst.
-        let mut runtime = EngineRuntime::new(clock, drive, ts, pacer);
+        // Build the single program now (post-prime, ADR-0030 MP-0): the run path
+        // flows through ONE `MultiviewProgram` that owns this program's clock +
+        // compositor drive + (internally) `EngineRuntime` + its own stop handle.
+        // `MultiviewProgram::new` reads tick 0's seed from `ts` here (via the
+        // wrapped `EngineRuntime`), so tick 0 is due at this instant — the prime
+        // delay sits before the epoch and is never paid back as a burst, exactly
+        // as the previous inline `EngineRuntime::new` did. The program clones the
+        // caller's `stop` (Arc-backed) as its own handle, so the existing Ctrl-C /
+        // control-plane stop still ends the run unchanged. A spec/cadence mismatch
+        // is a build-assembly bug, surfaced as a typed error (never a panic).
+        let mut program =
+            MultiviewProgram::new(&self.program_spec, clock, drive, ts, pacer, stop.clone())
+                .map_err(|e| PipelineError::Program {
+                    program: self.program_spec.id.clone(),
+                    reason: e.to_string(),
+                })?;
 
         // The hot-loop drop counter (live drop-on-overload) and the queue
         // high-watermark probe. Both are wait-free atomics shared with the
@@ -1196,15 +1245,20 @@ impl Pipeline {
             None
         };
 
+        // Drive the protected per-tick loop through the program. The program owns
+        // its stop handle (a clone of the caller's `stop`), so — unlike the inline
+        // `EngineRuntime` path — the run methods no longer take `stop`; the same
+        // bounded (`run_for`) vs forever (`run`) split + the same publisher /
+        // state/event projections / per-frame control hook are threaded verbatim.
         let outcome = match max_ticks {
             Some(max) => {
-                runtime
-                    .run_for_with_control(publisher, stop, max, state_of, event_of, control)
+                program
+                    .run_for_with_control(publisher, max, state_of, event_of, control)
                     .await
             }
             None => {
-                runtime
-                    .run_with_control(publisher, stop, state_of, event_of, control)
+                program
+                    .run_with_control(publisher, state_of, event_of, control)
                     .await
             }
         }
@@ -1219,8 +1273,9 @@ impl Pipeline {
         // already closed → the bake consumer's `recv()` has seen end-of-input,
         // drains the queue, fans the remainder, and drops the per-sink senders →
         // each sink sees its channel close and finalises (writes its trailer).
-        // Dropping the runtime here only releases the engine's own resources.
-        drop(runtime);
+        // Dropping the program here only releases the engine's own resources
+        // (its wrapped `EngineRuntime` = clock + drive + time source + pacer).
+        drop(program);
 
         // Join the bake consumer + sink threads FIRST — folding their outcome and
         // writing the trailers (the sinks' own `run()` finalisation) — BEFORE

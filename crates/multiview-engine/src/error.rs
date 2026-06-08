@@ -49,6 +49,15 @@ pub enum Error {
     #[error("cannot re-point cell: {0}")]
     Rebind(String),
 
+    /// A [`MultiviewProgram`](crate::MultiviewProgram) was constructed from a
+    /// [`ProgramSpec`](multiview_config::ProgramSpec) whose
+    /// [`ProgramKind`](crate::ProgramKind) is not `Multiview` (ADR-0030 MP-0).
+    /// The guarded-passthrough and transcode kinds run through their own program
+    /// types (MP-3/MP-4); building a multiview program from the wrong kind is a
+    /// caller assembly error surfaced as a typed error rather than a panic.
+    #[error("multiview program built from non-multiview spec: kind {0:?}")]
+    WrongProgramKind(&'static str),
+
     /// A permanent HA cluster-transport fault while *submitting* a heartbeat or
     /// replication message for publication (a malformed-encoding or a hard
     /// socket fault — never a transient drop, which is silent and best-effort).
