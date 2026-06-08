@@ -1,355 +1,136 @@
 # Multiview
 
-**An efficient, hardware-accelerated, Rust live video multiview generator.** Ingest many live
-sources, composite them into a templated multiview on the GPU, and serve the result robustly —
-built to run great on **commodity hardware** with **bulletproof, never-falters output**.
+**Turn many live video feeds into one dependable multiviewer.** Multiview ingests your
+cameras, encoders and streams, composites them into a clean, templated wall on the GPU, and
+serves that wall out in the formats your facility already uses — engineered to run well on
+ordinary hardware and to **never drop a frame**.
+
+<!-- badges: CI / license / container — kept minimal on purpose -->
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
+[![Container: GHCR](https://img.shields.io/badge/container-ghcr.io%2Faperim%2Fmultiview-2496ED.svg)](https://github.com/aperim/multiview/pkgs/container/multiview)
 
 > [!NOTE]
-> **Status: early stage — design complete, implementation beginning.** This repository is the whole
-> Multiview application. Its architecture, full API/UI design, 89 ADRs, and verification-hardened
-> research are finished and pinned in [`docs/`](docs/). Implementation is just starting: the
-> `crates/`, `xtask/`, and `web/` trees are an early scaffold — they compile
-> (`cargo check`/`clippy`/`fmt` are green), but bodies are trait/type stubs being built out against
-> the documented contracts. The current phase is the documentation pass; APIs and config shown below
-> describe the target design. See [`ROADMAP.md`](ROADMAP.md) for the milestone plan and
-> [`FEATURES.md`](FEATURES.md) for the capability/status matrix.
+> **Early stage, under active development.** The architecture, full API/UI design, ADRs and
+> research are complete, and the Rust foundation is built and tested. The Docker quick-start
+> below runs today (composite → encode → HLS + web UI/API); the live RTSP/NDI/RTMP/SRT output
+> servers and hardware-accelerated paths are landing per the **[roadmap](ROADMAP.md)**. See
+> **[FEATURES.md](FEATURES.md)** for the live, per-feature status matrix.
 
 ---
 
-## What it does
+## Why Multiview
 
-Multiview is a headless, scriptable compositor/router. It samples many independent live inputs into
-a fixed, templated canvas and encodes that canvas **once per rendition** — the encode-once-mux-many
-design then fans the same stream to many transports (RTSP, HLS/LL-HLS, NDI, RTMP, SRT).
-
-> **Status (early stage).** Today the engine ingests → composites → encodes → writes **HLS/file
-> output**, driven by declarative config (TOML). With a `[control]` section in the config, `multiview
-> run` also serves the **web UI**, the **REST/WS/SSE API**, and the **OpenAPI 3.1 / Scalar docs** on
-> one listener alongside the engine (the control plane is isolation-safe and cannot back-pressure the
-> output clock — invariant #10). The additional live output *servers* (RTSP/NDI/RTMP/SRT) are built
-> as libraries and remain on the near-term [roadmap](ROADMAP.md). See "Roadmap".
-
-The two non-negotiable theses:
-
-1. **Bulletproof, continuous output.** At every tick of a single fixed-cadence internal clock the
-   output stage emits exactly one valid, correctly-timestamped frame (plus matching audio),
-   *forever*, independent of any input. Inputs are *sampled*, never *pacing*. A dead camera shows a
-   "no signal" card in its tile — it never freezes, stalls, or corrupts the multiview.
-2. **Commodity hardware first.** The binding resource on an Intel iGPU, an AMD APU, a base Apple
-   Silicon Mac, or an entry NVIDIA card is **memory bandwidth and fixed-function decode/encode**,
-   not compositor math. Multiview decodes at display resolution, stays NV12 end-to-end, keeps frames
-   on-device within a vendor island, and degrades tile-by-tile under load before the program output
-   is ever touched. A 4-GPU server is the trivial case, not the target.
+- **Output that never falters.** A single fixed-cadence clock emits one valid, correctly-timed
+  frame every tick — *forever*, independent of any input. A dead camera shows a "no signal"
+  tile; it never freezes, stalls or corrupts the wall.
+- **Runs on commodity hardware.** NVIDIA, Intel, AMD or Apple Silicon — or pure software as a
+  universal fallback. Multiview decodes at display size, stays NV12 end-to-end, keeps frames on
+  the GPU, and sheds load tile-by-tile under pressure before the program output is ever touched.
+- **Many sources in, many destinations out.** RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, files and
+  synthetic test patterns in; composite **once** and fan the same stream out to RTSP, HLS/LL-HLS,
+  NDI, RTMP and SRT.
+- **Built to be operated.** Declarative TOML config, an embedded web UI, and a REST/WebSocket/SSE
+  API with interactive OpenAPI docs — scriptable and automatable end to end.
+- **Open and license-clean.** Pure Rust, dual-licensed **MIT OR Apache-2.0**, with a default
+  build that is LGPL-clean and redistributable.
 
 ---
 
-## Features
+## Quick start
 
-| Area | Capabilities |
-|------|--------------|
-| **Inputs** | RTSP, HLS/M3U, MPEG-TS, SRT, NDI (opt-in), RTMP, file, and synthetic test sources — with supervised reconnect, jitter buffers, and per-input timestamp normalization. |
-| **GPU HAL** | Per-stage backend **auto-negotiation** (decode / composite / encode chosen independently) with a cost-model planner that prefers single-vendor **zero-copy islands** and costs every cross-vendor copy. Software is the universal fallback. |
-| **Compositor** | A **custom GPU-native compositor** (not FFmpeg filters): scale + place + per-tile color convert + linear-light blend + overlays, fused into one pass. Owns all fit/cover/crop, gaps, borders, rounded corners. |
-| **Layouts** | Declarative, **hot-reconfigurable** templates — named presets (`grid:2x2`, `grid:3x3`, `1+5`, `pip`), CSS-grid-like tracks with ASCII area maps, and absolute normalized rects for arbitrary PiP/overlap. |
-| **Outputs** | RTSP, HLS, **Apple LL-HLS** (custom CMAF segmenter), NDI out, RTMP push, SRT push — via **encode-once-mux-many** fan-out. H.264 is the interop baseline; HEVC/AV1 are runtime-detected upgrades. |
-| **Audio** | Per-input decode/resample/mix; clean **discrete per-input tracks** + a normalized program bus (EBU R128 / `loudnorm`); silence-fill on dropout so tracks never vanish; capability-aware routing per output. |
-| **Subtitles** | CEA-608/708, DVB-sub, teletext, WebVTT/SRT/ASS ingest; **libass burn-in** (off the hot path) and format-aware discrete passthrough. |
-| **Overlays** | Serializable layer stack — text, clocks, logos, tally borders, alert cards, audio meters — rendered input-decoupled so the alert path works even when every input and the GPU are gone. |
-| **Web UI + API** | A single embedded React SPA + an **axum** REST API with **OpenAPI 3.1** (interactive Scalar docs), WebSocket/SSE realtime, auth + RBAC, and SQLite-backed config-as-code. |
-| **Preview** | Sub-second **WHEP/WebRTC** preview + a cheap **MJPEG/JPEG** fallback, strictly isolated from the program path (preview can never back-pressure the engine). |
-
----
-
-## Architecture
-
-A layered Rust workspace with two planes: a **Tokio control/IO plane** for networking and the API,
-and a dedicated-thread **data plane** for the codec/composite hot path. The protected output core
-owns the clock and emits a frame every tick regardless of upstream state.
-
-```mermaid
-flowchart TB
-    subgraph Ingest["Ingest — per-source supervised (multiview-input)"]
-        SRCS["RTSP · HLS · MPEG-TS · SRT · RTMP · NDI · file · test"]
-    end
-
-    subgraph Data["Data plane — dedicated threads"]
-        DEC["Decode (multiview-ffmpeg, HAL backends)"]
-        FS["Per-tile last-good-frame store + state machine (multiview-framestore)"]
-        COMP["Custom GPU compositor (multiview-compositor)"]
-        ENC["Encode (HAL backends)"]
-    end
-
-    subgraph Core["Protected output core (multiview-engine)"]
-        CLK(["Fixed-cadence output clock — PTS = f(tick)"])
-        AUD["Audio mix + program bus (multiview-audio)"]
-    end
-
-    subgraph HAL["multiview-hal — capability detect + negotiation + cost model"]
-        PLAN["Backend planner (admission + degradation)"]
-    end
-
-    subgraph Serve["Outputs — encode-once-mux-many (multiview-output)"]
-        OUTS["RTSP · HLS/LL-HLS · NDI · RTMP · SRT"]
-    end
-
-    subgraph Mgmt["Control / IO plane (Tokio)"]
-        API["REST + WS + SSE API (multiview-control, axum + OpenAPI)"]
-        WEB["Embedded React SPA (web/)"]
-        PREV["Preview taps — WHEP / MJPEG (multiview-preview)"]
-        TEL["Telemetry + health (multiview-telemetry)"]
-    end
-
-    SRCS --> DEC --> FS --> COMP --> ENC --> OUTS
-    CLK -- "pull 1 frame/tick" --> COMP
-    CLK -- "pull samples/tick" --> AUD --> ENC
-    PLAN --> DEC & COMP & ENC
-    API --> PLAN
-    WEB --> API
-    COMP -. tap .-> PREV
-    TEL -. observes .-> Data
-```
-
-See the [Core Engine brief](docs/research/core-engine.md) and
-[Resilience & A/V brief](docs/research/resilience-and-av.md) for the full data flow, and the
-[canonical conventions](docs/architecture/conventions.md) for the authoritative crate map, feature
-flags, and invariants.
-
----
-
-## Quick start (Docker Compose)
-
-The fastest way to see Multiview running. It brings up the engine plus a small companion
-container that publishes a **synthetic** `testsrc2` + `sine` RTSP feed (no real or private
-sources), composites a 2×2 canvas, encodes it, serves the result as HLS, and serves the **web UI +
-REST/WS API + OpenAPI/Scalar docs** on `:8080`.
+The fastest way to see it running. This brings up the engine plus a small companion that
+publishes a **synthetic** test feed (no real or private sources), composites a 2×2 wall, encodes
+it, serves the result as HLS, and serves the web UI + API on `:8080`.
 
 ```bash
 git clone https://github.com/aperim/multiview.git
 cd multiview
-
-# Pulls ghcr.io/aperim/multiview:latest + a MediaMTX testsrc companion + an
-# nginx that serves the HLS output.
 docker compose -f deploy/compose.yaml up -d
-
-# Open the management web UI and the interactive API docs:
-#   http://localhost:8080/        the web UI (manage the engine)
-#   http://localhost:8080/docs    the Scalar API playground (try-it-out)
-# Open the multiview itself in a player (VLC / ffplay):
-#   vlc http://localhost:8888/multiview.m3u8
-docker compose -f deploy/compose.yaml logs -f multiview
 ```
 
-The web UI is served because the published image is built with the `web` feature (the SPA is
-embedded in the binary) and the quick-start config has a `[control]` section. `/`, `/docs`, and
-`/api/v1/openapi.json` are unauthenticated; every `/api/v1` data route needs
-`Authorization: Bearer admin.<secret>`, where `<secret>` is the `MULTIVIEW_CONTROL_TOKEN` env var
-(the compose file defaults it to `local-dev-change-me` for local use — override it for anything
-real, or unset it and read the bootstrap token the server logs once at startup). Paste
-`admin.<secret>` into the Scalar playground's Auth field to call write routes.
+Then open:
 
-The quick-start config is [`deploy/config/multiview.toml`](deploy/config/multiview.toml) — one tile
-reads the companion's `rtsp://testsrc:8554/test`, the other three are built-in synthetic test
-patterns. Edit it and re-run `up -d` to point a tile at your own source. Tear down with
-`docker compose -f deploy/compose.yaml down -v`.
+- **Web UI** — <http://localhost:8080/> (manage the engine)
+- **API playground** — <http://localhost:8080/docs> (interactive OpenAPI / Scalar)
+- **The multiview** — `vlc http://localhost:8888/multiview.m3u8` (or any HLS player)
 
-> [!NOTE]
-> The default LGPL-clean image encodes **mpeg2video** — open the HLS in **VLC**/ffplay. For
-> browser-friendly **H.264**, use the `-gpl` image and set `codec = "h264"` (H.264/H.265 make the
-> build GPL). Live **RTSP/NDI/RTMP/SRT output servers** are still on the [roadmap](ROADMAP.md) —
-> today the engine composites, encodes, and writes HLS/file output to disk (the `hls` sidecar
-> serves it over HTTP).
+Edit [`deploy/config/multiview.toml`](deploy/config/multiview.toml) to point a tile at your own
+source and re-run `up -d`. Tear down with `docker compose -f deploy/compose.yaml down -v`.
 
-### GPU one-liners
-
-```bash
-# NVIDIA (NVDEC/NVENC/CUDA): needs the NVIDIA driver + Container Toolkit on the host.
-docker compose -f deploy/compose.yaml -f deploy/compose.gpu-nvidia.yaml up -d
-
-# Intel/AMD VAAPI: passes through /dev/dri; set RENDER_GID to your host's render group id.
-RENDER_GID=$(getent group render | cut -d: -f3) \
-  docker compose -f deploy/compose.yaml -f deploy/compose.gpu-vaapi.yaml up -d
-```
+> The default image is LGPL-clean and encodes **MPEG-2** (open it in VLC/ffplay). For
+> browser-friendly **H.264**, use the `-gpl` image. GPU one-liners (NVIDIA / VAAPI) and the full
+> configuration reference are in **[docs/operations](docs/operations/)**.
 
 ---
 
 ## Install
 
-### Container image (GHCR)
-
-```bash
-# LGPL-clean default image (software + VAAPI). Encodes the canvas with LGPL mpeg2video.
-docker pull ghcr.io/aperim/multiview:latest
-
-# NVIDIA variant (NVDEC/NVENC/CUDA).
-docker pull ghcr.io/aperim/multiview:latest-nvidia
-```
-
-Images are multi-arch (`linux/amd64` + `linux/arm64`), built on native runners, and published with
-SLSA build-provenance attestations + keyless cosign signatures.
-
-### Prebuilt binaries (GitHub Releases)
-
-Each tagged release attaches a `tar.gz` (+ `.sha256`) per platform on the
-[Releases page](https://github.com/aperim/multiview/releases):
-
-| Platform | Asset target |
-|----------|--------------|
-| Linux x86_64 | `x86_64-unknown-linux-gnu` |
-| Linux aarch64 | `aarch64-unknown-linux-gnu` |
-| macOS Apple Silicon | `aarch64-apple-darwin` (signed + notarized) |
-| macOS Intel | `x86_64-apple-darwin` (signed + notarized) |
-
-> Two separate macOS binaries are shipped (not a universal2 `lipo`): Homebrew's FFmpeg bottle is
-> arm64-only on the build runner, so a true universal2 link isn't yet available.
-
-### Runtime requirement: FFmpeg 7.x
-
-The released binaries link **FFmpeg / libav 7.x dynamically** — the `libavcodec.so.61` soname
-family. You must have a matching FFmpeg 7.x on the host:
-
-- **macOS:** `brew install ffmpeg` (Homebrew ships 7.x).
-- **Linux:** distro libav 7.x — e.g. **Debian trixie** ships FFmpeg 7.1 (`libavcodec61` …). On
-  **Ubuntu 24.04** apt ships FFmpeg **6.1**, so install 7.x from a maintained PPA
-  (`ppa:ubuntuhandbook1/ffmpeg7`) or use the container image instead.
-- Verify with `pkg-config --modversion libavcodec` → expect `61.x`.
-
-The default container image bundles the correct FFmpeg 7.x runtime, so no host FFmpeg is needed when
-running via Docker.
-
-### Build from source
-
-```bash
-# Default build: pure-Rust trait/type layer, no native GPU deps, LGPL-clean.
-cargo build
-
-# Platform umbrella presets (defined in multiview-cli):
-cargo build --features ffmpeg                  # real libav* pipeline, LGPL mpeg2video
-cargo build --features nvidia                  # cuda + ffmpeg + wgpu (NVENC/NVDEC/CUDA)
-cargo build --features apple                   # videotoolbox + metal + ffmpeg (macOS)
-cargo build --features linux-vaapi             # vaapi + qsv + ffmpeg + wgpu (Intel/AMD)
-cargo build --features full                    # everything non-GPL
-cargo build --features ffmpeg,gpl-codecs       # adds x264/x265 — relicenses the build GPL
-```
-
-### Run a 2×2 multiview
-
-Multiview is configured by a declarative TOML document — canvas, layout, sources, cells, overlays,
-and outputs. Self-contained examples live in [`examples/`](examples/) (all built-in `test` sources,
-no network needed).
-
-```bash
-# Validate a config without starting the pipeline
-multiview validate examples/2x2.toml
-
-# Run it (real libav* pipeline). Bound the run with --duration / --ticks, or
-# --headless for the GPU/FFmpeg-free software output-clock smoke.
-multiview run examples/2x2.toml --duration 10
-multiview run examples/2x2.toml --headless --ticks 300
-```
-
-A minimal 2×2 canvas drawing from four synthetic sources (see [`examples/2x2.toml`](examples/2x2.toml)):
-
-```toml
-schema_version = 1
-
-[canvas]
-width = 1920
-height = 1080
-fps = "30000/1001"          # exact rational string — never a float fps
-pixel_format = "nv12"
-background = "#101014"
-
-[canvas.color]
-profile = "sdr-bt709-limited"
-
-[layout]
-kind = "grid"
-columns = ["1fr", "1fr"]
-rows = ["1fr", "1fr"]
-gap = 8
-areas = ["a b", "c d"]
-
-[[sources]]
-id = "in_a"
-kind = "test"               # built-in synthetic pattern; swap to rtsp/hls/ts/srt/file/ndi
-# ... in_b / in_c / in_d likewise ...
-
-[[cells]]
-id = "cell_a"
-area = "a"
-fit = "contain"
-[cells.source]
-input_id = "in_a"
-# ... cell_b / cell_c / cell_d likewise ...
-
-# Encode once, fan out to many transports (invariant #7).
-[[outputs]]
-kind = "rtsp_server"
-mount = "/multiview"
-codec = "h264"
-latency_profile = "low_latency"
-```
-
-Add a `[control]` section (e.g. `listen = "0.0.0.0:8080"`) and `multiview run` serves the web UI
-(`/`), the REST/WS/SSE API (`/api/v1`), and the OpenAPI docs from the same process on that listener
-— Scalar try-it-out at `/docs`, spec at `/api/v1/openapi.json`. Build with `--features web` so the
-SPA is embedded (the published container images are); set `MULTIVIEW_CONTROL_TOKEN` for a stable
-`admin.<secret>` bearer token, else one is generated and logged once. The `rtsp_server` output
-above is a *target* example — live RTSP/NDI/RTMP/SRT output servers are on the
-[roadmap](ROADMAP.md); HLS/file output works today.
-
-> Synthetic and public test-stream recipes — reproducible `lavfi testsrc2`/`sine` feeds, Big Buck
-> Bunny, and a deliberately diverse "gotcha" matrix (mixed fps, codecs, untagged color, subtitles) —
-> are cataloged in **[docs/reference/example-streams.md](docs/reference/example-streams.md)**.
+| Method | Get it |
+|--------|--------|
+| **Container (recommended)** | `docker pull ghcr.io/aperim/multiview:latest` (multi-arch `amd64`+`arm64`, SLSA provenance + cosign-signed). NVIDIA variant: `:latest-nvidia`. |
+| **Prebuilt binaries** | Linux (`x86_64`/`aarch64`) and macOS (Apple Silicon/Intel, signed + notarized) on the [Releases page](https://github.com/aperim/multiview/releases). Requires FFmpeg 7.x on the host. |
+| **From source** | `cargo build` (pure-Rust, LGPL-clean default). Feature presets and the FFmpeg/toolchain requirements are in **[docs/operations/building.md](docs/operations/building.md)**. |
 
 ---
 
-## Platform support
+## What it does
 
-| Platform | Decode | Composite | Encode | Notes |
-|----------|--------|-----------|--------|-------|
-| **Linux / NVIDIA** | NVDEC | Custom CUDA | NVENC | Zero-copy NVDEC→CUDA→NVENC island; via NVIDIA Container Toolkit. |
-| **Linux / Intel·AMD** | VAAPI / QSV | Vulkan·wgpu·libplacebo | VAAPI / QSV | dma-buf zero-copy where the driver allows; `/dev/dri` passthrough. |
-| **macOS (Apple Silicon + Intel)** | VideoToolbox | Metal | VideoToolbox | Native universal2 build; zero-copy VT→Metal→VT island. |
-| **Any (software fallback)** | libav / dav1d | wgpu / CPU | x264 / SVT-AV1 | Universal fallback tier; the GPU-free CI path. |
+Multiview is a headless, scriptable compositor and router. It samples many independent live
+inputs into a fixed, templated canvas and encodes that canvas **once per rendition** — then fans
+the same packets to every transport. Inputs are *sampled*, never allowed to *pace* the output, so
+one misbehaving source can never warp or stall the wall.
 
-**No Windows.** Targets are Linux (x86_64 + aarch64, containerized) and macOS (native). Edition
-Rust 2021, pinned via `rust-toolchain.toml`; MSRV documented at release.
+| Area | In brief |
+|------|----------|
+| **Inputs** | RTSP · HLS · MPEG-TS · SRT · RTMP · NDI · file · synthetic — supervised reconnect, jitter buffering, per-input timestamp normalization. |
+| **Compositor** | A custom GPU-native pass: scale + place + per-tile colour-convert + linear-light blend + overlays. Hot-reconfigurable grid/PiP layouts. |
+| **Outputs** | RTSP · HLS · Apple LL-HLS · NDI · RTMP · SRT via encode-once-mux-many. |
+| **Audio** | Per-input decode/resample/mix, discrete tracks + an EBU R128 program bus, silence-fill on dropout. |
+| **Subtitles & overlays** | CEA-608/708, DVB-sub, teletext, WebVTT/SRT/ASS; text, clocks, logos, tally, alert cards, audio meters. |
+| **Control & preview** | Embedded React web UI, axum REST/WS/SSE API with OpenAPI 3.1, and sub-second WHEP/MJPEG preview — strictly isolated from the program path. |
+
+The complete capability/status matrix is in **[FEATURES.md](FEATURES.md)**.
 
 ---
 
 ## Documentation
 
-| Section | What's there |
-|---------|--------------|
-| **[docs/architecture](docs/architecture/)** | The [canonical conventions](docs/architecture/conventions.md) — **source of truth** for crate names, API paths, feature flags, invariants, and licensing. |
-| **[docs/decisions](docs/decisions/)** | 72 Architecture Decision Records ([index](docs/decisions/README.md)) capturing every load-bearing choice. |
-| **[docs/research](docs/research/)** | Deep, verification-hardened design briefs ([index](docs/research/README.md)) — [core engine](docs/research/core-engine.md), [resilience & A/V](docs/research/resilience-and-av.md), [efficiency](docs/research/efficiency.md), [color](docs/research/color-management.md), [web/API stack](docs/research/web-api-stack.md), and more. |
-| **API** | REST + realtime conventions are pinned in [conventions.md §6](docs/architecture/conventions.md); the live OpenAPI 3.1 spec is served at `/api/v1/openapi.json` with interactive Scalar docs at `/docs`. |
-| **[docs/reference](docs/reference/)** | [Example & test streams](docs/reference/example-streams.md) and the [bibliography](docs/reference/bibliography.md). |
+| Where | What |
+|-------|------|
+| **[docs/architecture](docs/architecture/)** | System [overview](docs/architecture/overview.md), [pipeline](docs/architecture/pipeline.md), [timing](docs/architecture/timing-and-sync.md), [resilience](docs/architecture/resilience.md), [color](docs/architecture/color.md) — and the [canonical conventions](docs/architecture/conventions.md) (source of truth for names, flags, invariants). |
+| **[docs/research](docs/research/)** | Deep, verification-hardened design briefs ([index](docs/research/README.md)). |
+| **[docs/decisions](docs/decisions/)** | Architecture Decision Records ([index](docs/decisions/README.md)) capturing every load-bearing choice. |
+| **[ROADMAP.md](ROADMAP.md) · [FEATURES.md](FEATURES.md)** | The milestone plan and the per-feature status. |
+| **API** | Live OpenAPI 3.1 spec at `/api/v1/openapi.json`, interactive Scalar docs at `/docs`. |
+
+---
+
+## Platforms
+
+Linux (x86_64 + aarch64, containerised) and macOS (Apple Silicon + Intel, native). Hardware
+acceleration via NVIDIA (NVDEC/NVENC/CUDA), Intel/AMD (VAAPI/QSV), and Apple (VideoToolbox/Metal),
+with a universal software fallback. **No Windows.** Full matrix in
+[docs/architecture/hardware-and-efficiency.md](docs/architecture/hardware-and-efficiency.md).
 
 ---
 
 ## Licensing
 
-Project code is dual-licensed **MIT OR Apache-2.0** — use either at your option.
+Project code is dual-licensed **MIT OR Apache-2.0** — use either at your option. The **default
+build is LGPL-clean and redistributable** (FFmpeg linked LGPL; all scaling/compositing in-house).
+Two capabilities are strictly opt-in and change the licensing of the resulting build:
 
-The **default build is LGPL-clean and redistributable**: FFmpeg is linked LGPL, NVENC/NVDEC use the
-MIT `nv-codec-headers` (no `--enable-gpl`, no `--enable-nonfree`), and all scaling/compositing is
-done in-house (no libnpp, no x264/x265). Two capabilities are strictly opt-in:
+- **`gpl-codecs`** — adds x264/x265 → the build becomes **GPL**.
+- **`ndi`** — uses the proprietary, runtime-loaded NDI SDK (never vendored) under its EULA with
+  mandatory attribution: *NDI® is a registered trademark of Vizrt NDI AB.*
 
-| Feature | Effect |
-|---------|--------|
-| `gpl-codecs` | Pulls in x264/x265 → the resulting build is **GPL**. Off by default. |
-| `ndi` | Uses the **proprietary** NDI SDK (royalty-free, runtime-loaded, never vendored). Carries the NDI EULA and **mandatory attribution** — "NDI® is a registered trademark of Vizrt NDI AB." Off by default. |
+Codec **patent** licensing (H.264/HEVC/AAC) is separate from software copyright and may apply to
+your outputs regardless of build flags. Full model: [conventions.md §7](docs/architecture/conventions.md)
+and [ADR-0012](docs/decisions/ADR-0012.md).
 
-The published container images and release binaries are built **LGPL-clean** (no `gpl-codecs`): the
-canvas is encoded with LGPL `mpeg2video`, so a config naming `h264` falls back to MPEG-2. A separate
-**`-gpl` image tag** (built with `--build-arg CARGO_FEATURES=ffmpeg,linux-vaapi,gpl-codecs`) provides
-true x264/x265 H.264/HEVC output and is, as a whole, **GPL-licensed** — use it only if that license
-is acceptable for your deployment.
+---
 
-Codec **patent** licensing (H.264/HEVC/AAC pools) is a separate question from software copyright and
-may apply to your outputs regardless of build flags. CI gates licenses and advisories with
-`cargo-deny`. See [conventions.md §7](docs/architecture/conventions.md) and
-[ADR-0012](docs/decisions/ADR-0012.md) for the full licensing model.
+## Contributing
+
+Issues and PRs are welcome — please read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md) first. Security reports: see [SECURITY.md](SECURITY.md).
