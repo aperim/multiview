@@ -1775,6 +1775,159 @@
         }
       }
     },
+    "/api/v1/routing/plan": {
+      "post": {
+        "tags": [
+          "routing"
+        ],
+        "summary": "`POST /api/v1/routing/plan` — classify a crosspoint take without applying\n(role: read; per-destination authz). Returns the #11 [`RoutePlan`].",
+        "operationId": "plan_route",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteTakeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The #11 classification (class1/reset_lite/class2 + coerced).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutePlan"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to plan this crosspoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/routing/{kind}/take": {
+      "post": {
+        "tags": [
+          "routing"
+        ],
+        "summary": "`POST /api/v1/routing/{kind}/take` — take (apply) a crosspoint (role: write;\nper-destination authz; Idempotency-Key). `200 {class, applied}` for a hot\nClass-1/Reset-lite re-point; `202 {operation_id}` for a Class-2 migration.",
+        "operationId": "take_route",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Crosspoint kind: video | audio | subtitle.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteTakeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A hot Class-1/Reset-lite re-point was submitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeApplied"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A Class-2 migration was accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path kind does not match the target kind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to take this crosspoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown crosspoint kind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/salvos": {
       "get": {
         "tags": [
@@ -4115,6 +4268,165 @@
           }
         }
       },
+      "RouteClass": {
+        "type": "string",
+        "description": "The #11 class of a crosspoint take — the three tiers the capability matrix\ndefines, surfaced **before** the take applies.\n\nSerialised in `snake_case` (`\"class1\"` / `\"reset_lite\"` / `\"class2\"`) and\n**never `untagged`**. `#[non_exhaustive]` for forward compatibility.",
+        "enum": [
+          "class1",
+          "reset_lite",
+          "class2"
+        ]
+      },
+      "RoutePlan": {
+        "type": "object",
+        "description": "The classified plan for a crosspoint take: the #11 class plus a\ncoerced-degradation flag.",
+        "required": [
+          "class",
+          "coerced"
+        ],
+        "properties": {
+          "class": {
+            "$ref": "#/components/schemas/RouteClass",
+            "description": "The #11 class of the take."
+          },
+          "coerced": {
+            "type": "boolean",
+            "description": "Whether the (would-be Class-2) take was **coerced** to Class-1 by an\noperator-confirmed down/up-mix to the destination's pinned layout — a\nClass-1 **with degradation**, surfaced so the operator sees the trade."
+          }
+        }
+      },
+      "RouteTakeRequest": {
+        "type": "object",
+        "description": "The body of a `POST /routing/plan` or `/routing/{kind}/take` request.\n\nCarries the destination + source, plus optional classifier hints used when the\nengine snapshot does not (yet) carry the source inventory or the destination's\npinned params (so a plan/take is classifiable before the first probe):\n\n* `source_channels` — the source audio track's channel count (used for the\n  discrete-track layout comparison when the inventory is absent);\n* `coerce` — the operator confirms a down/up-mix to the destination's pinned\n  layout (turns a would-be Class-2 audio mismatch into Class-1-with-degradation);\n* `primed` — whether the video target source is warm (absent ⇒ assumed primed).",
+        "required": [
+          "target",
+          "source"
+        ],
+        "properties": {
+          "coerce": {
+            "type": "boolean",
+            "description": "Optional operator-confirmed coercion to the pinned layout."
+          },
+          "primed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Optional video-target priming hint (absent ⇒ assumed primed)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/StreamRefDoc",
+            "description": "The source elementary stream feeding the destination."
+          },
+          "source_channels": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional source audio channel-count hint (discrete-track layout compare).",
+            "minimum": 0
+          },
+          "target": {
+            "$ref": "#/components/schemas/RouteTargetDoc",
+            "description": "The destination the take re-points."
+          }
+        }
+      },
+      "RouteTargetDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A layout video cell.",
+            "required": [
+              "cell",
+              "kind"
+            ],
+            "properties": {
+              "cell": {
+                "type": "string",
+                "description": "The destination cell id."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "video_cell"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The mixed program-bus channel (absorbs the source layout).",
+            "required": [
+              "channel",
+              "kind"
+            ],
+            "properties": {
+              "channel": {
+                "type": "string",
+                "description": "The program-bus channel name."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "audio_program_bus"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A named discrete output track (its layout is pinned for the session).",
+            "required": [
+              "track",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "audio_discrete_track"
+                ]
+              },
+              "pinned_channels": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The pinned channel count, if known (the classifier's compare target).",
+                "minimum": 0
+              },
+              "track": {
+                "type": "string",
+                "description": "The discrete-track name."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A subtitle / caption layer.",
+            "required": [
+              "layer",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "subtitle_layer"
+                ]
+              },
+              "layer": {
+                "type": "string",
+                "description": "The destination layer id."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_control::routing::RouteTarget`] (RT-11).\n\nThe destination a crosspoint take re-points — internally tagged on `kind`,\n`snake_case`, never `untagged`."
+      },
       "SalvoDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::Salvo`].\n\nSerde-equivalent field-for-field; the optional fields skip when empty/absent\nexactly as the config type does.",
@@ -4551,6 +4863,109 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_core::stream::StreamKind`].\n\nSerde-equivalent: internally tagged on `kind` with the payload (for the\ndata/timecode variants) under `payload`, `snake_case` tags. This is the same\n`kind`/`payload` pair the descriptor flattens in."
       },
+      "StreamRefDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::routing::StreamRef`] (RT-4 / RT-11).\n\nA reference to **one elementary stream of one input** — the source side of a\ncrosspoint take. Serde-equivalent: `kind` is a **nested** adjacently-tagged\n[`StreamKindDoc`] object (`kind = { kind = \"video\" }`), not flattened — exactly\nas `StreamRef` serialises (a pinned round-trip test guards against drift).",
+        "required": [
+          "input_id",
+          "kind"
+        ],
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "description": "The managed input id this stream comes from."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/StreamKindDoc",
+            "description": "The canonical kind of the elementary stream (nested `kind`/`payload`)."
+          },
+          "selector": {
+            "$ref": "#/components/schemas/StreamSelectorDoc",
+            "description": "Which stream of that kind to use (absent ⇒ `best`)."
+          }
+        }
+      },
+      "StreamSelectorDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Select the stream at this 0-based index within its kind.",
+            "required": [
+              "index",
+              "by"
+            ],
+            "properties": {
+              "by": {
+                "type": "string",
+                "enum": [
+                  "index"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "description": "The 0-based index among same-kind streams.",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select the first stream whose BCP-47 / ISO-639 language tag matches.",
+            "required": [
+              "language",
+              "by"
+            ],
+            "properties": {
+              "by": {
+                "type": "string",
+                "enum": [
+                  "language"
+                ]
+              },
+              "language": {
+                "type": "string",
+                "description": "The requested BCP-47 / ISO-639 language tag."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Let the input pick its best stream of the kind (the default).",
+            "required": [
+              "by"
+            ],
+            "properties": {
+              "by": {
+                "type": "string",
+                "enum": [
+                  "best"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select by a stable, kind-scoped id (`StableStreamId`).",
+            "required": [
+              "id",
+              "by"
+            ],
+            "properties": {
+              "by": {
+                "type": "string",
+                "enum": [
+                  "stream_id"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "description": "The stable stream id string (e.g. `v/pid:256`)."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_config::routing::StreamSelector`] (RT-4).\n\nSerde-equivalent: internally tagged on `by`, `snake_case` tags — never\n`untagged` (ADR-0010). Picks **which** elementary stream of a kind a\n[`StreamRefDoc`] addresses."
+      },
       "SwapRequest": {
         "type": "object",
         "description": "The body of a `POST /commands/swap` request.",
@@ -4566,6 +4981,34 @@
           "tile": {
             "type": "string",
             "description": "The tile/cell id whose source binding changes."
+          }
+        }
+      },
+      "TakeApplied": {
+        "type": "object",
+        "description": "The `200` body of a hot (Class-1 / Reset-lite) `/routing/{kind}/take`.",
+        "required": [
+          "class",
+          "applied",
+          "coerced",
+          "operation_id"
+        ],
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "Always `true` for a hot take (the route command was submitted)."
+          },
+          "class": {
+            "$ref": "#/components/schemas/RouteClass",
+            "description": "The #11 class the take resolved to (`class1` / `reset_lite`)."
+          },
+          "coerced": {
+            "type": "boolean",
+            "description": "Whether the take was coerced to Class-1 with a down/up-mix degradation."
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id correlating the take's outcome on the realtime stream."
           }
         }
       },
@@ -4832,6 +5275,10 @@
     {
       "name": "salvos",
       "description": "Salvo definitions + arm/take/cancel"
+    },
+    {
+      "name": "routing",
+      "description": "Per-stream crosspoint routing: classify (plan) + apply (take)"
     },
     {
       "name": "tally",

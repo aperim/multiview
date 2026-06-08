@@ -26,6 +26,7 @@
 //! (ADR-W008). The HTTP response never waits for the engine to apply the change.
 use std::fmt;
 
+use multiview_config::routing::StreamRef;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -76,7 +77,11 @@ impl fmt::Display for OperationId {
 /// (at a frame boundary, per the Class-1/Class-2 model, invariant #11). The
 /// control plane validates and enqueues them; the engine applies them when it
 /// drains. Each is correlated by an [`OperationId`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`/`Hash`: [`Command::RouteAudio`] carries a floating-point `gain_db`
+/// (a level), so the enum is `PartialEq` only — commands are matched and routed,
+/// never used as a hash key.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Command {
     /// Start program output.
@@ -90,6 +95,12 @@ pub enum Command {
         op: OperationId,
     },
     /// Swap the source bound to a tile (make-before-break).
+    ///
+    /// This is the **desugared alias** of [`Command::RouteVideo`] with a
+    /// `StreamRef{ source, Video, Best }` selector (ADR-0034 / RT-11): a legacy
+    /// `SwapSource{tile,source}` and the equivalent `RouteVideo` apply to the
+    /// **same** O(1) `CompositorDrive::rebind_cell` crosspoint. Kept as a distinct
+    /// variant for back-compat; new callers should prefer [`Command::RouteVideo`].
     SwapSource {
         /// Correlation id for the async outcome.
         op: OperationId,
@@ -97,6 +108,47 @@ pub enum Command {
         tile: String,
         /// The new source/input id to bind.
         source: String,
+    },
+    /// Re-point a layout **cell** to a video [`StreamRef`] — the per-stream VIDEO
+    /// crosspoint (ADR-0034 / RT-11, RT-6 `rebind_cell`). Class-1 (hot, seamless):
+    /// the next frame draws the new source, no encoder/session reset.
+    RouteVideo {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The destination layout cell id.
+        cell: String,
+        /// The source elementary stream feeding the cell.
+        source: StreamRef,
+    },
+    /// Re-point a program-bus channel / discrete **track** to an audio
+    /// [`StreamRef`] — the per-stream AUDIO crosspoint / breakaway (ADR-0034 /
+    /// RT-11, RT-8a/RT-9 `ProgramBus::repoint_crossfade`). Class-1 onto the
+    /// program bus (mixer re-route, pop-free cross-fade); a breakaway onto a
+    /// discrete track whose pinned layout differs is Class-2 (see
+    /// [`crate::routing::classify`]).
+    RouteAudio {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The destination program-bus channel / discrete-track name.
+        target: String,
+        /// The source elementary stream feeding the target.
+        source: StreamRef,
+        /// Program-bus contribution gain in dB (`0.0` ⇒ unity).
+        gain_db: f32,
+        /// Whether the source contributes silence (still routed).
+        mute: bool,
+    },
+    /// Re-point a subtitle **layer** to a subtitle [`StreamRef`] — the per-stream
+    /// SUBTITLE crosspoint / breakaway (ADR-0034 / RT-11, RT-10a
+    /// `SubtitleLayer::repoint`). Class-1 onto an existing layer (hard cut,
+    /// CLEAR-on-switch).
+    RouteSubtitle {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The destination subtitle layer id.
+        layer: String,
+        /// The source elementary stream feeding the layer.
+        source: StreamRef,
     },
     /// Apply a new layout to the running multiview.
     ApplyLayout {
@@ -156,6 +208,9 @@ impl Command {
             Self::Start { op }
             | Self::Stop { op }
             | Self::SwapSource { op, .. }
+            | Self::RouteVideo { op, .. }
+            | Self::RouteAudio { op, .. }
+            | Self::RouteSubtitle { op, .. }
             | Self::ApplyLayout { op, .. }
             | Self::ArmSalvo { op, .. }
             | Self::TakeSalvo { op, .. }
@@ -171,11 +226,54 @@ impl Command {
             Self::Start { .. } => "start",
             Self::Stop { .. } => "stop",
             Self::SwapSource { .. } => "swap_source",
+            Self::RouteVideo { .. } => "route_video",
+            Self::RouteAudio { .. } => "route_audio",
+            Self::RouteSubtitle { .. } => "route_subtitle",
             Self::ApplyLayout { .. } => "apply_layout",
             Self::ArmSalvo { .. } => "arm_salvo",
             Self::TakeSalvo { .. } => "take_salvo",
             Self::CancelSalvo { .. } => "cancel_salvo",
             Self::SetTallyOverride { .. } => "set_tally_override",
+        }
+    }
+
+    /// Desugar this command into the engine-native [`RouteIntent`] it applies, if
+    /// it is a routing command (`SwapSource` / `Route*`), else [`None`].
+    ///
+    /// This is the bridge the engine's command drain uses: `multiview-control`
+    /// depends on `multiview-engine` (not the reverse), so the control plane
+    /// translates its `Command` into the engine's intent type. `SwapSource`
+    /// desugars to a `RouteIntent::Video { …, StreamRef{source, Video, Best} }`
+    /// (ADR-0034 / RT-11 — the alias), so a legacy swap and the equivalent
+    /// `RouteVideo` apply identically.
+    #[must_use]
+    pub fn route_intent(&self) -> Option<multiview_engine::RouteIntent> {
+        use multiview_engine::RouteIntent;
+        match self {
+            Self::SwapSource { tile, source, .. } => {
+                Some(RouteIntent::swap_source(tile.clone(), source.clone()))
+            }
+            Self::RouteVideo { cell, source, .. } => Some(RouteIntent::Video {
+                cell: cell.clone(),
+                source: source.clone(),
+            }),
+            Self::RouteAudio {
+                target,
+                source,
+                gain_db,
+                mute,
+                ..
+            } => Some(RouteIntent::Audio {
+                target: target.clone(),
+                source: source.clone(),
+                gain_db: *gain_db,
+                mute: *mute,
+            }),
+            Self::RouteSubtitle { layer, source, .. } => Some(RouteIntent::Subtitle {
+                layer: layer.clone(),
+                source: source.clone(),
+            }),
+            _ => None,
         }
     }
 }
@@ -274,5 +372,80 @@ impl CommandReceiver {
     /// Returns [`None`] once every [`CommandSender`] has been dropped.
     pub async fn recv(&mut self) -> Option<Command> {
         self.rx.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::float_cmp)]
+
+    use super::*;
+    use multiview_config::routing::{StreamRef, StreamSelector};
+    use multiview_core::stream::StreamKind;
+    use multiview_engine::RouteIntent;
+
+    #[test]
+    fn swap_source_desugars_to_the_route_video_best_alias() {
+        // ADR-0034 / RT-11 back-compat: a legacy `SwapSource{tile,source}` and the
+        // equivalent `RouteVideo{cell, StreamRef{source, Video, Best}}` desugar to
+        // the SAME engine route intent — so the alias keeps working.
+        let swap = Command::SwapSource {
+            op: OperationId::new(),
+            tile: "c0".to_owned(),
+            source: "cam-b".to_owned(),
+        };
+        let route = Command::RouteVideo {
+            op: OperationId::new(),
+            cell: "c0".to_owned(),
+            source: StreamRef::best("cam-b", StreamKind::Video),
+        };
+        let swap_intent = swap.route_intent().expect("SwapSource desugars");
+        let route_intent = route.route_intent().expect("RouteVideo desugars");
+        assert_eq!(
+            swap_intent, route_intent,
+            "SwapSource is the desugared alias of RouteVideo{{Video, Best}}"
+        );
+        assert_eq!(
+            swap_intent,
+            RouteIntent::Video {
+                cell: "c0".to_owned(),
+                source: StreamRef::best("cam-b", StreamKind::Video),
+            }
+        );
+    }
+
+    #[test]
+    fn route_audio_carries_gain_and_mute_into_the_intent() {
+        let mut source = StreamRef::best("cam-b", StreamKind::Audio);
+        source.selector = StreamSelector::language("eng".to_owned());
+        let cmd = Command::RouteAudio {
+            op: OperationId::new(),
+            target: "prog".to_owned(),
+            source,
+            gain_db: -3.0,
+            mute: true,
+        };
+        match cmd.route_intent().expect("RouteAudio desugars") {
+            RouteIntent::Audio {
+                target,
+                gain_db,
+                mute,
+                ..
+            } => {
+                assert_eq!(target, "prog");
+                assert_eq!(gain_db, -3.0);
+                assert!(mute);
+            }
+            other => panic!("expected an Audio intent, got {other:?}"),
+        }
+        assert_eq!(cmd.kind(), "route_audio");
+    }
+
+    #[test]
+    fn non_routing_commands_have_no_route_intent() {
+        let start = Command::Start {
+            op: OperationId::new(),
+        };
+        assert!(start.route_intent().is_none());
     }
 }

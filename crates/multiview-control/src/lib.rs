@@ -56,6 +56,7 @@ pub mod repository;
 pub mod resource_store;
 pub mod router;
 pub mod routes;
+pub mod routing;
 pub mod salvo_store;
 pub mod state;
 pub mod tally_ingest;
@@ -125,6 +126,7 @@ pub use router::{
     ingest_route, route_follow, route_follow_all, RouteBinding, RouteFollowUpdate, RouteTable,
     RouterRoute,
 };
+pub use routing::{classify, DestinationProfile, RouteClass, RoutePlan, RouteRequest, RouteTarget};
 pub use salvo_store::{InMemorySalvoStore, SalvoRepository, VersionedSalvo, SALVO_KIND};
 pub use state::{seed_resources, AckClock, AppState, EngineStateSnapshot, SeededResources};
 pub use tally_ingest::{run_tally_ingest, tally_ingest_step, TallyIngestStep};

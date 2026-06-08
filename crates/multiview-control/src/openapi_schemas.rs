@@ -468,6 +468,90 @@ pub struct StreamInventoryDoc {
     pub streams: Vec<StreamDescriptorDoc>,
 }
 
+/// `OpenAPI` mirror of [`multiview_config::routing::StreamSelector`] (RT-4).
+///
+/// Serde-equivalent: internally tagged on `by`, `snake_case` tags — never
+/// `untagged` (ADR-0010). Picks **which** elementary stream of a kind a
+/// [`StreamRefDoc`] addresses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "by", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamSelectorDoc {
+    /// Select the stream at this 0-based index within its kind.
+    Index {
+        /// The 0-based index among same-kind streams.
+        index: usize,
+    },
+    /// Select the first stream whose BCP-47 / ISO-639 language tag matches.
+    Language {
+        /// The requested BCP-47 / ISO-639 language tag.
+        language: String,
+    },
+    /// Let the input pick its best stream of the kind (the default).
+    Best,
+    /// Select by a stable, kind-scoped id (`StableStreamId`).
+    StreamId {
+        /// The stable stream id string (e.g. `v/pid:256`).
+        id: String,
+    },
+}
+
+/// `OpenAPI` mirror of [`multiview_config::routing::StreamRef`] (RT-4 / RT-11).
+///
+/// A reference to **one elementary stream of one input** — the source side of a
+/// crosspoint take. Serde-equivalent: `kind` is a **nested** adjacently-tagged
+/// [`StreamKindDoc`] object (`kind = { kind = "video" }`), not flattened — exactly
+/// as `StreamRef` serialises (a pinned round-trip test guards against drift).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StreamRefDoc {
+    /// The managed input id this stream comes from.
+    pub input_id: String,
+    /// The canonical kind of the elementary stream (nested `kind`/`payload`).
+    pub kind: StreamKindDoc,
+    /// Which stream of that kind to use (absent ⇒ `best`).
+    #[serde(default = "default_best_selector")]
+    pub selector: StreamSelectorDoc,
+}
+
+/// The default selector for [`StreamRefDoc`] (`best`), mirroring the config
+/// default.
+fn default_best_selector() -> StreamSelectorDoc {
+    StreamSelectorDoc::Best
+}
+
+/// `OpenAPI` mirror of [`multiview_control::routing::RouteTarget`] (RT-11).
+///
+/// The destination a crosspoint take re-points — internally tagged on `kind`,
+/// `snake_case`, never `untagged`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RouteTargetDoc {
+    /// A layout video cell.
+    VideoCell {
+        /// The destination cell id.
+        cell: String,
+    },
+    /// The mixed program-bus channel (absorbs the source layout).
+    AudioProgramBus {
+        /// The program-bus channel name.
+        channel: String,
+    },
+    /// A named discrete output track (its layout is pinned for the session).
+    AudioDiscreteTrack {
+        /// The discrete-track name.
+        track: String,
+        /// The pinned channel count, if known (the classifier's compare target).
+        #[serde(default)]
+        pinned_channels: Option<u16>,
+    },
+    /// A subtitle / caption layer.
+    SubtitleLayer {
+        /// The destination layer id.
+        layer: String,
+    },
+}
+
 /// `OpenAPI` mirror of [`multiview_events::WarningSeverity`] (SA-0).
 ///
 /// Serde-equivalent: a unit enum rendered as its `snake_case` variant name.
