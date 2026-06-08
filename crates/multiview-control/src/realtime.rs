@@ -121,8 +121,14 @@ impl CorrKey {
             // and unknown here, so it is left uncorrelated rather than guessed.
             Command::TakeSalvo { salvo: None, .. }
             | Command::CancelSalvo { salvo: None, .. }
-            // No dedicated realtime outcome event to correlate.
+            // No dedicated realtime outcome event to correlate. The per-stream
+            // route commands (RT-11) apply at the frame boundary with no single
+            // unambiguous outcome event yet (the change rides the conflated
+            // snapshot), so they are left uncorrelated rather than mis-correlated.
             | Command::SwapSource { .. }
+            | Command::RouteVideo { .. }
+            | Command::RouteAudio { .. }
+            | Command::RouteSubtitle { .. }
             | Command::ApplyLayout { .. }
             | Command::SetTallyOverride { .. } => None,
         }

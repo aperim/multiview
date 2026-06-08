@@ -31,6 +31,7 @@ pub mod inputs;
 pub mod outputs;
 pub mod overlays;
 pub mod preview;
+pub mod routing;
 pub mod salvos;
 pub mod sources;
 pub mod tally;
@@ -494,6 +495,9 @@ pub fn api_router() -> Router<AppState> {
         .route("/salvos/{id}/arm", post(salvos::arm_salvo))
         .route("/salvos/{id}/take", post(salvos::take_salvo))
         .route("/salvos/{id}/cancel", post(salvos::cancel_salvo))
+        // Per-stream crosspoint routing (RT-11): classify (plan) + apply (take).
+        .route("/routing/plan", post(routing::plan_route))
+        .route("/routing/{kind}/take", post(routing::take_route))
         // Tally operator surface: read resolved state, profiles, manual override.
         .route("/tally", get(tally::list_tally))
         .route(

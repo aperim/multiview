@@ -49,6 +49,15 @@ pub enum Error {
     #[error("cannot re-point cell: {0}")]
     Rebind(String),
 
+    /// A per-stream route ([`crate::route::RouteApplier`]) could not be applied:
+    /// its [`StreamRef`](multiview_config::routing::StreamRef) did not resolve in
+    /// the input inventory, the destination (cell / bus channel / subtitle layer)
+    /// is unknown, or the underlying re-point primitive failed. The live
+    /// crosspoint is held unchanged — never a panic, never a silent mis-route
+    /// (RT-11 / ADR-0034).
+    #[error("cannot apply route: {0}")]
+    Route(String),
+
     /// A permanent HA cluster-transport fault while *submitting* a heartbeat or
     /// replication message for publication (a malformed-encoding or a hard
     /// socket fault — never a transient drop, which is silent and best-effort).
