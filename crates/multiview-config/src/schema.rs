@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::audio::OutputAudio;
 use crate::error::ConfigError;
+use crate::failover::{default_failover_slate, FailoverSlate};
 use crate::grid::{GridLayout, Track};
 use crate::placement::DevicePin;
 
@@ -319,6 +320,48 @@ pub struct Source {
     /// the source's decode. A pin always wins (it is never silently relocated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_pin: Option<DevicePin>,
+    /// Per-source **wall-clock** Use/Discard verb (ADR-0038, SYNC-0).
+    ///
+    /// Absent means the default behaviour (reclock-to-house). When present and set
+    /// to [`WallClockUse::Use`], a source whose wall-clock is measured **Trusted**
+    /// at runtime (e.g. HLS `PROGRAM-DATE-TIME`) is rebased onto the common
+    /// wall-clock timeline; [`WallClockUse::Discard`] keeps the as-built
+    /// reclock-to-house anchor. Config carries **only** this operator verb — the
+    /// trust *tier* is measured at runtime, never authored. See [`SourceWallClock`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallclock: Option<SourceWallClock>,
+}
+
+/// Per-source wall-clock configuration (ADR-0038, SYNC-0): the operator's
+/// Use/Discard verb for the source's detected wall-clock.
+///
+/// Internally a tagged record (`{ use = "use" | "discard" }`), robust across TOML
+/// and JSON — never `untagged`. The detected trust *tier* is a runtime measurement
+/// and is **not** carried here; this struct holds only the authored verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SourceWallClock {
+    /// Whether to **use** the source's detected wall-clock (rebase onto the common
+    /// timeline when Trusted) or **discard** it (reclock-to-house). Defaults to
+    /// [`WallClockUse::Use`] when the `wallclock` table is present without a `use`
+    /// key, matching ADR-0038's default-Use stance.
+    #[serde(rename = "use", default)]
+    pub use_: WallClockUse,
+}
+
+/// The per-source wall-clock operator verb (ADR-0038, SYNC-0).
+///
+/// Serializes as a snake-case string tag (`"use"` / `"discard"`); never an integer
+/// or untagged positional form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WallClockUse {
+    /// Use the detected wall-clock: rebase the source onto the common wall-clock
+    /// timeline when its runtime-measured tier is Trusted. The default.
+    #[default]
+    Use,
+    /// Discard the detected wall-clock; keep the as-built reclock-to-house anchor.
+    Discard,
 }
 
 /// How captions/subtitles are sourced for one input, decoded **natively from the
@@ -498,6 +541,14 @@ pub struct Cell {
     /// `QoS` / degradation policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<CellQos>,
+    /// What this tile shows when its source is lost or misbehaving — the
+    /// configurable failover-slate policy (ADR-0027 / ADR-0030). Defaults to
+    /// [`FailoverSlate::Bars`] (the broadcast standard) when omitted, so a
+    /// pre-existing document gets the default rather than a dead screen. The
+    /// engine's compositor drive composites this per cell once the tile state
+    /// machine reaches the down state (it changes *what* shows, not *when*).
+    #[serde(default = "default_failover_slate")]
+    pub on_loss: FailoverSlate,
     /// Source binding.
     pub source: CellSource,
 }

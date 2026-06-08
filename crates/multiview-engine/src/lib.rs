@@ -99,11 +99,13 @@ pub mod isolation;
 pub mod placement;
 pub mod probe;
 pub mod program;
+pub mod programset;
 pub mod ptp;
 pub mod route;
 pub mod runtime;
 pub mod salvo;
 pub mod scheduler;
+pub mod slate;
 pub mod supervisor;
 pub mod sysref;
 pub mod tally;
@@ -134,6 +136,7 @@ pub use probe::{
     FormatProbe, FreezeConfig, FreezeProbe, LumaView, LumaViewError, ProbeObservation,
 };
 pub use program::{MultiviewProgram, ProgramId, ProgramKind};
+pub use programset::{Program, ProgramSet};
 pub use ptp::{PtpSample, PtpServo, ServoConfig};
 pub use route::{resolve_selector, RouteApplier, RouteIntent, RouteResolution};
 pub use runtime::{
@@ -141,6 +144,9 @@ pub use runtime::{
 };
 pub use salvo::{Salvo, SalvoBatch, SalvoChange, SalvoPhase};
 pub use scheduler::{EventKind, ScheduledAction, Scheduler, TriggerEvent};
+pub use slate::{failover_slate_image, FailoverSlate};
+#[cfg(feature = "ffmpeg")]
+pub use slate::{output_slate_audio, output_slate_kind};
 pub use supervisor::{
     Actor, ActorExit, RestartDecision, RestartPolicy, StopReason, SupervisionOutcome, Supervisor,
 };

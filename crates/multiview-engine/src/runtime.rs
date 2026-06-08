@@ -53,13 +53,20 @@ use crate::isolation::EnginePublisher;
 /// the executor thread; it returns once the time source has reached (or passed)
 /// the deadline. Two implementations cover production and deterministic tests
 /// (see the module docs).
-#[allow(async_fn_in_trait)]
-// reason: like `Actor`, this trait is consumed only inside the engine runtime;
-// we do not need `Send`-bound futures via the `trait-variant` crate and adding
-// it would pull an external dep for no behavioural gain.
 pub trait Pacer {
     /// Wait until `source.now_nanos() >= deadline_nanos`, cooperatively.
-    async fn wait_until(&self, deadline_nanos: i64, source: &dyn TimeSource);
+    ///
+    /// The returned future is **`Send`** so an [`EngineRuntime`] driving this
+    /// pacer can run on a `tokio::spawn`ed task — exactly what MP-1's
+    /// [`ProgramSet`](crate::ProgramSet) needs to run N programs concurrently, each
+    /// on its own task. Both production ([`RealtimePacer`]) and test
+    /// ([`CooperativePacer`]) waits are `Send` (a `tokio::time::sleep` /
+    /// `yield_now` over a `Send + Sync` [`TimeSource`]).
+    fn wait_until(
+        &self,
+        deadline_nanos: i64,
+        source: &dyn TimeSource,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Production pacer: a real [`tokio::time::sleep`] until the deadline.
@@ -224,6 +231,18 @@ impl<P: Pacer> EngineRuntime<P> {
     #[must_use]
     pub fn ticks_emitted(&self) -> u64 {
         self.ticks_emitted.load(Ordering::Acquire)
+    }
+
+    /// A clone of the wait-free cumulative-ticks counter.
+    ///
+    /// The runtime increments this every tick (`fetch_add`, Release). A holder of
+    /// the clone reads it Acquire from **another task/thread** without locking or
+    /// blocking the tick loop — exactly what MP-1's [`ProgramSet`](crate::ProgramSet)
+    /// supervisor samples to prove a sibling program's clock keeps advancing while
+    /// this one runs on its own task (invariants #1 + #10, per program).
+    #[must_use]
+    pub fn ticks_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.ticks_emitted)
     }
 
     /// Run the tick loop **forever**, until `stop` is raised.

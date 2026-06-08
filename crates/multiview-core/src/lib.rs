@@ -16,5 +16,6 @@ pub mod stream;
 pub mod tally;
 pub mod time;
 pub mod traits;
+pub mod wallclock;
 
 pub use error::{Error, Result};

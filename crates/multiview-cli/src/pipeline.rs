@@ -887,6 +887,37 @@ impl Pipeline {
     where
         FC: FnMut(&mut CompositorDrive<Nv12Image>),
     {
+        self.run_until_serving_observed(stop, publisher, preview, control, None)
+            .await
+    }
+
+    /// Like [`Pipeline::run_until_serving`], but mirrors this program's **live
+    /// per-tick count** into `tick_observer` (incremented once per emitted output
+    /// tick on the hot loop, a single wait-free `fetch_add`).
+    ///
+    /// MP-1 (ADR-0030 §2.2): the daemon run path drives this one program through an
+    /// engine [`ProgramSet`](multiview_engine::ProgramSet) (a set of exactly one
+    /// program, id `"main"`, for the legacy single-program config — behaviour-
+    /// identical to today). The `ProgramSet` samples each program's
+    /// `ticks_emitted` to observe progress without touching its hot loop; the same
+    /// `Arc<AtomicU64>` is handed here so the program's tick count is genuinely live
+    /// on the supervisor side (not fabricated). `None` ⇒ no observer (the plain
+    /// [`Pipeline::run_until_serving`] behaviour).
+    ///
+    /// # Errors
+    ///
+    /// See [`Pipeline::run_for`].
+    pub async fn run_until_serving_observed<FC>(
+        &mut self,
+        stop: &StopSignal,
+        publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+        preview: &crate::preview::ProgramSlot,
+        control: FC,
+        tick_observer: Option<Arc<AtomicU64>>,
+    ) -> Result<PipelineReport, PipelineError>
+    where
+        FC: FnMut(&mut CompositorDrive<Nv12Image>),
+    {
         let time: Arc<dyn TimeSource> = Arc::new(MonotonicTimeSource::new());
         // Live daemon: drop-on-overload so a wedged encoder can never stall the
         // output clock (inv #1) or back-pressure the engine (inv #10). A live run
@@ -895,7 +926,7 @@ impl Pipeline {
         let plan = StreamPlan {
             policy: SendPolicy::DropOnOverload,
             runners: self.build_sink_runners(true),
-            hot_tick_observer: None,
+            hot_tick_observer: tick_observer,
         };
         let out = self
             .drive_streaming(

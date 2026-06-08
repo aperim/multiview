@@ -55,7 +55,7 @@ workstreams follow (they touch many files and partly need coordination with othe
    Cargo.toml `license` → `license-file` + the mandatory `license-file.workspace = true` key-rename
    across **all 20 members**; remove root `LICENSE-MIT`/`LICENSE-APACHE`; `web/package.json`; the
    OpenAPI **generator macro** + AsyncAPI; `conventions.md` §7 first; `CONTRIBUTING.md` DCO→CLA; new
-   **ADR-0042** superseding ADR-0012; and the **"open source" → "source-available"** sweep. Plus a CLA
+   **ADR-0043** superseding ADR-0012; and the **"open source" → "source-available"** sweep. Plus a CLA
    doc + `THIRD-PARTY-NOTICES`.
 3. **CI/release split (fan-out).** Generate & publish **distinct public/non-public** binaries and
    containers, with a hard "no-leak" gate on the public lane. Teams A–D + gating in

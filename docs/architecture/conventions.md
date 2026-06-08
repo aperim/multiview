@@ -146,3 +146,27 @@ These are load-bearing; every doc and implementation must respect them (see the 
 - Docs: every public item documented; `#![warn(missing_docs)]` on library crates.
 - Formatting: `rustfmt` (config in `rustfmt.toml`); lint clean under `clippy` (`-D warnings` in CI).
 - **Inclusive language is required everywhere, always** — code, identifiers, comments, docs, commit messages, branches, config, logs, and UI copy. Prefer `allowlist`/`blocklist`, `primary`/`replica`, `main`, and gender-neutral wording. See [`CODE_OF_CONDUCT.md`](../../CODE_OF_CONDUCT.md). This may be enforced in review and CI.
+
+---
+
+## 10. Networking & addressing (IPv6-first)
+
+**All network-facing surfaces are IPv6-first.** IPv4 is supported for **legacy interop only** and is
+on a **deprecation path** — it will be removed from this product. New designs, code, config, and docs
+MUST be IPv6-first: **never IPv4-only, never IPv4-first.** A network surface that cannot do IPv6 is a
+defect. Full rationale + the remediation plan: [ADR-0042](../decisions/ADR-0042.md) /
+[ipv6-first](../research/ipv6-first.md) (backlog: [ipv6-first-backlog](../development/ipv6-first-backlog.md)).
+
+- **Bind / listen:** default to **dual-stack on `[::]`** (`IPV6_V6ONLY=false`), never `0.0.0.0`;
+  loopback is `[::1]`, never `127.0.0.1`. Control plane, telemetry, preview, RTSP, HLS, SRT, and
+  multicast all bind IPv6/dual-stack by default.
+- **Addresses & URLs:** accept and prefer IPv6 wherever an address is parsed; **bracket IPv6 literals**
+  in URLs (`udp://@[ff3e::1]:5004`, `rtp://[…]`, `[::1]:8080`). Examples and defaults lead with IPv6;
+  an IPv4 form, if shown, is explicitly labelled *legacy*.
+- **SDP:** handle `c=IN IP6` as a first-class form alongside `IN IP4`. The IPv6 multicast connection
+  line carries **no TTL** (`c=IN IP6 <addr>[/<count>]` — the slash is an address *count*); only the
+  IPv4 form takes `/ttl` (RFC 8866 §5.7).
+- **Multicast:** IPv6 multicast `ff00::/8` (flags + scope nibbles) with IPv6 SSM `FF3x::/32` via
+  **MLDv2** is the primary path; IPv4 `239/8` (admin-scoped) / `232/8` (SSM) + IGMPv3 is the legacy
+  peer. A `join_multicast_v6` / protocol-agnostic `MCAST_JOIN_(SOURCE_)GROUP` path is required, not a
+  follow-up.

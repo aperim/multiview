@@ -31,6 +31,7 @@
 
 pub mod audio;
 pub mod error;
+pub mod failover;
 pub mod grid;
 pub mod placement;
 pub mod probe;
@@ -53,6 +54,7 @@ pub use audio::{
     AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioMode, PROGRAM_TRACK,
 };
 pub use error::ConfigError;
+pub use failover::{default_failover_slate, FailoverSlate};
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use program::{ProgramId, ProgramKind, ProgramSpec};

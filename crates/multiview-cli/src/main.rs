@@ -27,6 +27,8 @@ use multiview_cli::validate::validate_config;
 use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_control::{command_bus, EngineStateSnapshot};
+#[cfg(feature = "ffmpeg")]
+use multiview_engine::{ActorExit, Program, ProgramId, ProgramSet, RealtimePacer};
 use multiview_engine::{CompositorDrive, EnginePublisher, StopSignal};
 use multiview_events::Event;
 use multiview_telemetry::tracing_init::SubscriberBuilder;
@@ -34,7 +36,11 @@ use multiview_telemetry::tracing_init::SubscriberBuilder;
 /// The boxed per-tick command drain the engine applies at the frame boundary
 /// (the control-plane command bus → live reconfiguration), shared by the
 /// software-engine and full-pipeline run paths.
-type ControlDrain = Box<dyn FnMut(&mut CompositorDrive<Nv12Image>)>;
+///
+/// `Send` so the full-pipeline run can be driven on a spawned supervised task
+/// under the engine `ProgramSet` (MP-1, ADR-0030 §2.2). The drain runs on the
+/// output-clock loop and must be non-blocking (invariants #1 + #10).
+type ControlDrain = Box<dyn FnMut(&mut CompositorDrive<Nv12Image>) + Send>;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -156,7 +162,10 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("bounded pipeline run")?
     } else {
         tracing::info!("pipeline run: until Ctrl-C");
-        run_pipeline_until_ctrl_c(&mut pipeline, config).await?
+        // MP-1 (ADR-0030 §2.2): the daemon run path builds an engine `ProgramSet`
+        // and drives this single program (id "main") through it — move the owned
+        // pipeline in (the set spawns it on its own supervised task).
+        run_pipeline_until_ctrl_c(pipeline, config).await?
     };
 
     println!("{}", report.render());
@@ -176,12 +185,15 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// frame boundary; none of it can back-pressure the output clock (inv #1 + #10).
 #[cfg(feature = "ffmpeg")]
 async fn run_pipeline_until_ctrl_c(
-    pipeline: &mut multiview_cli::pipeline::Pipeline,
+    pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let preview_slot = multiview_cli::preview::program_slot();
+    // This program's cadence (the legacy single program's canvas fps) for the
+    // engine `ProgramSet` member metadata.
+    let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
@@ -273,10 +285,12 @@ async fn run_pipeline_until_ctrl_c(
         );
     }
 
-    let report = pipeline
-        .run_until_serving(&stop, publisher.as_ref(), &preview_slot, drain)
-        .await
-        .context("pipeline run until Ctrl-C")?;
+    // MP-1 (ADR-0030 §2.2): build the engine `ProgramSet` and drive this single
+    // program (id "main") through it — behaviour-identical to today (one program,
+    // the same drive/stop/publisher/preview/drain). See `drive_main_program_in_set`.
+    let report =
+        drive_main_program_in_set(pipeline, cadence, &stop, &publisher, &preview_slot, drain)
+            .await?;
 
     // The pipeline loop returned; stop the metrics poller (it also self-stops on
     // the StopSignal within one sample period).
@@ -292,6 +306,95 @@ async fn run_pipeline_until_ctrl_c(
     }
     signal.abort();
     Ok(report)
+}
+
+/// Drive the single legacy `"main"` program through an engine
+/// [`ProgramSet`](multiview_engine::ProgramSet) (MP-1, ADR-0030 §2.2).
+///
+/// For the legacy single-program config the set has **exactly one** program (id
+/// `"main"`) — behaviour-identical to driving the [`Pipeline`] directly: the same
+/// `run_until_serving` drive, the same `StopSignal` (Ctrl-C reaches the program via
+/// the supervisor's per-program stop handle), the same publisher/preview/drain. The
+/// set owns the program's lifecycle (spawn on its own supervised task, stop, join)
+/// and samples its **live** `ticks_emitted` off a shared counter the pipeline
+/// increments per tick — exactly the N-concurrent-programs machinery, exercised
+/// here at N=1. MP-5 routes the config's `[[programs]]` into the same
+/// `ProgramSet::start` for N>1.
+///
+/// # Errors
+///
+/// Propagates a failure to admit/start the program, or the run's own error.
+#[cfg(feature = "ffmpeg")]
+async fn drive_main_program_in_set(
+    pipeline: multiview_cli::pipeline::Pipeline,
+    cadence: multiview_core::time::Rational,
+    stop: &StopSignal,
+    publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    preview_slot: &multiview_cli::preview::ProgramSlot,
+    drain: ControlDrain,
+) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
+    // The shared monotonic reference every program in the set reads (its one program
+    // reads it for its own clock's seed; identical to the inline `Monotonic` source
+    // the pipeline built before).
+    let mut programs: ProgramSet<RealtimePacer> =
+        ProgramSet::new(Arc::new(multiview_engine::MonotonicTimeSource::new()));
+    let program_id = ProgramId::new(ProgramId::MAIN).context("the reserved \"main\" program id")?;
+    // The live per-tick counter the `ProgramSet` samples for "main": the pipeline
+    // increments it once per emitted output tick (a single wait-free `fetch_add`),
+    // so `programs.ticks_emitted("main")` is genuinely live, not fabricated.
+    let main_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Recover the run's `PipelineReport` from the supervised task.
+    let (report_tx, report_rx) =
+        tokio::sync::oneshot::channel::<Result<multiview_cli::pipeline::PipelineReport, String>>();
+
+    let run_stop = stop.clone();
+    let run_publisher = Arc::clone(publisher);
+    let run_preview = Arc::clone(preview_slot);
+    let run_ticks = Arc::clone(&main_ticks);
+    let program = Program::<RealtimePacer>::from_runner(
+        program_id,
+        cadence,
+        run_stop.clone(),
+        main_ticks,
+        move || {
+            Box::pin(async move {
+                let mut pipeline = pipeline;
+                let outcome = pipeline
+                    .run_until_serving_observed(
+                        &run_stop,
+                        run_publisher.as_ref(),
+                        &run_preview,
+                        drain,
+                        Some(run_ticks),
+                    )
+                    .await;
+                let exit = if outcome.is_ok() {
+                    ActorExit::Completed
+                } else {
+                    ActorExit::Failed
+                };
+                let _ = report_tx.send(outcome.map_err(|e| e.to_string()));
+                exit
+            })
+        },
+    );
+    programs
+        .start(program)
+        .context("starting the \"main\" program in the ProgramSet")?;
+
+    // Await the single program's NATURAL completion: its run returns when the
+    // StopSignal is raised (Ctrl-C), at which point it sends its report. We await
+    // that first, THEN `shutdown` (raise any still-running program's stop — a no-op
+    // here — and join every supervised task so no task is left detached).
+    let recovered = report_rx.await;
+    programs.shutdown().await;
+    match recovered {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(reason)) => Err(anyhow::anyhow!(reason)).context("pipeline run until Ctrl-C"),
+        Err(_) => Err(anyhow::anyhow!(
+            "the \"main\" program task ended without reporting"
+        )),
+    }
 }
 
 /// Without the `ffmpeg` feature this build has no libav decoders, so external

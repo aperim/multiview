@@ -25,6 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
+use crate::failover::{default_failover_slate, FailoverSlate};
 use crate::schema::{Canvas, Cell, Layout, Output, Overlay};
 
 /// The canonical identity of one program within a program set (ADR-0030). It
@@ -179,6 +180,16 @@ pub struct ProgramSpec {
     /// start. Defaults to `true` (the legacy single program autostarts).
     #[serde(default = "default_autostart")]
     pub autostart: bool,
+    /// What this program shows on **source loss** — the configurable
+    /// failover-slate policy (ADR-0030 §4), selected the **same way** as a layout
+    /// tile ([`Cell::on_loss`]). For the non-layout **passthrough / transcode**
+    /// case this is the program-level slate the pre-baked GP-4 slate displays on
+    /// input loss; for a [`ProgramKind::Multiview`] program it is the
+    /// whole-canvas fallback when every tile is down. Defaults to
+    /// [`FailoverSlate::Bars`] (the broadcast standard) when omitted, so a
+    /// pre-existing program keeps working and gets the default.
+    #[serde(default = "default_failover_slate")]
+    pub on_loss: FailoverSlate,
     /// What this program is (multiview composite today).
     #[serde(flatten)]
     pub kind: ProgramKind,
@@ -209,6 +220,7 @@ impl ProgramSpec {
             id: ProgramId::main(),
             display_name: None,
             autostart: true,
+            on_loss: default_failover_slate(),
             kind: ProgramKind::Multiview {
                 canvas,
                 layout,

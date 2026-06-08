@@ -56,7 +56,10 @@ use multiview_ffmpeg::{DecodedVideoFrame, EncodedPacket, StreamKind};
 use crate::error::{Error, Result};
 use crate::sink::{AudioEncodeConfig, EncodeConfig, ProgramEncoder};
 
-/// The picture the slate displays on input loss.
+/// The picture the slate displays on input loss — the program-level half of the
+/// configurable failover-slate policy (ADR-0030 §4). The engine maps a
+/// `multiview_config::FailoverSlate` onto this so a passthrough / transcode
+/// program honours the **same** `on_loss` choice as a layout tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SlateKind {
@@ -64,6 +67,10 @@ pub enum SlateKind {
     Black,
     /// SMPTE-style vertical colour bars (the operator's "SMPTE-bars" failover).
     SmpteBars,
+    /// The **signal-lost** card — a distinct, recognisable "NO SIGNAL"
+    /// placeholder (the engine's `NO_SIGNAL` slate, mapped from
+    /// `multiview_config::FailoverSlate::NoSignal`).
+    NoSignal,
 }
 
 /// The audio the slate plays on input loss.
@@ -151,6 +158,10 @@ pub struct SlateSpec {
 /// [`SlateVideoSpec`] values, snapshotted so the value type is self-describing.
 #[derive(Debug, Clone)]
 pub struct BakedParams {
+    /// The failover **picture** that was baked ([`SlateKind`]) — the program-level
+    /// `on_loss` choice this slate displays on input loss. Recorded so a splice
+    /// (and the per-program robustness badge) knows what the program shows.
+    pub kind: SlateKind,
     /// The codec the slate was baked in.
     pub codec: SlateVideoCodec,
     /// The baked slate width in pixels.
@@ -268,6 +279,7 @@ impl SlateBaker {
             video: Arc::from(video_packets),
             audio,
             params: BakedParams {
+                kind: spec.kind,
                 codec: video.codec,
                 width: video.width,
                 height: video.height,
@@ -320,6 +332,7 @@ fn slate_frame(kind: SlateKind, video: &SlateVideoSpec) -> DecodedVideoFrame {
     match kind {
         SlateKind::Black => fill_black(&mut frame),
         SlateKind::SmpteBars => fill_bars(&mut frame, video.width),
+        SlateKind::NoSignal => fill_nosignal(&mut frame),
     }
     let meta = FrameMeta {
         pts: MediaTime::ZERO,
@@ -344,6 +357,33 @@ fn fill_black(frame: &mut Video) {
     y_plane.fill(Y_BLACK);
     let uv_plane = frame.data_mut(1);
     uv_plane.fill(C_NEUTRAL);
+}
+
+/// The **signal-lost** card: a flat dark-blue field — the classic recognisable
+/// "NO SIGNAL" placeholder, distinct from both `Black` and the colour `Bars`.
+///
+/// A flat field keeps the bake tiny (well under the < 5 MB budget) while its
+/// non-neutral chroma (`Cb` raised, `Cr` lowered for blue) makes the coded bytes
+/// differ from a pure-black bake — so the program-level `on_loss` choice
+/// provably changes *what* is shown. The exact code values are a deep, broadcast
+/// "no-signal blue" (limited-range NV12).
+fn fill_nosignal(frame: &mut Video) {
+    /// Luma of the dark "no-signal blue" field (limited range).
+    const Y_BLUE: u8 = 41;
+    /// `Cb` for blue (raised well above neutral 128).
+    const CB_BLUE: u8 = 200;
+    /// `Cr` for blue (lowered below neutral 128).
+    const CR_BLUE: u8 = 110;
+    let y_plane = frame.data_mut(0);
+    y_plane.fill(Y_BLUE);
+    let uv_plane = frame.data_mut(1);
+    // Interleaved NV12 chroma: even bytes are Cb, odd bytes are Cr.
+    for pair in uv_plane.chunks_exact_mut(2) {
+        if let [cb, cr] = pair {
+            *cb = CB_BLUE;
+            *cr = CR_BLUE;
+        }
+    }
 }
 
 /// Eight equal-width SMPTE-style vertical colour bars (white, yellow, cyan,

@@ -50,6 +50,7 @@ use multiview_framestore::TileStore;
 
 use crate::clock::Tick;
 use crate::error::{Error, Result};
+use crate::slate::{failover_slate_image, FailoverSlate};
 
 /// A frame composited for one output tick: the tagged canvas image, its
 /// presentation timestamp, and the per-source states sampled this tick.
@@ -110,8 +111,26 @@ pub struct CompositorDrive<T> {
     cell_index: HashMap<String, usize>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited by default).
     canvas_color: CanvasColor,
-    /// The "no signal" slate card, composited for tiles with no usable frame.
+    /// The "no signal" slate card, composited for a down tile that has **no**
+    /// per-cell failover policy supplied (the default / back-compat path — the
+    /// caller-provided card, byte-identical to the prior behaviour).
     nosignal_card: Arc<Nv12Image>,
+    /// Per-cell failover-slate policy (`on_loss`), aligned with `layout.cells`
+    /// order — `cell_slates[i]` is the policy for `layout.cells[i]` (ADR-0027 /
+    /// ADR-0030). Populated via [`CompositorDrive::with_cell_slates`] /
+    /// [`CompositorDrive::set_cell_slates`]. **Empty** (the default) means every
+    /// down cell shows `nosignal_card`, exactly as before. When present, a down
+    /// cell shows the slate its policy selects (`Bars` / `NoSignal` / `Black`),
+    /// built once and cached in `slate_cache`.
+    cell_slates: Vec<FailoverSlate>,
+    /// The per-policy slate-image cache + build odometer. Each distinct
+    /// [`FailoverSlate`] image is built **once** at canvas size (lazily, on first
+    /// use) and reused every tick — the protected output clock does no per-tick
+    /// slate allocation (invariant #1). Behind a [`RefCell`] so the lazy build
+    /// runs under `compose`'s `&self`; the drive composes on exactly one thread
+    /// (the output clock), so the cell is never contended and the borrow never
+    /// crosses an `.await`.
+    slate_cache: RefCell<SlateCache>,
     /// The canvas background (linear canvas-gamut), shown where no tile covers.
     background: LinearRgba,
     /// The compositor backend the per-tick composite dispatches through.
@@ -161,6 +180,8 @@ impl<T> CompositorDrive<T> {
             cell_index: HashMap::new(),
             canvas_color,
             nosignal_card: Arc::new(nosignal_card),
+            cell_slates: Vec::new(),
+            slate_cache: RefCell::new(SlateCache::default()),
             background,
             backend: RunBackend::cpu(),
             scratch: RefCell::new(ComposeScratch::default()),
@@ -209,6 +230,43 @@ impl<T> CompositorDrive<T> {
                 self.cell_index.insert(id, index);
             }
         }
+    }
+
+    /// Attach the per-cell **failover-slate policy** (`on_loss`), in `layout.cells`
+    /// order — `slates[i]` is the policy for `layout.cells[i]` (ADR-0027 /
+    /// ADR-0030). A down cell then composites the slate its policy selects
+    /// (`Bars` → SMPTE bars, `NoSignal` → the signal-lost card, `Black` → black),
+    /// built once and reused per tick.
+    ///
+    /// Builder form for ergonomic construction. **Omitting this** (or passing an
+    /// empty list) keeps the prior behaviour: every down cell shows the
+    /// caller-provided `nosignal_card`, byte-identical to before. A `slates`
+    /// shorter than the cell count leaves the trailing cells on the default card;
+    /// entries beyond the cell count are ignored.
+    #[must_use]
+    pub fn with_cell_slates(mut self, slates: Vec<FailoverSlate>) -> Self {
+        self.set_cell_slates(slates);
+        self
+    }
+
+    /// Set (or replace) the per-cell failover-slate policy from `slates` (in
+    /// `layout.cells` order). See [`CompositorDrive::with_cell_slates`].
+    pub fn set_cell_slates(&mut self, mut slates: Vec<FailoverSlate>) {
+        slates.truncate(self.layout.cells.len());
+        self.cell_slates = slates;
+    }
+
+    /// The cumulative number of distinct failover-slate **images built** so far.
+    ///
+    /// Each distinct [`FailoverSlate`] policy in use builds its canvas-size slate
+    /// image **once** (lazily, on first compose) and reuses it every tick, so this
+    /// odometer is bounded by the number of distinct policies (≤ 3), **never** by
+    /// the tick count — exactly the no-per-tick-slate-allocation gate (invariant
+    /// #1, CLAUDE.md safety rule §5). Exposed for the build-once test and
+    /// telemetry.
+    #[must_use]
+    pub fn slate_builds(&self) -> u64 {
+        self.slate_cache.borrow().builds
     }
 
     /// The source id currently bound to the cell named `cell_id`, if that cell is
@@ -393,7 +451,7 @@ impl CompositorDrive<Nv12Image> {
             let Some(cell) = self.layout.cells.get(i) else {
                 continue;
             };
-            let (image, state) = self.sample_cell(cell, now);
+            let (image, state) = self.sample_cell(i, cell, now);
             if let Some(source) = &cell.source {
                 source_states.insert(source.clone(), state);
             }
@@ -467,18 +525,24 @@ impl CompositorDrive<Nv12Image> {
     }
 
     /// Sample one cell's image and state without blocking: the bound source's
-    /// held/fresh frame, or the `NoSignal` slate when there is nothing usable.
+    /// held/fresh frame, or this cell's **failover slate** when there is nothing
+    /// usable (the slate its `on_loss` policy selects, or the default
+    /// `nosignal_card` when no per-cell policy was supplied).
+    ///
+    /// `index` is the cell's position in `layout.cells`, used to look up the
+    /// per-cell policy in `cell_slates`.
     fn sample_cell(
         &self,
+        index: usize,
         cell: &multiview_core::layout::Cell,
         now: MediaTime,
     ) -> (Arc<Nv12Image>, SourceState) {
         let Some(source) = &cell.source else {
             // An unbound cell always shows the slate.
-            return (Arc::clone(&self.nosignal_card), SourceState::NoSignal);
+            return (self.slate_for_cell(index), SourceState::NoSignal);
         };
         let Some(store) = self.stores.get(source) else {
-            return (Arc::clone(&self.nosignal_card), SourceState::NoSignal);
+            return (self.slate_for_cell(index), SourceState::NoSignal);
         };
         // Latch-on-tick: sample by the OUTPUT media instant `now`, selecting the
         // source frame nearest-but-not-after it (streaming-gotchas §1). This is
@@ -490,9 +554,63 @@ impl CompositorDrive<Nv12Image> {
         let state = read.state();
         match read.frame() {
             Some(frame) => (Arc::clone(frame), state),
-            None => (Arc::clone(&self.nosignal_card), state),
+            None => (self.slate_for_cell(index), state),
         }
     }
+
+    /// The slate image a **down** cell at `index` composites.
+    ///
+    /// Resolves the cell's per-cell [`FailoverSlate`] policy (`cell_slates[index]`)
+    /// to its canvas-size slate image, **built once** and cached
+    /// (`slate_cache`) — reused every tick (invariant #1: no per-tick slate
+    /// allocation on the output clock). The slate is scaled-at-composite into the
+    /// cell rect downstream (RT-6), exactly like the held source frame.
+    ///
+    /// When the cell has **no** per-cell policy (the default / back-compat path —
+    /// `cell_slates` empty or shorter than `index`), returns the caller-provided
+    /// `nosignal_card`, byte-identical to the prior behaviour. A slate that fails
+    /// to build (a structurally impossible canvas the compositor rejects) also
+    /// falls back to `nosignal_card` rather than stalling the clock.
+    fn slate_for_cell(&self, index: usize) -> Arc<Nv12Image> {
+        let Some(&policy) = self.cell_slates.get(index) else {
+            return Arc::clone(&self.nosignal_card);
+        };
+        let mut cache = self.slate_cache.borrow_mut();
+        if let Some(image) = cache.images.get(&policy) {
+            return Arc::clone(image);
+        }
+        // First use of this policy: build its canvas-size image once and cache it.
+        let canvas = &self.layout.canvas;
+        match failover_slate_image(policy, canvas.width, canvas.height, self.canvas_color) {
+            Ok(image) => {
+                let image = Arc::new(image);
+                cache.images.insert(policy, Arc::clone(&image));
+                cache.builds = cache.builds.saturating_add(1);
+                image
+            }
+            // A policy whose slate cannot be built on this canvas falls back to
+            // the default card — the output clock never stalls (invariant #1).
+            Err(_) => Arc::clone(&self.nosignal_card),
+        }
+    }
+}
+
+/// The per-policy failover-slate **image cache** + build odometer for one drive.
+///
+/// Each distinct [`FailoverSlate`] policy in use builds its canvas-size slate
+/// image **once** (lazily) and reuses it every tick; `builds` is the cumulative
+/// build count (bounded by the number of distinct policies, ≤ 3, **never** the
+/// tick count — invariant #1, CLAUDE.md safety rule §5). Held behind a
+/// [`RefCell`] inside [`CompositorDrive`] and touched only by the single-threaded
+/// [`CompositorDrive::compose`] (the output clock), so it is never contended and
+/// the borrow never crosses an `.await`.
+#[derive(Default)]
+struct SlateCache {
+    /// The built slate image per policy (built once, reused per tick).
+    images: HashMap<FailoverSlate, Arc<Nv12Image>>,
+    /// Cumulative count of slate-image builds (the no-per-tick-allocation gate's
+    /// odometer).
+    builds: u64,
 }
 
 /// Internal: a resolved tile placement referencing an entry in the `held` vec.
