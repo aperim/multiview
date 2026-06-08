@@ -38,6 +38,10 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         title = "Multiview Control API",
         version = "1.0.0",
         description = "REST + WebSocket + SSE management API for the Multiview engine.",
+        license(
+            name = "Multiview Source-Available Non-Commercial License",
+            url = "https://github.com/aperim/multiview/blob/main/LICENSE",
+        ),
     ),
     paths(
         crate::routes::list_layouts,

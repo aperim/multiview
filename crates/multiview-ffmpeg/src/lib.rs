@@ -148,13 +148,19 @@ pub use log_bridge::install as install_log_bridge;
 pub use idr::{is_idr, CodecKind, NalFraming};
 
 pub use hwdecode::{
-    cuvid_decoder, decode_surface_pool, plan_decode_resize, DecodeResizeStrategy,
-    DecodeSurfacePool, HwBitDepth, HwDecodePlan, HwDeviceKind, HwInputCodec, PoolInputs,
-    ResizeInputs, TileSize,
+    cuvid_decoder, decode_surface_pool, nvdec_disabled, plan_decode_resize, want_hw_decode,
+    DecodeResizeStrategy, DecodeSurfacePool, HwBitDepth, HwDecodePlan, HwDeviceKind, HwInputCodec,
+    PoolInputs, ResizeInputs, TileSize, NVDEC_DISABLE_ENV,
 };
 
 #[cfg(feature = "ffmpeg")]
-pub use hwdecode::select_decoder;
+pub use hwdecode::{hw_input_codec_for_id, select_decoder, select_decoder_for_id};
+
+/// The linked-libav codec identity enum, re-exported so callers (and tests) can
+/// name a stream's codec without depending on `ffmpeg-next` directly. Behind the
+/// `ffmpeg` feature.
+#[cfg(feature = "ffmpeg")]
+pub use ffmpeg_next::codec::Id as CodecId;
 
 pub use jpegxs::{
     resolve_availability, select_codec_name, JpegXsAvailability, JpegXsRole, JPEGXS_CODEC_NAMES,
@@ -261,7 +267,9 @@ pub use encode::{AudioEncodeTarget, AudioEncoder, VideoEncodeTarget, VideoEncode
 // `HwDeviceKind` is re-exported unconditionally from `hwdecode` (it is pure);
 // `hwframe` provides the FFI device/frames handles behind the `ffmpeg` feature.
 #[cfg(feature = "ffmpeg")]
-pub use hwframe::{HwDeviceContext, HwFramesContext, HwFramesSpec};
+pub use hwframe::{
+    is_cuda_frame, transfer_hwframe_to_host, HwDeviceContext, HwFramesContext, HwFramesSpec,
+};
 
 #[cfg(feature = "ffmpeg")]
 pub use mux::Muxer;

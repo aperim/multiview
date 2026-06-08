@@ -45,7 +45,7 @@ Three verified facts, end to end:
    `if codec.is_empty()` → `ConfigError::Validation("an output declares an empty codec")`.
    A workspace-wide grep for codec-token literals (`h264`/`hevc`/`av1`/…) inside
    `crates/multiview-config/src` returns **zero** hits: there is no transport-carriage matrix,
-   no real-codec whitelist, no host check anywhere in the config crate. Any non-empty
+   no real-codec allowlist, no host check anywhere in the config crate. Any non-empty
    string — `"not_a_codec"`, `"h265"` on classic RTMP, `"av1_nvenc"` on a non-Ada GPU —
    passes config validation untouched.
 
@@ -225,7 +225,7 @@ GPU" (see the corrected H.264 example in §5).
   as a late mid-pipeline crash.
 - **API:** `GET /api/v1/system/capabilities/codecs?transport=<kind>` (ADR-M007 binding spec;
   management-capability-matrix.md *"`codec_support … GET …/devices/{id}/codecs … Gates
-  Output dropdowns`"*) returns the **INTERSECTION** (catalog ∩ transport-whitelist ∩ host
+  Output dropdowns`"*) returns the **INTERSECTION** (catalog ∩ transport-allowlist ∩ host
   encode-support), each entry
   `{ id, label, kinds, acceleration, backends, license, license_escalating, supported,
   reason?, default }`. Read-only; reads a **cached `CapabilityReport` snapshot** — never
@@ -263,7 +263,7 @@ transport class; SRT≡MPEG-TS). NDI is **omitted** — it has no operator-chose
 | **NDI** | *no operator codec* (SpeedHQ / NDI-HX H264·H265 / UYVY intrinsic) — **matrix skips NDI** | PCM-float (unlimited ch) / AAC (≤2 ch) / Opus (≤255 ch) | `ChannelMap` | docs.ndi.video |
 | **WebRTC** *(PLANNED — no `Output` variant yet)* | VP8 + H264 Constrained-Baseline **MANDATORY** (RFC 7742); VP9/AV1/H265 optional | Opus + G.711 PCMU/PCMA **MANDATORY** (RFC 7874) | — | reserve as a future row; **do not expose** until a `WebRtc` variant exists |
 
-**Corrections folded from review** (the classic-RTMP whitelist precision):
+**Corrections folded from review** (the classic-RTMP allowlist precision):
 
 - Classic-RTMP video = `{H264}` **only** — explicitly excludes `Mpeg2Video`/`Ffv1`/`Mjpeg`/
   `H265`/`Av1`/`Vp9`/`Vp8`.

@@ -188,7 +188,7 @@ jobs:
           STAGE="multiview-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/${STAGE}"
           cp "${BIN}" "dist/${STAGE}/multiview"
-          cp README.md LICENSE-MIT LICENSE-APACHE NOTICE "dist/${STAGE}/" 2>/dev/null || true
+          cp README.md LICENSE LICENSE-COMMERCIAL.md NOTICE THIRD-PARTY-NOTICES.md "dist/${STAGE}/" 2>/dev/null || true
           tar -C dist -czf "dist/${STAGE}.tar.gz" "${STAGE}"
           ( cd dist && shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256" )
           echo "archive=dist/${STAGE}.tar.gz" >> "$GITHUB_OUTPUT"

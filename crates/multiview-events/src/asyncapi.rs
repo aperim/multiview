@@ -85,7 +85,8 @@ fn build_info() -> Value {
             "control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
         ),
         "license": {
-            "name": "MIT OR Apache-2.0"
+            "name": "Multiview Source-Available Non-Commercial License",
+            "url": "https://github.com/aperim/multiview/blob/main/LICENSE"
         },
         "contact": {
             "name": "The Multiview Authors",

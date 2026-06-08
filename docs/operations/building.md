@@ -274,16 +274,17 @@ cargo build --release -p multiview-cli --features "apple,embed-web"
 
 ## 6. Licensing & build profiles
 
-The **effective license of the artifact depends on the features you enable.** Project code is dual
-**MIT OR Apache-2.0**; the feature presets determine what gets linked. Full rationale:
+The **effective license of the artifact depends on the features you enable.** Project code is under the
+**Multiview Source-Available Non-Commercial License, Version 1.0** (source-available, **not** open
+source); the feature presets determine what third-party code gets linked. Full rationale:
 [ADR-0012](../decisions/ADR-0012.md) and [conventions §7](../architecture/conventions.md#7-licensing-model-build-profiles).
 
 | Profile / features | Composition | Effective status |
 |--------------------|-------------|------------------|
-| **default** (no `gpl-codecs`/`ndi-advanced`) | MIT/Apache code + dynamically-linked **LGPL-2.1** FFmpeg (no `--enable-gpl`, no `--enable-nonfree`; NVENC/NVDEC via MIT `nv-codec-headers`; `scale_cuda` not `scale_npp`; native AAC + GnuTLS) | **Redistributable, LGPL-clean** |
+| **default** (no `gpl-codecs`/`ndi-advanced`) | Source-available project code + dynamically-linked **LGPL-2.1** FFmpeg (no `--enable-gpl`, no `--enable-nonfree`; NVENC/NVDEC via MIT `nv-codec-headers`; `scale_cuda` not `scale_npp`; native AAC + GnuTLS) | **Redistributable, LGPL-clean** |
 | **+ `gpl-codecs`** | + x264/x265 (GPL FFmpeg) | Whole product **GPL-2.0-or-later** |
 | **+ nonfree** (libnpp / FDK-AAC / OpenSSL) | nonfree FFmpeg | **NOT redistributable** — internal/personal only |
-| **+ `ndi`** | + proprietary NDI runtime (royalty-free) | Permissive code **+ NDI EULA + mandatory attribution/branding** |
+| **+ `ndi`** | + proprietary NDI runtime (royalty-free) | Source-available project code **+ NDI EULA + mandatory attribution/branding** |
 | **+ `ndi-advanced`** | + NDI Advanced SDK (HX H.264/HEVC) | Separate **paid** commercial license + codec royalties |
 
 **Build-your-own LGPL FFmpeg (release path).** Because distro/Homebrew FFmpeg is frequently GPL,

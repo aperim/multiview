@@ -70,6 +70,17 @@ pub struct StreamVideoDecoder {
     /// stream's declared cadence via [`Self::with_declared_fps`] so 25/24 fps
     /// sources advance at their true rate rather than an NTSC-shaped guess.
     fallback_step_ns: i64,
+    /// The concrete NVDEC `*_cuvid` decoder this was opened with (e.g.
+    /// `"h264_cuvid"`), or [`None`] when it runs the software decoder. Lets the
+    /// caller report which decode path is live (telemetry / the hardware
+    /// validation check).
+    hw_decoder_name: Option<&'static str>,
+    /// The CUDA device context the cuvid decoder is bound to, when the hardware
+    /// path is live. Held for the decoder's lifetime so the device outlives every
+    /// decode + any [`transfer_hwframe_to_host`](crate::hwframe::transfer_hwframe_to_host)
+    /// download. Freed synchronously in `Drop` on the decode thread (CLAUDE.md
+    /// §7), never an async destructor. [`None`] on the software path.
+    hw_device: Option<crate::hwframe::HwDeviceContext>,
 }
 
 impl StreamVideoDecoder {
@@ -78,8 +89,12 @@ impl StreamVideoDecoder {
     /// derived from the declared fps via [`Self::with_declared_fps`].
     const DEFAULT_FALLBACK_STEP_NS: i64 = 33_366_667;
 
-    /// Build a decoder from a [`Demuxer`](crate::demux::Demuxer) stream's
-    /// parameters and time-base.
+    /// Build a **software** decoder from a [`Demuxer`](crate::demux::Demuxer)
+    /// stream's parameters and time-base.
+    ///
+    /// This always opens the libav software decoder for the stream's codec; it is
+    /// the universal fallback the hardware path degrades to. To prefer NVDEC where
+    /// available, use [`Self::new_preferring_hw`].
     ///
     /// # Errors
     /// Returns [`FfmpegError::OpenDecoder`] if a decoder cannot be built.
@@ -93,7 +108,115 @@ impl StreamVideoDecoder {
             to_nv12: None,
             last_pts_ns: None,
             fallback_step_ns: Self::DEFAULT_FALLBACK_STEP_NS,
+            hw_decoder_name: None,
+            hw_device: None,
         })
+    }
+
+    /// Build a decoder for `parameters`, **preferring NVDEC hardware decode**
+    /// (`*_cuvid`) when `want_hw` is set, the build compiled the `cuda` feature,
+    /// and the linked libav offers a cuvid wrapper for the stream's codec — else
+    /// (or on any hardware-open failure) the software decoder.
+    ///
+    /// This is the run-path constructor: it moves 4K H.264/HEVC decode off the
+    /// CPU onto the NVDEC ASIC. The selection is
+    /// [`select_decoder_for_id`](crate::hwdecode::select_decoder_for_id); opening
+    /// the GPU decoder needs a working CUDA device, so a driver/library mismatch
+    /// or a GPU-free box falls back to software **gracefully** — the source keeps
+    /// running, the output never falters (invariants #1/#2). Decoded CUDA surfaces
+    /// are downloaded to host NV12 in [`Self::receive_frame`] (the budgeted
+    /// CPU↔GPU copy), so downstream consumers are unchanged (invariant #5).
+    ///
+    /// The boolean of the returned tuple reports whether the hardware path opened,
+    /// so the caller can log it once and surface it as telemetry.
+    ///
+    /// # Errors
+    /// Returns [`FfmpegError::OpenDecoder`] only if **even the software** decoder
+    /// cannot be built; a hardware-open failure never surfaces as an error (it is
+    /// absorbed by the software fallback).
+    pub fn new_preferring_hw(
+        parameters: ffmpeg::codec::Parameters,
+        time_base: Rational,
+        want_hw: bool,
+    ) -> Result<(Self, bool)> {
+        if let Some(name) = crate::hwdecode::select_decoder_for_id(parameters.id(), want_hw) {
+            match Self::try_open_cuvid(parameters.clone(), time_base, name) {
+                Ok(decoder) => return Ok((decoder, true)),
+                Err(err) => {
+                    // Graceful degradation: a driver/library mismatch or no usable
+                    // GPU. Log ONCE (rate-limited libav bridge aside, this is a
+                    // single per-open warning) and fall through to software so the
+                    // tile keeps running rather than crashing the output.
+                    tracing::warn!(
+                        decoder = name,
+                        error = %err,
+                        "NVDEC hardware decode unavailable; falling back to software decode"
+                    );
+                }
+            }
+        }
+        let decoder = Self::new(parameters, time_base)?;
+        Ok((decoder, false))
+    }
+
+    /// Try to open the named NVDEC `*_cuvid` decoder bound to a fresh CUDA device
+    /// context. On success the decoder runs on the GPU and emits host NV12 (the
+    /// cuvid wrapper downloads internally) or CUDA surfaces (downloaded in
+    /// [`Self::receive_frame`]). Any failure here is recoverable — the caller
+    /// degrades to software.
+    fn try_open_cuvid(
+        parameters: ffmpeg::codec::Parameters,
+        time_base: Rational,
+        name: &'static str,
+    ) -> Result<Self> {
+        let codec =
+            ffmpeg::decoder::find_by_name(name).ok_or(FfmpegError::CodecNotFound("cuvid"))?;
+        let mut ctx = ffmpeg::codec::context::Context::from_parameters(parameters)
+            .map_err(FfmpegError::OpenDecoder)?;
+
+        // A CUDA device context the cuvid decoder runs on. Requires a working
+        // driver/GPU at run time; on a GPU-free box this returns a typed error and
+        // the caller falls back to software (never a panic).
+        let device =
+            crate::hwframe::HwDeviceContext::create(crate::hwdecode::HwDeviceKind::Cuda, None)?;
+        // Must be set BEFORE the decoder is opened — libav reads `hw_device_ctx`
+        // only during `avcodec_open2`.
+        device.attach_to_decoder(&mut ctx)?;
+
+        // Open as the cuvid codec specifically (not the context's own software
+        // codec id), then take the video decoder.
+        let opened = ctx
+            .decoder()
+            .open_as(codec)
+            .map_err(FfmpegError::OpenDecoder)?;
+        let decoder = opened.video().map_err(FfmpegError::OpenDecoder)?;
+
+        Ok(Self {
+            decoder,
+            time_base,
+            to_nv12: None,
+            last_pts_ns: None,
+            fallback_step_ns: Self::DEFAULT_FALLBACK_STEP_NS,
+            hw_decoder_name: Some(name),
+            hw_device: Some(device),
+        })
+    }
+
+    /// The concrete NVDEC `*_cuvid` decoder name this is running on (e.g.
+    /// `"h264_cuvid"`), or [`None`] when it runs the software decoder.
+    #[must_use]
+    pub fn hw_decoder_name(&self) -> Option<&'static str> {
+        self.hw_decoder_name
+    }
+
+    /// Whether this decoder is running the NVDEC hardware path.
+    ///
+    /// True exactly when a cuvid decoder opened **and** its CUDA device context
+    /// is held for the decoder's lifetime (so every decode + download stays valid
+    /// until `Drop`).
+    #[must_use]
+    pub fn is_hardware(&self) -> bool {
+        self.hw_decoder_name.is_some() && self.hw_device.is_some()
     }
 
     /// Set the genpts fallback inter-frame step from the stream's declared frame
@@ -147,6 +270,20 @@ impl StreamVideoDecoder {
             ) => return Ok(None),
             Err(other) => return Err(FfmpegError::Decode(other)),
         }
+
+        // If NVDEC handed back a CUDA device surface, download it to a host frame
+        // first — the budgeted CPU↔GPU copy (core-engine §8.1). The `*_cuvid`
+        // wrappers usually emit host NV12 directly (internal download), in which
+        // case this is a no-op; the predicate keeps the loop correct either way.
+        // A transfer failure is recoverable: the frame is dropped (ride last-good)
+        // rather than crashing the output (invariants #1/#2).
+        let decoded = if crate::hwframe::is_cuda_frame(&decoded) {
+            let mut host = Video::empty();
+            crate::hwframe::transfer_hwframe_to_host(&decoded, &mut host)?;
+            host
+        } else {
+            decoded
+        };
 
         let color = color_from_ff(
             decoded.color_space(),

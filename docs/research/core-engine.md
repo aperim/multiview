@@ -507,14 +507,14 @@ Cargo workspace, `resolver = "2"` (mandatory so a Linux-only test/build dep can'
 
 ## 18. Licensing Strategy & Build-Profile Matrix
 
-Project license: **dual `MIT OR Apache-2.0`** (Rust standard; Apache patent grant + MIT GPLv2-compatibility — important because x264/x265 are GPLv2-or-later and Apache-2.0 alone is GPLv2-incompatible).
+Project license: **Multiview Source-Available Non-Commercial License, Version 1.0** (source-available, **not** open source; (c) Aperim Pty Ltd, governed by New South Wales, Australia). This applies to Multiview's own code only — bundled/linked third-party code keeps its own licenses (FFmpeg LGPL, Rust deps MIT/Apache, etc.), so the build-profile composition below is unchanged.
 
 | Profile | Composition | Effective license / status |
 |---|---|---|
-| **default** | MIT/Apache project + dynamically-linked **LGPL-2.1** FFmpeg (no `--enable-gpl`, no `--enable-nonfree`; NVENC/NVDEC via MIT `nv-codec-headers`; **`scale_cuda` not `scale_npp`**) + MPL-2.0 libsrt + GnuTLS (LGPL TLS) | Redistributable, permissive/LGPL-clean |
+| **default** | Source-available project code + dynamically-linked **LGPL-2.1** FFmpeg (no `--enable-gpl`, no `--enable-nonfree`; NVENC/NVDEC via MIT `nv-codec-headers`; **`scale_cuda` not `scale_npp`**) + MPL-2.0 libsrt + GnuTLS (LGPL TLS) | Redistributable, LGPL-clean |
 | **+gpl** | + GPL FFmpeg with x264/x265 | Effective **GPL-2.0-or-later** (whole product) |
 | **+nonfree** | + libnpp/scale_npp / FDK-AAC / OpenSSL | **NOT redistributable** — internal/personal use only |
-| **+ndi** | + proprietary NDI runtime (royalty-free) | Permissive code + NDI EULA + mandatory attribution/branding |
+| **+ndi** | + proprietary NDI runtime (royalty-free) | Source-available project code + NDI EULA + mandatory attribution/branding |
 | **+ndi-advanced** | + NDI Advanced SDK (HX H.264/HEVC) | Separate **paid** commercial license + codec royalties |
 
 Rules: keep the default LGPL-clean; do scaling/compositing in-house (`scale_cuda` is the LGPL escape hatch for any GPU scaling needed); use native AAC + GnuTLS (avoid FDK-AAC/OpenSSL → nonfree, and mbedTLS → version3/LGPLv3); confine software x264/x265 to the `+gpl` variant; build FFmpeg yourself (distro FFmpeg may already be GPL/nonfree); verify `ffmpeg -buildconf` shows no `--enable-gpl`/`--enable-nonfree`/`--enable-libnpp`/`--enable-cuda-nvcc`. Codec **patent** licensing (H.264/HEVC/AAC pools) is a separate question from software copyright and may apply to outputs regardless of build flags.
