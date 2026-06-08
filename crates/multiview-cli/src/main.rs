@@ -206,14 +206,25 @@ async fn run_pipeline_until_ctrl_c(
         .await
         .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
         tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
-        (
-            Some(handle),
-            Box::new(control::command_drain(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-            )),
-        )
+        // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
+        // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
+        // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
+        // drive start, and the drain reads it wait-free (inv #1/#10). Only under
+        // `overlay` (without it the run renders no subtitles, so there is no layer).
+        #[cfg(feature = "overlay")]
+        let drain: ControlDrain = Box::new(control::command_drain_with_seams(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+            pipeline.subtitle_route_slot(),
+        ));
+        #[cfg(not(feature = "overlay"))]
+        let drain: ControlDrain = Box::new(control::command_drain(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+        ));
+        (Some(handle), drain)
     } else {
         drop(shutdown_rx);
         (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))

@@ -21,7 +21,9 @@ use multiview_control::{
     EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, SharedPreview,
     WarningRepository,
 };
-use multiview_engine::{CompositorDrive, EnginePublisher};
+use multiview_engine::{
+    CompositorDrive, EnginePublisher, RouteApplier, RouteIntent, RouteResolution,
+};
 use multiview_events::{Event, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -312,11 +314,27 @@ fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12I
 ///   [`Event::OutputStatus`] (`Running` / `Idle`). There is no output server wired
 ///   in the software engine yet, so this is the running-state echo, not a measured
 ///   sink status.
-/// * [`Command::SwapSource`] is a pure VIDEO→cell re-point: it goes through the
-///   **O(1)** [`CompositorDrive::rebind_cell`] path (no `solve_layout`/`validate`
-///   re-solve), coalesced + capped at [`MAX_REPOINTS_PER_TICK`] per tick. No
+/// * [`Command::SwapSource`] / [`Command::RouteVideo`] are VIDEO→cell re-points:
+///   each is desugared via [`Command::route_intent`] into a
+///   [`RouteIntent::Video`] and applied through the canonical, engine-tested
+///   [`RouteApplier::apply_video`] → **O(1)** [`CompositorDrive::rebind_cell`] (no
+///   `solve_layout`/`validate` re-solve), batched + capped at
+///   [`MAX_REPOINTS_PER_TICK`] per tick. `SwapSource` is the desugared alias of
+///   `RouteVideo{…,Video,Best}`, so the two apply identically (back-compat). No
 ///   dedicated swap event exists in [`Event`], so the observable outcome is the
 ///   binding change plus a `tracing` log.
+/// * [`Command::RouteSubtitle`] re-points a subtitle **layer** to another source's
+///   cues via the run's live [`SubtitleRouteHandle`](crate::captions::SubtitleRouteHandle)
+///   seam (RT-10b), threaded in by [`command_drain_with_seams`]. The seam applies
+///   the re-point at the bake consumer's sample boundary (the engine
+///   [`SubtitleLayer::repoint`](multiview_overlay::SubtitleLayer) the
+///   [`RouteApplier`] drives in-engine). Without a seam (the software-engine path,
+///   which renders no subtitles) the route is a logged held action, never a panic.
+/// * [`Command::RouteAudio`] desugars to [`RouteIntent::Audio`] but the run path
+///   wires **no per-source audio crosspoint** yet (program audio is silence —
+///   there is no per-source `AudioStore` to re-point onto, the run-side audio
+///   ingest is RT-5/RT-8b, unbuilt). It is therefore a **surfaced** held action
+///   (`tracing::warn!` naming the missing crosspoint), never a silent drop.
 /// * [`Command::ApplyLayout`] re-solves + re-applies the working layout iff
 ///   `layout` matches the solved working layout's name (geometry CAN change, so it
 ///   keeps the re-solve path); any other id is a failure (there is no named-layout
@@ -345,6 +363,39 @@ pub fn command_drain(
     }
 }
 
+/// Build the per-tick control hook **with the live run-side routing seams**
+/// threaded in, so per-stream routing commands reach their live crosspoints in the
+/// real run (RT-11 / ADR-0034).
+///
+/// Identical to [`command_drain`] but also accepts the running pipeline's shared
+/// **subtitle re-point slot**
+/// ([`Pipeline::subtitle_route_slot`](crate::pipeline::Pipeline::subtitle_route_slot)):
+/// a [`Command::RouteSubtitle`] drained here drives a breakaway into the running
+/// pipeline through that slot's live
+/// [`SubtitleRouteHandle`](crate::captions::SubtitleRouteHandle) (RT-10b) — the
+/// run applies it at the next sample boundary via the engine
+/// [`SubtitleLayer::repoint`](multiview_overlay::SubtitleLayer). Reading the slot
+/// is a lock-free `ArcSwapOption` load and publishing a re-point is wait-free +
+/// bounded drop-oldest, so neither can pace or stall the output clock
+/// (invariants #1/#10).
+///
+/// The binary wires this on the full libav\* path (`run_pipeline_until_ctrl_c`),
+/// where the pipeline has a subtitle router; the software-engine path (no subtitle
+/// rendering) wires the plain [`command_drain`].
+#[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+pub fn command_drain_with_seams(
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    let mut drain =
+        CommandDrain::new(commands, config, publisher).with_subtitle_route(subtitle_route);
+    move |drive: &mut CompositorDrive<Nv12Image>| {
+        let _applied = drain.apply(drive);
+    }
+}
+
 /// The maximum number of VIDEO→cell re-points applied in **one** frame-boundary
 /// pass (RT-6 / ADR-0034 cap-per-tick).
 ///
@@ -366,31 +417,45 @@ const MAX_REPOINT_BACKLOG: usize = 256;
 /// working config, the outbound publisher, and the across-tick state, and applies
 /// drained commands to the running [`CompositorDrive`] at the frame boundary.
 ///
-/// VIDEO→cell re-points (`SwapSource`, salvo `sources`) go through the **O(1)**
-/// [`CompositorDrive::rebind_cell`] path — no `solve_layout`/`validate` re-solve —
-/// and are **coalesced + capped**: a drained batch is applied as at most
-/// [`MAX_REPOINTS_PER_TICK`] re-points per tick, with the excess held in a bounded
-/// backlog (RT-6 / ADR-0034). Geometry-changing commands (`ApplyLayout`) still
-/// re-solve, exactly as before.
+/// Per-stream routing commands (`SwapSource`/`RouteVideo`, `RouteAudio`,
+/// `RouteSubtitle`) are desugared via [`Command::route_intent`] into engine-native
+/// [`RouteIntent`]s and applied through the **canonical engine apply primitives**
+/// (RT-11 / ADR-0034):
+///
+/// * **video** → [`RouteApplier::apply_video`] → O(1) [`CompositorDrive::rebind_cell`]
+///   (no `solve_layout`/`validate` re-solve), **batched + capped** at
+///   [`MAX_REPOINTS_PER_TICK`] per tick with the excess held in a bounded backlog
+///   (RT-6);
+/// * **subtitle** → the run's live [`SubtitleRouteHandle`](crate::captions::SubtitleRouteHandle)
+///   seam (RT-10b), when one is threaded in via [`command_drain_with_seams`];
+/// * **audio** → a surfaced held action (the run wires no per-source audio
+///   crosspoint yet — RT-5/RT-8b), never a silent drop.
+///
+/// Geometry-changing commands (`ApplyLayout`) still re-solve, exactly as before.
 pub struct CommandDrain {
     commands: CommandReceiver,
     config: MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     state: DrainState,
-    /// Pending VIDEO→cell re-points awaiting application (bounded, drop-oldest).
-    pending: std::collections::VecDeque<RePoint>,
+    /// Pending VIDEO→cell route intents awaiting application (bounded, drop-oldest).
+    pending: std::collections::VecDeque<RouteIntent>,
+    /// The engine-native resolution context the [`RouteApplier`] consults to turn a
+    /// video `StreamRef` into its `CompositorDrive` store key. In the run the store
+    /// key **is** the source id (the `rebind_cell` argument), so a video route's
+    /// store key is registered as `source.input_id` when the route is drained.
+    resolution: RouteResolution,
+    /// The live run-side subtitle re-point seam (RT-10b), when wired
+    /// ([`command_drain_with_seams`]). A `RouteSubtitle` drives a breakaway through
+    /// it; the run applies it at the next sample boundary. `None` on the
+    /// software-engine path (no subtitle rendering) — a `RouteSubtitle` is then a
+    /// logged held action.
+    #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+    subtitle_route: Option<Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
     cell_ids_set: bool,
     /// Test-only spy counting how many times this drain calls `solve_layout`.
     #[cfg(test)]
     resolve_spy: Option<Arc<std::sync::atomic::AtomicUsize>>,
-}
-
-/// A queued VIDEO→cell re-point: which cell to re-point to which source.
-#[derive(Debug, Clone)]
-struct RePoint {
-    cell: String,
-    source: String,
 }
 
 impl CommandDrain {
@@ -408,10 +473,26 @@ impl CommandDrain {
             publisher,
             state: DrainState::default(),
             pending: std::collections::VecDeque::new(),
+            resolution: RouteResolution::default(),
+            #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+            subtitle_route: None,
             cell_ids_set: false,
             #[cfg(test)]
             resolve_spy: None,
         }
+    }
+
+    /// Thread in the live run-side subtitle re-point seam (RT-10b) so a
+    /// `RouteSubtitle` reaches the running pipeline's layer. See
+    /// [`command_drain_with_seams`].
+    #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+    #[must_use]
+    fn with_subtitle_route(
+        mut self,
+        subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
+    ) -> Self {
+        self.subtitle_route = Some(subtitle_route);
+        self
     }
 
     /// Attach a test spy that counts every `solve_layout` re-solve the drain does.
@@ -423,7 +504,7 @@ impl CommandDrain {
     }
 
     /// Apply one frame-boundary pass: drain the (non-blocking) bus, classify each
-    /// command, coalesce + cap the VIDEO→cell re-points, and apply them to the
+    /// command, batch + cap the VIDEO→cell re-points, and apply them to the
     /// running `drive`. Returns the number of re-points applied **this tick**
     /// (bounded by [`MAX_REPOINTS_PER_TICK`]).
     ///
@@ -445,55 +526,61 @@ impl CommandDrain {
             self.cell_ids_set = true;
         }
 
-        // Drain the bus, routing commands. Re-points are enqueued (coalesced +
+        // Drain the bus, routing commands. Video re-points are enqueued (batched +
         // bounded); every other command is applied immediately as before.
         for command in self.commands.try_drain() {
             self.route_command(command, drive);
         }
 
-        // Apply at most the per-tick cap of pending re-points (the rest stay in
-        // the bounded backlog for the next tick). Each is an O(1) `rebind_cell`
-        // (no re-solve); a stale/superseded binding simply re-points again.
+        // Take at most the per-tick cap of pending VIDEO route intents off the
+        // bounded backlog (the rest stay for the next tick — the RT-6 cap-per-tick
+        // budget). Each is applied through the canonical, engine-tested
+        // `RouteApplier::apply_video` → O(1) `rebind_cell` (no `solve_layout`/
+        // `validate` re-solve). Each intent is applied as its own one-element batch
+        // so an honest route error on one cell (unknown cell / source with no store)
+        // is held + logged WITHOUT aborting the others' valid re-points — the
+        // per-cell hold the old `apply_repoint` path gave. Returns the number of
+        // intents taken off the backlog this tick.
         let mut applied = 0_usize;
         while applied < MAX_REPOINTS_PER_TICK {
-            let Some(rp) = self.pending.pop_front() else {
+            let Some(intent) = self.pending.pop_front() else {
                 break;
             };
-            Self::apply_repoint(&rp, drive);
+            let mut route_applier = RouteApplier::new(&self.resolution);
+            if let Err(e) = route_applier.apply_video(drive, std::slice::from_ref(&intent)) {
+                // An honest route error (unknown cell / source with no store): the
+                // binding is held unchanged, logged, never a panic, never a re-solve.
+                tracing::warn!(error = %e, "video route held (unknown cell/source)");
+            }
             applied = applied.saturating_add(1);
         }
         applied
     }
 
-    /// Enqueue a VIDEO→cell re-point, bounded drop-oldest (safety rule §5). The
-    /// working config is updated eagerly so introspection / a later re-solve sees
-    /// the binding.
-    fn enqueue_repoint(&mut self, cell: &str, source: &str) {
+    /// Enqueue a VIDEO→cell route intent, bounded drop-oldest (safety rule §5).
+    ///
+    /// Registers the intent's source store key in the [`RouteResolution`] (the run
+    /// store key **is** the source id), mirrors the binding into the working config
+    /// (so `ApplyLayout`/export reflect it), and pushes the intent onto the bounded
+    /// backlog the [`RouteApplier`] drains at the cap each tick.
+    fn enqueue_video_intent(&mut self, cell: &str, source: &multiview_config::routing::StreamRef) {
+        // Register the source's store key so the applier can resolve the StreamRef.
+        // In the run the `CompositorDrive` store key is the source id, which is the
+        // StreamRef's `input_id`.
+        self.resolution
+            .set_video_store_key(source, source.input_id.clone());
         // Mirror into the working config (so `ApplyLayout`/export reflect it); an
         // unknown cell id is ignored there, exactly as before.
-        let _ = apply_swap_source(&mut self.config, cell, source);
+        let _ = apply_swap_source(&mut self.config, cell, &source.input_id);
         if self.pending.len() >= MAX_REPOINT_BACKLOG {
             // Shed the oldest pending re-point: the newest binding wins, so an old
             // superseded one being dropped never mis-routes.
             let _ = self.pending.pop_front();
         }
-        self.pending.push_back(RePoint {
+        self.pending.push_back(RouteIntent::Video {
             cell: cell.to_owned(),
-            source: source.to_owned(),
+            source: source.clone(),
         });
-    }
-
-    /// Apply one queued re-point via the O(1) `rebind_cell`; an unknown cell or
-    /// source is logged and held (never a panic, never a re-solve).
-    fn apply_repoint(rp: &RePoint, drive: &mut CompositorDrive<Nv12Image>) {
-        if let Err(e) = drive.rebind_cell(&rp.cell, &rp.source) {
-            tracing::warn!(
-                cell = %rp.cell,
-                source = %rp.source,
-                error = %e,
-                "rebind_cell: re-point held (unknown cell/source)"
-            );
-        }
     }
 
     /// Re-solve the working config and hot-swap it onto `drive` (the geometry-
@@ -532,16 +619,36 @@ impl CommandDrain {
                 self.state.running = false;
                 publish_output_status(&self.publisher, OutputRunState::Idle);
             }
-            Command::SwapSource { tile, source, .. } => {
-                // A pure VIDEO→cell re-point: enqueue it for the O(1) `rebind_cell`
-                // path (coalesced + capped per tick), NOT a full layout re-solve.
-                // An unknown tile id is ignored (no enqueue) with a warn, exactly
-                // as before; the binding only takes effect if the cell exists.
-                if self.config.cells.iter().any(|c| c.id == tile) {
-                    self.enqueue_repoint(&tile, &source);
-                } else {
-                    tracing::warn!(tile = %tile, "swap_source: no such tile; ignored");
-                }
+            Command::SwapSource { .. } | Command::RouteVideo { .. } => {
+                self.route_video_command(&command);
+            }
+            Command::RouteAudio {
+                ref target,
+                ref source,
+                ..
+            } => {
+                // RT-11: `RouteAudio` desugars to `RouteIntent::Audio` and the
+                // canonical apply is `RouteApplier::apply_audio` →
+                // `ProgramBus::repoint_crossfade`. BUT the run wires **no per-source
+                // audio crosspoint** yet: program audio is silence (there is no
+                // per-source `AudioStore` to re-point onto), and the program bus is
+                // owned off-thread by the bake consumer with no re-point seam. The
+                // run-side audio ingest (per-source decode → `AudioStore` → bus
+                // registration) is RT-5/RT-8b, not built. Surface the held route
+                // loudly — NEVER a silent drop — naming the missing crosspoint.
+                tracing::warn!(
+                    target = %target,
+                    source = ?source,
+                    "route_audio held: the run has no per-source audio crosspoint yet \
+                     (program audio is silence; per-source audio ingest is RT-5/RT-8b)"
+                );
+            }
+            Command::RouteSubtitle {
+                ref layer,
+                ref source,
+                ..
+            } => {
+                self.route_subtitle(layer, source);
             }
             Command::ApplyLayout { layout, .. } => {
                 // There is no named-layout library in the software engine: the
@@ -577,32 +684,7 @@ impl CommandDrain {
                 }
             }
             Command::TakeSalvo { salvo, head, .. } => {
-                // Take the named salvo, else the currently-armed one.
-                let Some(target) = salvo.or_else(|| self.state.armed_salvo.clone()) else {
-                    tracing::warn!("take_salvo: no salvo named and none armed; ignored");
-                    return;
-                };
-                // Clone the matched salvo's recalls out so the immutable borrow of
-                // `config` ends before the mutations below.
-                let Some(recalled) = self.config.salvos.iter().find(|s| s.id == target).cloned()
-                else {
-                    tracing::warn!(salvo = %target, "take_salvo: no such salvo; ignored");
-                    return;
-                };
-                // Enqueue every source recall as a coalesced re-point — all the
-                // re-points of a salvo ride the same bounded, capped pass and are
-                // applied via the O(1) `rebind_cell`, NOT one re-solve per recall.
-                for recall in &recalled.sources {
-                    if self.config.cells.iter().any(|c| c.id == recall.cell) {
-                        self.enqueue_repoint(&recall.cell, &recall.input_id);
-                    }
-                }
-                self.state.armed_salvo = None;
-                self.publisher.publish_event(Event::SalvoTaken(salvo_event(
-                    target,
-                    SalvoPhase::Taken,
-                    head,
-                )));
+                self.take_salvo(salvo, head);
             }
             Command::CancelSalvo { salvo, head, .. } => {
                 // Cancel the named salvo, else the currently-armed one.
@@ -643,6 +725,118 @@ impl CommandDrain {
                 tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
             }
         }
+    }
+}
+
+impl CommandDrain {
+    /// Apply a `SwapSource`/`RouteVideo` command: desugar it to the engine-native
+    /// [`RouteIntent::Video`] (`SwapSource` is the `RouteVideo{…,Video,Best}` alias
+    /// — back-compat) and enqueue it for the canonical [`RouteApplier::apply_video`]
+    /// → O(1) [`CompositorDrive::rebind_cell`] path (batched + capped per tick),
+    /// NOT a full layout re-solve. An unknown cell id is ignored (no enqueue) with a
+    /// warn, exactly as before; the binding only takes effect if the cell exists.
+    fn route_video_command(&mut self, command: &Command) {
+        match command.route_intent() {
+            Some(RouteIntent::Video { cell, source }) => {
+                if self.config.cells.iter().any(|c| c.id == cell) {
+                    self.enqueue_video_intent(&cell, &source);
+                } else {
+                    tracing::warn!(cell = %cell, "route_video: no such cell; ignored");
+                }
+            }
+            // `route_intent()` returns `Video` for these variants; any other shape
+            // is impossible, but is held (never panicked on) for forward-compat with
+            // `#[non_exhaustive]` `RouteIntent`.
+            other => {
+                tracing::warn!(?other, "route_video: unexpected desugar; held");
+            }
+        }
+    }
+
+    /// Take the named salvo (else the currently-armed one): enqueue every source
+    /// recall as a VIDEO route intent — all the re-points of a salvo ride the same
+    /// bounded, capped pass and are applied via the canonical
+    /// [`RouteApplier::apply_video`] → O(1) [`CompositorDrive::rebind_cell`], NOT one
+    /// re-solve per recall (a recall is the `SwapSource` desugar
+    /// `{input_id, Video, Best}`). Emits [`Event::SalvoTaken`]; an unknown / unarmed
+    /// salvo logs `tracing::warn!` and emits nothing, never a panic.
+    fn take_salvo(&mut self, salvo: Option<String>, head: Option<String>) {
+        let Some(target) = salvo.or_else(|| self.state.armed_salvo.clone()) else {
+            tracing::warn!("take_salvo: no salvo named and none armed; ignored");
+            return;
+        };
+        // Clone the matched salvo's recalls out so the immutable borrow of `config`
+        // ends before the mutations below.
+        let Some(recalled) = self.config.salvos.iter().find(|s| s.id == target).cloned() else {
+            tracing::warn!(salvo = %target, "take_salvo: no such salvo; ignored");
+            return;
+        };
+        for recall in &recalled.sources {
+            if self.config.cells.iter().any(|c| c.id == recall.cell) {
+                let cell = recall.cell.clone();
+                let source = multiview_config::routing::StreamRef::best(
+                    recall.input_id.clone(),
+                    multiview_core::stream::StreamKind::Video,
+                );
+                self.enqueue_video_intent(&cell, &source);
+            }
+        }
+        self.state.armed_salvo = None;
+        self.publisher.publish_event(Event::SalvoTaken(salvo_event(
+            target,
+            SalvoPhase::Taken,
+            head,
+        )));
+    }
+
+    /// Apply a `RouteSubtitle` by driving the run's live subtitle re-point seam
+    /// (RT-10b): re-point the layer rendered into `layer` to the cues of the source
+    /// `source` resolves to.
+    ///
+    /// The seam ([`SubtitleRouteHandle`](crate::captions::SubtitleRouteHandle)) is
+    /// the thread-safe bridge to the bake consumer's `SubtitleRouter`, which applies
+    /// the re-point at its next sample boundary via the engine
+    /// [`SubtitleLayer::repoint`](multiview_overlay::SubtitleLayer) (CLEAR-on-switch
+    /// at the seam). Publishing is wait-free + bounded drop-oldest, so it can never
+    /// pace or stall the output clock (invariants #1/#10). The run's `SubtitleRouter`
+    /// keys layers + sources by source id, so the subtitle `StreamRef`'s `input_id`
+    /// names the target source (selector resolution to a specific track within a
+    /// source is the run-side caption-track work; identity-by-source is today's
+    /// per-source caption model).
+    #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+    fn route_subtitle(&self, layer: &str, source: &multiview_config::routing::StreamRef) {
+        let Some(slot) = self.subtitle_route.as_ref() else {
+            tracing::warn!(
+                layer = %layer,
+                "route_subtitle held: no subtitle route seam wired on this run path"
+            );
+            return;
+        };
+        let Some(handle) = slot.load_full() else {
+            // The run has not yet published its live handle (it does so at drive
+            // start); a route arriving in that tiny window is held, not panicked on.
+            tracing::warn!(
+                layer = %layer,
+                "route_subtitle held: the run has not yet published its subtitle route handle"
+            );
+            return;
+        };
+        handle.request_repoint(layer, &source.input_id);
+    }
+
+    /// Without `ffmpeg`+`overlay` the run renders no subtitles, so a `RouteSubtitle`
+    /// has no live layer to re-point. Surface it as a held action (never a silent
+    /// drop), naming why.
+    #[cfg(not(all(feature = "ffmpeg", feature = "overlay")))]
+    #[allow(clippy::unused_self)]
+    // reason: this method must mirror the `ffmpeg`+`overlay` variant's signature so
+    // the single `self.route_subtitle(..)` call site in `route_command` compiles
+    // under both feature sets; in this build there is no subtitle seam to consult.
+    fn route_subtitle(&self, layer: &str, _source: &multiview_config::routing::StreamRef) {
+        tracing::warn!(
+            layer = %layer,
+            "route_subtitle held: this build renders no subtitles (needs ffmpeg+overlay)"
+        );
     }
 }
 
