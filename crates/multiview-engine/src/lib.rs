@@ -99,6 +99,7 @@ pub mod isolation;
 pub mod placement;
 pub mod probe;
 pub mod program;
+pub mod programset;
 pub mod ptp;
 pub mod route;
 pub mod runtime;
@@ -134,6 +135,7 @@ pub use probe::{
     FormatProbe, FreezeConfig, FreezeProbe, LumaView, LumaViewError, ProbeObservation,
 };
 pub use program::{MultiviewProgram, ProgramId, ProgramKind};
+pub use programset::{Program, ProgramSet};
 pub use ptp::{PtpSample, PtpServo, ServoConfig};
 pub use route::{resolve_selector, RouteApplier, RouteIntent, RouteResolution};
 pub use runtime::{
