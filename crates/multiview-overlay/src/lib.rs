@@ -30,6 +30,11 @@
 //!   any compositor backend (wgpu / Metal / CUDA-NPP) consumes (ADR-R008).
 //! - [`subtitle`] — pure SRT/WebVTT timed-text ingest into a time-indexed
 //!   [`CueTrack`]; the compositor's text engine rasterizes the active cue.
+//! - [`subtitle_route`] — the per-layer subtitle/caption **cue re-point**
+//!   (RT-10a / ADR-0019): a [`SubtitleLayer`](subtitle_route::SubtitleLayer)
+//!   holds an `Arc<dyn `[`CueSource`](subtitle_route::CueSource)`>` sampled per
+//!   tick by `active_at(now)` and can be atomically re-pointed to a different
+//!   source's cue stream (subtitle breakaway), with a hard-cut CLEAR at the seam.
 //! - [`libass`] — the ASS/SSA capability gate: native libass styling behind the
 //!   off-by-default `libass` feature, gracefully falling back to the SRT/VTT
 //!   text path when it is not compiled in (ADR-R007).
@@ -80,6 +85,7 @@ pub mod resolve;
 pub mod safearea;
 pub mod scopes;
 pub mod subtitle;
+pub mod subtitle_route;
 pub mod tally;
 pub mod timecode;
 pub mod timer;
@@ -90,3 +96,4 @@ pub use layer::{OverlayLayer, OverlayStack};
 pub use libass::{AssCapability, SubtitleFallback};
 pub use resolve::{CanvasSize, DrawList, DrawQuad};
 pub use subtitle::{Cue, CueTrack, SubtitleFormat};
+pub use subtitle_route::{CueSource, EmptyCueSource, SubtitleLayer};
