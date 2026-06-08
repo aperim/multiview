@@ -11,6 +11,7 @@
 //! This is **not** `#[serde(untagged)]` (guardrails + conventions §5 forbid it);
 //! the explicit `t` tag gives one unambiguous parse path.
 use multiview_core::alarm::AlarmRecord;
+use multiview_core::stream::StreamInventory;
 use multiview_core::tally::TallyState;
 use multiview_core::traits::SourceState;
 use serde::{Deserialize, Serialize};
@@ -265,6 +266,35 @@ pub struct InputConnection {
     pub attempt: Option<u32>,
 }
 
+/// The full elementary-stream inventory an input offers (RT-3, ADR-0034 §9).
+///
+/// This is the `data` body of the `input.streams` event (topic
+/// [`crate::topic::Topic::Inputs`]): read-only **discovery** so the API/UI can
+/// SHOW every elementary stream (video / audio tracks / subtitles / SCTE-35 /
+/// KLV / timecode) an input carries. It is emitted when an input's inventory
+/// first appears and again as a **delta** on re-probe / PMT-version bump (the
+/// inventory is an open-time snapshot; a re-probe replaces it wholesale). The
+/// [`inventory`](InputStreams::inventory) is built **off the engine** by the
+/// ingest at `open()` (invariant #10) — this crate only carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputStreams {
+    /// The owning input's id (the configured source id).
+    pub input_id: String,
+    /// Every elementary stream the input offers, with stable ids + kinds.
+    pub inventory: StreamInventory,
+}
+
+impl InputStreams {
+    /// Build an `input.streams` event body for `input_id` carrying `inventory`.
+    #[must_use]
+    pub fn new(input_id: impl Into<String>, inventory: StreamInventory) -> Self {
+        Self {
+            input_id: input_id.into(),
+            inventory,
+        }
+    }
+}
+
 /// Progress of a long-running REST command job (correlated via `corr`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobProgress {
@@ -453,6 +483,11 @@ pub enum Event {
     /// Input source connection change (topic `inputs`).
     #[serde(rename = "input.connection")]
     InputConnection(InputConnection),
+    /// An input's elementary-stream inventory appeared or changed on re-probe
+    /// (topic `inputs`): read-only discovery of every stream the input offers
+    /// (RT-3). Rides the same `inputs` lane as `input.connection`.
+    #[serde(rename = "input.streams")]
+    InputStreams(InputStreams),
     /// Long-running job progress (topic `jobs`, correlated by `corr`).
     #[serde(rename = "job.progress")]
     JobProgress(JobProgress),
@@ -508,6 +543,7 @@ impl Event {
             Self::AlertRaised(_) => "alert.raised",
             Self::AlertCleared(_) => "alert.cleared",
             Self::InputConnection(_) => "input.connection",
+            Self::InputStreams(_) => "input.streams",
             Self::JobProgress(_) => "job.progress",
             Self::AlarmRaised(_) => "alarm.raised",
             Self::AlarmUpdated(_) => "alarm.updated",

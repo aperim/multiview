@@ -312,6 +312,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/InputConnection" }
     }));
+    map.insert("InputStreams".to_owned(), input_streams_message());
     map.insert(
         "JobProgress".to_owned(),
         json!({
@@ -353,6 +354,24 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         }),
     );
     map
+}
+
+/// The `input.streams` (RT-3) `AsyncAPI` message definition. Factored out so the
+/// data-events builder stays within the line budget.
+fn input_streams_message() -> Value {
+    json!({
+        "name": "InputStreams",
+        "title": "Input elementary-stream inventory",
+        "summary": "An input's stream inventory appeared or changed on re-probe (input.streams on topic `inputs`).",
+        "description": concat!(
+            "Read-only discovery: every elementary stream (video / audio tracks / ",
+            "subtitles / SCTE-35 / KLV / timecode) the input offers, each with a ",
+            "stable kind-scoped id. Emitted on first appearance and as a delta on ",
+            "re-probe / PMT-version bump.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/InputStreams" }
+    })
 }
 
 /// Build control-frame message definitions ($hello, $subscribe, …).
@@ -447,6 +466,7 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/OutputStatus" },
         { "$ref": "#/components/schemas/Alert" },
         { "$ref": "#/components/schemas/InputConnection" },
+        { "$ref": "#/components/schemas/InputStreams" },
         { "$ref": "#/components/schemas/JobProgress" },
         { "$ref": "#/components/schemas/AlarmTransition" },
         { "$ref": "#/components/schemas/TallyEvent" },
@@ -481,6 +501,7 @@ fn build_schemas() -> Value {
         "AlertSeverity": alert_severity_schema(),
         "Alert": alert_schema(),
         "InputConnection": input_connection_schema(),
+        "InputStreams": input_streams_schema(),
         "JobProgress": job_progress_schema(),
         "AlarmTransition": alarm_transition_schema(),
         "TallyTarget": tally_target_schema(),
@@ -725,6 +746,42 @@ fn input_connection_schema() -> Value {
                 "type": "integer",
                 "format": "uint32",
                 "description": "Reconnect attempt counter, if reconnecting."
+            }
+        }
+    })
+}
+
+fn input_streams_schema() -> Value {
+    // The inventory itself is a rich nested model (`multiview_core::stream`:
+    // StreamDescriptor / StableStreamId / StreamKind / StreamDetail). The Rust
+    // type is the canonical source of truth; this AsyncAPI mirror keeps the
+    // top-level shape exact and treats the inventory as an open object rather
+    // than re-stating the full nested schema (which would drift). The typed
+    // schema is surfaced on the REST `GET /inputs/{id}/streams` OpenAPI surface.
+    json!({
+        "type": "object",
+        "description": "Data body of the `input.streams` event: an input's full elementary-stream inventory (RT-3).",
+        "required": ["input_id", "inventory"],
+        "properties": {
+            "input_id": {
+                "type": "string",
+                "description": "The owning input's configured source id."
+            },
+            "inventory": {
+                "type": "object",
+                "description": "The StreamInventory (multiview_core::stream::StreamInventory): every elementary stream the input offers.",
+                "required": ["streams"],
+                "properties": {
+                    "input_id": {
+                        "type": ["string", "null"],
+                        "description": "The input id the inventory is bound to, if known."
+                    },
+                    "streams": {
+                        "type": "array",
+                        "description": "Every elementary stream, in container order.",
+                        "items": { "type": "object" }
+                    }
+                }
             }
         }
     })

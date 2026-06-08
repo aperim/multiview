@@ -236,6 +236,131 @@
         }
       }
     },
+    "/api/v1/commands/apply-layout": {
+      "post": {
+        "tags": [
+          "commands"
+        ],
+        "summary": "`POST /api/v1/commands/apply-layout` — apply a layout to the running\nmultiview (role: write; per-object authz; 202).",
+        "description": "Mirrors [`cmd_swap`]: it only `try_submit`s the command via\n[`submit_accepted`] (idempotency + shed-on-full free) and never blocks the\nengine (invariant #10). The eventual outcome arrives on the realtime stream\ncorrelated by the returned operation id (ADR-W008).",
+        "operationId": "cmd_apply_layout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyLayoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Apply-layout accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to apply a layout.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inputs/{id}/streams": {
+      "get": {
+        "tags": [
+          "inputs"
+        ],
+        "summary": "`GET /api/v1/inputs/{id}/streams` — the input's elementary-stream inventory\n(role: read; per-object authz).",
+        "description": "Returns the cached [`StreamInventory`] for input `id` from the off-engine\nsnapshot (inv #10 — the output-clock thread is never touched). `404` when the\ninput is unknown or has not been probed yet.",
+        "operationId": "get_input_streams",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Input/source id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The input's elementary-stream inventory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamInventoryDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such input, or it has not been probed yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/layouts": {
       "get": {
         "tags": [
@@ -3055,6 +3180,19 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_core::alarm::AlarmScope`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
       },
+      "ApplyLayoutRequest": {
+        "type": "object",
+        "description": "The body of a `POST /commands/apply-layout` request.",
+        "required": [
+          "layout"
+        ],
+        "properties": {
+          "layout": {
+            "type": "string",
+            "description": "The layout id to make active on the running multiview."
+          }
+        }
+      },
       "AuditAction": {
         "type": "string",
         "description": "The kind of mutation an audit entry records.",
@@ -3383,6 +3521,14 @@
             "description": "The TAI instant (`<seconds>:<nanoseconds>`) the pending change was staged\nat, captured so an `ActivateScheduledRelative` offset has a base to\nresolve against. [`None`] when nothing is staged, or when the stage was\nrecorded without a clock stamp."
           }
         }
+      },
+      "DataKindDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::DataKind`].",
+        "enum": [
+          "scte35",
+          "klv"
+        ]
       },
       "Device": {
         "allOf": [
@@ -3973,6 +4119,336 @@
           }
         }
       },
+      "StabilityTierDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::StabilityTier`].\n\nSerde-equivalent: a unit enum, `snake_case` (`hard` / `soft`).",
+        "enum": [
+          "hard",
+          "soft"
+        ]
+      },
+      "StableStreamIdDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::StableStreamId`].\n\nSerde-equivalent field-for-field: a kind-scope discriminant char, the opaque\nstable key string, and the stability tier.",
+        "required": [
+          "kind_scope",
+          "key",
+          "tier"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The opaque, stable key string (kind-scope excluded)."
+          },
+          "kind_scope": {
+            "type": "string",
+            "description": "The kind-scope discriminant character (`v`/`a`/`s`/`d`/`t`)."
+          },
+          "tier": {
+            "$ref": "#/components/schemas/StabilityTierDoc",
+            "description": "How stable the key is."
+          }
+        }
+      },
+      "StreamDescriptorDoc": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StreamKindDoc",
+            "description": "The canonical media kind (flattened `kind` / `payload`)."
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "codec",
+              "default",
+              "detail"
+            ],
+            "properties": {
+              "codec": {
+                "type": "string",
+                "description": "The codec descriptor name (e.g. `h264`, `aac`, `dvbsub`)."
+              },
+              "default": {
+                "type": "boolean",
+                "description": "Whether the container flags this stream as default for its kind."
+              },
+              "detail": {
+                "$ref": "#/components/schemas/StreamDetailDoc",
+                "description": "The kind-specific detail."
+              },
+              "id": {
+                "$ref": "#/components/schemas/StableStreamIdDoc",
+                "description": "The stable, kind-scoped identity a crosspoint binds to."
+              },
+              "language": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The validated BCP-47 language tag, if the container declared a usable one."
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The track title / handler name, if declared."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::StreamDescriptor`].\n\nSerde-equivalent: the [`StreamKindDoc`] is **flattened** (so a descriptor\ncarries a single `kind` / `payload` pair at its top level) alongside the\nadjacently-tagged [`StreamDetailDoc`]. `language` is a BCP-47 string or\n`null`."
+      },
+      "StreamDetailDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Video-stream geometry + cadence.",
+            "required": [
+              "params",
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "video"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "description": "Video-stream geometry + cadence.",
+                "required": [
+                  "width",
+                  "height"
+                ],
+                "properties": {
+                  "frame_rate": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "description": "The container's declared average frame rate, if any (exact rational\n`[num, den]` — never a float fps, invariant #3)."
+                  },
+                  "height": {
+                    "type": "integer",
+                    "format": "int32",
+                    "description": "Coded height in pixels (`0` if undeclared).",
+                    "minimum": 0
+                  },
+                  "width": {
+                    "type": "integer",
+                    "format": "int32",
+                    "description": "Coded width in pixels (`0` if undeclared).",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Audio-track layout.",
+            "required": [
+              "params",
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "audio"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "description": "Audio-track layout.",
+                "required": [
+                  "channels",
+                  "sample_rate"
+                ],
+                "properties": {
+                  "channels": {
+                    "type": "integer",
+                    "format": "int32",
+                    "description": "Channel count (`0` if undeclared).",
+                    "minimum": 0
+                  },
+                  "sample_rate": {
+                    "type": "integer",
+                    "format": "int32",
+                    "description": "Sample rate in Hz (`0` if undeclared).",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Subtitle / caption track flags.",
+            "required": [
+              "params",
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "subtitle"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "description": "Subtitle / caption track flags.",
+                "required": [
+                  "forced"
+                ],
+                "properties": {
+                  "forced": {
+                    "type": "boolean",
+                    "description": "Whether the track is flagged \"forced\"."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A passthrough (SCTE-35 / KLV data or timecode) stream — no AV detail.",
+            "required": [
+              "detail"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "passthrough"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::StreamDetail`].\n\nSerde-equivalent: adjacently tagged (`detail` / `params`), `snake_case` tags."
+      },
+      "StreamInventoryDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::StreamInventory`].\n\nThe full, typed list of every elementary stream an input offers (RT-3). This\nis the body of `GET /api/v1/inputs/{id}/streams`.",
+        "required": [
+          "streams"
+        ],
+        "properties": {
+          "input_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning input's id, if known."
+          },
+          "streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StreamDescriptorDoc"
+            },
+            "description": "Every elementary stream the input offers, in container order."
+          }
+        }
+      },
+      "StreamKindDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A video elementary stream.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "video"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An audio elementary stream.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "audio"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A subtitle / caption elementary stream.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "subtitle"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A data elementary stream (SCTE-35 / KLV) — passthrough, never decoded.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "data"
+                ]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DataKindDoc",
+                "description": "A data elementary stream (SCTE-35 / KLV) — passthrough, never decoded."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A timecode elementary stream — carried, not composited.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "timecode"
+                ]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/TcSourceKindDoc",
+                "description": "A timecode elementary stream — carried, not composited."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::StreamKind`].\n\nSerde-equivalent: internally tagged on `kind` with the payload (for the\ndata/timecode variants) under `payload`, `snake_case` tags. This is the same\n`kind`/`payload` pair the descriptor flattens in."
+      },
       "SwapRequest": {
         "type": "object",
         "description": "The body of a `POST /commands/swap` request.",
@@ -4136,6 +4612,16 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_events::TallyTarget`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
       },
+      "TcSourceKindDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_core::stream::TcSourceKind`].",
+        "enum": [
+          "ltc",
+          "vitc",
+          "atc_rp188",
+          "generated"
+        ]
+      },
       "TransportParams": {
         "type": "object",
         "description": "One leg's RTP transport parameters (IS-05 supports up to two legs for\nST 2022-7 redundancy; this models one).",
@@ -4200,6 +4686,10 @@
     {
       "name": "sources",
       "description": "Source (managed input) resource CRUD"
+    },
+    {
+      "name": "inputs",
+      "description": "Input elementary-stream inventory (read-only discovery)"
     },
     {
       "name": "outputs",

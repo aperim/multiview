@@ -312,3 +312,158 @@ pub struct TallyProfileDoc {
     #[serde(default)]
     pub index_cells: Vec<IndexCellDoc>,
 }
+
+// ---- Stream-inventory mirrors (RT-3 read-only discovery; ADR-0034 §3/§9) ----
+//
+// `GET /api/v1/inputs/{id}/streams` returns the serde-serialised
+// `multiview_core::stream::StreamInventory` verbatim. Like the alarm/tally
+// surfaces above, that type lives in the frozen, web-free `multiview-core`
+// crate (no `utoipa::ToSchema`), so these `*Doc` mirrors own the OpenAPI
+// contract: their serde shapes match the core types field-for-field and
+// tag-for-tag. A round-trip pin test (`tests/input_streams.rs`) keeps them from
+// drifting. The handlers serialise the real core type; these are documentation
+// only.
+
+/// `OpenAPI` mirror of [`multiview_core::stream::StabilityTier`].
+///
+/// Serde-equivalent: a unit enum, `snake_case` (`hard` / `soft`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StabilityTierDoc {
+    /// A genuinely-stable key (TS PID, HLS group+name): survives a re-probe.
+    Hard,
+    /// A heuristic key (ordinal-bearing hash): an operator-visible reorder risk.
+    Soft,
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::DataKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DataKindDoc {
+    /// SCTE-35 ad/splice signalling.
+    Scte35,
+    /// SMPTE ST 0601 KLV metadata.
+    Klv,
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::TcSourceKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TcSourceKindDoc {
+    /// Linear timecode.
+    Ltc,
+    /// Vertical-interval timecode.
+    Vitc,
+    /// Ancillary timecode (SMPTE RP 188).
+    AtcRp188,
+    /// Generated from the output clock (no embedded source timecode).
+    Generated,
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::StreamKind`].
+///
+/// Serde-equivalent: internally tagged on `kind` with the payload (for the
+/// data/timecode variants) under `payload`, `snake_case` tags. This is the same
+/// `kind`/`payload` pair the descriptor flattens in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamKindDoc {
+    /// A video elementary stream.
+    Video,
+    /// An audio elementary stream.
+    Audio,
+    /// A subtitle / caption elementary stream.
+    Subtitle,
+    /// A data elementary stream (SCTE-35 / KLV) — passthrough, never decoded.
+    Data(DataKindDoc),
+    /// A timecode elementary stream — carried, not composited.
+    Timecode(TcSourceKindDoc),
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::StreamDetail`].
+///
+/// Serde-equivalent: adjacently tagged (`detail` / `params`), `snake_case` tags.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "detail", content = "params", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamDetailDoc {
+    /// Video-stream geometry + cadence.
+    Video {
+        /// Coded width in pixels (`0` if undeclared).
+        width: u32,
+        /// Coded height in pixels (`0` if undeclared).
+        height: u32,
+        /// The container's declared average frame rate, if any (exact rational
+        /// `[num, den]` — never a float fps, invariant #3).
+        frame_rate: Option<[i64; 2]>,
+    },
+    /// Audio-track layout.
+    Audio {
+        /// Channel count (`0` if undeclared).
+        channels: u16,
+        /// Sample rate in Hz (`0` if undeclared).
+        sample_rate: u32,
+    },
+    /// Subtitle / caption track flags.
+    Subtitle {
+        /// Whether the track is flagged "forced".
+        forced: bool,
+    },
+    /// A passthrough (SCTE-35 / KLV data or timecode) stream — no AV detail.
+    Passthrough,
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::StableStreamId`].
+///
+/// Serde-equivalent field-for-field: a kind-scope discriminant char, the opaque
+/// stable key string, and the stability tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StableStreamIdDoc {
+    /// The kind-scope discriminant character (`v`/`a`/`s`/`d`/`t`).
+    pub kind_scope: char,
+    /// The opaque, stable key string (kind-scope excluded).
+    pub key: String,
+    /// How stable the key is.
+    pub tier: StabilityTierDoc,
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::StreamDescriptor`].
+///
+/// Serde-equivalent: the [`StreamKindDoc`] is **flattened** (so a descriptor
+/// carries a single `kind` / `payload` pair at its top level) alongside the
+/// adjacently-tagged [`StreamDetailDoc`]. `language` is a BCP-47 string or
+/// `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StreamDescriptorDoc {
+    /// The stable, kind-scoped identity a crosspoint binds to.
+    pub id: StableStreamIdDoc,
+    /// The canonical media kind (flattened `kind` / `payload`).
+    #[serde(flatten)]
+    pub kind: StreamKindDoc,
+    /// The validated BCP-47 language tag, if the container declared a usable one.
+    pub language: Option<String>,
+    /// The codec descriptor name (e.g. `h264`, `aac`, `dvbsub`).
+    pub codec: String,
+    /// The track title / handler name, if declared.
+    pub title: Option<String>,
+    /// Whether the container flags this stream as default for its kind.
+    pub default: bool,
+    /// The kind-specific detail.
+    pub detail: StreamDetailDoc,
+}
+
+/// `OpenAPI` mirror of [`multiview_core::stream::StreamInventory`].
+///
+/// The full, typed list of every elementary stream an input offers (RT-3). This
+/// is the body of `GET /api/v1/inputs/{id}/streams`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StreamInventoryDoc {
+    /// The owning input's id, if known.
+    pub input_id: Option<String>,
+    /// Every elementary stream the input offers, in container order.
+    pub streams: Vec<StreamDescriptorDoc>,
+}
