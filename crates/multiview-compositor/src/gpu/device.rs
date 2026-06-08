@@ -48,9 +48,22 @@ impl GpuContext {
         }))
         .map_err(|e| Error::NoAdapter(e.to_string()))?;
 
+        // The encode pass writes the NV12 output planes — Y as `r8unorm`, UV as
+        // `rg8unorm` — through WRITE storage textures (gpu/shaders/encode.wgsl).
+        // WebGPU core does NOT guarantee `r8unorm`/`rg8unorm` as storage-texture
+        // formats, so wgpu rejects the encode bind-group layout ("WriteOnly access
+        // to storage textures with format R8Unorm is not supported") unless
+        // `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` is enabled. Real desktop GPUs
+        // (NVIDIA/AMD/Intel) expose it; intersect with the adapter's own features
+        // so the request stays graceful on an adapter that lacks it (the GPU
+        // encode path is only selected when a real adapter is present — a
+        // software/llvmpipe adapter falls back to the CPU reference compositor).
+        let required_features =
+            wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES & adapter.features();
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("multiview-compositor device"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: wgpu::Limits::downlevel_defaults(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
