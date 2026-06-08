@@ -118,6 +118,44 @@ impl AudioStore {
         self.window.load().samples.len() / channels
     }
 
+    /// The reader's current **absolute** frame position — the next absolute
+    /// frame index [`read`](AudioStore::read) will return. The cursor lives in
+    /// the same absolute coordinate space as the writer's `base_frame`/head, so
+    /// it can be aligned to absolute tick time across a re-point (RT-8a).
+    ///
+    /// Lock-free; only the single consumer advances it.
+    #[must_use]
+    pub fn read_cursor(&self) -> i64 {
+        self.read_frame.load(Ordering::Relaxed)
+    }
+
+    /// Park the read cursor at an **absolute** frame position so the next
+    /// [`read`](AudioStore::read) begins there.
+    ///
+    /// This is the re-point alignment primitive (RT-8a): when the program bus
+    /// re-points onto a warm store, seeking the cursor to absolute tick time (or
+    /// to the live edge, see [`seek_to_live_edge`](AudioStore::seek_to_live_edge))
+    /// makes the switch sample-aligned at the seam instead of replaying evicted
+    /// history from frame 0. Only the single consumer calls this.
+    pub fn seek_to(&self, frame_pos: i64) {
+        self.read_frame.store(frame_pos, Ordering::Relaxed);
+    }
+
+    /// Park the read cursor at the store's **live edge** — the writer's current
+    /// write head (`base_frame + buffered_frames`).
+    ///
+    /// On a re-point onto a warm store that has been buffering drop-oldest (its
+    /// `base_frame` far ahead of frame 0), a fresh cursor would read silence
+    /// climbing from frame 0 through evicted history. Seeking to the live edge
+    /// makes the next read start at fresh audio, so the breakaway is
+    /// sample-aligned at the seam (RT-8a, decoupled-routing §5 "seek `read_frame`
+    /// to the live edge"). Only the single consumer calls this.
+    pub fn seek_to_live_edge(&self) {
+        let channels = self.format.channel_count();
+        let head = self.window.load().head_frame(channels.max(1));
+        self.read_frame.store(head, Ordering::Relaxed);
+    }
+
     /// Append a decoded block to the ring (the decode thread's write).
     ///
     /// The block's samples are *copied* into the bounded ring, so it is taken by

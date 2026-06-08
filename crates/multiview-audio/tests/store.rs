@@ -187,3 +187,70 @@ fn producer_thread_never_back_pressures_reader() {
     assert!(written > 0, "producer never published");
     stop.store(true, Ordering::Release);
 }
+
+/// The read cursor is an ABSOLUTE sample/frame position: `read_cursor` reports
+/// the next absolute frame the reader will read, and `read` advances it by
+/// exactly the number of frames pulled. This is what lets a re-point align the
+/// new store to absolute tick time instead of replaying from frame 0.
+#[test]
+fn read_cursor_is_absolute_and_advances_by_frames_read() {
+    let store = AudioStore::new(stereo(), 48_000);
+    assert_eq!(store.read_cursor(), 0, "a fresh store starts at frame 0");
+    let _ = store.read(100);
+    assert_eq!(
+        store.read_cursor(),
+        100,
+        "read(100) advances the cursor by 100"
+    );
+    let _ = store.read(57);
+    assert_eq!(
+        store.read_cursor(),
+        157,
+        "read(57) advances the cursor by 57"
+    );
+}
+
+/// `seek_to` sets the absolute read position; the next read starts there.
+#[test]
+fn seek_to_sets_the_absolute_read_position() {
+    let store = AudioStore::new(stereo(), 48_000);
+    store.publish(&ramp(0, 200)).unwrap();
+    // Jump the cursor to absolute frame 50; the next read must start at frame 50
+    // (sample value 100), not at frame 0.
+    store.seek_to(50);
+    assert_eq!(store.read_cursor(), 50);
+    let out = store.read(10);
+    for (i, &v) in out.interleaved().iter().enumerate() {
+        assert_eq!(
+            v,
+            (100 + i) as f32,
+            "after seek_to(50) the read must start at absolute frame 50"
+        );
+    }
+    assert_eq!(store.read_cursor(), 60);
+}
+
+/// `seek_to_live_edge` parks the cursor at the current write head, so a warm
+/// store that has been buffering far ahead reads from the LIVE EDGE — not from
+/// frame 0 climbing through evicted history.
+#[test]
+fn seek_to_live_edge_parks_at_the_write_head() {
+    let cap = 1_000usize;
+    let store = AudioStore::new(stereo(), cap);
+    // Publish 5x capacity: head is at frame 5000, only [4000,5000) survives.
+    let mut written = 0usize;
+    let total = cap * 5;
+    let chunk = 250;
+    while written < total {
+        store.publish(&ramp(written * 2, chunk)).unwrap();
+        written += chunk;
+    }
+    // The naive cursor is still at frame 0 (it would read evicted silence
+    // climbing toward the surviving tail). Seek to the live edge.
+    store.seek_to_live_edge();
+    assert_eq!(
+        store.read_cursor(),
+        i64::try_from(total).unwrap(),
+        "seek_to_live_edge must park the cursor at the write head (frame {total})"
+    );
+}
