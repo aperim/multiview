@@ -72,8 +72,8 @@ pub use error::{Error, Result};
 #[cfg(feature = "cuda")]
 pub use load::NvmlLoadPoller;
 pub use load::{
-    DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, NullLoadPoller,
-    PollInterval, SelfShare, Vendor,
+    DeviceId, DeviceLoad, GpuTargetInfo, LoadPoller, LoadProbe, LoadSample, LoadSource,
+    NullLoadPoller, PollInterval, SelfShare, Vendor,
 };
 pub use planner::{Admission, Plan, Planner, StageUsage};
 pub use probe::{

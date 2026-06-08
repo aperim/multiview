@@ -237,7 +237,7 @@ mod gpu_parity {
     #[test]
     #[ignore = "needs a real GPU adapter (GPU-tagged self-hosted runner)"]
     fn gpu_image_blit_matches_cpu_blend_image_parity() {
-        let gpu = match GpuCompositor::new() {
+        let gpu = match GpuCompositor::new(None) {
             Ok(g) => g,
             Err(Error::NoAdapter(r) | Error::DeviceRequest(r)) => {
                 panic!("the parity test was run without a GPU adapter: {r}");

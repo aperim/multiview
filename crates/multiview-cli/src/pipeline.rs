@@ -336,7 +336,7 @@ fn resolve_encoder(codec_token: &str) -> Result<ResolvedEncoder, PipelineError> 
     if let Some(name) = select_encoder(requested) {
         return Ok(ResolvedEncoder {
             name: name.to_owned(),
-            format: Pixel::YUV420P,
+            format: encoder_input_format(name),
         });
     }
     // The requested codec is not encodable in this build; fall back to MPEG-2.
@@ -352,8 +352,297 @@ fn resolve_encoder(codec_token: &str) -> Result<ResolvedEncoder, PipelineError> 
     })?;
     Ok(ResolvedEncoder {
         name: fallback.to_owned(),
-        format: Pixel::YUV420P,
+        format: encoder_input_format(fallback),
     })
+}
+
+/// The pixel format to feed a resolved encoder, by its concrete libav name.
+///
+/// **NVENC ingests NV12 natively** (invariant #5: the composited canvas is
+/// already NV12). When the resolved encoder is a `*_nvenc` hardware encoder we
+/// feed it NV12, so the per-tick full-canvas `FrameConverter` swscale
+/// (`sink.rs`'s NV12→YUV420P conversion) collapses to its passthrough branch —
+/// the single biggest avoidable CPU cost on the output path (a full ~3 MP@1080p /
+/// ~8 MP@4K libswscale every tick). The software codecs (`mpeg2video`, `libx264`,
+/// `libx265`, `ffv1`, `mjpeg`, …) take planar `YUV420P` as before — required, as
+/// they do not accept NV12 directly.
+fn encoder_input_format(name: &str) -> Pixel {
+    if name.ends_with("_nvenc") {
+        Pixel::NV12
+    } else {
+        Pixel::YUV420P
+    }
+}
+
+/// Build a wgpu [`GpuTarget`](multiview_compositor::backend::GpuTarget) from the
+/// hardware-addressing handles the load source resolved for the chosen device.
+///
+/// Pure (no I/O): it just projects the hal [`GpuTargetInfo`](multiview_hal::GpuTargetInfo)
+/// onto the compositor's wgpu-free target shape, so the wgpu adapter pick can
+/// match the chosen device by PCI bus id / `(vendor, device)` pair / name. Lives
+/// here (the cli is the only crate that depends on both hal and the compositor).
+#[cfg(feature = "gpu")]
+fn gpu_target_from_info(info: &multiview_hal::GpuTargetInfo) -> multiview_compositor::GpuTarget {
+    multiview_compositor::GpuTarget {
+        pci_bus_id: info.pci_bus_id.clone(),
+        vendor_id: info.vendor_id,
+        device_id: info.device_id,
+        name: info.name.clone(),
+    }
+}
+
+/// Choose the GPU to host the whole pipeline island at **admission** — the
+/// load-aware, decide-once pick (ADR-0035 Tier-1, ADR-0018; the GPU-placement
+/// principle: *load informs placement, never fragments a pipeline — affinity is
+/// the hard constraint*).
+///
+/// This is **synchronous and runs before the output clock starts** (called from
+/// the top of [`Pipeline::drive_streaming`]); it polls the existing NVML load
+/// source ONCE, assembles one candidate per visible GPU, builds a
+/// [`PipelineDemand`](multiview_hal::PipelineDemand) from the canvas geometry +
+/// cadence + tile count + the NVENC-session flag, and asks
+/// [`multiview_hal::select_device`] for the least-contended GPU that can host the
+/// whole `decode → composite → encode` island. It **never blocks or `.await`s**
+/// on the data plane (inv #1).
+///
+/// Returns `Some(target)` pinning the chosen device when the pick succeeded AND
+/// its hardware handles resolved; `None` (the legacy default-adapter path) when
+/// there is no NVML / no `cuda` feature / no visible GPU / the scorer rejected
+/// every candidate / the chosen device's handles could not be resolved — every
+/// failure mode degrades gracefully to today's behaviour, logged once, never a
+/// panic and never a stalled clock (inv #1/#2).
+///
+/// # Tier-2 seam (NVDEC/NVENC pinning — NOT built here)
+///
+/// The chosen device's `cuda_ordinal` is already resolved on the
+/// [`GpuTargetInfo`](multiview_hal::GpuTargetInfo) returned by the load source.
+/// The NVDEC (`*_cuvid`) decode and NVENC (`*_nvenc`) encode hardware paths are
+/// software-only in the run today (a `StreamVideoDecoder` plus a software-fed
+/// `VideoEncoder`). When those hardware paths are wired in, they will bind that
+/// SAME ordinal via `HwDeviceContext::create(Cuda, Some(ordinal))` on the decoder
+/// and the encoder `hw_device_ctx`, so decode/composite/encode physically share
+/// one GPU (affinity). That is the Tier-2 re-select-on-failure state machine's
+/// home and is deliberately left unbuilt per ADR-0035 §5 (Tier-2); see
+/// `multiview_hal::GpuTargetInfo::cuda_ordinal`.
+#[cfg(feature = "gpu")]
+fn select_admission_gpu_target(
+    load_source: &dyn multiview_hal::LoadSource,
+    canvas_w: u32,
+    canvas_h: u32,
+    cadence: Rational,
+    tile_count: usize,
+    opens_encode_session: bool,
+) -> Option<multiview_compositor::GpuTarget> {
+    use multiview_core::pixel::PixelFormat;
+    use multiview_core::traits::BackendKind;
+    use multiview_hal::{
+        select_device, Capability, CostBudget, GpuCandidate, Pins, PipelineDemand, PlacementPolicy,
+        Resolution, Stage, StageCaps, TileLoad,
+    };
+
+    let loads = load_source.poll();
+    if loads.is_empty() {
+        // No NVML / no visible GPU (the dev container, CI, a non-NVIDIA host):
+        // keep today's default-adapter behaviour. Not even logged at info — this
+        // is the overwhelmingly common, entirely-expected path.
+        return None;
+    }
+
+    let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
+    // A conservative per-engine budget large enough not to gate a typical
+    // multiview on a real GPU; the LIVE 4060-vs-P2000 routing on the contended
+    // box rests on the VRAM headroom gate (the 95%-full 4060 exceeds the 0.85
+    // ceiling) + VRAM-dominant scoring, which need no perf-class table. A real
+    // per-GPU perf-class `CostBudget` table is the documented Tier-2 refinement
+    // (ADR-0035 §5) — until then every candidate shares this permissive budget,
+    // so the budget gate is effectively inert and the headroom/score do the work.
+    let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
+
+    // One candidate per visible GPU. We treat each as capable of the whole island
+    // at the canvas resolution in NV12 (the compositor canvas + NVENC are NV12,
+    // inv #5); the headroom + VRAM gates are what actually steer the pick. A
+    // candidate carries its STABLE id from the load snapshot so `select_device`
+    // matches loads to candidates and a pin (future) binds correctly.
+    let cap = |stage: Stage| {
+        Capability::new(
+            BackendKind::Cuda,
+            stage,
+            canvas_res,
+            vec![PixelFormat::Nv12],
+        )
+    };
+    let candidates: Vec<GpuCandidate> = loads
+        .iter()
+        .map(|load| GpuCandidate {
+            device_id: load.device_id.clone(),
+            stage_caps: StageCaps::new(
+                cap(Stage::Decode),
+                cap(Stage::Composite),
+                cap(Stage::Encode),
+            ),
+            budget,
+        })
+        .collect();
+
+    // Demand: the canvas at the output cadence, NV12, a small per-tile decode +
+    // the composite + the single encode rendition. `predicted_pool_bytes = 0`
+    // leaves the VRAM gate to the headroom ceiling (we do not yet model the exact
+    // pool footprint here — a conservative-but-safe choice that never over-rejects
+    // a roomy GPU; the headroom ceiling still rejects a near-full one).
+    let mut tile_loads: Vec<TileLoad> = Vec::with_capacity(tile_count + 2);
+    for _ in 0..tile_count.max(1) {
+        tile_loads.push(TileLoad::new(Stage::Decode, canvas_res));
+    }
+    tile_loads.push(TileLoad::new(Stage::Composite, canvas_res));
+    tile_loads.push(TileLoad::new(Stage::Encode, canvas_res));
+    let demand = PipelineDemand::new(
+        cadence,
+        tile_loads,
+        canvas_res,
+        PixelFormat::Nv12,
+        0,
+        opens_encode_session,
+    );
+
+    // Ask the scorer for the single least-contended GPU that can host the whole
+    // island. A reject (no fit / all over the headroom ceiling) → fall back to
+    // the default adapter / CPU, logged, never a stall (inv #1).
+    let selection = match select_device(
+        &candidates,
+        &demand,
+        &loads,
+        &Pins::none(),
+        PlacementPolicy::default(),
+    ) {
+        Ok(selection) => selection,
+        Err(reason) => {
+            tracing::warn!(
+                ?reason,
+                "load-aware admission found no single GPU to host the pipeline; \
+                 falling back to the default adapter / CPU (inv #1: never stalls)"
+            );
+            return None;
+        }
+    };
+
+    // Resolve the chosen device's hardware-addressing handles so wgpu can pin it
+    // (and Tier-2 NVDEC/NVENC can share the ordinal). If they cannot be resolved,
+    // fall back to the default adapter rather than pin blindly.
+    let Some(info) = load_source.device_target(&selection.device) else {
+        tracing::warn!(
+            device_index = selection.device.index(),
+            "load-aware admission chose a GPU but could not resolve its hardware \
+             handles; falling back to the default adapter"
+        );
+        return None;
+    };
+    let target = gpu_target_from_info(&info);
+    if target.is_some() {
+        tracing::info!(
+            device_index = selection.device.index(),
+            stable_id = selection.device.stable_id(),
+            pci_bus_id = ?info.pci_bus_id,
+            name = ?info.name,
+            score = selection.score,
+            "load-aware admission: pinning the whole pipeline to the least-contended \
+             GPU (ADR-0035 Tier-1)"
+        );
+        Some(target)
+    } else {
+        tracing::warn!(
+            device_index = selection.device.index(),
+            "load-aware admission chose a GPU but its hardware handles were empty; \
+             falling back to the default adapter"
+        );
+        None
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod admission_target_tests {
+    use super::{gpu_target_from_info, select_admission_gpu_target};
+    use multiview_core::time::Rational;
+    use multiview_hal::{GpuTargetInfo, NullLoadPoller};
+
+    #[test]
+    fn no_visible_gpu_falls_back_to_none() {
+        // The NullLoadPoller (the GPU-free / no-NVML host — the dev container, CI)
+        // polls zero devices, so admission must return `None`: the caller then
+        // keeps today's default-adapter behaviour. This is the graceful-fallback
+        // proof for the GPU-free path (inv #1: never a panic, never a stall).
+        let source = NullLoadPoller::new();
+        let target = select_admission_gpu_target(
+            &source,
+            1920,
+            1080,
+            Rational::new(30, 1),
+            4,
+            true, // opens an NVENC session
+        );
+        assert!(
+            target.is_none(),
+            "a host with no visible GPU must fall back to the default adapter (None)"
+        );
+    }
+
+    #[test]
+    fn target_info_projects_onto_the_wgpu_target() {
+        // The hal `GpuTargetInfo` (PCI bus id / pair / name / ordinal) projects
+        // onto the compositor's wgpu-free `GpuTarget` (the cuda_ordinal is carried
+        // on the hal side for Tier-2, not on the wgpu target). A populated info is
+        // a usable (`is_some`) target.
+        let info = GpuTargetInfo {
+            pci_bus_id: Some("00000000:01:00.0".to_owned()),
+            vendor_id: Some(0x10de),
+            device_id: Some(0x1c30),
+            name: Some("Quadro P2000".to_owned()),
+            cuda_ordinal: Some("1".to_owned()),
+        };
+        let target = gpu_target_from_info(&info);
+        assert!(target.is_some());
+        assert_eq!(target.pci_bus_id.as_deref(), Some("00000000:01:00.0"));
+        assert_eq!(target.vendor_id, Some(0x10de));
+        assert_eq!(target.device_id, Some(0x1c30));
+        assert_eq!(target.name.as_deref(), Some("Quadro P2000"));
+    }
+
+    #[test]
+    fn empty_info_projects_to_an_inert_target() {
+        // An all-`None` info (NVML resolved nothing) projects to an inert target
+        // that pins nothing — so the caller keeps the default adapter.
+        let target = gpu_target_from_info(&GpuTargetInfo::default());
+        assert!(!target.is_some());
+    }
+}
+
+#[cfg(test)]
+mod encoder_format_tests {
+    use super::encoder_input_format;
+    use ffmpeg_next::format::Pixel;
+
+    #[test]
+    fn nvenc_encoders_are_fed_nv12_to_skip_the_per_tick_swscale() {
+        // The composited canvas is already NV12 (inv #5); NVENC ingests NV12
+        // natively, so the encoder input format must be NV12 — that is what makes
+        // the sink's FrameConverter hit its passthrough branch (no full-canvas
+        // libswscale per tick).
+        assert_eq!(encoder_input_format("h264_nvenc"), Pixel::NV12);
+        assert_eq!(encoder_input_format("hevc_nvenc"), Pixel::NV12);
+    }
+
+    #[test]
+    fn software_encoders_keep_yuv420p() {
+        // The software codecs do not accept NV12 directly — they MUST be fed
+        // planar YUV420P, exactly as before this change.
+        assert_eq!(encoder_input_format("mpeg2video"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("libx264"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("libx265"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("ffv1"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("mjpeg"), Pixel::YUV420P);
+        // A name that merely CONTAINS "nvenc" but does not end with the suffix is
+        // not treated as NVENC (defensive: the suffix is the discriminator).
+        assert_eq!(encoder_input_format("nvenc_fake_sw"), Pixel::YUV420P);
+    }
 }
 
 /// A runnable **mux-only** output sink resolved from a config `[[outputs]]`
@@ -1132,13 +1421,38 @@ impl Pipeline {
         )
         .map_err(|e| PipelineError::Engine(e.to_string()))?;
         // Under the opt-in `gpu` feature the run PREFERS the wgpu GPU
-        // compositor; `RunBackend::select(true)` uses it only if an adapter
-        // initializes and otherwise transparently falls back to the CPU
-        // reference (invariant #1: a missing/failed GPU never stalls or crashes
-        // the run). Without the feature the drive keeps its default CPU backend,
-        // so the default build path is byte-for-byte unchanged.
+        // compositor. The adapter is chosen LOAD-AWARE at admission (ADR-0035
+        // Tier-1, decide-once): poll NVML ONCE, score every visible GPU, and pin
+        // the whole pipeline to the least-contended one that can host the island
+        // (the GPU-placement principle — affinity is the hard constraint). This
+        // is synchronous and runs BEFORE the output clock starts; it never blocks
+        // or `.await`s on the data plane (inv #1). On a GPU-free host / no NVML /
+        // a scorer rejection, `select_admission_gpu_target` returns `None` and we
+        // fall back to the default `HighPerformance` adapter, exactly as before.
+        // `RunBackend::select` then uses the GPU only if that adapter initializes
+        // and otherwise transparently falls back to the CPU reference (inv #1: a
+        // missing/failed GPU never stalls or crashes the run). Without the feature
+        // the drive keeps its default CPU backend, so the default build path is
+        // byte-for-byte unchanged.
         #[cfg(feature = "gpu")]
-        let drive = drive.with_backend(multiview_compositor::backend::RunBackend::select(true));
+        let drive = {
+            use multiview_compositor::backend::{GpuTarget, RunBackend};
+            let load_source = crate::system_metrics::default_load_source();
+            let opens_encode_session = self.encoder.name.ends_with("_nvenc");
+            // The pinned chosen device, or `GpuTarget::none()` (prefer the GPU at
+            // the default adapter) when admission did not name a specific GPU — so
+            // the run still prefers the GPU on a single-GPU / no-NVML host.
+            let target = select_admission_gpu_target(
+                load_source.as_ref(),
+                self.layout.canvas.width,
+                self.layout.canvas.height,
+                self.cadence,
+                self.layout.cells.len(),
+                opens_encode_session,
+            )
+            .unwrap_or_else(GpuTarget::none);
+            drive.with_backend(RunBackend::select(Some(target)))
+        };
 
         let ts: Arc<dyn TimeSource> = time;
         // The engine's outbound publisher is supplied by the caller so the

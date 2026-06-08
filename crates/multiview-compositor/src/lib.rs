@@ -58,7 +58,7 @@ pub mod range;
 pub mod transfer;
 pub mod transfer_lut;
 
-pub use backend::{RunBackend, RunBackendKind};
+pub use backend::{normalize_pci_bus_id, AdapterMatchInfo, GpuTarget, RunBackend, RunBackendKind};
 pub use error::{Error, Result};
 pub use native::{
     admit_native_composite, CompositeBackend, NativeAdmission, NativeRejection, TileFormats,
