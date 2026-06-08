@@ -186,11 +186,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 # privilege drop. Our LGPL build INCLUDES h264_nvenc/hevc_nvenc (--enable-nvenc),
 # so NVENC GPU-encode works without GPL x264 (the driver's libnvidia-encode is
 # injected at RUN time by the NVIDIA Container Toolkit).
+#
+# libglvnd0/libegl1/libgl1 (the GLVND OpenGL/EGL loaders) let wgpu fall back to
+# its GL backend via the toolkit-injected nvidia EGL/GL (libEGL_nvidia, which DOES
+# initialise here — `eglinfo` enumerates NVIDIA) when this box's nvidia VULKAN ICD
+# refuses to create an instance (a Vulkan-specific driver fault — NVENC + GL work,
+# Vulkan does not). Without these GLVND loaders wgpu's GL path errors
+# "gl drivers/libraries could not be loaded" and the only adapter left is llvmpipe.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       libopus0 libsrt1.5-openssl libgnutls30t64 libdrm2 \
       libvulkan1 libx11-6 libxext6 util-linux \
+      libglvnd0 libegl1 libgl1 libgles2 \
  && rm -rf /var/lib/apt/lists/*
 
 # Our FFmpeg 8.1.1 shared libraries (libavcodec.so.62, libavutil.so.60,
