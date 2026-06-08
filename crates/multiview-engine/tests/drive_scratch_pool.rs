@@ -56,11 +56,14 @@ fn nosignal_card(w: u32, h: u32) -> Nv12Image {
 fn grid_layout(w: u32, h: u32, n: usize) -> (Layout, HashMap<String, Arc<TileStore<Nv12Image>>>) {
     let mut cells = Vec::with_capacity(n);
     let mut stores = HashMap::new();
+    // `as`-free fraction maths (guardrail: `as_conversions` is denied in tests):
+    // widen the small counts losslessly through `u16` -> `f32`.
+    let n_f = f32::from(u16::try_from(n.max(1)).unwrap());
     for i in 0..n {
         let id = format!("cam-{i}");
-        let frac = 1.0_f32 / n.max(1) as f32;
+        let frac = 1.0_f32 / n_f;
         cells.push(Cell {
-            x: frac * i as f32,
+            x: frac * f32::from(u16::try_from(i).unwrap()),
             y: 0.0,
             w: frac,
             h: 1.0,
@@ -119,6 +122,7 @@ fn scratch_reservations_are_bounded_not_proportional_to_ticks() {
     // (a one-time warm-up), never once-per-tick. With a stable layout the pool
     // stabilises after the first compose, so the reservation count after the
     // warm-up tick equals the count after thousands more ticks.
+    const N: u64 = 5_000;
     let (w, h) = (64, 48);
     let (layout, stores) = grid_layout(w, h, 9);
     let drive = make_drive(layout, stores);
@@ -129,14 +133,14 @@ fn scratch_reservations_are_bounded_not_proportional_to_ticks() {
     let after_warmup = drive.scratch_reservations();
 
     // Many more ticks over the SAME layout must not reserve again.
-    const N: u64 = 5_000;
     for i in 1..=N {
         let _ = drive.compose(tick_at(i)).unwrap();
     }
     let after_n = drive.scratch_reservations();
 
     assert_eq!(
-        after_n, after_warmup,
+        after_n,
+        after_warmup,
         "scratch must be POOLED: {N} extra ticks reserved \
          {extra} more times (must be 0 — allocations are one-time, not per-tick)",
         extra = after_n - after_warmup

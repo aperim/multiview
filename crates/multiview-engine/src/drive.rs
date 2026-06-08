@@ -17,8 +17,26 @@
 //!
 //! The result is one valid composited frame per tick, on time, forever —
 //! regardless of input health. The loop holds no locks an input could hold and
-//! makes no `.await` on any input (it is fully synchronous and allocation-light
-//! beyond the output canvas the compositor must allocate).
+//! makes no `.await` on any input (it is fully synchronous).
+//!
+//! ## Pooled per-tick scratch (no per-tick churn)
+//!
+//! The resolve step needs three small scratch buffers each tick — the `held`
+//! Arc vector keeping each sampled frame alive, the `placements` vector, and the
+//! z-order index vector. These come from a **pool reused across ticks**
+//! ([`ComposeScratch`], held behind a [`RefCell`]) that is cleared-and-refilled,
+//! never reallocated, so the protected output clock does no per-tick scratch
+//! allocation in steady state (CLAUDE.md safety rule §5: "frame buffers come from
+//! per-device pools allocated at start, never per-frame"). The pool grows at most
+//! once per layout-geometry (when a larger cell count first appears) and then
+//! stays stable — a bounded, one-time reservation, never proportional to the tick
+//! count. The pool is single-threaded (the drive composes on exactly one thread,
+//! the output clock), so the `RefCell` is never contended and the borrow never
+//! crosses an `.await`; invariant #1 (wait-free on the hot path) holds by
+//! construction. The composited canvas itself is the one genuine per-tick
+//! allocation the compositor backend must produce — it is **moved** into the
+//! returned frame, never copied here.
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -104,6 +122,17 @@ pub struct CompositorDrive<T> {
     /// (the GPU is degradation-safe: a missing/failed adapter falls back to the
     /// CPU reference, never stalling the output clock — invariant #1).
     backend: RunBackend,
+    /// Pooled per-tick resolve scratch (the `held` Arc vector, `placements`, and
+    /// the z-order index vector), reused tick-over-tick instead of reallocated
+    /// every tick on the output clock (CLAUDE.md safety rule §5). Behind a
+    /// [`RefCell`] so [`CompositorDrive::compose`] keeps its `&self` signature
+    /// (it is called on immutable drives in tests and by-reference from the
+    /// runtime); the drive composes on exactly one thread (the output clock), so
+    /// the cell is never contended and the borrow never crosses an `.await`.
+    /// Only the `Nv12Image` payload uses the scratch (the resolve step is
+    /// monomorphic over [`Nv12Image`]); a non-`Nv12Image` drive simply never
+    /// borrows it.
+    scratch: RefCell<ComposeScratch>,
 }
 
 impl<T> CompositorDrive<T> {
@@ -134,7 +163,23 @@ impl<T> CompositorDrive<T> {
             nosignal_card: Arc::new(nosignal_card),
             background,
             backend: RunBackend::cpu(),
+            scratch: RefCell::new(ComposeScratch::default()),
         })
+    }
+
+    /// The cumulative number of times the per-tick resolve **scratch pool** has
+    /// reserved backing capacity (grown), across the lifetime of this drive.
+    ///
+    /// This is the pool's allocation odometer: it bumps on the first compose (the
+    /// one-time warm-up that sizes the pool to the layout) and again only if a
+    /// later layout swap grows the cell count past the high-water mark. In steady
+    /// state — a stable layout composed for any number of ticks — it does **not**
+    /// advance, which is exactly the per-tick-allocation gate (CLAUDE.md safety
+    /// rule §5): the count is bounded by the layout-geometry changes, never by the
+    /// tick count. Exposed for the allocation-count test and for telemetry.
+    #[must_use]
+    pub fn scratch_reservations(&self) -> u64 {
+        self.scratch.borrow().reservations
     }
 
     /// Attach the cell ids (in `layout.cells` order) so cells can be addressed by
@@ -321,18 +366,30 @@ impl CompositorDrive<Nv12Image> {
         let now = tick.pts;
         let canvas = &self.layout.canvas;
 
-        // Resolve each cell to (placed image, dst pixel origin, opacity, state),
-        // sampling the store WITHOUT blocking. `held` keeps the sampled Arc alive
-        // for the duration of the composite call.
-        let mut held: Vec<Arc<Nv12Image>> = Vec::with_capacity(self.layout.cells.len());
-        let mut placements: Vec<Placement> = Vec::with_capacity(self.layout.cells.len());
+        // The per-tick resolve scratch comes from the pool (cleared-and-reused),
+        // not freshly allocated this tick (CLAUDE.md safety rule §5). The pool is
+        // single-threaded (this is the one output-clock thread) and the borrow is
+        // released before this method returns, so it never crosses an `.await` and
+        // never stalls the clock (invariant #1).
+        let mut scratch = self.scratch.borrow_mut();
+        let cell_count = self.layout.cells.len();
+        scratch.begin(cell_count);
+        let ComposeScratch {
+            held,
+            placements,
+            order,
+            ..
+        } = &mut *scratch;
+
+        // The result `source_states` is the frame's OUTPUT (moved to the consumer
+        // downstream), so it is genuinely produced each tick — not scratch.
         let mut source_states: HashMap<String, SourceState> = HashMap::new();
 
         // Draw order: ascending z (lower z first / bottom). Sort cell indices.
-        let mut order: Vec<usize> = (0..self.layout.cells.len()).collect();
+        order.extend(0..cell_count);
         order.sort_by_key(|&i| self.layout.cells.get(i).map_or(i32::MIN, |c| c.z));
 
-        for &i in &order {
+        for &i in order.iter() {
             let Some(cell) = self.layout.cells.get(i) else {
                 continue;
             };
@@ -341,7 +398,7 @@ impl CompositorDrive<Nv12Image> {
                 source_states.insert(source.clone(), state);
             }
             let (dst_x, dst_y, dst_w, dst_h) = cell_dst_rect(cell, canvas.width, canvas.height);
-            held.push(Arc::clone(&image));
+            held.push(image);
             placements.push(Placement {
                 image_index: held.len().saturating_sub(1),
                 dst_x,
@@ -352,14 +409,20 @@ impl CompositorDrive<Nv12Image> {
             });
         }
 
-        // Borrow the held images for the compositor's `Tile` slice. Each tile
-        // carries its DESTINATION cell rect so the compositor scales the source
-        // into the cell at composite time (scale-at-composite, RT-6 / ADR-0034 /
-        // inv #6): a source decoded at any geometry — including one just
-        // re-pointed in — composites correctly into the cell, never clipped or
-        // smeared. When the source already matches the cell size (the steady
-        // state: decode-at-display-resolution) the scale is a no-op and the result
-        // is byte-for-byte the prior 1:1 placement. The cell's per-tile opacity
+        // Borrow the held images for the compositor's `Tile` slice. This slice is
+        // a per-tick local, NOT pooled: a `Tile<'_>` borrows into the pooled
+        // `held` vector, so its lifetime is the borrow — a `Vec<Tile<'_>>` cannot
+        // be a reused struct field in safe Rust (`unsafe` is forbidden here). It
+        // is small (one thin `&Nv12Image` + a rect + an opacity per cell), and the
+        // large per-tick churn — the `held` Arc vector, `placements`, and the
+        // z-order index vector — is what the pool eliminates. Each tile carries
+        // its DESTINATION cell rect so the compositor scales the source into the
+        // cell at composite time (scale-at-composite, RT-6 / ADR-0034 / inv #6): a
+        // source decoded at any geometry — including one just re-pointed in —
+        // composites correctly into the cell, never clipped or smeared. When the
+        // source already matches the cell size (the steady state:
+        // decode-at-display-resolution) the scale is a no-op and the result is
+        // byte-for-byte the prior 1:1 placement. The cell's per-tile opacity
         // drives the compositor's premultiplied linear-light `over` blend.
         let tiles: Vec<Tile<'_>> = placements
             .iter()
@@ -383,9 +446,18 @@ impl CompositorDrive<Nv12Image> {
                 canvas.height,
                 self.canvas_color,
                 self.background,
-                &tiles,
+                tiles.as_slice(),
             )
             .map_err(|e| Error::Canvas(e.to_string()))?;
+
+        // Drop the borrowing tiles, then release the held `Arc`s now (rather than
+        // pinning them until the next tick's `begin`), keeping the pooled
+        // capacity. The next `begin` clears whatever remains, so correctness does
+        // not depend on this; it shortens last-good frame retention to within the
+        // tick. `drop(tiles)` first releases its immutable borrow of `held`.
+        drop(tiles);
+        held.clear();
+        drop(scratch);
 
         Ok(CompositedFrame {
             tick,
@@ -435,6 +507,68 @@ struct Placement {
     dst_h: u32,
     /// The cell's per-tile opacity (straight alpha), carried to the compositor.
     opacity: f32,
+}
+
+/// The per-tick resolve **scratch pool**: reusable buffers cleared-and-refilled
+/// each tick instead of allocated and dropped on the output clock (CLAUDE.md
+/// safety rule §5). Held behind a [`RefCell`] inside [`CompositorDrive`] and
+/// touched only by the single-threaded [`CompositorDrive::compose`] (the output
+/// clock), so it is never contended and the borrow never crosses an `.await`
+/// (invariant #1: wait-free on the hot path).
+///
+/// `reservations` is the pool's allocation odometer: [`ComposeScratch::begin`]
+/// bumps it whenever it must grow a backing store to fit the current cell count
+/// (a one-time event per new high-water layout geometry), and leaves it untouched
+/// when the existing capacity already fits — so in steady state composing any
+/// number of ticks adds **zero** reservations. [`CompositorDrive::scratch_reservations`]
+/// surfaces it for the allocation-count gate and telemetry.
+#[derive(Default)]
+struct ComposeScratch {
+    /// Keeps each sampled frame's `Arc` alive across the composite call.
+    held: Vec<Arc<Nv12Image>>,
+    /// The resolved tile placements (small `Copy` records).
+    placements: Vec<Placement>,
+    /// The cell draw order (indices into `layout.cells`), sorted by ascending z.
+    order: Vec<usize>,
+    /// Cumulative count of backing-store reservations (pool growths) — the
+    /// per-tick-allocation gate's odometer.
+    reservations: u64,
+}
+
+impl ComposeScratch {
+    /// Ready the pool for a tick that resolves `cell_count` cells: clear the
+    /// reused buffers (keeping their capacity) and reserve **once** if the
+    /// capacity does not already fit, bumping `reservations` only when it grows.
+    ///
+    /// Clearing keeps the allocation; the contents are fully overwritten each tick
+    /// (the resolve loop refills `held`/`placements`, `order` is re-extended), so
+    /// no stale data leaks — the composed output is byte-identical to a freshly
+    /// allocated scratch (proven by the byte-identity gate).
+    fn begin(&mut self, cell_count: usize) {
+        self.held.clear();
+        self.placements.clear();
+        self.order.clear();
+        // One bounded reservation per new high-water cell count. `capacity()` only
+        // grows, so once it covers the layout this is a no-op for every later tick
+        // — the steady-state per-tick allocation is zero.
+        let mut grew = false;
+        if self.held.capacity() < cell_count {
+            self.held.reserve(cell_count - self.held.capacity());
+            grew = true;
+        }
+        if self.placements.capacity() < cell_count {
+            self.placements
+                .reserve(cell_count - self.placements.capacity());
+            grew = true;
+        }
+        if self.order.capacity() < cell_count {
+            self.order.reserve(cell_count - self.order.capacity());
+            grew = true;
+        }
+        if grew {
+            self.reservations = self.reservations.saturating_add(1);
+        }
+    }
 }
 
 /// Map a cell's normalized rectangle to a canvas **pixel rectangle**
