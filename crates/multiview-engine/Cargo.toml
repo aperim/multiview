@@ -54,6 +54,16 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync
 
 [features]
 "default" = []
+# Map the configurable failover-slate policy onto the PASSTHROUGH / TRANSCODE
+# program's pre-baked output slate (`slate::output_slate_kind` /
+# `output_slate_audio` → `multiview_output::slate::SlateKind` / `SlateAudio`).
+# OFF by default because the output slate baker lives behind
+# `multiview-output/ffmpeg` (it bakes a real coded slate via libav). The
+# LAYOUT-tile half (`slate::failover_slate_image`, the per-cell drive slate) is
+# pure-Rust and always compiled — this feature only adds the output-program
+# mapping. Pulled in by the CLI's `ffmpeg`-bearing presets alongside the live
+# guarded-passthrough path.
+"ffmpeg" = ["multiview-output/ffmpeg"]
 # PTP / ST 2059-2 hardware binding (PTP NIC + PHC discipline). OFF by default:
 # it needs a real PTP-capable NIC, so it is compile-verified only here. The PURE
 # servo math (`ptp::PtpServo`) is always compiled and fully tested; this feature
