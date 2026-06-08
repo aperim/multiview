@@ -79,3 +79,54 @@ fn a_dropped_source_yields_silence_never_absent() {
         assert!(b.interleaved().iter().all(|&s| s == 0.0));
     }
 }
+
+#[test]
+fn repoint_swaps_an_existing_points_store_replace_not_append() {
+    // `repoint` REPLACES the Arc<AudioStore> bound to an existing route point —
+    // distinct from `add_source`'s append. After a repoint, the same route point
+    // reads the new store, and the bus still has exactly ONE source on it (the
+    // old store is no longer mixed in — replace, not append).
+    let fmt = stereo48();
+    let store_a = Arc::new(AudioStore::new(fmt, 48_000));
+    store_a
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.25f32; 4800 * 2]).unwrap())
+        .unwrap();
+    let store_b = Arc::new(AudioStore::new(fmt, 48_000));
+    store_b
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.75f32; 4800 * 2]).unwrap())
+        .unwrap();
+
+    let mut bus = ProgramBus::new(fmt, Rational::new(25, 1)); // 1920 samples/tick
+    let point = bus.add_source("in", Arc::clone(&store_a), 1.0);
+
+    let before = bus.tick();
+    assert!(
+        before.interleaved().iter().all(|&s| (s - 0.25).abs() < 1e-6),
+        "store A (+0.25) must be on the bus before the repoint"
+    );
+
+    // Repoint the SAME point onto store B.
+    bus.repoint(point, Arc::clone(&store_b)).unwrap();
+
+    let after = bus.tick();
+    assert!(
+        after.interleaved().iter().all(|&s| (s - 0.75).abs() < 1e-6),
+        "after repoint the SAME point must read store B (+0.75), replacing A"
+    );
+}
+
+#[test]
+fn repoint_of_a_nonexistent_point_is_a_clean_error_no_panic() {
+    // A repoint of a route point the bus never registered must be an honest
+    // error / no-op — never a panic, never a silent wrong-source bind.
+    let fmt = stereo48();
+    let mut bus = ProgramBus::new(fmt, Rational::new(25, 1));
+    let store = Arc::new(AudioStore::new(fmt, 48_000));
+    // RoutePoint::input(7) was never added.
+    let bogus = multiview_audio::RoutePoint::input(7);
+    let err = bus.repoint(bogus, store).unwrap_err();
+    assert!(
+        matches!(err, multiview_audio::AudioError::UnknownInput(7)),
+        "repointing an unknown point must be an UnknownInput error, got {err:?}"
+    );
+}
