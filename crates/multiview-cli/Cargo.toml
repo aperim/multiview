@@ -109,6 +109,12 @@ required-features = ["ffmpeg", "overlay"]
 name = "subtitle_meter_pipeline"
 required-features = ["ffmpeg", "overlay"]
 
+# RT-10b: the per-layer SubtitleRouter run-path sampling + breakaway re-point
+# end-to-end test needs both `ffmpeg` and `overlay`.
+[[test]]
+name = "subtitle_route_pipeline"
+required-features = ["ffmpeg", "overlay"]
+
 # The live HLS WebVTT caption-ingest proof needs both `ffmpeg` and `overlay`. Its
 # only test is `#[ignore]`d (it hits the network); run with `-- --ignored`.
 [[test]]

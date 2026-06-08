@@ -50,6 +50,237 @@ use multiview_input::hls::MasterPlaylist;
 /// [`CaptionCue`] model. The reader thread writes it; the overlay baker samples it.
 pub type CueStore = CaptionCueStore<CaptionCue>;
 
+/// RT-10b: a [`multiview_overlay::CueSource`] adapter over a per-source
+/// [`CueStore`], exposing its **text** cues as the routable subtitle unit a
+/// [`SubtitleLayer`](multiview_overlay::SubtitleLayer) samples and can be
+/// re-pointed onto.
+///
+/// The unified [`CaptionCue`] carries both text and bitmap (DVB-sub) shapes; this
+/// adapter surfaces the **text** shape (608/708/`WebVTT`/teletext), which is what
+/// `multiview-overlay`'s text [`Cue`](multiview_overlay::subtitle::Cue) models. A
+/// bitmap cue at `now` yields [`None`] here (the bitmap path stays on the existing
+/// per-source `sample_caption_bitmaps` sampling in the pipeline, unchanged).
+/// `active_at(now)` is the same lock-free [`CueStore::active_at`] read the baker
+/// already did, so routing through the layer adds no new hot-path cost and can
+/// neither pace nor stall the engine (invariants #1/#10).
+#[cfg(feature = "overlay")]
+#[derive(Clone)]
+pub struct CueStoreSource {
+    store: Arc<CueStore>,
+}
+
+#[cfg(feature = "overlay")]
+impl CueStoreSource {
+    /// Wrap a per-source cue store as a routable text [`CueSource`](multiview_overlay::CueSource).
+    #[must_use]
+    pub fn new(store: Arc<CueStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[cfg(feature = "overlay")]
+impl multiview_overlay::CueSource for CueStoreSource {
+    fn active_at(&self, now: MediaTime) -> Option<multiview_overlay::subtitle::Cue> {
+        match self.store.active_at(now) {
+            Some(CaptionCue::Text { start, end, text }) if !text.lines.is_empty() => {
+                Some(multiview_overlay::subtitle::Cue {
+                    start,
+                    end,
+                    lines: text.lines,
+                })
+            }
+            // A bitmap cue (or an empty-line text cue) is not a text cue: the
+            // text-layer renders nothing for it (the bitmap path is separate).
+            _ => None,
+        }
+    }
+}
+
+/// One pending subtitle re-point request: route the layer rendered into
+/// `layer_id` to source `source_id`'s cues. Applied at the next sample boundary.
+#[cfg(feature = "overlay")]
+#[derive(Debug, Clone)]
+struct SubtitleRePoint {
+    layer_id: String,
+    source_id: String,
+}
+
+/// The bound on pending subtitle re-points held between sample boundaries. A tiny
+/// control action; a deeper backlog can only come from a pathological storm, in
+/// which case the **newest** request for a layer is what the operator wants and an
+/// old superseded one being shed never mis-routes. Bounded memory (safety rule §5:
+/// queues drop, never grow).
+#[cfg(feature = "overlay")]
+const MAX_SUBTITLE_REPOINT_BACKLOG: usize = 256;
+
+/// RT-10b: a wait-free, `Arc`-shareable handle to request subtitle re-points
+/// **into the run**, without owning the (hot-loop-owned) [`SubtitleRouter`].
+///
+/// The router is sampled (`&mut`) on the bake consumer thread, so a re-point from
+/// the control plane cannot mutate it directly. Instead the handle publishes the
+/// request onto a lock-free RCU slot (the same `arc-swap` read-copy-update the cue
+/// store uses) that the router **drains at the start of each `sample`** (the
+/// sample-boundary apply — the subtitle analogue of the video command-drain at the
+/// frame boundary). Publishing is wait-free and bounded drop-oldest, so the
+/// control plane can never pace or stall the engine (invariants #1/#10). This is
+/// the seam `RouteSubtitle` (RT-11) drives once the command lands; until then it is
+/// exercised directly by the run + tests.
+#[cfg(feature = "overlay")]
+#[derive(Clone)]
+pub struct SubtitleRouteHandle {
+    pending: Arc<arc_swap::ArcSwap<Vec<SubtitleRePoint>>>,
+}
+
+#[cfg(feature = "overlay")]
+impl SubtitleRouteHandle {
+    /// Request that the layer rendered into `layer_id` re-point to `source_id`'s
+    /// cues. Wait-free; takes effect on the router's next `sample`. Bounded
+    /// drop-oldest: a backlog past [`MAX_SUBTITLE_REPOINT_BACKLOG`] sheds its
+    /// oldest request (the newest binding wins).
+    pub fn request_repoint(&self, layer_id: &str, source_id: &str) {
+        // RCU append: clone the current pending vec, push, publish. A benign race
+        // between two concurrent publishers can drop one append; re-points are rare
+        // operator actions, and the loser would simply re-issue — never a mis-route.
+        let current = self.pending.load();
+        let mut next: Vec<SubtitleRePoint> = current.as_ref().clone();
+        if next.len() >= MAX_SUBTITLE_REPOINT_BACKLOG {
+            next.remove(0);
+        }
+        next.push(SubtitleRePoint {
+            layer_id: layer_id.to_owned(),
+            source_id: source_id.to_owned(),
+        });
+        self.pending.store(Arc::new(next));
+    }
+}
+
+/// RT-10b: the per-layer subtitle crosspoint for the run.
+///
+/// Today's caption rendering samples one cue per **source** each output tick
+/// (`source_id -> on-screen lines`) and burns it into that source's tile. This
+/// router lifts that to a **per-layer** [`SubtitleLayer`](multiview_overlay::SubtitleLayer):
+/// one layer per source-bound caption store, each initially pointing at its own
+/// source's cues, sampled per output tick by
+/// [`SubtitleLayer::sample`](multiview_overlay::SubtitleLayer::sample) (`active_at(now)`).
+/// Because each layer holds an atomically-swappable
+/// [`CueSource`](multiview_overlay::CueSource), a [`repoint`](Self::repoint) makes a
+/// subtitle breakaway effective — the layer renders **another** source's cues on
+/// the next tick (CLEAR-on-switch at the seam) — while a layer that is never
+/// re-pointed samples its own source exactly as before (byte-identical steady
+/// behaviour).
+///
+/// The full source registry is retained so a re-point can target any source's
+/// cues by id. The router is sampled on the bake consumer (the same off-hot-path
+/// place the old `sample_caption_stores` ran), so it never paces or stalls the
+/// engine (invariants #1/#10). Re-points reach it wait-free via a
+/// [`SubtitleRouteHandle`], drained at the start of each [`sample`](Self::sample).
+#[cfg(feature = "overlay")]
+pub struct SubtitleRouter {
+    /// One re-pointable subtitle layer per source-bound caption store, keyed by the
+    /// source id it renders into (the tile target). Sampled (`&mut`) each tick.
+    layers: std::collections::HashMap<String, multiview_overlay::SubtitleLayer>,
+    /// The per-source cue stores, so a re-point can resolve a target source id to
+    /// its [`CueSource`]. Shared by `Arc` with the readers; a lock-free read only.
+    stores: std::collections::HashMap<String, Arc<CueStore>>,
+    /// The wait-free pending re-point slot the [`SubtitleRouteHandle`] publishes to
+    /// and `sample` drains. Shared by `Arc` with every handle clone.
+    pending: Arc<arc_swap::ArcSwap<Vec<SubtitleRePoint>>>,
+}
+
+#[cfg(feature = "overlay")]
+impl SubtitleRouter {
+    /// Build a router with one layer per `(source_id, store)`, each layer initially
+    /// pointing at its own source's cues (the identity routing the desugar implies).
+    pub fn from_stores<I>(stores: I) -> Self
+    where
+        I: IntoIterator<Item = (String, Arc<CueStore>)>,
+    {
+        let stores: std::collections::HashMap<String, Arc<CueStore>> = stores.into_iter().collect();
+        let layers = stores
+            .iter()
+            .map(|(id, store)| {
+                let source: Arc<dyn multiview_overlay::CueSource> =
+                    Arc::new(CueStoreSource::new(Arc::clone(store)));
+                (id.clone(), multiview_overlay::SubtitleLayer::new(source))
+            })
+            .collect();
+        Self {
+            layers,
+            stores,
+            pending: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        }
+    }
+
+    /// A wait-free, `Arc`-shareable handle to request re-points into this router
+    /// from off-thread (the control plane / `RouteSubtitle`). Every clone shares
+    /// the same pending slot.
+    #[must_use]
+    pub fn handle(&self) -> SubtitleRouteHandle {
+        SubtitleRouteHandle {
+            pending: Arc::clone(&self.pending),
+        }
+    }
+
+    /// Whether the router has any layers (i.e. any source-bound caption store).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// Drain and apply every pending re-point published since the last sample, then
+    /// sample every layer at output presentation time `now`, returning the active
+    /// **text** lines per layer (`source_id -> on-screen lines`). A layer whose
+    /// active cue is empty/bitmap/absent is omitted — exactly the shape
+    /// `sample_caption_stores` produced, so the steady (un-re-pointed) path is
+    /// unchanged. Called once per output tick on the bake consumer (off the hot
+    /// loop): a non-blocking RCU drain + lock-free `active_at` reads.
+    pub fn sample(&mut self, now: MediaTime) -> std::collections::HashMap<String, Vec<String>> {
+        // Sample-boundary apply: take the pending re-points (publish an empty vec in
+        // their place) and apply each. Re-pointing is `&self` on the layer, so this
+        // is sound while we hold `&mut self`. Empty (the common case) is a cheap
+        // pointer load + `is_empty` check — no allocation, no work.
+        let pending = self.pending.swap(Arc::new(Vec::new()));
+        for rp in pending.iter() {
+            self.repoint(&rp.layer_id, &rp.source_id);
+        }
+        let mut out = std::collections::HashMap::new();
+        for (id, layer) in &mut self.layers {
+            if let Some(cue) = layer.sample(now) {
+                if !cue.lines.is_empty() {
+                    out.insert(id.clone(), cue.lines);
+                }
+            }
+        }
+        out
+    }
+
+    /// Re-point the layer rendered into `layer_id` to the cues of source
+    /// `source_id` — the subtitle breakaway. Takes effect on the next
+    /// [`sample`](Self::sample) (CLEAR-on-switch at the seam). An unknown
+    /// `layer_id` or `source_id` is a logged no-op (never a panic), so a stale
+    /// route can never break the run.
+    pub fn repoint(&self, layer_id: &str, source_id: &str) {
+        let Some(layer) = self.layers.get(layer_id) else {
+            tracing::warn!(
+                layer = %layer_id,
+                "subtitle re-point held: unknown layer id"
+            );
+            return;
+        };
+        let Some(store) = self.stores.get(source_id) else {
+            tracing::warn!(
+                layer = %layer_id,
+                source = %source_id,
+                "subtitle re-point held: unknown source id"
+            );
+            return;
+        };
+        let source: Arc<dyn multiview_overlay::CueSource> =
+            Arc::new(CueStoreSource::new(Arc::clone(store)));
+        layer.repoint(source);
+    }
+}
+
 /// A resolved per-source caption reader plan: which rendition `m3u8` to demux and
 /// the store its decoded cues are published into.
 pub struct CaptionPlan {
@@ -945,5 +1176,164 @@ input_id = "cam_b"
                 plan.rendition_url
             );
         }
+    }
+
+    /// RT-10b: a per-source [`CueStore`] carrying one text cue, for the router
+    /// tests. `lines` is non-empty so it renders.
+    #[cfg(feature = "overlay")]
+    fn text_store(start_ns: i64, end_ns: i64, line: &str) -> Arc<CueStore> {
+        let store = Arc::new(CueStore::new());
+        let cue = CaptionCue::try_text(
+            MediaTime::from_nanos(start_ns),
+            MediaTime::from_nanos(end_ns),
+            vec![line.to_owned()],
+            None,
+        )
+        .expect("valid text cue");
+        store.publish(cue.start(), cue.end(), cue);
+        store
+    }
+
+    /// RT-10b: with one layer per source bound to its OWN store and no re-point,
+    /// the router's per-tick `sample` yields exactly the active text lines the
+    /// old per-source `active_at` sampling did — identical behaviour.
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn router_sample_matches_per_source_text_when_not_repointed() {
+        let a = text_store(1_000, 5_000, "alpha");
+        let b = text_store(2_000, 6_000, "bravo");
+        let mut router = SubtitleRouter::from_stores([
+            ("cam_a".to_owned(), Arc::clone(&a)),
+            ("cam_b".to_owned(), Arc::clone(&b)),
+        ]);
+
+        // Inside both windows: each layer shows its own source's lines.
+        let at = router.sample(MediaTime::from_nanos(3_000));
+        assert_eq!(at.get("cam_a"), Some(&vec!["alpha".to_owned()]));
+        assert_eq!(at.get("cam_b"), Some(&vec!["bravo".to_owned()]));
+
+        // Before cam_b's window: only cam_a is active (a source with no active cue
+        // is absent, exactly like `sample_caption_stores`).
+        let early = router.sample(MediaTime::from_nanos(1_500));
+        assert_eq!(early.get("cam_a"), Some(&vec!["alpha".to_owned()]));
+        assert_eq!(early.get("cam_b"), None);
+
+        // Outside all windows: nothing renders.
+        let none = router.sample(MediaTime::from_nanos(9_000));
+        assert!(none.is_empty());
+    }
+
+    /// RT-10b: re-pointing the `cam_a` layer to `cam_b`'s store makes the layer
+    /// render `cam_b`'s cues on the NEXT sample — the subtitle breakaway is
+    /// effective through the run's sampling path. The seam clears the old cue
+    /// (CLEAR-on-switch) so no stale `cam_a` cue flashes at the boundary.
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn repointing_a_layer_renders_the_new_source_on_the_next_sample() {
+        let a = text_store(0, 100_000, "alpha-wide");
+        let b = text_store(2_000, 6_000, "bravo");
+        let mut router = SubtitleRouter::from_stores([
+            ("cam_a".to_owned(), Arc::clone(&a)),
+            ("cam_b".to_owned(), Arc::clone(&b)),
+        ]);
+
+        // Steady: cam_a shows its wide cue.
+        let before = router.sample(MediaTime::from_nanos(1_000));
+        assert_eq!(before.get("cam_a"), Some(&vec!["alpha-wide".to_owned()]));
+
+        // BREAKAWAY: route the cam_a layer to cam_b's cue source.
+        router.repoint("cam_a", "cam_b");
+
+        // Seam at t=1500 (inside cam_a's wide cue, before cam_b's window): the old
+        // wide cam_a cue must NOT flash — the layer now reads cam_b (no cue yet) and
+        // clears. cam_b's own layer is unaffected (also no cue yet here).
+        let seam = router.sample(MediaTime::from_nanos(1_500));
+        assert_eq!(
+            seam.get("cam_a"),
+            None,
+            "CLEAR-on-switch: the stale cam_a cue must not flash at the seam"
+        );
+
+        // Past the seam, inside cam_b's window: the cam_a layer now renders cam_b's
+        // cue — the breakaway is live.
+        let after = router.sample(MediaTime::from_nanos(3_000));
+        assert_eq!(
+            after.get("cam_a"),
+            Some(&vec!["bravo".to_owned()]),
+            "after the breakaway the cam_a layer must render cam_b's cues"
+        );
+        // cam_b's own layer still renders cam_b too (independent layers).
+        assert_eq!(after.get("cam_b"), Some(&vec!["bravo".to_owned()]));
+    }
+
+    /// RT-10b: a re-point requested OFF-THREAD through the wait-free
+    /// [`SubtitleRouteHandle`] (the `RouteSubtitle` seam) is applied at the next
+    /// `sample` boundary — so the run's sampling path honours a control-plane
+    /// breakaway without the control plane ever touching the hot-loop-owned router.
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn handle_request_repoint_takes_effect_on_the_next_sample() {
+        let a = text_store(0, 100_000, "alpha-wide");
+        let b = text_store(2_000, 6_000, "bravo");
+        let mut router = SubtitleRouter::from_stores([
+            ("cam_a".to_owned(), Arc::clone(&a)),
+            ("cam_b".to_owned(), Arc::clone(&b)),
+        ]);
+        let handle = router.handle();
+
+        // Steady: cam_a shows its own cue.
+        assert_eq!(
+            router.sample(MediaTime::from_nanos(1_000)).get("cam_a"),
+            Some(&vec!["alpha-wide".to_owned()])
+        );
+
+        // The control plane (here, this thread via the shared handle) requests the
+        // breakaway. The router has NOT been told directly.
+        handle.request_repoint("cam_a", "cam_b");
+
+        // The very next sample drains + applies the pending request: the seam clears
+        // the stale cam_a cue (CLEAR-on-switch), then cam_a's layer reads cam_b.
+        let seam = router.sample(MediaTime::from_nanos(1_500));
+        assert_eq!(
+            seam.get("cam_a"),
+            None,
+            "the pending handle re-point must apply at the next sample (seam clears)"
+        );
+        let after = router.sample(MediaTime::from_nanos(3_000));
+        assert_eq!(
+            after.get("cam_a"),
+            Some(&vec!["bravo".to_owned()]),
+            "after the handle re-point the cam_a layer must render cam_b's cues"
+        );
+    }
+
+    /// RT-10b: the wait-free pending slot is bounded drop-oldest (safety rule §5) —
+    /// a storm of re-point requests never grows unbounded, and the NEWEST binding
+    /// for a layer is the one that takes effect.
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn handle_repoint_backlog_is_bounded_and_newest_wins() {
+        let a = text_store(0, 100_000, "alpha");
+        let b = text_store(0, 100_000, "bravo");
+        let c = text_store(0, 100_000, "charlie");
+        let mut router = SubtitleRouter::from_stores([
+            ("cam_a".to_owned(), Arc::clone(&a)),
+            ("cam_b".to_owned(), Arc::clone(&b)),
+            ("cam_c".to_owned(), Arc::clone(&c)),
+        ]);
+        let handle = router.handle();
+
+        // Storm far past the backlog cap, ending on the binding the operator wants.
+        for _ in 0..(MAX_SUBTITLE_REPOINT_BACKLOG * 3) {
+            handle.request_repoint("cam_a", "cam_b");
+        }
+        handle.request_repoint("cam_a", "cam_c"); // the last request wins
+
+        let after = router.sample(MediaTime::from_nanos(1_000));
+        assert_eq!(
+            after.get("cam_a"),
+            Some(&vec!["charlie".to_owned()]),
+            "the newest re-point (cam_c) must be the one in effect after the storm"
+        );
     }
 }
