@@ -97,7 +97,7 @@ RUN apt-get update \
  && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu noble main" \
       > /etc/apt/sources.list.d/jellyfin.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 \
+ && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 libvulkan1 \
  && test -e /usr/lib/jellyfin-ffmpeg/lib/libavcodec.so.61 \
  && apt-get purge -y curl gnupg \
  && apt-get autoremove -y \
@@ -108,8 +108,16 @@ RUN apt-get update \
 # system CUDA/Vulkan libs the compositor needs are still found.
 ENV LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib
 
-# Make CUDA expose the video (NVENC/NVDEC) capability in addition to compute.
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+# Driver capabilities the container needs from the NVIDIA Container Toolkit:
+#  - compute  → CUDA (NVDEC/NVENC compute side)
+#  - video    → NVENC/NVDEC
+#  - utility  → nvidia-smi / NVML (the per-process monitor)
+#  - graphics → the GPU's Vulkan/GL stack — REQUIRED for the wgpu compositor.
+# Without `graphics` the toolkit doesn't mount the Vulkan ICD, so wgpu finds no
+# adapter and the GPU compositor SILENTLY falls back to CPU (5+ cores at 4K). The
+# `graphics` cap mounts nvidia_icd.json + libGLX/EGL_nvidia; `libvulkan1` (the
+# Vulkan loader, installed above) then resolves the ICD so wgpu sees the GPU.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
 ENV NVIDIA_VISIBLE_DEVICES=all
 
 RUN groupadd --gid 10001 multiview \

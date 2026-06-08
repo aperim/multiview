@@ -16,8 +16,11 @@ services:
     devices:
       - "nvidia.com/gpu=all"
     environment:
-      # NVENC/NVDEC need the `video` capability in addition to compute.
-      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+      # compute=CUDA, video=NVENC/NVDEC, utility=NVML/nvidia-smi, graphics=Vulkan/GL.
+      # `graphics` is REQUIRED for the wgpu GPU compositor — without it the toolkit
+      # won't mount the Vulkan ICD, wgpu finds no adapter, and compositing silently
+      # falls back to CPU (5+ cores at 4K). Pairs with `libvulkan1` in the image.
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       NVIDIA_VISIBLE_DEVICES: all
     # ---------------------------------------------------------------------------
     # Per-process GPU attribution ("ours vs total" in the System monitor):
