@@ -27,18 +27,32 @@
 //!
 //! The whole anti-flood policy — the level mapping, the suppressor, and the
 //! rendered-line sanitiser — is **pure** and native-dep-free, so it is always
-//! compiled and unit-tested without libav. Only the `av_log_set_callback`
-//! installation and the `extern "C"` trampoline that renders a libav
-//! `va_list` into a bounded buffer live behind the `ffmpeg` feature.
+//! compiled and unit-tested without libav. Behind the `ffmpeg` feature live two
+//! pieces that touch libav: a tiny **C shim** (`csrc/log_shim.c`, compiled by
+//! `build.rs`) that owns the libav `va_list` and renders each line into a bounded
+//! buffer via `av_log_format_line2`, and the Rust `multiview_log_emit` callback
+//! the shim hands the already-formatted line to (it reads the component name,
+//! runs the suppressor, and emits via `tracing`).
+//!
+//! ## Why the rendering is in C (ABI safety)
+//!
+//! libav's log callback takes a `va_list`. There is no stable Rust `VaList` in
+//! function-parameter position, and `ffmpeg-sys-next`'s bindgen spells the type
+//! in two incompatible shapes per host libclang (an array-by-value here, a
+//! decayed `*mut __va_list_tag` on x86-64 trixie). A Rust trampoline that
+//! receives the `va_list` is therefore unsound at runtime on at least one arch —
+//! it SIGSEGV'd the decode thread on x86-64. C handles `va_list` ABI-correctly on
+//! every architecture by construction, so the rendering is done entirely in the C
+//! shim and Rust never touches the `va_list`.
 //!
 //! ## FFI safety (CLAUDE.md §7)
 //!
-//! The installed callback runs on **foreign/decoder threads**. It therefore:
+//! `multiview_log_emit` runs on **foreign/decoder threads**. It therefore:
 //! * never lets a Rust panic unwind across the FFI boundary — the entire Rust
 //!   body runs inside [`std::panic::catch_unwind`] and any caught panic is
 //!   dropped silently (a logging callback must never crash the decoder);
-//! * does no per-call heap allocation on the rendering path — the libav line is
-//!   rendered into a fixed stack buffer via `av_log_format_line2`;
+//! * does no per-call heap allocation on the render path — the line is rendered
+//!   into a fixed C stack buffer via `av_log_format_line2` before Rust sees it;
 //! * holds the suppressor [`std::sync::Mutex`] only for the O(small-cap) lookup,
 //!   never across the (cheap) `tracing` emit and never blocking.
 
@@ -298,19 +312,44 @@ pub use ffi::install;
 
 #[cfg(feature = "ffmpeg")]
 mod ffi {
-    //! The `av_log_set_callback` installation and the `extern "C"` trampoline.
+    //! The `av_log_set_callback` installation and the `multiview_log_emit`
+    //! callback that the **C shim** (`csrc/log_shim.c`) calls back into.
     //!
-    //! This is the only part of the bridge that touches libav. It renders the
-    //! incoming `va_list` into a bounded stack buffer via `av_log_format_line2`
-    //! (no per-call heap alloc on the render path), reads the component class
-    //! name from the libav object's leading `AVClass*`, runs the pure
-    //! suppressor, and emits via `tracing` — the whole body inside
-    //! `catch_unwind` so a Rust panic can never unwind across the FFI boundary.
+    //! ## Why a C shim owns the `va_list`
+    //!
+    //! libav's log callback is `void (*)(void*, int, const char*, va_list)`. The
+    //! `va_list` parameter is fundamentally unsound to receive in **stable Rust**
+    //! in function-parameter position: there is no stable `core::ffi::VaList` in
+    //! that position, and `ffmpeg-sys-next`'s bindgen spells the type in two
+    //! mutually-incompatible shapes per host libclang — an *array by value*
+    //! (`[u64; 4]` / `[__va_list_tag; 1]`) on this container, but a *decayed
+    //! pointer* (`*mut __va_list_tag`) on x86-64 Debian-trixie libclang. The old
+    //! Rust trampoline declared the parameter via the array alias and registered
+    //! through a fn-pointer `transmute`; that **compiled** on both renderings but
+    //! the **runtime ABI was wrong on x86-64 `SysV`**: libav passes `va_list` as a
+    //! single decayed `__va_list_tag*` (one register), while the array-by-value
+    //! body expected a 24-byte aggregate — so it read garbage, handed a bogus
+    //! pointer to `av_log_format_line2`, and SIGSEGV'd the decode thread the
+    //! moment libav emitted any log line.
+    //!
+    //! C handles `va_list` natively and ABI-correctly on **every** architecture
+    //! (x86-64 `SysV` and arm64 AAPCS): the compiler emits exactly the ABI the
+    //! callback type promises. So the rendering moves wholesale to
+    //! `multiview_av_log_trampoline` in `csrc/log_shim.c`, which owns the
+    //! `va_list` end to end, renders the line via `av_log_format_line2` into a
+    //! bounded stack buffer, and calls back into [`multiview_log_emit`] with the
+    //! already-formatted line. **Rust never touches the `va_list`.**
+    //!
+    //! [`multiview_log_emit`] then does exactly what the old Rust trampoline did
+    //! *after* rendering — read the component class name from the leading
+    //! `AVClass*`, run the pure bounded suppressor, and emit via `tracing` — the
+    //! whole body inside `catch_unwind` so a Rust panic can never unwind across
+    //! the FFI boundary (CLAUDE.md §7).
 
-    // reason: this module installs a raw libav `extern "C"` callback and reads a
-    // libav object's leading `AVClass*` pointer — raw FFI the crate's
-    // `unsafe_code = "deny"` posture allows here (CLAUDE.md §7), every block with
-    // a `// SAFETY:` note.
+    // reason: this module installs a raw libav `extern "C"` callback (defined in
+    // the C shim) and reads a libav object's leading `AVClass*` pointer — raw FFI
+    // the crate's `unsafe_code = "deny"` posture allows here (CLAUDE.md §7), every
+    // block with a `// SAFETY:` note.
     #![allow(unsafe_code)]
 
     use std::ffi::CStr;
@@ -325,73 +364,60 @@ mod ffi {
         map_av_level, sanitize_line, BridgeLevel, SuppressOutcome, Suppressor, MAX_LINE_LEN,
     };
 
-    /// The libav log-callback signature **as this crate declares the trampoline**,
-    /// spelling the `va_list` parameter via the binding's own [`ffi::va_list`]
-    /// alias (never the rendering-specific `__va_list_tag` form).
-    ///
-    /// ## Why an alias + `transmute` at the boundary (portability)
-    ///
-    /// `ffmpeg-sys-next`'s bindgen renders the libav `va_list` argument in **two
-    /// different shapes depending on the host libclang/bindgen version**, and the
-    /// two shapes are *not the same Rust type*:
-    ///
-    /// * On this dev container (and any toolchain that keeps the array form) every
-    ///   libav function — `av_log_set_callback`'s callback parameter **and**
-    ///   `av_log_format_line2`'s `vl` parameter — uses the [`ffi::va_list`] alias
-    ///   directly (e.g. `[__va_list_tag; 1]` or `__BindgenOpaqueArray<u64, 4>`).
-    /// * On Debian-trixie libclang, bindgen *decays* the `va_list` array in
-    ///   function-parameter position to `*mut __va_list_tag`, so those same two
-    ///   parameters are raw pointers — while the standalone `ffi::va_list` **alias**
-    ///   still resolves to the array. The decayed `__va_list_tag` type is also
-    ///   **absent** as a nameable type on the array-rendering toolchains, so it
-    ///   cannot be written portably.
-    ///
-    /// The trampoline therefore declares its `va_list` parameter as the portable
-    /// [`ffi::va_list`] alias and bridges to the binding's actual parameter type
-    /// with a function-pointer [`std::mem::transmute`] at exactly two boundaries
-    /// (registration below; the `av_log_format_line2` call in the trampoline). The
-    /// transmute is **ABI-identity**, not a reinterpretation of differently-shaped
-    /// values: the libav callback's C parameter is `va_list` (`__va_list_tag[1]`),
-    /// which under C array-parameter decay is *always* passed as a single
-    /// `__va_list_tag*` pointer in one argument register. Both bindgen shapes model
-    /// that one fixed C ABI — `extern "C" fn(.., *mut __va_list_tag)` and
-    /// `extern "C" fn(.., va_list)` (single-element array by value) lower to the
-    /// identical calling convention for that argument. On the array-rendering
-    /// toolchains the two fn-pointer types are literally equal, so the transmute is
-    /// the identity. The conversion is thus zero-cost and sound on every rendering.
-    type LogCallback = unsafe extern "C" fn(*mut c_void, c_int, *const c_char, ffi::va_list);
+    extern "C" {
+        /// The C log-callback shim (`csrc/log_shim.c`), compiled and linked by
+        /// `build.rs` under the `ffmpeg` feature. It has the exact libav callback
+        /// ABI — `void (*)(void*, int, const char*, va_list)` — and owns the
+        /// `va_list`: it renders the line with `av_log_format_line2` and calls
+        /// [`multiview_log_emit`]. The `va_list` parameter is spelled with the
+        /// binding's own [`ffi::va_list`] alias (see [`LogCallback`] for how the
+        /// fn pointer is reconciled with `av_log_set_callback`'s parameter type
+        /// across the two bindgen renderings).
+        ///
+        /// This is declared but **never called from Rust** — its function pointer
+        /// is handed straight to `av_log_set_callback`, and libav invokes it from
+        /// C with a genuine `va_list`.
+        fn multiview_av_log_trampoline(
+            avcl: *mut c_void,
+            level: c_int,
+            fmt: *const c_char,
+            vl: ffi::va_list,
+        );
+    }
 
-    /// `av_log_format_line2`'s signature spelled with the portable [`ffi::va_list`]
-    /// alias for its `vl` argument (same ABI-identity rationale as [`LogCallback`]).
-    /// The trampoline transmutes the real `ffi::av_log_format_line2` to this type so
-    /// the call type-checks whether bindgen kept the alias or decayed it to a
-    /// pointer, and passes the trampoline's `va_list` straight through.
-    type AvLogFormatLine2 = unsafe extern "C" fn(
-        *mut c_void,
-        c_int,
-        *const c_char,
-        ffi::va_list,
-        *mut c_char,
-        c_int,
-        *mut c_int,
-    ) -> c_int;
+    /// The libav log-callback fn-pointer type, spelled with the binding's own
+    /// [`ffi::va_list`] alias.
+    ///
+    /// `ffmpeg-sys-next`'s bindgen renders `av_log_set_callback`'s callback
+    /// parameter in two shapes per host libclang: the [`ffi::va_list`] alias
+    /// (array form) on this container, but a decayed `*mut __va_list_tag` on
+    /// x86-64 Debian-trixie. The *standalone* alias `ffi::va_list` keeps resolving
+    /// to the array on both. So a fn pointer typed with the alias matches
+    /// `av_log_set_callback`'s parameter directly on the array rendering, and a
+    /// single fn-pointer `transmute` (below) reconciles it on the decayed
+    /// rendering — an ABI-identity bridge between two one-machine-word fn-pointer
+    /// types, not a reinterpretation of values. Critically, unlike the old design
+    /// this is the only place the alias is used: the *function it points at* is the
+    /// C shim, which receives the real `va_list` in C with the correct ABI, so the
+    /// runtime is correct on every architecture regardless of how Rust spells the
+    /// pointer's type here.
+    type LogCallback = unsafe extern "C" fn(*mut c_void, c_int, *const c_char, ffi::va_list);
 
     /// Suppression window: identical repeats within this span are coalesced.
     const SUPPRESS_WINDOW: Duration = Duration::from_secs(5);
     /// Bounded LRU capacity: distinct recent `(level, message)` keys retained.
     const SUPPRESS_CAPACITY: usize = 256;
 
-    /// Render-buffer length in bytes: [`MAX_LINE_LEN`] payload plus the NUL.
+    /// The C shim's render-buffer payload length plus the NUL, as a single source
+    /// of truth on the Rust side. The C shim hard-codes `MULTIVIEW_LOG_LINE_BUF_LEN
+    /// = 1025` (= [`MAX_LINE_LEN`] + 1); this compile-time assertion fails the
+    /// build if [`MAX_LINE_LEN`] is ever changed without updating the C constant in
+    /// `csrc/log_shim.c` to match — keeping the two ends in lock-step.
     const LINE_BUF_LEN: usize = MAX_LINE_LEN + 1;
-    /// The same length the `c_int` parameter of `av_log_format_line2` expects.
-    /// Defined as a literal `c_int` so the `usize → c_int` narrowing is a
-    /// compile-time constant (no runtime `as`); the `const` assertion below binds
-    /// it to [`LINE_BUF_LEN`], so the build fails if `MAX_LINE_LEN` ever changes
-    /// without updating this literal too.
-    const LINE_BUF_LEN_C: c_int = 1025;
     const _: () = assert!(
         LINE_BUF_LEN == 1025,
-        "LINE_BUF_LEN_C literal must be kept equal to LINE_BUF_LEN (MAX_LINE_LEN + 1)"
+        "csrc/log_shim.c MULTIVIEW_LOG_LINE_BUF_LEN (1025) must equal MAX_LINE_LEN + 1; \
+         update the C constant if MAX_LINE_LEN changes"
     );
 
     /// Process-global suppressor shared by every decoder thread. A `Mutex` over a
@@ -422,35 +448,38 @@ mod ffi {
             // Initialise the shared state before the callback can fire.
             let _ = suppressor();
             let _ = origin();
-            // `log_trampoline` declares its `va_list` parameter via the portable
-            // `ffi::va_list` alias (see `LogCallback`). On toolchains where bindgen
-            // decays that parameter to `*mut __va_list_tag` in `av_log_set_callback`'s
-            // own callback type, the alias-typed fn pointer is not *spelled* the same
-            // even though it has the identical ABI, so a `transmute` bridges the two.
-            let trampoline: LogCallback = log_trampoline;
+            // The C shim's fn pointer, typed via the portable `ffi::va_list` alias
+            // (see `LogCallback`). On the array-rendering toolchain this *is*
+            // `av_log_set_callback`'s parameter type; on the decayed x86-64
+            // rendering the transmute below reconciles the two ABI-identical
+            // fn-pointer types.
+            let trampoline: LogCallback = multiview_av_log_trampoline;
             // reason(allow): on bindgen renderings that keep the `ffi::va_list`
             // alias in `av_log_set_callback`'s callback parameter, `LogCallback`
             // *is* that exact type, so the transmute is the identity and clippy
-            // flags it as `useless_transmute`. It is **load-bearing on the decayed
-            // rendering** (Debian-trixie libclang), where the binding's callback
-            // parameter is `*mut __va_list_tag` and `LogCallback` is the array
-            // alias: the transmute reconciles the two ABI-identical fn-pointer
-            // types there (see `LogCallback`). The lint cannot see the other
-            // rendering, so the allow is required and correct.
+            // flags it `useless_transmute`. It is **load-bearing on the decayed
+            // x86-64 rendering**, where the binding's callback parameter is
+            // `*mut __va_list_tag` and `LogCallback` is the array alias: the
+            // transmute reconciles the two ABI-identical fn-pointer types there.
+            // The lint cannot see the other rendering, so the allow is required.
             #[allow(clippy::useless_transmute)]
-            // SAFETY: `LogCallback` and the bindings' `av_log_set_callback` callback
-            // type differ only in how bindgen *spells* the `va_list` parameter
-            // (`ffi::va_list` array vs decayed `*mut __va_list_tag`); both are the
-            // same `extern "C"` calling convention for that argument (a single
-            // pointer to the `__va_list_tag` array — see `LogCallback`). Function
-            // pointers are one machine word; this reinterprets the pointer's *type*,
-            // not its bits. `av_log_set_callback` then stores it in a global and
-            // invokes it (with libav-valid arguments) for every libav log line, on
-            // any thread; `log_trampoline` owns no captured state. Passing `Some`
-            // replaces libav's default stderr writer.
+            // SAFETY: this transmutes ONE fn pointer to another. The two types
+            // differ only in how bindgen *spells* the `va_list` parameter
+            // (`ffi::va_list` array alias vs the decayed `*mut __va_list_tag`);
+            // both are a single machine word and the same `extern "C"` calling
+            // convention for that argument. Crucially the pointer's *callee* is the
+            // C shim `multiview_av_log_trampoline`, which receives the real
+            // `va_list` in C with the correct ABI on every architecture — so this
+            // only reconciles Rust's type-checker, never the runtime ABI (that is
+            // exactly why the rendering lives in C and not in a Rust trampoline).
+            // `av_log_set_callback` stores the pointer in a libav global and invokes
+            // it (from C, with a genuine `va_list`) for every log line on any
+            // thread; the shim owns no captured state. `Some` replaces libav's
+            // default stderr writer.
             let callback = unsafe { std::mem::transmute::<LogCallback, _>(trampoline) };
-            // SAFETY: see above — `callback` is the ABI-correct, bindgen-typed
-            // libav log callback. Installing it is libav's documented mechanism.
+            // SAFETY: `callback` is the ABI-correct, bindgen-typed libav log
+            // callback (the C shim's pointer). Installing it is libav's documented
+            // mechanism for replacing the log writer.
             unsafe {
                 ffi::av_log_set_callback(Some(callback));
             }
@@ -563,100 +592,46 @@ mod ffi {
         }
     }
 
-    /// The `extern "C"` callback libav invokes for every log line, on whatever
-    /// (foreign/decoder) thread produced it.
+    /// The Rust callback the **C shim** (`csrc/log_shim.c`) invokes after it has
+    /// rendered a libav log line, on whatever (foreign/decoder) thread produced it.
     ///
-    /// It renders the `va_list` into a fixed stack buffer with
-    /// `av_log_format_line2` (no heap alloc on the render path), reads the
-    /// component name from the leading `AVClass*`, and hands both to the pure
-    /// router. The entire Rust body runs inside `catch_unwind`: a logging
-    /// callback must never crash the decoder, so any panic is caught and the line
-    /// is dropped (CLAUDE.md §7 — never unwind across the FFI boundary).
-    extern "C" fn log_trampoline(
+    /// The `va_list` has already been consumed in C; this receives the libav
+    /// object pointer (`avcl`, for component-name extraction; may be null), the
+    /// libav `level`, and the already-formatted, NUL-terminated `line`. It reads
+    /// the component name from the leading `AVClass*` and hands both to the pure
+    /// router (the bounded suppressor + `tracing` emit).
+    ///
+    /// The entire Rust body runs inside `catch_unwind`: a logging callback must
+    /// never crash the decoder, so any panic is caught and the line is dropped
+    /// (CLAUDE.md §7 — never unwind across the FFI boundary). A null `line` is
+    /// tolerated (treated as nothing to emit) even though the shim never passes
+    /// one.
+    ///
+    /// `#[no_mangle]` so the C shim can resolve the symbol by name (the linker
+    /// exports it regardless of Rust visibility); `extern "C"` so it has the C ABI
+    /// the shim's `extern` declaration expects. Kept `pub(crate)` — it is part of
+    /// the crate-private FFI seam, not a public API, and `#[no_mangle]` handles the
+    /// C-side reachability.
+    #[no_mangle]
+    pub(crate) extern "C" fn multiview_log_emit(
         avcl: *mut c_void,
         level: c_int,
-        fmt: *const c_char,
-        vl: ffi::va_list,
+        line: *const c_char,
     ) {
         // `catch_unwind` requires `UnwindSafe`; the raw pointers/level are plain
         // `Copy` scalars with no interior invariants to break on a caught unwind.
         let result = std::panic::catch_unwind(move || {
-            // A null format string carries no message — nothing to render.
-            if fmt.is_null() {
+            // A null line carries no message (defensive — the shim always passes a
+            // valid pointer to its NUL-terminated stack buffer).
+            if line.is_null() {
                 return;
             }
-
-            // Render the line into a bounded stack buffer. `+1` for the NUL.
-            // `c_char` is `i8` on x86_64 and `u8` on aarch64; the literal `0`
-            // initialises either without an `as` cast (annotated element type).
-            let mut line_buf: [c_char; LINE_BUF_LEN] = [0; LINE_BUF_LEN];
-            let mut print_prefix: c_int = 1;
-            // Bridge to `av_log_format_line2` through the portable
-            // `AvLogFormatLine2` alias (spelled with `ffi::va_list`). On bindgen
-            // renderings that decay the `vl` parameter to `*mut __va_list_tag`,
-            // the real function is not *spelled* with `ffi::va_list`, so a
-            // fn-pointer transmute bridges the two ABI-identical types (see
-            // `LogCallback`); on the array-rendering toolchains it is the identity.
-            // Coerce the libav fn *item* to a fn *pointer* of its own
-            // (bindgen-chosen) type, leaving the `va_list` parameter position as an
-            // inferred `_` so this names neither `ffi::va_list` nor the decayed
-            // `*mut __va_list_tag` — it compiles whichever shape bindgen emitted.
-            // (Transmuting the fn *item* directly is rejected as a zero-sized type;
-            // this `let` coercion materialises the real fn pointer without an `as`
-            // cast.) The pointer is then transmuted to the alias-spelled
-            // `AvLogFormatLine2` so the call below type-checks on both renderings.
-            let native_format_line: unsafe extern "C" fn(
-                *mut c_void,
-                c_int,
-                *const c_char,
-                _,
-                *mut c_char,
-                c_int,
-                *mut c_int,
-            ) -> c_int = ffi::av_log_format_line2;
-            // reason(allow): on renderings that keep the `ffi::va_list` alias in
-            // `av_log_format_line2`'s `vl` parameter, `native_format_line` already
-            // *is* `AvLogFormatLine2` and the transmute is the identity, which
-            // clippy flags as `useless_transmute`. It is load-bearing on the decayed
-            // rendering (the inferred `_` resolves to `*mut __va_list_tag` there);
-            // see `LogCallback` for the ABI-identity argument.
-            #[allow(clippy::useless_transmute)]
-            // SAFETY: `native_format_line` (the real `av_log_format_line2`, with its
-            // `vl` parameter as bindgen rendered it) and `AvLogFormatLine2` differ
-            // only in how that one parameter is spelled (`ffi::va_list` array vs a
-            // decayed `*mut __va_list_tag`); both share the single C `va_list`
-            // calling convention (one `__va_list_tag*` — see `LogCallback`), so
-            // reinterpreting the fn pointer is sound. Function pointers are one
-            // machine word; this casts the pointer's type, not its address.
-            let format_line: AvLogFormatLine2 = unsafe { std::mem::transmute(native_format_line) };
-            // SAFETY: `format_line` is the ABI-correct `av_log_format_line2`. It
-            // formats `fmt` + `vl` for the libav object `avcl` into `line_buf` of
-            // `LINE_BUF_LEN` bytes (passed as `LINE_BUF_LEN_C`, a compile-time-checked
-            // `c_int`), writing a NUL-terminated, length-bounded string and consuming
-            // `vl` exactly once. `avcl`/`fmt`/`vl` are the libav-provided callback
-            // arguments (valid for the call); `line_buf`/`print_prefix` are live
-            // stack locals; `&raw mut print_prefix` yields a valid out-pointer for
-            // the `int*` parameter. The returned length is ignored — we re-scan for
-            // the NUL via `CStr` to stay independent of libav's truncation.
-            let _written = unsafe {
-                format_line(
-                    avcl,
-                    level,
-                    fmt,
-                    vl,
-                    line_buf.as_mut_ptr(),
-                    LINE_BUF_LEN_C,
-                    &raw mut print_prefix,
-                )
-            };
-            // Force NUL-termination defensively before reading as a C string.
-            if let Some(last) = line_buf.last_mut() {
-                *last = 0;
-            }
-            // SAFETY: `line_buf` is a live, NUL-terminated (guaranteed above)
-            // stack buffer of `c_char`; reading up to the NUL via `CStr` is
-            // sound. The borrow does not escape this scope.
-            let line_cstr = unsafe { CStr::from_ptr(line_buf.as_ptr()) };
+            // SAFETY: per the shim's contract `line` points at a live,
+            // NUL-terminated C string (the shim's stack buffer) for the duration
+            // of this call; it is non-null (checked above). `CStr::from_ptr` only
+            // requires a valid NUL-terminated string and the borrow does not
+            // escape this scope.
+            let line_cstr = unsafe { CStr::from_ptr(line) };
             let line = line_cstr.to_string_lossy();
 
             // Read the component (`AVClass::class_name`) into a stack buffer.

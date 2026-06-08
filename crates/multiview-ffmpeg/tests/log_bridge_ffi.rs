@@ -164,3 +164,52 @@ fn empty_and_percent_lines_do_not_crash_the_trampoline() {
         av_log_line(multiview_ffmpeg::AV_LOG_DEBUG, "   ");
     });
 }
+
+#[test]
+fn varargs_are_expanded_by_the_c_shim_va_list_path() {
+    // This is the direct regression test for the x86-64 ingest-thread SIGSEGV.
+    // libav emits real log lines with `va_list` varargs (e.g. counts, sizes,
+    // addresses). The old Rust trampoline received the `va_list` *by value* and
+    // read garbage on x86-64 SysV — handing a bogus pointer to
+    // `av_log_format_line2`, which dereferenced null and crashed the decode
+    // thread. With rendering moved into the C shim (which owns the `va_list`
+    // ABI-correctly), a `%d`/`%s` line is expanded and routed intact. We assert
+    // the *expanded* text (not the format string) reaches tracing — proving the
+    // shim consumed the varargs correctly rather than crashing or mis-reading.
+    multiview_ffmpeg::install_log_bridge();
+
+    let layer = CountingLayer::default();
+    let last = Arc::clone(&layer.last_message);
+    let subscriber = tracing_subscriber::registry().with(layer);
+
+    with_default(subscriber, || {
+        // A unique sentinel so this is independent of the process-global
+        // suppressor's prior state, plus two real varargs: an int and a string.
+        let fmt = CString::new("multiview shim vararg sentinel n=%d tag=%s").expect("no NUL");
+        let tag = CString::new("RPS").expect("no NUL");
+        // SAFETY: `av_log` takes a NUL-terminated printf format and matching
+        // varargs. `fmt` has exactly one `%d` (matched by the `7` int) and one
+        // `%s` (matched by `tag.as_ptr()`, a valid C string outliving the call);
+        // a null `avcl` is an explicitly allowed context-free log line.
+        unsafe {
+            ffi::av_log(
+                std::ptr::null_mut(),
+                multiview_ffmpeg::AV_LOG_WARNING,
+                fmt.as_ptr(),
+                7,
+                tag.as_ptr(),
+            );
+        }
+
+        let seen = last.lock().expect("last-message lock").clone();
+        // The expanded values must be present — the C shim consumed the va_list.
+        assert!(
+            seen.contains("n=7"),
+            "the int vararg was not expanded by the C shim, got {seen:?}"
+        );
+        assert!(
+            seen.contains("tag=RPS"),
+            "the string vararg was not expanded by the C shim, got {seen:?}"
+        );
+    });
+}
