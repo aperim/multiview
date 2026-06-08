@@ -101,17 +101,39 @@ fn repoint_swaps_an_existing_points_store_replace_not_append() {
 
     let before = bus.tick();
     assert!(
-        before.interleaved().iter().all(|&s| (s - 0.25).abs() < 1e-6),
+        before
+            .interleaved()
+            .iter()
+            .all(|&s| (s - 0.25).abs() < 1e-6),
         "store A (+0.25) must be on the bus before the repoint"
     );
 
-    // Repoint the SAME point onto store B.
+    // Record store A's read cursor before the repoint. The first tick advanced
+    // it by one tick's budget (1920); after the repoint A is DETACHED and must
+    // never be read again (replace, not append-leaving-a-duplicate).
+    let a_cursor_before = store_a.read_cursor();
+    assert_eq!(a_cursor_before, 1920, "the first tick read A once");
+
+    // Repoint the SAME point onto store B. This seeks B to its live edge
+    // (frame 4800, its current head); a live source then keeps publishing past
+    // the edge, so the next read returns B's fresh audio (replace), never A.
     bus.repoint(point, Arc::clone(&store_b)).unwrap();
+    store_b
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.75f32; 1920 * 2]).unwrap())
+        .unwrap();
 
     let after = bus.tick();
     assert!(
         after.interleaved().iter().all(|&s| (s - 0.75).abs() < 1e-6),
         "after repoint the SAME point must read store B (+0.75), replacing A"
+    );
+    // Replace, not append: the detached store A must NOT be pulled on the
+    // post-repoint tick — its cursor stays put. An append that left A in the
+    // route list would advance A's cursor again here.
+    assert_eq!(
+        store_a.read_cursor(),
+        a_cursor_before,
+        "after repoint, the replaced store A must be detached (never read again)"
     );
 }
 

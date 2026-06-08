@@ -197,9 +197,17 @@ fn read_cursor_is_absolute_and_advances_by_frames_read() {
     let store = AudioStore::new(stereo(), 48_000);
     assert_eq!(store.read_cursor(), 0, "a fresh store starts at frame 0");
     let _ = store.read(100);
-    assert_eq!(store.read_cursor(), 100, "read(100) advances the cursor by 100");
+    assert_eq!(
+        store.read_cursor(),
+        100,
+        "read(100) advances the cursor by 100"
+    );
     let _ = store.read(57);
-    assert_eq!(store.read_cursor(), 157, "read(57) advances the cursor by 57");
+    assert_eq!(
+        store.read_cursor(),
+        157,
+        "read(57) advances the cursor by 57"
+    );
 }
 
 /// `seek_to` sets the absolute read position; the next read starts there.
@@ -242,7 +250,7 @@ fn seek_to_live_edge_parks_at_the_write_head() {
     store.seek_to_live_edge();
     assert_eq!(
         store.read_cursor(),
-        total as i64,
+        i64::try_from(total).unwrap(),
         "seek_to_live_edge must park the cursor at the write head (frame {total})"
     );
 }

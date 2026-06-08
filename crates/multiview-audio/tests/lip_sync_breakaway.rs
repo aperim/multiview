@@ -24,8 +24,14 @@
     clippy::indexing_slicing
 )]
 // reason: test-only exact float comparisons on integer-valued ramps and
-// loss-free index<->float casts on small bounded ranges.
-#![allow(clippy::as_conversions, clippy::cast_precision_loss, clippy::float_cmp)]
+// loss-free index<->float casts on small bounded ranges; `doc_markdown` relaxed
+// for the prose constant names in test-helper doc comments.
+#![allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    clippy::doc_markdown
+)]
 
 use std::sync::Arc;
 
@@ -151,9 +157,11 @@ fn breakaway_under_overload_is_drift_free_and_sample_aligned() {
     let point = bus.add_source("prog", Arc::clone(&store_a), 1.0);
 
     // Source B: a warm breakaway target carrying a constant +0.75 tone. It has
-    // been buffering for a long time (drop-oldest), so its base_frame is far
-    // ahead and a frame-0 cursor would read evicted silence climbing up.
-    let store_b = Arc::new(AudioStore::new(fmt, 4_000));
+    // been buffering for a long time (drop-oldest), so its write head is far
+    // ahead of frame 0 — a fresh frame-0 cursor would read evicted silence
+    // climbing up. Capacity comfortably exceeds the largest single catch-up read
+    // below, so the live tail is always within the surviving window.
+    let store_b = Arc::new(AudioStore::new(fmt, 48_000));
     let mut written = 0usize;
     while written < 40_000 {
         store_b
@@ -162,10 +170,10 @@ fn breakaway_under_overload_is_drift_free_and_sample_aligned() {
         written += 2_000;
     }
 
-    // Drive a gappy tick sequence (overload drops). Confirm A is on the bus and
-    // there is no drift up to the breakaway tick.
+    // Drive a gappy tick sequence (DropOnOverload drops several ticks at a time).
+    // Confirm A is on the bus and there is no drift up to the breakaway tick.
     let mut cumulative = 0u64;
-    for &t in &[1u64, 3, 7, 20, 100] {
+    for &t in &[1u64, 2, 4, 7, 8, 12, 20] {
         let block = bus.tick_to(t);
         cumulative += u64::try_from(block.frame_count()).unwrap();
         assert_eq!(
@@ -179,20 +187,28 @@ fn breakaway_under_overload_is_drift_free_and_sample_aligned() {
         );
     }
 
-    // BREAKAWAY: repoint the SAME route point onto the warm store B. This must
-    // seek B to its live edge so the seam reads B's live tone, not silence /
-    // evicted history.
+    // BREAKAWAY at tick 20: repoint the SAME route point onto the warm store B.
+    // This seeks B to its live edge so the seam reads B's live tone, not silence
+    // / evicted history.
     bus.repoint(point, Arc::clone(&store_b)).unwrap();
 
-    // Keep publishing B's live tail so the live edge always has fresh audio.
-    // Continue the gappy tick sequence past the seam.
-    for &t in &[101u64, 105, 130, 400, 1000] {
+    // Past the seam: B is a live source, so before each (catch-up) tick it
+    // publishes exactly the samples that tick will consume — keeping its live
+    // edge ahead of the cursor exactly as a real-time decoder would. The tick
+    // sequence keeps skipping ticks (overload). Both properties must hold every
+    // tick.
+    let mut prev = 20u64;
+    for &t in &[21u64, 22, 25, 29, 30, 34, 42, 60] {
+        let catch_up =
+            usize::try_from(ideal_total(t, rate, num, den) - ideal_total(prev, rate, num, den))
+                .unwrap();
         store_b
-            .publish(&AudioBlock::from_interleaved(fmt, vec![0.75f32; 4_000 * 2]).unwrap())
+            .publish(&AudioBlock::from_interleaved(fmt, vec![0.75f32; catch_up * 2]).unwrap())
             .unwrap();
         let block = bus.tick_to(t);
         cumulative += u64::try_from(block.frame_count()).unwrap();
-        // (a) NO DRIFT across the seam + skipped ticks.
+        // (a) NO DRIFT across the seam + skipped ticks: cumulative emitted
+        // samples still equal the SampleClock ideal for the tick count.
         assert_eq!(
             cumulative,
             ideal_total(t, rate, num, den),
@@ -206,5 +222,6 @@ fn breakaway_under_overload_is_drift_free_and_sample_aligned() {
             "breakaway must be sample-aligned at the live edge: expected the +0.75 \
              source B, got a silence gap / stale climb at tick {t}"
         );
+        prev = t;
     }
 }
