@@ -96,6 +96,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Native build deps:
 #   * pkg-config + clang/libclang  — FFI bindgen + locating our libav* via .pc.
 #   * libva-dev                    — VAAPI (Intel/AMD) for the `linux-vaapi` path.
+#   * libopus0/libsrt/gnutls/libdrm2 — OUR FFmpeg's transitive runtime libs: the
+#     `builder` stage's `multiview --version` smoke test dynamically loads
+#     libavcodec.so.62 which NEEDs them; without them the loader exits 127.
 # The libav* themselves come from the published ffmpeg base (COPY --from=ffmpeg
 # below) — NOT from apt (no libav*-dev here; that opaque apt source is exactly
 # what we replaced).
@@ -103,6 +106,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config clang llvm-dev libclang-dev nasm \
       libva-dev \
+      libopus0 libsrt1.5-openssl libgnutls30t64 libdrm2 \
  && rm -rf /var/lib/apt/lists/*
 
 # Our pinned FFmpeg 8.1.1 (headers + .so + .pc) from the published base image.

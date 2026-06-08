@@ -96,9 +96,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Native build deps: pkg-config + clang/libclang for the FFI bindgen and to
 # locate libav* via pkg-config. The libav* themselves come from the published
 # ffmpeg base (COPY --from=ffmpeg below) — NOT from apt (no libav*-dev here).
+# Also install OUR FFmpeg's transitive runtime libs (libopus/libsrt/gnutls/libdrm)
+# here: the `builder` stage's `multiview --version` smoke test dynamically loads
+# libavcodec.so.62, which NEEDs them — without them the loader exits 127
+# ("error while loading shared libraries"). Same set the runtime stage installs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config clang llvm-dev libclang-dev nasm \
+      libopus0 libsrt1.5-openssl libgnutls30t64 libdrm2 \
  && rm -rf /var/lib/apt/lists/*
 
 # Our pinned FFmpeg 8.1.1 (headers + .so + .pc) from the published base image.
