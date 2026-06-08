@@ -168,7 +168,8 @@ impl PtsNormalizer {
         self.pending_discontinuity = true;
     }
 
-    /// Normalize one frame's raw timestamp.
+    /// Normalize one frame's raw timestamp (reclock-to-house: anchor the first
+    /// frame to `master_now_ns`).
     ///
     /// `raw` is the input timestamp in the input timebase, or `None` when the
     /// PTS is missing (`AV_NOPTS_VALUE`) — in which case a value is synthesized
@@ -179,11 +180,46 @@ impl PtsNormalizer {
     ///
     /// Returns the rebased, strictly-monotonic [`MediaTime`] for this frame.
     ///
+    /// This is the as-built **reclock-to-house** path (ADR-0038's Discard/None
+    /// default); it is exactly [`PtsNormalizer::normalize_wallclock`] with no
+    /// wall-clock reference.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidTimebase`] if the configured input timebase is
     /// degenerate (zero denominator), so timestamp math cannot proceed.
     pub fn normalize(&mut self, raw: Option<i64>, master_now_ns: i64) -> Result<MediaTime> {
+        self.normalize_wallclock(raw, master_now_ns, None)
+    }
+
+    /// Normalize one frame's raw timestamp, optionally **rebasing onto a common
+    /// wall-clock** (ADR-0038's Use path).
+    ///
+    /// When `wallclock_ref` is `Some` (the source's wall-clock is Trusted **and**
+    /// the operator chose `Use`), the **first frame's anchor instant** is the
+    /// source's detected wall-clock at that frame's PTS
+    /// ([`WallClockRef::wall_at`](multiview_core::wallclock::WallClockRef::wall_at)),
+    /// instead of `master_now_ns`. This makes the source's `media_time`
+    /// wall-clock-accurate (e.g. HLS `PROGRAM-DATE-TIME`-aligned). When
+    /// `wallclock_ref` is `None` (Discard / no detected wall-clock), the anchor is
+    /// `master_now_ns` — **byte-identical** to [`PtsNormalizer::normalize`].
+    ///
+    /// The rebase changes **only the anchor**, never the per-frame delta handling:
+    /// the 33-bit/32-bit wrap unwrap, the genpts fallback, the discontinuity
+    /// re-anchor, and the strict monotonic guard are all preserved (invariant #3).
+    /// The reference's media units must match the input's raw PTS units (e.g. the
+    /// HLS 90 kHz media rate against a 90 kHz input timebase).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidTimebase`] if the configured input timebase is
+    /// degenerate (zero denominator), so timestamp math cannot proceed.
+    pub fn normalize_wallclock(
+        &mut self,
+        raw: Option<i64>,
+        master_now_ns: i64,
+        wallclock_ref: Option<&multiview_core::wallclock::WallClockRef>,
+    ) -> Result<MediaTime> {
         if !self.timebase.is_valid() {
             return Err(Error::InvalidTimebase(
                 "input timebase has zero denominator",
@@ -213,9 +249,19 @@ impl PtsNormalizer {
         self.pending_discontinuity = false;
 
         let media_ns = if is_first {
-            // First frame: media_time anchors to master_now. offset = anchor - raw_ns.
-            self.offset = master_now_ns.saturating_sub(raw_ns);
-            master_now_ns
+            // First frame: the anchor instant is the source's detected wall-clock
+            // (Use path) when a ref is available AND this frame carries a real PTS;
+            // otherwise master_now (the as-built reclock-to-house default). The ref
+            // maps the frame's PTS (in the ref's media units) to its wall-clock
+            // instant. offset = anchor - raw_ns, so future deltas ride off the
+            // anchor exactly as in the house path.
+            let anchor_ns = match (wallclock_ref, raw) {
+                (Some(wc), Some(pts)) => wc.wall_at(pts),
+                // No ref, or a genpts first frame (no PTS to map): house anchor.
+                _ => master_now_ns,
+            };
+            self.offset = anchor_ns.saturating_sub(raw_ns);
+            anchor_ns
         } else if discontinuity {
             // Re-anchor: continue from the last emitted instant by one frame
             // period, and recompute offset so future deltas are relative to the
