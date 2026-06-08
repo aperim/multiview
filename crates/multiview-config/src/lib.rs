@@ -55,8 +55,8 @@ pub use error::ConfigError;
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use routing::{
-    AudioCrosspoint, OutputCrosspoint, RoutingRefs, RoutingTable, StreamRef, StreamSelector,
-    SubtitleCrosspoint, VideoCrosspoint, MAIN_PROGRAM,
+    AudioCrosspoint, OutputCrosspoint, OutputRef, RoutingRefs, RoutingTable, StreamRef,
+    StreamSelector, SubtitleCrosspoint, VideoCrosspoint, MAIN_PROGRAM,
 };
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
@@ -496,14 +496,22 @@ impl MultiviewConfig {
         Ok(())
     }
 
-    /// Ensure outputs are sane (at least one, each with a non-empty codec where
-    /// a codec applies).
+    /// Ensure outputs are sane (at least one; each with a non-empty codec where a
+    /// codec applies; a non-empty, unique stable id — ADR-0034 / RT-12).
+    ///
+    /// Output **id uniqueness** is enforced over the *resolved* ids
+    /// ([`Output::id`] — the explicit operator id, or the derived
+    /// [`Output::label`] for a v1/v2 output that declares none), so two outputs
+    /// can never resolve to the same routing handle (an explicit id may not even
+    /// collide with another output's derived label id). An explicitly-authored
+    /// `id` may not be empty.
     fn validate_outputs(&self) -> Result<(), ConfigError> {
         if self.outputs.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one output must be declared".to_owned(),
             ));
         }
+        let mut seen_ids: HashSet<String> = HashSet::with_capacity(self.outputs.len());
         for output in &self.outputs {
             let codec = match output {
                 Output::RtspServer { codec, .. }
@@ -519,6 +527,20 @@ impl MultiviewConfig {
                         "an output declares an empty codec".to_owned(),
                     ));
                 }
+            }
+            if let Some(explicit) = output.explicit_id() {
+                if explicit.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "output {:?} declares an empty id",
+                        output.label()
+                    )));
+                }
+            }
+            let id = output.id();
+            if !seen_ids.insert(id.clone()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate output id {id:?} (output ids must be unique)"
+                )));
             }
             if let Some(pin) = output.gpu_pin() {
                 pin.validate()
@@ -577,12 +599,14 @@ impl MultiviewConfig {
         self.overlays.iter().map(|o| o.id.as_str()).collect()
     }
 
-    /// The declared **output labels** an output crosspoint may target.
+    /// The declared **output ids** an output crosspoint may target (ADR-0034 /
+    /// RT-12).
     ///
-    /// Outputs carry no operator id yet (RT-12 adds one), so each is addressed by
-    /// its stable [`Output::label`] — the same string the desugar emits.
-    fn output_labels(&self) -> Vec<String> {
-        self.outputs.iter().map(Output::label).collect()
+    /// Each output is addressed by its stable [`Output::id`] — the explicit
+    /// operator id, or the derived [`Output::label`] for a v1/v2 output that
+    /// declares none — the same string the desugar emits.
+    fn output_ids(&self) -> Vec<String> {
+        self.outputs.iter().map(Output::id).collect()
     }
 
     /// The decoupled-routing **crosspoint table** for this document (ADR-0034 /
@@ -642,10 +666,11 @@ impl MultiviewConfig {
         }
 
         // OUTPUT: each declared output → an output crosspoint on the single
-        // "main" program (until ADR-0030's ProgramSet lands).
+        // "main" program (until ADR-0030's ProgramSet lands), addressed by the
+        // output's stable id (explicit operator id, or the derived label — RT-12).
         for output in &self.outputs {
             table.output.push(OutputCrosspoint {
-                output: output.label(),
+                output: output.id(),
                 program: MAIN_PROGRAM.to_owned(),
             });
         }
@@ -673,13 +698,13 @@ impl MultiviewConfig {
         };
 
         let tracks = self.selectable_tracks();
-        let output_labels = self.output_labels();
+        let output_ids = self.output_ids();
         let refs = RoutingRefs {
             sources: self.sources.iter().map(|s| s.id.as_str()).collect(),
             cells: self.cell_ids(),
             tracks: tracks.iter().copied().collect(),
             layers: self.subtitle_layers(),
-            outputs: output_labels.iter().map(String::as_str).collect(),
+            outputs: output_ids.iter().map(String::as_str).collect(),
         };
         table.validate(&refs)?;
 

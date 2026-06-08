@@ -209,12 +209,22 @@ pub struct SubtitleCrosspoint {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct OutputCrosspoint {
-    /// The destination output (its stable [`crate::Output::label`] today, since
-    /// outputs carry no operator id yet — RT-12 adds one).
+    /// The destination output, addressed by its stable [`crate::Output::id`]
+    /// (the explicit operator id, or the derived label for a v1/v2 output that
+    /// declares none — ADR-0034 / RT-12).
     pub output: String,
     /// The program this output carries. Absent ⇒ [`MAIN_PROGRAM`].
     #[serde(default = "main_program")]
     pub program: String,
+}
+
+impl OutputCrosspoint {
+    /// View this crosspoint as a standalone [`OutputRef`] handle (the
+    /// addressable `(output, program)` pair a runtime `RouteOutput` carries).
+    #[must_use]
+    pub fn as_ref(&self) -> OutputRef {
+        OutputRef::new(self.output.clone(), self.program.clone())
+    }
 }
 
 /// The single-program default program name until ADR-0030's `ProgramSet` lands.
@@ -223,6 +233,55 @@ pub const MAIN_PROGRAM: &str = "main";
 /// The default program name for serde (`#[serde(default)]` needs a free fn).
 fn main_program() -> String {
     MAIN_PROGRAM.to_owned()
+}
+
+/// A reference to **one output's program** — `(output, program)` (ADR-0034 /
+/// RT-12).
+///
+/// This is the TIER-2 → TIER-3 join the brief calls an *`OutputRef`*: it names
+/// a configured output (by its stable [`crate::Output::id`]) and the program it
+/// carries. The `program` defaults to [`MAIN_PROGRAM`] (`"main"`) — the
+/// single-program world today; ADR-0030's `ProgramSet` will make multiple
+/// programs addressable, at which point a non-`"main"` program becomes
+/// meaningful.
+///
+/// It is the standalone, addressable sibling of [`OutputCrosspoint`] (which is a
+/// row in the [`RoutingTable`]): an `OutputRef` is the handle a runtime
+/// `RouteOutput` command (RT-11) carries. Like every routing union it is
+/// **never untagged** (here, a plain two-field struct with `deny_unknown_fields`),
+/// robust across the self-describing JSON wire form and non-self-describing TOML
+/// (ADR-0010).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutputRef {
+    /// The destination output's stable id ([`crate::Output::id`]).
+    pub output: String,
+    /// The program this output carries. Absent ⇒ [`MAIN_PROGRAM`].
+    #[serde(default = "main_program")]
+    pub program: String,
+}
+
+impl OutputRef {
+    /// Construct an `OutputRef` for `output` carrying `program`.
+    #[must_use]
+    pub fn new(output: impl Into<String>, program: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            program: program.into(),
+        }
+    }
+
+    /// Construct an `OutputRef` for `output` carrying the default
+    /// [`MAIN_PROGRAM`] (`"main"`) — the single-program world until ADR-0030's
+    /// `ProgramSet` lands.
+    #[must_use]
+    pub fn to_main(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            program: MAIN_PROGRAM.to_owned(),
+        }
+    }
 }
 
 /// The per-program **crosspoint table** (the `RouteMatrix` of the brief).
@@ -413,6 +472,7 @@ pub struct RoutingRefs<'a> {
     pub tracks: HashSet<&'a str>,
     /// Declared subtitle layer ids (overlay ids today).
     pub layers: HashSet<&'a str>,
-    /// Declared output labels ([`crate::Output::label`]).
+    /// Declared output ids ([`crate::Output::id`] — explicit operator id, or the
+    /// derived label).
     pub outputs: HashSet<&'a str>,
 }
