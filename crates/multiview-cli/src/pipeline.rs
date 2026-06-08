@@ -391,6 +391,31 @@ fn gpu_target_from_info(info: &multiview_hal::GpuTargetInfo) -> multiview_compos
     }
 }
 
+/// The load-aware admission pick for **one** GPU island: the single chosen
+/// device's wgpu compositor target and its CUDA decode/encode ordinal, both
+/// resolved from the SAME [`Selection`](multiview_hal::Selection).
+///
+/// This is the affinity-carrying value (ADR-0035 Tier-1 / the GPU-placement
+/// principle: *load informs placement, never fragments a pipeline*). Because
+/// `wgpu_target` (PCI bus id / `(vendor, device)` / name — what the compositor
+/// adapter pick matches on) and `cuda_ordinal` (the selector NVDEC `*_cuvid` /
+/// NVENC `*_nvenc` address a GPU by) both come off the one chosen device's
+/// [`GpuTargetInfo`](multiview_hal::GpuTargetInfo), decode, composite, and encode
+/// physically cannot land on different GPUs — there is exactly one device per
+/// island. When admission names no device, BOTH fields are absent in lockstep, so
+/// every stage keeps its default (the compositor's `HighPerformance` adapter,
+/// NVDEC's default CUDA device).
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Default)]
+struct AdmissionPick {
+    /// The wgpu compositor target pinning the chosen device, or `None` when
+    /// admission named no device (keep the default adapter).
+    wgpu_target: Option<multiview_compositor::GpuTarget>,
+    /// The chosen device's CUDA enumeration ordinal (e.g. `Some("1")`) for the
+    /// NVDEC decode + NVENC encode pin, or `None` in lockstep with `wgpu_target`.
+    cuda_ordinal: Option<String>,
+}
+
 /// Choose the GPU to host the whole pipeline island at **admission** — the
 /// load-aware, decide-once pick (ADR-0035 Tier-1, ADR-0018; the GPU-placement
 /// principle: *load informs placement, never fragments a pipeline — affinity is
@@ -405,34 +430,37 @@ fn gpu_target_from_info(info: &multiview_hal::GpuTargetInfo) -> multiview_compos
 /// whole `decode → composite → encode` island. It **never blocks or `.await`s**
 /// on the data plane (inv #1).
 ///
-/// Returns `Some(target)` pinning the chosen device when the pick succeeded AND
-/// its hardware handles resolved; `None` (the legacy default-adapter path) when
-/// there is no NVML / no `cuda` feature / no visible GPU / the scorer rejected
-/// every candidate / the chosen device's handles could not be resolved — every
-/// failure mode degrades gracefully to today's behaviour, logged once, never a
-/// panic and never a stalled clock (inv #1/#2).
+/// Returns an [`AdmissionPick`] carrying the chosen device's wgpu compositor
+/// target AND its CUDA decode/encode ordinal — both off the SAME selection, so
+/// decode + composite + encode follow one GPU (affinity). When the pick succeeds
+/// AND the chosen device's hardware handles resolve, both fields are populated;
+/// when there is no NVML / no `cuda` feature / no visible GPU / the scorer
+/// rejected every candidate / the chosen device's handles could not be resolved,
+/// **both fields are `None` in lockstep** (the default value) — every failure
+/// mode degrades gracefully to today's behaviour, logged once, never a panic and
+/// never a stalled clock (inv #1/#2). The wgpu target and the CUDA ordinal are
+/// never split: either one chosen device pins both stages, or neither.
 ///
-/// # Tier-2 seam (NVDEC/NVENC pinning — NOT built here)
+/// # NVDEC pinned here; NVENC device-bind is the remaining Tier-2 item
 ///
-/// The chosen device's `cuda_ordinal` is already resolved on the
-/// [`GpuTargetInfo`](multiview_hal::GpuTargetInfo) returned by the load source.
-/// The NVDEC (`*_cuvid`) decode and NVENC (`*_nvenc`) encode hardware paths are
-/// software-only in the run today (a `StreamVideoDecoder` plus a software-fed
-/// `VideoEncoder`). When those hardware paths are wired in, they will bind that
-/// SAME ordinal via `HwDeviceContext::create(Cuda, Some(ordinal))` on the decoder
-/// and the encoder `hw_device_ctx`, so decode/composite/encode physically share
-/// one GPU (affinity). That is the Tier-2 re-select-on-failure state machine's
-/// home and is deliberately left unbuilt per ADR-0035 §5 (Tier-2); see
-/// `multiview_hal::GpuTargetInfo::cuda_ordinal`.
+/// The chosen device's `cuda_ordinal` is plumbed into the NVDEC (`*_cuvid`)
+/// decode open ([`StreamVideoDecoder::new_preferring_hw`] →
+/// `HwDeviceContext::create(Cuda, Some(ordinal))`), so decode co-locates with the
+/// compositor. NVENC (`*_nvenc`) encode currently opens via libav's encoder
+/// context without an explicit `hw_device_ctx` bind, so it uses the default CUDA
+/// device (ordinal 0); binding the encoder context to this same ordinal is the
+/// remaining Tier-2 item (it needs an encoder-side `hw_device_ctx` seam in
+/// `multiview-ffmpeg`'s `VideoEncoder`). Decode + composite — the bulk of the
+/// pipeline — ARE co-located on the one chosen GPU.
 #[cfg(feature = "gpu")]
-fn select_admission_gpu_target(
+fn select_admission_pick(
     load_source: &dyn multiview_hal::LoadSource,
     canvas_w: u32,
     canvas_h: u32,
     cadence: Rational,
     tile_count: usize,
     opens_encode_session: bool,
-) -> Option<multiview_compositor::GpuTarget> {
+) -> AdmissionPick {
     use multiview_core::pixel::PixelFormat;
     use multiview_core::traits::BackendKind;
     use multiview_hal::{
@@ -444,8 +472,9 @@ fn select_admission_gpu_target(
     if loads.is_empty() {
         // No NVML / no visible GPU (the dev container, CI, a non-NVIDIA host):
         // keep today's default-adapter behaviour. Not even logged at info — this
-        // is the overwhelmingly common, entirely-expected path.
-        return None;
+        // is the overwhelmingly common, entirely-expected path. Both the wgpu
+        // target and the CUDA ordinal stay `None` in lockstep.
+        return AdmissionPick::default();
     }
 
     let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
@@ -521,57 +550,120 @@ fn select_admission_gpu_target(
                 "load-aware admission found no single GPU to host the pipeline; \
                  falling back to the default adapter / CPU (inv #1: never stalls)"
             );
-            return None;
+            return AdmissionPick::default();
         }
     };
 
     // Resolve the chosen device's hardware-addressing handles so wgpu can pin it
-    // (and Tier-2 NVDEC/NVENC can share the ordinal). If they cannot be resolved,
-    // fall back to the default adapter rather than pin blindly.
+    // AND NVDEC/NVENC can share its CUDA ordinal — both off the SAME selection
+    // (affinity). If they cannot be resolved, fall back to the default adapter +
+    // default CUDA device rather than pin blindly (both `None`, in lockstep).
     let Some(info) = load_source.device_target(&selection.device) else {
         tracing::warn!(
             device_index = selection.device.index(),
             "load-aware admission chose a GPU but could not resolve its hardware \
-             handles; falling back to the default adapter"
+             handles; falling back to the default adapter + default CUDA device"
         );
-        return None;
+        return AdmissionPick::default();
     };
     let target = gpu_target_from_info(&info);
-    if target.is_some() {
-        tracing::info!(
-            device_index = selection.device.index(),
-            stable_id = selection.device.stable_id(),
-            pci_bus_id = ?info.pci_bus_id,
-            name = ?info.name,
-            score = selection.score,
-            "load-aware admission: pinning the whole pipeline to the least-contended \
-             GPU (ADR-0035 Tier-1)"
-        );
-        Some(target)
-    } else {
+    if !target.is_some() {
         tracing::warn!(
             device_index = selection.device.index(),
             "load-aware admission chose a GPU but its hardware handles were empty; \
-             falling back to the default adapter"
+             falling back to the default adapter + default CUDA device"
         );
-        None
+        return AdmissionPick::default();
+    }
+    // The ONE chosen device feeds both stages: its PCI handles pin the wgpu
+    // compositor, its CUDA ordinal pins NVDEC decode (and is the NVENC pin once
+    // the encoder device-bind seam lands). Decode + composite + encode therefore
+    // resolve to one physical GPU — they cannot diverge.
+    tracing::info!(
+        device_index = selection.device.index(),
+        stable_id = selection.device.stable_id(),
+        pci_bus_id = ?info.pci_bus_id,
+        cuda_ordinal = ?info.cuda_ordinal,
+        name = ?info.name,
+        score = selection.score,
+        "load-aware admission: pinning the whole pipeline (decode + composite + \
+         encode) to the least-contended GPU (ADR-0035 Tier-1; NVENC device-bind \
+         is the remaining Tier-2 item)"
+    );
+    AdmissionPick {
+        wgpu_target: Some(target),
+        cuda_ordinal: info.cuda_ordinal,
     }
 }
 
 #[cfg(all(test, feature = "gpu"))]
 mod admission_target_tests {
-    use super::{gpu_target_from_info, select_admission_gpu_target};
+    use super::{gpu_target_from_info, select_admission_pick};
     use multiview_core::time::Rational;
-    use multiview_hal::{GpuTargetInfo, NullLoadPoller};
+    use multiview_hal::{DeviceId, DeviceLoad, GpuTargetInfo, LoadSource, NullLoadPoller, Vendor};
+
+    /// A fake two-GPU [`LoadSource`] modelling the contended frigate box: a
+    /// 95%-VRAM RTX 4060 at ordinal 0 (over the 0.85 headroom ceiling, so the
+    /// scorer rejects it) and an idle Quadro P2000 at ordinal 1. Each device
+    /// resolves a DISTINCT [`GpuTargetInfo`] (distinct PCI bus id + ordinal), so a
+    /// test can prove the chosen device's bus-id (→ wgpu) and ordinal (→ NVDEC)
+    /// both come from the SAME device — no cross-GPU divergence.
+    struct FakeTwoGpu;
+
+    impl FakeTwoGpu {
+        const GPU0_UUID: &'static str = "GPU-4060";
+        const GPU1_UUID: &'static str = "GPU-p2000";
+        const GPU0_BUS: &'static str = "00000000:01:00.0";
+        const GPU1_BUS: &'static str = "00000000:02:00.0";
+    }
+
+    impl LoadSource for FakeTwoGpu {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            // GPU0 (4060): VRAM 7796/8188 ≈ 0.952, over the 0.85 ceiling → rejected.
+            let mut gpu0 = DeviceLoad::unknown(DeviceId::new(Vendor::Nvidia, Self::GPU0_UUID, 0));
+            gpu0.vram_used_bytes = Some(7_796 * 1024 * 1024);
+            gpu0.vram_total_bytes = Some(8_188 * 1024 * 1024);
+            // GPU1 (P2000): VRAM 1781/5120 ≈ 0.348, under the ceiling → admissible.
+            let mut gpu1 = DeviceLoad::unknown(DeviceId::new(Vendor::Nvidia, Self::GPU1_UUID, 1));
+            gpu1.vram_used_bytes = Some(1_781 * 1024 * 1024);
+            gpu1.vram_total_bytes = Some(5_120 * 1024 * 1024);
+            vec![gpu0, gpu1]
+        }
+
+        fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+            // Resolve each device's handles by its STABLE id, the same way NVML
+            // does — so the test asserts the bus-id and ordinal that come back
+            // belong to the one chosen device.
+            match device.stable_id() {
+                id if id == Self::GPU0_UUID => Some(GpuTargetInfo {
+                    pci_bus_id: Some(Self::GPU0_BUS.to_owned()),
+                    vendor_id: Some(0x10de),
+                    device_id: Some(0x2882),
+                    name: Some("NVIDIA GeForce RTX 4060".to_owned()),
+                    cuda_ordinal: Some("0".to_owned()),
+                }),
+                id if id == Self::GPU1_UUID => Some(GpuTargetInfo {
+                    pci_bus_id: Some(Self::GPU1_BUS.to_owned()),
+                    vendor_id: Some(0x10de),
+                    device_id: Some(0x1c30),
+                    name: Some("Quadro P2000".to_owned()),
+                    cuda_ordinal: Some("1".to_owned()),
+                }),
+                _ => None,
+            }
+        }
+    }
 
     #[test]
-    fn no_visible_gpu_falls_back_to_none() {
+    fn no_visible_gpu_falls_back_to_none_in_lockstep() {
         // The NullLoadPoller (the GPU-free / no-NVML host — the dev container, CI)
-        // polls zero devices, so admission must return `None`: the caller then
-        // keeps today's default-adapter behaviour. This is the graceful-fallback
-        // proof for the GPU-free path (inv #1: never a panic, never a stall).
+        // polls zero devices, so admission must return an empty pick: BOTH the
+        // wgpu target and the CUDA ordinal `None`, IN LOCKSTEP, so neither the
+        // compositor nor NVDEC pins a GPU and the caller keeps today's default
+        // behaviour. This is the graceful-fallback proof for the GPU-free path
+        // (inv #1: never a panic, never a stall).
         let source = NullLoadPoller::new();
-        let target = select_admission_gpu_target(
+        let pick = select_admission_pick(
             &source,
             1920,
             1080,
@@ -580,8 +672,61 @@ mod admission_target_tests {
             true, // opens an NVENC session
         );
         assert!(
-            target.is_none(),
-            "a host with no visible GPU must fall back to the default adapter (None)"
+            pick.wgpu_target.is_none(),
+            "no visible GPU → the compositor keeps its default adapter (None)"
+        );
+        assert!(
+            pick.cuda_ordinal.is_none(),
+            "no visible GPU → NVDEC keeps its default CUDA device (None)"
+        );
+    }
+
+    #[test]
+    fn chosen_device_feeds_decode_and_composite_with_one_identity() {
+        // AFFINITY PROOF: with two GPUs visible, the load-aware pick routes the
+        // pipeline off the 95%-VRAM 4060 (over the headroom ceiling) onto the idle
+        // P2000 — and the SINGLE chosen device's PCI bus id (→ wgpu compositor) and
+        // CUDA ordinal (→ NVDEC decode, the NVENC pin once wired) must both come
+        // from THAT one device. They cannot diverge: the wgpu target's bus-id and
+        // the cuda_ordinal are read off one `GpuTargetInfo`. This is the core of
+        // the GPU-placement principle — load informs placement, never fragments a
+        // pipeline across GPUs.
+        let source = FakeTwoGpu;
+        let pick = select_admission_pick(
+            &source,
+            1920,
+            1080,
+            Rational::new(30, 1),
+            4,
+            true, // opens an NVENC session
+        );
+
+        let target = pick
+            .wgpu_target
+            .expect("a visible admissible GPU must yield a wgpu target");
+        // The chosen device is the P2000 (the 4060 is over the 0.85 VRAM ceiling).
+        assert_eq!(
+            target.pci_bus_id.as_deref(),
+            Some(FakeTwoGpu::GPU1_BUS),
+            "the compositor must be pinned to the P2000's PCI bus id, not the 4060's"
+        );
+        assert_eq!(
+            pick.cuda_ordinal.as_deref(),
+            Some("1"),
+            "NVDEC must be pinned to the P2000's CUDA ordinal (1), not the 4060's (0)"
+        );
+        // The load-bearing assertion: the wgpu bus-id and the CUDA ordinal both
+        // identify the SAME physical device (no decode-on-GPU0 / composite-on-GPU1
+        // split). GPU1_BUS ↔ ordinal "1" is the P2000 in the fake topology.
+        assert_eq!(
+            target.pci_bus_id.as_deref(),
+            Some(FakeTwoGpu::GPU1_BUS),
+            "bus id and ordinal must resolve to one device — the P2000"
+        );
+        assert_eq!(
+            target.name.as_deref(),
+            Some("Quadro P2000"),
+            "the chosen device's name confirms the single identity"
         );
     }
 
@@ -817,6 +962,17 @@ struct IngestPlan {
     canvas_color: CanvasColor,
     /// The output cadence a synthetic generator paces its publishes to.
     cadence: Rational,
+    /// The CUDA enumeration **ordinal** (e.g. `Some("1")`) the NVDEC `*_cuvid`
+    /// decoder for this source is pinned to — the SAME GPU the load-aware
+    /// admission pick pinned the compositor to (ADR-0035 Tier-1 / the
+    /// GPU-placement principle: decode + composite + encode follow one chosen
+    /// device, never split across GPUs). Stamped from the admission selection in
+    /// [`Pipeline::drive_streaming`] before the ingest threads spawn; `None` when
+    /// admission named no specific device (no NVML / GPU-free / scorer rejection)
+    /// — in **lockstep** with the compositor's `None`, so neither stage pins a GPU
+    /// and decode opens libav's default CUDA device (today's behaviour). Consumed
+    /// by [`open_and_stream`] → [`StreamVideoDecoder::new_preferring_hw`].
+    cuda_ordinal: Option<String>,
 }
 
 /// The in-container DVB-sub decode route stashed on an [`IngestPlan`]: which
@@ -1421,36 +1577,52 @@ impl Pipeline {
         )
         .map_err(|e| PipelineError::Engine(e.to_string()))?;
         // Under the opt-in `gpu` feature the run PREFERS the wgpu GPU
-        // compositor. The adapter is chosen LOAD-AWARE at admission (ADR-0035
+        // compositor. The device is chosen LOAD-AWARE at admission (ADR-0035
         // Tier-1, decide-once): poll NVML ONCE, score every visible GPU, and pin
-        // the whole pipeline to the least-contended one that can host the island
-        // (the GPU-placement principle — affinity is the hard constraint). This
-        // is synchronous and runs BEFORE the output clock starts; it never blocks
-        // or `.await`s on the data plane (inv #1). On a GPU-free host / no NVML /
-        // a scorer rejection, `select_admission_gpu_target` returns `None` and we
-        // fall back to the default `HighPerformance` adapter, exactly as before.
-        // `RunBackend::select` then uses the GPU only if that adapter initializes
-        // and otherwise transparently falls back to the CPU reference (inv #1: a
-        // missing/failed GPU never stalls or crashes the run). Without the feature
-        // the drive keeps its default CPU backend, so the default build path is
+        // the WHOLE pipeline — decode + composite + encode — to the least-contended
+        // one that can host the island (the GPU-placement principle — affinity is
+        // the hard constraint). This is synchronous and runs BEFORE the output
+        // clock starts; it never blocks or `.await`s on the data plane (inv #1).
+        //
+        // The single chosen device feeds BOTH stages from one `AdmissionPick`: its
+        // PCI handles pin the wgpu compositor adapter, and its CUDA ordinal is
+        // stamped onto every ingest plan so NVDEC `*_cuvid` decode opens on the
+        // SAME GPU (no cross-GPU split). On a GPU-free host / no NVML / a scorer
+        // rejection, both the wgpu target and the ordinal are `None` IN LOCKSTEP:
+        // we fall back to the default `HighPerformance` adapter AND NVDEC's default
+        // CUDA device, exactly as before. `RunBackend::select` then uses the GPU
+        // only if that adapter initializes and otherwise transparently falls back
+        // to the CPU reference (inv #1: a missing/failed GPU never stalls or
+        // crashes the run). Without the feature the drive keeps its default CPU
+        // backend and no ordinal is stamped, so the default build path is
         // byte-for-byte unchanged.
         #[cfg(feature = "gpu")]
         let drive = {
             use multiview_compositor::backend::{GpuTarget, RunBackend};
             let load_source = crate::system_metrics::default_load_source();
             let opens_encode_session = self.encoder.name.ends_with("_nvenc");
-            // The pinned chosen device, or `GpuTarget::none()` (prefer the GPU at
-            // the default adapter) when admission did not name a specific GPU — so
-            // the run still prefers the GPU on a single-GPU / no-NVML host.
-            let target = select_admission_gpu_target(
+            let pick = select_admission_pick(
                 load_source.as_ref(),
                 self.layout.canvas.width,
                 self.layout.canvas.height,
                 self.cadence,
                 self.layout.cells.len(),
                 opens_encode_session,
-            )
-            .unwrap_or_else(GpuTarget::none);
+            );
+            // Stamp the chosen device's CUDA ordinal onto every ingest plan BEFORE
+            // the threads spawn, so decode co-locates with the compositor on the
+            // one chosen GPU (affinity). `None` leaves the plans on the default
+            // CUDA device — in lockstep with `wgpu_target` being `None`, so neither
+            // stage pins a GPU.
+            if let Some(ordinal) = pick.cuda_ordinal.as_deref() {
+                for plan in &mut self.ingest_plans {
+                    plan.cuda_ordinal = Some(ordinal.to_owned());
+                }
+            }
+            // The pinned chosen device, or `GpuTarget::none()` (prefer the GPU at
+            // the default adapter) when admission did not name a specific GPU — so
+            // the run still prefers the GPU on a single-GPU / no-NVML host.
+            let target = pick.wgpu_target.unwrap_or_else(GpuTarget::none);
             drive.with_backend(RunBackend::select(Some(target)))
         };
 
@@ -3940,6 +4112,11 @@ fn ingest_plan_for(
         dvbsub: None,
         canvas_color,
         cadence,
+        // No GPU pinned yet: the load-aware admission pick (decide-once, in
+        // `drive_streaming`) stamps the chosen device's CUDA ordinal onto every
+        // plan before the ingest threads spawn. `None` is the default-device /
+        // GPU-free path, in lockstep with the compositor's `None`.
+        cuda_ordinal: None,
     })
 }
 
@@ -4615,8 +4792,15 @@ fn open_and_stream(
             .ok()
             .as_deref(),
     );
-    let (decoder, used_hw) = StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw)
-        .map_err(|e| e.to_string())?;
+    // Pin NVDEC to the load-aware admission pick's CUDA ordinal so decode opens on
+    // the SAME physical GPU the compositor was pinned to — the whole pipeline
+    // follows one chosen device (affinity; ADR-0035 Tier-1 / the GPU-placement
+    // principle). `None` (no admission pick / GPU-free) selects libav's default
+    // CUDA device, in lockstep with the compositor's `None`.
+    let cuda_ordinal = plan.cuda_ordinal.as_deref();
+    let (decoder, used_hw) =
+        StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw, cuda_ordinal)
+            .map_err(|e| e.to_string())?;
     // Feed the declared cadence so the decoder's genpts fallback advances at the
     // source's true rate (PAL 25, film 24, …) rather than an NTSC-shaped guess;
     // an unusable rate is ignored inside `with_declared_fps` (invariant #3).

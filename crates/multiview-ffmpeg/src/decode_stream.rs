@@ -130,6 +130,16 @@ impl StreamVideoDecoder {
     /// The boolean of the returned tuple reports whether the hardware path opened,
     /// so the caller can log it once and surface it as telemetry.
     ///
+    /// `cuda_device` is the CUDA enumeration ordinal (e.g. `Some("1")`) the NVDEC
+    /// decoder is bound to — the **load-aware admission pick** (ADR-0035 Tier-1 /
+    /// the GPU-placement principle: *one chosen device hosts the whole pipeline*).
+    /// It is threaded straight to [`HwDeviceContext::create`](crate::hwframe::HwDeviceContext::create)
+    /// so decode opens on the SAME physical GPU the wgpu compositor was pinned to
+    /// (affinity — no cross-GPU split). `None` selects libav's default CUDA device
+    /// (ordinal 0), which is exactly today's behaviour and the lockstep partner of
+    /// the compositor's `None` (when admission names no device, neither stage
+    /// pins one).
+    ///
     /// # Errors
     /// Returns [`FfmpegError::OpenDecoder`] only if **even the software** decoder
     /// cannot be built; a hardware-open failure never surfaces as an error (it is
@@ -138,9 +148,10 @@ impl StreamVideoDecoder {
         parameters: ffmpeg::codec::Parameters,
         time_base: Rational,
         want_hw: bool,
+        cuda_device: Option<&str>,
     ) -> Result<(Self, bool)> {
         if let Some(name) = crate::hwdecode::select_decoder_for_id(parameters.id(), want_hw) {
-            match Self::try_open_cuvid(parameters.clone(), time_base, name) {
+            match Self::try_open_cuvid(parameters.clone(), time_base, name, cuda_device) {
                 Ok(decoder) => return Ok((decoder, true)),
                 Err(err) => {
                     // Graceful degradation: a driver/library mismatch or no usable
@@ -159,26 +170,36 @@ impl StreamVideoDecoder {
         Ok((decoder, false))
     }
 
-    /// Try to open the named NVDEC `*_cuvid` decoder bound to a fresh CUDA device
+    /// Try to open the named NVDEC `*_cuvid` decoder bound to a CUDA device
     /// context. On success the decoder runs on the GPU and emits host NV12 (the
     /// cuvid wrapper downloads internally) or CUDA surfaces (downloaded in
     /// [`Self::receive_frame`]). Any failure here is recoverable — the caller
     /// degrades to software.
+    ///
+    /// `cuda_device` selects which physical GPU by its CUDA enumeration ordinal
+    /// (e.g. `Some("1")`) — the load-aware admission pick, so decode lands on the
+    /// SAME GPU as the compositor (affinity). `None` uses libav's default CUDA
+    /// device (ordinal 0).
     fn try_open_cuvid(
         parameters: ffmpeg::codec::Parameters,
         time_base: Rational,
         name: &'static str,
+        cuda_device: Option<&str>,
     ) -> Result<Self> {
         let codec =
             ffmpeg::decoder::find_by_name(name).ok_or(FfmpegError::CodecNotFound("cuvid"))?;
         let mut ctx = ffmpeg::codec::context::Context::from_parameters(parameters)
             .map_err(FfmpegError::OpenDecoder)?;
 
-        // A CUDA device context the cuvid decoder runs on. Requires a working
-        // driver/GPU at run time; on a GPU-free box this returns a typed error and
-        // the caller falls back to software (never a panic).
-        let device =
-            crate::hwframe::HwDeviceContext::create(crate::hwdecode::HwDeviceKind::Cuda, None)?;
+        // A CUDA device context the cuvid decoder runs on, pinned to the
+        // admission-chosen ordinal (`cuda_device`) so decode co-locates with the
+        // compositor on one GPU (affinity). Requires a working driver/GPU at run
+        // time; on a GPU-free box this returns a typed error and the caller falls
+        // back to software (never a panic).
+        let device = crate::hwframe::HwDeviceContext::create(
+            crate::hwdecode::HwDeviceKind::Cuda,
+            cuda_device,
+        )?;
         // Must be set BEFORE the decoder is opened — libav reads `hw_device_ctx`
         // only during `avcodec_open2`.
         device.attach_to_decoder(&mut ctx)?;
