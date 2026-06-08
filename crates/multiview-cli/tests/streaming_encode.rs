@@ -609,3 +609,185 @@ fn wedged_sink_does_not_hang_teardown() {
         "the healthy sink must finalise all N packets despite a wedged co-sink"
     );
 }
+
+/// (6) RT-8b held-out lip-sync-under-overload, END TO END through the real cli
+/// bake consumer (not the extracted helper): with program audio enabled and the
+/// engine driven UNBOUNDED while a slow-but-alive sink paces the bake consumer
+/// below the engine, the hot queue overflows and `DropOnOverload` sheds VIDEO
+/// frames. The decisive property — audio must NOT drift behind video under that
+/// shed — is observed at the muxer boundary: the cumulative AUDIO samples the bake
+/// consumer fed the encoder must track the **tick count** (every emitted output
+/// tick), NOT the count of surviving video frames.
+///
+/// The audio packet `pts` is a pure sample counter (`audio_pts = Σ samples`), so
+/// the last audio packet's `pts + its frame size` is the cumulative samples fed.
+/// At 48 kHz / 25 fps that is 1920 samples per OUTPUT TICK. The pre-RT-8b driver
+/// called `bus.tick()` once per SURVIVING frame, so under a heavy shed its
+/// cumulative samples would be `survivors * 1920` — far short of `ticks * 1920` —
+/// i.e. audio trailing video by the dropped ticks' worth of samples. This test
+/// fails on that regression: it asserts the cumulative audio is close to the tick
+/// ideal and strictly far above the survivor-count ceiling.
+#[tokio::test(flavor = "current_thread")]
+async fn rt8b_audio_stays_lip_synced_to_the_tick_index_under_video_drops() {
+    // 48 kHz / 25 fps = exactly 1920 audio samples per output tick.
+    const SAMPLES_PER_TICK: u64 = 1_920;
+    // Drive a generous margin of ticks past the first observed drop so the shed is
+    // substantial and the tick-vs-survivor gap is unmistakable.
+    const POST_DROP_TICKS: u64 = 400;
+    const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let mut pipeline = build_pipeline();
+    // Opt into program audio: the bake consumer now drives the bus per tick index
+    // and fans AAC packets to the SAME sink as video.
+    pipeline.enable_program_audio();
+
+    // The sink is SLOW (sleeps per packet) but never wedges: it keeps draining, so
+    // the bake consumer keeps producing audio while running BELOW the engine — the
+    // hot queue overflows and the engine sheds video frames. The sink tracks the
+    // cumulative audio samples (the max `pts + frame_size` over audio packets) and
+    // a flag once any drop is observable (it has drained a packet).
+    let max_audio_end = Arc::new(AtomicU64::new(0));
+    let audio_packets = Arc::new(AtomicU64::new(0));
+    let drained_one = Arc::new(AtomicUsize::new(0));
+    let max_audio_end_in = Arc::clone(&max_audio_end);
+    let audio_packets_in = Arc::clone(&audio_packets);
+    let drained_one_in = Arc::clone(&drained_one);
+    let slow_runner = move |rx: Receiver<EncodedPacket>| -> TestSinkOutcome {
+        let mut frames = 0_usize;
+        while let Ok(packet) = rx.recv() {
+            // Pace the consumer below the (no-sleep, memory-speed) engine so the
+            // hot queue saturates and the engine sheds — but never wedge.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            if packet.kind() == multiview_ffmpeg::StreamKind::Audio {
+                // `pts` is the cumulative sample position at the START of this
+                // packet's frame; `len()` is bytes, not samples, so track the max
+                // observed start `pts` and add a single AAC frame (1024) for the
+                // tail. The exact tail size is immaterial — the tick-vs-survivor gap
+                // is hundreds of thousands of samples.
+                if let Some(pts) = packet.pts() {
+                    let pts = u64::try_from(pts).unwrap_or(0);
+                    let prev = max_audio_end_in.load(Ordering::Acquire);
+                    if pts > prev {
+                        max_audio_end_in.store(pts, Ordering::Release);
+                    }
+                }
+                audio_packets_in.fetch_add(1, Ordering::Release);
+            } else {
+                frames += 1;
+                drained_one_in.store(1, Ordering::Release);
+            }
+        }
+        TestSinkOutcome { frames }
+    };
+
+    let clock = Arc::new(ManualTimeSource::new());
+    let stop = StopSignal::new();
+    let driver_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    spawn_clock_driver(Arc::clone(&clock), Arc::clone(&driver_stop));
+
+    let hot_tick = Arc::new(AtomicU64::new(0));
+
+    // Watcher: once the sink has drained at least one packet (the consumer is
+    // running but paced below the engine), drive POST_DROP_TICKS further engine
+    // ticks — every tick past the hot-queue fill is shed — then stop.
+    let watch_drained = Arc::clone(&drained_one);
+    let watch_hot_tick = Arc::clone(&hot_tick);
+    let watch_stop = stop.clone();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + WATCHDOG;
+        while watch_drained.load(Ordering::Acquire) == 0 {
+            if std::time::Instant::now() >= deadline {
+                watch_stop.stop();
+                return;
+            }
+            std::thread::yield_now();
+        }
+        let base = watch_hot_tick.load(Ordering::Acquire);
+        let target = base.saturating_add(POST_DROP_TICKS);
+        while watch_hot_tick.load(Ordering::Acquire) < target {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        watch_stop.stop();
+    });
+
+    let clock_concrete: Arc<ManualTimeSource> = Arc::clone(&clock);
+    let ts: Arc<dyn TimeSource> = clock_concrete;
+    let result = pipeline
+        .drive_streaming_for_test(
+            StreamTestParams {
+                time: ts,
+                pacer: CooperativePacer,
+                max_ticks: None,
+                policy: SendPolicy::DropOnOverload,
+                runners: vec![Box::new(slow_runner)],
+                hot_tick_observer: Some(Arc::clone(&hot_tick)),
+            },
+            &stop,
+        )
+        .await
+        .expect("drive streaming");
+    driver_stop.store(true, Ordering::Release);
+
+    // Preconditions: the shed actually happened, and audio flowed.
+    assert!(
+        result.report.dropped > 0,
+        "the slow sink must have forced the engine to shed video frames (got {} dropped)",
+        result.report.dropped
+    );
+    assert!(
+        audio_packets.load(Ordering::Acquire) > 0,
+        "program audio must have reached the sink"
+    );
+
+    assert_audio_tracks_tick_index(
+        result.report.frames,
+        result.report.dropped,
+        max_audio_end.load(Ordering::Acquire),
+        SAMPLES_PER_TICK,
+    );
+}
+
+/// The RT-8b decision: cumulative audio samples must track the TICK count, not the
+/// surviving-frame count. Splits out the post-run analysis so the driver test reads
+/// cleanly. `ticks` = output ticks emitted, `dropped` = ticks shed, `cumulative` =
+/// the max audio-packet sample position observed, `per_tick` = samples per tick.
+fn assert_audio_tracks_tick_index(ticks: u64, dropped: u64, cumulative: u64, per_tick: u64) {
+    let survivors = ticks.saturating_sub(dropped);
+    // The drift-free ideal: cumulative audio tracks the TICK count. The last
+    // surviving frame's catch-up `tick_to` brings the bus up to its tick index.
+    let tick_ideal = ticks.saturating_mul(per_tick);
+    let survivor_ceiling = survivors.saturating_mul(per_tick);
+
+    // The DECISIVE assertion: cumulative audio is FAR above what a per-surviving-
+    // frame `bus.tick()` could ever emit (`survivors * per_tick`). Under a heavy
+    // shed `survivors << ticks`, so the pre-RT-8b drift would land cumulative audio
+    // at/below the survivor ceiling; the tick-index driver lands it near the ideal.
+    assert!(
+        survivors < ticks,
+        "the test needs a real shed so the tick-vs-survivor gap exists (survivors {survivors}, \
+         ticks {ticks})"
+    );
+    assert!(
+        cumulative > survivor_ceiling.saturating_add(per_tick),
+        "RT-8b: cumulative audio {cumulative} must exceed the surviving-frame ceiling \
+         {survivor_ceiling} (a per-surviving-frame bus.tick() would trail there) — audio is \
+         drifting behind video under the shed"
+    );
+    // And it tracks the tick timeline within a BOUNDED in-flight tail: when `stop`
+    // lands, the last several emitted ticks are still buffered (hot queue cap + one
+    // in transit + the sink fan-out cap + the slow sink's small drain backlog) and
+    // their surviving frames' catch-up has not yet been fed. That tail is O(cap),
+    // independent of run length — generously bounded at 32 ticks (test (1) measures
+    // the analogous depth at ~9 and ceilings it at 24). The gap this forbids — the
+    // pre-RT-8b drift — is the WHOLE dropped span (hundreds of ticks), not a tail.
+    let tail_slack = 32_u64.saturating_mul(per_tick);
+    assert!(
+        cumulative.saturating_add(tail_slack) >= tick_ideal,
+        "RT-8b: cumulative audio {cumulative} must track the tick ideal {tick_ideal} \
+         (within a bounded {tail_slack}-sample in-flight tail) — the bus must catch up across \
+         every dropped tick, not trail by the dropped span"
+    );
+}

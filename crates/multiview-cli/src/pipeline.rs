@@ -397,6 +397,16 @@ pub struct Pipeline {
     /// feature to render, so the stores are only built/sampled under it.
     #[cfg(feature = "overlay")]
     caption_stores: std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
+    /// RT-10b: the live subtitle re-point handle, published when a `drive` begins
+    /// (the hot-loop-owned [`SubtitleRouter`](crate::captions::SubtitleRouter) builds
+    /// its [`SubtitleRouteHandle`](crate::captions::SubtitleRouteHandle) into this
+    /// shared slot). The control plane reads it via
+    /// [`subtitle_route_handle`](Self::subtitle_route_handle) to drive a subtitle
+    /// breakaway (`RouteSubtitle`, RT-11) into the running pipeline. `None` before a
+    /// run starts (or on a run with no caption stores). A lock-free `ArcSwapOption`
+    /// so publishing/reading the handle never blocks the engine (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
     /// Per-source caption reader plans (resolved at build time): the rendition
     /// `m3u8` to demux + the store to publish into. Consumed by the ingest
     /// supervisor (one reader thread each) on the first `drive`, like the video
@@ -675,6 +685,8 @@ impl Pipeline {
             #[cfg(feature = "overlay")]
             caption_stores,
             #[cfg(feature = "overlay")]
+            subtitle_route: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(feature = "overlay")]
             caption_plans,
             canvas_color,
             nosignal_card,
@@ -712,6 +724,25 @@ impl Pipeline {
     #[must_use]
     pub fn with_subtitles(self, _track: multiview_overlay::subtitle::CueTrack) -> Self {
         self
+    }
+
+    /// Attach a pre-populated **native caption cue store** for source `source_id`
+    /// (RT-10b). The run builds one re-pointable subtitle layer per attached store
+    /// and samples it each output tick (`active_at(pts)`), burning the active cue
+    /// into that source's tile — exactly the path the HLS `WebVTT` reader feeds via
+    /// [`caption_plans`](Self::caption_plans), but with the store supplied directly.
+    /// Replaces any existing store for the same source. Returns the shared
+    /// [`Arc`](std::sync::Arc) so the caller (a native caption reader, or a test)
+    /// can keep publishing cues into it.
+    #[cfg(feature = "overlay")]
+    pub fn attach_caption_store(
+        &mut self,
+        source_id: impl Into<String>,
+        store: Arc<crate::captions::CueStore>,
+    ) -> Arc<crate::captions::CueStore> {
+        let id = source_id.into();
+        self.caption_stores.insert(id, Arc::clone(&store));
+        store
     }
 
     /// The fixed output cadence (exact rational).
@@ -849,6 +880,39 @@ impl Pipeline {
     #[must_use]
     pub fn preview_stores(&self) -> HashMapStores {
         self.stores.clone()
+    }
+
+    /// RT-10b: the live subtitle re-point handle for the running pipeline, or
+    /// [`None`] before a `drive` has started (or on a run with no caption stores).
+    ///
+    /// The control plane drives a **subtitle breakaway** by calling
+    /// [`SubtitleRouteHandle::request_repoint`](crate::captions::SubtitleRouteHandle::request_repoint)
+    /// on it — re-pointing a layer to another source's cues takes effect on the
+    /// next output tick (the run's [`SubtitleRouter`](crate::captions::SubtitleRouter)
+    /// drains it at the sample boundary). Reading the handle is a lock-free
+    /// `ArcSwapOption` load, so it can never pace or stall the engine (inv #1/#10).
+    /// This is the run-side seam `Command::RouteSubtitle` (RT-11) drives.
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn subtitle_route_handle(&self) -> Option<Arc<crate::captions::SubtitleRouteHandle>> {
+        self.subtitle_route.load_full()
+    }
+
+    /// RT-10b: the **shared** subtitle re-point slot (the `Arc` behind
+    /// [`subtitle_route_handle`](Self::subtitle_route_handle)).
+    ///
+    /// Cloning this slot lets a caller observe the live handle **concurrently with
+    /// a running `drive`** (which borrows the pipeline mutably): the run publishes
+    /// the handle into this slot at drive start, and a holder of a slot clone reads
+    /// it with a lock-free [`ArcSwapOption`](arc_swap::ArcSwapOption) load. This is
+    /// how the control plane wires `RouteSubtitle` to the running pipeline (and how
+    /// the run-path re-point is exercised in tests) without aliasing `self`.
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn subtitle_route_slot(
+        &self,
+    ) -> Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>> {
+        Arc::clone(&self.subtitle_route)
     }
 
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
@@ -1087,6 +1151,24 @@ impl Pipeline {
         // non-blocking. Only built under `overlay` (the badge renderer).
         #[cfg(feature = "overlay")]
         let caption_stores = self.caption_stores.clone();
+        // RT-10b: the per-layer subtitle crosspoint. One re-pointable
+        // `SubtitleLayer` per source-bound caption store (identity routing by
+        // default), sampled per output tick via `active_at(now)` so subtitle
+        // rendering goes through the re-pointable layer. A run with no caption
+        // stores builds an empty router (no layers): sampling it yields an empty
+        // map, exactly like the old `sample_caption_stores`. The router is sampled
+        // (`&mut`) inside the hot-loop projection; its `SubtitleRouteHandle` is
+        // published into the shared slot so the control plane (`RouteSubtitle`,
+        // RT-11) can drive a breakaway into the running pipeline (inv #1/#10).
+        #[cfg(feature = "overlay")]
+        let mut subtitle_router = crate::captions::SubtitleRouter::from_stores(
+            caption_stores
+                .iter()
+                .map(|(id, store)| (id.clone(), Arc::clone(store))),
+        );
+        #[cfg(feature = "overlay")]
+        self.subtitle_route
+            .store(Some(Arc::new(subtitle_router.handle())));
         #[cfg(feature = "overlay")]
         let mut fault_detector = FaultDetector::new(
             self.stores.clone(),
@@ -1114,8 +1196,14 @@ impl Pipeline {
         // blocking send offline (exact-N back-pressure on the renderer), wait-free
         // `try_send` + drop-and-count live (the engine never blocks — inv #1/#10).
         let state_of = move |frame: &CompositedFrame| -> EngineStateSnapshot {
+            // RT-10b: sample the per-layer subtitle router (drains any pending
+            // re-point at this sample boundary, then `active_at(pts)` per layer) —
+            // identical text lines to the old per-source `sample_caption_stores`
+            // when no layer was re-pointed. The bitmap (DVB-sub) cues stay on the
+            // per-source path below (the text-layer primitive RT-10a built is
+            // text-only).
             #[cfg(feature = "overlay")]
-            let captions = sample_caption_stores(&caption_stores, frame.pts());
+            let captions = subtitle_router.sample(frame.pts());
             #[cfg(feature = "overlay")]
             let caption_bitmaps = sample_caption_bitmaps(&caption_stores, frame.pts());
             #[cfg(feature = "overlay")]
@@ -1898,6 +1986,30 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// Drive the program-audio bus to the output **tick index** of one surviving
+/// [`StreamItem`] and return that frame's audio block (RT-8b, the lip-sync fix).
+///
+/// The bake consumer only receives the frames that SURVIVED the `DropOnOverload`
+/// shed, so it must drive the bus by the absolute output tick index — not once per
+/// surviving frame — or the audio `SampleClock` would fall behind video by exactly
+/// the dropped ticks' samples (a per-surviving-frame `bus.tick()` is the drift bug
+/// RT-8a fixed in the audio crate and RT-8b closes here). The output clock stamps
+/// `out_pts = f(tick)` and the engine carries that 0-based index on every
+/// `StreamItem`, so advancing the bus to `tick_index + 1` emits exactly the samples
+/// owed for output ticks `0..=tick_index` — catching up across any gap. A
+/// duplicated or out-of-order index is a monotonic no-op in
+/// [`SampleClock`](multiview_audio::cadence::SampleClock) (it never rewinds), so a
+/// stale item can never make the bus emit rewound audio (invariant #3).
+fn drive_audio_for_item(
+    bus: &mut multiview_audio::program::ProgramBus,
+    tick_index: u64,
+) -> multiview_audio::format::AudioBlock {
+    // `tick_index` is 0-based; advancing the clock to `tick_index + 1` yields the
+    // samples for output ticks `0..=tick_index`. `saturating_add` guards the
+    // (unreachable) `u64::MAX` tick so the catch-up arithmetic never wraps.
+    bus.tick_to(tick_index.saturating_add(1))
+}
+
 /// The single bake-consumer thread body (encode-once-mux-many, invariant #7):
 /// build the [`StreamBaker`] from the owned [`BakeContext`] and own the single
 /// [`ProgramEncoder`], then loop receiving [`StreamItem`]s — bake each into an
@@ -1945,14 +2057,18 @@ fn consumer_main(
                 reason: e.to_string(),
             })?;
         fan_packets(&sink_txs, &mut live, packets);
-        // Program audio (AUD-4), OFF the engine hot loop: when the bus is present,
-        // mix exactly one tick of program audio (silence until per-source decode is
-        // wired) and encode it into AAC packets, fanned to the SAME sinks as the
-        // video. `tick()` does no I/O and cannot block (inv #1/#10); the encode
-        // runs here on the bake consumer, never on the output-clock loop. `None`
-        // (audio off) skips this entirely — the run is video-only as before.
+        // Program audio (AUD-4 + RT-8b), OFF the engine hot loop: when the bus is
+        // present, mix program audio up to THIS frame's output tick index — catching
+        // up the samples for any ticks `DropOnOverload` shed since the last surviving
+        // frame — and encode it into AAC packets, fanned to the SAME sinks as the
+        // video. Driving by the tick index (not once per surviving frame) keeps the
+        // audio `SampleClock` a pure function of the tick counter, so audio stays
+        // lip-synced to video even under sustained encoder overload (invariant #3).
+        // The pull does no I/O and cannot block (inv #1/#10); the encode runs here on
+        // the bake consumer, never on the output-clock loop. `None` (audio off) skips
+        // this entirely — the run is video-only as before.
         if let Some(bus) = audio_bus.as_mut() {
-            let block = bus.tick();
+            let block = drive_audio_for_item(bus, item.tick_index);
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {
@@ -2192,33 +2308,12 @@ fn run_push_output(
 }
 
 /// Sample every per-source caption cue store at `pts`, returning the active
-/// caption lines per source (`source_id -> on-screen lines`). Only text cues
-/// carry display lines; a source with no active cue at `pts` is omitted. Called
-/// per tick on the hot loop — a pure lock-free read that can neither pace nor
-/// stall the engine (invariants #1/#10).
-#[cfg(feature = "overlay")]
-fn sample_caption_stores(
-    stores: &std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
-    pts: MediaTime,
-) -> std::collections::HashMap<String, Vec<String>> {
-    let mut out = std::collections::HashMap::new();
-    for (id, store) in stores {
-        if let Some(multiview_ffmpeg::caption::CaptionCue::Text { text, .. }) = store.active_at(pts)
-        {
-            if !text.lines.is_empty() {
-                out.insert(id.clone(), text.lines);
-            }
-        }
-    }
-    out
-}
-
-/// Sample every per-source caption cue store at `pts`, returning the active
-/// **bitmap** cue per source (`source_id -> CueBitmap`). The sibling of
-/// [`sample_caption_stores`] for the [`CaptionCue::Bitmap`] shape (DVB-sub); a
-/// source with no active bitmap cue at `pts` is omitted. Called per tick on the
-/// hot loop — a pure lock-free read that can neither pace nor stall the engine
-/// (invariants #1/#10).
+/// **bitmap** cue per source (`source_id -> CueBitmap`). The bitmap (DVB-sub)
+/// sibling of the per-layer [`SubtitleRouter`](crate::captions::SubtitleRouter)
+/// text sampling (RT-10b's `CueSource` primitive is text-only), for the
+/// [`CaptionCue::Bitmap`] shape; a source with no active bitmap cue at `pts` is
+/// omitted. Called per tick on the hot loop — a pure lock-free read that can
+/// neither pace nor stall the engine (invariants #1/#10).
 #[cfg(feature = "overlay")]
 fn sample_caption_bitmaps(
     stores: &std::collections::HashMap<String, Arc<crate::captions::CueStore>>,
@@ -5209,6 +5304,109 @@ mod eng2_timeline_tests {
             assert!(
                 pair[1] > pair[0],
                 "genpts fallback must advance the timeline each frame, got {out:?}"
+            );
+        }
+    }
+}
+
+/// RT-8b: the cli bake consumer must drive the program-audio bus by the **output
+/// tick index** carried on each [`StreamItem`], not once per surviving (dequeued)
+/// frame. Under `DropOnOverload` some video frames are shed, so a surviving-frame-
+/// paced `bus.tick()` would emit fewer audio ticks than the tick count and audio
+/// would trail video by exactly the dropped ticks' samples (invariant #3
+/// violation). [`drive_audio_for_item`] catches up across each gap via
+/// [`ProgramBus::tick_to`](multiview_audio::program::ProgramBus::tick_to), so the
+/// cumulative emitted samples stay locked to the `SampleClock` ideal regardless of
+/// how many ticks were dropped. This proves the fix at the cli-driver seam (the
+/// audio-crate primitive is proven separately in `lip_sync_breakaway.rs`).
+#[cfg(test)]
+mod rt8b_lip_sync_driver_tests {
+    use std::sync::Arc;
+
+    use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
+    use multiview_audio::program::ProgramBus;
+    use multiview_audio::store::AudioStore;
+    use multiview_core::time::Rational;
+
+    use super::drive_audio_for_item;
+
+    const FS: u32 = 48_000;
+
+    fn stereo() -> AudioFormat {
+        AudioFormat::new(FS, ChannelLayout::Stereo)
+    }
+
+    /// The `SampleClock` drift-free ideal cumulative sample count after `ticks`
+    /// ticks at `rate` Hz / `num`/`den` fps — `floor(ticks * rate * den / num)`.
+    fn ideal_total(ticks: u64, rate: u64, num: u64, den: u64) -> u64 {
+        (ticks * rate * den) / num
+    }
+
+    /// Under a `DropOnOverload` gap (only the SURVIVING ticks reach the consumer),
+    /// driving the bus through the cli's [`drive_audio_for_item`] by each surviving
+    /// item's tick index keeps cumulative emitted samples equal to the `SampleClock`
+    /// ideal for the LAST tick index reached — it catches up across every dropped
+    /// tick. A per-surviving-frame `tick()` would trail by the dropped ticks'
+    /// samples; this test forbids that.
+    #[test]
+    fn cli_driver_is_tick_index_driven_under_dropped_frames() {
+        let fmt = stereo();
+        // NTSC fractional cadence so a per-tick-scalar shortcut cannot accidentally
+        // pass: the per-tick budget alternates 1601/1602 and only the absolute
+        // tick-index total is exact.
+        let (rate, num, den) = (48_000_u64, 30_000_u64, 1001_u64);
+        let mut bus = ProgramBus::new(fmt, Rational::new(30_000, 1001));
+        let store = Arc::new(AudioStore::new(fmt, 96_000));
+        store
+            .publish(&AudioBlock::silence(fmt, 96_000))
+            .expect("publish silence");
+        bus.add_source("a", Arc::clone(&store), 1.0);
+
+        // The output clock ticked 0..=499; under overload only these tick indices
+        // SURVIVED to the bake consumer (every other tick, then larger gaps). The
+        // dropped ticks must NOT drop an audio tick — the bus catches up.
+        let surviving: [u64; 9] = [0, 1, 4, 8, 9, 49, 136, 300, 499];
+        let mut cumulative = 0_u64;
+        for &tick_index in &surviving {
+            let block = drive_audio_for_item(&mut bus, tick_index);
+            cumulative += u64::try_from(block.frame_count()).expect("block len fits u64");
+            // After processing the surviving item at `tick_index`, the bus must have
+            // emitted exactly the ideal cumulative samples for ticks 0..=tick_index
+            // (i.e. `total_at(tick_index + 1)`) — never fewer (drift) despite the
+            // skipped ticks before this one.
+            let ideal = ideal_total(tick_index + 1, rate, num, den);
+            assert_eq!(
+                cumulative, ideal,
+                "cli audio driver must be tick-index driven: after the surviving frame at \
+                 tick {tick_index}, cumulative emitted samples must equal the SampleClock ideal \
+                 {ideal} (catch-up across the dropped ticks), got {cumulative}"
+            );
+        }
+    }
+
+    /// With NO drops (every consecutive tick survives), the cli driver emits the
+    /// SAME per-tick blocks as the old `bus.tick()` would — byte-identical
+    /// behaviour on the steady path (the regression guard for the existing
+    /// program-audio tests).
+    #[test]
+    fn cli_driver_matches_per_tick_when_nothing_is_dropped() {
+        let fmt = stereo();
+        let (rate, num, den) = (48_000_u64, 30_000_u64, 1001_u64);
+        let mut bus = ProgramBus::new(fmt, Rational::new(30_000, 1001));
+        let store = Arc::new(AudioStore::new(fmt, 96_000));
+        store
+            .publish(&AudioBlock::silence(fmt, 96_000))
+            .expect("publish silence");
+        bus.add_source("a", Arc::clone(&store), 1.0);
+
+        let mut cumulative = 0_u64;
+        for tick_index in 0_u64..200 {
+            let block = drive_audio_for_item(&mut bus, tick_index);
+            cumulative += u64::try_from(block.frame_count()).expect("block len fits u64");
+            assert_eq!(
+                cumulative,
+                ideal_total(tick_index + 1, rate, num, den),
+                "steady (no-drop) cli audio must equal the per-tick ideal at tick {tick_index}"
             );
         }
     }
