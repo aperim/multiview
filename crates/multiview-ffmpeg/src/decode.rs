@@ -39,6 +39,11 @@ static INIT: Once = Once::new();
 /// caller observes any failure; subsequent callers assume success (libav has
 /// no way to re-report it, and a failed registration is fatal regardless).
 ///
+/// On the first successful init this also installs the libav → `tracing` log
+/// bridge ([`crate::log_bridge`]), replacing libav's unbounded stderr writer
+/// with a rate-limited structured logger so a glitchy/corrupt input can never
+/// flood the operator's logs.
+///
 /// # Errors
 /// Returns [`FfmpegError::Init`] if libav initialization fails.
 pub fn ensure_initialized() -> Result<()> {
@@ -46,7 +51,11 @@ pub fn ensure_initialized() -> Result<()> {
     INIT.call_once(|| {
         if let Err(err) = ffmpeg::init() {
             outcome = Err(FfmpegError::Init(err));
+            return;
         }
+        // libav is up: route + rate-limit its log output before any decoder can
+        // emit a flood. Idempotent and infallible.
+        crate::log_bridge::install();
     });
     outcome
 }
