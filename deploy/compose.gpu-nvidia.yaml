@@ -22,15 +22,17 @@ services:
       # falls back to CPU (5+ cores at 4K). Pairs with `libvulkan1` in the image.
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       NVIDIA_VISIBLE_DEVICES: all
-    # The wgpu/Vulkan compositor must open the DRM render node /dev/dri/renderD*
-    # (owned root:render, mode 0660). The toolkit mounts the node but does NOT add
-    # the container user to the host's `render` group, so a non-root container user
-    # (uid 10001) gets "vkCreateInstance failed" → silent CPU fallback (SA-0 warns
-    # "GPU present but compositing unavailable"). Grant the HOST render + video GIDs
-    # so uid 10001 can open the render node. Check yours with `getent group render`
-    # (105 on Debian/Ubuntu — the nvidia/cuda base; video is 44). VERIFIED on the box:
-    # adding these is what makes wgpu enumerate the discrete GPU instead of llvmpipe.
-    group_add: ["105", "44"]
+    # GPU render-node access is handled automatically by the image entrypoint —
+    # NO `group_add` with magic GIDs is needed here. Background: the wgpu/Vulkan
+    # compositor must open the DRM render node /dev/dri/renderD* (root:render 0660);
+    # the toolkit mounts the node but does NOT add the container user to the host's
+    # `render` group, and that GID is host-specific (105 on Debian/Ubuntu, varies
+    # elsewhere). docker-entrypoint.sh detects the mounted nodes' GIDs at runtime
+    # and grants exactly those to the unprivileged uid 10001 — portable to any host,
+    # zero config. (Without it: "vkCreateInstance failed" → CPU fallback; SA-0 warns
+    # "GPU present but compositing unavailable".) For a BARE-METAL `multiview run`
+    # (no container) instead, add the service user to the groups:
+    #   sudo usermod -aG render,video <user>
     # ---------------------------------------------------------------------------
     # Per-process GPU attribution ("ours vs total" in the System monitor):
     # NVML keys per-process counters (encode sessions, VRAM, SM/NVENC util) by the

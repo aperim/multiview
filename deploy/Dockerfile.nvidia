@@ -97,7 +97,7 @@ RUN apt-get update \
  && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu noble main" \
       > /etc/apt/sources.list.d/jellyfin.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 libvulkan1 libx11-6 libxext6 \
+ && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 libvulkan1 libx11-6 libxext6 util-linux \
  && test -e /usr/lib/jellyfin-ffmpeg/lib/libavcodec.so.61 \
  && apt-get purge -y curl gnupg \
  && apt-get autoremove -y \
@@ -126,8 +126,18 @@ RUN groupadd --gid 10001 multiview \
  && chown -R 10001:10001 /etc/multiview /var/lib/multiview
 
 COPY --from=builder /usr/local/bin/multiview /usr/local/bin/multiview
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-USER 10001:10001
+# NO `USER` directive — by design. The wgpu/Vulkan compositor must open the DRM
+# render node /dev/dri/renderD* (root:render 0660), and the host's `render` group
+# GID is NOT fixed (105 on Debian/Ubuntu, but varies by host) so it cannot be
+# baked in. The entrypoint therefore starts as root ONLY to detect the GID(s) of
+# the GPU device nodes actually mounted into this container, then IMMEDIATELY
+# drops to the unprivileged uid:gid 10001 via `setpriv`, granting exactly those
+# device groups. The multiview process never runs as root. To skip the drop (e.g.
+# a hardened deploy that pins `user: "10001"` + supplies the render GID via
+# `group_add` itself), the entrypoint honors the explicit non-root uid as-is.
 WORKDIR /var/lib/multiview
 
 # Control plane: web UI at `/`, REST `/api/v1`, WS `/api/v1/ws`, SSE
@@ -137,5 +147,5 @@ WORKDIR /var/lib/multiview
 # stable `admin.<secret>` bearer token (else one is generated + logged once).
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/multiview"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["run", "/etc/multiview/multiview.toml"]
