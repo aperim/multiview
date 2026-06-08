@@ -97,7 +97,7 @@ RUN apt-get update \
  && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu noble main" \
       > /etc/apt/sources.list.d/jellyfin.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 libvulkan1 \
+ && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 libvulkan1 libx11-6 libxext6 \
  && test -e /usr/lib/jellyfin-ffmpeg/lib/libavcodec.so.61 \
  && apt-get purge -y curl gnupg \
  && apt-get autoremove -y \
