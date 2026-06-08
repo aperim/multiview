@@ -15,6 +15,7 @@
 
 pub mod compositor;
 pub mod device;
+pub(crate) mod pool;
 pub mod shader;
 pub mod uniforms;
 
