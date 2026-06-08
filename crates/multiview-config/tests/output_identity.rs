@@ -20,7 +20,7 @@
 )]
 
 use multiview_config::routing::OutputRef;
-use multiview_config::{MultiviewConfig, Output};
+use multiview_config::MultiviewConfig;
 
 /// A v3 document declaring two outputs, the first with an explicit operator
 /// `id`, the second relying on the derived (label-based) stable id.
@@ -194,7 +194,7 @@ fn output_ref_constructor_defaults_to_main_program() {
 }
 
 /// A v3 document whose explicit routing carries an output crosspoint addressing
-/// the output by its **stable id** (not its label), exercising the OutputRef →
+/// the output by its **stable id** (not its label), exercising the `OutputRef` →
 /// known-output validation.
 const EXPLICIT_ROUTING: &str = r##"
 schema_version = 3

@@ -531,6 +531,11 @@ pub struct Overlay {
 pub enum Output {
     /// RTSP server.
     RtspServer {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ a stable id is
+        /// **derived** from [`Output::label`] (back-compat for v1/v2 docs), so a
+        /// crosspoint can address this output via an [`crate::OutputRef`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         /// Mount point (e.g. `/multiview`).
         mount: String,
         /// Video codec (`h264`, `hevc`, …).
@@ -549,6 +554,10 @@ pub enum Output {
     },
     /// Low-latency HLS packager.
     LlHls {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         /// Output path.
         path: String,
         /// Video codec.
@@ -571,6 +580,10 @@ pub enum Output {
     },
     /// HLS packager.
     Hls {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         /// Output path.
         path: String,
         /// Video codec.
@@ -587,6 +600,10 @@ pub enum Output {
     },
     /// NDI output.
     Ndi {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         /// NDI source name to advertise.
         name: String,
         /// Operator pin for this output's frame source to a stable GPU.
@@ -599,6 +616,10 @@ pub enum Output {
     },
     /// RTMP push.
     Rtmp {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         /// Destination URL.
         url: String,
         /// Video codec.
@@ -613,6 +634,10 @@ pub enum Output {
     },
     /// SRT push.
     Srt {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         /// Destination URL.
         url: String,
         /// Video codec.
@@ -627,6 +652,36 @@ pub enum Output {
 }
 
 impl Output {
+    /// The **explicit** operator id this output declares, if any (ADR-0034 /
+    /// RT-12). `None` ⇒ no `id` was authored, and [`Output::id`] derives a
+    /// stable one from [`Output::label`].
+    #[must_use]
+    pub fn explicit_id(&self) -> Option<&str> {
+        match self {
+            Output::RtspServer { id, .. }
+            | Output::LlHls { id, .. }
+            | Output::Hls { id, .. }
+            | Output::Ndi { id, .. }
+            | Output::Rtmp { id, .. }
+            | Output::Srt { id, .. } => id.as_deref(),
+        }
+    }
+
+    /// This output's **stable id** — the operator-addressable handle a routing
+    /// [`crate::OutputRef`] binds to (ADR-0034 / RT-12).
+    ///
+    /// Returns the explicitly-authored `id` when present, otherwise a stable id
+    /// **derived** from [`Output::label`]. The derivation keeps v1/v2 documents
+    /// (which carry no `id`) routing identically: the desugared output
+    /// crosspoints reference this same string. An explicit id should not collide
+    /// with another output's resolved id — [`crate::MultiviewConfig::validate`]
+    /// rejects a document where two outputs resolve to the same id.
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.explicit_id()
+            .map_or_else(|| self.label(), ToOwned::to_owned)
+    }
+
     /// The operator GPU pin for this output's encode stage, if any (ADR-0018
     /// §2.1). `None` ⇒ the placement engine auto-places the output's encode.
     #[must_use]

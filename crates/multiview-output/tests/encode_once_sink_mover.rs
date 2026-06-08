@@ -165,15 +165,16 @@ fn move_to_warm_rendition_spawns_zero_new_encodes() {
 
     // One steady tick: both renditions encode once each ⇒ 2 encodes.
     driver.tick(0, encoder.as_ref());
-    assert_eq!(encoder.total_calls(), 2, "two warm renditions ⇒ two encodes");
+    assert_eq!(
+        encoder.total_calls(),
+        2,
+        "two warm renditions ⇒ two encodes"
+    );
     let baseline = encoder.calls_for("sd");
     assert_eq!(baseline, 1);
 
     // Move sink `a` from hd → sd (sd is already encoding).
-    assert!(
-        driver.move_sink("a", &hd, sd.clone()),
-        "the sink must move"
-    );
+    assert!(driver.move_sink("a", &hd, sd.clone()), "the sink must move");
 
     // Next tick: sd still encodes ONCE (now feeding two sinks); hd has no sinks
     // left, so it is NOT encoded. Zero NEW encodes spawned by the warm move —
@@ -214,7 +215,10 @@ fn move_to_cold_rendition_spawns_exactly_one_new_encode() {
     assert_eq!(encoder.calls_for("cold"), 0, "cold rendition not encoded");
 
     // Move sink `a` from hd → cold.
-    assert!(driver.move_sink("a", &hd, cold.clone()), "the sink must move");
+    assert!(
+        driver.move_sink("a", &hd, cold.clone()),
+        "the sink must move"
+    );
 
     // Next tick: cold now has a consumer ⇒ encodes EXACTLY ONCE; hd has no sinks
     // ⇒ not encoded. Exactly one new encode total for this tick.
@@ -230,7 +234,11 @@ fn move_to_cold_rendition_spawns_exactly_one_new_encode() {
         1,
         "exactly one encode this tick (cold), since hd is now dark"
     );
-    assert_eq!(a.received.lock().unwrap().len(), 2, "sink fed across the move");
+    assert_eq!(
+        a.received.lock().unwrap().len(),
+        2,
+        "sink fed across the move"
+    );
 }
 
 /// `move_sink` from an unknown source rendition (or unknown sink) is a no-op
@@ -245,7 +253,11 @@ fn move_sink_unknown_is_a_noop() {
         "moving an absent sink reports false"
     );
     assert!(
-        !driver.move_sink("present", &RenditionId::new("nowhere"), RenditionId::new("target")),
+        !driver.move_sink(
+            "present",
+            &RenditionId::new("nowhere"),
+            RenditionId::new("target")
+        ),
         "moving from an absent source rendition reports false"
     );
 }
