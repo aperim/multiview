@@ -22,6 +22,15 @@ services:
       # falls back to CPU (5+ cores at 4K). Pairs with `libvulkan1` in the image.
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       NVIDIA_VISIBLE_DEVICES: all
+    # The wgpu/Vulkan compositor must open the DRM render node /dev/dri/renderD*
+    # (owned root:render, mode 0660). The toolkit mounts the node but does NOT add
+    # the container user to the host's `render` group, so a non-root container user
+    # (uid 10001) gets "vkCreateInstance failed" → silent CPU fallback (SA-0 warns
+    # "GPU present but compositing unavailable"). Grant the HOST render + video GIDs
+    # so uid 10001 can open the render node. Check yours with `getent group render`
+    # (105 on Debian/Ubuntu — the nvidia/cuda base; video is 44). VERIFIED on the box:
+    # adding these is what makes wgpu enumerate the discrete GPU instead of llvmpipe.
+    group_add: ["105", "44"]
     # ---------------------------------------------------------------------------
     # Per-process GPU attribution ("ours vs total" in the System monitor):
     # NVML keys per-process counters (encode sessions, VRAM, SM/NVENC util) by the
