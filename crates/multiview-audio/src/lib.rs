@@ -75,8 +75,9 @@ pub use error::{AudioError, Result};
 pub use format::{AudioBlock, AudioFormat, ChannelLayout};
 pub use loudness::LoudnessMeter;
 pub use meterdata::{Conflator, MeterSample, StereoMeterSample, DISPLAY_HZ};
-pub use mixer::{Mixer, RoutePoint};
+pub use mixer::{GainRamp, Mixer, RoutePoint};
 pub use probe::{AudioProbeBank, AudioProbeConfig, ProbeSeverityProfile};
+pub use program::{ApplyClass, ProgramBus, SwitchTier};
 #[cfg(feature = "ffmpeg")]
 pub use store::audio_decode_loop;
 pub use store::AudioStore;

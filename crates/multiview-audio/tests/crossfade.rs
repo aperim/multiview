@@ -50,20 +50,6 @@ fn stereo() -> AudioFormat {
     AudioFormat::new(FS, ChannelLayout::Stereo)
 }
 
-/// Gather the full left-channel sample run a `ProgramBus` emits over `ticks`
-/// ticks, concatenated into one contiguous signal (so seam continuity across
-/// tick blocks can be checked end to end).
-fn drain_left(bus: &mut ProgramBus, ticks: usize) -> Vec<f32> {
-    let mut out = Vec::new();
-    for _ in 0..ticks {
-        let block = bus.tick();
-        for frame in 0..block.frame_count() {
-            out.push(block.interleaved()[frame * 2]);
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Mixer-level: the per-sample equal-power envelope.
 // ---------------------------------------------------------------------------
@@ -175,12 +161,17 @@ fn equal_power_crossfade_has_no_click_and_constant_power_across_a_tick_block() {
     let ramp = 480usize;
 
     let store_a = Arc::new(AudioStore::new(fmt, 192_000));
+    // Source B is a LIVE breakaway target: a `repoint_crossfade` seeks it to its
+    // live edge (as `repoint` does), so a real source publishes fresh audio AT
+    // that edge each tick. Model that by seeding B's current tail and topping it
+    // up at the live edge as the bus consumes it (exactly as RT-8a's breakaway
+    // test models a live decoder).
     let store_b = Arc::new(AudioStore::new(fmt, 192_000));
     store_a
         .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 192_000 * 2]).unwrap())
         .unwrap();
     store_b
-        .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 192_000 * 2]).unwrap())
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 4_000 * 2]).unwrap())
         .unwrap();
     let point = bus.add_source("prog", Arc::clone(&store_a), 1.0);
 
@@ -193,10 +184,15 @@ fn equal_power_crossfade_has_no_click_and_constant_power_across_a_tick_block() {
     let last_pre = *pre_left.last().unwrap();
 
     // BREAKAWAY: cross-fade to B over `ramp` frames. This is the CLICK-FREE tier.
+    // The crossfade seeks B to its live edge (frame 4000); publish fresh B audio
+    // there so the seam reads B's live tone, exactly as a real decoder would.
     let tier = bus
         .repoint_crossfade(point, Arc::clone(&store_b), ramp)
         .unwrap();
     assert_eq!(tier, SwitchTier::ClickFree);
+    store_b
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 8_000 * 2]).unwrap())
+        .unwrap();
 
     let post = bus.tick();
     let post_left: Vec<f32> = (0..post.frame_count())
@@ -238,6 +234,63 @@ fn equal_power_crossfade_has_no_click_and_constant_power_across_a_tick_block() {
     );
 }
 
+/// (c) R128 / TRUE-PEAK not violated: for two UNCORRELATED sources (so there is
+/// no constructive +3 dB bump), the equal-power cross-fade's bus true-peak never
+/// exceeds the louder source's peak, and the summed POWER stays constant across
+/// the fade (no dip). Source A is a +1.0/-1.0 square at one phase, B the same at
+/// the opposite phase, so at every instant only one is at +1.0 and the cross term
+/// is statistically zero — the equal-power sum gainA²·1 + gainB²·1 = 1 holds the
+/// power flat while the peak stays at <= 1.0 (the louder source).
+#[test]
+fn crossfade_true_peak_bounded_and_power_flat_for_uncorrelated_sources() {
+    let fmt = stereo();
+    let mut mixer = Mixer::new(fmt);
+    let a = mixer.add_input("a");
+    let b = mixer.add_input("b");
+    mixer.route_to_program(a, 1.0);
+    mixer.route_to_program(b, 1.0);
+
+    // Uncorrelated full-scale content: A square +1/-1, B the inverse square so the
+    // two are anti-phase (cross term cancels in power; never both +1 at once).
+    let n = 960usize;
+    let mut sa = Vec::with_capacity(n * 2);
+    let mut sb = Vec::with_capacity(n * 2);
+    for f in 0..n {
+        let va = if f % 2 == 0 { 1.0f32 } else { -1.0 };
+        let vb = -va; // anti-phase
+        sa.push(va);
+        sa.push(va);
+        sb.push(vb);
+        sb.push(vb);
+    }
+    mixer
+        .submit(a, AudioBlock::from_interleaved(fmt, sa).unwrap())
+        .unwrap();
+    mixer
+        .submit(b, AudioBlock::from_interleaved(fmt, sb).unwrap())
+        .unwrap();
+    mixer.set_gain_ramp(a, GainRamp::down(n));
+    mixer.set_gain_ramp(b, GainRamp::up(n));
+
+    let bus = mixer.mix_program().unwrap();
+    // TRUE-PEAK bounded: no bus sample exceeds 1.0 (the louder source's peak).
+    // An equal-power fade of anti-phase ±1 sources is gA·(±1) + gB·(∓1), whose
+    // magnitude |gA - gB| <= 1 always (and the clamp would catch any overflow).
+    for (i, &v) in bus.interleaved().iter().enumerate() {
+        assert!(
+            v.abs() <= 1.0 + 1e-6,
+            "true-peak must not exceed the louder source (1.0) at sample {i}: {v}"
+        );
+    }
+    // POWER flat: per frame the instantaneous power gA²·1 + gB²·1 == 1. Recover
+    // the per-strip gains from the envelopes and check the sum-of-squares.
+    for f in 0..n {
+        let ga = GainRamp::down(n).envelope_at(f);
+        let gb = GainRamp::up(n).envelope_at(f);
+        approx::assert_abs_diff_eq!(ga * ga + gb * gb, 1.0, epsilon = 1e-4);
+    }
+}
+
 /// (d) After the ramp completes the OLD strip is UNROUTED — it no longer
 /// contributes to the bus. Drive the bus past the ramp and confirm the old
 /// source's store is no longer read (its cursor freezes) while B keeps advancing.
@@ -252,18 +305,26 @@ fn old_strip_is_unrouted_after_the_ramp_completes() {
     store_a
         .publish(&AudioBlock::from_interleaved(fmt, vec![0.3f32; 192_000 * 2]).unwrap())
         .unwrap();
+    // B is a live source: a small seeded tail then top-ups at the live edge.
     store_b
-        .publish(&AudioBlock::from_interleaved(fmt, vec![0.9f32; 192_000 * 2]).unwrap())
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.9f32; 2_000 * 2]).unwrap())
         .unwrap();
     let point = bus.add_source("prog", Arc::clone(&store_a), 1.0);
 
     bus.repoint_crossfade(point, Arc::clone(&store_b), ramp)
+        .unwrap();
+    // B (live) publishes fresh audio at its live edge to cover the next reads.
+    store_b
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.9f32; 4_000 * 2]).unwrap())
         .unwrap();
     // Tick 1: covers the whole ramp (1920 > 480) and into B-only territory.
     let _ = bus.tick();
     let cursor_a_after_ramp = store_a.read_cursor();
     // Tick 2: fully past the ramp — A must NOT be read again (unrouted), so its
     // cursor does not advance, while B keeps being read.
+    store_b
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.9f32; 4_000 * 2]).unwrap())
+        .unwrap();
     let cursor_b_before = store_b.read_cursor();
     let block2 = bus.tick();
     assert_eq!(
@@ -296,8 +357,9 @@ fn crossfade_spans_a_tick_boundary_with_no_step_at_the_block_seam() {
     store_a
         .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 384_000 * 2]).unwrap())
         .unwrap();
+    // B is a live source: seed a small tail, then top up at the live edge.
     store_b
-        .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 384_000 * 2]).unwrap())
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 2_000 * 2]).unwrap())
         .unwrap();
     let point = bus.add_source("prog", Arc::clone(&store_a), 1.0);
 
@@ -305,8 +367,19 @@ fn crossfade_spans_a_tick_boundary_with_no_step_at_the_block_seam() {
     bus.repoint_crossfade(point, Arc::clone(&store_b), ramp)
         .unwrap();
 
-    // Drain three more ticks (covers the 2400-frame ramp which spans 2 blocks).
-    let signal = drain_left(&mut bus, 3);
+    // Drain three more ticks (covers the 2400-frame ramp which spans 2 blocks);
+    // B (live) publishes a tick's budget of fresh audio at its live edge before
+    // each so the seam + fade read B's live tone, not silence past EOF.
+    let mut signal = Vec::new();
+    for _ in 0..3 {
+        store_b
+            .publish(&AudioBlock::from_interleaved(fmt, vec![0.5f32; 1_920 * 2]).unwrap())
+            .unwrap();
+        let block = bus.tick();
+        for frame in 0..block.frame_count() {
+            signal.push(block.interleaved()[frame * 2]);
+        }
+    }
     let max_step = signal
         .windows(2)
         .map(|w| (w[1] - w[0]).abs())
@@ -379,8 +452,5 @@ fn crossfade_of_a_nonexistent_point_is_a_clean_error() {
     let store = Arc::new(AudioStore::new(fmt, 48_000));
     let bogus = multiview_audio::RoutePoint::input(42);
     let err = bus.repoint_crossfade(bogus, store, 480).unwrap_err();
-    assert!(matches!(
-        err,
-        multiview_audio::AudioError::UnknownInput(42)
-    ));
+    assert!(matches!(err, multiview_audio::AudioError::UnknownInput(42)));
 }
