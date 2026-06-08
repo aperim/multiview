@@ -3,29 +3,90 @@
 # Multiview NVIDIA runtime image (NVDEC/NVENC/CUDA, LGPL-clean default build).
 #
 # Multi-stage:
+#   * ffmpeg-build — Debian trixie; builds OUR OWN pinned FFmpeg 8.1.1 from a
+#                GPG- AND SHA-256-verified source tarball with the exact ADR-0031
+#                LGPL-clean allowlist (NVENC/NVDEC/cuvid/scale_cuda via
+#                nv-codec-headers + --enable-cuda-llvm; NO CUDA SDK; NO GPL/
+#                nonfree). Installs to /opt/multiview-ffmpeg (libavcodec.so.62).
+#                Replaces the old jellyfin-ffmpeg7 apt repo entirely.
 #   * web      — Node 22, builds the React SPA to `web/dist` (npm ci + npm run
 #                build). MUST precede the rust build: the `web` feature embeds
 #                `web/dist` into the binary at compile time (rust_embed).
-#   * builder  — Debian trixie + Rust, libav* -dev headers, builds `multiview`
-#                with `--features ffmpeg,nvidia,web` (CUDA decode/encode + wgpu,
-#                plus the embedded web UI + control API).
-#   * runtime  — nvidia/cuda:12.6.3-runtime-ubuntu24.04 with the FFmpeg 7.x
-#                runtime sonames + the binary, run as a non-root user.
+#   * builder  — Debian trixie + Rust, links against OUR FFmpeg 8.1.1 dev headers
+#                + .so (via PKG_CONFIG_PATH), builds `multiview` with
+#                `--features ffmpeg,nvidia,web` (CUDA decode/encode + wgpu, plus
+#                the embedded web UI + control API).
+#   * runtime  — nvidia/cuda:12.6.3-runtime-ubuntu24.04 with OUR FFmpeg 8.1.1
+#                runtime sonames (libavcodec.so.62, …) + the binary, run as a
+#                non-root user.
 #
 # IMPORTANT host prerequisite: this image does NOT contain the NVIDIA kernel
 # driver. The host must have the driver + the NVIDIA Container Toolkit (CDI);
 # the toolkit injects the host driver libraries (libcuda, NVENC/NVDEC) at run
 # time. See deploy/compose.gpu-nvidia.yaml.
 #
-# Builder is Debian trixie (FFmpeg 7.1 dev headers, libavcodec.so.61). The
-# runtime is the CUDA 12.6 runtime image on Ubuntu 24.04. Ubuntu 24.04 apt ships
-# FFmpeg 6.1, so the matching FFmpeg 7.x runtime sonames are installed from a
-# maintained PPA (ubuntuhandbook1/ffmpeg7) — pinned by the libav*61 family and
-# verified with `ldconfig`/`pkg-config` at build time.
+# FFmpeg provenance (ADR-0031 FF-0/FF-0b): we build FFmpeg 8.1.1 ourselves from
+# the pinned ffmpeg.org tarball, verified by BOTH the FFmpeg release GPG key
+# (FCF986EA15E6E293A5644F10B4322F04D67658D8) AND a pinned SHA-256, under our
+# `--disable-everything` allowlist. This kills the opaque foreign jellyfin
+# patchset/cadence AND its GPL x264/x265 (jellyfin-ffmpeg is `--enable-gpl`,
+# which mislabelled a GPL artifact as the project's "default build"). Our build
+# is genuinely LGPL-clean yet still ships h264_nvenc/hevc_nvenc, so the old
+# `select_encoder` fallback-to-mpeg2 concern disappears WITHOUT going GPL.
+#
+# 8.1.1 → libavcodec.so.62 / libavutil.so.60 / libavformat.so.62, matching
+# `ffmpeg-sys-next 8.1.0` (build.rs `ffmpeg_8_1` → libavcodec 62), the version
+# the workspace lockfile resolves — so the binary links .so.62.
 #
 # Base-image pinning: pin both bases by digest for a reproducible release, e.g.
+#   FROM debian:trixie@sha256:<digest> AS ffmpeg-build
 #   FROM rust:1-trixie@sha256:<digest> AS builder
 #   FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04@sha256:<digest> AS runtime
+
+# -----------------------------------------------------------------------------
+# Stage 0: ffmpeg-build — our own pinned, GPG+SHA-256-verified FFmpeg 8.1.1
+# (NVIDIA/NVENC profile). deploy/ffmpeg-build.sh owns the audited configure
+# flag list (LGPL-clean by default). Output: /opt/multiview-ffmpeg.
+# -----------------------------------------------------------------------------
+FROM debian:trixie AS ffmpeg-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# FFmpeg source pin. FFMPEG_SHA256 is the SHA-256 of ffmpeg-8.1.1.tar.xz from
+# ffmpeg.org/releases, verified end-to-end (the GPG good-signature + this digest
+# both checked against the real tarball at author time). The build ALSO verifies
+# the detached GPG .asc against FFMPEG_GPG_KEY; both must pass.
+ARG FFMPEG_VERSION=8.1.1
+ARG FFMPEG_SHA256=b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3
+ARG FFMPEG_GPG_KEY=FCF986EA15E6E293A5644F10B4322F04D67658D8
+# nv-codec-headers content-pinned by git commit (tag n13.0.19.0 → this commit).
+ARG NVCODEC_COMMIT=e844e5b26f46bb77479f063029595293aa8f812d
+# Licensing profile: lgpl (default) | gpl. gpl adds x264/x265 and tags `-gpl`.
+ARG FF_LICENSE=lgpl
+# Buildx supplies TARGETARCH (amd64|arm64); QSV/libvpl is gated amd64-only.
+ARG TARGETARCH
+
+# Build toolchain + the LGPL-clean external libs our allowlist enables
+# (libopus, libsrt, gnutls/nettle, libdrm). clang/llvm provide --enable-cuda-llvm
+# (JIT scale_cuda, no CUDA SDK). NO x264/x265-dev here in the lgpl default.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg git \
+      build-essential clang llvm pkg-config nasm yasm make \
+      libopus-dev libsrt-openssl-dev libgnutls28-dev libdrm-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/ffmpeg-build.sh /usr/local/bin/ffmpeg-build.sh
+RUN chmod 0755 /usr/local/bin/ffmpeg-build.sh \
+ && FF_HWACCEL=nvidia \
+    FFMPEG_VERSION="${FFMPEG_VERSION}" \
+    FFMPEG_SHA256="${FFMPEG_SHA256}" \
+    FFMPEG_GPG_KEY="${FFMPEG_GPG_KEY}" \
+    NVCODEC_COMMIT="${NVCODEC_COMMIT}" \
+    FF_LICENSE="${FF_LICENSE}" \
+    TARGETARCH="${TARGETARCH:-amd64}" \
+    FF_PREFIX=/opt/multiview-ffmpeg \
+    /usr/local/bin/ffmpeg-build.sh
 
 # -----------------------------------------------------------------------------
 # Stage 1: web — build the React SPA to web/dist (Node 22). The `web` cargo
@@ -43,7 +104,7 @@ COPY web/ ./
 RUN npm run build
 
 # -----------------------------------------------------------------------------
-# Stage 2: builder (Debian trixie => FFmpeg 7.x dev headers)
+# Stage 2: builder — links against OUR FFmpeg 8.1.1 (libavcodec.so.62)
 # -----------------------------------------------------------------------------
 FROM rust:1-trixie AS builder
 
@@ -52,12 +113,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 # GPL deps; pass a different CARGO_FEATURES to vary the build.
 ARG CARGO_FEATURES=ffmpeg,nvidia,web
 
+# Native build deps: pkg-config + clang/libclang for the FFI bindgen and to
+# locate libav* via pkg-config. The libav* themselves come from our ffmpeg-build
+# stage below — NOT from apt (no libav*-dev here).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config clang llvm-dev libclang-dev nasm \
-      libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
-      libavdevice-dev libswscale-dev libswresample-dev \
  && rm -rf /var/lib/apt/lists/*
+
+# Our pinned FFmpeg 8.1.1 (headers + .so + .pc). Point pkg-config + the loader at
+# it so `ffmpeg-sys-next` discovers FFmpeg 8.1.1 (detects ffmpeg_8_1 → libavcodec
+# 62) and the build links .so.62.
+COPY --from=ffmpeg-build /opt/multiview-ffmpeg /opt/multiview-ffmpeg
+ENV PKG_CONFIG_PATH=/opt/multiview-ffmpeg/lib/pkgconfig \
+    LD_LIBRARY_PATH=/opt/multiview-ffmpeg/lib
 
 WORKDIR /build
 COPY . .
@@ -74,39 +143,36 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && /usr/local/bin/multiview --version
 
 # -----------------------------------------------------------------------------
-# Stage 3: runtime (CUDA 12.6 runtime on Ubuntu 24.04 + FFmpeg 7.x sonames)
+# Stage 3: runtime (CUDA 12.6 runtime on Ubuntu 24.04 + OUR FFmpeg 8.1.1 sonames)
 # -----------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# multiview links libavcodec.so.61 (FFmpeg 7.x). The stock Ubuntu/PPA FFmpeg is a
-# minimal LGPL build with NO h264_nvenc (and no libx264), so the NVENC GPU-encode
-# path is unreachable — `select_encoder(H264)` probes the linked libav at run time
-# and falls back to mpeg2video. jellyfin-ffmpeg7 is a self-contained FFmpeg 7.x
-# built with `--enable-nvenc` + `--enable-libx264` (and bundles its own libav*61),
-# purpose-made for container hardware transcode. We install it and point the loader
-# at its lib dir so multiview selects `h264_nvenc` (the driver's libnvidia-encode
-# is injected at RUN time by the NVIDIA Container Toolkit). Assert the soname so a
-# layout change fails the build, not the demo.
+# Runtime deps for OUR FFmpeg 8.1.1 shared libs + the wgpu/Vulkan compositor.
+# We build FFmpeg with --enable-shared against libopus/libsrt/gnutls/libdrm, so
+# the runtime needs those shared libs present (the loader resolves them when the
+# binary pulls in libavcodec.so.62 et al). libvulkan1 + libx11-6 + libxext6 are
+# for the wgpu compositor; util-linux supplies `setpriv` for the entrypoint's
+# privilege drop. Our LGPL build INCLUDES h264_nvenc/hevc_nvenc (--enable-nvenc),
+# so NVENC GPU-encode works without GPL x264 (the driver's libnvidia-encode is
+# injected at RUN time by the NVIDIA Container Toolkit).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
- && mkdir -p /etc/apt/keyrings \
- && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
-      | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
- && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu noble main" \
-      > /etc/apt/sources.list.d/jellyfin.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 libvulkan1 libx11-6 libxext6 util-linux \
- && test -e /usr/lib/jellyfin-ffmpeg/lib/libavcodec.so.61 \
- && apt-get purge -y curl gnupg \
- && apt-get autoremove -y \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libopus0 libsrt1.5-openssl libgnutls30t64 libdrm2 \
+      libvulkan1 libx11-6 libxext6 util-linux \
  && rm -rf /var/lib/apt/lists/*
 
-# Load jellyfin-ffmpeg's nvenc/x264-enabled libav* (it bundles the full set:
-# libavcodec/format/util/filter/device + libsw{scale,resample}). Prepended, so the
-# system CUDA/Vulkan libs the compositor needs are still found.
-ENV LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib
+# Our FFmpeg 8.1.1 shared libraries (libavcodec.so.62, libavutil.so.60,
+# libavformat.so.62, libavfilter.so.11, libswscale.so.9, libswresample.so.6, and
+# their symlinks). Install into /usr/local/lib and ldconfig so the binary finds
+# them with NO LD_LIBRARY_PATH override. Assert the 8.1.1 soname (.so.62, NOT
+# .61) so a version/layout drift fails the BUILD, not the demo.
+COPY --from=ffmpeg-build /opt/multiview-ffmpeg/lib /usr/local/lib
+RUN ldconfig \
+ && test -e /usr/local/lib/libavcodec.so.62 \
+ && test -e /usr/local/lib/libavutil.so.60
 
 # Driver capabilities the container needs from the NVIDIA Container Toolkit:
 #  - compute  → CUDA (NVDEC/NVENC compute side)
