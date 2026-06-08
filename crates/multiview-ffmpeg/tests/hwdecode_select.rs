@@ -13,7 +13,29 @@
     clippy::indexing_slicing
 )]
 
-use multiview_ffmpeg::hwdecode::{cuvid_decoder, HwInputCodec};
+use multiview_ffmpeg::hwdecode::{cuvid_decoder, nvdec_disabled, want_hw_decode, HwInputCodec};
+
+#[test]
+fn nvdec_opt_out_defaults_to_enabled_and_parses_falsey_tokens() {
+    // Unset / empty / explicit falsey tokens leave hardware decode ENABLED so a
+    // GPU box prefers NVDEC by default; only an affirmative value opts out.
+    assert!(!nvdec_disabled(None), "unset must keep NVDEC enabled");
+    assert!(!nvdec_disabled(Some("")), "empty must keep NVDEC enabled");
+    assert!(
+        !nvdec_disabled(Some("   ")),
+        "whitespace-only stays enabled"
+    );
+    for off in ["0", "false", "FALSE", "No", "off", " off "] {
+        assert!(!nvdec_disabled(Some(off)), "{off:?} must NOT disable NVDEC");
+    }
+    for on in ["1", "true", "YES", "on", "anything"] {
+        assert!(nvdec_disabled(Some(on)), "{on:?} must disable NVDEC");
+    }
+    // `want_hw_decode` is the exact complement.
+    assert!(want_hw_decode(None));
+    assert!(!want_hw_decode(Some("1")));
+    assert!(want_hw_decode(Some("0")));
+}
 
 #[test]
 fn cuvid_names_follow_the_libav_convention() {
@@ -71,4 +93,62 @@ fn without_cuda_no_hardware_decoder_is_selected() {
     // LGPL/software default never reaches NVDEC.
     assert_eq!(select_decoder(HwInputCodec::H264, true), None);
     assert_eq!(select_decoder(HwInputCodec::H265, true), None);
+}
+
+// The codec-id -> HwInputCodec mapping is the bridge the run path uses to turn a
+// demuxed stream's libav codec id into a hardware-decode request. It needs the
+// `ffmpeg` feature for `ffmpeg::codec::Id`.
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn codec_id_maps_to_the_logical_hw_input_codec() {
+    use multiview_ffmpeg::hwdecode::hw_input_codec_for_id;
+    use multiview_ffmpeg::CodecId;
+    assert_eq!(
+        hw_input_codec_for_id(CodecId::H264),
+        Some(HwInputCodec::H264)
+    );
+    assert_eq!(
+        hw_input_codec_for_id(CodecId::HEVC),
+        Some(HwInputCodec::H265)
+    );
+    assert_eq!(hw_input_codec_for_id(CodecId::AV1), Some(HwInputCodec::Av1));
+    assert_eq!(hw_input_codec_for_id(CodecId::VP9), Some(HwInputCodec::Vp9));
+    assert_eq!(
+        hw_input_codec_for_id(CodecId::MPEG2VIDEO),
+        Some(HwInputCodec::Mpeg2Video)
+    );
+    // A codec with no NVDEC cuvid wrapper (e.g. an audio codec) maps to None, so
+    // the caller transparently keeps the software decoder.
+    assert_eq!(hw_input_codec_for_id(CodecId::AAC), None);
+}
+
+#[cfg(all(feature = "ffmpeg", feature = "cuda"))]
+#[test]
+fn select_decoder_for_id_resolves_the_cuvid_wrapper_when_wanted() {
+    use multiview_ffmpeg::hwdecode::select_decoder_for_id;
+    use multiview_ffmpeg::CodecId;
+    // H.264 stream + hardware wanted -> the registered cuvid wrapper name.
+    assert_eq!(
+        select_decoder_for_id(CodecId::H264, true),
+        Some("h264_cuvid")
+    );
+    assert_eq!(
+        select_decoder_for_id(CodecId::HEVC, true),
+        Some("hevc_cuvid")
+    );
+    // Hardware not wanted -> software (None), even on a cuda build.
+    assert_eq!(select_decoder_for_id(CodecId::H264, false), None);
+    // A codec with no cuvid wrapper -> software (None).
+    assert_eq!(select_decoder_for_id(CodecId::AAC, true), None);
+}
+
+#[cfg(all(feature = "ffmpeg", not(feature = "cuda")))]
+#[test]
+fn select_decoder_for_id_yields_software_without_cuda() {
+    use multiview_ffmpeg::hwdecode::select_decoder_for_id;
+    use multiview_ffmpeg::CodecId;
+    // No `cuda` feature: even an H.264 stream wanting hardware decodes in
+    // software (None) — the default build never reaches NVDEC.
+    assert_eq!(select_decoder_for_id(CodecId::H264, true), None);
+    assert_eq!(select_decoder_for_id(CodecId::HEVC, true), None);
 }

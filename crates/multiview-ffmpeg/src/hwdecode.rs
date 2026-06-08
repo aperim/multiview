@@ -174,6 +174,84 @@ pub fn select_decoder(codec: HwInputCodec, want_hw: bool) -> Option<&'static str
     }
 }
 
+/// Map a linked-libav video [`Id`](ffmpeg_next::codec::Id) to the logical
+/// [`HwInputCodec`] family, or [`None`] for a codec with no NVDEC cuvid wrapper.
+///
+/// Pure: a total `match` over the codec ids Multiview's cuvid wrappers cover
+/// (every other id — including audio/subtitle/data — maps to [`None`], so a
+/// caller transparently keeps the software decoder). This is the bridge the run
+/// path uses to turn a demuxed stream's codec id into a hardware-decode request.
+#[cfg(feature = "ffmpeg")]
+#[must_use]
+pub fn hw_input_codec_for_id(id: ffmpeg_next::codec::Id) -> Option<HwInputCodec> {
+    use ffmpeg_next::codec::Id;
+    match id {
+        Id::H264 => Some(HwInputCodec::H264),
+        Id::HEVC => Some(HwInputCodec::H265),
+        Id::AV1 => Some(HwInputCodec::Av1),
+        Id::VP9 => Some(HwInputCodec::Vp9),
+        Id::MPEG2VIDEO => Some(HwInputCodec::Mpeg2Video),
+        _ => None,
+    }
+}
+
+/// The concrete NVDEC `*_cuvid` decoder name for a demuxed stream's codec `id`
+/// when hardware decode is wanted, present in the linked libav, and the build
+/// compiled the `cuda` feature — otherwise [`None`] (decode in software).
+///
+/// This folds the codec-id → [`HwInputCodec`] mapping into [`select_decoder`],
+/// so a codec without a cuvid wrapper, a build without `cuda`, or
+/// `want_hw == false` all yield [`None`] and the caller decodes in software.
+/// Never panics, never a silent substitution.
+#[cfg(feature = "ffmpeg")]
+#[must_use]
+pub fn select_decoder_for_id(id: ffmpeg_next::codec::Id, want_hw: bool) -> Option<&'static str> {
+    let codec = hw_input_codec_for_id(id)?;
+    select_decoder(codec, want_hw)
+}
+
+/// The environment variable that disables NVDEC hardware decode at run time
+/// (a per-deploy opt-out — to force the software path for A/B comparison, or to
+/// dodge a known-bad driver — without a rebuild).
+pub const NVDEC_DISABLE_ENV: &str = "MULTIVIEW_DISABLE_NVDEC";
+
+/// Whether the NVDEC opt-out is engaged, given the raw `MULTIVIEW_DISABLE_NVDEC`
+/// reading ([`None`] when the variable is unset).
+///
+/// Pure and total. An unset or empty/whitespace value, or one of the explicit
+/// falsey tokens `0`/`false`/`no`/`off` (any case, surrounding whitespace
+/// ignored), leaves hardware decode **enabled**; any other non-empty value
+/// disables it. So `MULTIVIEW_DISABLE_NVDEC=1` forces software decode while the
+/// variable being absent keeps the GPU path available.
+#[must_use]
+pub fn nvdec_disabled(env_value: Option<&str>) -> bool {
+    match env_value {
+        None => false,
+        Some(raw) => {
+            let v = raw.trim();
+            if v.is_empty() {
+                return false;
+            }
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        }
+    }
+}
+
+/// Whether hardware (NVDEC) decode should be attempted, given the runtime
+/// opt-out reading.
+///
+/// The pure complement of [`nvdec_disabled`]: hardware decode is wanted unless
+/// the opt-out is engaged. The compile-time `cuda` gate and the run-time
+/// registry/device checks still apply downstream — this only folds in the
+/// operator's explicit opt-out.
+#[must_use]
+pub fn want_hw_decode(env_value: Option<&str>) -> bool {
+    !nvdec_disabled(env_value)
+}
+
 /// A pixel size (width x height), the unit the decode planner reasons in.
 ///
 /// Distinct from `multiview-hal`'s `Resolution` so this crate stays leaf-free of
@@ -458,6 +536,27 @@ mod tests {
         ] {
             assert!(!kind.fuses_decode_resize(), "{kind:?} must not fuse");
         }
+    }
+
+    #[test]
+    fn nvdec_opt_out_defaults_enabled_and_only_affirmative_disables() {
+        // Unset / empty / explicit falsey -> NVDEC stays enabled (default-on).
+        assert!(!nvdec_disabled(None));
+        assert!(!nvdec_disabled(Some("")));
+        assert!(!nvdec_disabled(Some("  \t ")));
+        for off in ["0", "false", "FALSE", "No", "off", "  Off  "] {
+            assert!(!nvdec_disabled(Some(off)), "{off:?} must keep NVDEC on");
+        }
+        // Any affirmative value disables hardware decode.
+        for on in ["1", "true", "yes", "on", "x"] {
+            assert!(nvdec_disabled(Some(on)), "{on:?} must disable NVDEC");
+        }
+        // want_hw_decode is the exact complement of nvdec_disabled.
+        assert!(want_hw_decode(None));
+        assert!(!want_hw_decode(Some("1")));
+        assert!(want_hw_decode(Some("off")));
+        // The opt-out env var name is the canonical MULTIVIEW_* spelling.
+        assert_eq!(NVDEC_DISABLE_ENV, "MULTIVIEW_DISABLE_NVDEC");
     }
 
     #[test]

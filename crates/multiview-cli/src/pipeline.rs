@@ -4288,12 +4288,31 @@ fn open_and_stream(
         )
     };
 
+    // Prefer NVDEC hardware decode (`*_cuvid`) so 4K H.264/HEVC decode runs on
+    // the GPU ASIC instead of the CPU (efficiency). The selection is gated by the
+    // `cuda` feature + a registered cuvid wrapper + a working GPU; a per-deploy
+    // env opt-out (`MULTIVIEW_DISABLE_NVDEC`) forces software. On a GPU-free box
+    // or any hardware-open failure this degrades to software decode gracefully —
+    // the tile keeps running (invariants #1/#2). Decoded CUDA surfaces are
+    // downloaded to host NV12 inside the decoder (the budgeted CPU↔GPU copy), so
+    // the rest of the pipeline is unchanged (invariant #5).
+    let want_hw = multiview_ffmpeg::want_hw_decode(
+        std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV)
+            .ok()
+            .as_deref(),
+    );
+    let (decoder, used_hw) = StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw)
+        .map_err(|e| e.to_string())?;
     // Feed the declared cadence so the decoder's genpts fallback advances at the
     // source's true rate (PAL 25, film 24, …) rather than an NTSC-shaped guess;
     // an unusable rate is ignored inside `with_declared_fps` (invariant #3).
-    let mut decoder = StreamVideoDecoder::new(params, time_base)
-        .map_err(|e| e.to_string())?
-        .with_declared_fps(Some(declared_fps));
+    let mut decoder = decoder.with_declared_fps(Some(declared_fps));
+    tracing::info!(
+        source = %plan.id,
+        hardware = used_hw,
+        decoder = decoder.hw_decoder_name().unwrap_or("software"),
+        "opened video decoder"
+    );
     let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
 
     // Per-input PTS normalizer (invariant #3, the unified timing model): unwrap a

@@ -137,6 +137,93 @@ impl HwDeviceContext {
     pub fn as_raw(&self) -> *mut ffi::AVBufferRef {
         self.ptr.as_ptr()
     }
+
+    /// Attach this device context to a not-yet-opened decoder `context` so the
+    /// decoder runs its hardware path on this GPU.
+    ///
+    /// Sets the decoder's `hw_device_ctx` to a **new owning reference** on this
+    /// device buffer (via `av_buffer_ref`), which libav frees when the codec
+    /// context is freed; `self` keeps its own ref. Must be called **before**
+    /// `avcodec_open2` (i.e. before `Decoder::open`/`video()`), which is the only
+    /// time libav reads `hw_device_ctx`.
+    ///
+    /// # Errors
+    /// Returns [`FfmpegError::HwContext`] if libav cannot take a new reference on
+    /// the device buffer (out of memory) — the caller then degrades to software.
+    pub fn attach_to_decoder(&self, context: &mut ffmpeg::codec::context::Context) -> Result<()> {
+        // SAFETY: `self.ptr` is a live, non-null owning ref on the device
+        // context (the `NonNull` invariant). `av_buffer_ref` returns a NEW
+        // independent owning ref (or null on OOM) without consuming ours. We
+        // hand that new ref to the codec context's `hw_device_ctx`, which libav
+        // takes ownership of and unrefs on `avcodec_free_context`. `context` is
+        // exclusively borrowed `&mut`, so writing the field is not aliased.
+        unsafe {
+            let new_ref = ffi::av_buffer_ref(self.ptr.as_ptr());
+            if new_ref.is_null() {
+                return Err(FfmpegError::HwContext(ffmpeg::Error::Bug));
+            }
+            let ctx_ptr = context.as_mut_ptr();
+            (*ctx_ptr).hw_device_ctx = new_ref;
+        }
+        Ok(())
+    }
+}
+
+/// Whether a decoded frame is a CUDA hardware surface (pixel format
+/// [`Pixel::CUDA`]) — i.e. its pixels live in device memory and must be
+/// downloaded with [`transfer_hwframe_to_host`] before the host pipeline can
+/// read them.
+///
+/// The `*_cuvid` wrapper decoders normally output host NV12 directly (they do
+/// the NVDEC decode + download internally), in which case this is `false` and no
+/// transfer is needed; this predicate exists so the decode loop stays correct if
+/// a future build is configured to return CUDA frames.
+#[must_use]
+pub fn is_cuda_frame(frame: &ffmpeg::frame::Video) -> bool {
+    frame.format() == Pixel::CUDA
+}
+
+/// Download a hardware (e.g. CUDA/NVDEC) `src` frame into the host `dst` frame
+/// via `av_hwframe_transfer_data` — the **budgeted CPU↔GPU copy** at the decode
+/// boundary (core-engine §8.1). `dst` is left as a host frame in the surface
+/// pool's software format (NV12 / P010), exactly what the rest of the pipeline
+/// consumes (invariant #5).
+///
+/// On entry `dst` is reset to an empty frame so libav allocates a correctly
+/// sized host buffer in the source's software format; on success its `pts` and
+/// best-effort timestamp are copied across so downstream PTS handling is
+/// unchanged.
+///
+/// # Errors
+/// Returns [`FfmpegError::HwContext`] if the transfer fails (e.g. driver/device
+/// error) — the caller logs once and degrades to software for that source, never
+/// crashing the output (invariants #1/#2).
+pub fn transfer_hwframe_to_host(
+    src: &ffmpeg::frame::Video,
+    dst: &mut ffmpeg::frame::Video,
+) -> Result<()> {
+    // A fresh destination so libav picks the surface pool's software format and
+    // allocates a matching host buffer for the download.
+    *dst = ffmpeg::frame::Video::empty();
+    // SAFETY: `src` and `dst` are valid, distinct `AVFrame`s (owned by the
+    // caller's bindings). `av_hwframe_transfer_data(dst, src, 0)` reads the GPU
+    // surface referenced by `src->hw_frames_ctx` and writes host planes into
+    // `dst`, allocating `dst`'s buffer; it does not take ownership of either
+    // frame. The `&mut`/`&` borrows guarantee `dst != src` and exclusive write
+    // access to `dst`. A negative return is a recoverable error surfaced below.
+    let rc = unsafe { ffi::av_hwframe_transfer_data(dst.as_mut_ptr(), src.as_ptr(), 0) };
+    if rc < 0 {
+        return Err(FfmpegError::HwContext(ffmpeg::Error::from(rc)));
+    }
+    // Carry the timestamps across the download so the decode loop's PTS handling
+    // sees the same values it would from a software frame.
+    dst.set_pts(src.pts());
+    // SAFETY: both pointers are valid `AVFrame`s for the duration of the call;
+    // `best_effort_timestamp` is a plain scalar field copy, no ownership effects.
+    unsafe {
+        (*dst.as_mut_ptr()).best_effort_timestamp = (*src.as_ptr()).best_effort_timestamp;
+    }
+    Ok(())
 }
 
 impl Drop for HwDeviceContext {
