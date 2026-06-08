@@ -2898,6 +2898,7 @@ dependencies = [
 name = "multiview-overlay"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "multiview-core",
  "proptest",
  "serde",
