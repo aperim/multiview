@@ -248,6 +248,12 @@ nvidia = [
     "ffmpeg",
     # The cli's own `cuda` feature selects the NVML system-metrics poller.
     "cuda",
+    # The cli's own `gpu` feature — gates the RUN-PATH GPU-compositor SELECTION
+    # (`#[cfg(feature = "gpu")] RunBackend::select(true)` in pipeline.rs). Without
+    # it `multiview-compositor/wgpu` only COMPILES the GPU compositor but the run
+    # SILENTLY keeps the CPU reference backend (the on-hardware "GPU never engages,
+    # CPU pegged at 4K" bug). `gpu` pulls `multiview-compositor/wgpu` + `dep:wgpu`.
+    "gpu",
     "multiview-hal/cuda",
     "multiview-compositor/cuda",
     "multiview-compositor/wgpu",
@@ -277,6 +283,9 @@ apple = [
 # (vaapi + qsv + ffmpeg + wgpu.)
 linux-vaapi = [
     "ffmpeg",
+    # `gpu` gates the run-path GPU-compositor SELECTION (see the `nvidia` note);
+    # without it the wgpu compositor compiles but the run stays on the CPU backend.
+    "gpu",
     "multiview-hal/vaapi",
     "multiview-hal/qsv",
     "multiview-compositor/vaapi",
