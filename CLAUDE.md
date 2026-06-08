@@ -254,6 +254,11 @@ Full text: [`conventions.md` §9](docs/architecture/conventions.md). The essenti
 - **Async:** `tokio`. **Logging/tracing:** `tracing`. **Serialization:** `serde`.
 - **Serde enums:** use **adjacently/internally-tagged** (`#[serde(tag = "kind")]`) for source/overlay/fit
  unions — robust across TOML and JSON. **Never `untagged`.**
+- **Networking — IPv6-first** (see [`conventions.md` §10](docs/architecture/conventions.md), [ADR-0042](docs/decisions/ADR-0042.md)):
+ all network-facing surfaces are **IPv6-first**; IPv4 is **legacy-only and on a deprecation path** —
+ **never design/document IPv4-only or IPv4-first.** Bind **dual-stack `[::]`** (`IPV6_V6ONLY=false`),
+ not `0.0.0.0`; loopback `[::1]`; bracket IPv6 URL literals; SDP `c=IN IP6` (no TTL); IPv6 multicast
+ `ff00::/8`+SSM `FF3x::/32` via MLDv2 primary; examples lead IPv6.
 - **Docs:** every public item documented; library crates carry `#![warn(missing_docs)]`.
 - **Formatting:** `rustfmt` (`rustfmt.toml`); clippy-clean under `-D warnings`.
 - **API conventions** (when touching `multiview-control`, see [`conventions.md` §6](docs/architecture/conventions.md)):

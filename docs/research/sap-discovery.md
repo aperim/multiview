@@ -6,6 +6,14 @@ discovers/announces, multicast carries). **Unifies** the planned AES67 SAP/SDP
 ([aes67-delivery](aes67-delivery.md) §6, [ADR-0033](../decisions/ADR-0033.md); backlog AES67-5/-6)
 into thin profiles. **SAP here = Session Announcement Protocol (the protocol VLC surfaces as
 "Network Streams (SAP)"), not anything to do with subtitles.**
+
+> **IPv6-first ([ADR-0042](../decisions/ADR-0042.md) / [conventions §10](../architecture/conventions.md)).**
+> SAP is IPv6-first: the listener joins the IPv6 SAP group `FF0X::2:7FFE` (and the IPv4 groups as the
+> **legacy** peer), the SDP model treats **`c=IN IP6` as a first-class form** (IPv6 multicast carries
+> **no TTL** — the slash is an address *count*, RFC 8866 §5.7; only IPv4 takes `/ttl`), derived MRLs
+> bracket IPv6 literals (`udp://@[ff3e::1]:p`, `rtp://[…]`), and announced outputs lead with IPv6.
+> Where SDP examples below show `IN IP4` they are the legacy form.
+
 **Question:** what is the implementation-ready architecture for **SAP discovery and announcement —
 listen for, and emit, the SDP descriptions of multicast media sessions** — so Multiview is
 plug-and-play discoverable by, and can discover, VLC / Dante-AES67 / RAVENNA gear, without a second
@@ -136,10 +144,14 @@ typed fields — they are different addresses.
 ## 5. The general SDP model
 
 **One** essence-agnostic SDP model in `multiview-input/src/sdp/` (RFC 8866 line syntax, wire-compatible
-with the RFC 4566 reference): session-level `v=0` / `o=<user> <id> <ver> IN IP4 <host>` / `s=<name>`
+with the RFC 4566 reference): session-level `v=0` / `o=<user> <id> <ver> IN IP6 <host>` (IPv6-first;
+`IN IP4` is the legacy form) / `s=<name>`
 (the **only** human label VLC shows — must be set, unique per announced output) / optional `i=` /
-`t=0 0` (permanent) / `c=IN IP4 <group>/<ttl>[/<count>]` (**TTL mandatory** for IPv4 multicast; order
-is **group/TTL/count** — the number after the first slash is the **TTL, not a CIDR prefix**; strip
+`t=0 0` (permanent) / a connection line that is **IPv6-first**: `c=IN IP6 <group>[/<count>]`
+(**no TTL** — scope is in the IPv6 address; the slash integer is an address *count*) is the primary
+form, with the **legacy** IPv4 form `c=IN IP4 <group>/<ttl>[/<count>]` (**TTL mandatory** for IPv4
+multicast; order is **group/TTL/count** — the number after the first slash is the **TTL, not a CIDR
+prefix** — RFC 8866 §5.7); strip
 `/ttl[/count]` before forming the join URL; be liberal accepting odd TTLs). Per-media
 `m=<media> <port>[/<count>] <proto> <fmt>` with typed `proto` (`RTP/AVP` | `udp` | other),
 `a=rtpmap:<pt> <name>/<clock>[/<ch>]`, `a=source-filter` (RFC 4570 incl/excl for SSM), `a=ptime`,
@@ -192,7 +204,8 @@ config** (so `c=`/`m=`/`rtpmap` stay in lockstep with what is actually transmitt
 SAP packet (flags `0x20`, `|0x10` for an IPv6 origin; `auth_len = 0`; a **stable non-zero per-output
 hash** derived from the output id; the originating source; `"application/sdp\0"` prefix for VLC
 clarity), and sends to the SAP group chosen by the §4 scope selector on 9875 TTL 255. SDP emitted:
-`v=0` / `o=- <id> <ver> IN IP4 <self>` / `s=<program name>` / `t=0 0` / `c=IN IP4 <group>/<ttl>` /
+`v=0` / `o=- <id> <ver> IN IP6 <self>` / `s=<program name>` / `t=0 0` / `c=IN IP6 <group>` (IPv6-first,
+no TTL; the **legacy** IPv4 form is `o=… IN IP4 <self>` / `c=IN IP4 <group>/<ttl>`) /
 `m=video <port> RTP/AVP 33` + `a=rtpmap:33 MP2T/90000` (RTP-TS) **or** `m=video <port> udp 33`
 (raw-UDP-TS) / `a=type:broadcast` / `a=recvonly` / `a=tool:multiview` / `b=RR:0`. Re-announce on a
 deliberate timer (default **≥30 s** — interoperable with VLC/AES67; the RFC bandwidth-fair
