@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::audio::OutputAudio;
 use crate::error::ConfigError;
+use crate::failover::{default_failover_slate, FailoverSlate};
 use crate::grid::{GridLayout, Track};
 use crate::placement::DevicePin;
 
@@ -540,6 +541,14 @@ pub struct Cell {
     /// `QoS` / degradation policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<CellQos>,
+    /// What this tile shows when its source is lost or misbehaving — the
+    /// configurable failover-slate policy (ADR-0027 / ADR-0030). Defaults to
+    /// [`FailoverSlate::Bars`] (the broadcast standard) when omitted, so a
+    /// pre-existing document gets the default rather than a dead screen. The
+    /// engine's compositor drive composites this per cell once the tile state
+    /// machine reaches the down state (it changes *what* shows, not *when*).
+    #[serde(default = "default_failover_slate")]
+    pub on_loss: FailoverSlate,
     /// Source binding.
     pub source: CellSource,
 }

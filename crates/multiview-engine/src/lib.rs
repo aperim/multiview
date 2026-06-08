@@ -105,6 +105,7 @@ pub mod route;
 pub mod runtime;
 pub mod salvo;
 pub mod scheduler;
+pub mod slate;
 pub mod supervisor;
 pub mod sysref;
 pub mod tally;
@@ -143,6 +144,9 @@ pub use runtime::{
 };
 pub use salvo::{Salvo, SalvoBatch, SalvoChange, SalvoPhase};
 pub use scheduler::{EventKind, ScheduledAction, Scheduler, TriggerEvent};
+pub use slate::{failover_slate_image, FailoverSlate};
+#[cfg(feature = "ffmpeg")]
+pub use slate::{output_slate_audio, output_slate_kind};
 pub use supervisor::{
     Actor, ActorExit, RestartDecision, RestartPolicy, StopReason, SupervisionOutcome, Supervisor,
 };
