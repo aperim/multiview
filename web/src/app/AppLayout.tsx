@@ -8,6 +8,7 @@ import { Menu } from "lucide-react";
 import { Outlet, useLocation } from "react-router-dom";
 
 import { ConnectionStatus } from "../components/ConnectionStatus";
+import { HealthBanner } from "../components/HealthBanner";
 import { LocaleSwitcher } from "../components/LocaleSwitcher";
 import { SystemFooter } from "../components/SystemFooter";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -81,6 +82,11 @@ export function AppLayout(): JSX.Element {
               <ThemeToggle />
             </div>
           </header>
+
+          {/* Global health-warning banner (SA-0): renders nothing when clean,
+              an actionable callout (severity + message + remediation) when a
+              capability mismatch is active (e.g. GPU present but CPU compositing). */}
+          <HealthBanner />
 
           <main
             id="main-content"

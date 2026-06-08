@@ -20,8 +20,8 @@ use axum::Router;
 use http_body_util::BodyExt;
 use multiview_control::{
     command_bus, AlarmRepository, ApiKeyStore, AppState, CommandReceiver, EngineStateSnapshot,
-    InMemoryAlarmStore, InMemoryRepository, InMemorySalvoStore, NmosRegistry, Principal, Role,
-    SalvoRepository, TallyMirror,
+    InMemoryAlarmStore, InMemoryRepository, InMemorySalvoStore, InMemoryWarningStore, NmosRegistry,
+    Principal, Role, SalvoRepository, TallyMirror, WarningRepository,
 };
 use multiview_core::time::MediaTime;
 use multiview_engine::EnginePublisher;
@@ -53,6 +53,10 @@ pub struct Harness {
     /// The shared alarm store the router reads/writes — also the ingest sink, so
     /// a test can publish an engine alarm event and observe it over HTTP.
     pub alarms: Arc<dyn AlarmRepository>,
+    /// The shared health-warning store the router reads — also the warning-ingest
+    /// sink, so a test can publish an engine `health.warning.*` event and read it
+    /// over `GET /api/v1/health`.
+    pub warnings: Arc<dyn WarningRepository>,
     /// The shared salvo store the router reads/writes (so a test can seed a
     /// definition and exercise CRUD + arm/take over HTTP).
     pub salvos: Arc<dyn SalvoRepository>,
@@ -131,6 +135,7 @@ pub fn harness_with_capacity(capacity: usize) -> Harness {
     let engine = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let (tx, rx) = command_bus(capacity);
     let alarms: Arc<dyn AlarmRepository> = Arc::new(InMemoryAlarmStore::new());
+    let warnings: Arc<dyn WarningRepository> = Arc::new(InMemoryWarningStore::new());
     let salvos: Arc<dyn SalvoRepository> = Arc::new(InMemorySalvoStore::new());
     let tally = Arc::new(TallyMirror::new());
     let nmos = Arc::new(NmosRegistry::new());
@@ -141,6 +146,7 @@ pub fn harness_with_capacity(capacity: usize) -> Harness {
         Arc::new(seeded_keys()),
     )
     .with_alarm_store(Arc::clone(&alarms))
+    .with_warning_store(Arc::clone(&warnings))
     .with_salvo_store(Arc::clone(&salvos))
     .with_tally_mirror(Arc::clone(&tally))
     .with_nmos(Arc::clone(&nmos))
@@ -150,6 +156,7 @@ pub fn harness_with_capacity(capacity: usize) -> Harness {
         engine,
         commands: rx,
         alarms,
+        warnings,
         salvos,
         tally,
         nmos,

@@ -264,6 +264,48 @@
         ],
         "type": "string"
       },
+      "HealthWarning": {
+        "description": "Data body of `health.warning.raised` and `health.warning.cleared`. A richer sibling of `Alert`: the `code` is the stable dedupe key, and `remediation` carries the concrete fix. Capability-mismatch codes are latched build-time facts (raised once, cleared on reconfigure/restart).",
+        "properties": {
+          "active": {
+            "description": "Whether the condition is currently active (raise vs clear).",
+            "type": "boolean"
+          },
+          "code": {
+            "$ref": "#/components/schemas/WarningCode"
+          },
+          "message": {
+            "description": "A clear, human-readable description of the condition.",
+            "type": "string"
+          },
+          "remediation": {
+            "description": "The concrete remediation — what the operator must do to fix it.",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/WarningSeverity"
+          },
+          "since": {
+            "description": "When the condition was first raised (engine monotonic nanoseconds).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "subsystem": {
+            "description": "The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "subsystem",
+          "message",
+          "remediation",
+          "since",
+          "active"
+        ],
+        "type": "object"
+      },
       "Hello": {
         "description": "Data body of `$hello`: the first server frame after auth.",
         "properties": {
@@ -784,6 +826,22 @@
           "topics"
         ],
         "type": "object"
+      },
+      "WarningCode": {
+        "description": "Stable catalog code of a health warning (kebab-case). `#[non_exhaustive]`: the catalog grows over time, so a client must treat an unknown code as a forward-compatible warning, not an error.",
+        "enum": [
+          "gpu-present-no-vulkan-adapter"
+        ],
+        "type": "string"
+      },
+      "WarningSeverity": {
+        "description": "Severity of a health warning (sibling of AlertSeverity).",
+        "enum": [
+          "info",
+          "warning",
+          "critical"
+        ],
+        "type": "string"
       }
     }
   },
@@ -857,6 +915,9 @@
               },
               {
                 "$ref": "#/components/schemas/Alert"
+              },
+              {
+                "$ref": "#/components/schemas/HealthWarning"
               },
               {
                 "$ref": "#/components/schemas/InputConnection"
@@ -965,6 +1026,16 @@
       },
       "summary": "The single wire frame used for all realtime messages (ADR-RT002).",
       "title": "Versioned realtime envelope"
+    },
+    "HealthWarning": {
+      "contentType": "application/json",
+      "description": "A richer sibling of `Alert` carrying a stable `code`, the affected `subsystem`, and a concrete `remediation`. The `code` is the dedupe key: frames with the same code coalesce rather than stacking. Capability-mismatch codes (e.g. `gpu-present-no-vulkan-adapter`) are latched build-time facts — raised once, cleared on reconfigure/restart.",
+      "name": "HealthWarning",
+      "payload": {
+        "$ref": "#/components/schemas/HealthWarning"
+      },
+      "summary": "A health warning was raised (health.warning.raised) or cleared (health.warning.cleared) on topic `alerts`.",
+      "title": "Actionable health warning raised or cleared"
     },
     "Hello": {
       "contentType": "application/json",

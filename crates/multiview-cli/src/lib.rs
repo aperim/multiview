@@ -33,6 +33,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Build-time GPU-capability cross-check + health-warning emit (SA-0 / ADR-0035):
+/// detect when a real GPU is present but the wgpu compositor resolved a
+/// software/CPU adapter (the silent CPU fallback) and emit a latched, actionable
+/// `gpu-present-no-vulkan-adapter` warning through the engine's drop-oldest
+/// publisher. A thin seam over the pure hal cross-check + the control emit helper.
+pub mod capability_warn;
 pub mod cli;
 pub mod control;
 pub mod preview;

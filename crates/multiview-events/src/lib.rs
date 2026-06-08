@@ -41,9 +41,10 @@ pub mod topic;
 pub use envelope::{Envelope, FrameKind, SchemaVersion};
 pub use error::{Error, Result};
 pub use event::{
-    AlarmTransition, Alert, AlertSeverity, AudioMeter, Event, GpuMetrics, GpuVendor,
+    AlarmTransition, Alert, AlertSeverity, AudioMeter, Event, GpuMetrics, GpuVendor, HealthWarning,
     InputConnection, InputStreams, JobProgress, LifecycleState, OutputRunState, OutputStatus,
-    SalvoEvent, SalvoPhase, SystemMetrics, TallyEvent, TallyTarget, TileState,
+    SalvoEvent, SalvoPhase, SystemMetrics, TallyEvent, TallyTarget, TileState, WarningCode,
+    WarningSeverity,
 };
 pub use ordering::{Accepted, TopicCursor};
 pub use seq::{Seq, SeqCounter};

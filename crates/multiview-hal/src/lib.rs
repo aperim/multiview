@@ -48,6 +48,7 @@
 #![warn(missing_docs)]
 
 pub mod capability;
+pub mod composite_probe;
 pub mod cost;
 pub mod degradation;
 pub mod error;
@@ -59,6 +60,10 @@ pub mod select;
 pub mod split;
 
 pub use capability::{Capability, Resolution, Stage};
+pub use composite_probe::{
+    composite_mismatch, hardware_present, AdapterClass, AdapterDeviceType, AdapterReport,
+    CompositeMismatch,
+};
 pub use cost::{CostBudget, TileLoad};
 pub use degradation::{
     actions_at_level, DegradationAction, Hysteresis, HysteresisConfig, LadderMove, MAX_LEVEL,

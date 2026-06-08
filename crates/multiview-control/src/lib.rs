@@ -61,6 +61,8 @@ pub mod state;
 pub mod tally_ingest;
 pub mod tally_state;
 pub mod versioning;
+pub mod warning_ingest;
+pub mod warning_store;
 
 #[cfg(feature = "embed-web")]
 pub mod spa;
@@ -134,6 +136,11 @@ pub use versioning::{
     diff_documents, ConfigRevision, ConfigVersionStore, DocumentDiff, InMemoryConfigVersionStore,
     RevisionId, CONFIG_REVISION_KIND,
 };
+pub use warning_ingest::{
+    emit_capability_warnings, run_warning_ingest, warning_ingest_step, warning_transition,
+    CompositeMismatchView, WarningIngestStep,
+};
+pub use warning_store::{InMemoryWarningStore, WarningFilter, WarningRepository, WARNING_KIND};
 
 /// Build the complete control-plane [`Router`] for the given [`AppState`].
 ///
