@@ -588,6 +588,38 @@ impl<P: LoadProbe> LoadPoller<P> {
     }
 }
 
+/// The hardware-addressing handles needed to **pin a chosen device** at every
+/// pipeline stage (ADR-0035 Tier-1 / the GPU-placement principle).
+///
+/// A [`DeviceLoad`]/[`DeviceId`] identifies a device by its *stable* handle (NVML
+/// UUID) — perfect for placement + pins, but **not** the key the downstream
+/// hardware APIs address a GPU by. The wgpu compositor matches on the **PCI bus
+/// id** (or the `(vendor, device)` PCI pair / name); libav NVDEC/NVENC address by
+/// the CUDA enumeration **ordinal**. This is the small bag of those handles for a
+/// single device, resolved off-hot-path at admission so the one chosen device
+/// reaches wgpu, NVDEC, and NVENC as a single value (affinity).
+///
+/// Every field is `Option`: a vendor/platform that does not expose a handle
+/// yields `None` (the honest unknown), and the consumer falls back to a coarser
+/// discriminator or its default path — never a fabricated value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GpuTargetInfo {
+    /// The PCI bus id (NVML `PciInfo.bus_id`, e.g. `00000000:01:00.0`) — the
+    /// robust cross-API key the wgpu compositor matches its adapter on.
+    pub pci_bus_id: Option<String>,
+    /// The PCI vendor id (e.g. `0x10de` for NVIDIA), the fallback discriminator.
+    pub vendor_id: Option<u32>,
+    /// The PCI device id, paired with `vendor_id` as the fallback discriminator.
+    pub device_id: Option<u32>,
+    /// The human-readable adapter name (e.g. `NVIDIA GeForce RTX 4060`).
+    pub name: Option<String>,
+    /// The CUDA enumeration **ordinal** as a string (e.g. `"1"`) — the selector
+    /// libav's `cuda` hwdevice / `*_cuvid` decoders + `*_nvenc` encoders address a
+    /// GPU by. This is the Tier-2 NVDEC/NVENC pin value (the hardware decode/encode
+    /// paths consume it once they are wired into the run).
+    pub cuda_ordinal: Option<String>,
+}
+
 /// An object-safe "where the live load comes from" seam.
 ///
 /// [`LoadPoller`] is generic over its [`LoadProbe`], which is convenient at the
@@ -618,6 +650,21 @@ pub trait LoadSource {
     /// / non-blocking contract as [`poll`](Self::poll) applies.
     fn poll_self_share(&self) -> Vec<SelfShare> {
         Vec::new()
+    }
+
+    /// Resolve the hardware-addressing handles ([`GpuTargetInfo`]) for `device`,
+    /// so a chosen device can be **pinned** at every pipeline stage (wgpu / NVDEC
+    /// / NVENC) — the ADR-0035 Tier-1 affinity seam.
+    ///
+    /// The default returns `None`: a source with no per-device hardware-handle
+    /// signal (the [`NullLoadPoller`], a vendor that exposes none) cannot pin a
+    /// device, so the consumer keeps its default adapter path. The NVIDIA NVML
+    /// source overrides this to return the device's PCI bus id, `(vendor,
+    /// device)` pair, name, and CUDA ordinal. Off-hot-path / non-blocking, exactly
+    /// like [`poll`](Self::poll).
+    fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+        let _ = device;
+        None
     }
 }
 
@@ -712,7 +759,8 @@ pub use self::nvml::{NvmlLoadPoller, NvmlLoadProbe};
 mod nvml {
     use super::{
         self_mem_from_processes, self_sessions_from, self_util_avg_from_samples, DeviceId,
-        DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, PollInterval, SelfShare, Vendor,
+        DeviceLoad, GpuTargetInfo, LoadPoller, LoadProbe, LoadSample, LoadSource, PollInterval,
+        SelfShare, Vendor,
     };
     use nvml_wrapper::enums::device::UsedGpuMemory;
 
@@ -837,6 +885,44 @@ mod nvml {
                 encoder_sessions,
             })
         }
+
+        /// Resolve the hardware-addressing handles ([`GpuTargetInfo`]) for
+        /// `device`: its PCI bus id, `(vendor, device)` PCI pair, name, and CUDA
+        /// ordinal — so a chosen NVIDIA device can be pinned at wgpu / NVDEC /
+        /// NVENC (ADR-0035 Tier-1 affinity).
+        ///
+        /// Returns `None` only when the device handle is unavailable or its
+        /// identity changed under us (a handle reordering); otherwise a
+        /// `GpuTargetInfo` whose individual fields are `None` exactly where NVML
+        /// did not expose that handle — never a fabricated value. The CUDA ordinal
+        /// is the device's NVML enumeration index (the same ordinal libav's `cuda`
+        /// hwdevice addresses), as a string.
+        #[must_use]
+        pub fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+            let handle = self.nvml.device_by_index(device.index()).ok()?;
+            // Guard against a handle reordering: if the UUID changed, don't pin
+            // the wrong card.
+            if handle.uuid().map_or(true, |u| u != device.stable_id()) {
+                return None;
+            }
+            let pci_bus_id = handle.pci_info().ok().map(|info| info.bus_id);
+            let name = handle.name().ok();
+            Some(GpuTargetInfo {
+                pci_bus_id,
+                // NVML reports the combined `pciDeviceId` (device<<16 | vendor);
+                // split it into the wgpu-comparable 16-bit vendor + device ids.
+                vendor_id: handle
+                    .pci_info()
+                    .ok()
+                    .map(|info| info.pci_device_id & 0xFFFF),
+                device_id: handle
+                    .pci_info()
+                    .ok()
+                    .map(|info| (info.pci_device_id >> 16) & 0xFFFF),
+                name,
+                cuda_ordinal: Some(device.index().to_string()),
+            })
+        }
     }
 
     /// Extract the byte count from an NVML [`UsedGpuMemory`], mapping the WDDM /
@@ -957,6 +1043,13 @@ mod nvml {
                 .iter()
                 .filter_map(|device| probe.self_share(device, our_pid))
                 .collect()
+        }
+
+        fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+            // One bounded NVML pass to resolve the device's hardware-addressing
+            // handles (PCI bus id / pair / name / ordinal) for pinning. Off
+            // hot-path, never blocks the engine.
+            self.inner.probe().device_target(device)
         }
     }
 }
@@ -1836,6 +1929,29 @@ mod tests {
         // Usable behind the object-safe `LoadSource` seam the CLI injects.
         let dynamic: &dyn LoadSource = &poller;
         assert!(dynamic.poll().is_empty());
+    }
+
+    #[test]
+    fn device_target_default_is_none_for_a_source_with_no_handles() {
+        // A source with no per-device hardware-handle signal (the no-GPU poller,
+        // any vendor that exposes none) cannot pin a device: `device_target` must
+        // return `None` so the consumer keeps its default adapter path (the
+        // ADR-0035 Tier-1 graceful-fallback contract, GPU-free build).
+        let poller = NullLoadPoller::new();
+        let source: &dyn LoadSource = &poller;
+        assert!(source.device_target(&nv("GPU-uuid", 0)).is_none());
+    }
+
+    #[test]
+    fn gpu_target_info_default_is_all_unknown() {
+        // The honest starting point: every hardware handle `None` (never a
+        // fabricated value), so a projection of it pins nothing.
+        let info = GpuTargetInfo::default();
+        assert_eq!(info.pci_bus_id, None);
+        assert_eq!(info.vendor_id, None);
+        assert_eq!(info.device_id, None);
+        assert_eq!(info.name, None);
+        assert_eq!(info.cuda_ordinal, None);
     }
 
     #[test]
