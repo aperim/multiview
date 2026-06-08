@@ -67,6 +67,14 @@ pub enum Error {
     #[error("multiview program built from non-multiview spec: kind {0:?}")]
     WrongProgramKind(&'static str),
 
+    /// A [`ProgramSet`](crate::ProgramSet) was asked to
+    /// [`start`](crate::ProgramSet::start) a program whose id is **already**
+    /// running (program ids are unique within a set, ADR-0030 §2.2 / §6). The
+    /// existing program is left untouched; the duplicate is rejected rather than
+    /// silently replacing or shadowing a running program.
+    #[error("program id already running: {0}")]
+    DuplicateProgram(String),
+
     /// A permanent HA cluster-transport fault while *submitting* a heartbeat or
     /// replication message for publication (a malformed-encoding or a hard
     /// socket fault — never a transient drop, which is silent and best-effort).
@@ -85,5 +93,11 @@ impl Error {
             num: cadence.num,
             den: cadence.den,
         }
+    }
+
+    /// Construct an [`Error::DuplicateProgram`] for a program id already running.
+    #[must_use]
+    pub(crate) fn duplicate_program(id: &str) -> Self {
+        Self::DuplicateProgram(id.to_owned())
     }
 }

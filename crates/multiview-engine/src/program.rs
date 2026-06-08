@@ -155,6 +155,19 @@ impl<P: Pacer> MultiviewProgram<P> {
         self.runtime.ticks_emitted()
     }
 
+    /// A clone of the wait-free cumulative-ticks counter (see
+    /// [`EngineRuntime::ticks_counter`](crate::EngineRuntime::ticks_counter)).
+    ///
+    /// MP-1's [`ProgramSet`](crate::ProgramSet) keeps this handle on the
+    /// supervisor side so it can read a running program's `ticks_emitted` from
+    /// another task — proving a sibling clock keeps advancing while this program
+    /// runs (or while another program's egress is wedged) — without ever touching
+    /// the program's hot loop (invariants #1 + #10).
+    #[must_use]
+    pub fn ticks_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.runtime.ticks_counter()
+    }
+
     /// Drive the protected per-tick loop **forever**, until this program's
     /// [`StopSignal`] is raised, applying the per-tick `control` reconfiguration
     /// hook at each frame boundary.
