@@ -48,6 +48,20 @@ private = { ignore = true }
 # scans only the default (str0m-free) build, so none of these appear in the
 # scanned graph today; they are listed here so a future `--all-features` scan
 # (or moving the feature on) is already license-clean with no surprise additions.
+#
+# The off-by-default `net` feature of the dev-only `xtask` crate (the
+# `soak-iptv` iptv-org test-source selection tool, IPTV-SOAK) pulls a small
+# blocking rustls-backed HTTP client (`ureq` 3.x → `rustls` + `ring` +
+# `rustls-webpki` + `webpki-roots` + `flate2`). `ureq`/`rustls`/`rustls-webpki`/
+# `webpki-roots`/`flate2` resolve to allowlisted licenses (`MIT`/`Apache-2.0`/
+# `ISC`), but `ring` carries a bespoke non-SPDX license that is deliberately
+# NOT added to the allowlist below. This is sound because `[graph]
+# all-features = false`: the default build (and `xtask` itself sans `net`)
+# never links `ureq`/`ring`, so the scanned graph stays clean and LGPL-clean.
+# `xtask` is `publish = false`, dev-automation only, and the live fetch is run
+# manually where there is network — never in the product build. If a future
+# `--all-features` scan is wanted, gate `ring`'s license behind a clarify/
+# exception rather than blanket-allowing it.
 allow = [
   "MIT",
   "Apache-2.0",

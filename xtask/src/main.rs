@@ -20,6 +20,11 @@ const OPENAPI_OUT: &str = "docs/api/openapi.json";
 /// Relative path (from the workspace root) of the generated `AsyncAPI` document.
 const ASYNCAPI_OUT: &str = "docs/api/asyncapi.json";
 
+/// Relative path (from the workspace root, gitignored) of the emitted iptv soak
+/// source manifest. `.multiview-build/` is the transient build working dir and
+/// is never committed — the resolved real stream URLs MUST NOT enter git.
+const IPTV_SOAK_OUT: &str = ".multiview-build/iptv-soak-sources.json";
+
 fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_else(|| "help".to_owned());
     match task.as_str() {
@@ -27,6 +32,11 @@ fn main() -> ExitCode {
             println!("xtask — Multiview developer automation");
             println!("  gen-openapi    write the OpenAPI 3.1 document to {OPENAPI_OUT}");
             println!("  gen-asyncapi   write the AsyncAPI 3.0 document to {ASYNCAPI_OUT}");
+            println!(
+                "  soak-iptv      resolve a quirk-tagged, liveness-probed set of REAL iptv-org"
+            );
+            println!("                 test sources → {IPTV_SOAK_OUT} (needs network; build with");
+            println!("                 `--features net`). Aliases: iptv-sources.");
             ExitCode::SUCCESS
         }
         "gen-openapi" => match gen_openapi() {
@@ -49,9 +59,112 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        "soak-iptv" | "iptv-sources" => match soak_iptv() {
+            Ok(path) => {
+                println!("wrote {}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("soak-iptv failed: {err}");
+                ExitCode::FAILURE
+            }
+        },
         other => {
             eprintln!("unknown task: {other}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Resolve a quirk-tagged, liveness-probed soak source set from iptv-org and
+/// write the manifest to the gitignored [`IPTV_SOAK_OUT`] path; print the
+/// summary table. Requires the `net` feature (a live network fetch + probe);
+/// without it the task explains how to enable it rather than producing a stub.
+#[cfg(feature = "net")]
+fn soak_iptv() -> Result<PathBuf, IptvSoakError> {
+    use std::time::Duration;
+    use xtask::iptv::{select_sources, Blocklist, HttpCatalog, HttpProber, Plan};
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(IptvSoakError::Runtime)?;
+
+    // Load a local blocklist if one is present at the workspace root; otherwise
+    // run with an empty blocklist (NSFW is filtered unconditionally regardless).
+    let blocklist_path = workspace_root().join("blocklist.json");
+    let blocklist = match std::fs::read_to_string(&blocklist_path) {
+        Ok(json) => Blocklist::from_json(&json).map_err(IptvSoakError::Selection)?,
+        Err(_) => Blocklist::empty(),
+    };
+
+    // Seed from wall-clock so each run draws a fresh stratified sample; the
+    // sampler stays deterministic for any fixed seed (proven in the tests).
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let plan = Plan {
+        seed,
+        oversample: 256,
+        keep_live: 24,
+        keep_dead: 4,
+    };
+
+    let catalog = HttpCatalog::new(Duration::from_secs(30));
+    let prober = HttpProber::new(Duration::from_secs(8));
+
+    let manifest = runtime
+        .block_on(select_sources(&catalog, &prober, &blocklist, &plan))
+        .map_err(IptvSoakError::Selection)?;
+
+    let out = workspace_root().join(IPTV_SOAK_OUT);
+    manifest.write_to(&out).map_err(IptvSoakError::Selection)?;
+    print!("{}", manifest.summary_table());
+    Ok(out)
+}
+
+/// The `net`-disabled stub: refuse cleanly with instructions (NOT a `todo!()`).
+/// The pure selection logic is always compiled + unit-tested; only the live
+/// fetch/probe needs the network crate, which is opt-in.
+#[cfg(not(feature = "net"))]
+fn soak_iptv() -> Result<PathBuf, IptvSoakError> {
+    Err(IptvSoakError::NetFeatureDisabled)
+}
+
+/// Failure modes of the `soak-iptv` task.
+#[derive(Debug)]
+enum IptvSoakError {
+    /// The `net` feature (live HTTP client) is not compiled in.
+    #[cfg_attr(feature = "net", allow(dead_code))]
+    NetFeatureDisabled,
+    /// The async runtime could not be built (only with `net`).
+    #[cfg_attr(not(feature = "net"), allow(dead_code))]
+    Runtime(std::io::Error),
+    /// The selection pipeline (fetch/parse/probe/emit) failed.
+    #[cfg_attr(not(feature = "net"), allow(dead_code))]
+    Selection(xtask::iptv::IptvError),
+}
+
+impl std::fmt::Display for IptvSoakError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NetFeatureDisabled => write!(
+                f,
+                "the live iptv-org fetch+probe needs the network: rebuild with \
+                 `cargo run -p xtask --features net -- soak-iptv` (run where there is network)"
+            ),
+            Self::Runtime(source) => write!(f, "building the async runtime: {source}"),
+            Self::Selection(source) => write!(f, "{source}"),
+        }
+    }
+}
+
+impl std::error::Error for IptvSoakError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NetFeatureDisabled => None,
+            Self::Runtime(source) => Some(source),
+            Self::Selection(source) => Some(source),
         }
     }
 }
