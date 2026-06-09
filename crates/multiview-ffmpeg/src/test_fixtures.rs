@@ -38,6 +38,15 @@ use ffmpeg_next as ffmpeg;
 
 use crate::error::{FfmpegError, Result};
 
+/// The known media instant (seconds, on the rendition's 0-based timeline) the
+/// single cue in [`generate_hls_with_valid_webvtt`] becomes visible.
+pub const WEBVTT_CUE_START_S: i32 = 1;
+/// The media instant (seconds) the [`generate_hls_with_valid_webvtt`] cue ends.
+pub const WEBVTT_CUE_END_S: i32 = 3;
+/// The exact text of the cue carried by [`generate_hls_with_valid_webvtt`]; the
+/// isolated `WebVTT` reader must recover this verbatim.
+pub const WEBVTT_CUE_TEXT: &str = "OFFLINE WEBVTT CUE";
+
 /// The program canvas width of the generated clip (px).
 pub const WIDTH: i32 = 640;
 /// The program canvas height (px).
@@ -791,4 +800,298 @@ unsafe fn drain_a53_video(
     // SAFETY: free the drain packet exactly once.
     ffi::av_packet_free(&raw mut pkt_p);
     result
+}
+
+// ---------------------------------------------------------------------------
+// HLS master + WebVTT-subtitle-rendition fixtures (fully offline, `file://`)
+// ---------------------------------------------------------------------------
+//
+// These reproduce the ABC-News-AU class of master playlist: an
+// `EXT-X-MEDIA:TYPE=SUBTITLES` WebVTT rendition alongside a video variant. libav
+// folds the rendition into the *one* shared `AVFormatContext` it opens for the
+// video, so a corrupt/expired `.vtt` segment either aborts `avformat_open_input`
+// or makes `av_read_frame` return that rendition's error for the whole context —
+// killing the video tile. The fix (ADR-T011) discards the unrouted subtitle
+// stream in the main demuxer; the isolated `read_captions` reader is the sole
+// WebVTT path. Both fixtures are written entirely on disk (a short LGPL
+// `mpeg2video` TS segment + hand-written playlists + a `.vtt`), referenced by
+// `file://` URLs, so the end-to-end tests need no network.
+//
+// The TS segment is built with the same LGPL `mpeg2video` encoder as the
+// captions fixtures above (no x264/x265). The playlists are plain text.
+
+/// The duration (seconds) of the single media segment the HLS fixtures carry.
+const HLS_SEGMENT_S: i32 = 2;
+/// The frame rate of the HLS fixtures' video segment (fps).
+const HLS_FPS: i32 = 25;
+/// The pixel width of the HLS fixtures' video segment (small for a fast decode
+/// in CI).
+const HLS_W: i32 = 160;
+/// The HLS fixtures' video segment height.
+const HLS_H: i32 = 120;
+
+/// Generate, under `dir`, an HLS master playlist whose `TYPE=SUBTITLES` `WebVTT`
+/// rendition's first `.vtt` segment is **deliberately corrupt** (garbage bytes,
+/// no `WEBVTT` header) — the ABC-News-AU failure shape. Writes:
+///
+/// * `master.m3u8` — an `EXT-X-MEDIA:TYPE=SUBTITLES` group plus a video variant,
+/// * `video.m3u8` + `seg0.ts` — a short LGPL `mpeg2video` MPEG-TS segment,
+/// * `subs.m3u8` + `subs0.vtt` — the corrupt subtitle rendition.
+///
+/// The main demuxer opened on `master.m3u8` must keep decoding the video despite
+/// the broken `WebVTT` rendition (the fix); the isolated reader is the only path
+/// that would touch the `.vtt`.
+///
+/// # Errors
+/// Returns [`FfmpegError`] if any libav encode/mux step or file write fails.
+pub fn generate_hls_with_broken_webvtt(dir: &Path) -> Result<()> {
+    crate::decode::ensure_initialized()?;
+    write_ts_segment(&dir.join("seg0.ts"))?;
+    write_text(&dir.join("video.m3u8"), &media_playlist_for("seg0.ts"))?;
+    // A corrupt first segment: control/high bytes with NO `WEBVTT` signature, so
+    // the WebVTT demuxer errors on "loading first segment".
+    write_text(
+        &dir.join("subs0.vtt"),
+        "\u{0}\u{1}\u{2}NOT-A-WEBVTT-FILE\u{7f}garbage cue payload\n",
+    )?;
+    write_text(&dir.join("subs.m3u8"), &media_playlist_for("subs0.vtt"))?;
+    write_text(&dir.join("master.m3u8"), &master_playlist(dir))?;
+    Ok(())
+}
+
+/// Generate, under `dir`, an HLS master playlist whose `TYPE=SUBTITLES` `WebVTT`
+/// rendition carries **one valid cue** ([`WEBVTT_CUE_TEXT`], on screen
+/// [`WEBVTT_CUE_START_S`]–[`WEBVTT_CUE_END_S`]). Same file layout as
+/// [`generate_hls_with_broken_webvtt`] but `subs0.vtt` is a well-formed `WebVTT`
+/// segment, so the isolated reader recovers the cue.
+///
+/// # Errors
+/// Returns [`FfmpegError`] if any libav encode/mux step or file write fails.
+pub fn generate_hls_with_valid_webvtt(dir: &Path) -> Result<()> {
+    crate::decode::ensure_initialized()?;
+    write_ts_segment(&dir.join("seg0.ts"))?;
+    write_text(&dir.join("video.m3u8"), &media_playlist_for("seg0.ts"))?;
+    write_text(&dir.join("subs0.vtt"), &valid_webvtt_segment())?;
+    write_text(&dir.join("subs.m3u8"), &media_playlist_for("subs0.vtt"))?;
+    write_text(&dir.join("master.m3u8"), &master_playlist(dir))?;
+    Ok(())
+}
+
+/// Write `contents` to `path`, mapping an I/O error into a typed
+/// [`FfmpegError::OpenInput`] (EIO) while logging the underlying io detail.
+fn write_text(path: &Path, contents: &str) -> Result<()> {
+    std::fs::write(path, contents).map_err(|e| {
+        tracing::debug!(path = %path.display(), error = %e, "fixture file write failed");
+        FfmpegError::OpenInput {
+            path: path.display().to_string(),
+            source: ffmpeg::Error::from(ffi::AVERROR(libc::EIO)),
+        }
+    })
+}
+
+/// A `VOD` media playlist referencing one segment file (`seg`) for two seconds.
+fn media_playlist_for(seg: &str) -> String {
+    let dur = HLS_SEGMENT_S;
+    format!(
+        "#EXTM3U\n\
+         #EXT-X-VERSION:3\n\
+         #EXT-X-TARGETDURATION:{dur}\n\
+         #EXT-X-MEDIA-SEQUENCE:0\n\
+         #EXT-X-PLAYLIST-TYPE:VOD\n\
+         #EXTINF:{dur}.000,\n\
+         {seg}\n\
+         #EXT-X-ENDLIST\n",
+    )
+}
+
+/// The master playlist binding the video variant to the `WebVTT` subtitle
+/// rendition, with absolute `file://` URIs resolved against `dir`.
+fn master_playlist(dir: &Path) -> String {
+    let base = format!("file://{}", dir.display());
+    format!(
+        "#EXTM3U\n\
+         #EXT-X-VERSION:3\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",\
+         LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=300000,SUBTITLES=\"subs\"\n\
+         {base}/video.m3u8\n",
+    )
+}
+
+/// A well-formed single-cue `WebVTT` segment carrying [`WEBVTT_CUE_TEXT`].
+fn valid_webvtt_segment() -> String {
+    let start = WEBVTT_CUE_START_S;
+    let end = WEBVTT_CUE_END_S;
+    let text = WEBVTT_CUE_TEXT;
+    format!(
+        "WEBVTT\n\
+         X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\
+         \n\
+         00:00:0{start}.000 --> 00:00:0{end}.000\n\
+         {text}\n",
+    )
+}
+
+/// Encode a short LGPL `mpeg2video` clip into the MPEG-TS file at `path`.
+fn write_ts_segment(path: &Path) -> Result<()> {
+    // SAFETY: a single-threaded libav build sequence; we own every context /
+    // stream / packet / frame allocated below and free them before returning.
+    unsafe { write_ts_segment_inner(path) }
+}
+
+unsafe fn write_ts_segment_inner(path: &Path) -> Result<()> {
+    let cpath = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| bug())?;
+    let cfmt = CString::new("mpegts").map_err(|_| bug())?;
+
+    let mut oc: *mut ffi::AVFormatContext = ptr::null_mut();
+    // SAFETY: fresh null out-param + valid CStrings; libav fills `oc` on success.
+    let r = ffi::avformat_alloc_output_context2(
+        &raw mut oc,
+        ptr::null_mut(),
+        cfmt.as_ptr(),
+        cpath.as_ptr(),
+    );
+    if r < 0 || oc.is_null() {
+        return Err(ff_err(r));
+    }
+    let result = write_ts_segment_all(oc, &cpath);
+    // SAFETY: free the context we allocated exactly once (releases its streams).
+    ffi::avformat_free_context(oc);
+    result
+}
+
+/// Add one `mpeg2video` stream, encode `HLS_SEGMENT_S * HLS_FPS` grey frames,
+/// and finalise the MPEG-TS container.
+unsafe fn write_ts_segment_all(oc: *mut ffi::AVFormatContext, cpath: &CString) -> Result<()> {
+    let (vst, vctx) = add_hls_video_stream(oc)?;
+
+    // SAFETY: `oformat` flags read on the live context.
+    let needs_file = ((*(*oc).oformat).flags & ffi::AVFMT_NOFILE) == 0;
+    if needs_file {
+        // SAFETY: `pb` out-param of the live context; `cpath` is a valid CString.
+        let r = ffi::avio_open(&raw mut (*oc).pb, cpath.as_ptr(), ffi::AVIO_FLAG_WRITE);
+        if r < 0 {
+            return Err(ff_err(r));
+        }
+    }
+    // SAFETY: header write on the live, fully-configured context.
+    let r = ffi::avformat_write_header(oc, ptr::null_mut());
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+
+    let res = encode_hls_video(oc, vst, vctx);
+    if res.is_ok() {
+        // SAFETY: trailer on the live context after a successful header + frames.
+        let r = ffi::av_write_trailer(oc);
+        if r < 0 {
+            return Err(ff_err(r));
+        }
+    }
+    if needs_file {
+        // SAFETY: closes + nulls the `pb` we opened above.
+        ffi::avio_closep(&raw mut (*oc).pb);
+    }
+    let mut vctx_p = vctx;
+    // SAFETY: free the encoder context we allocated + opened, exactly once.
+    ffi::avcodec_free_context(&raw mut vctx_p);
+    res
+}
+
+/// Add an `mpeg2video` stream sized for the HLS fixtures, returning
+/// `(stream, opened encoder ctx)`.
+unsafe fn add_hls_video_stream(
+    oc: *mut ffi::AVFormatContext,
+) -> Result<(*mut ffi::AVStream, *mut ffi::AVCodecContext)> {
+    // SAFETY: encoder lookup by id; static codec descriptor or null.
+    let vcodec = ffi::avcodec_find_encoder(ffi::AVCodecID::AV_CODEC_ID_MPEG2VIDEO);
+    if vcodec.is_null() {
+        return Err(bug());
+    }
+    // SAFETY: adds a stream to the live context; null on failure.
+    let vst = ffi::avformat_new_stream(oc, ptr::null());
+    if vst.is_null() {
+        return Err(bug());
+    }
+    // SAFETY: allocates an encoder context for the found codec; null on failure.
+    let vctx = ffi::avcodec_alloc_context3(vcodec);
+    if vctx.is_null() {
+        return Err(bug());
+    }
+    // SAFETY: `vctx` is a fresh, exclusively-owned context; plain field writes.
+    (*vctx).width = HLS_W;
+    (*vctx).height = HLS_H;
+    (*vctx).time_base = ffi::AVRational {
+        num: 1,
+        den: HLS_FPS,
+    };
+    (*vctx).framerate = ffi::AVRational {
+        num: HLS_FPS,
+        den: 1,
+    };
+    (*vctx).pix_fmt = ffi::AVPixelFormat::AV_PIX_FMT_YUV420P;
+    (*vctx).gop_size = HLS_FPS;
+    (*vctx).bit_rate = 1_000_000;
+    // SAFETY: `oformat` flags read on the live context.
+    if ((*(*oc).oformat).flags & ffi::AVFMT_GLOBALHEADER) != 0 {
+        let flag = i32::try_from(ffi::AV_CODEC_FLAG_GLOBAL_HEADER).map_err(|_| bug())?;
+        (*vctx).flags |= flag;
+    }
+    // SAFETY: opens the encoder on its own context.
+    let r = ffi::avcodec_open2(vctx, vcodec, ptr::null_mut());
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+    // SAFETY: copies opened-encoder params into the stream's codecpar.
+    let r = ffi::avcodec_parameters_from_context((*vst).codecpar, vctx);
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+    // SAFETY: plain field write on the owned stream.
+    (*vst).time_base = (*vctx).time_base;
+    Ok((vst, vctx))
+}
+
+/// Encode `HLS_SEGMENT_S * HLS_FPS` grey frames and mux them, then flush.
+unsafe fn encode_hls_video(
+    oc: *mut ffi::AVFormatContext,
+    vst: *mut ffi::AVStream,
+    vctx: *mut ffi::AVCodecContext,
+) -> Result<()> {
+    let w = u32::try_from(HLS_W).map_err(|_| bug())?;
+    let h = u32::try_from(HLS_H).map_err(|_| bug())?;
+    let total = HLS_SEGMENT_S * HLS_FPS;
+    for i in 0..i64::from(total) {
+        let mut video = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, w, h);
+        // SAFETY: `video.as_mut_ptr()` is the live owned frame; fill its planes via
+        // raw pointers (the safe API has no constant-fill).
+        let frame = video.as_mut_ptr();
+        let r = ffi::av_frame_make_writable(frame);
+        if r < 0 {
+            return Err(ff_err(r));
+        }
+        fill_plane((*frame).data[0], (*frame).linesize[0], HLS_W, HLS_H, 80);
+        fill_plane(
+            (*frame).data[1],
+            (*frame).linesize[1],
+            HLS_W / 2,
+            HLS_H / 2,
+            128,
+        );
+        fill_plane(
+            (*frame).data[2],
+            (*frame).linesize[2],
+            HLS_W / 2,
+            HLS_H / 2,
+            128,
+        );
+        (*frame).pts = i;
+        drain_video(oc, vst, vctx, frame)?;
+    }
+    // SAFETY: flush the encoder with a null frame, then drain.
+    let r = ffi::avcodec_send_frame(vctx, ptr::null());
+    if r < 0 {
+        return Err(ff_err(r));
+    }
+    drain_video(oc, vst, vctx, ptr::null_mut())
 }

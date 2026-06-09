@@ -17,9 +17,11 @@ that is not within a free exception in Section 5 of that License — you need a
   you combine a Multiview Commercial License with your own commercial codec license
   (e.g. x264 LLC, MulticoreWare x265, or MainConcept); patent-pool licensing (MPEG-LA /
   Access Advance) where applicable is your responsibility.
-- **Proprietary components:** native **NDI** (Vizrt) and native **Dante** (Audinate)
-  require your own separate licenses from those vendors; Multiview does not grant them.
-  The open **AES67 / ST 2110-30** audio path needs no such license.
+- **Proprietary components:** native **NDI** (Vizrt) requires your own separate license
+  from the vendor; Multiview does not grant it. **Native Dante is NOT supported** — the
+  open **AES67 / ST 2110-30** audio path (Audinate's own open, royalty-free standard) is
+  the Dante interop path, needs no such license, and is included in the public
+  non-commercial license.
 
 A Commercial License is a separate written agreement and is not granted by this
 document.

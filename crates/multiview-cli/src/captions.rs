@@ -290,6 +290,12 @@ pub struct CaptionPlan {
     pub rendition_url: String,
     /// The store the decoded cues are published into (shared with the baker).
     pub store: Arc<CueStore>,
+    /// Whether the rendition is a **live** (continuous, never-finishing) source.
+    /// A live caption reader is supervised-reconnected on EOF/error (a transient
+    /// `.vtt` 404/token-expiry never permanently kills captions); a finite VOD
+    /// rendition plays out once and then stops. HLS sources are live (mirrors the
+    /// video [`IngestPlan::live`] derivation). See [`caption_loop`].
+    pub live: bool,
 }
 
 /// Resolve a rendition's (possibly relative) `URI` against the master playlist's
@@ -570,6 +576,11 @@ fn resolve_caption_plan(
         id: id.to_owned(),
         rendition_url,
         store: Arc::new(CueStore::new()),
+        // This planner is only reached for an HLS source (via `webvtt_language` →
+        // `hls_url`); HLS is a live source (mirrors the video `IngestPlan` deriving
+        // `live = true` for `SourceKind::Hls`), so its caption rendition is
+        // supervised-reconnected.
+        live: true,
     })
 }
 
@@ -678,20 +689,49 @@ const MAX_PLAYLIST_BYTES: usize = 8 * 1024 * 1024;
 ///
 /// Opens the resolved rendition `m3u8`, finds its subtitle stream, builds a
 /// `WebVTT` [`CaptionDecoder`], pumps packets, and publishes each decoded cue
-/// into the per-source [`CueStore`]. Returns when `stop` is raised or the
-/// rendition demux ends (a VOD rendition has an end). Any error is logged and the
-/// loop ends (best-effort — no cues, never a stall).
+/// into the per-source [`CueStore`].
+///
+/// A **live** rendition (an HLS source) is **supervised-reconnected** on
+/// EOF/error, mirroring the video [`ingest_loop`](crate::pipeline) bracket: a
+/// transient `.vtt` 404 / token-expiry / segment blip backs off
+/// (capped-exponential + per-source jitter) and retries, instead of permanently
+/// killing captions for the run. A connection that streamed for a while resets
+/// the escalation; a hard-down rendition never hot-loops. A **finite** VOD
+/// rendition (e.g. bipbop) plays out once and then stops — we do not
+/// hammer-reconnect a finished VOD; its decoded cues remain in the bounded store
+/// for the baker. The loop returns promptly whenever `stop` is raised (the
+/// backoff sleep is `stop`-checked).
 ///
 /// The loop only ever *writes* the lock-free store, so it can neither pace nor
-/// stall the output clock (invariant #1) nor back-pressure the engine (#10). A
-/// VOD rendition (bipbop) plays out once; its decoded cues remain in the bounded
-/// store for the baker to sample — we do not hammer-reconnect a finished VOD.
+/// stall the output clock (invariant #1) nor back-pressure the engine (#10).
 pub fn caption_loop(plan: &CaptionPlan, stop: &AtomicBool) {
-    if stop.load(Ordering::Acquire) {
-        return;
-    }
-    if let Err(reason) = read_captions(plan, stop) {
-        tracing::warn!(source = %plan.id, %reason, "caption rendition ended/errored");
+    let mut attempt: u32 = 0;
+    let mut jitter = crate::pipeline::JitterRng::seeded(&plan.id);
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let started = std::time::Instant::now();
+        if let Err(reason) = read_captions(plan, stop) {
+            tracing::warn!(source = %plan.id, %reason, "caption rendition ended/errored");
+        }
+        let ran_for = started.elapsed();
+        // A finite (VOD) rendition plays out once; never reconnect it. A stop
+        // raised while we ran ends the loop immediately.
+        if !plan.live || stop.load(Ordering::Acquire) {
+            return;
+        }
+        // Live: back off (capped-exponential + jitter) and retry, so a transient
+        // rendition failure recovers instead of disabling captions for the run.
+        attempt = crate::pipeline::next_reconnect_attempt(attempt, ran_for);
+        let nap = crate::pipeline::reconnect_backoff(attempt, jitter.next_unit());
+        tracing::debug!(
+            source = %plan.id,
+            attempt,
+            backoff_ms = nap.as_millis(),
+            "caption rendition reconnecting after a fault"
+        );
+        crate::pipeline::sleep_interruptible(nap, stop);
     }
 }
 

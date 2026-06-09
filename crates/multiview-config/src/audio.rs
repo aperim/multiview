@@ -364,4 +364,164 @@ impl OutputAudio {
         }
         Ok(())
     }
+
+    /// The number of **discrete** tracks this selection carries: the selected
+    /// tracks that are not the mixed program bus ([`PROGRAM_TRACK`]).
+    ///
+    /// In [`OutputAudioMode::Program`] this is always `0` (the output carries
+    /// only the mixed bus). This is the count the per-output capability matrix
+    /// ([`OutputAudioCapability`]) gates: a transport that cannot carry
+    /// simultaneous discrete tracks (NDI) or only carries one (legacy RTMP)
+    /// rejects a selection whose discrete count exceeds its capacity.
+    #[must_use]
+    pub fn discrete_track_count(&self) -> u32 {
+        if self.mode == OutputAudioMode::Program {
+            return 0;
+        }
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.tracks.len());
+        let mut count: u32 = 0;
+        for track in &self.tracks {
+            if track == PROGRAM_TRACK {
+                continue;
+            }
+            // De-duplicate so a (malformed) repeated name is not double-counted;
+            // the reference validator above rejects duplicates independently.
+            if seen.insert(track.as_str()) {
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+
+    /// Validate this output's audio selection against the transport's
+    /// **capability** (ADR-R005 §4.2): the selectable-track *references* must be
+    /// consistent (delegated to [`OutputAudio::validate`]) **and** the count of
+    /// requested discrete tracks must fit what the transport can actually
+    /// deliver.
+    ///
+    /// This is the capability cross-check the brief's "designed-in asymmetry"
+    /// requires: N simultaneous discrete tracks pass on MPEG-TS/SRT and RTSP,
+    /// are rejected on NDI (channel-map only) and a legacy RTMP endpoint, and are
+    /// accepted on an Enhanced-RTMP endpoint that declares multitrack. HLS is
+    /// select-one — multiple tracks are a *selector*, not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] for an inconsistent reference (see
+    /// [`OutputAudio::validate`]), or [`ConfigError::AudioCapability`] when the
+    /// discrete-track count exceeds the transport's
+    /// [`discrete_capacity`](OutputAudioCapability::discrete_capacity).
+    pub fn validate_against_capability(
+        &self,
+        output_label: &str,
+        selectable_tracks: &[&str],
+        capability: OutputAudioCapability,
+    ) -> Result<(), ConfigError> {
+        self.validate(output_label, selectable_tracks)?;
+
+        let requested = self.discrete_track_count();
+        if !capability.discrete_capacity.accepts(requested) {
+            return Err(ConfigError::AudioCapability {
+                output: output_label.to_owned(),
+                reason: capability.refusal_reason(requested),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// How a transport delivers discrete audio tracks (ADR-R005 §4.2). This is the
+/// machine-readable delivery semantics the validator and the Web UI (AUD-8) both
+/// read, so an impossible selection is greyed out without re-deriving the rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TrackDelivery {
+    /// All selected discrete tracks are delivered **at once** (MPEG-TS/SRT PIDs,
+    /// RTSP `m=audio` subsessions): the UI shows simultaneous monitors.
+    Simultaneous,
+    /// N tracks are carried but the player plays **one at a time** (HLS/DASH
+    /// renditions): the UI is a track *selector*, not simultaneous monitoring.
+    SelectOne,
+    /// No selectable discrete tracks at all — channels only (NDI channel-map).
+    /// A discrete-track selection on such a transport is a capability error.
+    None,
+}
+
+/// How many discrete audio tracks a transport can carry (ADR-R005 §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TrackCapacity {
+    /// No practical cap (MPEG-TS/SRT, RTSP, HLS renditions).
+    Unlimited,
+    /// At most `n` discrete tracks (legacy RTMP = `1`; NDI channel-map = `0`).
+    AtMost(u32),
+}
+
+impl TrackCapacity {
+    /// Whether this capacity admits `requested` discrete tracks.
+    #[must_use]
+    pub const fn accepts(self, requested: u32) -> bool {
+        match self {
+            Self::Unlimited => true,
+            Self::AtMost(n) => requested <= n,
+        }
+    }
+}
+
+/// The **per-output audio capability** — the verified ADR-R005 §4.2 matrix as a
+/// first-class, machine-readable value (the brief: "a first-class data
+/// structure, not scattered conditionals").
+///
+/// Derived from an [`crate::Output`] by [`crate::Output::audio_capability`] and
+/// consumed both by config-time validation
+/// ([`OutputAudio::validate_against_capability`]) and by the Web UI routing matrix
+/// (AUD-8), which greys out cells a transport cannot deliver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct OutputAudioCapability {
+    /// How discrete tracks are delivered (simultaneous, select-one, or none).
+    pub delivery: TrackDelivery,
+    /// How many discrete tracks the transport can carry.
+    pub discrete_capacity: TrackCapacity,
+    /// The maximum number of audio **channels** the transport can carry in one
+    /// stream, if bounded (e.g. AAC-over-NDI is capped at 2). `None` ⇒ no
+    /// transport-imposed channel cap modelled here. Reserved for the per-channel
+    /// downmix check the Web UI surfaces; not yet gated by this validator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_channels: Option<u32>,
+}
+
+impl OutputAudioCapability {
+    /// Construct a capability with no channel cap.
+    #[must_use]
+    pub const fn new(delivery: TrackDelivery, discrete_capacity: TrackCapacity) -> Self {
+        Self {
+            delivery,
+            discrete_capacity,
+            max_channels: None,
+        }
+    }
+
+    /// A human-readable explanation of why `requested` discrete tracks exceed
+    /// this capability — used as the [`ConfigError::AudioCapability`] reason.
+    #[must_use]
+    pub fn refusal_reason(self, requested: u32) -> String {
+        match (self.delivery, self.discrete_capacity) {
+            (TrackDelivery::None, _) => format!(
+                "this transport carries no selectable discrete tracks (channels only, e.g. an NDI \
+                 channel-map); {requested} discrete track(s) were selected — carry the mixed \
+                 program bus instead"
+            ),
+            (_, TrackCapacity::AtMost(n)) => format!(
+                "this transport carries at most {n} discrete audio track(s) (e.g. a legacy RTMP \
+                 endpoint); {requested} were selected — declare an endpoint that supports \
+                 multitrack or degrade to the mixed program bus"
+            ),
+            (_, TrackCapacity::Unlimited) => {
+                format!("this transport's audio capacity rejected {requested} discrete track(s)")
+            }
+        }
+    }
 }
