@@ -1108,6 +1108,7 @@ mod nvml {
                 .into_iter()
                 .filter_map(|device| probe.device_perf(&device).map(|perf| (device, perf)))
                 .collect()
+        }
     }
 }
 
