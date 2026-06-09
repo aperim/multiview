@@ -48,12 +48,29 @@ pub struct VideoEncodeTarget {
     pub bit_rate: usize,
     /// Keyframe interval in frames (GOP size); `0` lets the codec choose.
     pub gop: u32,
+    /// Optional CUDA device ordinal (e.g. `Some("1")`) to pin a `*_nvenc`
+    /// encoder onto, so encode lands on the admission-selected GPU instead of
+    /// libav's default CUDA device (ordinal 0) — the NVENC device-affinity seam
+    /// (Tier-2 P1a). `None` keeps the default-device behaviour, and the pin is
+    /// **inert** for any non-`*_nvenc` codec (the bind is gated by the codec-name
+    /// suffix in [`VideoEncoder::new`]). A bind failure (no GPU / no such
+    /// ordinal) degrades gracefully to a default-device open, never a panic.
+    pub cuda_device: Option<String>,
 }
 
 /// A configured-and-opened video encoder.
 pub struct VideoEncoder {
     encoder: encoder::video::Encoder,
     time_base: Rational,
+    /// The CUDA device context a `*_nvenc` encoder is bound to, when the
+    /// device-affinity pin (Tier-2 P1a) is live. Held for the encoder's lifetime
+    /// so the device outlives every `send_frame` — exactly as
+    /// [`StreamVideoDecoder`](crate::decode_stream::StreamVideoDecoder) holds its
+    /// decode-side `hw_device`. Freed synchronously in `Drop` on the encode
+    /// thread (CLAUDE.md §7), never an async destructor. [`None`] on the default
+    /// path (no pin requested, a non-NVENC codec, or a bind that gracefully fell
+    /// back to the default device).
+    hw_device: Option<crate::hwframe::HwDeviceContext>,
 }
 
 impl VideoEncoder {
@@ -87,17 +104,78 @@ impl VideoEncoder {
             ctx.set_gop(target.gop);
         }
 
+        // NVENC device-affinity pin (Tier-2 P1a): when an ordinal is requested
+        // AND the codec is a `*_nvenc` encoder, bind a CUDA device context for
+        // that ordinal onto the not-yet-opened encoder so encode lands on the
+        // admission-selected GPU instead of defaulting to ordinal 0. The bind is
+        // gated by the `_nvenc` suffix so naming an ordinal on a software codec
+        // is inert. A create/attach failure (no GPU, no such ordinal, OOM) is
+        // logged once and degraded to a default-device open — mirroring the
+        // decode-side HW->default graceful degradation, never a panic
+        // (`hw_device` then stays `None`).
+        let hw_device = match target.cuda_device.as_deref() {
+            Some(ordinal) if target.codec_name.ends_with("_nvenc") => {
+                match Self::bind_nvenc_device(&mut ctx, ordinal) {
+                    Ok(device) => Some(device),
+                    Err(err) => {
+                        tracing::warn!(
+                            codec = %target.codec_name,
+                            ordinal,
+                            error = %err,
+                            "NVENC device pin unavailable; opening encoder on the default CUDA device"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         let encoder = ctx.open_as(codec).map_err(FfmpegError::OpenEncoder)?;
         Ok(Self {
             encoder,
             time_base: target.time_base,
+            hw_device,
         })
+    }
+
+    /// Create a CUDA device context for `ordinal` and attach it to the
+    /// not-yet-opened `ctx` (NVENC device-affinity pin, Tier-2 P1a). On success
+    /// the returned handle MUST outlive the encoder (stored in `hw_device`); the
+    /// attach takes a separate `av_buffer_ref` libav frees with the encoder.
+    /// Requires a working driver/GPU at run time; on a GPU-free box / a missing
+    /// ordinal this returns a typed error and the caller degrades to the default
+    /// device (never a panic).
+    fn bind_nvenc_device(
+        ctx: &mut encoder::video::Video,
+        ordinal: &str,
+    ) -> Result<crate::hwframe::HwDeviceContext> {
+        let device = crate::hwframe::HwDeviceContext::create(
+            crate::hwdecode::HwDeviceKind::Cuda,
+            Some(ordinal),
+        )?;
+        // Must be set BEFORE the encoder is opened — libav reads `hw_device_ctx`
+        // only during `avcodec_open2` (`open_as`).
+        device.attach_to_encoder(ctx)?;
+        Ok(device)
     }
 
     /// The encoder time-base (exact rational).
     #[must_use]
     pub const fn time_base(&self) -> Rational {
         self.time_base
+    }
+
+    /// Whether this encoder is pinned to a specific CUDA device (Tier-2 P1a) —
+    /// true exactly when a `*_nvenc` device-affinity bind succeeded and its CUDA
+    /// device context is held for the encoder's lifetime. `false` on the default
+    /// path (no pin requested, a non-NVENC codec, or a bind that gracefully fell
+    /// back to the default device). The mirror of
+    /// [`StreamVideoDecoder::is_hardware`](crate::decode_stream::StreamVideoDecoder::is_hardware)
+    /// on the encode side; used by telemetry / the hardware-validation check.
+    #[must_use]
+    pub const fn is_device_pinned(&self) -> bool {
+        self.hw_device.is_some()
     }
 
     /// Borrow the opened encoder's codec context — used to register a matching

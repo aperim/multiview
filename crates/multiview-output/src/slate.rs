@@ -317,6 +317,8 @@ fn encode_config(spec: &SlateSpec) -> EncodeConfig {
             // Native libav AAC (LGPL); `bit_rate: 0` lets the encoder choose.
             AudioEncodeConfig::aac(a.sample_rate, a.channels, 0)
         }),
+        // The slate is a CPU-generated failover card — never device-pinned.
+        cuda_ordinal: None,
     }
 }
 

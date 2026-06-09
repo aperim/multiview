@@ -114,6 +114,11 @@ fn decode_all_to_nv12(clip: &Path) -> Vec<ffmpeg::util::frame::Video> {
     frames
 }
 
+// reason: this end-to-end round-trip is a single, linear, assertion-dense
+// scenario (demux -> decode -> re-encode -> mux -> re-open); splitting it would
+// fragment the one chain it verifies. Adding the `cuda_device: None` field to
+// the encode target tipped it one line past the cosmetic length lint.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn decode_reencode_mux_reopen_round_trips() {
     let dir = TempDir::new().unwrap();
@@ -139,6 +144,7 @@ fn decode_reencode_mux_reopen_round_trips() {
         time_base,
         bit_rate: 1_000_000,
         gop: 12,
+        cuda_device: None,
     };
     let mut encoder = VideoEncoder::new(&target).expect("open mpeg2video encoder");
 

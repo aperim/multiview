@@ -138,25 +138,32 @@ impl HwDeviceContext {
         self.ptr.as_ptr()
     }
 
-    /// Attach this device context to a not-yet-opened decoder `context` so the
-    /// decoder runs its hardware path on this GPU.
+    /// Attach this device context to a not-yet-opened codec `context` (decoder
+    /// **or** encoder) so the codec runs its hardware path on this GPU.
     ///
-    /// Sets the decoder's `hw_device_ctx` to a **new owning reference** on this
+    /// Sets the context's `hw_device_ctx` to a **new owning reference** on this
     /// device buffer (via `av_buffer_ref`), which libav frees when the codec
     /// context is freed; `self` keeps its own ref. Must be called **before**
-    /// `avcodec_open2` (i.e. before `Decoder::open`/`video()`), which is the only
-    /// time libav reads `hw_device_ctx`.
+    /// `avcodec_open2` (i.e. before `Decoder::open`/`Video::open_as`), which is
+    /// the only time libav reads `hw_device_ctx`.
+    ///
+    /// This is the shared raw-FFI body behind [`Self::attach_to_decoder`] and
+    /// [`Self::attach_to_encoder`]; both reach the same not-yet-opened
+    /// `codec::context::Context` (the encoder via its `DerefMut` chain).
     ///
     /// # Errors
     /// Returns [`FfmpegError::HwContext`] if libav cannot take a new reference on
-    /// the device buffer (out of memory) — the caller then degrades to software.
-    pub fn attach_to_decoder(&self, context: &mut ffmpeg::codec::context::Context) -> Result<()> {
+    /// the device buffer (out of memory) — the caller then degrades to software
+    /// / the default device.
+    fn attach_to_codec_ctx(&self, context: &mut ffmpeg::codec::context::Context) -> Result<()> {
         // SAFETY: `self.ptr` is a live, non-null owning ref on the device
         // context (the `NonNull` invariant). `av_buffer_ref` returns a NEW
         // independent owning ref (or null on OOM) without consuming ours. We
         // hand that new ref to the codec context's `hw_device_ctx`, which libav
         // takes ownership of and unrefs on `avcodec_free_context`. `context` is
         // exclusively borrowed `&mut`, so writing the field is not aliased.
+        // `as_mut_ptr` is `unsafe` only because it hands out the raw context
+        // pointer; we use it solely to write the single scalar field below.
         unsafe {
             let new_ref = ffi::av_buffer_ref(self.ptr.as_ptr());
             if new_ref.is_null() {
@@ -166,6 +173,48 @@ impl HwDeviceContext {
             (*ctx_ptr).hw_device_ctx = new_ref;
         }
         Ok(())
+    }
+
+    /// Attach this device context to a not-yet-opened decoder `context` so the
+    /// decoder runs its hardware path on this GPU.
+    ///
+    /// A thin wrapper over [`Self::attach_to_codec_ctx`]; see it for the
+    /// reference-counting + ordering contract. Must be called **before**
+    /// `Decoder::open`/`video()`.
+    ///
+    /// # Errors
+    /// Returns [`FfmpegError::HwContext`] if libav cannot take a new reference on
+    /// the device buffer (out of memory) — the caller then degrades to software.
+    pub fn attach_to_decoder(&self, context: &mut ffmpeg::codec::context::Context) -> Result<()> {
+        self.attach_to_codec_ctx(context)
+    }
+
+    /// Attach this device context to a not-yet-opened video `encoder` so the
+    /// encoder runs its hardware path (e.g. NVENC) on this GPU — the encode-side
+    /// mirror of [`Self::attach_to_decoder`].
+    ///
+    /// `encoder::video::Video` derefs (`DerefMut`) through `encoder::Encoder`
+    /// down to the underlying `codec::context::Context`, so writing
+    /// `hw_device_ctx` on the deref'd `&mut Context` configures the *same*
+    /// not-yet-opened context libav reads in `avcodec_open2`. Must be called
+    /// **before**
+    /// [`Video::open_as`](ffmpeg::codec::encoder::video::Video::open_as), which is
+    /// the only time libav reads `hw_device_ctx`. Pins the chosen CUDA ordinal so
+    /// encode lands on the admission-selected GPU instead of defaulting to
+    /// ordinal 0 (Tier-2 P1a).
+    ///
+    /// # Errors
+    /// Returns [`FfmpegError::HwContext`] if libav cannot take a new reference on
+    /// the device buffer (out of memory) — the caller then degrades to a
+    /// default-device open (never a panic).
+    pub fn attach_to_encoder(
+        &self,
+        encoder: &mut ffmpeg::codec::encoder::video::Video,
+    ) -> Result<()> {
+        // Auto-deref coerces `&mut Video` through its `DerefMut` chain
+        // (Video -> Encoder -> codec::context::Context) to the `&mut Context`
+        // parameter — the same not-yet-opened context libav reads in `open_as`.
+        self.attach_to_codec_ctx(encoder)
     }
 }
 

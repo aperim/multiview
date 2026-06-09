@@ -1100,6 +1100,10 @@ impl Pipeline {
             // drive_streaming (subsequent slice); `None` keeps the muxer
             // single-stream so the existing run output is unchanged.
             audio: None,
+            // NVENC device-affinity pin (Tier-2 P1a): `None` until the admission
+            // pick threads the chosen ordinal in (separate integration); behaviour
+            // is unchanged from before the seam existed.
+            cuda_ordinal: None,
         };
 
         let outputs = build_outputs(&config.outputs)?;
