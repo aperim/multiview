@@ -44,7 +44,7 @@ pub const WEBVTT_CUE_START_S: i32 = 1;
 /// The media instant (seconds) the [`generate_hls_with_valid_webvtt`] cue ends.
 pub const WEBVTT_CUE_END_S: i32 = 3;
 /// The exact text of the cue carried by [`generate_hls_with_valid_webvtt`]; the
-/// isolated WebVTT reader must recover this verbatim.
+/// isolated `WebVTT` reader must recover this verbatim.
 pub const WEBVTT_CUE_TEXT: &str = "OFFLINE WEBVTT CUE";
 
 /// The program canvas width of the generated clip (px).
@@ -811,7 +811,7 @@ unsafe fn drain_a53_video(
 // folds the rendition into the *one* shared `AVFormatContext` it opens for the
 // video, so a corrupt/expired `.vtt` segment either aborts `avformat_open_input`
 // or makes `av_read_frame` return that rendition's error for the whole context —
-// killing the video tile. The fix (ADR-T010) discards the unrouted subtitle
+// killing the video tile. The fix (ADR-T011) discards the unrouted subtitle
 // stream in the main demuxer; the isolated `read_captions` reader is the sole
 // WebVTT path. Both fixtures are written entirely on disk (a short LGPL
 // `mpeg2video` TS segment + hand-written playlists + a `.vtt`), referenced by
@@ -830,7 +830,7 @@ const HLS_W: i32 = 160;
 /// The HLS fixtures' video segment height.
 const HLS_H: i32 = 120;
 
-/// Generate, under `dir`, an HLS master playlist whose `TYPE=SUBTITLES` WebVTT
+/// Generate, under `dir`, an HLS master playlist whose `TYPE=SUBTITLES` `WebVTT`
 /// rendition's first `.vtt` segment is **deliberately corrupt** (garbage bytes,
 /// no `WEBVTT` header) — the ABC-News-AU failure shape. Writes:
 ///
@@ -839,7 +839,7 @@ const HLS_H: i32 = 120;
 /// * `subs.m3u8` + `subs0.vtt` — the corrupt subtitle rendition.
 ///
 /// The main demuxer opened on `master.m3u8` must keep decoding the video despite
-/// the broken WebVTT rendition (the fix); the isolated reader is the only path
+/// the broken `WebVTT` rendition (the fix); the isolated reader is the only path
 /// that would touch the `.vtt`.
 ///
 /// # Errors
@@ -859,10 +859,10 @@ pub fn generate_hls_with_broken_webvtt(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Generate, under `dir`, an HLS master playlist whose `TYPE=SUBTITLES` WebVTT
+/// Generate, under `dir`, an HLS master playlist whose `TYPE=SUBTITLES` `WebVTT`
 /// rendition carries **one valid cue** ([`WEBVTT_CUE_TEXT`], on screen
 /// [`WEBVTT_CUE_START_S`]–[`WEBVTT_CUE_END_S`]). Same file layout as
-/// [`generate_hls_with_broken_webvtt`] but `subs0.vtt` is a well-formed WebVTT
+/// [`generate_hls_with_broken_webvtt`] but `subs0.vtt` is a well-formed `WebVTT`
 /// segment, so the isolated reader recovers the cue.
 ///
 /// # Errors
@@ -891,6 +891,7 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
 
 /// A `VOD` media playlist referencing one segment file (`seg`) for two seconds.
 fn media_playlist_for(seg: &str) -> String {
+    let dur = HLS_SEGMENT_S;
     format!(
         "#EXTM3U\n\
          #EXT-X-VERSION:3\n\
@@ -900,11 +901,10 @@ fn media_playlist_for(seg: &str) -> String {
          #EXTINF:{dur}.000,\n\
          {seg}\n\
          #EXT-X-ENDLIST\n",
-        dur = HLS_SEGMENT_S,
     )
 }
 
-/// The master playlist binding the video variant to the WebVTT subtitle
+/// The master playlist binding the video variant to the `WebVTT` subtitle
 /// rendition, with absolute `file://` URIs resolved against `dir`.
 fn master_playlist(dir: &Path) -> String {
     let base = format!("file://{}", dir.display());
@@ -918,17 +918,17 @@ fn master_playlist(dir: &Path) -> String {
     )
 }
 
-/// A well-formed single-cue WebVTT segment carrying [`WEBVTT_CUE_TEXT`].
+/// A well-formed single-cue `WebVTT` segment carrying [`WEBVTT_CUE_TEXT`].
 fn valid_webvtt_segment() -> String {
+    let start = WEBVTT_CUE_START_S;
+    let end = WEBVTT_CUE_END_S;
+    let text = WEBVTT_CUE_TEXT;
     format!(
         "WEBVTT\n\
          X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\
          \n\
          00:00:0{start}.000 --> 00:00:0{end}.000\n\
          {text}\n",
-        start = WEBVTT_CUE_START_S,
-        end = WEBVTT_CUE_END_S,
-        text = WEBVTT_CUE_TEXT,
     )
 }
 

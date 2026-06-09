@@ -259,7 +259,7 @@ pub use decode_stream::{
 };
 
 #[cfg(feature = "ffmpeg")]
-pub use demux::{DemuxOptions, Demuxer, ReadPacket, StreamParams};
+pub use demux::{discard_unrouted_subtitles, DemuxOptions, Demuxer, ReadPacket, StreamParams};
 
 #[cfg(feature = "ffmpeg")]
 pub use encode::{AudioEncodeTarget, AudioEncoder, VideoEncodeTarget, VideoEncoder};

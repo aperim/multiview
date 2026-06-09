@@ -1,15 +1,15 @@
-//! Unit proof for [`multiview_ffmpeg::discard_unrouted_subtitles`] (ADR-T010):
-//! the main demuxer marks every unrouted SUBTITLE-medium stream `AVDISCARD_ALL`
+//! Unit proof for [`multiview_ffmpeg::discard_unrouted_subtitles`] (ADR-T011):
+//! the main demuxer marks every unrouted subtitle-medium stream `AVDISCARD_ALL`
 //! so libav stops fetching it, while NEVER touching audio or video and KEEPING a
 //! single routed (`keep`) subtitle stream.
 //!
 //! Driven entirely offline. Two scenarios:
 //!
 //! 1. The **HLS-shared-context** scenario — the ABC-News-AU mechanism. libav only
-//!    folds a `TYPE=SUBTITLES` WebVTT rendition into the one shared
+//!    folds a `TYPE=SUBTITLES` `WebVTT` rendition into the one shared
 //!    `AVFormatContext` when opened with `strict <= experimental` +
-//!    `allowed_extensions ALL` (FFmpeg `hls.c` `new_rendition`); we open the
-//!    offline broken-WebVTT fixture exactly that way so a real WebVTT subtitle
+//!    `allowed_extensions ALL` (`FFmpeg` `hls.c` `new_rendition`); we open the
+//!    offline broken-`WebVTT` fixture exactly that way so a real `WebVTT` subtitle
 //!    stream sits alongside the video, then prove the discard removes it and
 //!    leaves the video untouched.
 //! 2. The **routed-keep** scenario — an in-container DVB-sub stream that the
@@ -25,19 +25,19 @@
 
 use ffmpeg::media::Type;
 use ffmpeg_next as ffmpeg;
+use tempfile::TempDir;
 
 use multiview_ffmpeg::discard_unrouted_subtitles;
 use multiview_ffmpeg::test_fixtures::{generate_dvbsub_ts, generate_hls_with_broken_webvtt};
 
-/// Open the offline broken-WebVTT HLS master the way that makes libav surface the
-/// subtitle rendition into the one shared context (the real failure shape), and
-/// return the opened input. The tempdir is leaked so the on-disk fixture outlives
-/// the input (cleaned by the OS on test-process exit).
-fn open_hls_with_surfaced_subtitle() -> ffmpeg::format::context::Input {
+/// Open the offline broken-`WebVTT` HLS master the way that makes libav surface
+/// the subtitle rendition into the one shared context (the real failure shape).
+/// Returns the opened input plus the [`TempDir`] guard — the caller must keep the
+/// guard alive so the on-disk fixture outlives the input.
+fn open_hls_with_surfaced_subtitle() -> (ffmpeg::format::context::Input, TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     generate_hls_with_broken_webvtt(dir.path()).expect("generate broken-webvtt HLS fixture");
     let master = format!("file://{}/master.m3u8", dir.path().display());
-    std::mem::forget(dir);
 
     let mut opts = ffmpeg::Dictionary::new();
     // `strict experimental` is what makes FFmpeg's HLS demuxer ADD the WebVTT
@@ -46,13 +46,14 @@ fn open_hls_with_surfaced_subtitle() -> ffmpeg::format::context::Input {
     // the dangerous shared-context shape the main demuxer must defend against.
     opts.set("strict", "experimental");
     opts.set("allowed_extensions", "ALL");
-    ffmpeg::format::input_with_dictionary(&master.as_str(), opts)
-        .expect("open broken-webvtt HLS master with the subtitle surfaced")
+    let input = ffmpeg::format::input_with_dictionary(&master.as_str(), opts)
+        .expect("open broken-webvtt HLS master with the subtitle surfaced");
+    (input, dir)
 }
 
 #[test]
 fn discards_the_surfaced_hls_subtitle_and_leaves_video_untouched() {
-    let mut input = open_hls_with_surfaced_subtitle();
+    let (mut input, _dir) = open_hls_with_surfaced_subtitle();
 
     // Precondition: libav really did surface a subtitle stream alongside the video
     // (else this test would not be exercising the bug).
@@ -97,24 +98,24 @@ fn discards_the_surfaced_hls_subtitle_and_leaves_video_untouched() {
 }
 
 /// Open the in-tree LGPL `dvbsub` MPEG-TS fixture (one `mpeg2video` + one
-/// `dvb_subtitle` stream) and return the opened input plus its subtitle index.
-fn open_dvbsub() -> (ffmpeg::format::context::Input, usize) {
+/// `dvb_subtitle` stream). Returns the opened input, its subtitle index, and the
+/// [`TempDir`] guard (kept alive by the caller).
+fn open_dvbsub() -> (ffmpeg::format::context::Input, usize, TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("dvbsub.ts");
     generate_dvbsub_ts(&path).expect("generate dvbsub fixture");
-    std::mem::forget(dir);
     let input = ffmpeg::format::input(&path).expect("open dvbsub fixture");
     let sub = input
         .streams()
         .best(Type::Subtitle)
         .map(|s| s.index())
         .expect("fixture has a subtitle stream");
-    (input, sub)
+    (input, sub, dir)
 }
 
 #[test]
 fn keep_preserves_the_routed_subtitle_stream() {
-    let (mut input, sub_index) = open_dvbsub();
+    let (mut input, sub_index, _dir) = open_dvbsub();
 
     // With keep=Some(sub_index) (the MPEG-TS DVB-sub route): that stream is KEPT
     // (not discarded). The fixture has exactly one subtitle stream, so with it
@@ -129,7 +130,10 @@ fn keep_preserves_the_routed_subtitle_stream() {
         .stream(sub_index)
         .expect("routed subtitle stream present");
     assert!(
-        matches!(kept.discard(), ffmpeg::Discard::None | ffmpeg::Discard::Default),
+        matches!(
+            kept.discard(),
+            ffmpeg::Discard::None | ffmpeg::Discard::Default
+        ),
         "the routed (kept) subtitle stream must NOT be discarded (got {:?})",
         kept.discard()
     );

@@ -1,11 +1,11 @@
-//! Flagship regression guard (ADR-T010): an HLS source whose master playlist
-//! carries a **corrupt WebVTT subtitle rendition** must NOT kill the video tile.
+//! Flagship regression guard (ADR-T011): an HLS source whose master playlist
+//! carries a **corrupt `WebVTT` subtitle rendition** must NOT kill the video tile.
 //!
 //! libav folds an `EXT-X-MEDIA:TYPE=SUBTITLES` rendition into the one shared
 //! `AVFormatContext` it opens for the video, so a corrupt/404/expired `.vtt`
 //! either aborts the open or makes `av_read_frame` return that rendition's error
 //! for the whole context — blacking out the tile. The fix discards every unrouted
-//! subtitle stream in the main demuxer (the isolated reader is the sole WebVTT
+//! subtitle stream in the main demuxer (the isolated reader is the sole `WebVTT`
 //! path), so the video keeps flowing.
 //!
 //! This drives the REAL [`Pipeline`] against a fully-offline fixture
@@ -32,8 +32,8 @@ use multiview_cli::pipeline::Pipeline;
 use multiview_config::MultiviewConfig;
 use multiview_ffmpeg::test_fixtures::generate_hls_with_broken_webvtt;
 
-/// A 1x1 config whose single HLS source points at the broken-WebVTT master, with
-/// an `auto` caption selector (so the isolated WebVTT reader path is exercised
+/// A 1x1 config whose single HLS source points at the broken-`WebVTT` master, with
+/// an `auto` caption selector (so the isolated `WebVTT` reader path is exercised
 /// too), a small canvas (so the CPU reference compositor keeps up in CI), and an
 /// HLS output writing under `out_playlist`.
 fn config_text(master: &str, out_playlist: &std::path::Path) -> String {
