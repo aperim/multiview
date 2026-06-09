@@ -4377,12 +4377,12 @@ const INGEST_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// source id so different sources de-correlate (no thundering herd) while the
 /// sequence stays reproducible — which is what keeps [`reconnect_backoff`]
 /// testable with no real randomness. A SplitMix64-style step; not cryptographic.
-struct JitterRng(u64);
+pub(crate) struct JitterRng(u64);
 
 impl JitterRng {
     /// Seed from a stable hash of the source id (each source gets its own jitter
     /// phase). The seed is forced odd so the step never degenerates to a constant.
-    fn seeded(id: &str) -> Self {
+    pub(crate) fn seeded(id: &str) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut hasher);
@@ -4390,7 +4390,7 @@ impl JitterRng {
     }
 
     /// Advance the state and return the next jitter unit in `[0.0, 1.0]`.
-    fn next_unit(&mut self) -> f64 {
+    pub(crate) fn next_unit(&mut self) -> f64 {
         // SplitMix64 step (deterministic, well-distributed across the id space).
         self.0 = self
             .0
@@ -4409,7 +4409,7 @@ impl JitterRng {
 /// reconnect loop) and de-correlated across sources/attempts (no thundering herd).
 /// `jitter_fraction` comes from [`JitterRng::next_unit`]; a non-finite or
 /// out-of-range value is clamped into `[0, 1]`.
-fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
+pub(crate) fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
     let shift = attempt.min(INGEST_RECONNECT_MAX_ATTEMPT);
     // `shift <= 6`, so the shift is always `Some`; `unwrap_or` is just belt-and-
     // braces against a future constant change.
@@ -4432,7 +4432,7 @@ fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
 /// [`INGEST_RECONNECT_HEALTHY`] resets the escalation to 0 (it was healthy and
 /// merely blipped); anything shorter is a fast failure that escalates the index by
 /// one, capped at [`INGEST_RECONNECT_MAX_ATTEMPT`].
-fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
+pub(crate) fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
     if ran_for >= INGEST_RECONNECT_HEALTHY {
         0
     } else {
@@ -4465,7 +4465,48 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
         // `rw_timeout` is expressed in microseconds; libav copies the strings.
         opts.set("rw_timeout", &INGEST_RW_TIMEOUT.as_micros().to_string());
     }
+    // HLS open-time hardening (ADR-T011): a master playlist with a
+    // `TYPE=SUBTITLES` WebVTT rendition is the ABC-News-AU footgun — libav can
+    // fold the rendition into the one shared context, so a corrupt/404/expired
+    // `.vtt` aborts the open or fails the whole read. Defence-in-depth ahead of
+    // the in-loop `discard_unrouted_subtitles` (the primary guard):
+    //   * `strict=normal` — FFmpeg's HLS demuxer (`hls.c` `new_rendition`) drops a
+    //     SUBTITLES rendition pre-probe when `strict_std_compliance > experimental`,
+    //     so a normal/strict open never even adds the WebVTT stream to the context.
+    //     We never widen `allowed_extensions` to admit `.vtt` here — the isolated
+    //     reader is the sole WebVTT path.
+    //   * `seg_max_retry` — a transient SEGMENT fetch failure retries instead of
+    //     failing the open.
+    //   * `protocol_whitelist` — a sane set so an HTTPS master + AES (`crypto`)
+    //     segments open, without admitting `file`/`concat`-style surprises beyond
+    //     the standard HLS surface.
+    if is_hls_location(location) {
+        opts.set("strict", "normal");
+        opts.set("seg_max_retry", "8");
+        opts.set("protocol_whitelist", "file,http,https,tcp,tls,crypto,data");
+    }
     opts
+}
+
+/// Whether `location` opens an HLS master playlist (a `.m3u8` URL, or a resolved
+/// `YouTube` master — which libav opens as HLS too). Detected on the URL string so
+/// the HLS open-time hardening in [`ingest_open_options`] applies (ADR-T011).
+fn is_hls_location(location: &SourceLocation) -> bool {
+    let url = match location {
+        SourceLocation::Url(u) => u.as_str(),
+        // A resolved YouTube watch URL is opened as a `*.googlevideo.com` HLS
+        // master; treat it as HLS for the open-time hardening.
+        #[cfg(feature = "youtube")]
+        SourceLocation::Youtube { .. } => return true,
+        // A local `.m3u8` file is also an HLS playlist.
+        SourceLocation::Path(p) => p.to_str().unwrap_or(""),
+        #[cfg(feature = "ndi")]
+        SourceLocation::Ndi { .. } => return false,
+        SourceLocation::Synthetic(_) => return false,
+    };
+    // An `.m3u8` (with or without a query string) is an HLS playlist.
+    let base = url.split(['?', '#']).next().unwrap_or(url);
+    base.to_ascii_lowercase().ends_with(".m3u8")
 }
 
 /// The per-source streaming-ingest loop, run on a dedicated thread (BUG-2 fix).
@@ -4819,18 +4860,7 @@ fn open_and_stream(
         }
     };
 
-    let (stream_index, params, time_base, declared_fps) = {
-        let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .ok_or_else(|| "input has no video stream".to_owned())?;
-        (
-            stream.index(),
-            stream.parameters(),
-            multiview_ffmpeg::from_ff_rational(stream.time_base()),
-            multiview_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
-        )
-    };
+    let (stream_index, params, time_base, declared_fps) = best_video_stream_params(&input)?;
 
     // Prefer NVDEC hardware decode (`*_cuvid`) so 4K H.264/HEVC decode runs on
     // the GPU ASIC instead of the CPU (efficiency). The selection is gated by the
@@ -4887,6 +4917,11 @@ fn open_and_stream(
     // video still streams). Only under `overlay`.
     #[cfg(feature = "overlay")]
     let mut dvbsub = build_dvbsub_decoder(plan, &input);
+
+    // HLS WebVTT-rendition isolation (ADR-T011): discard unrouted subtitle streams
+    // before the first read (see the fn doc for the footgun + the routed-keep).
+    discard_unrouted_subtitle_streams(plan, &mut input);
+
     // The wall-clock pacer: maps the first frame's PTS to "now" and releases
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
     let mut pacer = PtsWallClock::new();
@@ -4942,6 +4977,55 @@ fn open_and_stream(
     }
 }
 
+/// Resolve the best video stream's `(index, codec parameters, time-base,
+/// declared fps)` from an opened `input`, or `Err` if the container has no video
+/// stream. The codec [`Parameters`] and rationals are owned snapshots that borrow
+/// nothing from `input`, so the demuxer can keep being read after this returns.
+fn best_video_stream_params(
+    input: &ffmpeg::format::context::Input,
+) -> Result<(usize, ffmpeg::codec::Parameters, Rational, Rational), String> {
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .ok_or_else(|| "input has no video stream".to_owned())?;
+    Ok((
+        stream.index(),
+        stream.parameters(),
+        multiview_ffmpeg::from_ff_rational(stream.time_base()),
+        multiview_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
+    ))
+}
+
+/// Mark every UNROUTED subtitle stream in `input` `AVDISCARD_ALL` so libav stops
+/// fetching it (HLS WebVTT-rendition isolation, ADR-T011).
+///
+/// If the open surfaced a `TYPE=SUBTITLES` `WebVTT` rendition into this shared
+/// context (the ABC-News-AU footgun), a corrupt/404 `.vtt` would otherwise make
+/// `av_read_frame` return that rendition's error for the WHOLE context, killing
+/// the video tile. The main demuxer needs nothing from a `WebVTT` rendition — the
+/// isolated `caption_loop` reader is the sole `WebVTT` path — so discarding it
+/// loses no stream. A routed in-container DVB-sub stream (the MPEG-TS DVB-sub
+/// route) is KEPT; audio renditions are never touched (the guard keys strictly on
+/// `medium() == Subtitle`). Must be called before the first `packet.read()`:
+/// libav's HLS `recheck_discard_flags` fires one-shot on the first packet.
+fn discard_unrouted_subtitle_streams(
+    plan: &IngestPlan,
+    input: &mut ffmpeg::format::context::Input,
+) {
+    #[cfg(feature = "overlay")]
+    let keep_subtitle = plan.dvbsub.as_ref().map(|d| d.stream_index);
+    #[cfg(not(feature = "overlay"))]
+    let keep_subtitle = None;
+    let discarded = multiview_ffmpeg::discard_unrouted_subtitles(input, keep_subtitle);
+    if discarded > 0 {
+        tracing::info!(
+            source = %plan.id,
+            discarded,
+            "discarded unrouted subtitle stream(s) in the main demuxer (HLS rendition isolation)"
+        );
+    }
+}
+
 /// Build the in-container DVB-sub [`CaptionDecoder`] for `plan`'s route, from the
 /// open container's subtitle stream parameters. Returns `None` when the source
 /// has no dvbsub route or the decoder cannot be built (logged, best-effort).
@@ -4989,7 +5073,7 @@ fn pump_dvbsub(
 
 /// Sleep up to `total`, waking early (in <= 50 ms slices) if `stop` is raised,
 /// so ingest teardown stays prompt without a condvar.
-fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
+pub(crate) fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
     let slice = Duration::from_millis(50);
     let mut remaining = total;
     while remaining > Duration::ZERO {
@@ -5644,8 +5728,8 @@ mod reconnect_tests {
     use std::time::Duration;
 
     use super::{
-        ingest_open_options, next_reconnect_attempt, reconnect_backoff, JitterRng, SourceLocation,
-        INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
+        ingest_open_options, is_hls_location, next_reconnect_attempt, reconnect_backoff, JitterRng,
+        SourceLocation, INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
         INGEST_RECONNECT_MAX_ATTEMPT, INGEST_RW_TIMEOUT,
     };
 
@@ -5760,6 +5844,39 @@ mod reconnect_tests {
         let path = SourceLocation::Path(std::path::PathBuf::from("/tmp/clip.mp4"));
         let opts = ingest_open_options(&path);
         assert_eq!(opts.get("rw_timeout"), None);
+    }
+
+    #[test]
+    fn open_options_harden_hls_masters_against_the_webvtt_rendition_footgun() {
+        // An HLS master (.m3u8 URL) gets the open-time hardening (ADR-T011): a
+        // normal/strict compliance so libav drops the SUBTITLES rendition
+        // pre-probe, a bounded segment retry, and a sane protocol whitelist — and
+        // it MUST NOT widen `allowed_extensions` to admit `.vtt`.
+        let hls = SourceLocation::Url("https://h.test/live/master.m3u8".to_owned());
+        assert!(is_hls_location(&hls), "an .m3u8 URL is an HLS master");
+        let opts = ingest_open_options(&hls);
+        assert_eq!(opts.get("strict"), Some("normal"));
+        assert_eq!(opts.get("seg_max_retry"), Some("8"));
+        assert_eq!(
+            opts.get("protocol_whitelist"),
+            Some("file,http,https,tcp,tls,crypto,data")
+        );
+        assert_eq!(
+            opts.get("allowed_extensions"),
+            None,
+            "the main demuxer must NEVER widen allowed_extensions to admit .vtt"
+        );
+
+        // A query string after the .m3u8 still classifies as HLS.
+        let hls_q = SourceLocation::Url("https://h.test/m.m3u8?token=abc".to_owned());
+        assert!(is_hls_location(&hls_q));
+
+        // A non-HLS network source gets `rw_timeout` but NONE of the HLS knobs.
+        let rtsp = SourceLocation::Url("rtsp://example.invalid/stream".to_owned());
+        assert!(!is_hls_location(&rtsp));
+        let opts = ingest_open_options(&rtsp);
+        assert_eq!(opts.get("strict"), None);
+        assert_eq!(opts.get("seg_max_retry"), None);
     }
 }
 

@@ -17,14 +17,19 @@
 #![cfg(all(feature = "ffmpeg", feature = "overlay"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use multiview_cli::captions::{caption_loop, caption_plan_for};
+use multiview_cli::captions::{caption_loop, caption_plan_for, CaptionPlan, CueStore};
 use multiview_config::schema::CaptionSelector;
 use multiview_config::{MultiviewConfig, Source, SourceKind};
 use multiview_core::time::MediaTime;
 use multiview_ffmpeg::caption::CaptionCue;
+use multiview_ffmpeg::test_fixtures::{
+    generate_hls_with_broken_webvtt, generate_hls_with_valid_webvtt, WEBVTT_CUE_START_S,
+    WEBVTT_CUE_TEXT,
+};
 
 const BIPBOP_MASTER: &str = "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8";
 
@@ -142,4 +147,111 @@ fn bipbop_english_webvtt_cue_decodes_into_the_store() {
         "the first decoded English cue must contain the real bipbop text \
          (got {joined:?})"
     );
+}
+
+/// Build a `CaptionPlan` for the rendition `m3u8` at `rendition_url`, with the
+/// given `live` flag and a fresh cue store. The `#[non_exhaustive]`-free
+/// `CaptionPlan` has public fields, so a test constructs it directly.
+fn plan_for(rendition_url: String, live: bool) -> CaptionPlan {
+    CaptionPlan {
+        id: "cam".to_owned(),
+        rendition_url,
+        store: Arc::new(CueStore::new()),
+        live,
+    }
+}
+
+#[test]
+fn valid_webvtt_cue_lands_via_isolated_reader() {
+    // Fully offline: the isolated WebVTT reader decodes one known cue from a
+    // `file://` rendition and publishes it into the per-source store. This is the
+    // SOLE WebVTT path (the main demuxer discards the subtitle rendition), so it
+    // must work on its own.
+    let dir = tempfile::tempdir().expect("tempdir");
+    generate_hls_with_valid_webvtt(dir.path()).expect("generate valid-webvtt fixture");
+    let rendition = format!("file://{}/subs.m3u8", dir.path().display());
+
+    // A finite VOD rendition: not live (plays out once). The reader publishes its
+    // cue and returns at EOF.
+    let plan = plan_for(rendition, false);
+    let store = Arc::clone(&plan.store);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let plan = plan;
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || caption_loop(&plan, &stop))
+    };
+
+    // The cue is on screen WEBVTT_CUE_START_S..WEBVTT_CUE_END_S (1s..3s); sample
+    // mid-window at 1.5s and poll until it appears (the reader paces by PTS).
+    let at = MediaTime::from_nanos(i64::from(WEBVTT_CUE_START_S) * 1_000_000_000 + 500_000_000);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut found: Option<Vec<String>> = None;
+    while Instant::now() < deadline {
+        if let Some(CaptionCue::Text { text, .. }) = store.active_at(at) {
+            found = Some(text.lines);
+            break;
+        }
+        if reader.is_finished() {
+            if let Some(CaptionCue::Text { text, .. }) = store.active_at(at) {
+                found = Some(text.lines);
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    stop.store(true, Ordering::Release);
+    let _ = reader.join();
+
+    let lines = found.expect("the known offline WebVTT cue must land in the store");
+    let joined = lines.join(" ");
+    assert!(
+        joined.contains(WEBVTT_CUE_TEXT),
+        "the decoded cue must contain the fixture's known text (got {joined:?})"
+    );
+}
+
+#[test]
+fn live_caption_reader_retries_after_transient_error() {
+    // A LIVE caption reader pointed at a broken (corrupt-first-segment) rendition
+    // must NOT return after the first error — it loops/backs-off (so a transient
+    // .vtt 404/token-expiry never permanently kills captions) — and it must stop
+    // PROMPTLY when the stop flag is raised.
+    let dir = tempfile::tempdir().expect("tempdir");
+    generate_hls_with_broken_webvtt(dir.path()).expect("generate broken-webvtt fixture");
+    let rendition = format!("file://{}/subs.m3u8", dir.path().display());
+
+    let plan = plan_for(rendition, true);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let reader = {
+        let plan = plan;
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || caption_loop(&plan, &stop))
+    };
+
+    // Give the loop time to hit the open/read error at least once and enter its
+    // backoff. A LIVE reader must still be running (it retries) — NOT finished.
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(
+        !reader.is_finished(),
+        "a live caption reader must keep retrying after a transient error, not return"
+    );
+
+    // Raising stop must tear it down promptly (the backoff sleep is stop-checked).
+    stop.store(true, Ordering::Release);
+    let joined_by = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < joined_by {
+        if reader.is_finished() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        reader.is_finished(),
+        "a live caption reader must stop promptly once the stop flag is raised"
+    );
+    let _ = reader.join();
 }
