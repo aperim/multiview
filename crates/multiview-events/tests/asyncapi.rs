@@ -170,3 +170,154 @@ fn audio_meter_message_notes_high_rate() {
         "AudioMeter message must document its high-rate / conflated nature; got: {desc:?}"
     );
 }
+
+// --- AsyncAPI 3.0 structural-validity gate ---
+//
+// The eight assertions below mirror the eight governance errors reported by
+// `@asyncapi/cli validate` against the AsyncAPI 3.0 JSON Schema. A document that
+// passes these passes the CI `asyncapi validate` gate; each test names the exact
+// spec rule it guards so a future regression points straight at the cause.
+
+#[test]
+fn no_top_level_messages_block() {
+    // AsyncAPI 3.0 has no top-level `messages` field (Spectral:
+    // "Property \"messages\" is not expected to be here"). Reusable messages live
+    // under `components.messages`.
+    let doc = generated_doc();
+    assert!(
+        doc.get("messages").is_none(),
+        "AsyncAPI 3.0 forbids a top-level `messages` block; it must live under components.messages"
+    );
+}
+
+#[test]
+fn reusable_messages_live_under_components() {
+    // The relocated message catalog must carry the Envelope and the key event
+    // messages under components.messages.
+    let doc = generated_doc();
+    let messages = doc
+        .pointer("/components/messages")
+        .and_then(Value::as_object)
+        .expect("components.messages must exist");
+    for key in &[
+        "Envelope",
+        "TileState",
+        "AudioMeter",
+        "OutputStatus",
+        "Alert",
+        "InputConnection",
+        "JobProgress",
+        "TallyEvent",
+    ] {
+        assert!(
+            messages.contains_key(*key),
+            "components.messages must contain `{key}`"
+        );
+    }
+}
+
+#[test]
+fn channels_reference_components_messages() {
+    // Each channel's `messages` map must $ref into components.messages (not a
+    // top-level #/messages/... pointer, which no longer exists).
+    let doc = generated_doc();
+    for channel in &["ws", "sse"] {
+        let pointer = format!("/channels/{channel}/messages/EnvelopeMessage/$ref");
+        let r = doc
+            .pointer(&pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(
+            r, "#/components/messages/Envelope",
+            "channel `{channel}` must reference the Envelope under components.messages"
+        );
+    }
+}
+
+#[test]
+fn operation_messages_belong_to_their_channel() {
+    // Spectral `asyncapi3-operation-messages-from-referred-channel`: each operation
+    // message $ref MUST start with `<operation.channel.$ref>/messages`.
+    let doc = generated_doc();
+    for (op, channel) in &[("subscribe-ws", "ws"), ("subscribe-sse", "sse")] {
+        let channel_ref = doc
+            .pointer(&format!("/operations/{op}/channel/$ref"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(channel_ref, format!("#/channels/{channel}"));
+        let msg_ref = doc
+            .pointer(&format!("/operations/{op}/messages/0/$ref"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            msg_ref.starts_with(&format!("{channel_ref}/messages")),
+            "operation `{op}` message {msg_ref:?} must belong to channel {channel_ref:?}"
+        );
+    }
+}
+
+#[test]
+fn tally_target_discriminator_is_a_string() {
+    // AsyncAPI 3.0 Schema Object `discriminator` is the property NAME (a string),
+    // not an OpenAPI-style `{ propertyName }` object.
+    let doc = generated_doc();
+    let discriminator = doc
+        .pointer("/components/schemas/TallyTarget/discriminator")
+        .expect("TallyTarget must declare a discriminator");
+    assert_eq!(
+        discriminator.as_str(),
+        Some("kind"),
+        "discriminator must be the string property name `kind`, got {discriminator:?}"
+    );
+}
+
+#[test]
+fn external_docs_url_is_absolute() {
+    // info.externalDocs.url must be a valid absolute URI (format: uri).
+    let doc = generated_doc();
+    let url = doc
+        .pointer("/info/externalDocs/url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        url.starts_with("https://") || url.starts_with("http://"),
+        "externalDocs.url must be an absolute URI, got {url:?}"
+    );
+}
+
+#[test]
+fn envelope_data_oneof_refs_resolve() {
+    // The Envelope payload's `data.oneOf` references must all resolve to existing
+    // entries in components.schemas (so the resolved document validates).
+    let doc = generated_doc();
+    let one_of = doc
+        .pointer("/components/messages/Envelope/payload/properties/data/oneOf")
+        .and_then(Value::as_array)
+        .expect("Envelope payload data.oneOf must be an array");
+    assert!(!one_of.is_empty(), "data.oneOf must not be empty");
+    for entry in one_of {
+        let r = entry
+            .get("$ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = r
+            .strip_prefix("#/components/schemas/")
+            .unwrap_or_else(|| panic!("oneOf entry must ref components.schemas, got {r:?}"));
+        assert!(
+            doc.pointer(&format!("/components/schemas/{name}")).is_some(),
+            "data.oneOf references missing schema `{name}`"
+        );
+    }
+}
+
+#[test]
+fn no_dangling_top_level_message_refs() {
+    // After relocation, no `$ref` anywhere may point at the removed top-level
+    // `#/messages/...` namespace.
+    let doc = generated_doc();
+    let serialized = serde_json::to_string(&doc).unwrap();
+    assert!(
+        !serialized.contains("#/messages/"),
+        "no $ref may target the removed top-level #/messages/ namespace"
+    );
+}
