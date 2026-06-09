@@ -123,12 +123,18 @@ fn classifier_emits_resilience_quirk_tags() {
         .find(|j| j.url == "https://stream.example.com/movie-three/master.m3u8")
         .expect("not-24/7 movie stream");
     let tags = classify_quirks(part_time);
-    assert!(tags.contains(&QuirkTag::NotAroundTheClock), "tags: {tags:?}");
+    assert!(
+        tags.contains(&QuirkTag::NotAroundTheClock),
+        "tags: {tags:?}"
+    );
 
     // Non-TLS http:// scheme → NonTls.
     let plain = joined
         .iter()
-        .find(|j| j.url.starts_with("http://stream.example.net/news-one-backup"))
+        .find(|j| {
+            j.url
+                .starts_with("http://stream.example.net/news-one-backup")
+        })
         .expect("http backup stream");
     let tags = classify_quirks(plain);
     assert!(tags.contains(&QuirkTag::NonTls), "tags: {tags:?}");
@@ -212,9 +218,7 @@ fn sampler_filters_nsfw_and_is_stratified_across_categories() {
         "no nsfw source may survive sampling"
     );
     assert!(
-        selected
-            .iter()
-            .all(|s| s.channel_id != "AdultSeven.xx"),
+        selected.iter().all(|s| s.channel_id != "AdultSeven.xx"),
         "the adult channel must never be selected"
     );
 
@@ -257,11 +261,15 @@ async fn prober_keeps_live_and_retains_some_dead_for_state_machine_testing() {
         }
     });
     assert_eq!(
-        prober.probe("https://stream.example.com/x/master.m3u8", None, None).await,
+        prober
+            .probe("https://stream.example.com/x/master.m3u8", None, None)
+            .await,
         ProbeOutcome::Live
     );
     assert_eq!(
-        prober.probe("https://blocked.example.com/x/master.m3u8", None, None).await,
+        prober
+            .probe("https://blocked.example.com/x/master.m3u8", None, None)
+            .await,
         ProbeOutcome::Dead
     );
 }

@@ -21,7 +21,6 @@ fn plan() -> Plan {
         oversample: 32,
         keep_live: 6,
         keep_dead: 2,
-        ..Plan::default()
     }
 }
 
@@ -66,8 +65,8 @@ async fn select_filters_blocklisted_domains() {
         include_str!("fixtures/channels.json"),
     );
     let prober = FixtureProber::new(|_url| ProbeOutcome::Live);
-    let blocklist = Blocklist::from_json(include_str!("fixtures/blocklist.json"))
-        .expect("parse blocklist");
+    let blocklist =
+        Blocklist::from_json(include_str!("fixtures/blocklist.json")).expect("parse blocklist");
     let manifest = select_sources(&catalog, &prober, &blocklist, &plan())
         .await
         .expect("selection succeeds");
@@ -135,7 +134,10 @@ async fn manifest_serializes_quirk_tagged_to_a_tempfile_never_the_repo() {
 
     let json = manifest.to_pretty_json().expect("serialize manifest");
     // The manifest is quirk-tagged + carries the resolve-time note.
-    assert!(json.contains("\"quirks\""), "manifest must carry quirk tags");
+    assert!(
+        json.contains("\"quirks\""),
+        "manifest must carry quirk tags"
+    );
     assert!(
         json.contains("resolved_at") || json.contains("resolved"),
         "manifest must record that URLs are resolved live each run"
