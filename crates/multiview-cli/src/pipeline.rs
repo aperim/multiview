@@ -1680,6 +1680,13 @@ impl Pipeline {
             .audio
             .as_ref()
             .map(|cfg| program_audio_bus(cfg, self.cadence));
+        // The program-bus loudness normaliser (AUD-6): pair one with the audio bus
+        // so the mixed program is normalised toward the target LUFS with a
+        // true-peak ceiling BEFORE encode, while discrete tracks stay unaltered
+        // (ADR-R005/R006). Built from the same audio config (so its format matches
+        // the bus); `None` when audio is off. Default target: the -16 LUFS
+        // streaming/web level (this output is a live streaming multiview).
+        let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
@@ -1688,7 +1695,14 @@ impl Pipeline {
         // overlay baker from it, plus the single `ProgramEncoder`; the bake +
         // encode math moved off the hot loop, never onto it.
         let bake_ctx = self.bake_context();
-        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder, audio_bus);
+        let (egress, hot_tx) = StreamEgress::spawn(
+            bake_ctx,
+            runners,
+            policy,
+            encoder,
+            audio_bus,
+            audio_loudnorm,
+        );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
         // flows through ONE `MultiviewProgram` that owns this program's clock +
@@ -2387,6 +2401,7 @@ impl StreamEgress {
         policy: SendPolicy,
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
+        audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -2443,6 +2458,7 @@ impl StreamEgress {
                     sink_txs,
                     encoder,
                     audio_bus,
+                    audio_loudnorm,
                     &consumer_in_flight,
                 )
             })
@@ -2562,6 +2578,27 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
+///
+/// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
+/// (discrete tracks stay unaltered — the ADR-R005/R006 authenticity guarantee).
+/// The format mirrors [`program_audio_bus`] (so the normaliser's meter matches the
+/// bus it processes). The default target is the `-16` LUFS streaming/web level
+/// with the default `-1.5` dBTP true-peak ceiling (resilience-and-av §4.1). Returns
+/// `None` only if the audio format is unusable (zero rate/channels — already
+/// validated upstream), in which case the bus is emitted un-normalised rather than
+/// failing the run.
+fn program_loudnorm(
+    cfg: &multiview_output::AudioEncodeConfig,
+) -> Option<multiview_audio::LoudnormProcessor> {
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    let format = multiview_audio::AudioFormat::new(cfg.sample_rate, layout);
+    multiview_audio::LoudnormProcessor::new(format, multiview_audio::LoudnessTarget::Streaming).ok()
+}
+
 /// Drive the program-audio bus to the output **tick index** of one surviving
 /// [`StreamItem`] and return that frame's audio block (RT-8b, the lip-sync fix).
 ///
@@ -2611,6 +2648,7 @@ fn consumer_main(
     sink_txs: Vec<SyncSender<EncodedPacket>>,
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
+    mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -2645,6 +2683,17 @@ fn consumer_main(
         // this entirely — the run is video-only as before.
         if let Some(bus) = audio_bus.as_mut() {
             let block = drive_audio_for_item(bus, item.tick_index);
+            // EBU R128 loudness normalisation of the PROGRAM bus (AUD-6), still off
+            // the engine hot loop (this bake-consumer thread): a smoothed makeup
+            // gain toward the target LUFS with a true-peak limiter clamping to the
+            // -1.5 dBTP ceiling so normalisation never clips. The block shape is
+            // preserved exactly, so the AAC encode sees the same frame count it
+            // would have. `None` (no normaliser) emits the mixed bus unaltered.
+            // Discrete tracks never pass through here (program-bus-only — ADR-R006).
+            let block = match audio_loudnorm.as_mut() {
+                Some(norm) => norm.process(block),
+                None => block,
+            };
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {

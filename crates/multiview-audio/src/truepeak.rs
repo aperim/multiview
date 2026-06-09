@@ -92,6 +92,19 @@ impl TruePeakDetector {
         self.peak
     }
 
+    /// Reset only the running peak to zero, **keeping** the FIR history and primed
+    /// state intact.
+    ///
+    /// A normal [`peak_linear`](Self::peak_linear) is a running maximum over the
+    /// whole signal — it never decays. A feedforward limiter that needs the peak of
+    /// *just the most recent span* (e.g. the loudnorm per-block true-peak limiter,
+    /// AUD-6) zeroes the peak between spans while preserving the polyphase ring so
+    /// the inter-sample interpolation stays continuous across the span boundary
+    /// (no artificial seam step).
+    pub fn reset_peak(&mut self) {
+        self.peak = 0.0;
+    }
+
     /// The running true-peak in dBTP, or `None` if no non-zero sample has been
     /// seen (silence has no defined peak level).
     #[must_use]

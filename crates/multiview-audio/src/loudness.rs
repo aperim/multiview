@@ -197,6 +197,27 @@ impl LoudnessMeter {
         Ok(())
     }
 
+    /// Bound the retained sub-block history to the most recent `keep` sub-blocks,
+    /// dropping older ones from the front.
+    ///
+    /// The streaming meter otherwise accumulates one sub-block per 100 ms for the
+    /// whole run; a **live** consumer (e.g. the program-bus normaliser, AUD-6)
+    /// that only needs the short-term/momentary windows calls this each tick so
+    /// memory stays bounded regardless of run length. The momentary (400 ms) and
+    /// short-term (3 s) windows read the tail and so are preserved as long as
+    /// `keep` covers at least their span; the integrated/LRA computations become
+    /// windowed over the retained history rather than the whole run — the live
+    /// trade documented in resilience-and-av §4.1. A no-op when fewer than `keep`
+    /// sub-blocks exist; `keep == 0` is treated as `1` so at least the in-progress
+    /// window survives.
+    pub fn retain_recent(&mut self, keep: usize) {
+        let keep = keep.max(1);
+        if self.subblocks.len() > keep {
+            let drop = self.subblocks.len() - keep;
+            self.subblocks.drain(0..drop);
+        }
+    }
+
     /// Mean of the most recent `n` sub-block weighted mean-squares (the energy
     /// of an `n × 100 ms` sliding window), or `None` if fewer than `n`
     /// sub-blocks exist.
