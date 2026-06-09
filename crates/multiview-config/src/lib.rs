@@ -325,7 +325,11 @@ impl MultiviewConfig {
                 | SourceKind::Srt { .. }
                 | SourceKind::Rtmp { .. }
                 | SourceKind::Ndi { .. }
-                | SourceKind::File { .. } => {}
+                | SourceKind::File { .. }
+                // AES67's binding (SDP / multicast group / PTP domain) is a
+                // runtime ingest concern, like the network URL kinds — accepted
+                // as authored here.
+                | SourceKind::Aes67 { .. } => {}
             }
         }
         Ok(())
@@ -526,7 +530,9 @@ impl MultiviewConfig {
                 | Output::Hls { codec, .. }
                 | Output::Rtmp { codec, .. }
                 | Output::Srt { codec, .. } => Some(codec),
-                Output::Ndi { .. } => None,
+                // NDI carries a channel-map, AES67 sends raw PCM — neither has a
+                // (video) codec to validate.
+                Output::Ndi { .. } | Output::Aes67 { .. } => None,
             };
             if let Some(codec) = codec {
                 if codec.is_empty() {

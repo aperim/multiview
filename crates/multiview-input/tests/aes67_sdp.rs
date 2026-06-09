@@ -43,7 +43,7 @@ fn parse_class_a_l24_stereo_1ms() {
     assert_eq!(
         sess.ts_refclk,
         TsRefclk::Ptp {
-            gmid: "AA-BB-CC-DD-EE-FF-00-11".to_string(),
+            gmid: "AA-BB-CC-DD-EE-FF-00-11".to_owned(),
             domain: 0,
         }
     );
@@ -75,7 +75,7 @@ fn parse_mediaclk_nonzero_offset() {
     assert_eq!(
         sess.ts_refclk,
         TsRefclk::Ptp {
-            gmid: "DE-AD-BE-EF-00-00-00-00".to_string(),
+            gmid: "DE-AD-BE-EF-00-00-00-00".to_owned(),
             domain: 1,
         }
     );
@@ -150,7 +150,7 @@ fn generate_emits_well_formed_lines() {
         clock_rate: 48_000,
         ptime_ms_x1000: 1_000,
         ts_refclk: TsRefclk::Ptp {
-            gmid: "AA-BB-CC-DD-EE-FF-00-11".to_string(),
+            gmid: "AA-BB-CC-DD-EE-FF-00-11".to_owned(),
             domain: 0,
         },
         mediaclk_offset: 0,
@@ -175,7 +175,7 @@ fn generate_emits_fractional_ptime() {
         clock_rate: 48_000,
         ptime_ms_x1000: 125,
         ts_refclk: TsRefclk::Ptp {
-            gmid: "00-00-00-00-00-00-00-00".to_string(),
+            gmid: "00-00-00-00-00-00-00-00".to_owned(),
             domain: 0,
         },
         mediaclk_offset: 0,
@@ -197,7 +197,7 @@ fn round_trip_idempotent_ptp() {
         clock_rate: 48_000,
         ptime_ms_x1000: 1_000,
         ts_refclk: TsRefclk::Ptp {
-            gmid: "DE-AD-BE-EF-CA-FE-BA-BE".to_string(),
+            gmid: "DE-AD-BE-EF-CA-FE-BA-BE".to_owned(),
             domain: 7,
         },
         mediaclk_offset: 98_765,

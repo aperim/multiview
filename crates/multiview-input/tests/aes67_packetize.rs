@@ -1,21 +1,21 @@
 //! AES67 / SMPTE ST 2110-30 RTP audio **packetizer** round-trip tests.
 //!
-//! The encoder lives in `multiview-output` (egress); the decoder
-//! ([`multiview_input::st2110::v30::V30Payload`]) lives in `multiview-input`,
-//! pulled here as a dev-dependency only. The two crates model the wire format
-//! independently, so an `encode → parse` round-trip proves the byte layout
-//! agrees. Pure f32→bytes math: no NIC, no clock, no producer.
+//! The encoder ([`Aes67Packetizer`]) and the decoder ([`V30Payload`]) live in
+//! the same crate (`multiview-input::st2110`), sharing one [`SampleDepth`] /
+//! [`Aes3Format`] wire model, so an `encode → parse` round-trip proves the byte
+//! layout agrees. Pure f32→bytes math: no NIC, no clock, no producer.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
 )]
 
 use multiview_input::st2110::v30::{Aes3Format, SampleDepth, V30Payload};
-use multiview_output::st2110::{Aes67Packetizer, Aes67Error};
+use multiview_input::st2110::{Aes67Error, Aes67Packetizer};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,9 @@
 //! or `.await`s the output clock.
 
 pub mod assembler;
+pub mod packetize;
 pub mod rtp;
+pub mod sdp;
 pub mod v20;
 pub mod v30;
 pub mod v40;
@@ -37,7 +39,9 @@ pub mod v40;
 #[cfg(feature = "st2110")]
 pub mod transport;
 
+pub use packetize::{Aes67Error, Aes67Packetizer};
 pub use rtp::{RtpError, RtpHeader, RtpPacket};
+pub use sdp::{AudioSdpSession, SdpError, TsRefclk};
 pub use v20::{SrdSegment, V20Error, V20Payload};
 pub use v30::{Aes3Format, SampleDepth, V30Error, V30Payload};
 pub use v40::{AncPacket, V40Error, V40Payload};
@@ -65,4 +69,12 @@ pub enum St2110Error {
     /// An ST 2110-40 ANC depacketization failure.
     #[error("st2110-40: {0}")]
     V40(#[from] V40Error),
+
+    /// An AES67 / ST 2110-30 audio SDP parse failure.
+    #[error("sdp: {0}")]
+    Sdp(#[from] SdpError),
+
+    /// An AES67 / ST 2110-30 audio packetization (egress) failure.
+    #[error("aes67 packetize: {0}")]
+    Aes67(#[from] Aes67Error),
 }
