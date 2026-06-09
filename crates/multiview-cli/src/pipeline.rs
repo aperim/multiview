@@ -602,7 +602,7 @@ mod admission_target_tests {
     use multiview_core::time::Rational;
     use multiview_hal::{DeviceId, DeviceLoad, GpuTargetInfo, LoadSource, NullLoadPoller, Vendor};
 
-    /// A fake two-GPU [`LoadSource`] modelling the contended frigate box: a
+    /// A fake two-GPU [`LoadSource`] modelling a contended dual-GPU host: a
     /// 95%-VRAM RTX 4060 at ordinal 0 (over the 0.85 headroom ceiling, so the
     /// scorer rejects it) and an idle Quadro P2000 at ordinal 1. Each device
     /// resolves a DISTINCT [`GpuTargetInfo`] (distinct PCI bus id + ordinal), so a
