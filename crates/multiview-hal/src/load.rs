@@ -619,6 +619,22 @@ pub trait LoadSource {
     fn poll_self_share(&self) -> Vec<SelfShare> {
         Vec::new()
     }
+
+    /// Read each visible device's **static perf signals** (name, shader-core
+    /// count, max graphics clock, architecture) — the priors the perf-class model
+    /// ([`crate::perf::PerfClass::for_device`]) turns into a real per-GPU
+    /// [`crate::cost::CostBudget`].
+    ///
+    /// These are immutable hardware facts, not live load, so a consumer reads them
+    /// **once** at pipeline-build time (off the output-clock thread) and keys them
+    /// by the same stable [`DeviceId`] as [`poll`](Self::poll). The default returns
+    /// an empty vector — a source with no perf signal (the [`NullLoadPoller`], a
+    /// vendor that exposes none) supplies nothing, and the candidate falls back to
+    /// [`crate::perf::DEFAULT_PERF_CLASS`]; never a fabricated value. The same
+    /// off-hot-path / non-blocking contract as [`poll`](Self::poll) applies.
+    fn device_perf(&self) -> Vec<(DeviceId, crate::perf::PerfSignals)> {
+        Vec::new()
+    }
 }
 
 impl<P: LoadProbe> LoadSource for LoadPoller<P> {
@@ -837,6 +853,37 @@ mod nvml {
                 encoder_sessions,
             })
         }
+
+        /// Read one device's **static perf signals** for the perf-class model.
+        ///
+        /// Populates [`crate::perf::PerfSignals`] from NVML's immutable hardware
+        /// queries: `name()`, `num_cores()` (the CUDA-core count), the max
+        /// graphics-domain clock (`max_clock_info(Clock::Graphics)`, MHz), and the
+        /// `architecture()` generation (stringified via its `Display`, e.g.
+        /// `"Ada"`/`"Pascal"`). Each query is independently optional: a device or
+        /// driver that cannot answer one leaves that field `None` (the honest
+        /// unknown — the perf-class resolver simply drops to the next signal),
+        /// never a fabricated value and never a panic.
+        ///
+        /// Returns `None` only when the device handle is unavailable or its
+        /// identity changed under us (a reordering guard, matching
+        /// [`Self::self_share`]).
+        #[must_use]
+        pub fn device_perf(&self, device: &DeviceId) -> Option<crate::perf::PerfSignals> {
+            let handle = self.nvml.device_by_index(device.index()).ok()?;
+            // Guard against a handle reordering: never mislabel a different card.
+            if handle.uuid().map_or(true, |u| u != device.stable_id()) {
+                return None;
+            }
+            Some(crate::perf::PerfSignals {
+                name: handle.name().ok(),
+                num_cores: handle.num_cores().ok(),
+                max_graphics_clock_mhz: handle
+                    .max_clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
+                    .ok(),
+                architecture: handle.architecture().ok().map(|arch| arch.to_string()),
+            })
+        }
     }
 
     /// Extract the byte count from an NVML [`UsedGpuMemory`], mapping the WDDM /
@@ -956,6 +1003,17 @@ mod nvml {
                 .devices()
                 .iter()
                 .filter_map(|device| probe.self_share(device, our_pid))
+                .collect()
+        }
+
+        fn device_perf(&self) -> Vec<(DeviceId, super::super::perf::PerfSignals)> {
+            // One bounded NVML pass reading each device's immutable perf priors,
+            // keyed by stable identity. Off-hot-path, never blocks the engine.
+            let probe = self.inner.probe();
+            probe
+                .devices()
+                .into_iter()
+                .filter_map(|device| probe.device_perf(&device).map(|perf| (device, perf)))
                 .collect()
         }
     }
@@ -1836,6 +1894,10 @@ mod tests {
         // Usable behind the object-safe `LoadSource` seam the CLI injects.
         let dynamic: &dyn LoadSource = &poller;
         assert!(dynamic.poll().is_empty());
+        // The default `device_perf` honestly reports no perf signals (so the CLI
+        // candidate falls back to the conservative DEFAULT_PERF_CLASS), never a
+        // fabricated device.
+        assert!(dynamic.device_perf().is_empty());
     }
 
     #[test]

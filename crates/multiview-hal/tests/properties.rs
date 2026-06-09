@@ -8,6 +8,7 @@
 
 use multiview_core::time::Rational;
 use multiview_hal::degradation::{Hysteresis, HysteresisConfig, LadderMove, MAX_LEVEL};
+use multiview_hal::perf::{anchor, PerfClass, PerfSignals};
 use multiview_hal::{CostBudget, Plan, Planner, Resolution, Stage, TileLoad};
 use proptest::prelude::*;
 
@@ -119,5 +120,37 @@ proptest! {
         }
         // Eventually we fully recover.
         prop_assert_eq!(h.level(), 0);
+    }
+
+    /// Perf-class scaling is monotone in the cores x clock perf index: a device
+    /// with a strictly-higher (cores x clock) product never gets a strictly-lower
+    /// per-stage ceiling. (The inv-#1 ordering must never invert — a stronger GPU
+    /// is always at least as trusted to sustain a stage.)
+    #[test]
+    fn perf_class_monotone_in_cores_times_clock(
+        c1 in 1u32..20_000, k1 in 200u32..3_500,
+        c2 in 1u32..20_000, k2 in 200u32..3_500,
+    ) {
+        let a = PerfClass::for_device(&PerfSignals::from_nvml(Some("X"), Some(c1), Some(k1), None));
+        let b = PerfClass::for_device(&PerfSignals::from_nvml(Some("X"), Some(c2), Some(k2), None));
+        let i1 = u64::from(c1) * u64::from(k1);
+        let i2 = u64::from(c2) * u64::from(k2);
+        let (lo, hi) = if i1 <= i2 { (a, b) } else { (b, a) };
+        prop_assert!(hi.decode_mpps_ceiling() + 1e-6 >= lo.decode_mpps_ceiling());
+        prop_assert!(hi.composite_mpps_ceiling() + 1e-6 >= lo.composite_mpps_ceiling());
+        prop_assert!(hi.encode_mpps_ceiling() + 1e-6 >= lo.encode_mpps_ceiling());
+        // And every ceiling is always finite (never infinite) regardless of input.
+        prop_assert!(a.composite_mpps_ceiling().is_finite());
+        prop_assert!(b.composite_mpps_ceiling().is_finite());
+    }
+
+    /// The anchor (RTX 4060) cores x clock reproduces its table ceilings: the two
+    /// resolution paths agree at the calibration point.
+    #[test]
+    fn anchor_index_reproduces_table(noise in 0u32..2) {
+        // `noise` only varies the case prop runs; the assertion is fixed.
+        let _ = noise;
+        let scaled = anchor::scaled(anchor::CORES, anchor::CLOCK_MHZ);
+        prop_assert_eq!(scaled, anchor::class());
     }
 }

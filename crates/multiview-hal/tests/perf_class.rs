@@ -14,11 +14,11 @@
     clippy::indexing_slicing
 )]
 
+use multiview_core::time::Rational;
 use multiview_hal::capability::{Resolution, Stage};
 use multiview_hal::cost::TileLoad;
 use multiview_hal::perf::{PerfClass, PerfSignals, DEFAULT_PERF_CLASS};
 use multiview_hal::planner::{Plan, Planner};
-use multiview_core::time::Rational;
 
 /// A 4K canvas composited at 30 fps, in megapixels/sec, computed by the SAME
 /// `stage_load_mpps` the planner uses — not a hand-typed magic number.
