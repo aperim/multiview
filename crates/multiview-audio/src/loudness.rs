@@ -110,6 +110,15 @@ pub struct LoudnessMeter {
     /// Per-sub-block weighted mean square `(Σ_c G_c · y_c²) / subblock_len`.
     /// One entry per completed 100 ms sub-block.
     subblocks: Vec<f64>,
+
+    /// Whether [`push_interleaved`](Self::push_interleaved) advances the 4×
+    /// oversampled per-channel true-peak detectors. `true` by default (the meter
+    /// reports dBTP via [`true_peak_dbtp`](Self::true_peak_dbtp)). A loudness-only
+    /// consumer that runs its **own** true-peak detector — the program-bus
+    /// normaliser's limiter (AUD-6) — disables this with
+    /// [`without_true_peak`](Self::without_true_peak) so the expensive FIR is not
+    /// evaluated twice over every sample.
+    track_true_peak: bool,
 }
 
 impl LoudnessMeter {
@@ -147,7 +156,24 @@ impl LoudnessMeter {
             subblock_filled: 0,
             subblock_weighted_sq: 0.0,
             subblocks: Vec::new(),
+            track_true_peak: true,
         })
+    }
+
+    /// Disable the oversampled true-peak FIR in [`push_interleaved`](Self::push_interleaved).
+    ///
+    /// A loudness-only consumer that maintains its **own** true-peak detector — the
+    /// program-bus loudness normaliser, whose feedforward limiter already runs a 4×
+    /// oversampled true-peak FIR over the gained output (AUD-6) — does not need the
+    /// meter to run the same FIR a second time over the raw input. Disabling it
+    /// makes per-block metering one K-weighting pass rather than K-weighting plus a
+    /// redundant true-peak pass, so a large `DropOnOverload` catch-up block cannot
+    /// stall the bake consumer (RT-8b). With true-peak disabled
+    /// [`true_peak_dbtp`](Self::true_peak_dbtp) stays `None` (no peak is tracked).
+    #[must_use]
+    pub const fn without_true_peak(mut self) -> Self {
+        self.track_true_peak = false;
+        self
     }
 
     /// The meter's audio format.
@@ -174,9 +200,12 @@ impl LoudnessMeter {
             let mut weighted_sq = 0.0;
             for (c, &raw) in frame.iter().enumerate() {
                 let x = f64::from(raw);
-                // True-peak runs on the raw (pre-K-weight) sample.
-                if let Some(tp) = self.true_peak.get_mut(c) {
-                    tp.push(x);
+                // True-peak runs on the raw (pre-K-weight) sample, unless a
+                // loudness-only consumer disabled it (it runs its own — RT-8b).
+                if self.track_true_peak {
+                    if let Some(tp) = self.true_peak.get_mut(c) {
+                        tp.push(x);
+                    }
                 }
                 let (Some(filter), Some(&g)) = (self.filters.get_mut(c), self.weights.get(c))
                 else {

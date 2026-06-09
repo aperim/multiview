@@ -252,23 +252,32 @@ fn process_preserves_block_shape() {
 /// cheap — not a multiple-of-the-meter cost. Under a `DropOnOverload` shed the bake
 /// consumer catches the program bus up across the whole dropped span in a SINGLE
 /// `tick_to`, so one `process` call sees a block of hundreds of thousands of frames;
-/// if `process` runs the oversampled true-peak FIR more times than necessary it
-/// stalls the consumer for seconds and audio falls behind the output-tick timeline
-/// (the rt8b lip-sync failure). `process` legitimately needs one K-weighting pass
-/// (for the loudness drive) plus one true-peak FIR pass (for the limiter ceiling);
-/// it must NOT additionally run the meter's own true-peak FIR (it keeps its own
-/// limiter) nor probe the limiter in a second redundant pass.
+/// if `process` runs the 4× oversampled true-peak FIR over every sample of such a
+/// block it stalls the consumer for seconds and audio falls behind the output-tick
+/// timeline (the rt8b lip-sync failure).
+///
+/// For program audio sitting near its target loudness — the overwhelmingly common
+/// case — the gained sample peak is comfortably below the true-peak ceiling, so the
+/// limiter's sample-peak pre-screen proves the block safe and skips the oversampling
+/// FIR entirely (it only primes the seam window). `process` then costs essentially
+/// just the one K-weighting loudness pass plus a couple of cheap linear scans — well
+/// UNDER the cost of one full metering pass (which additionally runs the true-peak
+/// FIR). The regression — running the FIR over the whole block (the meter's own
+/// true-peak pass plus the limiter's probe + persistent passes) — costs roughly
+/// THREE metering passes.
 ///
 /// Self-calibrating bound (so it is not flaky across machines/build profiles): one
 /// full `LoudnessMeter::push_interleaved` over the same samples — K-weighting PLUS
-/// the meter's true-peak FIR — is the reference cost of "one metering pass". A
-/// well-written `process` (K-weight + one limiter FIR, no meter true-peak) costs
-/// ABOUT one such pass; the redundant-FIR regression costs roughly three, so it
-/// blows past this generous `2.2×` ceiling.
+/// the meter's true-peak FIR — is the reference "one metering pass". A below-ceiling
+/// `process` must come in well under that (the FIR is skipped); the `0.6×` ceiling
+/// both forbids the original ~3× regression AND locks in that the oversampling FIR
+/// is not run over a block the sample peak already proved safe.
 #[test]
 fn process_is_o_block_cheap_on_a_large_catch_up_block() {
     let format = AudioFormat::new(FS, ChannelLayout::Stereo);
-    // 400-tick catch-up @ 1920 frames/tick: the rt8b shed span in one block.
+    // 400-tick catch-up @ 1920 frames/tick: the rt8b shed span in one block. A
+    // quiet -23 dBFS tone (well below the ceiling) so the limiter's sample-peak
+    // pre-screen engages — the common program-audio case the consumer must absorb.
     let frames = 400 * 1920;
     let amp = 10f64.powf(-23.0 / 20.0);
     let mut phase = 0.0;
@@ -289,10 +298,11 @@ fn process_is_o_block_cheap_on_a_large_catch_up_block() {
 
     let ratio = process_cost.as_secs_f64() / one_meter_pass.as_secs_f64().max(1e-9);
     assert!(
-        ratio <= 2.2,
-        "RT-8b perf: process() of a {frames}-frame catch-up block took {process_cost:?}, \
-         {ratio:.2}x one metering pass ({one_meter_pass:?}); it must stay O(block) cheap \
-         (about one pass) so the bake consumer never stalls under a shed"
+        ratio <= 0.6,
+        "RT-8b perf: process() of a below-ceiling {frames}-frame catch-up block took \
+         {process_cost:?}, {ratio:.2}x one metering pass ({one_meter_pass:?}); it must stay \
+         O(block) cheap (the sample-peak pre-screen must skip the oversampling true-peak FIR) \
+         so the bake consumer never stalls under a shed"
     );
 }
 

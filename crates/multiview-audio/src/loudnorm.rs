@@ -15,10 +15,16 @@
 //! ## Off the hot path, bounded, deterministic
 //! [`LoudnormProcessor::process`] runs on the program-audio bus (the bake
 //! consumer thread, *not* the engine output-clock loop), so it cannot stall the
-//! output clock (invariant #1) and back-pressures nothing (invariant #10). Per
-//! tick it does `O(block)` work (the meter's per-sample accumulate plus one
-//! per-sample gain apply) and `O(1)` scalar gain math; the meter's sub-block
-//! history is bounded to the short-term window via
+//! output clock (invariant #1) and back-pressures nothing (invariant #10). It does
+//! `O(block)` work that stays cheap even when a `DropOnOverload` shed makes one
+//! block cover a whole catch-up span: the meter is built
+//! [without its own true-peak FIR](crate::loudness::LoudnessMeter::without_true_peak)
+//! (one K-weighting pass, not two), the feedforward true-peak limiter runs a
+//! **single** FIR pass and folds its block-wide attenuation into the seam history
+//! in `O(taps)` rather than re-running the FIR, and the gained-sample scratch is
+//! reused across blocks (no per-block heap allocation). `O(1)` scalar gain math
+//! drives the rest. The meter's sub-block history is bounded to the short-term
+//! window via
 //! [`LoudnessMeter::retain_recent`](crate::loudness::LoudnessMeter::retain_recent)
 //! so memory never grows with run length. The gain moves by a bounded per-tick
 //! step (a one-pole smoother), never instantaneously, so there is no click.
@@ -92,10 +98,12 @@ pub struct LoudnormProcessor {
     format: AudioFormat,
     target_lufs: f64,
     ceiling_dbtp: f64,
-    /// The meter measuring the program bus. It carries the oversampled true-peak
-    /// detector (this is the one track that displays/limits dBTP, per ADR-R006),
-    /// so true-peak runs only here. It measures the **pre-gain** mixed bus; the
-    /// makeup gain `target - measured` then brings the emitted bus to target.
+    /// The meter measuring the **pre-gain** mixed program bus; the makeup gain
+    /// `target - measured` then brings the emitted bus to target. Built with
+    /// [`LoudnessMeter::without_true_peak`] — this normaliser drives its gain off
+    /// the meter's LOUDNESS only and runs its own true-peak FIR in `limiters`, so
+    /// letting the meter run a second true-peak FIR over every sample would be pure
+    /// redundant cost (the RT-8b stall).
     meter: LoudnessMeter,
     /// Per-channel feedforward true-peak limiter detectors run over the **gained**
     /// (about-to-be-emitted) samples. The detectors persist across blocks so the
@@ -103,6 +111,14 @@ pub struct LoudnormProcessor {
     /// the emitted true-peak never exceeds the ceiling even on a transient burst
     /// the loudness smoother has not yet reacted to.
     limiters: Vec<TruePeakDetector>,
+    /// The limiter FIR's worst-case peak gain
+    /// ([`TruePeakDetector::peak_gain_bound`]). The true-peak of a block is bounded
+    /// by this times the block's **sample** peak, so when `peak_gain_bound ×
+    /// gained_sample_peak ≤ ceiling` the block is provably under the ceiling and the
+    /// per-sample oversampling FIR is skipped (only the seam window is primed) — the
+    /// common case for program audio at target loudness, keeping a large catch-up
+    /// block `O(block)` cheap rather than `O(block × taps)` (RT-8b).
+    peak_gain_bound: f64,
     /// The current applied makeup gain, in dB (the smoother's state). A bounded
     /// one-pole filter moves it toward the gate-clamped target each tick.
     gain_db: f64,
@@ -110,6 +126,11 @@ pub struct LoudnormProcessor {
     /// instantaneous target the gain closes each block (a one-pole step). Smaller
     /// is smoother/slower; `1.0` would jump instantly.
     smoothing: f64,
+    /// Reusable gained-sample scratch (`f64`) for the true-peak FIR, grown to the
+    /// largest block seen and reused thereafter so [`process`](Self::process) does
+    /// not heap-allocate this 8-bytes-per-sample buffer per block. Bounded by the
+    /// largest catch-up block, not by run length.
+    gained: Vec<f64>,
 }
 
 impl LoudnormProcessor {
@@ -144,20 +165,31 @@ impl LoudnormProcessor {
         target: LoudnessTarget,
         ceiling_dbtp: f64,
     ) -> Result<Self> {
-        let meter = LoudnessMeter::new(format)?;
-        let limiters = (0..format.channel_count())
+        // The normaliser drives its makeup gain off the meter's LOUDNESS only; its
+        // own feedforward limiter (`limiters`) runs the true-peak FIR over the
+        // gained output. Disable the meter's redundant true-peak FIR so a large
+        // catch-up block is metered in one K-weighting pass, not two (RT-8b).
+        let meter = LoudnessMeter::new(format)?.without_true_peak();
+        let limiters: Vec<TruePeakDetector> = (0..format.channel_count())
             .map(|_| TruePeakDetector::new())
             .collect();
+        // The FIR peak-gain bound is constant across the run; cache it for the
+        // limiter's sample-peak pre-screen.
+        let peak_gain_bound = limiters
+            .first()
+            .map_or(1.0, TruePeakDetector::peak_gain_bound);
         Ok(Self {
             format,
             target_lufs: target.lufs(),
             ceiling_dbtp,
             meter,
             limiters,
+            peak_gain_bound,
             gain_db: 0.0,
             // ~0.15 closes most of the gap over ~1 s of 25 fps ticks — fast
             // enough to converge within seconds, slow enough to be click-free.
             smoothing: 0.15,
+            gained: Vec::new(),
         })
     }
 
@@ -234,14 +266,15 @@ impl LoudnormProcessor {
         self.gain_db += (target_gain_db - self.gain_db) * self.smoothing;
         let gain_lin = 10f64.powf(self.gain_db / 20.0);
 
-        // (4) Apply the makeup gain, then the feedforward true-peak limiter.
+        // (4) Apply the makeup gain into the reusable `gained` scratch (no per-block
+        // heap allocation — the buffers are reused across blocks), then the
+        // feedforward true-peak limiter in a single FIR pass.
         let channels = self.format.channel_count();
-        let gained: Vec<f64> = block
-            .interleaved()
-            .iter()
-            .map(|&s| f64::from(s) * gain_lin)
-            .collect();
+        let mut gained = core::mem::take(&mut self.gained);
+        gained.clear();
+        gained.extend(block.interleaved().iter().map(|&s| f64::from(s) * gain_lin));
         let limit_lin = self.true_peak_limit(&gained, channels);
+
         let out: Vec<f32> = gained
             .iter()
             .map(|&v| clamp_sample(v * limit_lin))
@@ -249,42 +282,66 @@ impl LoudnormProcessor {
 
         // The sample count is unchanged, so reconstruction cannot fail; on the
         // (impossible) error degrade to the untouched input rather than panicking
-        // on the audio bus (invariant #1: the bus is never short or absent).
-        AudioBlock::from_interleaved(self.format, out).unwrap_or(block)
+        // on the audio bus (invariant #1: the bus is never short or absent). Return
+        // the (now bounded-capacity) `gained` scratch to the processor to reuse.
+        let result = AudioBlock::from_interleaved(self.format, out);
+        self.gained = gained;
+        result.unwrap_or(block)
     }
 
     /// Compute the linear attenuation (`<= 1.0`) to apply to the already-gained
     /// interleaved samples so the emitted true-peak does not exceed the ceiling.
     ///
-    /// A clone of each channel's persistent [`TruePeakDetector`] — with its
-    /// running peak reset so it reports *this block's* inter-sample peak, not the
-    /// all-time maximum — is advanced over this block's gained samples. The FIR
-    /// ring is preserved by the clone so the interpolation is continuous across
-    /// the block seam (no artificial start-up step). If the block peak exceeds the
-    /// ceiling the whole block is scaled by `ceiling / peak` so the loudest
-    /// inter-sample point lands on the ceiling. The **persistent** detectors are
-    /// then advanced over the FINAL (post-attenuation) samples and their peak
-    /// reset, so the next block's probe continues from the right history with a
-    /// fresh per-block peak. This is feedforward (look-ahead over the current block
-    /// only), so it catches a transient the loudness smoother has not yet seen —
-    /// the guarantee that normalisation never clips.
+    /// **Sample-peak pre-screen (the common, cheap path).** A band-limited
+    /// reconstruction's inter-sample (true) peak is bounded above by the filter's
+    /// peak gain ([`TruePeakDetector::peak_gain_bound`]) times the block's plain
+    /// **sample** peak. So if `peak_gain_bound × sample_peak ≤ ceiling` the block is
+    /// provably under the ceiling: the attenuation is `1.0` and the per-sample
+    /// oversampling FIR is skipped entirely — the persistent seam window is primed
+    /// from the block tail in `O(taps)` so the next block stays seam-continuous.
+    /// Program audio sitting near its target loudness is below the ceiling almost
+    /// always, so a large `DropOnOverload` catch-up block costs one cheap absolute-
+    /// max scan, not an `O(block × taps)` convolution (RT-8b).
+    ///
+    /// **Exact path (a block that might breach).** Only when the sample-peak screen
+    /// cannot rule out a breach does a **single** FIR pass over the persistent
+    /// per-channel detectors measure the block's true inter-sample peak (each
+    /// detector's running peak reset first, keeping its ring for seam continuity).
+    /// If that exceeds the ceiling the whole block is scaled by `ceiling / peak` so
+    /// the loudest inter-sample point lands on the ceiling; because the attenuation
+    /// is block-wide and the FIR is linear, the seam history is brought to the
+    /// post-attenuation tail in `O(taps)` via
+    /// [`scale_history`](TruePeakDetector::scale_history) rather than a second FIR
+    /// pass. This is feedforward (look-ahead over the current block only), so it
+    /// catches a transient the loudness smoother has not yet seen — the guarantee
+    /// that normalisation never clips.
     fn true_peak_limit(&mut self, gained: &[f64], channels: usize) -> f64 {
         if channels == 0 {
             return 1.0;
         }
         let ceiling_lin = 10f64.powf(self.ceiling_dbtp / 20.0);
 
-        // Probe THIS block's true-peak on clones (so the un-attenuated peak never
-        // pollutes the persistent state). Reset each clone's running peak so it
-        // measures only this block, keeping the FIR ring for seam continuity.
-        let mut probe = self.limiters.clone();
-        let mut peak = 0.0f64;
-        for det in &mut probe {
+        // Cheap pre-screen: the block's plain sample peak (one absolute-max scan, no
+        // FIR). If the filter's peak-gain bound cannot lift it to the ceiling, no
+        // inter-sample peak can either — skip the FIR and just keep the seam warm.
+        let sample_peak = gained.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        if sample_peak * self.peak_gain_bound <= ceiling_lin {
+            for (c, det) in self.limiters.iter_mut().enumerate() {
+                det.prime_tail_interleaved(gained, c, channels);
+                det.reset_peak();
+            }
+            return 1.0;
+        }
+
+        // Exact path: ONE FIR pass over the persistent detectors (peak reset first,
+        // ring kept for seam continuity), tracking this block's inter-sample peak.
+        for det in &mut self.limiters {
             det.reset_peak();
         }
+        let mut peak = 0.0f64;
         for frame in gained.chunks_exact(channels) {
             for (c, &v) in frame.iter().enumerate() {
-                if let Some(det) = probe.get_mut(c) {
+                if let Some(det) = self.limiters.get_mut(c) {
                     det.push(v);
                     let p = det.peak_linear();
                     if p > peak {
@@ -294,20 +351,21 @@ impl LoudnormProcessor {
             }
         }
 
-        let atten = if peak > ceiling_lin && peak > 0.0 {
-            ceiling_lin / peak
-        } else {
-            1.0
-        };
+        // The block breaches only when its measured true-peak is above the ceiling;
+        // otherwise no attenuation (and no history scaling) is needed. Tracking the
+        // breach with this boolean (rather than comparing `atten == 1.0`) keeps the
+        // history-fold exact and avoids a float-equality test.
+        let breaches = peak > ceiling_lin && peak > 0.0;
+        let atten = if breaches { ceiling_lin / peak } else { 1.0 };
 
-        // Advance the PERSISTENT detectors over the final emitted samples so the
-        // inter-sample peak is continuous across the next block's seam, then reset
-        // their running peak so each block is probed independently.
-        for frame in gained.chunks_exact(channels) {
-            for (c, &v) in frame.iter().enumerate() {
-                if let Some(det) = self.limiters.get_mut(c) {
-                    det.push(v * atten);
-                }
+        // Fold the block-wide attenuation into the persistent seam history (linear
+        // FIR ⇒ scaling the retained inputs == having pushed them attenuated), then
+        // reset the running peak so each block is probed independently. This makes
+        // the next block's interpolation continue from the right post-attenuation
+        // tail without a second whole-block FIR pass.
+        if breaches {
+            for det in &mut self.limiters {
+                det.scale_history(atten);
             }
         }
         for det in &mut self.limiters {
