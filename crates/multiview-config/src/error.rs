@@ -56,6 +56,20 @@ pub enum ConfigError {
     /// area, duplicate id, out-of-range geometry, unusable cadence, …).
     #[error("validation error: {0}")]
     Validation(String),
+
+    /// An output's audio selection exceeds what its transport can actually
+    /// deliver (ADR-R005 §4.2 capability matrix): e.g. selectable discrete
+    /// tracks on NDI (channel-map only), or more discrete tracks than a legacy
+    /// RTMP endpoint carries. Distinct from a generic [`ConfigError::Validation`]
+    /// so the API/UI can attribute a *capability* refusal precisely and offer the
+    /// honest degradation (fall back to the mixed program bus).
+    #[error("audio capability error on output {output:?}: {reason}")]
+    AudioCapability {
+        /// The offending output's stable label (its kind + addressed endpoint).
+        output: String,
+        /// Why the transport cannot deliver the requested audio selection.
+        reason: String,
+    },
 }
 
 impl From<ConfigError> for multiview_core::Error {

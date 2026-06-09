@@ -9,7 +9,7 @@
 //! generic string. HLS is *select-one*: multiple tracks are a selector, not
 //! simultaneous monitoring, so the document is accepted but the matrix records
 //! the select-one semantics. The matrix is exposed as a first-class data
-//! structure (`Output::audio_capability`) for reuse by the WebUI (AUD-8).
+//! structure (`Output::audio_capability`) for reuse by the Web UI (AUD-8).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -124,8 +124,7 @@ fn ndi_rejects_discrete_tracks_with_typed_error() {
     match &err {
         ConfigError::AudioCapability { output, reason } => {
             assert!(
-                reason.to_lowercase().contains("ndi")
-                    || reason.to_lowercase().contains("channel"),
+                reason.to_lowercase().contains("ndi") || reason.to_lowercase().contains("channel"),
                 "reason explains the NDI channel-map limit: {reason}"
             );
             assert!(!output.is_empty(), "names the offending output");
@@ -162,11 +161,13 @@ fn legacy_rtmp_rejects_multitrack_with_typed_error() {
     match &err {
         ConfigError::AudioCapability { output, reason } => {
             assert!(
-                reason.to_lowercase().contains("rtmp")
-                    || reason.to_lowercase().contains("track"),
+                reason.to_lowercase().contains("rtmp") || reason.to_lowercase().contains("track"),
                 "reason explains the RTMP single-track limit: {reason}"
             );
-            assert!(output.contains("rtmp") || !output.is_empty(), "names the output");
+            assert!(
+                output.contains("rtmp") || !output.is_empty(),
+                "names the output"
+            );
         }
         other => panic!("expected AudioCapability, got {other:?}"),
     }
@@ -216,7 +217,7 @@ fn hls_accepts_multitrack_as_select_one() {
 
 /// The capability matrix is machine-readable and first-class: each transport
 /// reports the delivery mode and discrete-track capacity the validator uses, so
-/// the WebUI (AUD-8) can grey out impossible cells without re-deriving the rules.
+/// the Web UI (AUD-8) can grey out impossible cells without re-deriving the rules.
 #[test]
 fn capability_matrix_is_machine_readable_per_transport() {
     let cases: &[(&str, TrackDelivery, TrackCapacity)] = &[
@@ -252,10 +253,7 @@ fn capability_matrix_is_machine_readable_per_transport() {
         let cfg = parse(&doc);
         let output: &Output = cfg.outputs.first().expect("one output declared");
         let cap: OutputAudioCapability = output.audio_capability();
-        assert_eq!(
-            cap.delivery, *want_delivery,
-            "delivery for {out_toml:?}"
-        );
+        assert_eq!(cap.delivery, *want_delivery, "delivery for {out_toml:?}");
         assert_eq!(
             cap.discrete_capacity, *want_capacity,
             "capacity for {out_toml:?}"
