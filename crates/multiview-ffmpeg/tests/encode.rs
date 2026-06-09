@@ -28,6 +28,9 @@ fn target(codec: &str) -> VideoEncodeTarget {
         time_base: Rational::new(1, 25),
         bit_rate: 500_000,
         gop: 12,
+        // Default: no device pin — behaviour is unchanged from before the NVENC
+        // affinity seam existed (P1a). Tests that exercise the pin set it below.
+        cuda_device: None,
     }
 }
 
@@ -138,6 +141,59 @@ fn audio_encoder_encodes_planar_f32_blocks_into_packets() {
         packets += 1;
     }
     assert!(packets > 0, "aac produced packets from planar f32 input");
+}
+
+#[test]
+fn software_codec_ignores_cuda_device_and_opens_unchanged() {
+    // P1a: the encoder hw-device bind is gated by the `_nvenc` codec-name
+    // suffix. A software codec (`mpeg2video`) given a `cuda_device` must NOT
+    // attempt any hardware bind — it opens exactly as it would with `None`,
+    // produces packets, and reports the same time-base. This proves the suffix
+    // guard: `cuda_device.is_some()` alone never reaches the bind path.
+    let mut tgt = target("mpeg2video");
+    tgt.cuda_device = Some("0".to_owned());
+    let mut enc = VideoEncoder::new(&tgt).expect("software codec opens despite cuda_device");
+    assert_eq!(enc.time_base(), Rational::new(1, 25));
+
+    let mut packets = 0_u32;
+    for tick in 0..6_i64 {
+        enc.send_frame(&gray_yuv420p(tick)).expect("send frame");
+        while enc.receive_packet().expect("recv").is_some() {
+            packets += 1;
+        }
+    }
+    enc.send_eof().expect("flush");
+    while enc.receive_packet().expect("drain").is_some() {
+        packets += 1;
+    }
+    assert!(
+        packets > 0,
+        "software codec with cuda_device still encodes normally"
+    );
+}
+
+#[test]
+fn nvenc_target_with_cuda_device_does_not_panic_on_a_gpu_free_box() {
+    // P1a graceful fallback: a `*_nvenc` target naming a CUDA ordinal must never
+    // panic when no GPU/driver is present. `VideoEncoder::new` either:
+    //   * succeeds on the default device because the bind degraded gracefully
+    //     (a real GPU runner without that ordinal), OR
+    //   * fails with a typed error if the `_nvenc` codec is absent from the
+    //     build / the encoder open is rejected.
+    // The load-bearing assertion is "typed Result, never a panic" — exactly the
+    // decode-stream HW->default degradation contract mirrored on the encode side.
+    let mut tgt = target("h264_nvenc");
+    tgt.cuda_device = Some("1".to_owned());
+    match VideoEncoder::new(&tgt) {
+        Ok(enc) => {
+            // If it opened, the time-base survived configuration.
+            assert_eq!(enc.time_base(), Rational::new(1, 25));
+        }
+        Err(err) => {
+            // Typed error rendered without panicking.
+            assert!(!err.to_string().is_empty(), "error renders to a message");
+        }
+    }
 }
 
 #[test]

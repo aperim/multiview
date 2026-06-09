@@ -13,6 +13,7 @@
     clippy::indexing_slicing
 )]
 
+use ffmpeg_next as ffmpeg;
 use multiview_ffmpeg::{HwDeviceContext, HwDeviceKind, HwFramesContext};
 
 #[test]
@@ -60,4 +61,45 @@ fn hw_handles_are_send() {
     fn assert_send<T: Send>() {}
     assert_send::<HwDeviceContext>();
     assert_send::<HwFramesContext>();
+}
+
+/// Build an unopened H.264 video-encoder context (its software codec id is fine
+/// — `attach_to_encoder` only writes `hw_device_ctx`, it does not open). Returns
+/// `None` if no H.264 encoder is in this build.
+fn unopened_video_encoder() -> Option<ffmpeg::codec::encoder::video::Video> {
+    let codec = ffmpeg::encoder::find(ffmpeg::codec::Id::H264)?;
+    let enc = ffmpeg::codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()
+        .ok()?;
+    Some(enc)
+}
+
+#[test]
+fn attach_to_encoder_on_a_built_unopened_ctx_is_a_typed_result_not_a_panic() {
+    // P1a: the encoder hw-device bind seam. On a GPU-free host the CUDA device
+    // create returns a typed error (the GPU-free CI path); on a real CUDA box it
+    // succeeds and `attach_to_encoder` writes `hw_device_ctx` on the still-
+    // unopened encoder context. Either way: a typed `Result`, never a panic —
+    // and the bind, when it runs, happens BEFORE the encoder is opened.
+    let Some(mut enc) = unopened_video_encoder() else {
+        // No H.264 encoder in this build — nothing to bind; not a failure.
+        return;
+    };
+    match HwDeviceContext::create(HwDeviceKind::Cuda, Some("0")) {
+        Ok(device) => {
+            // A real CUDA device: attaching to the unopened encoder must succeed
+            // and take a NEW owning ref (device keeps its own).
+            device
+                .attach_to_encoder(&mut enc)
+                .expect("attach to unopened encoder ctx");
+            assert!(!device.as_raw().is_null(), "device keeps its own ref");
+            drop(enc);
+            drop(device);
+        }
+        Err(err) => {
+            // GPU-free CI: the create is a typed error, rendered without a panic.
+            assert!(!err.to_string().is_empty(), "error renders to a message");
+        }
+    }
 }
