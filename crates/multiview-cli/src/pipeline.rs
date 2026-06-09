@@ -5850,7 +5850,7 @@ mod reconnect_tests {
     fn open_options_harden_hls_masters_against_the_webvtt_rendition_footgun() {
         // An HLS master (.m3u8 URL) gets the open-time hardening (ADR-T011): a
         // normal/strict compliance so libav drops the SUBTITLES rendition
-        // pre-probe, a bounded segment retry, and a sane protocol whitelist — and
+        // pre-probe, a bounded segment retry, and a sane protocol allowlist — and
         // it MUST NOT widen `allowed_extensions` to admit `.vtt`.
         let hls = SourceLocation::Url("https://h.test/live/master.m3u8".to_owned());
         assert!(is_hls_location(&hls), "an .m3u8 URL is an HLS master");
