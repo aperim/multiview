@@ -28,7 +28,9 @@ use std::f64::consts::PI;
 
 use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
 use multiview_audio::loudness::LoudnessMeter;
-use multiview_audio::loudnorm::{LoudnessTarget, LoudnormProcessor, DEFAULT_TRUE_PEAK_CEILING_DBTP};
+use multiview_audio::loudnorm::{
+    LoudnessTarget, LoudnormProcessor, DEFAULT_TRUE_PEAK_CEILING_DBTP,
+};
 use proptest::prelude::*;
 
 const FS: u32 = 48_000;
@@ -223,11 +225,7 @@ fn discrete_tracks_unaltered() {
 fn targets_are_documented_lufs() {
     approx::assert_abs_diff_eq!(LoudnessTarget::Broadcast.lufs(), -23.0, epsilon = 1e-9);
     approx::assert_abs_diff_eq!(LoudnessTarget::Streaming.lufs(), -16.0, epsilon = 1e-9);
-    approx::assert_abs_diff_eq!(
-        LoudnessTarget::Custom(-20.0).lufs(),
-        -20.0,
-        epsilon = 1e-9
-    );
+    approx::assert_abs_diff_eq!(LoudnessTarget::Custom(-20.0).lufs(), -20.0, epsilon = 1e-9);
     // The default ceiling is the brief's -1.5 dBTP.
     approx::assert_abs_diff_eq!(DEFAULT_TRUE_PEAK_CEILING_DBTP, -1.5, epsilon = 1e-9);
 }
