@@ -28,12 +28,15 @@ Dante network:
    **already owns the load-bearing part**: the ST 2110-30 / AES67 L16/L24 PCM depacketizer + RTP
    parser (`multiview-input/src/st2110/v30.rs`, property-tested) and a PTP servo.
 
-We originally intended to support native Dante as well, as an off-by-default, never-vendored,
+We originally hoped to support native Dante as well, as an off-by-default, never-vendored,
 operator-licence-attested feature mirroring the NDI posture ([ADR-0008](ADR-0008.md)). We are not
-pursuing that. The basis — *as conveyed to us* — is that Audinate will not engage with open-source
-and community projects without a paid commercial arrangement. Requiring a commercial deal to build
-on a protocol this central to professional audio puts the tools of the trade behind a paywall and
-raises the barrier for newcomers; that is not a footing we are willing to build on. The open AES67 /
+pursuing that. We asked Audinate directly; their response (on file) was that their SDKs are
+"intended for products operating under commercial licensing agreements" and that they are therefore
+"not able to provide guidance or support for integrating Dante functionality into open-source
+projects." With no licence-free path to a native implementation — and a reverse-engineered one not
+being shippable for an open product — native Dante is not buildable for Multiview. (It is also our
+view, separately, that gating a protocol this central to professional audio behind a commercial
+arrangement raises the barrier for newcomers; that is opinion, stated as such.) The open AES67 /
 ST 2110-30 standards are free for anyone to use and still interoperate with Dante through Dante's
 AES67 mode, so choosing open standards loses no real Dante reach. (This revises the earlier
 acceptance of this ADR, which had kept native Dante as an optional gated binding.)
@@ -60,10 +63,11 @@ acceptance of this ADR, which had kept native Dante as an optional gated binding
    ≤8 ch/flow, multicast 239.x/16, PTPv2 domain 0, SAP/SDP discovery**. This is `AES67-1..5` in
    the plan; the send/receive implementation is specified in [ADR-0033](ADR-0033.md).
 2. **Native Dante is NOT supported** (per the licensing/complexity analysis above): it requires a
-   licensed Audinate SDK that, as conveyed to us, is not available to open-source/community
-   projects without a paid commercial arrangement, and a reverse-engineered native implementation
-   is not shippable for an open product. There is no `multiview-dante-sys` leaf, no `DanteLicense`
-   gate, and no native-Dante feature in the build.
+   licensed Audinate SDK which, per Audinate's response to us (on file), is intended for products
+   operating under commercial licensing agreements and is not available for open-source
+   integration, and a reverse-engineered native implementation is not shippable for an open
+   product. There is no `multiview-dante-sys` leaf, no `DanteLicense` gate, and no native-Dante
+   feature in the build.
 3. **Timing:** be a PTPv2 follower on an AES67 / SMPTE ST 2059 grandmaster and use it as the
    **media-clock reference**, never as a pacer — the output tick stays the sole pacer
    (invariant #1; ADR-T003). The AoIP send/recv runs off the engine hot loop with bounded
@@ -89,7 +93,7 @@ acceptance of this ADR, which had kept native Dante as an optional gated binding
 - **Native Dante in the default build** — impossible without licensed Audinate IP;
   reverse-engineered implementations are not shippable for an open product. Rejected.
 - **Native Dante as an optional, licence-gated binding** (the earlier position in this ADR) —
-  it would still depend on an Audinate SDK that, as conveyed to us, is not offered to
-  open-source/community projects without a paid commercial arrangement, and it would not be
-  reachable by the community in any case. AES67 already covers Dante interop on open standards.
-  Rejected; native Dante is not a planned feature.
+  it would still depend on an Audinate SDK which, per Audinate's response to us (on file), is
+  intended for products under commercial licensing agreements and is not available for open-source
+  integration, so it would not be reachable by the community in any case. AES67 already covers
+  Dante interop on open standards. Rejected; native Dante is not a planned feature.

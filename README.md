@@ -122,27 +122,32 @@ Multiview transports audio over IP using **[AES67](https://en.wikipedia.org/wiki
 with SAP/SDP and synchronised with PTP (IEEE 1588), so any AES67-compatible device on the network
 can send or receive a Multiview audio stream without a proprietary licence or controller.
 
-**This still reaches Dante networks.** Dante devices that support **Dante's own AES67 mode** can
+**This still reaches Dante® networks.** Dante devices that support **Dante's own AES67 mode** can
 discover (via SAP) and subscribe to Multiview's AES67 streams, and Multiview can receive theirs —
 that interop path is exactly what AES67 was created to provide between otherwise-incompatible
 audio-over-IP systems. So choosing open standards does not cut you off from a Dante facility; it
 meets it on the common, standardised ground.
 
-**Why we don't implement Dante natively — our position.** We originally intended to support Dante
-and its commercial variants natively, alongside the open standards. We did not pursue that path
-because, *as conveyed to us*, Audinate — the maker of Dante — will not engage with open-source and
-community projects without a paid commercial arrangement. In our view, requiring a commercial deal
-to build on a protocol this central to professional audio puts the tools of the trade behind a
-paywall and raises the barrier for newcomers entering the industry. That is a position we are not
-willing to build on. We therefore implement the open AES67 / SMPTE ST 2110-30 standards, which are
-free for anyone to use and still interoperate with Dante networks through Dante's AES67 mode.
+**Why we don't implement Dante natively — our position.** We originally hoped to support Dante and
+its commercial variants natively, alongside the open standards. When we asked, Audinate® — the maker
+of Dante, and, like us, an Australian company — told us that their SDKs are "intended for products
+operating under commercial licensing agreements" and that they were therefore "not able to provide
+guidance or support for integrating Dante functionality into open-source projects."
 
-If Audinate's terms for open-source and community projects change, we would welcome revisiting
-native Dante support. We will update this section if and when that happens.
+We'll let that speak for itself. We were disappointed — especially to see an Australian company close
+the door on open, non-commercial, educational work. It's their call to make; ours is to build on open
+standards anyone can learn. Multiview therefore implements the open AES67 / SMPTE ST 2110-30
+standards, which are free for anyone to use and still reach Dante networks through Dante's own AES67
+mode.
 
-> *Dante is a registered trademark of Audinate Pty Ltd. Multiview is not affiliated with, endorsed
-> by, or sponsored by Audinate. References to Dante are for interoperability and identification
-> only.*
+If Audinate's terms for open-source and community projects change, we would welcome revisiting native
+Dante support. We will update this section if and when that happens.
+
+> *Dante® and Audinate® are registered trademarks of Audinate Pty Ltd; other Dante-family names
+> (e.g. Dante AV, Dante Domain Manager) are trademarks of Audinate Pty Ltd. Multiview is an
+> independent project of Aperim Pty Ltd and is not affiliated with, endorsed by, or sponsored by
+> Audinate — the marks are used nominatively, to identify Audinate's products and the Dante
+> audio-networking standard only.*
 
 ---
 

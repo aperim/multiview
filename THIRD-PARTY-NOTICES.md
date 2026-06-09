@@ -147,8 +147,10 @@ support Dante's AES67 mode. **Native Dante integration is NOT supported** (per
 [ADR-T010](docs/decisions/ADR-T010.md)); there is no Audinate SDK in any Multiview
 build. References to Dante here are for interoperability and identification only.
 
-> Dante is a registered trademark of Audinate Pty Ltd. Multiview is not affiliated
-> with, endorsed by, or sponsored by Audinate.
+> Dante® and Audinate® are registered trademarks of Audinate Pty Ltd; other
+> Dante-family product names are trademarks of Audinate Pty Ltd. Multiview is an
+> independent project of Aperim Pty Ltd, not affiliated with, endorsed by, or
+> sponsored by Audinate; the marks are used nominatively, for identification only.
 
 See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md) for how the remaining proprietary
 components (NDI) relate to a commercial deployment.
