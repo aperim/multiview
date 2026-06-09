@@ -25,6 +25,7 @@
 )]
 
 use std::f64::consts::PI;
+use std::time::Instant;
 
 use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
 use multiview_audio::loudness::LoudnessMeter;
@@ -245,6 +246,54 @@ fn process_preserves_block_shape() {
         assert_eq!(out.frame_count(), frames);
         assert_eq!(out.format(), format);
     }
+}
+
+/// RT-8b perf guard: [`LoudnormProcessor::process`] must be genuinely `O(block)`
+/// cheap — not a multiple-of-the-meter cost. Under a `DropOnOverload` shed the bake
+/// consumer catches the program bus up across the whole dropped span in a SINGLE
+/// `tick_to`, so one `process` call sees a block of hundreds of thousands of frames;
+/// if `process` runs the oversampled true-peak FIR more times than necessary it
+/// stalls the consumer for seconds and audio falls behind the output-tick timeline
+/// (the rt8b lip-sync failure). `process` legitimately needs one K-weighting pass
+/// (for the loudness drive) plus one true-peak FIR pass (for the limiter ceiling);
+/// it must NOT additionally run the meter's own true-peak FIR (it keeps its own
+/// limiter) nor probe the limiter in a second redundant pass.
+///
+/// Self-calibrating bound (so it is not flaky across machines/build profiles): one
+/// full `LoudnessMeter::push_interleaved` over the same samples — K-weighting PLUS
+/// the meter's true-peak FIR — is the reference cost of "one metering pass". A
+/// well-written `process` (K-weight + one limiter FIR, no meter true-peak) costs
+/// ABOUT one such pass; the redundant-FIR regression costs roughly three, so it
+/// blows past this generous `2.2×` ceiling.
+#[test]
+fn process_is_o_block_cheap_on_a_large_catch_up_block() {
+    let format = AudioFormat::new(FS, ChannelLayout::Stereo);
+    // 400-tick catch-up @ 1920 frames/tick: the rt8b shed span in one block.
+    let frames = 400 * 1920;
+    let amp = 10f64.powf(-23.0 / 20.0);
+    let mut phase = 0.0;
+    let block = tone_block(format, 1000.0, amp, frames, &mut phase);
+
+    // Reference: one full metering pass (K-weight + true-peak FIR) over the block.
+    let mut meter = LoudnessMeter::new(format).unwrap();
+    let t = Instant::now();
+    meter.push_interleaved(block.interleaved()).unwrap();
+    let one_meter_pass = t.elapsed();
+
+    // The processor over the SAME block.
+    let mut proc = LoudnormProcessor::new(format, LoudnessTarget::Streaming).unwrap();
+    let t = Instant::now();
+    let out = proc.process(block);
+    let process_cost = t.elapsed();
+    assert_eq!(out.frame_count(), frames, "block shape must be preserved");
+
+    let ratio = process_cost.as_secs_f64() / one_meter_pass.as_secs_f64().max(1e-9);
+    assert!(
+        ratio <= 2.2,
+        "RT-8b perf: process() of a {frames}-frame catch-up block took {process_cost:?}, \
+         {ratio:.2}x one metering pass ({one_meter_pass:?}); it must stay O(block) cheap \
+         (about one pass) so the bake consumer never stalls under a shed"
+    );
 }
 
 /// Run a single-amplitude tone through a processor for long enough to settle and
