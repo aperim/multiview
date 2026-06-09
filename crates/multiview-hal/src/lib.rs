@@ -53,6 +53,7 @@ pub mod cost;
 pub mod degradation;
 pub mod error;
 pub mod load;
+pub mod perf;
 pub mod planner;
 pub mod probe;
 pub mod registry;
@@ -75,6 +76,7 @@ pub use load::{
     DeviceId, DeviceLoad, GpuTargetInfo, LoadPoller, LoadProbe, LoadSample, LoadSource,
     NullLoadPoller, PollInterval, SelfShare, Vendor,
 };
+pub use perf::{PerfClass, PerfSignals, ARCH_TABLE, DEFAULT_PERF_CLASS};
 pub use planner::{Admission, Plan, Planner, StageUsage};
 pub use probe::{
     detect, software_capability, DeviceCaps, DeviceProbe, EnvProbe, HardwareKind, ProbeOutcome,
