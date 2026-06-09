@@ -882,6 +882,13 @@ impl Output {
             Output::Ndi { .. } => {
                 OutputAudioCapability::new(TrackDelivery::None, TrackCapacity::AtMost(0))
             }
+            // AES67 / ST 2110-30: one multicast PCM flow carrying a channel map, not
+            // selectable discrete tracks — like NDI, a discrete-track route is a
+            // capability error. (Multiple program tracks would be multiple AES67
+            // outputs / SDP sessions, each its own channel-map flow.)
+            Output::Aes67 { .. } => {
+                OutputAudioCapability::new(TrackDelivery::None, TrackCapacity::AtMost(0))
+            }
             // RTMP: endpoint-gated. Legacy = one track; Enhanced-RTMP v2 = N.
             Output::Rtmp { multitrack, .. } => {
                 if *multitrack {

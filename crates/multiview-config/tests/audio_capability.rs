@@ -246,6 +246,14 @@ fn capability_matrix_is_machine_readable_per_transport() {
             TrackDelivery::Simultaneous,
             TrackCapacity::AtMost(1),
         ),
+        // AES67 / ST 2110-30: one multicast PCM channel-map flow, no selectable
+        // discrete tracks — mirrors NDI (a discrete-track route is a capability
+        // error). Guards the AUD-7 x AES67 integration arm.
+        (
+            "[[outputs]]\nkind = \"aes67\"\nlabel = \"A\"\nmulticast = \"[ff3e::1]:5004\"\n",
+            TrackDelivery::None,
+            TrackCapacity::AtMost(0),
+        ),
     ];
 
     for (out_toml, want_delivery, want_capacity) in cases {
