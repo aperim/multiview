@@ -51,7 +51,8 @@ use multiview_core::stream::StreamKind as CoreStreamKind;
 
 use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
 pub use audio::{
-    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioMode, PROGRAM_TRACK,
+    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
+    TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
@@ -579,7 +580,14 @@ impl MultiviewConfig {
 
         for output in &self.outputs {
             if let Some(selection) = output.audio() {
-                selection.validate(&output.label(), &selectable)?;
+                // Cross-check the selection against the transport's verified
+                // capability matrix (ADR-R005 §4.2): reference consistency plus
+                // the discrete-track count the transport can actually deliver.
+                selection.validate_against_capability(
+                    &output.label(),
+                    &selectable,
+                    output.audio_capability(),
+                )?;
             }
         }
 
