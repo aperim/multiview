@@ -16,6 +16,10 @@ ordinary hardware and to **never drop a frame**.
 > servers and hardware-accelerated paths are landing per the **[roadmap](ROADMAP.md)**. See
 > **[FEATURES.md](FEATURES.md)** for the live, per-feature status matrix.
 
+> [!NOTE]
+> **New here?** [**WHY.md**](WHY.md) is the short story of why Multiview exists — a tool to help
+> emerging artists and technicians get hands-on with live-production concepts on commodity hardware.
+
 ---
 
 ## Why Multiview
