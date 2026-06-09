@@ -18,7 +18,7 @@ use multiview_core::time::Rational;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::audio::OutputAudio;
+use crate::audio::{OutputAudio, OutputAudioCapability, TrackCapacity, TrackDelivery};
 use crate::error::ConfigError;
 use crate::failover::{default_failover_slate, FailoverSlate};
 use crate::grid::{GridLayout, Track};
@@ -678,8 +678,18 @@ pub enum Output {
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
-        /// Per-output audio selection. RTMP multitrack is endpoint-gated; the
-        /// capability matrix in `multiview-audio` validates this.
+        /// Whether the **endpoint** supports Enhanced-RTMP v2 multitrack audio
+        /// (ADR-R005 §4.2). RTMP's discrete-track capability is *endpoint-gated*,
+        /// not format-gated: the legacy default (`false`) carries one audio track
+        /// only, while `true` declares an endpoint (Enhanced-RTMP v2 + a modern
+        /// `flvenc`) that carries N tracks via `audioTrackId`. Multitrack
+        /// selections are rejected at config time unless this is set — degrade
+        /// explicitly to the mixed bus, never silently drop tracks.
+        #[serde(default)]
+        multitrack: bool,
+        /// Per-output audio selection. RTMP multitrack is endpoint-gated by
+        /// [`multitrack`](Output::Rtmp::multitrack); the capability matrix
+        /// ([`Output::audio_capability`]) validates this.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
@@ -758,6 +768,55 @@ impl Output {
             | Output::Ndi { audio, .. }
             | Output::Rtmp { audio, .. }
             | Output::Srt { audio, .. } => audio.as_ref(),
+        }
+    }
+
+    /// This output's **audio capability** — the verified per-transport matrix
+    /// from ADR-R005 §4.2 as a first-class, machine-readable value.
+    ///
+    /// - **RTSP** carries N simultaneous `m=audio` subsessions ⇒ unlimited
+    ///   simultaneous discrete tracks.
+    /// - **MPEG-TS over SRT** carries N PIDs ⇒ unlimited simultaneous.
+    /// - **HLS / LL-HLS** carry N renditions but the player plays one at a time
+    ///   ⇒ unlimited but *select-one* (a UI selector, not simultaneous monitors).
+    /// - **NDI** carries no selectable discrete tracks (channel-map only) ⇒ a
+    ///   discrete-track selection is a capability error.
+    /// - **RTMP** is endpoint-gated: legacy carries one track; an endpoint that
+    ///   declares [`multitrack`](Output::Rtmp::multitrack) carries N.
+    ///
+    /// Consumed by config-time validation and by the Web UI routing matrix
+    /// (AUD-8), which greys out cells a transport cannot deliver.
+    #[must_use]
+    pub const fn audio_capability(&self) -> OutputAudioCapability {
+        match self {
+            // RTSP: N simultaneous `m=audio` subsessions. SRT carries MPEG-TS ⇒
+            // N PIDs, also simultaneous (the receiver-dependent first-PID-only
+            // behaviour is a delivery caveat, not a config-time capacity cap).
+            Output::RtspServer { .. } | Output::Srt { .. } => {
+                OutputAudioCapability::new(TrackDelivery::Simultaneous, TrackCapacity::Unlimited)
+            }
+            // HLS/LL-HLS: N renditions, but the player plays one at a time.
+            Output::Hls { .. } | Output::LlHls { .. } => {
+                OutputAudioCapability::new(TrackDelivery::SelectOne, TrackCapacity::Unlimited)
+            }
+            // NDI: one multiplexed stream (channel-map), never selectable tracks.
+            Output::Ndi { .. } => {
+                OutputAudioCapability::new(TrackDelivery::None, TrackCapacity::AtMost(0))
+            }
+            // RTMP: endpoint-gated. Legacy = one track; Enhanced-RTMP v2 = N.
+            Output::Rtmp { multitrack, .. } => {
+                if *multitrack {
+                    OutputAudioCapability::new(
+                        TrackDelivery::Simultaneous,
+                        TrackCapacity::Unlimited,
+                    )
+                } else {
+                    OutputAudioCapability::new(
+                        TrackDelivery::Simultaneous,
+                        TrackCapacity::AtMost(1),
+                    )
+                }
+            }
         }
     }
 
