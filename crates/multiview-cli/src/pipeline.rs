@@ -911,6 +911,10 @@ pub struct Pipeline {
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
+    /// The per-source producer stop flags (ADR-W018): every startup ingest
+    /// thread registers its flag here, and the live-source hub shares the same
+    /// registry, so a live `RemoveSource` can tear down exactly one producer.
+    stop_registry: crate::live_sources::StopRegistry,
     /// Per-source streaming ingest plans: how to open + decode each source, and
     /// the tile size its frames are scaled to. The drive starts one decode
     /// thread per plan; the threads publish into [`Self::stores`] as frames
@@ -1180,6 +1184,7 @@ impl Pipeline {
             cadence,
             program_spec,
             stores,
+            stop_registry: crate::live_sources::stop_registry(),
             ingest_plans,
             inventories,
             #[cfg(feature = "overlay")]
@@ -1257,6 +1262,14 @@ impl Pipeline {
     #[must_use]
     pub fn source_count(&self) -> usize {
         self.stores.len()
+    }
+
+    /// The shared per-source producer stop registry (ADR-W018): hand this to
+    /// the [`LiveSourceHub`](crate::live_sources::LiveSourceHub) so a live
+    /// remove can tear down a startup producer (ingest thread or generator).
+    #[must_use]
+    pub fn stop_registry(&self) -> crate::live_sources::StopRegistry {
+        Arc::clone(&self.stop_registry)
     }
 
     /// The resolved concrete encoder name.
@@ -1667,7 +1680,7 @@ impl Pipeline {
         let caption_plans = std::mem::take(&mut self.caption_plans);
         #[cfg(not(feature = "overlay"))]
         let caption_plans: Vec<crate::captions::CaptionPlan> = Vec::new();
-        let supervisor = IngestSupervisor::start(plans, caption_plans);
+        let supervisor = IngestSupervisor::start(plans, caption_plans, &self.stop_registry);
 
         // Prime the first frame per tile BEFORE constructing the runtime (whose
         // `new` seeds tick 0 to "now") and therefore before the output clock's
@@ -3498,27 +3511,41 @@ impl FaultDetector {
 /// raises the stop flag and joins every thread, so a bounded run tears ingest
 /// down deterministically rather than leaking threads.
 struct IngestSupervisor {
-    stop: Arc<AtomicBool>,
-    handles: Vec<JoinHandle<()>>,
+    /// One (stop flag, join handle) per spawned thread. Per-thread flags
+    /// (ADR-W018) let a live `RemoveSource` tear down exactly one startup
+    /// producer via the shared stop registry; shutdown raises every flag.
+    producers: Vec<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
 
 impl IngestSupervisor {
     /// Spawn one decode thread per video plan **and** one caption reader thread
     /// per caption plan, then return the running supervisor.
     ///
+    /// Each video-ingest thread carries its **own** stop flag, registered by
+    /// source id in the run's shared `registry` (ADR-W018) so a live
+    /// `RemoveSource` can stop exactly that producer; caption readers keep
+    /// per-thread flags too but are not registry-addressable (a removed
+    /// source's reader runs harmlessly into an orphan store until run end —
+    /// the documented gap).
+    ///
     /// A caption reader is just another best-effort writer of a lock-free store
-    /// (the cue store) — it shares the same stop flag and is joined the same way,
-    /// so it can neither pace nor stall the output clock (invariant #1) nor
-    /// back-pressure the engine (invariant #10).
-    fn start(plans: Vec<IngestPlan>, caption_plans: Vec<crate::captions::CaptionPlan>) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::with_capacity(plans.len().saturating_add(caption_plans.len()));
+    /// (the cue store) — it is joined the same way, so it can neither pace nor
+    /// stall the output clock (invariant #1) nor back-pressure the engine
+    /// (invariant #10).
+    fn start(
+        plans: Vec<IngestPlan>,
+        caption_plans: Vec<crate::captions::CaptionPlan>,
+        registry: &crate::live_sources::StopRegistry,
+    ) -> Self {
+        let mut producers = Vec::with_capacity(plans.len().saturating_add(caption_plans.len()));
         for plan in plans {
-            let stop = Arc::clone(&stop);
+            let stop = Arc::new(AtomicBool::new(false));
             let id = plan.id.clone();
+            crate::live_sources::register_stop(registry, &id, &stop);
+            let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
-            match builder.spawn(move || ingest_loop(&plan, &stop)) {
-                Ok(handle) => handles.push(handle),
+            match builder.spawn(move || ingest_loop(&plan, &thread_stop)) {
+                Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A thread that cannot spawn is logged and skipped: its tile
                     // simply rides NO_SIGNAL (slate) rather than failing the run
@@ -3528,11 +3555,12 @@ impl IngestSupervisor {
             }
         }
         for plan in caption_plans {
-            let stop = Arc::clone(&stop);
+            let stop = Arc::new(AtomicBool::new(false));
             let id = plan.id.clone();
+            let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-captions-{id}"));
-            match builder.spawn(move || crate::captions::caption_loop(&plan, &stop)) {
-                Ok(handle) => handles.push(handle),
+            match builder.spawn(move || crate::captions::caption_loop(&plan, &thread_stop)) {
+                Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A caption reader that cannot spawn is logged and skipped:
                     // its tile simply shows no caption (best-effort — invariant
@@ -3541,7 +3569,7 @@ impl IngestSupervisor {
                 }
             }
         }
-        Self { stop, handles }
+        Self { producers }
     }
 
     /// Signal every ingest thread to stop and join them.
@@ -3563,9 +3591,11 @@ impl IngestSupervisor {
     /// the produced output nor stall the caller. This keeps the output-clock
     /// guarantee (invariant #1) intact end-to-end, including teardown.
     fn join_all(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        for (stop, _) in &self.producers {
+            stop.store(true, Ordering::Release);
+        }
         let deadline = Instant::now() + INGEST_JOIN_GRACE;
-        for handle in self.handles.drain(..) {
+        for (_, handle) in self.producers.drain(..) {
             let name = handle.thread().name().unwrap_or("ingest").to_owned();
             while !handle.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));

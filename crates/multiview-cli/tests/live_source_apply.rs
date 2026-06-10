@@ -12,7 +12,7 @@
 //! * a remove slates bound cells at the next boundary and tears the producer
 //!   down (bounded, off the hot path);
 //! * a realtime run sees the added tile reach LIVE and the removed tile return
-//!   to NO_SIGNAL, with the output **never faltering** (invariant #1);
+//!   to `NO_SIGNAL`, with the output **never faltering** (invariant #1);
 //! * a continuous upsert/route/remove churn flood cannot stall the clock or
 //!   skip a frame (invariants #1 + #10) — the soak gate.
 #![allow(
@@ -147,7 +147,9 @@ async fn upsert_source_registers_routes_and_produces_frames() {
     sender
         .try_submit(Command::UpsertSource {
             op: OperationId::new(),
-            source: source_doc(serde_json::json!({ "id": "live1", "kind": "bars" })),
+            source: Box::new(source_doc(
+                serde_json::json!({ "id": "live1", "kind": "bars" }),
+            )),
         })
         .expect("submit upsert");
     sender
@@ -161,7 +163,10 @@ async fn upsert_source_registers_routes_and_produces_frames() {
 
     // Frame boundary: the store is registered and the cell re-pointed in the
     // SAME pass (FIFO — upsert before route).
-    let store = drive.store("live1").cloned().expect("live1 store registered");
+    let store = drive
+        .store("live1")
+        .cloned()
+        .expect("live1 store registered");
     assert_eq!(
         drive.effective_cell_source("cell_a").as_deref(),
         Some("live1"),
@@ -210,7 +215,9 @@ async fn remove_source_slates_bound_cells_and_tears_down_the_producer() {
     sender
         .try_submit(Command::UpsertSource {
             op: OperationId::new(),
-            source: source_doc(serde_json::json!({ "id": "live1", "kind": "bars" })),
+            source: Box::new(source_doc(
+                serde_json::json!({ "id": "live1", "kind": "bars" }),
+            )),
         })
         .expect("submit upsert");
     sender
@@ -221,7 +228,10 @@ async fn remove_source_slates_bound_cells_and_tears_down_the_producer() {
         })
         .expect("submit swap");
     drain(&mut drive);
-    let store = drive.store("live1").cloned().expect("live1 store registered");
+    let store = drive
+        .store("live1")
+        .cloned()
+        .expect("live1 store registered");
     assert!(wait_for(Duration::from_secs(5), || store.is_primed()));
 
     sender
@@ -292,7 +302,9 @@ async fn edit_reuses_the_store_and_swaps_the_producer() {
     sender
         .try_submit(Command::UpsertSource {
             op: OperationId::new(),
-            source: source_doc(serde_json::json!({ "id": "live1", "kind": "bars" })),
+            source: Box::new(source_doc(
+                serde_json::json!({ "id": "live1", "kind": "bars" }),
+            )),
         })
         .expect("submit upsert");
     drain(&mut drive);
@@ -305,13 +317,16 @@ async fn edit_reuses_the_store_and_swaps_the_producer() {
     sender
         .try_submit(Command::UpsertSource {
             op: OperationId::new(),
-            source: source_doc(
-                serde_json::json!({ "id": "live1", "kind": "solid", "color": "#22aa44" }),
-            ),
+            source: Box::new(source_doc(serde_json::json!({
+                "id": "live1", "kind": "solid", "color": "#22aa44"
+            }))),
         })
         .expect("submit edit");
     drain(&mut drive);
-    let second = drive.store("live1").cloned().expect("store still registered");
+    let second = drive
+        .store("live1")
+        .cloned()
+        .expect("store still registered");
     assert!(
         Arc::ptr_eq(&first, &second),
         "an edit must reuse the SAME TileStore (the tile never flashes the slate)"
@@ -363,10 +378,10 @@ async fn live_source_churn_flood_never_falters_the_output_clock() {
                 let id = format!("churn{}", n % 4);
                 let _ = tx.try_submit(Command::UpsertSource {
                     op: OperationId::new(),
-                    source: serde_json::from_value(
-                        serde_json::json!({ "id": id, "kind": "bars" }),
-                    )
-                    .expect("valid churn source"),
+                    source: Box::new(
+                        serde_json::from_value(serde_json::json!({ "id": id, "kind": "bars" }))
+                            .expect("valid churn source"),
+                    ),
                 });
                 let _ = tx.try_submit(Command::SwapSource {
                     op: OperationId::new(),
@@ -408,7 +423,7 @@ async fn live_source_churn_flood_never_falters_the_output_clock() {
 
 /// REALTIME PROOF: on a wall-clock run, a live-added source's tile reaches
 /// LIVE (observed via the engine's own `tile.state` events) and a live remove
-/// returns it to NO_SIGNAL — while the output never falters.
+/// returns it to `NO_SIGNAL` — while the output never falters.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn realtime_live_add_goes_live_and_remove_slates() {
     let cfg = two_cell_config();
@@ -433,8 +448,10 @@ async fn realtime_live_add_goes_live_and_remove_slates() {
     let driver = tokio::spawn(async move {
         tx.try_submit(Command::UpsertSource {
             op: OperationId::new(),
-            source: serde_json::from_value(serde_json::json!({ "id": "live1", "kind": "bars" }))
-                .expect("valid source"),
+            source: Box::new(
+                serde_json::from_value(serde_json::json!({ "id": "live1", "kind": "bars" }))
+                    .expect("valid source"),
+            ),
         })
         .expect("submit upsert");
         tx.try_submit(Command::SwapSource {

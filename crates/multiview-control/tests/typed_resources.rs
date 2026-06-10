@@ -509,7 +509,11 @@ async fn synthetic_source_delete_applies_live_and_enqueues_remove() {
 
     let resp = send(
         &h.router,
-        support::delete_if_match("/api/v1/sources/cam1", support::ADMIN_TOKEN, Some("W/\"1\"")),
+        support::delete_if_match(
+            "/api/v1/sources/cam1",
+            support::ADMIN_TOKEN,
+            Some("W/\"1\""),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);

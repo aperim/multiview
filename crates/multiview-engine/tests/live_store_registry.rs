@@ -104,7 +104,9 @@ fn insert_store_makes_a_live_added_source_rebindable() {
         drive.store("live-1").is_some(),
         "an inserted store is addressable via the store accessor"
     );
-    drive.rebind_cell("c0", "live-1").expect("rebind to the live-added source");
+    drive
+        .rebind_cell("c0", "live-1")
+        .expect("rebind to the live-added source");
     let frame = drive.compose(tick_at(1)).expect("compose");
     let (y, _, _) = frame.canvas.sample(32, 32).expect("sample");
     assert!(
@@ -128,7 +130,10 @@ fn remove_store_slates_bound_cells_next_tick_and_holds_rebinds() {
 
     // Live remove: the store unregisters; the bound cell composites the slate
     // (dark card) from the very next tick, with the honest NoSignal state.
-    assert!(drive.remove_store("cam-a"), "removal of a known id reports true");
+    assert!(
+        drive.remove_store("cam-a"),
+        "removal of a known id reports true"
+    );
     assert!(drive.store("cam-a").is_none());
     let after = drive.compose(tick_at(2)).expect("compose after remove");
     assert_eq!(

@@ -196,14 +196,25 @@ async fn run_pipeline_until_ctrl_c(
     let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
+    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) = if let Some(cfg) =
+        config.control.as_ref()
+    {
         let (commands, command_rx) = command_bus(64);
-        // The live-preview provider reads the program slot the run loop fills + the
-        // pipeline's per-source stores (the decoded input frames).
+        // The live-source hub (ADR-W018): owns runtime producer spawn/teardown
+        // + the SHARED, live-updatable preview store map, off the clock thread.
+        // It shares the pipeline's per-source stop registry so a live remove
+        // can tear down a startup producer (generator or ingest thread) too.
+        let shared_stores = multiview_cli::live_sources::shared_stores(pipeline.preview_stores());
+        let hub = multiview_cli::live_sources::LiveSourceHub::start(
+            pipeline.stop_registry(),
+            Arc::clone(&shared_stores),
+        );
+        // The live-preview provider reads the program slot the run loop fills +
+        // the shared per-input store map (the decoded input frames).
         let provider: multiview_control::SharedPreview =
             Arc::new(multiview_cli::preview::CliPreviewProvider::new(
                 Arc::clone(&preview_slot),
-                pipeline.preview_stores(),
+                shared_stores,
             ));
         let (addr, handle) = control::bind_and_serve(
             &cfg.listen,
@@ -223,23 +234,30 @@ async fn run_pipeline_until_ctrl_c(
         // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
         // drive start, and the drain reads it wait-free (inv #1/#10). Only under
         // `overlay` (without it the run renders no subtitles, so there is no layer).
+        // The live-source seam (ADR-W018) rides both variants.
         #[cfg(feature = "overlay")]
         let drain: ControlDrain = Box::new(control::command_drain_with_seams(
             command_rx,
             config.clone(),
             Arc::clone(&publisher),
             pipeline.subtitle_route_slot(),
+            hub.handle(),
         ));
         #[cfg(not(feature = "overlay"))]
-        let drain: ControlDrain = Box::new(control::command_drain(
+        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
             command_rx,
             config.clone(),
             Arc::clone(&publisher),
+            hub.handle(),
         ));
-        (Some(handle), drain)
+        (Some(handle), drain, Some(hub))
     } else {
         drop(shutdown_rx);
-        (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))
+        (
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+        )
     };
 
     let stop_for_signal = stop.clone();
@@ -293,8 +311,12 @@ async fn run_pipeline_until_ctrl_c(
             .await?;
 
     // The pipeline loop returned; stop the metrics poller (it also self-stops on
-    // the StopSignal within one sample period).
+    // the StopSignal within one sample period) and tear down the live-source hub
+    // (it stops + joins every runtime producer).
     metrics_task.abort();
+    if let Some(hub) = live_hub {
+        hub.shutdown();
+    }
 
     let _ = shutdown_tx.send(());
     if let Some(handle) = server {
@@ -451,14 +473,25 @@ async fn run_software_until_ctrl_c(
     // control plane is up, a no-op otherwise. The server serves until
     // `shutdown_rx` resolves (once the engine loop returns).
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
+    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) = if let Some(cfg) =
+        config.control.as_ref()
+    {
         let (commands, command_rx) = command_bus(64);
-        // The engine-backed live-preview provider (program slot + per-input
-        // stores), shared read-only with the control plane (invariant #10).
+        // The live-source hub (ADR-W018): owns runtime producer spawn/teardown
+        // + the SHARED, live-updatable preview store map, off the clock thread.
+        // It shares the engine's per-source stop registry so a live remove can
+        // tear down a startup generator too.
+        let shared_stores = multiview_cli::live_sources::shared_stores(engine.preview_stores());
+        let hub = multiview_cli::live_sources::LiveSourceHub::start(
+            engine.stop_registry(),
+            Arc::clone(&shared_stores),
+        );
+        // The engine-backed live-preview provider (program slot + the shared
+        // per-input store map), read-only for the control plane (invariant #10).
         let preview: multiview_control::SharedPreview =
             Arc::new(multiview_cli::preview::CliPreviewProvider::new(
                 engine.program_preview(),
-                engine.preview_stores(),
+                shared_stores,
             ));
         let (addr, handle) = control::bind_and_serve(
             &cfg.listen,
@@ -473,17 +506,20 @@ async fn run_software_until_ctrl_c(
         .await
         .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
         tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
-        (
-            Some(handle),
-            Box::new(control::command_drain(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-            )),
-        )
+        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+            hub.handle(),
+        ));
+        (Some(handle), drain, Some(hub))
     } else {
         drop(shutdown_rx);
-        (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))
+        (
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+        )
     };
 
     let stop_for_signal = stop.clone();
@@ -515,8 +551,12 @@ async fn run_software_until_ctrl_c(
         .context("headless run until Ctrl-C")?;
 
     // The engine loop returned; stop the metrics poller (it also self-stops on the
-    // StopSignal within one sample period) and bring the control server down.
+    // StopSignal within one sample period), tear down the live-source hub (it
+    // stops + joins every runtime producer), and bring the control server down.
     metrics_task.abort();
+    if let Some(hub) = live_hub {
+        hub.shutdown();
+    }
     let _ = shutdown_tx.send(());
     if let Some(handle) = server {
         match handle.await {

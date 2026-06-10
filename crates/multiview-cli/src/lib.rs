@@ -41,6 +41,7 @@
 pub mod capability_warn;
 pub mod cli;
 pub mod control;
+pub mod live_sources;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
