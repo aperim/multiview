@@ -69,6 +69,22 @@ fn clamp_sample(v: f64) -> f32 {
     v.clamp(-1.0, 1.0) as f32
 }
 
+/// A frame count (`usize`) as a `u64`, saturating, without a raw `as` cast.
+#[must_use]
+fn frame_as_u64(frames: usize) -> u64 {
+    u64::try_from(frames).unwrap_or(u64::MAX)
+}
+
+/// The exact ratio `turns / rate` as `f64`, both reduced into `[0, rate)`, without
+/// a raw `as` cast. Both operands are `< sample_rate` (≤ 192 kHz), comfortably
+/// within `f64`'s exact-integer range, so the division is exact to `f64`.
+#[must_use]
+fn turns_ratio(turns: u64, rate: u64) -> f64 {
+    let num = u32::try_from(turns).map_or(f64::from(u32::MAX), f64::from);
+    let den = u32::try_from(rate.max(1)).map_or(f64::from(u32::MAX), f64::from);
+    num / den
+}
+
 /// A phase-continuous sine-tone generator at a fixed frequency and level.
 ///
 /// Build one per synthetic source with [`ToneGenerator::new`], then call
@@ -130,11 +146,37 @@ impl ToneGenerator {
     /// [`AudioBlock::from_interleaved`]; constructed lengths are always whole
     /// frames, so this never fires in practice.
     pub fn next_block(&mut self, frames: usize) -> Result<AudioBlock> {
-        // TDD RED STUB: not yet implemented — returns silence so the tone tests
-        // fail for the right reason (no energy / wrong level / drift). Replaced by
-        // the real phase-continuous sine generator in the green commit.
-        let _ = (&self.freq_hz, &self.amplitude, &mut self.phase_frame);
-        Ok(AudioBlock::silence(self.format, frames))
+        let channels = self.format.channel_count();
+        let rate = u64::from(self.format.sample_rate().max(1));
+        let freq = u64::from(self.freq_hz);
+        let mut samples = vec![0.0f32; frames.saturating_mul(channels)];
+
+        for frame in 0..frames {
+            // Absolute frame index of this frame, reduced modulo the sample rate.
+            // `2π · freq · n / rate` is periodic in `n` with period `rate`, so the
+            // reduced index gives an identical sine value with no precision loss —
+            // the integer phase never grows unbounded and never drifts.
+            let n = self.phase_frame.saturating_add(frame_as_u64(frame)) % rate;
+            let turns = freq.saturating_mul(n) % rate; // phase numerator in [0, rate)
+            let theta = std::f64::consts::TAU * turns_ratio(turns, rate);
+            let sample = clamp_sample(self.amplitude * theta.sin());
+            let base = frame.saturating_mul(channels);
+            for ch in 0..channels {
+                if let Some(slot) = samples.get_mut(base.saturating_add(ch)) {
+                    *slot = sample;
+                }
+            }
+        }
+
+        // Advance the integer phase counter, keeping it reduced modulo the rate so
+        // it is bounded forever (drift-free; invariant #3).
+        self.phase_frame = self
+            .phase_frame
+            .saturating_add(frame_as_u64(frames))
+            .checked_rem(rate)
+            .unwrap_or(0);
+
+        AudioBlock::from_interleaved(self.format, samples)
     }
 }
 
@@ -148,6 +190,17 @@ mod tests {
         AudioFormat::new(AudioFormat::CANONICAL_RATE, ChannelLayout::Stereo)
     }
 
+    /// A count as `f64` without a raw `as` cast (test helper; the workspace bans
+    /// `as` even in unit tests for the numeric-precision lints).
+    fn count_f64(n: usize) -> f64 {
+        f64::from(u32::try_from(n).unwrap_or(u32::MAX))
+    }
+
+    /// An absolute frame index (`u64`) as `f64` without a raw `as` cast.
+    fn frame_f64(n: u64) -> f64 {
+        f64::from(u32::try_from(n).unwrap_or(u32::MAX))
+    }
+
     /// The mean square of a block's samples (energy proxy). Zero iff silence.
     fn mean_square(block: &AudioBlock) -> f64 {
         let s = block.interleaved();
@@ -155,7 +208,7 @@ mod tests {
             return 0.0;
         }
         let sum: f64 = s.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
-        sum / (s.len() as f64)
+        sum / count_f64(s.len())
     }
 
     #[test]
@@ -201,7 +254,7 @@ mod tests {
         let second = gen.next_block(64).expect("second");
 
         // The analytic value the sine should take at absolute frame n0 (channel 0).
-        let theta = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * (n0 as f64))
+        let theta = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * count_f64(n0))
             / f64::from(AudioFormat::CANONICAL_RATE);
         let predicted = amp * theta.sin();
         let actual = f64::from(*second.interleaved().first().expect("sample"));
@@ -213,7 +266,7 @@ mod tests {
         // And the last sample of block N is the sample just before, also on-curve.
         let last = f64::from(*first.interleaved().get((n0 - 1) * 2).expect("last sample"));
         let theta_last = std::f64::consts::TAU
-            * (f64::from(REFERENCE_TONE_HZ) * ((n0 - 1) as f64))
+            * (f64::from(REFERENCE_TONE_HZ) * count_f64(n0 - 1))
             / f64::from(AudioFormat::CANONICAL_RATE);
         assert!(
             (last - amp * theta_last.sin()).abs() < 1.0e-4,
@@ -236,7 +289,7 @@ mod tests {
             for &c in &chunks {
                 let block = gen.next_block(c).expect("block");
                 // Check the first sample of this block against the analytic value.
-                let theta = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * (absolute as f64))
+                let theta = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * frame_f64(absolute))
                     / f64::from(AudioFormat::CANONICAL_RATE);
                 let predicted = amp * theta.sin();
                 let actual = f64::from(*block.interleaved().first().expect("sample"));
@@ -244,7 +297,7 @@ mod tests {
                     (actual - predicted).abs() < 1.0e-4,
                     "no drift at frame {absolute}: predicted {predicted}, got {actual}"
                 );
-                absolute = absolute.saturating_add(c as u64);
+                absolute = absolute.saturating_add(u64::try_from(c).unwrap_or(u64::MAX));
             }
         }
     }
