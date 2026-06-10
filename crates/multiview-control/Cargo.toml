@@ -23,6 +23,14 @@ multiview-telemetry = { workspace = true }
 # CI-green default build; enforcement is DATA the control plane renders, never a
 # control-flow decision that could touch the engine (invariant #1/#10).
 multiview-licence = { workspace = true }
+# The local-mesh discovery/relay plane (Conspect, ADR-0051): the untrusted
+# discovered-peer inventory, the relay opt-in, and the computed mesh role the
+# `/api/v1/mesh/*` routes render + toggle. Pure-Rust leaf crate (no engine, no
+# socket — the live mDNS announce lives behind the mesh crate's own off-by-default
+# `mdns` feature, which the control plane does NOT enable); it stays in the
+# CI-green default build, control-plane-only, never able to back-pressure the
+# engine (invariant #10).
+multiview-mesh = { workspace = true }
 # The `FocusGate` admission primitive (pure-Rust default build: counters only, no
 # native/codec dep) bounds concurrent WHEP focus sessions. The control plane wraps
 # its codec-free `WhepProvider` seam with the gate; both Tier-A control-plane
