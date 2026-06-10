@@ -17,7 +17,7 @@ import { Pencil, Plus, Send, Trash2 } from 'lucide-react';
 import { createApiClient } from '../api/client';
 import { useDeleteLayout, useLayouts } from '../api/queries';
 import type { Layout } from '../api/queries';
-import { applyLayoutCommand } from '../layout/applyLayout';
+import { applyLayoutCommand, describeApplyError } from '../layout/applyLayout';
 import { fromLayoutBody } from '../layout/model';
 import { HelpLink } from '../components/HelpLink';
 import { PageHeader } from '../components/PageHeader';
@@ -135,21 +135,23 @@ export function LayoutsPage(): JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<Layout | null>(null);
   const [applying, setApplying] = useState(false);
 
-  // Apply is a LIVE action (202 + operation id; the outcome arrives on the
-  // realtime stream) — unlike stored-resource edits, which need export+restart.
+  // Apply is a LIVE action (ADR-W017): the stored layout is resolved + solved
+  // at the route and swaps in at the next frame boundary — no export, no
+  // restart. A 422 (unknown id / unsolvable body / pinned-canvas mismatch)
+  // carries the reason in the problem detail.
   const applyLayout = (layout: Layout): void => {
     setApplying(true);
     applyLayoutCommand(layout.id)
       .then((accepted): void => {
         toast({
-          title: t`Apply-layout accepted`,
-          description: `${t`Operation id`}: ${accepted.operation_id}`,
+          title: t`Layout applied live`,
+          description: `${t`Takes effect at the next frame boundary.`} ${t`Operation id`}: ${accepted.operation_id}`,
         });
       })
       .catch((error: unknown): void => {
         toast({
           title: t`Could not apply layout`,
-          description: error instanceof Error ? error.message : String(error),
+          description: describeApplyError(error),
           variant: 'destructive',
         });
       })

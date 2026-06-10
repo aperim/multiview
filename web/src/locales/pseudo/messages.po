@@ -275,7 +275,7 @@ msgstr ""
 msgid "About color spaces and range"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:202
+#: src/pages/LayoutsPage.tsx:204
 msgid "About layouts"
 msgstr ""
 
@@ -306,7 +306,7 @@ msgstr ""
 msgid "About tile lifecycle states"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:270
+#: src/pages/LayoutsPage.tsx:272
 msgid "Accessible editing path: Cells form + Inspector in the editor"
 msgstr ""
 
@@ -421,7 +421,7 @@ msgstr ""
 msgid "Alarms matching the current filter."
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:237
+#: src/pages/LayoutsPage.tsx:239
 msgid "All configured layouts."
 msgstr ""
 
@@ -535,8 +535,8 @@ msgid "Apply layout to engine"
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:145
-msgid "Apply-layout accepted"
-msgstr ""
+#~ msgid "Apply-layout accepted"
+#~ msgstr ""
 
 #: src/pages/SalvosPage.tsx:257
 msgid "Arm"
@@ -666,7 +666,7 @@ msgid "Bus"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:431
-#: src/pages/LayoutsPage.tsx:308
+#: src/pages/LayoutsPage.tsx:310
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
@@ -851,7 +851,7 @@ msgstr ""
 msgid "Compose reference"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:162
+#: src/pages/LayoutEditorPage.tsx:164
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr ""
 
@@ -920,7 +920,7 @@ msgstr ""
 msgid "Could not acknowledge alarm"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:151
+#: src/pages/LayoutsPage.tsx:153
 msgid "Could not apply layout"
 msgstr ""
 
@@ -932,7 +932,7 @@ msgstr ""
 msgid "Could not delete"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:182
+#: src/pages/LayoutsPage.tsx:184
 msgid "Could not delete layout"
 msgstr ""
 
@@ -956,7 +956,7 @@ msgstr ""
 msgid "Could not load for editing"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:221
+#: src/pages/LayoutsPage.tsx:223
 msgid "Could not load layouts:"
 msgstr ""
 
@@ -997,7 +997,7 @@ msgid "Could not save"
 msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:68
-#: src/pages/LayoutEditorPage.tsx:104
+#: src/pages/LayoutEditorPage.tsx:106
 msgid "Could not save layout"
 msgstr ""
 
@@ -1028,7 +1028,7 @@ msgstr ""
 msgid "Create"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:231
+#: src/pages/LayoutsPage.tsx:233
 msgid "Create your first layout"
 msgstr ""
 
@@ -1110,7 +1110,7 @@ msgid "Definition"
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:118
-#: src/pages/LayoutsPage.tsx:311
+#: src/pages/LayoutsPage.tsx:313
 #: src/pages/SalvosPage.tsx:307
 #: src/pages/SalvosPage.tsx:436
 #: src/pages/TallyPage.tsx:392
@@ -1124,7 +1124,7 @@ msgstr ""
 msgid "Delete layout"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:285
+#: src/pages/LayoutsPage.tsx:287
 msgid "Delete layout?"
 msgstr ""
 
@@ -1289,10 +1289,10 @@ msgstr ""
 msgid "Edit"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:116
-#: src/pages/LayoutEditorPage.tsx:127
-#: src/pages/LayoutEditorPage.tsx:140
-#: src/pages/LayoutEditorPage.tsx:160
+#: src/pages/LayoutEditorPage.tsx:118
+#: src/pages/LayoutEditorPage.tsx:129
+#: src/pages/LayoutEditorPage.tsx:142
+#: src/pages/LayoutEditorPage.tsx:162
 msgid "Edit layout"
 msgstr ""
 
@@ -1865,7 +1865,11 @@ msgstr ""
 msgid "Layout"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:178
+#: src/pages/LayoutsPage.tsx:147
+msgid "Layout applied live"
+msgstr ""
+
+#: src/pages/LayoutsPage.tsx:180
 msgid "Layout deleted"
 msgstr ""
 
@@ -1881,19 +1885,23 @@ msgstr ""
 msgid "Layout saved"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:96
+#: src/pages/LayoutEditorPage.tsx:91
+msgid "Layout saved & applied live"
+msgstr ""
+
+#: src/pages/LayoutEditorPage.tsx:98
 msgid "Layout saved, but apply failed"
 msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:89
-msgid "Layout saved; apply accepted"
-msgstr ""
+#~ msgid "Layout saved; apply accepted"
+#~ msgstr ""
 
 #: src/app/navigation.tsx:35
 #: src/docs/registry.ts:201
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:25
-#: src/pages/LayoutsPage.tsx:194
+#: src/pages/LayoutsPage.tsx:196
 msgid "Layouts"
 msgstr ""
 
@@ -1985,11 +1993,11 @@ msgstr ""
 msgid "Loading canvas…"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:118
+#: src/pages/LayoutEditorPage.tsx:120
 msgid "Loading layout…"
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:217
+#: src/pages/LayoutsPage.tsx:219
 msgid "Loading layouts…"
 msgstr ""
 
@@ -2166,7 +2174,7 @@ msgstr ""
 #~ msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 #~ msgstr ""
 
-#: src/pages/LayoutsPage.tsx:197
+#: src/pages/LayoutsPage.tsx:199
 msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas. Apply is live on the running engine."
 msgstr ""
 
@@ -2246,8 +2254,8 @@ msgstr ""
 msgid "New cell"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:160
-#: src/pages/LayoutsPage.tsx:209
+#: src/pages/LayoutEditorPage.tsx:162
+#: src/pages/LayoutsPage.tsx:211
 msgid "New layout"
 msgstr ""
 
@@ -2311,7 +2319,7 @@ msgstr ""
 msgid "No inputs are available to preview."
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:226
+#: src/pages/LayoutsPage.tsx:228
 msgid "No layouts are defined yet."
 msgstr ""
 
@@ -2453,8 +2461,8 @@ msgstr ""
 msgid "Open the system metrics page"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:90
-#: src/pages/LayoutsPage.tsx:146
+#: src/pages/LayoutEditorPage.tsx:92
+#: src/pages/LayoutsPage.tsx:148
 #: src/pages/SalvosPage.tsx:154
 #: src/pages/TallyPage.tsx:142
 msgid "Operation id"
@@ -3059,6 +3067,11 @@ msgstr ""
 msgid "Take salvo"
 msgstr ""
 
+#: src/pages/LayoutEditorPage.tsx:92
+#: src/pages/LayoutsPage.tsx:148
+msgid "Takes effect at the next frame boundary."
+msgstr ""
+
 #: src/app/navigation.tsx:40
 #: src/docs/registry.ts:221
 #: src/docs/registry.ts:576
@@ -3107,7 +3120,7 @@ msgstr ""
 msgid "That key was not accepted. Check it and try again."
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:129
+#: src/pages/LayoutEditorPage.tsx:131
 msgid "That layout no longer exists."
 msgstr ""
 
@@ -3375,7 +3388,7 @@ msgstr ""
 msgid "This is why the wall keeps running through any input failure: the output's timing is independent of every input by construction. Frame rates are handled as exact fractions (NTSC 29.97 is <0>30000/1001</0>, never a rounded decimal), so the cadence cannot drift over long runs."
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:148
+#: src/pages/LayoutEditorPage.tsx:150
 msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 msgstr ""
 
@@ -3387,7 +3400,7 @@ msgstr ""
 msgid "This overlay kind has no configurable parameters in this build. Parameters authored in a config file are preserved unchanged."
 msgstr ""
 
-#: src/pages/LayoutsPage.tsx:288
+#: src/pages/LayoutsPage.tsx:290
 msgid "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
 msgstr ""
 

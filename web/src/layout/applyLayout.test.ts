@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 
-import { applyLayoutCommand } from './applyLayout';
+import { applyLayoutCommand, describeApplyError } from './applyLayout';
 
 let lastBody: unknown;
 let lastAuth: string | null;
@@ -55,5 +55,35 @@ describe('applyLayoutCommand', () => {
       message: 'Engine command bus at capacity',
       status: 503,
     });
+  });
+
+  it('carries the 422 problem detail (the honest pre-202 refusal, ADR-W017)', async () => {
+    server.use(
+      http.post('*/api/v1/commands/apply-layout', () =>
+        HttpResponse.json(
+          {
+            title: 'Request validation failed',
+            status: 422,
+            detail: 'layout "wall-9" does not exist in the layouts library',
+          },
+          { status: 422 },
+        ),
+      ),
+    );
+    const failure = await applyLayoutCommand('wall-9', { token: 'tok-1' }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ status: 422 });
+    expect(describeApplyError(failure)).toBe(
+      'layout "wall-9" does not exist in the layouts library',
+    );
+  });
+});
+
+describe('describeApplyError', () => {
+  it('prefers the problem detail, falls back to the message, then String()', () => {
+    expect(describeApplyError(new Error('plain failure'))).toBe('plain failure');
+    expect(describeApplyError('odd rejection')).toBe('odd rejection');
   });
 });
