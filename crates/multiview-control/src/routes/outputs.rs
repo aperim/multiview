@@ -94,7 +94,7 @@ pub(crate) async fn get_output(
         path = "/api/v1/outputs/{id}",
         tag = "outputs",
         params(("id" = String, Path, description = "Output id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OutputResourceInputDoc,
         responses(
             (status = 201, description = "The created output (ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
@@ -137,7 +137,7 @@ pub(crate) async fn create_output(
         path = "/api/v1/outputs/{id}",
         tag = "outputs",
         params(("id" = String, Path, description = "Output id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OutputResourceInputDoc,
         responses(
             (status = 200, description = "The replaced output (new ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),

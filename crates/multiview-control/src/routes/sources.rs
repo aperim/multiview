@@ -96,7 +96,7 @@ pub(crate) async fn get_source(
         path = "/api/v1/sources/{id}",
         tag = "sources",
         params(("id" = String, Path, description = "Source id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
             (status = 201, description = "The created source (ETag in the response header; X-Multiview-Apply declares how it takes effect).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
@@ -139,7 +139,7 @@ pub(crate) async fn create_source(
         path = "/api/v1/sources/{id}",
         tag = "sources",
         params(("id" = String, Path, description = "Source id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
             (status = 200, description = "The replaced source (new ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),

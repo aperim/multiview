@@ -230,3 +230,65 @@ async fn create_valid_overlay_succeeds() {
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
 }
+
+/// Pin the `OpenAPI` mirror schemas (`openapi_schemas`) to the real
+/// `multiview_config` types: every representative document must be accepted by
+/// BOTH (a mirror that drifts fails here, per ADR-W015).
+#[test]
+fn openapi_mirrors_accept_what_the_config_types_accept() {
+    let sources = [
+        json!({ "id": "s", "kind": "bars" }),
+        json!({ "id": "s", "kind": "solid", "color": "#101014" }),
+        json!({ "id": "s", "kind": "clock", "face": "digital", "twelve_hour": true, "tz_offset_minutes": 600 }),
+        json!({ "id": "s", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam", "rtsp": { "transport": "tcp" } }),
+        json!({ "id": "s", "kind": "hls", "url": "https://example.com/x.m3u8" }),
+        json!({ "id": "s", "kind": "youtube", "url": "https://www.youtube.com/watch?v=abc" }),
+        json!({ "id": "s", "kind": "ts", "url": "udp://[ff3e::1]:5000" }),
+        json!({ "id": "s", "kind": "srt", "url": "srt://[2001:db8::2]:9000" }),
+        json!({ "id": "s", "kind": "rtmp", "url": "rtmp://example.com/live/x" }),
+        json!({ "id": "s", "kind": "ndi", "name": "STUDIO (CAM 1)" }),
+        json!({ "id": "s", "kind": "file", "path": "/media/loop.ts" }),
+        json!({
+            "id": "s", "kind": "rtsp", "url": "rtsp://h/x",
+            "display_name": "Cam",
+            "auth": { "secret_ref": "op://Servers/cam/credentials" },
+            "color_override": { "primaries": "bt709" },
+            "captions": { "mode": "teletext_page", "page": 801 },
+            "gpu_pin": { "vendor": "nvidia", "stable_id": "GPU-uuid" },
+            "wallclock": { "use": "discard" }
+        }),
+    ];
+    for doc in &sources {
+        let real: Result<multiview_config::Source, _> = serde_json::from_value(doc.clone());
+        let mirror: Result<multiview_control::openapi_schemas::SourceBodyDoc, _> =
+            serde_json::from_value(doc.clone());
+        assert!(real.is_ok(), "config rejects {doc}: {:?}", real.err());
+        assert!(mirror.is_ok(), "mirror rejects {doc}: {:?}", mirror.err());
+    }
+
+    let outputs = [
+        json!({ "kind": "rtsp_server", "mount": "/mv", "codec": "h264", "latency_profile": "low" }),
+        json!({ "kind": "ll_hls", "path": "/srv/hls", "codec": "h264", "part_target_ms": 333, "segment_ms": 2000, "gop_ms": 1000 }),
+        json!({ "kind": "hls", "path": "/srv/hls", "codec": "hevc", "segment_ms": 4000 }),
+        json!({ "kind": "ndi", "name": "MULTIVIEW" }),
+        json!({ "kind": "rtmp", "url": "rtmp://ingest.example/live/k", "codec": "h264" }),
+        json!({ "kind": "srt", "url": "srt://[2001:db8::3]:7000", "codec": "h264",
+                "gpu_pin": { "vendor": "intel", "stable_id": "pci-0000:00:02.0" },
+                "audio": { "mode": "program" } }),
+    ];
+    for doc in &outputs {
+        let real: Result<multiview_config::Output, _> = serde_json::from_value(doc.clone());
+        let mirror: Result<multiview_control::openapi_schemas::OutputBodyDoc, _> =
+            serde_json::from_value(doc.clone());
+        assert!(real.is_ok(), "config rejects {doc}: {:?}", real.err());
+        assert!(mirror.is_ok(), "mirror rejects {doc}: {:?}", mirror.err());
+    }
+
+    let overlay =
+        json!({ "id": "o", "kind": "clock", "target": "canvas", "z": 5, "face": "analog" });
+    assert!(serde_json::from_value::<multiview_config::Overlay>(overlay.clone()).is_ok());
+    assert!(
+        serde_json::from_value::<multiview_control::openapi_schemas::OverlayBodyDoc>(overlay)
+            .is_ok()
+    );
+}

@@ -94,7 +94,7 @@ pub(crate) async fn get_overlay(
         path = "/api/v1/overlays/{id}",
         tag = "overlays",
         params(("id" = String, Path, description = "Overlay id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
             (status = 201, description = "The created overlay (ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
@@ -137,7 +137,7 @@ pub(crate) async fn create_overlay(
         path = "/api/v1/overlays/{id}",
         tag = "overlays",
         params(("id" = String, Path, description = "Overlay id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
             (status = 200, description = "The replaced overlay (new ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
