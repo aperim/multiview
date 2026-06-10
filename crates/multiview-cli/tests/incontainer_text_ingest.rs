@@ -32,11 +32,7 @@ const CUE_TEXT: &str = "HELLO SUBTITLE";
 /// (`subtitle_codec`, e.g. `mov_text`/`ass`) carrying [`CUE_TEXT`] on screen from
 /// 1 s to 3 s, in container format `container` (e.g. `mp4`/`matroska`).
 fn build_text_subtitle_clip(path: &Path, srt: &Path, subtitle_codec: &str, container: &str) {
-    std::fs::write(
-        srt,
-        "1\n00:00:01,000 --> 00:00:03,000\nHELLO SUBTITLE\n",
-    )
-    .expect("write srt");
+    std::fs::write(srt, "1\n00:00:01,000 --> 00:00:03,000\nHELLO SUBTITLE\n").expect("write srt");
     let status = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -136,7 +132,8 @@ async fn cue_reaching_store(clip: &Path, out_dir: &Path) -> Option<CaptionCue> {
 }
 
 fn assert_text_cue(cue: Option<CaptionCue>, what: &str) {
-    match cue.unwrap_or_else(|| panic!("a {what} text cue must reach the cue store via the wiring")) {
+    match cue.unwrap_or_else(|| panic!("a {what} text cue must reach the cue store via the wiring"))
+    {
         CaptionCue::Text { text, start, end } => {
             assert!(
                 text.lines.iter().any(|l| l.contains(CUE_TEXT)),

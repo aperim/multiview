@@ -110,7 +110,8 @@ async fn embedded_cc_source_drives_a_text_cue_into_the_cue_store() {
     // recovered text cue (the cue store is sampled by absolute media time).
     let fps = i64::from(A53_FPS);
     let mut found: Option<CaptionCue> = None;
-    for frame in 0..(TICKS as i64) {
+    for frame in 0..TICKS {
+        let frame = i64::try_from(frame).expect("tick fits i64");
         let ns = frame.saturating_mul(1_000_000_000) / fps;
         if let Some(cue) = store.active_at(MediaTime::from_nanos(ns)) {
             found = Some(cue);
