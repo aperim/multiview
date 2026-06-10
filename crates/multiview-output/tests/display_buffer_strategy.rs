@@ -209,7 +209,7 @@ fn nv12_plane_but_modifier_mismatch_falls_back_not_direct() {
 // ---------------------------------------------------------------------------
 
 /// Build a `struct drm_format_modifier_blob` payload (uapi `drm_mode.h`):
-/// a 24-byte header, then the `u32` format fourccs, then 16-byte
+/// a 24-byte header, then the `u32` format fourccs, then 24-byte
 /// `drm_format_modifier` records `{ formats: u64, offset: u32, pad: u32,
 /// modifier: u64 }`.
 fn build_in_formats_blob(formats: &[[u8; 4]], modifiers: &[(u64, u64)]) -> Vec<u8> {
