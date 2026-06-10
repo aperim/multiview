@@ -142,6 +142,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-W014](ADR-W014.md) — Control-plane access: bootstrap admin token from `MULTIVIEW_CONTROL_TOKEN` (else generated + logged once)
 - [ADR-W015](ADR-W015.md) — Typed resource validation (422 on invalid source/output/overlay bodies) + `GET /api/v1/config/export` TOML + honest apply semantics
 - [ADR-W016](ADR-W016.md) — In-app docs system: registry-derived MiniSearch keyword search, stable anchors, `HelpLink` deep links from the UI, operator concept library
+- [ADR-W018](ADR-W018.md) — Live source apply: `UpsertSource`/`RemoveSource` on the command bus, frame-boundary registration + off-thread producer hub, per-response `X-Multiview-Apply` live/restart per kind, placement pinned to the running island
 
 ## Dev Container
 
