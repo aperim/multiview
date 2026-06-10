@@ -12,8 +12,8 @@
 )]
 
 use multiview_output::display::strategy::{
-    plane_supports_nv12, select_buffer_strategy, BufferStrategy, CanvasDelivery, DrmFormat,
-    PlaneFormatCaps, ScanoutCaps,
+    parse_in_formats_blob, plane_supports_nv12, select_buffer_strategy, BufferStrategy,
+    CanvasDelivery, DrmFormat, PlaneFormatCaps, ScanoutCaps,
 };
 
 /// The Broadcom SAND128 column-tiled modifier (vc4 hardware-decoder native
@@ -192,6 +192,63 @@ fn nv12_plane_but_modifier_mismatch_falls_back_not_direct() {
         gpu_pass_available: false,
     };
     assert_eq!(select_buffer_strategy(&caps), BufferStrategy::CpuXrgbConvert);
+}
+
+// ---------------------------------------------------------------------------
+// parse_in_formats_blob — the kernel IN_FORMATS modifier blob → (formats,
+// modifiers). Pure byte parsing, so it is tested here without a real plane.
+// ---------------------------------------------------------------------------
+
+/// Build a `struct drm_format_modifier_blob` payload (uapi `drm_mode.h`):
+/// a 24-byte header, then the `u32` format fourccs, then 16-byte
+/// `drm_format_modifier` records `{ formats: u64, offset: u32, pad: u32,
+/// modifier: u64 }`.
+fn build_in_formats_blob(formats: &[[u8; 4]], modifiers: &[(u64, u64)]) -> Vec<u8> {
+    let header_len: u32 = 24;
+    let formats_offset = header_len;
+    let formats_len = u32::try_from(formats.len() * 4).unwrap();
+    let modifiers_offset = formats_offset + formats_len;
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&1u32.to_ne_bytes()); // version
+    blob.extend_from_slice(&0u32.to_ne_bytes()); // flags
+    blob.extend_from_slice(&u32::try_from(formats.len()).unwrap().to_ne_bytes());
+    blob.extend_from_slice(&formats_offset.to_ne_bytes());
+    blob.extend_from_slice(&u32::try_from(modifiers.len()).unwrap().to_ne_bytes());
+    blob.extend_from_slice(&modifiers_offset.to_ne_bytes());
+    for fmt in formats {
+        blob.extend_from_slice(&u32::from_le_bytes(*fmt).to_ne_bytes());
+    }
+    for (format_mask, modifier) in modifiers {
+        blob.extend_from_slice(&format_mask.to_ne_bytes()); // formats bitmask
+        blob.extend_from_slice(&0u32.to_ne_bytes()); // offset (index base)
+        blob.extend_from_slice(&0u32.to_ne_bytes()); // pad
+        blob.extend_from_slice(&modifier.to_ne_bytes());
+    }
+    blob
+}
+
+#[test]
+fn in_formats_blob_parses_formats_and_modifiers() {
+    // Two formats (NV12, XR24); two modifiers each applying to both (bitmask
+    // 0b11 = formats[0] and formats[1]).
+    let blob = build_in_formats_blob(
+        &[*b"NV12", *b"XR24"],
+        &[(0b11, 0), (0b11, SAND128)],
+    );
+    let caps = parse_in_formats_blob(&blob).expect("valid blob parses");
+    assert!(caps.has_format(DrmFormat::NV12));
+    assert!(caps.has_format(DrmFormat::XRGB8888));
+    // Both LINEAR and SAND128 are advertised.
+    assert!(caps.accepts_modifier(Some(0)));
+    assert!(caps.accepts_modifier(Some(SAND128)));
+}
+
+#[test]
+fn truncated_in_formats_blob_is_a_none_not_a_panic() {
+    // A short/garbage blob must never panic — return None so the caller falls
+    // back to a linear-only assumption.
+    assert!(parse_in_formats_blob(&[]).is_none());
+    assert!(parse_in_formats_blob(&[0u8; 10]).is_none());
 }
 
 #[test]
