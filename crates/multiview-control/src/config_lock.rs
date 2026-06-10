@@ -74,10 +74,7 @@ fn is_operational_or_recovery(path: &str) -> bool {
         return true;
     }
     // Operational commands (program start/stop/swap) are continuity, not config.
-    if matches!(
-        p,
-        "/commands/start" | "/commands/stop" | "/commands/swap"
-    ) {
+    if matches!(p, "/commands/start" | "/commands/stop" | "/commands/swap") {
         return true;
     }
     // Operational takes/actions: a salvo/routing take, a tally override, a

@@ -95,7 +95,11 @@ async fn file_lease_reports_file_transport_and_the_honest_local_shape() {
         support::get("/api/v1/licensing/heartbeat-status", VIEWER_TOKEN),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "read-only surface answers 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "read-only surface answers 200"
+    );
     let body = body_json(resp).await;
 
     // A file-sourced lease reports transport "file".
@@ -118,14 +122,8 @@ async fn file_lease_reports_file_transport_and_the_honest_local_shape() {
         fields.iter().any(|f| f.contains("fingerprint")),
         "{fields:?}"
     );
-    assert!(
-        fields.iter().any(|f| f.contains("version")),
-        "{fields:?}"
-    );
-    assert!(
-        fields.iter().any(|f| f.contains("serial")),
-        "{fields:?}"
-    );
+    assert!(fields.iter().any(|f| f.contains("version")), "{fields:?}");
+    assert!(fields.iter().any(|f| f.contains("serial")), "{fields:?}");
 }
 
 #[tokio::test]

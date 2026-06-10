@@ -173,15 +173,14 @@ impl EntitlementPlane {
 fn pinned_key_from_env() -> Option<PinnedKey> {
     let hex = std::env::var(PUBKEY_ENV).ok().filter(|s| !s.is_empty())?;
     let bytes = decode_hex(hex.trim())?;
-    match PinnedKey::from_slice(&bytes) {
-        Ok(key) => Some(key),
-        Err(_) => {
-            tracing::warn!(
-                "{PUBKEY_ENV} is not a valid 32-byte Ed25519 public key — ignoring \
-                 (running unlicensed-honest)"
-            );
-            None
-        }
+    if let Ok(key) = PinnedKey::from_slice(&bytes) {
+        Some(key)
+    } else {
+        tracing::warn!(
+            "{PUBKEY_ENV} is not a valid 32-byte Ed25519 public key — ignoring \
+             (running unlicensed-honest)"
+        );
+        None
     }
 }
 
@@ -259,7 +258,10 @@ mod tests {
         let signal = WatermarkSignal::clean();
         assert!(!signal.watermark());
         signal.set(EnforcementLevel::Watermark);
-        assert!(signal.watermark(), "an off-thread set is visible to the next read");
+        assert!(
+            signal.watermark(),
+            "an off-thread set is visible to the next read"
+        );
         assert_eq!(signal.level(), EnforcementLevel::Watermark);
     }
 

@@ -67,7 +67,9 @@ pub fn push_tile_watermark(list: &mut OverlayDrawList, width: u32, height: u32) 
         return 0;
     }
     let short = width.min(height);
-    let badge = (short / BADGE_FRACTION).clamp(MIN_BADGE_PX, MAX_BADGE_PX).min(short);
+    let badge = (short / BADGE_FRACTION)
+        .clamp(MIN_BADGE_PX, MAX_BADGE_PX)
+        .min(short);
     if badge == 0 {
         return 0;
     }
@@ -118,7 +120,12 @@ pub fn push_tile_watermark(list: &mut OverlayDrawList, width: u32, height: u32) 
         badge.saturating_sub(pad).saturating_sub(bar_h),
     )));
     list.push(OverlayPrimitive::Line {
-        rect: OverlayRect::new(left.saturating_add(i32_clamp(i64::from(pad))), bar_y, bar_w, bar_h),
+        rect: OverlayRect::new(
+            left.saturating_add(i32_clamp(i64::from(pad))),
+            bar_y,
+            bar_w,
+            bar_h,
+        ),
         color: MARK,
     });
 
@@ -159,7 +166,10 @@ mod tests {
         let (w, h) = (1280, 720);
         let mut list = OverlayDrawList::new();
         let n = push_tile_watermark(&mut list, w, h);
-        assert!(n >= 3, "watermark emits a plate + slash + underline, got {n}");
+        assert!(
+            n >= 3,
+            "watermark emits a plate + slash + underline, got {n}"
+        );
         assert_eq!(list.len(), n, "appends exactly its own primitives");
 
         // Every primitive footprint must sit in the right half + top half of the

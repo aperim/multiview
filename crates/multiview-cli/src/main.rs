@@ -114,8 +114,8 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     // (S1). A running engine is NEVER re-gated; this only refuses a *new* start at
     // the block-new-instance rung (the never-off-air promise).
     let plane = multiview_cli::licence::EntitlementPlane::from_env();
-    let mut engine = SoftwareEngine::build_gated(config, plane.level())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut engine =
+        SoftwareEngine::build_gated(config, plane.level()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let cadence = engine.cadence();
     let report = if let Some(ticks) = args.tick_budget(cadence) {
         tracing::info!(ticks, "software run: bounded");
@@ -203,6 +203,12 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
 /// returns). The hub shares `registry`, so a live remove can tear down a
 /// startup producer (generator or ingest thread) too.
+// reason: this is the single control-plane bring-up seam for BOTH run paths; its
+// parameters (listen, config, publisher, preview slot, stores, stop registry,
+// the Conspect LicenceState, and the shutdown receiver) are each a distinct,
+// independently-owned input the bind needs. Bundling them into a struct would
+// only move the arity behind a one-use builder without improving clarity.
+#[allow(clippy::too_many_arguments)]
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
@@ -493,8 +499,8 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     // Conspect S1 startup gate: gate the NEW engine build on the published ladder
     // level (refuse at the block-new-instance rung).
     let plane = multiview_cli::licence::EntitlementPlane::from_env();
-    let engine = SoftwareEngine::build_gated(config, plane.level())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let engine =
+        SoftwareEngine::build_gated(config, plane.level()).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(
         "ready: built engine for {} source(s) at {}/{} fps; \
          this build has no `ffmpeg` feature, so an external ingest/encode run is unavailable — \

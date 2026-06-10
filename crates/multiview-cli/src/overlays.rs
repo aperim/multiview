@@ -2048,19 +2048,14 @@ mod tests {
         );
     }
 
-    /// The whole canvas of a 2x2 quad_tiles layout (1280x720).
+    /// The whole canvas of a 2x2 `quad_tiles` layout (1280x720).
     const CANVAS_W: u32 = 1280;
     const CANVAS_H: u32 = 720;
 
     /// Count primitives whose footprint is in the top-right quarter of the canvas
     /// (where the enforcement watermark is anchored).
     fn corner_primitive_count(list: &OverlayDrawList) -> usize {
-        let band = OverlayRect::new(
-            i32_dim(CANVAS_W / 2),
-            0,
-            CANVAS_W / 2,
-            CANVAS_H / 2,
-        );
+        let band = OverlayRect::new(i32_dim(CANVAS_W / 2), 0, CANVAS_W / 2, CANVAS_H / 2);
         list.primitives
             .iter()
             .filter(|p| match p {
@@ -2082,14 +2077,24 @@ mod tests {
             .with_watermark(signal, CANVAS_W, CANVAS_H);
         let before = corner_primitive_count(
             &baker
-                .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+                .draw_list(
+                    MediaTime::ZERO,
+                    &HashMap::new(),
+                    &no_captions(),
+                    &no_bitmaps(),
+                )
                 .unwrap(),
         );
         // (The corner already holds the top-right tile's own state flag/meter; we
         // only assert the watermark adds nothing when clean — compared below.)
         let _ = before;
         let clean = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         assert!(
             !has_watermark_underline(&clean),
@@ -2108,7 +2113,12 @@ mod tests {
             .unwrap()
             .with_watermark(signal, CANVAS_W, CANVAS_H);
         let list = baker
-            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
             .unwrap();
         // The watermark's underline bar (a distinctive Line) marks it apart from
         // ordinary tile chrome; it must be present and in the top-right corner.
@@ -2117,12 +2127,18 @@ mod tests {
             "a watermark signal must draw the enforcement watermark"
         );
         assert!(
-            corner_primitive_count(&list) > corner_primitive_count(
-                &OverlayBaker::new(quad_tiles(), epoch_clock())
-                    .unwrap()
-                    .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
-                    .unwrap()
-            ),
+            corner_primitive_count(&list)
+                > corner_primitive_count(
+                    &OverlayBaker::new(quad_tiles(), epoch_clock())
+                        .unwrap()
+                        .draw_list(
+                            MediaTime::ZERO,
+                            &HashMap::new(),
+                            &no_captions(),
+                            &no_bitmaps()
+                        )
+                        .unwrap()
+                ),
             "the watermark adds primitives to the top-right corner vs an un-watermarked bake"
         );
     }

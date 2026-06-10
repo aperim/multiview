@@ -20,8 +20,14 @@ use multiview_licence::EnforcementLevel;
 /// source-build watermark). It is clean for `active`, `warning`, `config-locked`.
 #[test]
 fn watermark_flag_matches_the_spec_table() {
-    assert!(!EnforcementLevel::Active.watermark(), "active: clean canvas");
-    assert!(!EnforcementLevel::Warning.watermark(), "warning: clean canvas");
+    assert!(
+        !EnforcementLevel::Active.watermark(),
+        "active: clean canvas"
+    );
+    assert!(
+        !EnforcementLevel::Warning.watermark(),
+        "warning: clean canvas"
+    );
     assert!(
         !EnforcementLevel::ConfigLocked.watermark(),
         "config-locked: clean canvas (only reconfiguration is denied)"

@@ -146,9 +146,7 @@ pub const BLOCK_NEW_INSTANCE_REASON: &str =
 ///
 /// [`RunError::LeaseExpired`] iff `level` is
 /// [`EnforcementLevel::BlockNewInstance`](multiview_licence::EnforcementLevel::BlockNewInstance).
-pub fn start_gate(
-    level: Option<multiview_licence::EnforcementLevel>,
-) -> Result<(), RunError> {
+pub fn start_gate(level: Option<multiview_licence::EnforcementLevel>) -> Result<(), RunError> {
     match level {
         Some(level) if level.blocks_new_instances() => {
             Err(RunError::LeaseExpired(BLOCK_NEW_INSTANCE_REASON.to_owned()))

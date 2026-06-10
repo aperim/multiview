@@ -1917,6 +1917,48 @@
         }
       }
     },
+    "/api/v1/licensing/heartbeat-status": {
+      "get": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`GET /api/v1/licensing/heartbeat-status` — the read-only heartbeat status\n(role: read).",
+        "description": "Always `200` (it is a data report, never an error path): the honest local\nheartbeat status (transport + last/next contact + payload fields). With no\nlease installed it reports `transport: \"none\"` and null contact instants. The\nspec mandates **no** mutating endpoint exists for the heartbeat — this is\nread-only, and the router wires only `GET`.",
+        "operationId": "get_heartbeat_status",
+        "responses": {
+          "200": {
+            "description": "The honest local heartbeat status (read-only; no mutating endpoint exists).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeartbeatStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/outputs": {
       "get": {
         "tags": [
@@ -6447,6 +6489,41 @@
           "subsystem": {
             "type": "string",
             "description": "The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`)."
+          }
+        }
+      },
+      "HeartbeatStatus": {
+        "type": "object",
+        "description": "The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).\n\nWith no licence-server client yet (blocked on the external wire-protocol doc,\nbrief §14 O1), this reports **honestly from local state**: the transport the\nactive lease arrived over, the lease install instant as `last_at`, the lease's\n`next_contact_due` as `next_due`, and the exhaustive payload-field list. There\nis **no** mutating endpoint for the heartbeat (the spec mandates none) — the\n`POST /api/v1/account/licence/heartbeat` force-now action is a later,\nfeature-gated item (brief §11 #4), not this read surface.",
+        "required": [
+          "transport",
+          "payload_fields"
+        ],
+        "properties": {
+          "last_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The instant this machine last accepted a lease (the install instant), RFC\n3339; `None` when no lease is installed (no heartbeat yet — honest)."
+          },
+          "next_due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the next licensing contact is due (the active lease's\n`next_contact_due`), RFC 3339; `None` when no lease is installed."
+          },
+          "payload_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The exhaustive list of fields a heartbeat payload carries\n([`HEARTBEAT_PAYLOAD_FIELDS`]) — reported, never raw identifiers (§8)."
+          },
+          "transport": {
+            "type": "string",
+            "description": "The transport the active lease arrived over: `\"direct\"` (online server\ncontact), `\"relay\"` (mesh relay), or `\"file\"` (a dropped offline lease).\n`\"none\"` when no lease is installed."
           }
         }
       },
