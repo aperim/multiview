@@ -94,7 +94,9 @@ export function isAudioRoutingState(value: unknown): value is AudioRoutingState 
   );
 }
 
-function isProblem(value: unknown): value is { title: string; status: number } {
+function isProblem(
+  value: unknown,
+): value is { title: string; status: number; detail?: unknown } {
   return (
     isRecord(value) &&
     typeof value.status === 'number' &&
@@ -106,7 +108,12 @@ async function readProblem(response: Response): Promise<ApiError> {
   try {
     const body: unknown = await response.json();
     if (isProblem(body)) {
-      return new ApiError(body.title, body.status);
+      // The RFC 9457 `detail` carries the offending field path — surface it.
+      const message =
+        typeof body.detail === 'string' && body.detail !== ''
+          ? `${body.title}: ${body.detail}`
+          : body.title;
+      return new ApiError(message, body.status);
     }
   } catch {
     // Fall through to a status-only error when the body is absent/unparseable.

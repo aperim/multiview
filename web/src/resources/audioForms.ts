@@ -159,7 +159,10 @@ function parseGain(value: string): number | undefined {
     return 0;
   }
   const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  // The wire type is an f32: reject magnitudes that overflow it to infinity
+  // server-side even though they are finite in JS's f64.
+  const F32_MAX = 3.4028235e38;
+  return Number.isFinite(parsed) && Math.abs(parsed) <= F32_MAX ? parsed : undefined;
 }
 
 /** Map the validated form back onto the wire document (blank optionals omitted). */

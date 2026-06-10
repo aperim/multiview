@@ -267,7 +267,13 @@ async fn put_with_an_unknown_channel_layout_is_422() {
 async fn semantic_violations_are_422_naming_the_violation() {
     let h = harness();
     // Each case is well-typed but violates the routing block's own validation.
-    let cases: [(&str, serde_json::Value); 5] = [
+    let cases: [(&str, serde_json::Value); 6] = [
+        (
+            "non-finite gain (JSON literal overflows f32 to inf)",
+            json!({ "sample_rate_hz": 48000, "routes": [
+                { "input_id": "cam1", "channels": { "kind": "stereo" }, "gain_db": 1e39 }
+            ] }),
+        ),
         (
             "zero sample rate",
             json!({ "sample_rate_hz": 0, "routes": [] }),
