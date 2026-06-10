@@ -11,7 +11,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { createApiClient } from '../api/client';
 import { useLayouts, useSaveLayout } from '../api/queries';
-import { applyLayoutCommand } from '../layout/applyLayout';
+import { applyLayoutCommand, describeApplyError } from '../layout/applyLayout';
 import { fromLayoutBody } from '../layout/model';
 import type { LayoutModel } from '../layout/model';
 import {
@@ -101,8 +101,10 @@ export function LayoutEditorPage(): JSX.Element {
   };
 
   // Save & Apply: persist first, then submit the LIVE apply-layout command
-  // (202 + operation id; outcome on the realtime stream). A failed apply
-  // leaves the layout saved — the toast says which step failed.
+  // (ADR-W019: the route solves the stored body; a 202 means the layout swaps
+  // in at the engine's next frame boundary — no export, no restart). A failed
+  // apply leaves the layout saved — the toast says which step failed and why
+  // (the 422 problem detail names the reason, e.g. a pinned-canvas mismatch).
   const handleSaveAndApply = (payload: LayoutSavePayload): void => {
     const id = payload.id !== '' ? payload.id : crypto.randomUUID();
     save.mutate(
@@ -112,15 +114,15 @@ export function LayoutEditorPage(): JSX.Element {
           applyLayoutCommand(id)
             .then((accepted): void => {
               toast({
-                title: t`Layout saved; apply accepted`,
-                description: `${t`Operation id`}: ${accepted.operation_id}`,
+                title: t`Layout saved & applied live`,
+                description: `${t`Takes effect at the next frame boundary.`} ${t`Operation id`}: ${accepted.operation_id}`,
               });
               void navigate('/layouts');
             })
             .catch((error: unknown): void => {
               toast({
                 title: t`Layout saved, but apply failed`,
-                description: error instanceof Error ? error.message : String(error),
+                description: describeApplyError(error),
                 variant: 'destructive',
               });
             });

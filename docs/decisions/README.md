@@ -1,5 +1,6 @@
 # Architecture Decision Records
 
+These ADRs capture the load-bearing decisions for the Multiview engine. 100 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
@@ -150,6 +151,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs
 - [ADR-W014](ADR-W014.md) — Control-plane access: bootstrap admin token from `MULTIVIEW_CONTROL_TOKEN` (else generated + logged once)
 - [ADR-W015](ADR-W015.md) — Typed resource validation (422 on invalid source/output/overlay bodies) + `GET /api/v1/config/export` TOML + honest apply semantics
 - [ADR-W016](ADR-W016.md) — In-app docs system: registry-derived MiniSearch keyword search, stable anchors, `HelpLink` deep links from the UI, operator concept library
+- [ADR-W019](ADR-W019.md) — Live apply of stored layouts: resolve+solve at the route (422 before 202), command carries the solved artifact, frame-boundary swap (Class-1; pinned-canvas mismatches refused)
 - [ADR-W017](ADR-W017.md) — Action route style: bare verb path segments (codify shipped practice) *(Proposed)*
 
 ## Dev Container

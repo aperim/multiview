@@ -118,7 +118,7 @@ const fn default_opacity() -> f32 {
 /// constructed without them (or deserialized from a document predating them)
 /// behaves exactly as before. Use `..Cell::default()` in struct literals to opt
 /// out of the new fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     /// Left edge (fraction of canvas width).
     pub x: f32,
@@ -197,6 +197,19 @@ impl Canvas {
         Rational::new(self.fps_num, self.fps_den)
     }
 
+    /// Whether two canvases denote the **same output signal**: identical pixel
+    /// geometry and the same cadence **by value** ([`Rational`]'s `PartialEq`
+    /// cross-multiplies in `i128`), so a non-reduced `50/2` cadence equals
+    /// `25/1`. The live-apply pinned-canvas gates (ADR-W019 / ADR-R004)
+    /// compare with this — never with the structural derived `==`, whose
+    /// `fps_num`/`fps_den` fields deliberately distinguish non-reduced forms.
+    #[must_use]
+    pub fn same_signal(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.cadence() == other.cadence()
+    }
+
     /// Validate this canvas in isolation.
     ///
     /// Enforces positive pixel dimensions and a valid positive rational cadence
@@ -240,7 +253,7 @@ impl Canvas {
 }
 
 /// A complete named layout/template.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     /// Template name.
     pub name: String,
