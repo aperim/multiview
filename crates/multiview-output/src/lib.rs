@@ -46,6 +46,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// DEV-B1 / ADR-0044 — local DRM/KMS display output: the raw-frame sink that
+/// scans the pre-encode NV12 canvas out to HDMI/DP glass via atomic page
+/// flips. The mailbox, mode policy (EDID/CVT-RB), flip state machine, and the
+/// sink thread are pure Rust, always compiled, and CI-tested over a mock
+/// device seam; only `display::kms` (the real ioctl backend, feature
+/// `display-kms`) touches hardware.
+pub mod display;
 pub mod error;
 pub mod fanout;
 pub mod hls;

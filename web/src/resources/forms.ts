@@ -60,7 +60,8 @@ export type FormErrorCode =
   | 'duplicate-track'
   | 'duplicate-input'
   | 'reserved-track'
-  | 'program-bus-muted';
+  | 'program-bus-muted'
+  | 'rational-fps';
 
 /** Per-field validation errors keyed by form-state field name. */
 export type FieldErrors<Field extends string> = Partial<Record<Field, FormErrorCode>>;
@@ -657,6 +658,14 @@ export function validateSourceForm(
 /** Per-output audio selection ('default' = no `audio` block). */
 export type OutputAudioChoice = 'default' | 'program' | 'tracks';
 
+/**
+ * How a display output's mode is chosen: automatic (EDID preferred +
+ * exact-rational cadence match), an explicit EDID `mode` override, or a
+ * CVT-RB `forced_mode` for an EDID-less head. Mirrors the config schema's
+ * mutually-exclusive `mode` / `forced_mode` fields.
+ */
+export type DisplayModeChoice = 'auto' | 'override' | 'forced';
+
 /** The editable state behind the output form. */
 export interface OutputFormState {
   readonly id: string;
@@ -671,7 +680,20 @@ export interface OutputFormState {
   readonly url: string;
   /** Advertised NDI source name (`ndi`). */
   readonly ndiName: string;
-  /** Video codec (all kinds except `ndi`). An open schema string. */
+  /** KMS connector name, or `auto` for the first connected (`display`). */
+  readonly connector: string;
+  /** Display mode strategy (`display`): auto / EDID override / CVT-RB forced. */
+  readonly displayModeChoice: DisplayModeChoice;
+  /** Mode width in pixels (`display`, override/forced). */
+  readonly displayModeWidth: string;
+  /** Mode height in pixels (`display`, override/forced). */
+  readonly displayModeHeight: string;
+  /**
+   * Mode refresh as an exact rational (`60000/1001`) or a bare integer
+   * (`display`, override/forced). Never a float (invariant #3).
+   */
+  readonly displayModeRefresh: string;
+  /** Video codec (all kinds except `ndi`/`display`). An open schema string. */
   readonly codec: string;
   /** Latency profile hint (`rtsp_server`, optional). */
   readonly latencyProfile: string;
@@ -701,6 +723,10 @@ export type OutputField =
   | 'path'
   | 'url'
   | 'ndiName'
+  | 'connector'
+  | 'displayModeWidth'
+  | 'displayModeHeight'
+  | 'displayModeRefresh'
   | 'codec'
   | 'partTargetMs'
   | 'segmentMs'
@@ -709,18 +735,28 @@ export type OutputField =
   | 'gpuPinStableId';
 
 /**
- * Which output kinds the CLI run path can actually serve today. Mirrors
- * `build_outputs` in crates/multiview-cli/src/pipeline.rs: hls / ll_hls /
- * rtmp / srt build runnable sinks; rtsp_server and ndi are accepted by the
- * config schema but warned + skipped ("not yet runnable in this build").
+ * Whether (and how) an output kind runs in this build of the engine:
+ * `'runnable'` always runs; `'requires-feature'` runs only in a binary built
+ * with the named opt-in feature (a default build FAILS the run with a clear
+ * error rather than skipping); `'unbuilt'` is accepted by the config schema
+ * but warned + skipped by `build_outputs` ("not yet runnable in this build").
  */
-export const OUTPUT_RUNNABLE: Readonly<Record<OutputKind, boolean>> = {
-  rtsp: false,
-  hls: true,
-  'll-hls': true,
-  ndi: false,
-  rtmp: true,
-  srt: true,
+export type OutputRunnability = 'runnable' | 'requires-feature' | 'unbuilt';
+
+/**
+ * Mirrors `build_outputs` in crates/multiview-cli/src/pipeline.rs: hls /
+ * ll_hls / rtmp / srt build runnable sinks; display builds a raw-frame
+ * DRM/KMS sink only in a `display-kms` build (and hard-fails elsewhere —
+ * DEV-B1/ADR-0044); rtsp_server and ndi are accepted but warned + skipped.
+ */
+export const OUTPUT_RUNNABLE: Readonly<Record<OutputKind, OutputRunnability>> = {
+  rtsp: 'unbuilt',
+  hls: 'runnable',
+  'll-hls': 'runnable',
+  ndi: 'unbuilt',
+  rtmp: 'runnable',
+  srt: 'runnable',
+  display: 'requires-feature',
 };
 
 /** Map a display kind onto the config wire tag. */
@@ -745,6 +781,11 @@ export function emptyOutputForm(): OutputFormState {
     path: '',
     url: '',
     ndiName: '',
+    connector: 'auto',
+    displayModeChoice: 'auto',
+    displayModeWidth: '',
+    displayModeHeight: '',
+    displayModeRefresh: '',
     codec: 'h264',
     latencyProfile: '',
     partTargetMs: '',
@@ -774,6 +815,9 @@ const OUTPUT_MANAGED_KEYS: readonly string[] = [
   'path',
   'url',
   'name',
+  'connector',
+  'mode',
+  'forced_mode',
   'codec',
   'latency_profile',
   'part_target_ms',
@@ -828,6 +872,25 @@ export function outputFormToBody(form: OutputFormState): Record<string, unknown>
     case 'ndi':
       body.name = form.ndiName.trim();
       break;
+    case 'display': {
+      // Raw-frame DRM/KMS head (DEV-B1/ADR-0044): connector + at most one of
+      // the mutually-exclusive mode tables; no codec (pre-encode canvas).
+      body.connector = form.connector.trim();
+      if (form.displayModeChoice !== 'auto') {
+        const width = parseIntStrict(form.displayModeWidth);
+        const height = parseIntStrict(form.displayModeHeight);
+        const refresh = parseRationalFps(form.displayModeRefresh);
+        if (width !== undefined && height !== undefined && refresh !== undefined) {
+          const spec = { width, height, refresh: `${String(refresh.num)}/${String(refresh.den)}` };
+          if (form.displayModeChoice === 'override') {
+            body.mode = spec;
+          } else {
+            body.forced_mode = spec;
+          }
+        }
+      }
+      break;
+    }
     case 'rtmp':
     case 'srt':
       body.url = form.url.trim();
@@ -844,6 +907,32 @@ export function outputFormToBody(form: OutputFormState): Record<string, unknown>
     body.gpu_pin = { vendor: form.gpuPinVendor, stable_id: form.gpuPinStableId.trim() };
   }
   return body;
+}
+
+/**
+ * Parse an exact-rational refresh entry: `num/den` (`60000/1001`) or a bare
+ * positive integer (`50` ⇒ `50/1`). Floats are rejected — frame rates are
+ * exact rationals, never floats (invariant #3).
+ */
+export function parseRationalFps(value: string): { num: number; den: number } | undefined {
+  const trimmed = value.trim();
+  const ratio = /^(\d+)\s*\/\s*(\d+)$/.exec(trimmed);
+  if (ratio) {
+    const num = Number.parseInt(ratio[1] ?? '', 10);
+    const den = Number.parseInt(ratio[2] ?? '', 10);
+    if (!Number.isSafeInteger(num) || !Number.isSafeInteger(den) || num <= 0 || den <= 0) {
+      return undefined;
+    }
+    return { num, den };
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const num = Number.parseInt(trimmed, 10);
+    if (!Number.isSafeInteger(num) || num <= 0) {
+      return undefined;
+    }
+    return { num, den: 1 };
+  }
+  return undefined;
 }
 
 /** Split a comma-separated track list into trimmed, non-empty names. */
@@ -865,7 +954,7 @@ export function parseOutputFormKind(tag: string | undefined): OutputKind | undef
   if (tag === 'll_hls') {
     return 'll-hls';
   }
-  return (['hls', 'ndi', 'rtmp', 'srt'] as const).find((k) => k === tag);
+  return (['hls', 'ndi', 'rtmp', 'srt', 'display'] as const).find((k) => k === tag);
 }
 
 /**
@@ -887,6 +976,17 @@ export function outputFormFromRecord(record: ResourceRecord): OutputFormState | 
     ? rawTracks.filter((track): track is string => typeof track === 'string')
     : [];
   const gpuPin = asRecord(body.gpu_pin);
+  // The display mode tables (`mode` overrides among EDID modes; `forced_mode`
+  // is the EDID-less CVT-RB timing). At most one is authored (config-validated).
+  const overrideSpec = asRecord(body.mode);
+  const forcedSpec = asRecord(body.forced_mode);
+  const modeSpec = overrideSpec ?? forcedSpec;
+  let modeChoice: DisplayModeChoice = 'auto';
+  if (overrideSpec !== undefined) {
+    modeChoice = 'override';
+  } else if (forcedSpec !== undefined) {
+    modeChoice = 'forced';
+  }
   return {
     ...empty,
     id: record.id,
@@ -896,7 +996,12 @@ export function outputFormFromRecord(record: ResourceRecord): OutputFormState | 
     path: asString(body.path) ?? '',
     url: asString(body.url) ?? '',
     ndiName: kind === 'ndi' ? (asString(body.name) ?? '') : '',
-    codec: asString(body.codec) ?? (kind === 'ndi' ? '' : 'h264'),
+    connector: asString(body.connector) ?? 'auto',
+    displayModeChoice: kind === 'display' ? modeChoice : 'auto',
+    displayModeWidth: numberToField(asFiniteNumber(modeSpec?.width)),
+    displayModeHeight: numberToField(asFiniteNumber(modeSpec?.height)),
+    displayModeRefresh: asString(modeSpec?.refresh) ?? '',
+    codec: asString(body.codec) ?? (kind === 'ndi' || kind === 'display' ? '' : 'h264'),
     latencyProfile: asString(body.latency_profile) ?? '',
     partTargetMs: numberToField(asFiniteNumber(body.part_target_ms)),
     segmentMs: numberToField(asFiniteNumber(body.segment_ms)),
@@ -951,6 +1056,25 @@ export function validateOutputForm(
         errors.ndiName = 'required';
       }
       break;
+    case 'display': {
+      if (form.connector.trim() === '') {
+        errors.connector = 'required';
+      }
+      if (form.displayModeChoice !== 'auto') {
+        const width = parseIntStrict(form.displayModeWidth);
+        if (width === undefined || width <= 0) {
+          errors.displayModeWidth = 'positive-int';
+        }
+        const height = parseIntStrict(form.displayModeHeight);
+        if (height === undefined || height <= 0) {
+          errors.displayModeHeight = 'positive-int';
+        }
+        if (parseRationalFps(form.displayModeRefresh) === undefined) {
+          errors.displayModeRefresh = 'rational-fps';
+        }
+      }
+      break;
+    }
     case 'rtmp': {
       const code = urlErrorCode(form.url, ['rtmp', 'rtmps'], 'scheme-rtmp');
       if (code !== undefined) {
@@ -966,7 +1090,8 @@ export function validateOutputForm(
       break;
     }
   }
-  if (form.kind !== 'ndi' && form.codec.trim() === '') {
+  // NDI and display carry raw frames, not an encoded rendition — no codec.
+  if (form.kind !== 'ndi' && form.kind !== 'display' && form.codec.trim() === '') {
     errors.codec = 'required';
   }
   if (form.kind === 'll-hls') {

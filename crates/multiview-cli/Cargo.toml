@@ -185,6 +185,17 @@ overlay = ["multiview-compositor/overlay"]
 # default graph). Wires no FFI here; the CLI stays `unsafe_code = forbid`.
 gpu = ["multiview-compositor/wgpu", "dep:wgpu"]
 
+# Local DRM/KMS display output (DEV-B1 / ADR-0044): wire `Output::Display`
+# heads into the run as raw-frame scanout sinks (the pre-encode canvas through
+# wait-free mailboxes; never the packet fan-out). OFF by default: it pulls the
+# drm/gbm native path in multiview-output (building needs libgbm-dev; the
+# binary dynamically links Mesa's libgbm). Without this feature a config
+# declaring a display output FAILS the run with a clear error -- never a silent
+# skip. The CLI itself adds NO unsafe and stays `forbid(unsafe_code)`. The
+# run wiring lives in the `ffmpeg`-gated pipeline (the only live run path), so
+# a deploy build combines them: `--features nvidia,display-kms` etc.
+display-kms = ["multiview-output/display-kms"]
+
 # Report the MEASURED kernel NTP/PTP discipline status on the wall-clock badge
 # (ENG-3b) instead of an assumed one. Off by default: it pulls the engine's `ntp`
 # feature, which links the `multiview-ntpsys` FFI leaf crate (the one `adjtimex`

@@ -956,6 +956,12 @@ pub struct Pipeline {
     encode_cfg: EncodeConfig,
     /// The runnable outputs declared in the config.
     outputs: Vec<RunnableOutput>,
+    /// The configured DRM/KMS display heads (DEV-B1 / ADR-0044, feature
+    /// `display-kms`): **raw-frame** sinks fed the pre-encode NV12 canvas
+    /// through wait-free mailboxes — never part of the packet fan-out. Taken
+    /// (and started) once at stream start; the sinks live for the run.
+    #[cfg(feature = "display-kms")]
+    display_plans: Vec<DisplayOutputPlan>,
     /// Per-input elementary-stream inventories, keyed (and id-sorted) by source
     /// id (RT-3, ADR-0034 §9). Probed **once at build time** — off the
     /// output-clock thread — from each path-backed source's demuxer (the
@@ -1205,8 +1211,13 @@ impl Pipeline {
             cuda_ordinal: None,
         };
 
-        let outputs = build_outputs(&config.outputs)?;
-        if outputs.is_empty() {
+        let built = build_outputs(&config.outputs)?;
+        #[cfg(feature = "display-kms")]
+        let has_display = !built.display.is_empty();
+        #[cfg(not(feature = "display-kms"))]
+        let has_display = false;
+        let outputs = built.packet;
+        if outputs.is_empty() && !has_display {
             return Err(PipelineError::NoOutput("file/HLS"));
         }
 
@@ -1283,6 +1294,8 @@ impl Pipeline {
             encoder,
             encode_cfg: cfg,
             outputs,
+            #[cfg(feature = "display-kms")]
+            display_plans: built.display,
             #[cfg(feature = "overlay")]
             subtitles: None,
             #[cfg(feature = "overlay")]
@@ -1978,6 +1991,18 @@ impl Pipeline {
             publisher.publish_event(event);
         }
         let input_fragment = crate::control::input_inventories_fragment(&self.inventories);
+        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
+        // startup, before the output clock runs — and keep their handles alive
+        // for the whole run (drop = stop + join, off the hot path). Each sink
+        // owns its device on a dedicated thread; the engine side holds only
+        // wait-free mailbox publishers, fed in `state_of` exactly where the
+        // live-preview slot is filled. A startup failure (no such connector,
+        // no usable mode, modeset rejected) fails the run like any other
+        // misconfigured output; after startup the sinks can never fail the
+        // engine (invariants #1 + #10).
+        #[cfg(feature = "display-kms")]
+        let (_display_handles, display_publishers) =
+            start_display_sinks(std::mem::take(&mut self.display_plans), self.cadence)?;
         // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
         // state (kept here on the hot loop — the bounded cue store holds only a
         // small live window, so it must be sampled now, not after the run), clones
@@ -2006,6 +2031,13 @@ impl Pipeline {
             // free swap; the control plane serves the latest still off it).
             let canvas = Arc::new(frame.canvas.clone());
             preview.store(Some(Arc::clone(&canvas)));
+            // The display heads ride the SAME pre-encode canvas `Arc` through
+            // their wait-free mailboxes (one atomic bump + one lock-free swap
+            // each — the engine never awaits a sink; ADR-0044, inv #1/#10).
+            #[cfg(feature = "display-kms")]
+            for display in &display_publishers {
+                display.publish(CanvasFrame(Arc::clone(&canvas)));
+            }
             let item = StreamItem {
                 canvas: Arc::clone(&canvas),
                 tick_index: frame.tick.index,
@@ -4237,19 +4269,188 @@ fn output_codec(output: &Output) -> Option<&str> {
     }
 }
 
+/// The outputs `build_outputs` assembles: the encode-once-mux-many **packet**
+/// sinks, plus (feature `display-kms`) the **raw-frame** display-head plans —
+/// two disjoint paths by design (ADR-0044: a display sink consumes the
+/// pre-encode canvas and never joins the packet fan-out).
+struct BuiltOutputs {
+    /// File/HLS/push sinks fed the one encoded packet stream (invariant #7).
+    packet: Vec<RunnableOutput>,
+    /// DRM/KMS display heads, started as raw-frame sinks at stream start.
+    #[cfg(feature = "display-kms")]
+    display: Vec<DisplayOutputPlan>,
+}
+
+/// One configured display head (feature `display-kms`): everything
+/// [`start_display_sinks`] needs to open the device and light the connector.
+#[cfg(feature = "display-kms")]
+#[derive(Debug, Clone)]
+struct DisplayOutputPlan {
+    /// The output's stable id (diagnostics).
+    output_id: String,
+    /// Which connector to drive.
+    connector: multiview_output::display::ConnectorSelector,
+    /// The mode request (auto / exact override).
+    mode: multiview_output::display::ModeRequest,
+    /// The CVT-RB forced mode for an EDID-less chain, if configured.
+    forced_mode: Option<multiview_output::display::ForcedMode>,
+}
+
+/// Extract the display-head plan from one `Output::Display` (feature
+/// `display-kms`).
+#[cfg(feature = "display-kms")]
+fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
+    use multiview_output::display::{ConnectorSelector, ForcedMode, ModeRequest};
+    let Output::Display {
+        connector,
+        mode,
+        forced_mode,
+        ..
+    } = output
+    else {
+        return None;
+    };
+    let selector = if connector.trim().eq_ignore_ascii_case("auto") {
+        ConnectorSelector::Auto
+    } else {
+        ConnectorSelector::Name(connector.clone())
+    };
+    let request = mode
+        .as_ref()
+        .map_or(ModeRequest::Auto, |spec| ModeRequest::Exact {
+            width: spec.width,
+            height: spec.height,
+            refresh: spec.refresh.rational(),
+        });
+    let forced = forced_mode.as_ref().map(|spec| ForcedMode {
+        width: spec.width,
+        height: spec.height,
+        refresh: spec.refresh.rational(),
+    });
+    Some(DisplayOutputPlan {
+        output_id: output.id(),
+        connector: selector,
+        mode: request,
+        forced_mode: forced,
+    })
+}
+
+/// The display sinks' view of the composited program (feature `display-kms`):
+/// an `Arc` clone of the **same** pre-encode NV12 canvas the preview slot and
+/// the encode fan-out share — no extra pixel copy on the hot loop.
+#[cfg(feature = "display-kms")]
+#[derive(Debug)]
+struct CanvasFrame(Arc<Nv12Image>);
+
+#[cfg(feature = "display-kms")]
+impl multiview_output::display::DisplayCanvas for CanvasFrame {
+    fn width(&self) -> u32 {
+        self.0.width()
+    }
+    fn height(&self) -> u32 {
+        self.0.height()
+    }
+    fn y_plane(&self) -> &[u8] {
+        self.0.y_plane()
+    }
+    fn uv_plane(&self) -> &[u8] {
+        self.0.uv_plane()
+    }
+}
+
+/// Open and light every configured display head (feature `display-kms`):
+/// scan `/dev/dri` for the connector-owning card, probe + select the mode
+/// (EDID preferred / exact-rational `cadence` match / CVT-RB forced), run the
+/// `TEST_ONLY` validation and the one startup modeset, and spawn the
+/// dedicated flip-loop thread per head (ADR-0044 §1). Startup-only; runs
+/// before the output clock starts.
+///
+/// # Errors
+///
+/// [`PipelineError::Output`] when a head cannot be opened, has no usable
+/// mode, or fails validation/modeset — a misconfigured output fails the run
+/// (it is never silently skipped).
+#[cfg(feature = "display-kms")]
+fn start_display_sinks(
+    plans: Vec<DisplayOutputPlan>,
+    cadence: Rational,
+) -> Result<
+    (
+        Vec<multiview_output::display::DisplaySinkHandle>,
+        Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
+    ),
+    PipelineError,
+> {
+    use multiview_output::display::kms::KmsDisplayDevice;
+    use multiview_output::display::{DisplaySink, DisplaySinkConfig};
+    let mut handles = Vec::with_capacity(plans.len());
+    let mut publishers = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let device = KmsDisplayDevice::open_for_connector(&plan.connector).map_err(|e| {
+            PipelineError::Output {
+                kind: "display",
+                reason: format!("{}: {e}", plan.output_id),
+            }
+        })?;
+        let (handle, publisher) = DisplaySink::start::<CanvasFrame, _>(
+            device,
+            DisplaySinkConfig {
+                output_id: plan.output_id.clone(),
+                connector: plan.connector,
+                mode: plan.mode,
+                forced_mode: plan.forced_mode,
+                engine_cadence: Some(cadence),
+                // A few ms bounds both the stop-flag latency and how quickly
+                // an idle pipe notices a fresh mailbox frame; well under one
+                // frame period at any broadcast cadence.
+                poll_interval: Duration::from_millis(4),
+            },
+        )
+        .map_err(|e| PipelineError::Output {
+            kind: "display",
+            reason: format!("{}: {e}", plan.output_id),
+        })?;
+        handles.push(handle);
+        publishers.push(publisher);
+    }
+    Ok((handles, publishers))
+}
+
 /// Build the runnable sinks from the config outputs.
 ///
 /// HLS/LL-HLS segment to disk; **RTMP and SRT push outputs are run** via the
 /// [`PushSink`] (the same encode-once-mux-many drive loop the file/HLS sinks use —
-/// invariant #7 — only the muxer targets a network URL). The RTSP *server* and NDI
-/// out are genuinely not implemented (an RTSP server is its own RTP/RTSP protocol
-/// stack; NDI is the proprietary runtime-loaded SDK), so they are honestly skipped
-/// with a log line rather than pretended-runnable — a config mixing one with a
-/// supported output still produces that supported output.
-fn build_outputs(outputs: &[Output]) -> Result<Vec<RunnableOutput>, PipelineError> {
+/// invariant #7 — only the muxer targets a network URL). A **display** output
+/// (DEV-B1 / ADR-0044) is built as a raw-frame DRM/KMS plan in a `display-kms`
+/// build and is a hard error otherwise (never silently skipped — the gate in
+/// [`crate::outputs`]). The RTSP *server* and NDI out are genuinely not
+/// implemented (an RTSP server is its own RTP/RTSP protocol stack; NDI is the
+/// proprietary runtime-loaded SDK), so they are honestly skipped with a log
+/// line rather than pretended-runnable — a config mixing one with a supported
+/// output still produces that supported output.
+fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
+    // A display output in a non-display-kms build is a configuration the
+    // binary cannot honour: fail the build clearly, never skip (DEV-B1).
+    crate::outputs::ensure_display_outputs_supported(outputs).map_err(|reason| {
+        PipelineError::Output {
+            kind: "display",
+            reason,
+        }
+    })?;
     let mut runnable = Vec::new();
+    #[cfg(feature = "display-kms")]
+    let mut display_plans = Vec::new();
     for output in outputs {
         match output {
+            Output::Display { .. } => {
+                // Runnable only under `display-kms` (the gate above already
+                // rejected it otherwise): a raw-frame scanout plan, started at
+                // stream start — deliberately NOT a packet sink (ADR-0044).
+                #[cfg(feature = "display-kms")]
+                if let Some(plan) = display_plan_of(output) {
+                    display_plans.push(plan);
+                }
+            }
             Output::Hls { path, .. } | Output::LlHls { path, .. } => {
                 let (dir, prefix, playlist_path) = hls_paths(Path::new(path));
                 std::fs::create_dir_all(&dir).map_err(|e| PipelineError::Output {
@@ -4309,7 +4510,11 @@ fn build_outputs(outputs: &[Output]) -> Result<Vec<RunnableOutput>, PipelineErro
     // HLS run must not also write an ever-growing `program.ts` (HLS-2, ADR-0032),
     // while a finite/offline render still wants the self-contained container — so
     // the anchor is prepended at run time by `maybe_prepend_program_ts`, not here.
-    Ok(runnable)
+    Ok(BuiltOutputs {
+        packet: runnable,
+        #[cfg(feature = "display-kms")]
+        display: display_plans,
+    })
 }
 
 /// Optionally derive a single-file `program.ts` container sink from the first HLS
