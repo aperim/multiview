@@ -177,9 +177,12 @@ export interface paths {
         /**
          * `POST /api/v1/devices/{id}` — adopt/create a device (role: write).
          * @description Validates the body against `multiview_config::Device` (`422` on an invalid
-         *     document) and seeds the runtime status registry in `ADOPTING` so
-         *     `GET /devices/{id}/status` answers immediately — the first probe lands with
-         *     the driver actors (DEV-A4/A5).
+         *     document), seeds the runtime status registry in `ADOPTING` so
+         *     `GET /devices/{id}/status` answers immediately, and **starts the device's
+         *     supervised driver poller** (DEV-A4) — which performs the first probe and
+         *     drives the device to `ONLINE`/`AUTH_FAILED`/`UNREACHABLE`. The poller is a
+         *     no-op for devices the factory does not manage (the default build / a
+         *     non-`zowietek` driver).
          */
         post: operations["create_device"];
         /**
@@ -223,10 +226,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/devices/{id}/output-targets` — the declared output-binding
-         *     projection (ADR-M009 facet (b)).
-         * @description Honestly empty until a driver enumerates decode slots (no live driver in this
-         *     slice): never fabricated live telemetry.
+         * `GET /api/v1/devices/{id}/output-targets` — the output-binding projection
+         *     (ADR-M009 facet (b)).
+         * @description Returns the device's running driver's enumerated targets (DEV-A4: a
+         *     decoder-mode `zowietek` box's decode-table slots). Honestly empty until a
+         *     driver has enumerated — and on a build/device with no live driver — never
+         *     fabricated live telemetry.
          */
         get: operations["output_targets"];
         put?: never;
@@ -248,9 +253,11 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).
-         * @description A synchronous management verb (ADR-W017): in this slice (no driver actor) it
-         *     confirms the device exists and acknowledges the probe request (`200`). The
-         *     real probe round-trip lands with the driver actors (DEV-A4/A5).
+         * @description A synchronous management verb (ADR-W017): it confirms the device exists and
+         *     acknowledges the probe request (`200`). The device's supervised driver poller
+         *     (DEV-A4) is already probing on its own ≤1 Hz cadence and re-probing on
+         *     reconnect, so the latest status is read via `GET /devices/{id}/status`; this
+         *     verb is the operator's explicit "I looked" acknowledgement.
          */
         post: operations["probe_device"];
         delete?: never;
@@ -294,9 +301,16 @@ export interface paths {
          *     (role: write; `202` + operation id + declared DEV-class impact).
          * @description The device-side impact is **declared in the body before apply** (ADR-M009):
          *     the device restarts its pipeline; bound sources ride the tile ladder to
-         *     `NO_SIGNAL` during the switch; no Multiview output is interrupted. In this
-         *     slice the operation id is minted and `202`'d; the `device.mode` outcome
-         *     arrives on the realtime stream once the driver actor lands.
+         *     `NO_SIGNAL` during the switch; no Multiview output is interrupted. The route
+         *     mints the operation id, `202`s, and **dispatches** the convergence to the
+         *     device's running driver poller (DEV-A4), which records the requested mode as
+         *     its desired mode, runs `plan_mode_convergence` → `converge_mode`
+         *     (close-before-open), and publishes the `device.mode` outcome on the realtime
+         *     stream; a failed apply is re-converged on the poller's next adopt/reconnect
+         *     pass. When no live poller is running (the default build / a device with no
+         *     spawned driver), the `202` still declares the impact but nothing applies the
+         *     change: the device's configured `desired_mode` is what a later-spawned
+         *     poller converges onto when its adopt/reconnect reaches `ONLINE`.
          */
         post: operations["set_mode"];
         delete?: never;
@@ -313,10 +327,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/devices/{id}/source-candidates` — the declared source-binding
-         *     projection (ADR-M009 facet (a)).
-         * @description Honestly empty until a driver enumerates streams (no live driver in this
-         *     slice): never fabricated live telemetry.
+         * `GET /api/v1/devices/{id}/source-candidates` — the source-binding projection
+         *     (ADR-M009 facet (a)).
+         * @description Returns the device's running driver's enumerated candidates (DEV-A4: a
+         *     `zowietek` device's served RTSP mounts). Honestly empty until a driver has
+         *     enumerated — and on a build/device with no live driver — never fabricated
+         *     live telemetry.
          */
         get: operations["source_candidates"];
         put?: never;

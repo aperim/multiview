@@ -20,7 +20,7 @@ use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
 use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
-use crate::devices::DeviceStatusRegistry;
+use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
@@ -349,6 +349,22 @@ pub struct AppState {
     /// unverified — never fabricated) and any extra DNS-SD types to browse.
     /// Defaults to the empty section (built-in Cast + NDI types only).
     pub discovery_config: Arc<multiview_config::DiscoveryConfig>,
+    /// The latest-wins device **driver** registry (runtime state, never
+    /// persisted/exported): the source-candidate / output-target facets each
+    /// driver (DEV-A4 `zowietek`, …) enumerated for its device, read by the
+    /// `GET /devices/{id}/source-candidates` and `/output-targets` routes
+    /// (ADR-M009). Empty until a driver enumerates — the routes' honest-empty
+    /// fallback. Bounded, control-plane-only — it can never back-pressure the
+    /// engine (invariant #10).
+    pub device_drivers: Arc<DeviceDriverRegistry>,
+    /// The runtime registry of **spawned** device poller actors (DEV-A4): adopt
+    /// starts one for a `zowietek` device, delete stops it, and `set-mode`
+    /// dispatches a convergence to the running actor. The default build uses the
+    /// no-op factory (no live transport → no poller spawned, projection routes
+    /// stay honestly empty); the binary installs the reqwest-backed factory
+    /// behind the `zowietek` feature. Control-plane-only, `Mutex`-guarded handle
+    /// map — it can never back-pressure the engine (invariant #10).
+    pub device_pollers: Arc<DevicePollerRegistry>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -475,6 +491,8 @@ impl AppState {
             discovery_browser: Arc::new(NullBrowser),
             discovery_scan_gate: Arc::new(ScanGate::new()),
             discovery_config: Arc::new(multiview_config::DiscoveryConfig::default()),
+            device_drivers: Arc::new(DeviceDriverRegistry::new()),
+            device_pollers: Arc::new(DevicePollerRegistry::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -687,6 +705,57 @@ impl AppState {
     pub fn with_discovery_config(mut self, config: multiview_config::DiscoveryConfig) -> Self {
         self.discovery_config = Arc::new(config);
         self
+    }
+
+    /// Replace the device **driver** registry (e.g. to share one with the
+    /// `zowietek` driver actors so their enumerated facets reach the
+    /// source-candidate / output-target routes — ADR-M009, DEV-A4).
+    #[must_use]
+    pub fn with_device_drivers(mut self, device_drivers: Arc<DeviceDriverRegistry>) -> Self {
+        self.device_drivers = device_drivers;
+        self
+    }
+
+    /// Replace the runtime device **poller** registry (DEV-A4): the binary
+    /// installs one carrying the reqwest-backed [`DevicePollerFactory`](crate::devices::DevicePollerFactory)
+    /// (feature `zowietek`) so adopting a `zowietek` device spawns a live
+    /// supervised poller; tests inject a scripted factory.
+    #[must_use]
+    pub fn with_device_pollers(mut self, device_pollers: Arc<DevicePollerRegistry>) -> Self {
+        self.device_pollers = device_pollers;
+        self
+    }
+
+    /// The control-plane wiring a spawned poller actor needs (the broadcaster it
+    /// publishes through and the driver registry it enumerates facets into),
+    /// assembled from this state. The broadcaster's status registry is this
+    /// state's [`device_status`](AppState::device_status), so a poller's
+    /// published status reaches `GET /devices/{id}/status`.
+    #[must_use]
+    pub fn poller_wiring(&self) -> crate::devices::PollerWiring {
+        crate::devices::PollerWiring {
+            broadcaster: crate::devices::DeviceBroadcaster::new(
+                Arc::clone(&self.engine),
+                Arc::clone(&self.device_status),
+            ),
+            drivers: Arc::clone(&self.device_drivers),
+        }
+    }
+
+    /// Boot-seed: start a supervised poller for every config-declared device
+    /// (DEV-A4), so a `multiview run` that loads a config with `[[devices]]`
+    /// brings each managed device online (login → probe → enumerate facets →
+    /// poll) without an operator re-adopt. A no-op for devices the poller
+    /// factory does not manage (the default build's no-op factory spawns
+    /// nothing). Called once at bind time, off the engine hot loop (invariant
+    /// #10). Returns the number of pollers spawned.
+    #[allow(clippy::must_use_candidate)] // count is informational at the call site.
+    pub fn seed_device_pollers(&self, devices: &[multiview_config::Device]) -> usize {
+        let wiring = self.poller_wiring();
+        devices
+            .iter()
+            .filter(|device| self.device_pollers.start(device, &wiring))
+            .count()
     }
 
     /// Replace the audio-routing singleton store (e.g. to share one seeded
