@@ -41,6 +41,12 @@
 pub mod capability_warn;
 pub mod cli;
 pub mod control;
+/// The Conspect entitlement-plane wiring for the cli (CONSPECT-2b/10, ADR-0050):
+/// the shared lease store, the published [`licence::WatermarkSignal`] the engine
+/// bake samples lock-free (S3), and the sampled [`multiview_licence::EnforcementLevel`]
+/// the startup gate (S1) consults. Always compiled — the entitlement *state model*
+/// renders consistently regardless of features (ADR-0050 §7).
+pub mod licence;
 pub mod live_sources;
 /// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
 /// `display` output must FAIL a non-`display-kms` build with a clear error —

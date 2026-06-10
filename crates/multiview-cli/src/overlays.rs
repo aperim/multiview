@@ -218,6 +218,23 @@ pub struct OverlayBaker {
     /// (invariant #1).
     wall_clock: WallClockSource,
     per_tile_safe_area: bool,
+    /// The Conspect tile-watermark seam (S3, ADR-0050 §5): when present and the
+    /// published ladder level is at a watermark rung, the bake appends the corner
+    /// watermark to the draw list. `None` (the default) never watermarks. The
+    /// read is a single wait-free `arc_swap` load off the hot loop — it cannot
+    /// pace or stall the output clock (invariant #1). Carries the canvas geometry
+    /// the corner mark is anchored to.
+    watermark: Option<WatermarkPlacement>,
+}
+
+/// The Conspect tile-watermark placement: the wait-free
+/// [`WatermarkSignal`](crate::licence::WatermarkSignal) the bake samples + the
+/// canvas geometry the corner mark is anchored to.
+#[derive(Clone)]
+struct WatermarkPlacement {
+    signal: crate::licence::WatermarkSignal,
+    canvas_width: u32,
+    canvas_height: u32,
 }
 
 /// An analog clock face placed on the canvas: its [`ClockModel`] (for the
@@ -306,7 +323,32 @@ impl OverlayBaker {
             analog_clock: None,
             wall_clock,
             per_tile_safe_area: false,
+            watermark: None,
         })
+    }
+
+    /// Attach the Conspect tile-watermark seam (S3, ADR-0050 §5): when `signal` is
+    /// at a watermark rung, every bake appends a corner watermark anchored to the
+    /// `canvas_width × canvas_height` canvas. The decision is a single wait-free
+    /// `arc_swap` load per baked frame, off the hot loop — it cannot pace or stall
+    /// the output clock (invariant #1). The watermark marks the composited
+    /// multiview canvas only (the tiles); a 1:1 pass-through program is never
+    /// composited through this bake, so it is never marked (the spec's "tiles
+    /// only, never pass-through program"). Builder-style; omitting it never
+    /// watermarks.
+    #[must_use]
+    pub fn with_watermark(
+        mut self,
+        signal: crate::licence::WatermarkSignal,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> Self {
+        self.watermark = Some(WatermarkPlacement {
+            signal,
+            canvas_width,
+            canvas_height,
+        });
+        self
     }
 
     /// Enable per-tile safe-area / centre-cross markers (drawn inside each cell
@@ -470,6 +512,23 @@ impl OverlayBaker {
                 for prim in clock_face(hand_angles(hands), style, 12) {
                     list.push(prim);
                 }
+            }
+        }
+
+        // The Conspect enforcement tile watermark (S3, ADR-0050 §5): when the
+        // published ladder level is at a watermark rung, append the corner mark
+        // to the composited multiview canvas. Drawn LAST so it sits on top of the
+        // tile chrome. The decision is a single wait-free `arc_swap` load — no
+        // lock, no allocation — off the hot loop, so it cannot pace or stall the
+        // output clock (invariant #1). It rides the existing overlay sub-pass like
+        // every other primitive (region-limited bake, ADR-0023).
+        if let Some(wm) = &self.watermark {
+            if wm.signal.watermark() {
+                let _ = multiview_compositor::overlay::push_tile_watermark(
+                    &mut list,
+                    wm.canvas_width,
+                    wm.canvas_height,
+                );
             }
         }
 
@@ -1987,5 +2046,100 @@ mod tests {
             "the clock band must hold MORE glyphs than the bare time — the \
              reference badge text adds to it"
         );
+    }
+
+    /// The whole canvas of a 2x2 quad_tiles layout (1280x720).
+    const CANVAS_W: u32 = 1280;
+    const CANVAS_H: u32 = 720;
+
+    /// Count primitives whose footprint is in the top-right quarter of the canvas
+    /// (where the enforcement watermark is anchored).
+    fn corner_primitive_count(list: &OverlayDrawList) -> usize {
+        let band = OverlayRect::new(
+            i32_dim(CANVAS_W / 2),
+            0,
+            CANVAS_W / 2,
+            CANVAS_H / 2,
+        );
+        list.primitives
+            .iter()
+            .filter(|p| match p {
+                OverlayPrimitive::FilledRect { rect, .. } | OverlayPrimitive::Line { rect, .. } => {
+                    rect.x >= band.x && rect.y >= band.y && rect.y < i32_dim(CANVAS_H / 2)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    #[test]
+    fn no_watermark_when_the_signal_is_clean() {
+        // A baker with no watermark signal (the compliant default) never draws the
+        // enforcement watermark — the corner carries only ordinary tile chrome.
+        let signal = crate::licence::WatermarkSignal::clean();
+        let mut baker = OverlayBaker::new(quad_tiles(), epoch_clock())
+            .unwrap()
+            .with_watermark(signal, CANVAS_W, CANVAS_H);
+        let before = corner_primitive_count(
+            &baker
+                .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+                .unwrap(),
+        );
+        // (The corner already holds the top-right tile's own state flag/meter; we
+        // only assert the watermark adds nothing when clean — compared below.)
+        let _ = before;
+        let clean = baker
+            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+            .unwrap();
+        assert!(
+            !has_watermark_underline(&clean),
+            "a clean signal must not draw the enforcement watermark underline bar"
+        );
+    }
+
+    #[test]
+    fn watermark_is_drawn_on_the_canvas_corner_when_the_signal_is_set() {
+        // A baker whose signal is at a watermark rung draws the enforcement
+        // watermark primitives into the TOP-RIGHT canvas corner — deterministically
+        // (golden via the injected signal, never a per-pixel hot-path decision).
+        let signal =
+            crate::licence::WatermarkSignal::at(multiview_licence::EnforcementLevel::Watermark);
+        let mut baker = OverlayBaker::new(quad_tiles(), epoch_clock())
+            .unwrap()
+            .with_watermark(signal, CANVAS_W, CANVAS_H);
+        let list = baker
+            .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+            .unwrap();
+        // The watermark's underline bar (a distinctive Line) marks it apart from
+        // ordinary tile chrome; it must be present and in the top-right corner.
+        assert!(
+            has_watermark_underline(&list),
+            "a watermark signal must draw the enforcement watermark"
+        );
+        assert!(
+            corner_primitive_count(&list) > corner_primitive_count(
+                &OverlayBaker::new(quad_tiles(), epoch_clock())
+                    .unwrap()
+                    .draw_list(MediaTime::ZERO, &HashMap::new(), &no_captions(), &no_bitmaps())
+                    .unwrap()
+            ),
+            "the watermark adds primitives to the top-right corner vs an un-watermarked bake"
+        );
+    }
+
+    /// Whether the draw list contains the enforcement-watermark underline bar: a
+    /// thin amber `Line` in the top-right corner (the watermark's signature
+    /// primitive — see `multiview_compositor::overlay::watermark`).
+    fn has_watermark_underline(list: &OverlayDrawList) -> bool {
+        list.primitives.iter().any(|p| match p {
+            OverlayPrimitive::Line { rect, color } => {
+                rect.x >= i32_dim(CANVAS_W * 3 / 4)
+                    && rect.y < i32_dim(CANVAS_H / 2)
+                    // The watermark mark colour is a warm amber (r high, b low).
+                    && color.r > 0.8
+                    && color.b < 0.3
+            }
+            _ => false,
+        })
     }
 }

@@ -298,32 +298,6 @@ impl SoftwareEngine {
     /// Returns [`RunError::Config`] if the layout cannot be solved (the document
     /// should be validated first), or [`RunError::Pattern`] if a synthetic frame
     /// cannot be constructed for the canvas geometry.
-    /// Build a software engine **through the Conspect startup gate** (S1,
-    /// ADR-0050 §5): consult the published entitlement [`EnforcementLevel`]
-    /// **before** constructing the engine, and refuse to create a NEW instance at
-    /// the `block-new-instance` rung with [`BLOCK_NEW_INSTANCE_REASON`]. Every
-    /// softer rung (and `None` — no plane / no lease) builds exactly as
-    /// [`SoftwareEngine::build`].
-    ///
-    /// # Never off air (invariant #1)
-    ///
-    /// The gate runs at build time only; a **running** engine never re-enters
-    /// `build`/`build_gated`, so the hardest rung can never stop a running
-    /// program (ADR-0050 §6.3). The binary calls this with the level sampled from
-    /// the entitlement store off the hot loop.
-    ///
-    /// # Errors
-    ///
-    /// [`RunError::LeaseExpired`] when the gate refuses (block-new-instance), else
-    /// the same errors as [`SoftwareEngine::build`].
-    pub fn build_gated(
-        config: &MultiviewConfig,
-        level: Option<multiview_licence::EnforcementLevel>,
-    ) -> Result<Self, RunError> {
-        start_gate(level)?;
-        Self::build(config)
-    }
-
     pub fn build(config: &MultiviewConfig) -> Result<Self, RunError> {
         let layout = config.solve_layout()?;
         let cadence = config.canvas.fps.rational();
@@ -398,6 +372,32 @@ impl SoftwareEngine {
             program_preview: crate::preview::program_slot(),
             stop_registry: crate::live_sources::stop_registry(),
         })
+    }
+
+    /// Build a software engine **through the Conspect startup gate** (S1,
+    /// ADR-0050 §5): consult the published entitlement [`EnforcementLevel`]
+    /// (sampled off the hot loop) **before** constructing the engine, and refuse
+    /// to create a NEW instance at the `block-new-instance` rung with
+    /// [`BLOCK_NEW_INSTANCE_REASON`]. Every softer rung (and `None` — no plane /
+    /// no lease) builds exactly as [`SoftwareEngine::build`].
+    ///
+    /// # Never off air (invariant #1)
+    ///
+    /// The gate runs at build time only; a **running** engine never re-enters
+    /// `build`/`build_gated`, so the hardest rung can never stop a running program
+    /// (ADR-0050 §6.3). The binary calls this with the level sampled from the
+    /// entitlement store.
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::LeaseExpired`] when the gate refuses (block-new-instance), else
+    /// the same errors as [`SoftwareEngine::build`].
+    pub fn build_gated(
+        config: &MultiviewConfig,
+        level: Option<multiview_licence::EnforcementLevel>,
+    ) -> Result<Self, RunError> {
+        start_gate(level)?;
+        Self::build(config)
     }
 
     /// The shared per-source producer stop registry (ADR-W018): hand this to

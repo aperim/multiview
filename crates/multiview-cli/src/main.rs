@@ -109,7 +109,13 @@ async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
 /// built-in test-pattern sources (the software end-to-end smoke of the
 /// output-clock invariant), serving the API/WebUI just like the full build.
 async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
-    let mut engine = SoftwareEngine::build(config)?;
+    // Conspect entitlement plane (ADR-0050): assemble the shared lease store +
+    // published ladder level from the environment, then gate the NEW engine build
+    // (S1). A running engine is NEVER re-gated; this only refuses a *new* start at
+    // the block-new-instance rung (the never-off-air promise).
+    let plane = multiview_cli::licence::EntitlementPlane::from_env();
+    let mut engine = SoftwareEngine::build_gated(config, plane.level())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let cadence = engine.cadence();
     let report = if let Some(ticks) = args.tick_budget(cadence) {
         tracing::info!(ticks, "software run: bounded");
@@ -119,7 +125,7 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("software bounded run")?
     } else {
         tracing::info!("software run: until Ctrl-C");
-        run_software_until_ctrl_c(&mut engine, config).await?
+        run_software_until_ctrl_c(&mut engine, config, &plane).await?
     };
 
     println!("{}", report.render());
@@ -136,7 +142,18 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
     use multiview_cli::pipeline::Pipeline;
 
-    let mut pipeline = Pipeline::build(config).context("building the pipeline")?;
+    // Conspect entitlement plane (ADR-0050): assemble the shared store + ladder
+    // level from the environment, then gate the NEW pipeline build (S1) — refuse a
+    // new start at the block-new-instance rung. A running pipeline is never
+    // re-gated (the never-off-air promise).
+    let plane = multiview_cli::licence::EntitlementPlane::from_env();
+    multiview_cli::run::start_gate(plane.level()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Wire the wait-free tile-watermark signal (S3) into the pipeline's overlay
+    // bake (a no-op without the `overlay` feature). The bake samples it off the
+    // hot loop; it can never stall the output clock (invariant #1).
+    let mut pipeline = Pipeline::build(config)
+        .context("building the pipeline")?
+        .with_watermark_signal(plane.signal.clone());
     if let Some(subs) = &args.subtitles {
         let track = load_subtitles(subs)
             .with_context(|| format!("loading subtitles {}", subs.display()))?;
@@ -165,7 +182,7 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         // MP-1 (ADR-0030 §2.2): the daemon run path builds an engine `ProgramSet`
         // and drives this single program (id "main") through it — move the owned
         // pipeline in (the set spawns it on its own supervised task).
-        run_pipeline_until_ctrl_c(pipeline, config).await?
+        run_pipeline_until_ctrl_c(pipeline, config, &plane).await?
     };
 
     println!("{}", report.render());
@@ -193,6 +210,7 @@ async fn serve_control_plane(
     program_slot: multiview_cli::preview::ProgramSlot,
     stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
     registry: multiview_cli::live_sources::StopRegistry,
+    licence: Option<multiview_control::LicenceState>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<(
     tokio::task::JoinHandle<std::io::Result<()>>,
@@ -216,6 +234,7 @@ async fn serve_control_plane(
         Arc::clone(publisher),
         commands,
         provider,
+        licence,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -237,6 +256,7 @@ async fn serve_control_plane(
 async fn run_pipeline_until_ctrl_c(
     pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
+    plane: &multiview_cli::licence::EntitlementPlane,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
@@ -255,6 +275,10 @@ async fn run_pipeline_until_ctrl_c(
                 Arc::clone(&preview_slot),
                 pipeline.preview_stores(),
                 pipeline.stop_registry(),
+                Some(multiview_control::LicenceState::new(
+                    Arc::clone(&plane.store),
+                    plane.pinned.clone(),
+                )),
                 shutdown_rx,
             )
             .await?;
@@ -466,7 +490,11 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     if args.program_audio {
         tracing::warn!("--program-audio needs the `ffmpeg` feature (full pipeline); ignoring");
     }
-    let engine = SoftwareEngine::build(config)?;
+    // Conspect S1 startup gate: gate the NEW engine build on the published ladder
+    // level (refuse at the block-new-instance rung).
+    let plane = multiview_cli::licence::EntitlementPlane::from_env();
+    let engine = SoftwareEngine::build_gated(config, plane.level())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(
         "ready: built engine for {} source(s) at {}/{} fps; \
          this build has no `ffmpeg` feature, so an external ingest/encode run is unavailable — \
@@ -487,6 +515,7 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 async fn run_software_until_ctrl_c(
     engine: &mut SoftwareEngine,
     config: &MultiviewConfig,
+    plane: &multiview_cli::licence::EntitlementPlane,
 ) -> anyhow::Result<RunReport> {
     let stop = StopSignal::new();
 
@@ -511,6 +540,10 @@ async fn run_software_until_ctrl_c(
                 engine.program_preview(),
                 engine.preview_stores(),
                 engine.stop_registry(),
+                Some(multiview_control::LicenceState::new(
+                    Arc::clone(&plane.store),
+                    plane.pinned.clone(),
+                )),
                 shutdown_rx,
             )
             .await?;
