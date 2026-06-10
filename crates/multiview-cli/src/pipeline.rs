@@ -4573,10 +4573,13 @@ fn ingest_plan_for(
     cadence: Rational,
 ) -> Result<IngestPlan, PipelineError> {
     let (location, live) = match &source.kind {
-        // Synthetic sources (bars/solid/clock) are rendered in-process by a
+        // Synthetic sources (bars/solid/clock/timer) are rendered in-process by a
         // generator thread (ADR-0027) — a peer of a decode thread, `live` because
         // it produces frames continuously. No ffmpeg subprocess, no media to open.
-        SourceKind::Bars | SourceKind::Solid { .. } | SourceKind::Clock { .. } => {
+        SourceKind::Bars
+        | SourceKind::Solid { .. }
+        | SourceKind::Clock { .. }
+        | SourceKind::Timer { .. } => {
             let kind =
                 crate::synth::SyntheticKind::from_source_kind(&source.kind).ok_or_else(|| {
                     PipelineError::Ingest {
@@ -4669,7 +4672,10 @@ fn ingest_plan_for(
 fn audio_ingest_plan_for(source: &Source) -> Option<crate::audio::AudioIngestPlan> {
     let (location, live) = match &source.kind {
         // Synthetic sources render video in-process and carry no audio.
-        SourceKind::Bars | SourceKind::Solid { .. } | SourceKind::Clock { .. } => return None,
+        SourceKind::Bars
+        | SourceKind::Solid { .. }
+        | SourceKind::Clock { .. }
+        | SourceKind::Timer { .. } => return None,
         SourceKind::File { path } => (path.clone(), false),
         SourceKind::Rtsp { url, .. }
         | SourceKind::Hls { url }
