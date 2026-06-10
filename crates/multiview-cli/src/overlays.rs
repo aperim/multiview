@@ -1716,10 +1716,11 @@ mod tests {
     }
 
     #[test]
-    fn set_analog_clock_swaps_the_face_at_runtime() {
-        // ADR-W021: a live overlay apply re-derives the analog face on the
-        // bake consumer — the baker must accept a runtime swap (set / move /
-        // clear), not only the build-time builder.
+    fn set_analog_clocks_swaps_the_face_set_at_runtime() {
+        // ADR-W021: a live overlay apply re-derives the analog face SET on
+        // the bake consumer — EVERY analog-face entry renders its own face
+        // (no first-wins), and the baker accepts a runtime swap (set / shrink
+        // / clear), not only the build-time builder.
         let mut baker = OverlayBaker::new(quad_tiles(), epoch_clock()).unwrap();
         let list = baker
             .draw_list(
@@ -1731,12 +1732,10 @@ mod tests {
             .unwrap();
         assert_eq!(rings_and_strokes(&list), (0, 0), "no face configured yet");
 
-        baker.set_analog_clock(Some(AnalogClockSpec::new(
-            TimeZoneOffset::UTC,
-            1160.0,
-            600.0,
-            90.0,
-        )));
+        baker.set_analog_clocks(vec![
+            AnalogClockSpec::new(TimeZoneOffset::UTC, 300.0, 600.0, 90.0),
+            AnalogClockSpec::new(TimeZoneOffset::UTC, 1160.0, 600.0, 90.0),
+        ]);
         let list = baker
             .draw_list(
                 MediaTime::ZERO,
@@ -1746,10 +1745,30 @@ mod tests {
             )
             .unwrap();
         let (rings, strokes) = rings_and_strokes(&list);
-        assert_eq!(rings, 1, "the swapped-in analog face draws its bezel ring");
-        assert_eq!(strokes, 15, "12 hour ticks + 3 hands");
+        assert_eq!(rings, 2, "BOTH analog faces draw their bezel rings");
+        assert_eq!(strokes, 30, "each face draws 12 hour ticks + 3 hands");
 
-        baker.set_analog_clock(None);
+        baker.set_analog_clocks(vec![AnalogClockSpec::new(
+            TimeZoneOffset::UTC,
+            1160.0,
+            600.0,
+            90.0,
+        )]);
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
+            .unwrap();
+        assert_eq!(
+            rings_and_strokes(&list),
+            (1, 15),
+            "shrinking the set to one face draws exactly that face"
+        );
+
+        baker.set_analog_clocks(Vec::new());
         let list = baker
             .draw_list(
                 MediaTime::ZERO,
@@ -1761,7 +1780,7 @@ mod tests {
         assert_eq!(
             rings_and_strokes(&list),
             (0, 0),
-            "clearing the face removes the ring + strokes"
+            "clearing the set removes every ring + stroke"
         );
     }
 

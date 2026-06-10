@@ -587,3 +587,96 @@ async fn full_bus_degrades_the_header_to_restart() {
     let drained = h.commands.try_drain();
     assert_eq!(drained.len(), 1, "only the first command rode the bus");
 }
+
+#[tokio::test]
+async fn analog_to_digital_edit_applies_live_because_the_face_vanishes() {
+    // MAJOR-1(b): editing a RENDERED analog clock to a digital face is itself
+    // a live-visible change — the face disappears at the next frame — so the
+    // header must say `live` (live iff submitted ∧ (renders(new) ∨
+    // renders(previous))), and the new document still rides the bus.
+    let mut h = live_harness();
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/overlays/clk",
+            OPERATOR_TOKEN,
+            &analog_clock_body("clk"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let _ = h.commands.try_drain();
+
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/overlays/clk",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({
+                "name": "Wall clock",
+                "body": { "id": "clk", "kind": "clock", "target": "canvas", "face": "digital" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        apply_header(&resp),
+        "live",
+        "removing a rendered face via an edit IS a live-visible change (ADR-W021)"
+    );
+    let drained = h.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            multiview_control::Command::UpsertOverlay { overlay, .. }
+                if overlay.id == "clk"
+                    && overlay.params.get("face") == Some(&json!("digital"))
+        )),
+        "the digital-face edit still rides the bus, got {drained:?}"
+    );
+}
+
+#[tokio::test]
+async fn never_rendered_edit_stays_restart() {
+    // The ∨ in the PUT condition must not over-promise: an edit where NEITHER
+    // the previous nor the new document renders (digital → digital) changes
+    // no pixels and stays `restart`.
+    let mut h = live_harness();
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/overlays/dclk",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "Digital",
+                "body": { "id": "dclk", "kind": "clock", "target": "canvas", "face": "digital" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let _ = h.commands.try_drain();
+
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/overlays/dclk",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({
+                "name": "Digital",
+                "body": { "id": "dclk", "kind": "clock", "target": "canvas", "face": "digital", "z": 7 }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        apply_header(&resp),
+        "restart",
+        "an edit rendering neither before nor after must stay restart"
+    );
+    let _ = h.commands.try_drain();
+}

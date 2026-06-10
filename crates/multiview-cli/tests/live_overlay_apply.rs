@@ -118,6 +118,18 @@ fn analog_clock(id: &str, x: i64, y: i64) -> multiview_config::Overlay {
     }))
 }
 
+/// Drain every queued `job.progress` event off `sub`, returning the phases in
+/// arrival order (the drain's apply/held observability — ADR-W021 / MINOR-4).
+fn job_phases(sub: &mut multiview_engine::EventSubscription<Event>) -> Vec<String> {
+    let mut phases = Vec::new();
+    while let Ok(envelope) = sub.try_recv() {
+        if let Event::JobProgress(progress) = envelope.event.as_ref() {
+            phases.push(progress.phase.clone());
+        }
+    }
+    phases
+}
+
 #[tokio::test]
 async fn upsert_overlay_publishes_the_new_set_at_the_frame_boundary() {
     let config = two_cell_config();
@@ -131,6 +143,7 @@ async fn upsert_overlay_publishes_the_new_set_at_the_frame_boundary() {
         Arc::clone(&slot),
     );
     let mut drive = test_drive(&config);
+    let mut sub = publisher.subscribe();
 
     assert_eq!(
         slot.load().generation(),
@@ -155,6 +168,11 @@ async fn upsert_overlay_publishes_the_new_set_at_the_frame_boundary() {
     assert_eq!(set.overlays().len(), 1);
     assert_eq!(set.overlays()[0].id, "clk");
     assert_eq!(set.overlays()[0].kind, "clock");
+    assert_eq!(
+        job_phases(&mut sub),
+        vec!["apply_overlay".to_owned()],
+        "the applied upsert is observable as a job.progress outcome"
+    );
 
     // EDIT: an upsert under the same id REPLACES the entry (never duplicates).
     sender
@@ -210,7 +228,9 @@ async fn remove_overlay_drops_the_entry_from_the_published_set() {
     assert_eq!(set.generation(), 2, "the remove publishes a new generation");
     assert!(set.overlays().is_empty(), "the entry is gone from the set");
 
-    // Removing an UNKNOWN id is a logged no-op: nothing new is published.
+    // Removing an UNKNOWN id publishes no new set — but it is still surfaced
+    // (warned + a held outcome event), never a silent drop.
+    let mut sub = publisher.subscribe();
     sender
         .try_submit(Command::RemoveOverlay {
             op: OperationId::new(),
@@ -223,17 +243,24 @@ async fn remove_overlay_drops_the_entry_from_the_published_set() {
         2,
         "an unknown-id remove publishes nothing (no spurious re-derive)"
     );
+    assert_eq!(
+        job_phases(&mut sub),
+        vec!["apply_overlay_held".to_owned()],
+        "an unknown-id remove is observable as a held job.progress outcome"
+    );
 }
 
 #[tokio::test]
 async fn overlay_commands_without_a_seam_are_held_without_panicking() {
     // The plain drain (software path without the seam wired) holds the
-    // commands — warned, never a panic, and the clock-side apply still runs.
+    // commands — warned, surfaced as held job.progress outcomes, never a
+    // panic — and the clock-side apply still runs.
     let config = two_cell_config();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
     let (sender, command_rx) = command_bus(16);
     let mut drain = command_drain(command_rx, config.clone(), Arc::clone(&publisher));
     let mut drive = test_drive(&config);
+    let mut sub = publisher.subscribe();
 
     sender
         .try_submit(Command::UpsertOverlay {
@@ -248,6 +275,14 @@ async fn overlay_commands_without_a_seam_are_held_without_panicking() {
         })
         .expect("submit remove");
     drain(&mut drive);
+    assert_eq!(
+        job_phases(&mut sub),
+        vec![
+            "apply_overlay_held".to_owned(),
+            "apply_overlay_held".to_owned()
+        ],
+        "BOTH seam-less holds are observable as held job.progress outcomes"
+    );
 }
 
 /// SOAK (invariants #1 + #10): a continuous full-speed flood of live overlay
