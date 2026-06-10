@@ -1,8 +1,9 @@
 // Docs: config-as-code (the TOML schema). Summarizes the real fields from
 // crates/multiview-config and the shipped examples/*.toml.
 import type { JSX } from "react";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 
+import { HelpLink } from "../../components/HelpLink";
 import { PageHeader } from "../../components/PageHeader";
 import {
   Code,
@@ -16,6 +17,7 @@ import {
 
 /** Config-as-code documentation. */
 export function ConfigPage(): JSX.Element {
+  const { t } = useLingui();
   return (
     <>
       <PageHeader
@@ -29,7 +31,7 @@ export function ConfigPage(): JSX.Element {
       />
 
       <div className="space-y-4">
-        <DocSection title={<Trans>Document shape</Trans>}>
+        <DocSection id="document-shape" title={<Trans>Document shape</Trans>}>
           <Prose>
             <Trans>
               Every document starts with a <Code>schema_version</Code> and then
@@ -61,7 +63,7 @@ areas = ["a b", "c d"]`}
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>Canvas</Trans>}>
+        <DocSection id="canvas" title={<Trans>Canvas</Trans>}>
           <Prose>
             <Trans>
               The output canvas: geometry, cadence, working pixel format,
@@ -99,9 +101,13 @@ areas = ["a b", "c d"]`}
               </Trans>
             </DocTerm>
           </DocDefinitions>
+          <HelpLink
+            to="/help/concepts/color#color-spaces"
+            label={t`About color spaces and range`}
+          />
         </DocSection>
 
-        <DocSection title={<Trans>Layout</Trans>}>
+        <DocSection id="layout" title={<Trans>Layout</Trans>}>
           <Prose>
             <Trans>
               The <Code>[layout]</Code> block selects how cells are placed, tagged
@@ -132,7 +138,7 @@ areas = ["a b", "c d"]`}
           </DocDefinitions>
         </DocSection>
 
-        <DocSection title={<Trans>Sources</Trans>}>
+        <DocSection id="sources" title={<Trans>Sources</Trans>}>
           <Prose>
             <Trans>
               Each <Code>[[sources]]</Code> entry is a managed input with a stable{" "}
@@ -176,7 +182,7 @@ transport = "tcp"`}
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>Cells</Trans>}>
+        <DocSection id="cells" title={<Trans>Cells</Trans>}>
           <Prose>
             <Trans>
               Each <Code>[[cells]]</Code> entry is one tile. It is placed by a grid{" "}
@@ -217,7 +223,7 @@ input_id = "in_live"`}
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>Overlays</Trans>}>
+        <DocSection id="overlays" title={<Trans>Overlays</Trans>}>
           <Prose>
             <Trans>
               Each <Code>[[overlays]]</Code> entry attaches a layer to the whole{" "}
@@ -239,7 +245,7 @@ source = "wall"   # the always-ticking clock doubles as a falter sentinel`}
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>Outputs</Trans>}>
+        <DocSection id="outputs" title={<Trans>Outputs</Trans>}>
           <Prose>
             <Trans>
               Each <Code>[[outputs]]</Code> entry is one sink, tagged by{" "}
@@ -290,9 +296,17 @@ path = "/var/lib/multiview/hls/multiview.m3u8"
 codec = "mpeg2video"
 segment_ms = 2000`}
           </CodeBlock>
+          <HelpLink
+            to="/help/concepts/codecs#what-is-transcoding"
+            label={t`About codecs and transcoding`}
+          />
+          <HelpLink
+            to="/help/concepts/transports#choosing"
+            label={t`About output transports`}
+          />
         </DocSection>
 
-        <DocSection title={<Trans>Validation and import / export</Trans>}>
+        <DocSection id="validation" title={<Trans>Validation and import / export</Trans>}>
           <Prose>
             <Trans>
               The document is validated as a whole: source and cell ids must be

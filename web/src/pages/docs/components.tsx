@@ -4,7 +4,8 @@
 // page stays focused on content. Headings nest correctly under the route's
 // single <h1> (the page renders an <h2> per section; these helpers emit <h3>).
 import type { JSX, ReactNode } from "react";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
+import { Link as LinkIcon } from "lucide-react";
 
 import { Badge } from "../../components/ui/badge";
 import {
@@ -14,23 +15,44 @@ import {
   CardTitle,
 } from "../../components/ui/card";
 
-/** A titled documentation section rendered as a Card with an `<h3>` heading. */
+/**
+ * A titled documentation section rendered as a Card with an `<h3>` heading.
+ *
+ * `id` is the section's public anchor (ADR-W016): it must match the page's
+ * entry in the docs registry, is kebab-case, and is append-only — renames
+ * require a registry redirect. The heading carries a copyable anchor link
+ * that is visible on hover and keyboard focus.
+ */
 export function DocSection({
+  id,
   title,
   children,
 }: {
+  readonly id: string;
   readonly title: ReactNode;
   readonly children: ReactNode;
 }): JSX.Element {
+  const { t } = useLingui();
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4 text-sm leading-relaxed text-muted-foreground">
-        {children}
-      </CardContent>
-    </Card>
+    <section id={id} className="group/docsection scroll-mt-20 rounded-xl">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <span>{title}</span>
+            <a
+              href={`#${id}`}
+              aria-label={t`Link to section`}
+              className="rounded-sm text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-ring group-hover/docsection:opacity-100"
+            >
+              <LinkIcon className="size-3.5" aria-hidden="true" />
+            </a>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 text-sm leading-relaxed text-muted-foreground">
+          {children}
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 

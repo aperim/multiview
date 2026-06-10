@@ -27,7 +27,7 @@ export function ComposePage(): JSX.Element {
       />
 
       <div className="space-y-4">
-        <DocSection title={<Trans>The three services</Trans>}>
+        <DocSection id="services" title={<Trans>The three services</Trans>}>
           <Prose>
             <Trans>
               The quick-start file at <Code>deploy/compose.yaml</Code> brings up
@@ -59,7 +59,7 @@ export function ComposePage(): JSX.Element {
           </DocDefinitions>
         </DocSection>
 
-        <DocSection title={<Trans>Bring it up and down</Trans>}>
+        <DocSection id="up-and-down" title={<Trans>Bring it up and down</Trans>}>
           <CodeBlock label="Shell command">
             {`# start the stack in the background
 docker compose -f deploy/compose.yaml up -d
@@ -78,7 +78,7 @@ docker compose -f deploy/compose.yaml down -v`}
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>GPU overlays</Trans>}>
+        <DocSection id="gpu-overlays" title={<Trans>GPU overlays</Trans>}>
           <Prose>
             <Trans>
               Compose merges files left to right. The GPU overlay files swap the{" "}
@@ -99,15 +99,17 @@ RENDER_GID=$(getent group render | cut -d: -f3) \\
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>Exposed ports and roadmap</Trans>}>
+        <DocSection id="ports-and-roadmap" title={<Trans>Exposed ports and roadmap</Trans>}>
           <Prose>
             <Trans>
-              The stack publishes the test RTSP feed on <Code>8554</Code> (for
-              host inspection) and the HLS HTTP server on <Code>8888</Code>. There
-              is no control-API or web-UI port yet: the current binary composites,
-              encodes, and writes HLS or file output to disk, but does not yet
-              bind a network listener. The live RTSP, NDI, and RTMP output{" "}
-              <em>servers</em> and the API listener are on the roadmap.
+              The stack publishes the management API and this web UI on{" "}
+              <Code>8080</Code> (the mounted config carries a{" "}
+              <Code>[control]</Code> listener; authenticate with the{" "}
+              <Code>MULTIVIEW_CONTROL_TOKEN</Code> bearer token), the test RTSP
+              feed on <Code>8554</Code> (for host inspection), and the HLS HTTP
+              server on <Code>8888</Code>. HLS/LL-HLS plus RTMP and SRT push
+              outputs run today; the live RTSP and NDI output <em>servers</em>{" "}
+              are on the roadmap.
             </Trans>
           </Prose>
         </DocSection>
