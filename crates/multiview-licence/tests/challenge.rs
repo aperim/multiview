@@ -22,11 +22,7 @@ fn sample() -> ChallengeFile {
             "dd44ee55ff66".to_owned(),
             "0011223344556677".to_owned(),
         ],
-        ChallengeCounters {
-            boot_count: 7,
-            heartbeat_attempts: 42,
-            lease_installs: 3,
-        },
+        ChallengeCounters::new(7, 42, 3),
     )
 }
 

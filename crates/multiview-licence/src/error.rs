@@ -26,4 +26,11 @@ pub enum LicenceError {
     /// payload, the wrong signer, or a forged assertion. The lease is rejected.
     #[error("Ed25519 signature verification failed")]
     BadSignature,
+
+    /// A CBOR encode/decode fault on the lease/binding file or the
+    /// `<host>.challenge` export (CONSPECT-1). Carries the underlying message so
+    /// a malformed dropped file is logged, never panicked on
+    /// (bad-inputs-are-the-purpose).
+    #[error("CBOR codec error: {0}")]
+    Cbor(String),
 }

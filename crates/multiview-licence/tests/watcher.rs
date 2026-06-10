@@ -9,6 +9,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
+    clippy::map_unwrap_or,
     clippy::missing_panics_doc
 )]
 

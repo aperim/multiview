@@ -148,7 +148,7 @@ fn a_below_threshold_fingerprint_is_rejected_fingerprint_mismatch() {
 
     let err = store_install_err(&b, &pinned, now);
     assert!(
-        matches!(err, InstallError::FingerprintMismatch { score: 69 }),
+        matches!(err, InstallError::FingerprintMismatch { score: 69, .. }),
         "below-threshold fingerprint must be FingerprintMismatch, got {err:?}"
     );
 }
@@ -183,11 +183,13 @@ fn an_older_lease_is_rejected_stale_after_a_newer_one_installs() {
 
     // A subsequently-presented OLDER grant must be rejected as stale (replay /
     // rollback protection): the active lease never goes backwards.
-    let err = store_install_err(
-        &binding(&key, &lease_at("serial-OLD", old_granted), 100),
-        &pinned,
-        new_granted,
-    );
+    let err = store
+        .install_binding(
+            &binding(&key, &lease_at("serial-OLD", old_granted), 100),
+            &pinned,
+            new_granted,
+        )
+        .expect_err("an older grant must be rejected");
     assert!(
         matches!(err, InstallError::Stale { .. }),
         "an older grant must be Stale, got {err:?}"

@@ -21,13 +21,26 @@
 //! ([`ladder::LadderState::program_stays_on_air`]). A broadcaster's program is
 //! sacred; this crate cannot violate that even by mistake.
 //!
-//! ## Scope of THIS crate (CONSPECT-0 + the data-model half of CONSPECT-1)
+//! ## Scope of THIS crate (CONSPECT-0 + CONSPECT-1)
 //!
-//! Pure data + verification only. There are **no** licence-server calls (the
-//! `heartbeat` network client is a later, feature-gated item) and **no** engine
-//! seams wired here (those are CONSPECT-2/CONSPECT-10). The pinned verifying key
-//! is a **parameter** ([`verify::PinnedKey`]); key pinning/rotation policy (O2)
-//! lives in the caller.
+//! The pure data + verification model ([`entitlement`], [`lease`], [`ladder`],
+//! [`fingerprint`], [`verify`], [`status`]) **plus** the local lease lifecycle
+//! (CONSPECT-1): the in-memory active-lease [`store`], the lease-directory
+//! [`watcher`] (a dependency-free poll loop that picks up a dropped lease file
+//! and verifies it against the pinned key), and the [`challenge`] CBOR export.
+//! There are **no** licence-server calls (the `heartbeat` network client is a
+//! later, feature-gated item) and **no** engine seams wired here (those are
+//! CONSPECT-2/CONSPECT-10). The pinned verifying key is a **parameter**
+//! ([`verify::PinnedKey`]); key pinning/rotation policy (O2) lives in the caller.
+//!
+//! The lifecycle pieces are still **physically incapable of touching output**:
+//! the [`store`] holds an `RwLock` over control-plane-only state read off the hot
+//! loop, and the [`watcher`] does control-plane filesystem I/O only — neither
+//! holds an engine handle, and a malformed dropped file is logged + skipped, not
+//! crashed on (bad-inputs-are-the-purpose). The only system-clock read in the
+//! whole crate is the watcher's wall-clock sample for each install, off the
+//! engine; everything else takes the instant as a parameter (the [`store::Clock`]
+//! seam).
 //!
 //! ## Data minimisation
 //!
@@ -40,6 +53,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod challenge;
 pub mod constants;
 pub mod entitlement;
 pub mod error;
@@ -47,8 +61,12 @@ pub mod fingerprint;
 pub mod ladder;
 pub mod lease;
 pub mod status;
+pub mod store;
 pub mod verify;
+pub mod watcher;
 
+#[doc(inline)]
+pub use challenge::{ChallengeCounters, ChallengeFile};
 #[doc(inline)]
 pub use constants::{
     ACTIVATION_WINDOW_DAYS, CLAIM_CODE_LEN, EVALUATION_PERIOD_DAYS, EVALUATION_WATERMARK_DAY,
@@ -65,3 +83,9 @@ pub use ladder::{compute_ladder_state, LadderInput, LadderOutcome, LadderState};
 pub use lease::{Lease, LeaseSource};
 #[doc(inline)]
 pub use status::{EnforcementLevel, LicenceStatus};
+#[doc(inline)]
+pub use store::{
+    Clock, HardwareClassView, InstallError, LeaseBinding, LeaseStore, LicenceStatusView,
+};
+#[doc(inline)]
+pub use watcher::{LeaseDirectoryWatcher, PollOutcome, DEFAULT_LEASE_DIR};
