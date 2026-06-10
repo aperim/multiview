@@ -35,6 +35,19 @@ gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-rtsp-server = "0.23"
 glib = "0.20"
+# Off-by-default `display-kms` path ONLY (DEV-B1 / ADR-0044): the local
+# DRM/KMS display sink. `drm`/`drm-ffi` are Smithay's SAFE pure-ioctl
+# wrappers (MIT, no C linkage); `gbm` binds Mesa's libgbm (MIT bindings; the
+# Mesa C library is resolved by DYNAMIC LINK at run time, never vendored) for
+# scanout-buffer allocation, with KMS dumb buffers as the GBM-less fallback;
+# `rustix` (already in the graph transitively via drm) provides the safe
+# poll(2) wait on the DRM event fd. Pulled in ONLY by `multiview-output`'s
+# `display-kms` feature, so the default build links nothing and `cargo deny`
+# (`all-features = false`) never scans them.
+drm = "0.15"
+drm-ffi = "0.9"
+gbm = { version = "0.18", default-features = false }
+rustix = { version = "0.38", features = ["event"] }
 # Internal crates
 multiview-core = { path = "crates/multiview-core" }
 multiview-hal = { path = "crates/multiview-hal" }

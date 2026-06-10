@@ -61,7 +61,9 @@ fn writer_never_blocks_when_nothing_drains() {
         }
         publisher
     });
-    let publisher = writer.join().expect("writer thread completed (never blocked)");
+    let publisher = writer
+        .join()
+        .expect("writer thread completed (never blocked)");
     let (frame, seq) = reader.latest().expect("latest survives the burst");
     assert_eq!(*frame, Payload(99_999), "reader sees the newest frame");
     assert_eq!(seq, 100_000);

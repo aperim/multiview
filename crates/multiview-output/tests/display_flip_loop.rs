@@ -54,7 +54,10 @@ fn flip_driver_treats_ebusy_as_in_flight_and_retries_after_the_flip() {
     // committed — it stays the retry candidate for the next flip event; no
     // queueing, no spin-retry.
     driver.on_commit_busy();
-    assert!(!driver.wants_commit(5), "EBUSY means in-flight: wait for the flip event");
+    assert!(
+        !driver.wants_commit(5),
+        "EBUSY means in-flight: wait for the flip event"
+    );
     driver.on_flip_complete();
     assert!(
         driver.wants_commit(5),
@@ -319,13 +322,7 @@ fn frames_flow_and_conflate_to_the_latest() {
     for tag in 1..=200u8 {
         publisher.publish(TestCanvas::tagged(tag));
     }
-    wait_until(|| {
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| *c == Call::Submit(200))
-    });
+    wait_until(|| calls.lock().unwrap().contains(&Call::Submit(200)));
     drop(handle);
 
     let calls = calls.lock().unwrap();
@@ -366,7 +363,7 @@ fn no_new_frame_means_no_commit() {
         DisplaySink::start::<TestCanvas, _>(backend, sink_config(ConnectorSelector::Auto))
             .expect("startup succeeds");
     publisher.publish(TestCanvas::tagged(7));
-    wait_until(|| calls.lock().unwrap().iter().any(|c| *c == Call::Submit(7)));
+    wait_until(|| calls.lock().unwrap().contains(&Call::Submit(7)));
     // Give the loop many poll cycles with NO new frame.
     std::thread::sleep(Duration::from_millis(50));
     drop(handle);
@@ -394,14 +391,22 @@ fn ebusy_is_conflation_not_a_retry_loop() {
     // sink never spins. Eventually exactly the latest frame lands.
     wait_until(|| {
         let calls = calls.lock().unwrap();
-        calls.iter().filter(|c| matches!(c, Call::Submit(_))).count() >= 2
+        calls
+            .iter()
+            .filter(|c| matches!(c, Call::Submit(_)))
+            .count()
+            >= 2
     });
     drop(handle);
     let stats = stats_of_test_log(&calls);
-    assert_eq!(stats, (2, 9), "one EBUSY then one successful commit of frame 9");
+    assert_eq!(
+        stats,
+        (2, 9),
+        "one EBUSY then one successful commit of frame 9"
+    );
 }
 
-/// (submit_count, last_tag) from the call log.
+/// `(submit_count, last_tag)` from the call log.
 fn stats_of_test_log(calls: &Arc<Mutex<Vec<Call>>>) -> (usize, u64) {
     let calls = calls.lock().unwrap();
     let submits: Vec<u64> = calls
@@ -429,7 +434,7 @@ fn wedged_display_never_blocks_the_publisher() {
         DisplaySink::start::<TestCanvas, _>(backend, sink_config(ConnectorSelector::Auto))
             .expect("startup succeeds");
     publisher.publish(TestCanvas::tagged(1));
-    wait_until(|| calls.lock().unwrap().iter().any(|c| *c == Call::Submit(1)));
+    wait_until(|| calls.lock().unwrap().contains(&Call::Submit(1)));
     wedged.store(true, Ordering::Release);
 
     // The engine-side publish must complete a large burst with the sink
@@ -441,7 +446,9 @@ fn wedged_display_never_blocks_the_publisher() {
             publisher2.publish(TestCanvas::tagged(u8::try_from(i % 251).unwrap_or(0)));
         }
     });
-    writer.join().expect("publisher burst completed while wedged");
+    writer
+        .join()
+        .expect("publisher burst completed while wedged");
 
     // The wedged sink holds at most one further in-flight commit (the flip for
     // frame 1 may or may not have drained before the wedge took effect) and
