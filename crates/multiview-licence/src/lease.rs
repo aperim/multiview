@@ -131,4 +131,12 @@ impl Lease {
     pub fn days_past_expiry(&self, now: DateTime<Utc>) -> i64 {
         (now - self.expires_at).num_days()
     }
+
+    /// The lease term expiry as an RFC 3339 string (`valid_to` on the install
+    /// response). The crate owns the `chrono` arithmetic, so date formatting is
+    /// rendered here once rather than re-derived by every caller.
+    #[must_use]
+    pub fn valid_to_rfc3339(&self) -> String {
+        self.expires_at.to_rfc3339()
+    }
 }

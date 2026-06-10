@@ -233,6 +233,17 @@ impl LeaseStore {
         }
     }
 
+    /// "Now" as the store sees it, via the injected [`Clock`] seam.
+    ///
+    /// The control plane reads this to stamp an install (`POST /licence/lease`)
+    /// at the same instant the store's reads use, so a test that injects a fixed
+    /// clock drives both the install and the status read deterministically. The
+    /// store never reads a system clock directly — this is the single seam.
+    #[must_use]
+    pub fn now(&self) -> DateTime<Utc> {
+        (self.clock)()
+    }
+
     /// Record the current GPU-usage sample (the caller samples placement). Used
     /// only to compute the `over_gpu` ladder reason; never gates output.
     pub fn set_gpus_in_use(&self, count: u32) {

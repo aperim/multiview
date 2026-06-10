@@ -17,6 +17,12 @@ multiview-engine = { workspace = true }
 multiview-events = { workspace = true }
 multiview-config = { workspace = true }
 multiview-telemetry = { workspace = true }
+# The local entitlement plane (Conspect, ADR-0050): the verified-lease store, the
+# enforcement-ladder-as-data, and the lease-verification path the licence routes
+# render. Pure-Rust leaf crate (no engine, no GPU, no FFmpeg), so it stays in the
+# CI-green default build; enforcement is DATA the control plane renders, never a
+# control-flow decision that could touch the engine (invariant #1/#10).
+multiview-licence = { workspace = true }
 # The `FocusGate` admission primitive (pure-Rust default build: counters only, no
 # native/codec dep) bounds concurrent WHEP focus sessions. The control plane wraps
 # its codec-free `WhepProvider` seam with the gate; both Tier-A control-plane
@@ -106,6 +112,19 @@ http-body-util = "0.1.3"
 proptest = "1.11.0"
 rumqttd = { version = "0.20", default-features = false }
 toml = "0.8"
+# Build signed lease bindings in the licence-route tests (Conspect, ADR-0050):
+# generate a test keypair, sign a lease, and CBOR-encode the binding the
+# `POST /api/v1/licence/lease` route ingests. Test-only; the non-test control
+# build never mints keys (the licence crate is verification-only). All
+# `MIT`/`Apache-2.0`, already on the deny.toml allowlist.
+ed25519-dalek = { version = "2", default-features = false, features = [
+    "alloc",
+    "rand_core",
+] }
+rand_core = { version = "0.6", default-features = false, features = [
+    "getrandom",
+] }
+ciborium = "0.2.2"
 
 [features]
 "default" = ["openapi"]

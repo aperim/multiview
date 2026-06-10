@@ -30,6 +30,7 @@ pub mod config;
 pub mod devices;
 pub mod health;
 pub mod inputs;
+pub mod licence;
 pub mod outputs;
 pub mod overlays;
 pub mod preview;
@@ -723,6 +724,13 @@ pub fn api_router() -> Router<AppState> {
         // Read-only health warnings (SA-0 / ADR-0035): active capability mismatches
         // (e.g. GPU present but compositing fell back to CPU) with remediation.
         .route("/health", get(health::list_health))
+        // Local licence (Conspect, CONSPECT-1 / ADR-0050): the computed licence
+        // resource (enforcement is DATA → always 200), the lease install path
+        // (verify + install a presented signed binding), and the salted CBOR
+        // challenge export. All-local: no licence-server calls; never off air.
+        .route("/licence", get(licence::get_licence))
+        .route("/licence/lease", post(licence::install_lease))
+        .route("/licence/challenge", get(licence::get_challenge))
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(

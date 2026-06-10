@@ -12,6 +12,8 @@ use multiview_config::MultiviewConfig;
 use multiview_core::time::MediaTime;
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
+use multiview_licence::verify::PinnedKey;
+use multiview_licence::{ChallengeFile, LeaseStore};
 
 use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
 use crate::audio_routing::AudioRoutingStore;
@@ -43,6 +45,70 @@ use crate::warning_store::{InMemoryWarningStore, WarningRepository};
 /// tests inject a deterministic clock. The clock is read **off** the engine and
 /// never touches the data plane.
 pub type AckClock = Arc<dyn Fn() -> MediaTime + Send + Sync>;
+
+/// The control-plane handle on the **local entitlement plane** (Conspect,
+/// ADR-0050 / CONSPECT-1).
+///
+/// Bundles the in-memory verified-lease [`LeaseStore`] the `GET /api/v1/licence`
+/// resource renders with the optional [`PinnedKey`] the
+/// `POST /api/v1/licence/lease` install path verifies a presented binding
+/// against. Both are control-plane-only: the store holds an `RwLock` over a
+/// single verified entitlement read off the hot loop, and verification is pure
+/// signature math — neither holds an engine handle, so the entitlement plane is
+/// **physically incapable of back-pressuring the engine** (invariant #10) or of
+/// taking a running program off air (invariant #1). Enforcement is **data** the
+/// surface renders, never a control-flow decision here.
+///
+/// The `pinned` key is `None` for deployments that have not pinned an issuer
+/// public key (e.g. an unconfigured machine or a store-only test); the install
+/// route then refuses with a typed problem rather than installing an
+/// unverifiable binding.
+#[derive(Clone)]
+pub struct LicenceState {
+    /// The in-memory verified-lease store the licence resource reads.
+    pub store: Arc<LeaseStore>,
+    /// The pinned issuer verifying key the install path checks a binding against,
+    /// or `None` when no key has been pinned (install is then refused).
+    pub pinned: Option<PinnedKey>,
+    /// The salted-digest + counter challenge the cli assembles for this machine
+    /// (brief §3/§8), or `None` until the cli has gathered it (CONSPECT-10). The
+    /// `GET /api/v1/licence/challenge` endpoint serves this verbatim; when `None`
+    /// it serves an empty-but-well-formed challenge (zeroed counters, no digests)
+    /// so the endpoint never fails and never leaks an identifier.
+    pub challenge: Option<ChallengeFile>,
+}
+
+impl LicenceState {
+    /// A licence state holding `store` and pinning `pinned` (or no key when
+    /// `None`), with no challenge document gathered yet.
+    #[must_use]
+    pub fn new(store: Arc<LeaseStore>, pinned: Option<PinnedKey>) -> Self {
+        Self {
+            store,
+            pinned,
+            challenge: None,
+        }
+    }
+
+    /// Attach the salted-digest + counter challenge the cli assembled for this
+    /// machine (brief §3/§8). The control plane only renders it; it never gathers
+    /// raw identifiers itself (data minimisation).
+    #[must_use]
+    pub fn with_challenge(mut self, challenge: ChallengeFile) -> Self {
+        self.challenge = Some(challenge);
+        self
+    }
+}
+
+impl Default for LicenceState {
+    /// An empty, unpinned licence state: a fresh [`LeaseStore`] (no lease
+    /// installed), no pinned key, and no challenge gathered. This is the secure,
+    /// never-off-air default — the resource reports "unlicensed" data and the
+    /// install path refuses until a key is pinned.
+    fn default() -> Self {
+        Self::new(Arc::new(LeaseStore::new()), None)
+    }
+}
 
 /// The engine state-snapshot type the realtime layer republishes.
 ///
@@ -410,6 +476,12 @@ pub struct AppState {
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
+    /// The local entitlement plane (Conspect, ADR-0050): the verified-lease store
+    /// the `GET /api/v1/licence` resource renders and the optional pinned key the
+    /// `POST /api/v1/licence/lease` install path verifies against. Control-plane
+    /// only; it can never back-pressure the engine or take a program off air
+    /// (invariant #1/#10). The default is empty + unpinned.
+    pub licence: LicenceState,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -471,7 +543,22 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // Empty + unpinned by default: the licence resource reports
+            // unlicensed data and the install path refuses until the binary
+            // pins an issuer key + wires a store (CONSPECT-10). Never off air.
+            licence: LicenceState::default(),
         }
+    }
+
+    /// Wire the local entitlement plane (Conspect): the verified-lease store the
+    /// licence resource renders and the pinned issuer key the install path
+    /// verifies against. The binary calls this with the host store + pinned key;
+    /// tests inject a clock-controlled store. Control-plane only (invariant
+    /// #1/#10).
+    #[must_use]
+    pub fn with_licence(mut self, licence: LicenceState) -> Self {
+        self.licence = licence;
+        self
     }
 
     /// Replace the live-preview provider (the binary wires an engine-backed one;
