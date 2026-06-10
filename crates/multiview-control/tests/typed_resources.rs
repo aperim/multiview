@@ -292,3 +292,152 @@ fn openapi_mirrors_accept_what_the_config_types_accept() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn semantically_invalid_bodies_are_422_even_when_well_typed() {
+    let h = harness();
+    // Well-typed but semantically wrong documents must be rejected at the API
+    // boundary (review M3) — they would otherwise poison /config/export.
+    let cases = [
+        (
+            "/api/v1/sources/s1",
+            json!({ "name": "S", "body": { "kind": "solid", "color": "chartreuse" } }),
+        ),
+        (
+            "/api/v1/sources/s2",
+            json!({ "name": "S", "body": { "kind": "clock", "tz_offset_minutes": 99999 } }),
+        ),
+        (
+            "/api/v1/outputs/o1",
+            json!({ "name": "O", "body": { "kind": "rtmp", "url": "rtmp://h/x", "codec": "" } }),
+        ),
+    ];
+    for (path, body) in &cases {
+        let resp = send(&h.router, post_json(path, OPERATOR_TOKEN, body)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{path} must reject a semantically invalid body"
+        );
+    }
+}
+
+#[tokio::test]
+async fn output_body_id_is_a_separate_namespace_from_the_store_id() {
+    let h = harness();
+    // Review M2: an output's config-level `id` is optional, label-derived, and
+    // routable (OutputRef) — a DIFFERENT namespace from the resource/store id.
+    // An authored id differing from the store id must be preserved, not 422'd
+    // and never rewritten.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/outputs/output-0",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "Push",
+                "body": { "id": "push-main", "kind": "rtmp", "url": "rtmp://h/x", "codec": "h264" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(
+        created["body"]["id"], "push-main",
+        "the authored output id is preserved verbatim"
+    );
+
+    // And a body with NO id must not have the store id injected.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/outputs/output-1",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "HLS",
+                "body": { "kind": "hls", "path": "/srv/hls", "codec": "h264" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert!(
+        created["body"].get("id").is_none(),
+        "no store-id injection for outputs (label-derived ids stay derived)"
+    );
+}
+
+#[tokio::test]
+async fn stale_if_match_wins_over_an_invalid_body_on_update() {
+    let h = harness();
+    // RFC 9110 §13.2.2: preconditions are evaluated before request content.
+    send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "C", "body": { "kind": "bars" } }),
+        ),
+    )
+    .await;
+    send(
+        &h.router,
+        put_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({ "name": "C2", "body": { "kind": "bars" } }),
+        ),
+    )
+    .await;
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({ "name": "X", "body": { "kind": "flux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::PRECONDITION_FAILED,
+        "stale If-Match is reported before body validation"
+    );
+}
+
+/// Reject-fixtures: the mirrors must REJECT what the config types reject
+/// (review minor 3 — the both-accept fixture alone cannot catch a mirror that
+/// is looser than the real type).
+#[test]
+fn openapi_mirrors_reject_what_the_config_types_reject() {
+    let bad_sources = [
+        json!({ "id": "s", "kind": "clock", "face": null }),
+        json!({ "id": "s", "kind": "rtsp", "url": "rtsp://h/x", "wallclock": { "use": "maybe" } }),
+    ];
+    for doc in &bad_sources {
+        assert!(
+            serde_json::from_value::<multiview_config::Source>(doc.clone()).is_err(),
+            "config must reject {doc}"
+        );
+        assert!(
+            serde_json::from_value::<multiview_control::openapi_schemas::SourceBodyDoc>(
+                doc.clone()
+            )
+            .is_err(),
+            "mirror must reject {doc}"
+        );
+    }
+    let bad_output = json!({
+        "kind": "srt", "url": "srt://[2001:db8::3]:7000", "codec": "h264",
+        "audio": { "mode": "both" }
+    });
+    assert!(serde_json::from_value::<multiview_config::Output>(bad_output.clone()).is_err());
+    assert!(serde_json::from_value::<multiview_control::openapi_schemas::OutputBodyDoc>(
+        bad_output
+    )
+    .is_err());
+}

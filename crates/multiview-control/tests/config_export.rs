@@ -133,3 +133,129 @@ async fn export_without_a_working_layout_is_422() {
     let problem = support::body_json(resp).await;
     assert_eq!(problem["type"], "/problems/validation");
 }
+
+#[tokio::test]
+async fn export_retains_base_config_sections_the_stores_do_not_carry() {
+    // Review B1: exporting must not destroy authored sections (control,
+    // placement, probes, …) — a restart with the exported file would otherwise
+    // lose the management listener itself.
+    let base = json!({
+        "schema_version": 1,
+        "canvas": {
+            "width": 1280, "height": 720, "fps": "25/1",
+            "pixel_format": "nv12", "background": "#000000",
+            "color": { "profile": "sdr-bt709-limited" }
+        },
+        "layout": { "kind": "absolute" },
+        "cells": [],
+        "sources": [],
+        "outputs": [ { "kind": "hls", "path": "/srv/hls", "codec": "h264" } ],
+        "control": { "listen": "[::1]:8087" },
+        "placement": { "policy": {} },
+        "probes": []
+    });
+    let h = support::harness_with(|state| state.with_base_document(base.clone()));
+    seed(&h).await;
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(
+        text.contains("[control]") && text.contains("[::1]:8087"),
+        "the [control] section survives export:\n{text}"
+    );
+    assert!(text.contains("[placement"), "placement survives export");
+    // Store-backed sections override the base: the seeded source/output/canvas
+    // win over the base document's.
+    let parsed: multiview_config::MultiviewConfig = toml::from_str(&text).unwrap();
+    assert_eq!(parsed.canvas.width, 1920, "working-layout canvas wins");
+    assert_eq!(parsed.sources.len(), 1, "store sources win");
+    assert_eq!(parsed.outputs.len(), 1, "store outputs win");
+}
+
+#[tokio::test]
+async fn export_prefers_the_seeded_working_layout_over_alphabetical_order() {
+    // Review M1: with several layouts carrying a canvas, the export must use
+    // the designated working layout, not the id-sorted first.
+    let h = support::harness_with(|state| state.with_working_layout_id("schema_v1"));
+    seed(&h).await; // seeds layout id "working" (carries 1920x1080)
+
+    // An alphabetically-earlier decoy with a different canvas.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/layouts/aaa-decoy",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "decoy",
+                "body": {
+                    "canvas": {
+                        "width": 640, "height": 360, "fps": "25/1",
+                        "pixel_format": "nv12", "background": "#000000",
+                        "color": { "profile": "sdr-bt709-limited" }
+                    },
+                    "layout": { "kind": "absolute" },
+                    "cells": []
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // The designated working layout id ("schema_v1") doesn't exist yet — so
+    // create it too, mirroring the seeded-name flow.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/layouts/schema_v1",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "schema_v1",
+                "body": {
+                    "canvas": {
+                        "width": 3840, "height": 2160, "fps": "30/1",
+                        "pixel_format": "nv12", "background": "#101014",
+                        "color": { "profile": "sdr-bt709-limited" }
+                    },
+                    "layout": { "kind": "absolute" },
+                    "cells": []
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+    assert_eq!(
+        parsed.canvas.width, 3840,
+        "the designated working layout wins over the alphabetical decoy"
+    );
+}
+
+#[tokio::test]
+async fn export_carries_a_download_disposition() {
+    let h = harness();
+    seed(&h).await;
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-disposition")
+            .expect("export offers a filename")
+            .to_str()
+            .unwrap(),
+        "attachment; filename=\"multiview.toml\""
+    );
+}
