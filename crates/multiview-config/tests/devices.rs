@@ -150,13 +150,13 @@ fn brief_sketch_parses_verbatim() {
     let node = &cfg.devices[1];
     assert_eq!(node.id, "dev-node-left");
     assert_eq!(node.driver, DeviceDriver::Displaynode);
-    assert!(node.address.is_none(), "displaynode binds by enrolled identity");
+    assert!(
+        node.address.is_none(),
+        "displaynode binds by enrolled identity"
+    );
     assert!(node.auth.is_none(), "displaynode authenticates by keypair");
     let display = node.display.as_ref().expect("display node carries display");
-    assert_eq!(
-        display.assign,
-        DisplayAssign::WallHead("head-l".to_owned())
-    );
+    assert_eq!(display.assign, DisplayAssign::WallHead("head-l".to_owned()));
 
     let group = &cfg.sync_groups[0];
     assert_eq!(group.id, "lobby-wall");
@@ -300,7 +300,8 @@ assign = { output = "out-main" }
         cfg.devices[1].display.as_ref().expect("display").assign,
         DisplayAssign::Output("out-main".to_owned())
     );
-    cfg.validate().expect("program + declared-output assigns are valid");
+    cfg.validate()
+        .expect("program + declared-output assigns are valid");
 
     let toml_text = cfg.to_toml().expect("serializes to TOML");
     let reparsed = MultiviewConfig::load_from_toml(&toml_text).expect("re-parses");
@@ -436,7 +437,10 @@ id = "dev-a"
 driver = "cast"
 "#]);
     let err = cfg.validate().expect_err("cast needs an address");
-    assert!(err.to_string().contains("address"), "names the field: {err}");
+    assert!(
+        err.to_string().contains("address"),
+        "names the field: {err}"
+    );
 }
 
 #[test]
@@ -459,7 +463,10 @@ driver = "zowietek"
 address = ""
 "#]);
     let err = cfg.validate().expect_err("empty address must fail");
-    assert!(err.to_string().contains("address"), "names the field: {err}");
+    assert!(
+        err.to_string().contains("address"),
+        "names the field: {err}"
+    );
 }
 
 #[test]
@@ -698,7 +705,9 @@ id = "g2"
 target_skew_ms = 50
 members = [{ device = "dev-a" }]
 "#]);
-    let err = cfg.validate().expect_err("cross-group membership must fail");
+    let err = cfg
+        .validate()
+        .expect_err("cross-group membership must fail");
     let msg = err.to_string();
     assert!(msg.contains("dev-a"), "names the device: {msg}");
     assert!(
@@ -757,7 +766,8 @@ id = "g"
 target_skew_ms = 10000
 members = [{ device = "dev-a", offset_ms = 10000 }]
 "#]);
-    cfg.validate().expect("10s skew/offset bounds are inclusive");
+    cfg.validate()
+        .expect("10s skew/offset bounds are inclusive");
 }
 
 #[test]
