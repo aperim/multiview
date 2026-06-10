@@ -261,6 +261,37 @@ pub enum SourceKind {
         #[serde(default)]
         numerals: bool,
     },
+    /// A digital countdown / count-up to a target instant (ADR-0047). The target
+    /// is a wall-clock time-of-day (optionally recurring) or an absolute
+    /// date+time, resolved in an IANA zone (DST-correct) or a fixed offset; the
+    /// displayed duration is **integer seconds** (never float). Silent, pure
+    /// pixels, in-process — a synthetic source like `clock`.
+    Timer {
+        /// The target instant, internally tagged on `target`
+        /// (`time_of_day` | `date_time`) and flattened to the top level.
+        #[serde(flatten)]
+        target: crate::timer::TimerTarget,
+        /// Count `down` (default) to the target or `up` from it.
+        #[serde(default)]
+        direction: crate::timer::TimerDirection,
+        /// What to do at/after the target: `hold` (default) | `continue` |
+        /// `zero_then_up` | `recur`.
+        #[serde(default)]
+        on_target: crate::timer::TimerOnTarget,
+        /// The display format: `d_hh_mm_ss` (default) | `hh_mm_ss` | `mm_ss` |
+        /// `hh_mm_ss_ff` | `auto`.
+        #[serde(default)]
+        format: crate::timer::TimerFormat,
+        /// Operator label drawn with the count (e.g. `ON AIR IN`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Overrun prefix override (default `+` past the target; `-`/none before).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overrun_prefix: Option<String>,
+        /// Draw the overrun a11y badge (`OVER` / `ELAPSED`) past the target.
+        #[serde(default = "default_true")]
+        overrun_badge: bool,
+    },
     /// RTSP pull.
     Rtsp {
         /// Source URL.
@@ -352,7 +383,10 @@ impl SourceKind {
     /// renderer (`SyntheticKind::from_source_kind`) accepts exactly this set.
     #[must_use]
     pub const fn is_synthetic(&self) -> bool {
-        matches!(self, Self::Bars | Self::Solid { .. } | Self::Clock { .. })
+        matches!(
+            self,
+            Self::Bars | Self::Solid { .. } | Self::Clock { .. } | Self::Timer { .. }
+        )
     }
 }
 
@@ -812,6 +846,12 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
+}
+
+/// Default `true` (serde `default` for an opt-out boolean, e.g. the timer
+/// overrun badge).
+const fn default_true() -> bool {
+    true
 }
 
 /// Default AES67 output PCM depth (Class A interop): 24-bit L24.

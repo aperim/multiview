@@ -43,6 +43,7 @@ pub mod salvo;
 pub mod schema;
 pub mod sync_group;
 pub mod tally;
+pub mod timer;
 pub mod wall;
 
 use std::collections::{HashMap, HashSet};
@@ -75,6 +76,10 @@ pub use schema::{
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
+pub use timer::{
+    compute as compute_timer, decompose as decompose_duration, frame_index, overrun_badge_word,
+    TimerDirection, TimerError, TimerFormat, TimerOnTarget, TimerReadout, TimerState, TimerTarget,
+};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
 /// The management control-plane listener.
@@ -1010,6 +1015,37 @@ impl Source {
                                 self.id
                             )));
                         }
+                    }
+                }
+            }
+            SourceKind::Timer {
+                target,
+                on_target,
+                ..
+            } => {
+                // The target's `at` must parse and any IANA `timezone` must be a
+                // known id (typed error, never a panic — ADR-0047 §5.2).
+                target.validate().map_err(|e| {
+                    ConfigError::Validation(format!("source {:?}: {e}", self.id))
+                })?;
+                // `recur` is only meaningful for a recurring time-of-day target;
+                // reject it on a `date_time` or a non-recurring time-of-day so the
+                // configuration is unambiguous (it would otherwise silently
+                // degrade to `hold`).
+                if matches!(on_target, crate::timer::TimerOnTarget::Recur) {
+                    let recurs = matches!(
+                        target,
+                        crate::timer::TimerTarget::TimeOfDay {
+                            recur_daily: true,
+                            ..
+                        }
+                    );
+                    if !recurs {
+                        return Err(ConfigError::Validation(format!(
+                            "source {:?}: on_target = \"recur\" requires a time_of_day target \
+                             with recur_daily = true",
+                            self.id
+                        )));
                     }
                 }
             }
