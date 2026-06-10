@@ -206,9 +206,11 @@ ffmpeg = [
 # HLS ingest path, and run an off-data-plane re-resolution loop that refreshes the
 # URL before it expires. OFF by default: it spawns an external resolver process and
 # is network-bound (no CI network), so the default build neither contains nor
-# requires it. Implies `ffmpeg` via `multiview-input/youtube` (the resolved master
-# is opened by the libav/HLS ingest path). LGPL-clean: `yt-dlp` is a subprocess,
-# never vendored or linked.
+# requires it. Enables `ffmpeg` directly here (this crate opens the resolved master
+# via the libav/HLS ingest path); `multiview-input/youtube` is itself libav-free
+# (the pure resolver), so the `ffmpeg` it needs is pulled by this list, NOT by the
+# resolver feature — that keeps `multiview-input --features youtube` lintable on a
+# libav-free runner. LGPL-clean: `yt-dlp` is a subprocess, never vendored or linked.
 youtube = ["ffmpeg", "multiview-input/youtube"]
 
 # NDI® ingest (ADR-0008 / IN-3): wire a `ndi` source into the ingest path via
