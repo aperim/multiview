@@ -21,7 +21,17 @@ multiview-core = { workspace = true }
 multiview-framestore = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+# `fs` + `io-util` serve the HLS delivery surface (`hls::http`): async file
+# metadata/reads (with seek for Range requests) off the engine hot path.
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+# The HLS delivery origin (`hls::http`, ADR-0032 §6): an axum router serving
+# playlists/segments/init with the documented header contract (Content-Type per
+# extension, Cache-Control tiers, Origin-reflecting CORS, Accept-Ranges/206).
+# Pure Rust (no native dep), stays in the default LGPL-clean build; trimmed to
+# the core router + `tokio` feature (no HTTP/1 server here — the listener that
+# serves this router lives with the caller, e.g. the control listener).
+axum = { version = "0.8.9", default-features = false, features = ["tokio"] }
 
 # Off-by-default `ndi` path ONLY. The proprietary NDI® runtime is resolved at RUN
 # time via `NDIlib_v6_load` (never linked/vendored at build time; ADR-0008). All
@@ -61,6 +71,11 @@ ffmpeg-next = { version = "8.1", optional = true }
 [dev-dependencies]
 proptest = "1.11.0"
 tempfile = "3"
+# In-process HTTP tests for the `hls::http` delivery router (the workspace's
+# `tower::oneshot` route-test pattern, as in multiview-control).
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Round-trip codec tests ONLY: encode here, decode with multiview-input's TSL
 # decoders, asserting encode∘decode == identity on the wire. A DEV-dependency
 # only — it never enters the (non-test) crate graph, so the sibling relationship
