@@ -231,7 +231,8 @@ fn depacketizer_reassembles_fu_a_fragments() {
 #[test]
 fn depacketizer_emits_stap_a_and_keys_on_aggregated_idr() {
     // STAP-A (RFC 6184 §5.7.1): [hdr=24|NRI][len][NAL][len][NAL]...
-    let stap_hdr = 0x78_u8; // NRI=3, type 24.
+    // The header byte 0x78 is NRI=3, type 24.
+    let stap_hdr = 0x78_u8;
     // A STAP-A holding only a non-IDR slice: gated before any keyframe.
     let delta_stap = vec![stap_hdr, 0x00, 0x02, 0x41, 0x9A];
     // A STAP-A holding SPS-ish bytes plus an IDR slice: opens the gate.
@@ -239,7 +240,9 @@ fn depacketizer_emits_stap_a_and_keys_on_aggregated_idr() {
 
     let mut depack = H264Depacketizer::new();
     assert!(
-        depack.push(&single_nal(1, 1000, true, &delta_stap)).is_none(),
+        depack
+            .push(&single_nal(1, 1000, true, &delta_stap))
+            .is_none(),
         "a STAP-A with no IDR is gated before the first keyframe"
     );
     assert!(!depack.gate_open());
@@ -282,7 +285,10 @@ fn depacketizer_flags_sequence_gap_as_discontinuity() {
     let out = depack
         .push(&single_nal(4, 4000, true, NON_IDR_NAL))
         .expect("late delta emits (gate is open)");
-    assert!(!out.discontinuity, "a reordered packet is not a forward gap");
+    assert!(
+        !out.discontinuity,
+        "a reordered packet is not a forward gap"
+    );
     let out = depack
         .push(&single_nal(7, 7000, true, NON_IDR_NAL))
         .expect("delta emits");
@@ -416,24 +422,32 @@ fn opus_depacketizer_bounds_packet_size() {
 #[test]
 fn opus_depacketizer_reorder_does_not_flag_or_rewind() {
     let mut depack = OpusDepacketizer::new();
-    assert!(!depack
-        .push(&opus_packet(10, 960, &[0x01]))
-        .expect("emits")
-        .discontinuity);
-    assert!(!depack
-        .push(&opus_packet(11, 1920, &[0x02]))
-        .expect("emits")
-        .discontinuity);
+    assert!(
+        !depack
+            .push(&opus_packet(10, 960, &[0x01]))
+            .expect("emits")
+            .discontinuity
+    );
+    assert!(
+        !depack
+            .push(&opus_packet(11, 1920, &[0x02]))
+            .expect("emits")
+            .discontinuity
+    );
     // A stale reordered packet is not a forward gap...
-    assert!(!depack
-        .push(&opus_packet(9, 0, &[0x03]))
-        .expect("emits")
-        .discontinuity);
+    assert!(
+        !depack
+            .push(&opus_packet(9, 0, &[0x03]))
+            .expect("emits")
+            .discontinuity
+    );
     // ...and the watermark must not rewind: 12 follows 11 cleanly.
-    assert!(!depack
-        .push(&opus_packet(12, 2880, &[0x04]))
-        .expect("emits")
-        .discontinuity);
+    assert!(
+        !depack
+            .push(&opus_packet(12, 2880, &[0x04]))
+            .expect("emits")
+            .discontinuity
+    );
 }
 
 // ---------------------------------------------------------------------------
