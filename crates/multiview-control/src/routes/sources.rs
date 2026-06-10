@@ -72,11 +72,20 @@ fn live_apply_upsert(
     }
     if previous.is_some_and(|prev| prev.kind.is_synthetic()) {
         // Synthetic -> decoded kind change: stop the running generator now;
-        // the stored decoded source applies on restart.
-        let _ = state.commands.try_submit(Command::RemoveSource {
+        // the stored decoded source applies on restart. A shed submit is
+        // surfaced (never silent): the stale generator keeps rendering until
+        // restart, and the operator should know why.
+        if let Err(err) = state.commands.try_submit(Command::RemoveSource {
             op: OperationId::new(),
-            id: source.id,
-        });
+            id: source.id.clone(),
+        }) {
+            tracing::warn!(
+                source = %source.id,
+                error = %err,
+                "kind-change RemoveSource shed: the running generator keeps \
+                 rendering the old synthetic picture until restart"
+            );
+        }
     }
     ApplyMode::Restart
 }

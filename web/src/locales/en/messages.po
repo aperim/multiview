@@ -2709,8 +2709,12 @@ msgid "Removed from the store. The running engine is unchanged until a config ex
 msgstr "Removed from the store. The running engine is unchanged until a config export + restart."
 
 #: src/pages/SourcesPage.tsx:541
-msgid "Removed. The running engine drops the source immediately — tiles bound to it show the no-signal slate until re-routed."
-msgstr "Removed. The running engine drops the source immediately — tiles bound to it show the no-signal slate until re-routed."
+#~ msgid "Removed. The running engine drops the source immediately — tiles bound to it show the no-signal slate until re-routed."
+#~ msgstr "Removed. The running engine drops the source immediately — tiles bound to it show the no-signal slate until re-routed."
+
+#: src/pages/SourcesPage.tsx:541
+msgid "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
+msgstr "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
 
 #: src/layout/components/LayoutEditor.tsx:441
 msgid "Replace cells"

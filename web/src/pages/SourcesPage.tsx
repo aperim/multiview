@@ -538,7 +538,7 @@ export function SourcesPage(): JSX.Element {
         />
       }
       savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart.`}
-      deletedDescription={t`Removed. The running engine drops the source immediately — tiles bound to it show the no-signal slate until re-routed.`}
+      deletedDescription={t`Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed.`}
       list={sources.data ?? []}
       isPending={sources.isPending}
       isError={sources.isError}

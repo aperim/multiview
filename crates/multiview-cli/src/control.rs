@@ -935,7 +935,39 @@ impl CommandDrain {
             },
             Arc::clone,
         );
-        drive.insert_store(id.clone(), Arc::clone(&store));
+        // Heavy half off-thread FIRST: the hub tears down any previous
+        // producer under this id (and its `{id}/` companions) before spawning
+        // the SAME generator_loop the startup path runs, and RCUs the preview
+        // map. Requesting this BEFORE the binding mutations below gives the
+        // hub a head start on stopping a replaced producer, shrinking the
+        // bounded window in which old and new frames can interleave in the
+        // reused store on an edit (ADR-W018 §5).
+        match seam.request_spawn_synth(crate::live_sources::SynthSpawn {
+            id: id.clone(),
+            kind,
+            store: Arc::clone(&store),
+            width: self.config.canvas.width,
+            height: self.config.canvas.height,
+            canvas: multiview_compositor::pipeline::CanvasColor::default(),
+            cadence: self.config.canvas.fps.rational(),
+        }) {
+            crate::live_sources::HubSubmit::Accepted => {}
+            crate::live_sources::HubSubmit::Full => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub queue full; producer spawn shed — the tile \
+                     rides the slate (re-apply the source to retry)"
+                );
+            }
+            crate::live_sources::HubSubmit::Gone => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub gone — live producer apply is disabled until \
+                     restart; the tile rides the slate"
+                );
+            }
+        }
+        drive.insert_store(id.clone(), store);
         // Register the route key so a follow-up RouteVideo/SwapSource resolves:
         // in the run, the CompositorDrive store key IS the source id.
         let stream = multiview_config::routing::StreamRef::best(
@@ -948,24 +980,6 @@ impl CommandDrain {
         match self.config.sources.iter_mut().find(|s| s.id == id) {
             Some(slot) => *slot = source.clone(),
             None => self.config.sources.push(source.clone()),
-        }
-        // Heavy half off-thread: the hub spawns the SAME generator_loop the
-        // startup path runs (uniform producer path) and RCUs the preview map.
-        let accepted = seam.request_spawn_synth(crate::live_sources::SynthSpawn {
-            id: id.clone(),
-            kind,
-            store,
-            width: self.config.canvas.width,
-            height: self.config.canvas.height,
-            canvas: multiview_compositor::pipeline::CanvasColor::default(),
-            cadence: self.config.canvas.fps.rational(),
-        });
-        if !accepted {
-            tracing::warn!(
-                source = %id,
-                "live-source hub queue full; producer spawn shed — the tile rides \
-                 the slate (re-apply the source to retry)"
-            );
         }
     }
 
@@ -984,18 +998,32 @@ impl CommandDrain {
             );
             return;
         };
+        // Teardown-request FIRST (the hub starts raising the producer's stop
+        // flags while the drain finishes the binding mutations — the same
+        // window-shrinking order as upsert), then unregister the store.
+        match seam.request_teardown(id) {
+            crate::live_sources::HubSubmit::Accepted => {}
+            crate::live_sources::HubSubmit::Full => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub queue full; producer teardown shed — the store \
+                     is unregistered (slate) but the producer stops only at run teardown"
+                );
+            }
+            crate::live_sources::HubSubmit::Gone => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub gone — live apply disabled until restart; the \
+                     store is unregistered (slate) but the producer stops only at \
+                     run teardown"
+                );
+            }
+        }
         let removed = drive.remove_store(id);
         if !removed {
             tracing::info!(source = %id, "remove_source: no registered store under that id");
         }
         self.config.sources.retain(|s| s.id != id);
-        if !seam.request_teardown(id) {
-            tracing::warn!(
-                source = %id,
-                "live-source hub queue full; producer teardown shed — the store is \
-                 unregistered (slate) but the producer stops only at run teardown"
-            );
-        }
     }
 
     /// Apply a `RouteSubtitle` by driving the run's live subtitle re-point seam

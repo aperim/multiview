@@ -3523,10 +3523,10 @@ impl IngestSupervisor {
     ///
     /// Each video-ingest thread carries its **own** stop flag, registered by
     /// source id in the run's shared `registry` (ADR-W018) so a live
-    /// `RemoveSource` can stop exactly that producer; caption readers keep
-    /// per-thread flags too but are not registry-addressable (a removed
-    /// source's reader runs harmlessly into an orphan store until run end —
-    /// the documented gap).
+    /// `RemoveSource` can stop exactly that producer; each caption reader
+    /// registers under the derived `{id}/captions` key, so a live
+    /// remove/edit of the source stops its caption reader too (the hub raises
+    /// every `{id}`-rooted flag).
     ///
     /// A caption reader is just another best-effort writer of a lock-free store
     /// (the cue store) — it is joined the same way, so it can neither pace nor
@@ -3557,6 +3557,11 @@ impl IngestSupervisor {
         for plan in caption_plans {
             let stop = Arc::new(AtomicBool::new(false));
             let id = plan.id.clone();
+            // Registered under the derived `{id}/captions` key (ADR-W018): a
+            // live remove/edit of the source raises every `{id}`-rooted flag,
+            // so its caption reader stops too — never left decoding a stale
+            // URL's cues over the replacement picture.
+            crate::live_sources::register_stop(registry, &format!("{id}/captions"), &stop);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-captions-{id}"));
             match builder.spawn(move || crate::captions::caption_loop(&plan, &thread_stop)) {

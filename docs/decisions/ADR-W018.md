@@ -57,6 +57,14 @@ The mutation response's `X-Multiview-Apply` header is computed per request:
 `SourceKind::is_synthetic()` (new, on `multiview-config`) is the single classification point —
 the same predicate `SyntheticKind::from_source_kind` implements in the CLI.
 
+Two honesty bounds on the header: **(a)** a submit that succeeds but is never drained (the engine
+stops before the next frame boundary) converges on restart semantics — the stored document remains
+the durable truth and applies at the next start, so a `live` answer followed by an engine stop
+never strands state; **(b)** a `clock` live-add on a build without the `overlay` feature returns
+`live` (the control plane cannot see the engine build's features) but the hub cannot render it: it
+registers the store, warns once, and the tile rides the slate until a restart of an
+overlay-enabled build.
+
 ### 3. Frame-boundary registration; heavy work on a hub worker (inv #1/#10)
 
 The split is **register-on-the-drain, produce-on-the-hub**:
@@ -109,6 +117,17 @@ never flashes the slate unless the new producer genuinely fails to produce (then
 `NO_SIGNAL` path applies). A kind change synthetic→network (until level 2) is a remove (the old
 picture stopping is more honest than a stale generator pretending to be the new URL).
 
+**Bounded old-frame window:** the old producer stops *cooperatively* (its stop flag is observed
+between publishes — within one read/render cadence for a generator, one packet-read/`rw_timeout`
+for an ingest thread), so on an edit a handful of the old producer's frames can still land in the
+reused store after the new content is requested, interleaved with the new producer's first frames.
+This is wrong-*content* for a bounded moment, never a falter or a stall, and is the same class of
+window any source switch has. To shrink it, the drain submits the hub teardown/spawn request
+**before** mutating the drive bindings, giving the hub a head start on raising the old producer's
+flags. The teardown also raises every `{id}/`-prefixed companion flag — notably `{id}/captions` —
+so a replaced network source's caption reader stops with it instead of burning the stale URL's
+cues over the replacement picture.
+
 ### 6. Removal semantics
 
 Removal is a deliberate operator act, not a signal loss: the cell transitions to its `on_loss`
@@ -160,8 +179,9 @@ OpenAPI descriptions state exactly this per-kind split.
 
 Designed but **not** shipped here (header stays `restart` — truthful): **level 2** network-kind
 live add (rtsp/hls/ts/srt/rtmp/file via hub-spawned `ingest_loop` + the pinned placement consult
-above), `ndi`/`youtube` kinds, caption-reader teardown on remove (a removed source's HLS-WebVTT
-reader runs harmlessly into an orphan store until run end), and the placement booking ledger.
+above), `ndi`/`youtube` kinds, and the placement booking ledger. Caption-reader teardown on
+remove/edit **is** shipped: readers register under `{id}/captions` and the hub raises every
+`{id}`-rooted flag.
 
 ## Alternatives considered
 

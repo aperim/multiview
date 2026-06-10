@@ -130,6 +130,21 @@ const HUB_QUEUE_DEPTH: usize = 32;
 /// (`synth::sleep_until` chunks); the margin covers a heavily loaded host.
 const TEARDOWN_JOIN_GRACE: Duration = Duration::from_secs(3);
 
+/// The outcome of a non-blocking hub submission: the two shed cases are
+/// distinct because the operator action differs — a [`HubSubmit::Full`] queue
+/// recovers by re-applying, a [`HubSubmit::Gone`] worker means live apply is
+/// disabled until restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubSubmit {
+    /// The request is queued; the worker will apply it.
+    Accepted,
+    /// The bounded queue is full; the request was shed (re-apply retries).
+    Full,
+    /// The hub worker is gone (never spawned, panicked, or shut down); live
+    /// producer apply is unavailable until restart.
+    Gone,
+}
+
 /// The cloneable handle the command drain holds: non-blocking submission of
 /// spawn/teardown requests to the hub worker.
 #[derive(Clone)]
@@ -138,25 +153,30 @@ pub struct LiveSourceHandle {
 }
 
 impl LiveSourceHandle {
-    /// Request a synthetic producer spawn (or replacement). Never blocks.
-    /// Returns `false` when the bounded hub queue is full/closed and the
-    /// request was shed (the tile rides the slate; re-apply retries).
+    /// Request a synthetic producer spawn (or replacement). Never blocks; a
+    /// shed request is reported as [`HubSubmit::Full`]/[`HubSubmit::Gone`]
+    /// (the tile rides the slate).
     #[must_use]
-    pub fn request_spawn_synth(&self, spawn: SynthSpawn) -> bool {
-        match self.tx.try_send(HubRequest::SpawnSynth(spawn)) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
-        }
+    pub fn request_spawn_synth(&self, spawn: SynthSpawn) -> HubSubmit {
+        Self::submit_outcome(&self.tx.try_send(HubRequest::SpawnSynth(spawn)))
     }
 
-    /// Request a producer teardown for `id`. Never blocks. Returns `false`
-    /// when the bounded hub queue is full/closed and the request was shed.
+    /// Request a producer teardown for `id` (raising the id's stop flag AND
+    /// every `{id}/`-prefixed companion flag, e.g. the caption reader's).
+    /// Never blocks; a shed request is reported as
+    /// [`HubSubmit::Full`]/[`HubSubmit::Gone`].
     #[must_use]
-    pub fn request_teardown(&self, id: &str) -> bool {
+    pub fn request_teardown(&self, id: &str) -> HubSubmit {
         let request = HubRequest::Teardown { id: id.to_owned() };
-        match self.tx.try_send(request) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+        Self::submit_outcome(&self.tx.try_send(request))
+    }
+
+    /// Map a `try_send` result onto the [`HubSubmit`] outcome.
+    fn submit_outcome(result: &Result<(), TrySendError<HubRequest>>) -> HubSubmit {
+        match result {
+            Ok(()) => HubSubmit::Accepted,
+            Err(TrySendError::Full(_)) => HubSubmit::Full,
+            Err(TrySendError::Disconnected(_)) => HubSubmit::Gone,
         }
     }
 }
@@ -310,18 +330,31 @@ fn spawn_synth(
     }
 }
 
-/// Stop `id`'s producer: raise its registry flag (covers startup-spawned
-/// producers too) and, when the hub owns the thread, join it bounded.
+/// Stop `id`'s producers: raise the id's registry flag AND every
+/// `{id}/`-prefixed companion flag (e.g. the `{id}/captions` reader — a source
+/// teardown must stop ALL of that source's producers, never leave a caption
+/// reader decoding a stale URL over the replacement picture), covering
+/// startup-spawned producers too; when the hub owns the thread, join it
+/// bounded. An unrelated id merely sharing leading characters ("src10" vs
+/// "src1") is never touched — the companion separator is `/`.
 fn teardown(id: &str, owned: &mut HashMap<String, Producer>, registry: &StopRegistry) {
-    let registered = match registry.lock() {
-        Ok(mut map) => map.remove(id),
+    let prefix = format!("{id}/");
+    let registered: Vec<Arc<AtomicBool>> = match registry.lock() {
+        Ok(mut map) => {
+            let keys: Vec<String> = map
+                .keys()
+                .filter(|key| *key == id || key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.iter().filter_map(|key| map.remove(key)).collect()
+        }
         Err(poisoned) => {
             tracing::warn!(source = %id, "stop registry poisoned during teardown");
             drop(poisoned);
-            None
+            Vec::new()
         }
     };
-    if let Some(flag) = registered {
+    for flag in registered {
         flag.store(true, Ordering::Release);
     }
     if let Some(producer) = owned.remove(id) {
@@ -390,15 +423,18 @@ mod tests {
         let hub = LiveSourceHub::start(Arc::clone(&registry), Arc::clone(&preview));
         let store = Arc::new(TileStore::<Nv12Image>::with_defaults("s1"));
 
-        assert!(hub.handle().request_spawn_synth(SynthSpawn {
-            id: "s1".to_owned(),
-            kind: SyntheticKind::Bars,
-            store: Arc::clone(&store),
-            width: 64,
-            height: 64,
-            canvas: CanvasColor::default(),
-            cadence: Rational::new(25, 1),
-        }));
+        assert!(matches!(
+            hub.handle().request_spawn_synth(SynthSpawn {
+                id: "s1".to_owned(),
+                kind: SyntheticKind::Bars,
+                store: Arc::clone(&store),
+                width: 64,
+                height: 64,
+                canvas: CanvasColor::default(),
+                cadence: Rational::new(25, 1),
+            }),
+            HubSubmit::Accepted
+        ));
         assert!(
             wait_for(Duration::from_secs(5), || store.is_primed()),
             "the spawned generator publishes into the store"
@@ -407,7 +443,10 @@ mod tests {
             .load()
             .contains_key("s1")));
 
-        assert!(hub.handle().request_teardown("s1"));
+        assert!(matches!(
+            hub.handle().request_teardown("s1"),
+            HubSubmit::Accepted
+        ));
         assert!(
             wait_for(Duration::from_secs(5), || !preview
                 .load()
@@ -492,15 +531,18 @@ mod tests {
         let preview = shared_stores(HashMap::new());
         let hub = LiveSourceHub::start(Arc::clone(&registry), Arc::clone(&preview));
         let store = Arc::new(TileStore::<Nv12Image>::with_defaults("s1"));
-        assert!(hub.handle().request_spawn_synth(SynthSpawn {
-            id: "s1".to_owned(),
-            kind: SyntheticKind::Bars,
-            store: Arc::clone(&store),
-            width: 64,
-            height: 64,
-            canvas: CanvasColor::default(),
-            cadence: Rational::new(25, 1),
-        }));
+        assert!(matches!(
+            hub.handle().request_spawn_synth(SynthSpawn {
+                id: "s1".to_owned(),
+                kind: SyntheticKind::Bars,
+                store: Arc::clone(&store),
+                width: 64,
+                height: 64,
+                canvas: CanvasColor::default(),
+                cadence: Rational::new(25, 1),
+            }),
+            HubSubmit::Accepted
+        ));
         assert!(wait_for(Duration::from_secs(5), || store.is_primed()));
         // Shutdown joins the producer; afterwards no more frames are published.
         hub.shutdown();
