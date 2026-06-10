@@ -24,6 +24,11 @@ pub struct ValidationReport {
     pub path: PathBuf,
     /// The validation outcome.
     pub status: ValidationStatus,
+    /// Non-fatal advisories from the parsed document (e.g. a clock that sets
+    /// both `timezone` and `tz_offset_minutes` — legal, but the offset is
+    /// ignored). Empty when the document did not parse or nothing applies.
+    /// Rendered as `WARN` lines so the operator sees them.
+    pub warnings: Vec<String>,
 }
 
 /// Whether a config validated, and if not, the human-readable reason.
@@ -55,11 +60,12 @@ impl ValidationReport {
         matches!(self.status, ValidationStatus::Ok { .. })
     }
 
-    /// Render the report as the multi-line text the binary prints.
+    /// Render the report as the multi-line text the binary prints. Non-fatal
+    /// advisories follow the status line as `WARN` lines.
     #[must_use]
     pub fn render(&self) -> String {
         let path = self.path.display();
-        match &self.status {
+        let mut out = match &self.status {
             ValidationStatus::Ok { summary } => {
                 format!("OK   {path}\n     {summary}")
             }
@@ -69,7 +75,12 @@ impl ValidationReport {
             ValidationStatus::Invalid { reason } => {
                 format!("FAIL {path}\n     invalid configuration: {reason}")
             }
+        };
+        for warning in &self.warnings {
+            out.push_str("\nWARN ");
+            out.push_str(warning);
         }
+        out
     }
 }
 
@@ -96,6 +107,7 @@ pub fn validate_config(path: &Path) -> anyhow::Result<ValidationReport> {
                 status: ValidationStatus::Unreadable {
                     reason: err.to_string(),
                 },
+                warnings: Vec::new(),
             });
         }
     };
@@ -108,9 +120,14 @@ pub fn validate_config(path: &Path) -> anyhow::Result<ValidationReport> {
                 status: ValidationStatus::Invalid {
                     reason: format!("parse: {err}"),
                 },
+                warnings: Vec::new(),
             });
         }
     };
+
+    // Non-fatal advisories apply to any *parsed* document (a semantically
+    // invalid one still benefits — the operator fixes everything in one pass).
+    let warnings = config_warnings(&config);
 
     match config.validate() {
         Ok(()) => Ok(ValidationReport {
@@ -118,14 +135,30 @@ pub fn validate_config(path: &Path) -> anyhow::Result<ValidationReport> {
             status: ValidationStatus::Ok {
                 summary: summarize(&config),
             },
+            warnings,
         }),
         Err(err) => Ok(ValidationReport {
             path: path.to_path_buf(),
             status: ValidationStatus::Invalid {
                 reason: err.to_string(),
             },
+            warnings,
         }),
     }
+}
+
+/// Collect every non-fatal advisory for a parsed config — currently the per-
+/// source clock advisories ([`multiview_config::Source::clock_warnings`], e.g.
+/// `timezone` + `tz_offset_minutes` both set). The `validate` subcommand renders
+/// these as `WARN` report lines; `multiview run` startup emits each via
+/// `tracing::warn!` before the engine starts.
+#[must_use]
+pub fn config_warnings(config: &MultiviewConfig) -> Vec<String> {
+    config
+        .sources
+        .iter()
+        .flat_map(multiview_config::Source::clock_warnings)
+        .collect()
 }
 
 /// A one-line human summary of a validated document.
