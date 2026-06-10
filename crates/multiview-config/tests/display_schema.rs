@@ -181,11 +181,17 @@ fn display_without_id_derives_it_from_the_label() {
 /// Wrap one output TOML fragment in a minimal valid document.
 fn doc_with_output(output_toml: &str) -> String {
     format!(
-        r#"
+        r##"
+schema_version = 1
+
 [canvas]
 width = 640
 height = 360
 fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
 
 [layout]
 kind = "preset"
@@ -203,7 +209,7 @@ input_id = "in_a"
 
 [[outputs]]
 {output_toml}
-"#
+"##
     )
 }
 
