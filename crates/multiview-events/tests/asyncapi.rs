@@ -69,7 +69,12 @@ fn ws_channel_has_websocket_binding() {
 #[test]
 fn messages_block_contains_envelope_schema() {
     let doc = generated_doc();
-    let messages = doc.get("messages").unwrap().as_object().unwrap();
+    // AsyncAPI 3.0: reusable messages live under components.messages.
+    let messages = doc
+        .pointer("/components/messages")
+        .unwrap()
+        .as_object()
+        .unwrap();
     assert!(
         messages.contains_key("Envelope"),
         "messages must contain an Envelope message definition"
@@ -86,7 +91,11 @@ fn messages_block_contains_envelope_schema() {
 #[test]
 fn messages_block_contains_key_event_types() {
     let doc = generated_doc();
-    let messages = doc.get("messages").unwrap().as_object().unwrap();
+    let messages = doc
+        .pointer("/components/messages")
+        .unwrap()
+        .as_object()
+        .unwrap();
 
     // The core data events from the brief §3 (ADR-RT002 discriminated union).
     for key in &[
@@ -107,7 +116,9 @@ fn messages_block_contains_key_event_types() {
 #[test]
 fn envelope_schema_has_required_fields() {
     let doc = generated_doc();
-    let envelope_payload = doc.pointer("/messages/Envelope/payload").unwrap();
+    let envelope_payload = doc
+        .pointer("/components/messages/Envelope/payload")
+        .unwrap();
     let empty = vec![];
     let required = envelope_payload
         .get("required")
@@ -158,7 +169,7 @@ fn audio_meter_message_notes_high_rate() {
     // AudioMeter is the sole high-rate conflated topic; its message description
     // must mention this so integrators know to expect conflation.
     let doc = generated_doc();
-    let meter_msg = doc.pointer("/messages/AudioMeter").unwrap();
+    let meter_msg = doc.pointer("/components/messages/AudioMeter").unwrap();
     let desc = meter_msg
         .get("description")
         .and_then(|d| d.as_str())
@@ -304,7 +315,8 @@ fn envelope_data_oneof_refs_resolve() {
             .strip_prefix("#/components/schemas/")
             .unwrap_or_else(|| panic!("oneOf entry must ref components.schemas, got {r:?}"));
         assert!(
-            doc.pointer(&format!("/components/schemas/{name}")).is_some(),
+            doc.pointer(&format!("/components/schemas/{name}"))
+                .is_some(),
             "data.oneOf references missing schema `{name}`"
         );
     }
