@@ -107,13 +107,21 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 # YouTube live ingest via a runtime-discovered `yt-dlp` binary (ADR-0015). OFF by
 # default: it spawns an external, operator-supplied resolver process, so the
 # default build neither contains nor requires it. The PURE info-dict parser
-# (`parse_info_dict` / `parse_expire` — no network, no subprocess) and the thin
-# `tokio::process` spawn wrapper live in `youtube`, gated entirely behind this
-# feature. Requires `ffmpeg` because the resolved HLS master is fed into the
-# libav/HLS ingest path (the wiring is a later item). `serde_json` parses the
-# `yt-dlp -J` output; `tokio/process` spawns the binary with a hard timeout. No
-# native deps in THIS crate, no FFI — it stays `unsafe_code = forbid`.
-"youtube" = ["ffmpeg", "dep:serde", "dep:serde_json", "tokio/process", "tokio/io-util"]
+# (`parse_info_dict` / `parse_expire` — no network, no subprocess), the thin
+# `tokio::process` spawn wrapper, and the off-data-plane re-resolution loop live in
+# `youtube`, gated entirely behind this feature. It is **pure Rust and libav-free**:
+# this feature deliberately does NOT pull `ffmpeg`. The resolver only turns a watch
+# URL into a `*.googlevideo.com` HLS master URL; that URL is then fed *verbatim* to
+# the standard HLS ingest path, which is the `ffmpeg`-gated libav code. The consumer
+# that actually opens the URL (e.g. `multiview-cli`) enables `ffmpeg` on its OWN
+# `youtube` feature (`youtube = ["ffmpeg", …]`), so the end-to-end path stays wired
+# without coupling the resolver crate to libav. Keeping `youtube` libav-free lets
+# `cargo clippy -p multiview-input --features youtube` lint on a libav-free runner
+# (the dedicated CI leg) — pulling `ffmpeg` here would panic ffmpeg-sys-next's build
+# script (no libavutil.pc) on that runner. `serde_json` parses the `yt-dlp -J`
+# output; `tokio/process` spawns the binary with a hard timeout. No native deps in
+# THIS crate, no FFI — it stays `unsafe_code = forbid`.
+"youtube" = ["dep:serde", "dep:serde_json", "tokio/process", "tokio/io-util"]
 
 [lints]
 workspace = true
