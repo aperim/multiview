@@ -250,8 +250,10 @@ export function sourceLocatorKey(kind: SourceKind): 'url' | 'name' | 'path' | un
   }
 }
 
-/** The body key that carries an output kind's target (mount/path/url/name). */
-export function outputTargetKey(kind: OutputKind): 'mount' | 'path' | 'url' | 'name' {
+/** The body key that carries an output kind's target (mount/path/url/name/connector). */
+export function outputTargetKey(
+  kind: OutputKind,
+): 'mount' | 'path' | 'url' | 'name' | 'connector' {
   switch (kind) {
     case 'rtsp':
       return 'mount';
@@ -260,14 +262,19 @@ export function outputTargetKey(kind: OutputKind): 'mount' | 'path' | 'url' | 'n
       return 'path';
     case 'ndi':
       return 'name';
+    case 'display':
+      return 'connector';
     default:
       return 'url';
   }
 }
 
-/** Whether an output kind carries a video codec (every kind except NDI). */
+/**
+ * Whether an output kind carries a video codec — every kind except NDI and
+ * display, which carry raw frames rather than an encoded rendition.
+ */
 export function outputHasCodec(kind: OutputKind): boolean {
-  return kind !== 'ndi';
+  return kind !== 'ndi' && kind !== 'display';
 }
 
 function asOutputKind(value: string | undefined): OutputKind {

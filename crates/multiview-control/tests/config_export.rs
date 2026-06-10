@@ -487,3 +487,72 @@ async fn export_rejects_a_probe_watching_an_unknown_cell() {
         "the violation names the probe/cell, got: {detail}"
     );
 }
+
+#[tokio::test]
+async fn export_carries_a_runtime_adopted_device_and_sync_group() {
+    // ADR-M008: config-as-code is the durable source. A device (and a
+    // sync group over it) adopted at runtime via the API MUST round-trip
+    // through `GET /config/export`, or the adoption is silently lost on
+    // restart. Runtime status (the device_status registry) must NOT leak in.
+    let h = harness();
+    seed(&h).await;
+
+    for (id, addr) in [
+        ("dev-node-left", "http://[fd00:db8::1]"),
+        ("dev-node-right", "http://[fd00:db8::2]"),
+    ] {
+        let resp = send(
+            &h.router,
+            post_json(
+                &format!("/api/v1/devices/{id}"),
+                OPERATOR_TOKEN,
+                &json!({ "name": id, "body": { "id": id, "driver": "displaynode" } }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "device {id} must adopt");
+        let _ = addr;
+    }
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sync-groups/lobby-wall",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "Lobby wall",
+                "body": {
+                    "id": "lobby-wall",
+                    "mode": "auto",
+                    "target_skew_ms": 50,
+                    "members": [
+                        { "device": "dev-node-left", "offset_ms": 0 },
+                        { "device": "dev-node-right", "offset_ms": 120 }
+                    ]
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "sync group must create");
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("export is a valid MultiviewConfig document");
+
+    assert_eq!(parsed.devices.len(), 2, "both adopted devices are exported");
+    assert!(
+        parsed.devices.iter().any(|d| d.id == "dev-node-left"),
+        "the adopted device id round-trips"
+    );
+    assert_eq!(parsed.sync_groups.len(), 1, "the sync group is exported");
+    assert_eq!(parsed.sync_groups[0].id, "lobby-wall");
+    assert_eq!(parsed.sync_groups[0].members.len(), 2);
+    // Runtime status never leaks into config-as-code: a MultiviewConfig has no
+    // device-status field at all, so a clean parse already proves the boundary.
+}

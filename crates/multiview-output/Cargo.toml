@@ -56,6 +56,22 @@ gstreamer-app = { workspace = true, optional = true }
 gstreamer-rtsp-server = { workspace = true, optional = true }
 glib = { workspace = true, optional = true }
 
+# Off-by-default `display-kms` path ONLY (DEV-B1 / ADR-0044): the real DRM/KMS
+# backend of the display sink (`display::kms`). `drm`/`drm-ffi` are Smithay's
+# SAFE pure-ioctl wrappers (no C linkage); `gbm` links Mesa's libgbm at run
+# time for scanout allocation (dumb buffers are the GBM-less fallback);
+# `rustix` provides the safe poll(2) on the DRM event fd. This crate writes NO
+# `unsafe` and stays `forbid(unsafe_code)` — GBM GEM handles cross into DRM via
+# prime-fd export/import, never the C union accessor. The pure sink seam
+# (mailbox, mode policy, flip state machine, the sink thread over the
+# `KmsBackend` trait) is ALWAYS compiled and CI-tested; this feature only adds
+# the ioctl-speaking device. `cargo deny` runs with all-features=false so the
+# default graph never sees these.
+drm = { workspace = true, optional = true }
+drm-ffi = { workspace = true, optional = true }
+gbm = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
+
 # Real libav* encode/mux path — opt-in only behind the `ffmpeg` feature so the
 # DEFAULT build stays pure-Rust / native-dep-free. All raw FFI is owned by
 # `multiview-ffmpeg`; this crate only calls its SAFE wrappers (it stays
@@ -143,6 +159,13 @@ multiview-input = { workspace = true }
     "dep:gstreamer-rtsp-server",
     "dep:glib",
 ]
+# Local DRM/KMS display output (DEV-B1 / ADR-0044): compiles the real
+# ioctl-speaking `display::kms` backend (drm-rs atomic commits + GBM/dumb
+# scanout buffers). OFF by default — the default build stays pure-Rust and the
+# always-compiled display seam (mailbox/mode-policy/flip-loop over the mock)
+# is what CI tests. Building this feature needs Mesa's libgbm development
+# files present (libgbm-dev); the binary then dynamically links libgbm.
+"display-kms" = ["dep:drm", "dep:drm-ffi", "dep:gbm", "dep:rustix"]
 
 [lints]
 workspace = true

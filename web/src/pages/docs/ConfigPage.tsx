@@ -288,6 +288,16 @@ source = "wall"   # the always-ticking clock doubles as a falter sentinel`}
             <DocTerm term={<Code>ndi</Code>}>
               <Trans>Advertise the canvas as an NDI source by <Code>name</Code>.</Trans>
             </DocTerm>
+            <DocTerm term={<Code>display</Code>}>
+              <Trans>
+                Scan the canvas out to a local HDMI/DisplayPort screen by KMS{" "}
+                <Code>connector</Code> (a <Code>display-kms</Code> build), with
+                an optional exact <Code>mode</Code> override or a{" "}
+                <Code>forced_mode</Code> for screens that report no EDID. The
+                refresh is an exact rational like <Code>"60000/1001"</Code>,
+                never a decimal.
+              </Trans>
+            </DocTerm>
           </DocDefinitions>
           <CodeBlock label="Example output">
             {`[[outputs]]

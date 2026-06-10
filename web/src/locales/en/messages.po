@@ -303,8 +303,8 @@ msgstr "A tiny nginx that serves the HLS volume over HTTP so you can open the st
 msgid "A video stream does not just carry pixel values — it carries an agreement about what those values <0>mean</0>. Three standards cover almost everything: <1>BT.601</1> (standard definition), <2>BT.709</2> (high definition — the default assumption for most content today), and <3>BT.2020</3> (ultra-HD and HDR, with a much wider color gamut). Each defines its own recipe for turning the YUV numbers in the stream back into red, green, and blue."
 msgstr "A video stream does not just carry pixel values — it carries an agreement about what those values <0>mean</0>. Three standards cover almost everything: <1>BT.601</1> (standard definition), <2>BT.709</2> (high definition — the default assumption for most content today), and <3>BT.2020</3> (ultra-HD and HDR, with a much wider color gamut). Each defines its own recipe for turning the YUV numbers in the stream back into red, green, and blue."
 
-#: src/pages/docs/ConfigPage.tsx:301
-#: src/pages/OutputsPage.tsx:270
+#: src/pages/docs/ConfigPage.tsx:311
+#: src/pages/OutputsPage.tsx:383
 msgid "About codecs and transcoding"
 msgstr "About codecs and transcoding"
 
@@ -317,7 +317,7 @@ msgstr "About color spaces and range"
 msgid "About layouts"
 msgstr "About layouts"
 
-#: src/pages/docs/ConfigPage.tsx:305
+#: src/pages/docs/ConfigPage.tsx:315
 msgid "About output transports"
 msgstr "About output transports"
 
@@ -386,7 +386,7 @@ msgstr "Action"
 #: src/pages/AlarmsPage.tsx:221
 #: src/pages/AudioPage.tsx:429
 #: src/pages/LayoutsPage.tsx:86
-#: src/pages/OutputsPage.tsx:433
+#: src/pages/OutputsPage.tsx:546
 #: src/pages/OverlaysPage.tsx:194
 #: src/pages/ProbesPage.tsx:452
 #: src/pages/SourcesPage.tsx:487
@@ -456,7 +456,7 @@ msgstr "Add to layout"
 msgid "admin.xxxxxxxx-xxxx-…"
 msgstr "admin.xxxxxxxx-xxxx-…"
 
-#: src/pages/OutputsPage.tsx:317
+#: src/pages/OutputsPage.tsx:430
 #: src/pages/SourcesPage.tsx:274
 msgid "Advanced"
 msgstr "Advanced"
@@ -526,7 +526,7 @@ msgstr "An honest comparison — figures are typical classes, not guarantees; th
 #~ msgid "An identifier is required."
 #~ msgstr "An identifier is required."
 
-#: src/pages/OutputsPage.tsx:468
+#: src/pages/OutputsPage.tsx:581
 msgid "An output is a sink/server that publishes the program."
 msgstr "An output is a sink/server that publishes the program."
 
@@ -665,7 +665,7 @@ msgstr "ATSC A/85 (−24 LKFS)"
 
 #: src/app/navigation.tsx:41
 #: src/pages/AudioPage.tsx:338
-#: src/pages/OutputsPage.tsx:319
+#: src/pages/OutputsPage.tsx:432
 msgid "Audio"
 msgstr "Audio"
 
@@ -704,6 +704,10 @@ msgstr "Auto (first usable track)"
 #: src/pages/SourcesPage.tsx:142
 msgid "Automatic (default)"
 msgstr "Automatic (default)"
+
+#: src/pages/OutputsPage.tsx:275
+msgid "Automatic (EDID preferred mode)"
+msgstr "Automatic (EDID preferred mode)"
 
 #: src/docs/registry.ts:376
 #: src/pages/docs/concepts/CodecsPage.tsx:79
@@ -926,7 +930,7 @@ msgstr "Centre y (px)"
 msgid "Change log, newest first."
 msgstr "Change log, newest first."
 
-#: src/resources/FormControls.tsx:338
+#: src/resources/FormControls.tsx:345
 msgid "Changes saved here are stored, not yet live: the engine does not hot-add outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
 msgstr "Changes saved here are stored, not yet live: the engine does not hot-add outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
 
@@ -1001,8 +1005,8 @@ msgstr "Cleared only"
 msgid "Code:"
 msgstr "Code:"
 
-#: src/pages/OutputsPage.tsx:261
-#: src/pages/OutputsPage.tsx:410
+#: src/pages/OutputsPage.tsx:374
+#: src/pages/OutputsPage.tsx:523
 msgid "Codec"
 msgstr "Codec"
 
@@ -1108,11 +1112,11 @@ msgstr "Config-as-code"
 msgid "Configuration export"
 msgstr "Configuration export"
 
-#: src/resources/FormControls.tsx:368
+#: src/resources/FormControls.tsx:375
 msgid "Configuration exported"
 msgstr "Configuration exported"
 
-#: src/pages/OutputsPage.tsx:458
+#: src/pages/OutputsPage.tsx:571
 msgid "Configure output servers and renditions."
 msgstr "Configure output servers and renditions."
 
@@ -1128,7 +1132,7 @@ msgstr "Configured ingest sources."
 msgid "Configured multiview layouts."
 msgstr "Configured multiview layouts."
 
-#: src/pages/OutputsPage.tsx:469
+#: src/pages/OutputsPage.tsx:582
 msgid "Configured output sinks."
 msgstr "Configured output sinks."
 
@@ -1147,6 +1151,10 @@ msgstr "Connecting"
 #: src/auth/RequireAuth.tsx:39
 msgid "Connecting…"
 msgstr "Connecting…"
+
+#: src/pages/OutputsPage.tsx:286
+msgid "Connector"
+msgstr "Connector"
 
 #: src/layout/components/GridLayoutEditor.tsx:870
 msgid "Convert"
@@ -1209,7 +1217,7 @@ msgstr "Could not delete profile"
 msgid "Could not delete salvo"
 msgstr "Could not delete salvo"
 
-#: src/resources/FormControls.tsx:382
+#: src/resources/FormControls.tsx:389
 msgid "Could not export configuration"
 msgstr "Could not export configuration"
 
@@ -1225,7 +1233,7 @@ msgstr "Could not load for editing"
 msgid "Could not load layouts:"
 msgstr "Could not load layouts:"
 
-#: src/pages/OutputsPage.tsx:472
+#: src/pages/OutputsPage.tsx:585
 msgid "Could not load outputs:"
 msgstr "Could not load outputs:"
 
@@ -1334,11 +1342,11 @@ msgstr "Critical"
 msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 msgstr "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 
-#: src/pages/OutputsPage.tsx:281
+#: src/pages/OutputsPage.tsx:394
 msgid "Custom codec name"
 msgstr "Custom codec name"
 
-#: src/pages/OutputsPage.tsx:265
+#: src/pages/OutputsPage.tsx:378
 msgid "Custom…"
 msgstr "Custom…"
 
@@ -1434,7 +1442,7 @@ msgstr "Delete layout"
 msgid "Delete layout?"
 msgstr "Delete layout?"
 
-#: src/pages/OutputsPage.tsx:439
+#: src/pages/OutputsPage.tsx:552
 msgid "Delete output"
 msgstr "Delete output"
 
@@ -1479,12 +1487,12 @@ msgstr "Deleted"
 msgid "Design pillars"
 msgstr "Design pillars"
 
-#: src/pages/OutputsPage.tsx:401
+#: src/pages/OutputsPage.tsx:514
 msgid "Destination"
 msgstr "Destination"
 
-#: src/pages/OutputsPage.tsx:215
-#: src/pages/OutputsPage.tsx:229
+#: src/pages/OutputsPage.tsx:232
+#: src/pages/OutputsPage.tsx:246
 msgid "Destination URL"
 msgstr "Destination URL"
 
@@ -1594,7 +1602,7 @@ msgstr "e.g. center or top_left"
 msgid "e.g. Main wall"
 msgstr "e.g. Main wall"
 
-#: src/pages/OutputsPage.tsx:505
+#: src/pages/OutputsPage.tsx:618
 msgid "e.g. program-hls"
 msgstr "e.g. program-hls"
 
@@ -1660,8 +1668,8 @@ msgstr "Edit"
 msgid "Edit layout"
 msgstr "Edit layout"
 
-#: src/pages/OutputsPage.tsx:438
-#: src/pages/OutputsPage.tsx:467
+#: src/pages/OutputsPage.tsx:551
+#: src/pages/OutputsPage.tsx:580
 msgid "Edit output"
 msgstr "Edit output"
 
@@ -1715,7 +1723,7 @@ msgstr "Encoder utilisation (device total)"
 msgid "Encoder utilisation: ours over device total"
 msgstr "Encoder utilisation: ours over device total"
 
-#: src/pages/OutputsPage.tsx:309
+#: src/pages/OutputsPage.tsx:422
 msgid "Engine default (mixed program bus)"
 msgstr "Engine default (mixed program bus)"
 
@@ -1764,6 +1772,10 @@ msgstr "Enter a whole number."
 msgid "Enter an API key."
 msgstr "Enter an API key."
 
+#: src/resources/FormControls.tsx:94
+msgid "Enter an exact rational rate like 60000/1001, or a whole number like 50 — never a decimal."
+msgstr "Enter an exact rational rate like 60000/1001, or a whole number like 50 — never a decimal."
+
 #: src/pages/docs/ApiPage.tsx:86
 msgid "Errors"
 msgstr "Errors"
@@ -1792,15 +1804,19 @@ msgstr "Every tile rides its own four-state ladder, independently of every other
 msgid "Exact \"num/den\", e.g. 30/1 or 30000/1001 — never a float."
 msgstr "Exact \"num/den\", e.g. 30/1 or 30000/1001 — never a float."
 
-#: src/pages/OutputsPage.tsx:313
+#: src/pages/OutputsPage.tsx:343
+msgid "Exact rational Hz (60000/1001) or a whole number — never a decimal."
+msgstr "Exact rational Hz (60000/1001) or a whole number — never a decimal."
+
+#: src/pages/OutputsPage.tsx:426
 msgid "Explicit track list"
 msgstr "Explicit track list"
 
-#: src/resources/FormControls.tsx:391
+#: src/resources/FormControls.tsx:398
 msgid "Export configuration"
 msgstr "Export configuration"
 
-#: src/resources/FormControls.tsx:375
+#: src/resources/FormControls.tsx:382
 msgid "Export not available"
 msgstr "Export not available"
 
@@ -1865,6 +1881,10 @@ msgstr "Fix these before saving:"
 #: src/pages/TallyPage.tsx:285
 msgid "Force lamp"
 msgstr "Force lamp"
+
+#: src/pages/OutputsPage.tsx:279
+msgid "Forced CVT-RB timing (EDID-less screen)"
+msgstr "Forced CVT-RB timing (EDID-less screen)"
 
 #: src/layout/components/CellsForm.tsx:335
 msgid "Forward"
@@ -1982,7 +2002,7 @@ msgstr "Good on LAN; not for WAN"
 msgid "GOP (Group of Pictures)"
 msgstr "GOP (Group of Pictures)"
 
-#: src/pages/OutputsPage.tsx:185
+#: src/pages/OutputsPage.tsx:202
 msgid "GOP (ms)"
 msgstr "GOP (ms)"
 
@@ -2016,7 +2036,7 @@ msgstr "GPU access"
 msgid "GPU overlays"
 msgstr "GPU overlays"
 
-#: src/pages/OutputsPage.tsx:356
+#: src/pages/OutputsPage.tsx:469
 #: src/pages/SourcesPage.tsx:395
 msgid "GPU vendor"
 msgstr "GPU vendor"
@@ -2090,6 +2110,7 @@ msgstr "Height (%)"
 
 #: src/layout/components/GridLayoutEditor.tsx:323
 #: src/layout/components/LayoutEditor.tsx:235
+#: src/pages/OutputsPage.tsx:326
 msgid "Height (px)"
 msgstr "Height (px)"
 
@@ -2131,7 +2152,7 @@ msgid "Host memory: ours / used / total"
 msgstr "Host memory: ours / used / total"
 
 #: src/pages/AudioPage.tsx:351
-#: src/pages/OutputsPage.tsx:477
+#: src/pages/OutputsPage.tsx:590
 #: src/pages/ProbesPage.tsx:496
 #: src/pages/SourcesPage.tsx:528
 msgid "How configuration applies"
@@ -2162,7 +2183,7 @@ msgid "Idempotency"
 msgstr "Idempotency"
 
 #: src/pages/LayoutsPage.tsx:70
-#: src/pages/OutputsPage.tsx:501
+#: src/pages/OutputsPage.tsx:614
 #: src/pages/OverlaysPage.tsx:252
 #: src/pages/ProbesPage.tsx:520
 #: src/pages/SalvosPage.tsx:211
@@ -2274,7 +2295,7 @@ msgid "Kind"
 msgstr "Kind"
 
 #. placeholder {0}: ctx.row.original.rawKind
-#: src/pages/OutputsPage.tsx:443
+#: src/pages/OutputsPage.tsx:556
 #: src/pages/OverlaysPage.tsx:204
 #: src/pages/ProbesPage.tsx:462
 #: src/pages/SourcesPage.tsx:497
@@ -2327,7 +2348,7 @@ msgstr "latched"
 msgid "Latency"
 msgstr "Latency"
 
-#: src/pages/OutputsPage.tsx:461
+#: src/pages/OutputsPage.tsx:574
 msgid "Latency & protocol guide"
 msgstr "Latency & protocol guide"
 
@@ -2335,7 +2356,7 @@ msgstr "Latency & protocol guide"
 msgid "Latency class"
 msgstr "Latency class"
 
-#: src/pages/OutputsPage.tsx:110
+#: src/pages/OutputsPage.tsx:127
 msgid "Latency profile (optional)"
 msgstr "Latency profile (optional)"
 
@@ -2493,7 +2514,7 @@ msgstr "Loading layout…"
 msgid "Loading layouts…"
 msgstr "Loading layouts…"
 
-#: src/pages/OutputsPage.tsx:471
+#: src/pages/OutputsPage.tsx:584
 msgid "Loading outputs…"
 msgstr "Loading outputs…"
 
@@ -2631,6 +2652,10 @@ msgstr "missing area: {0}"
 msgid "MLDv2"
 msgstr "MLDv2"
 
+#: src/pages/OutputsPage.tsx:302
+msgid "Mode"
+msgstr "Mode"
+
 #: src/pages/docs/concepts/CodecsPage.tsx:95
 msgid "Modern GPUs and SoCs contain dedicated video engines — separate silicon for decode and encode that runs at a fraction of the power of a CPU doing the same work. Multiview uses them through each platform's standard interface: NVDEC/NVENC on NVIDIA, VAAPI on Intel and AMD (including Quick Sync), and VideoToolbox on Apple Silicon. With acceleration, decoding a wall of sources and encoding the canvas leaves the CPU almost idle; without it, a handful of HD decodes can saturate a machine."
 msgstr "Modern GPUs and SoCs contain dedicated video engines — separate silicon for decode and encode that runs at a fraction of the power of a CPU doing the same work. Multiview uses them through each platform's standard interface: NVDEC/NVENC on NVIDIA, VAAPI on Intel and AMD (including Quick Sync), and VideoToolbox on Apple Silicon. With acceleration, decoding a wall of sources and encoding the canvas leaves the CPU almost idle; without it, a handful of HD decodes can saturate a machine."
@@ -2656,7 +2681,7 @@ msgstr "Mostly static"
 msgid "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 msgstr "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 
-#: src/pages/OutputsPage.tsx:99
+#: src/pages/OutputsPage.tsx:116
 msgid "Mount point"
 msgstr "Mount point"
 
@@ -2719,7 +2744,7 @@ msgstr "Multiview itself never trades the output cadence away: under load it deg
 msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas. Apply is live on the running engine."
 msgstr "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas. Apply is live on the running engine."
 
-#: src/pages/OutputsPage.tsx:204
+#: src/pages/OutputsPage.tsx:221
 msgid "Multiview Program"
 msgstr "Multiview Program"
 
@@ -2744,8 +2769,8 @@ msgid "Mute on the program mix (route {row})"
 msgstr "Mute on the program mix (route {row})"
 
 #: src/pages/LayoutsPage.tsx:61
-#: src/pages/OutputsPage.tsx:391
-#: src/pages/OutputsPage.tsx:513
+#: src/pages/OutputsPage.tsx:504
+#: src/pages/OutputsPage.tsx:626
 #: src/pages/OverlaysPage.tsx:168
 #: src/pages/OverlaysPage.tsx:264
 #: src/pages/ProbesPage.tsx:414
@@ -2761,7 +2786,7 @@ msgstr "Name"
 msgid "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 msgstr "Named recalls. Arm stages a salvo, Take applies it, and Cancel drops a staged one. Each command is accepted asynchronously; its outcome arrives on the realtime stream."
 
-#: src/pages/OutputsPage.tsx:335
+#: src/pages/OutputsPage.tsx:448
 msgid "Names declared by the audio routing block; the program bus is always available as \"prog\"."
 msgstr "Names declared by the audio routing block; the program bus is always available as \"prog\"."
 
@@ -2785,7 +2810,7 @@ msgstr "NDI (Network Device Interface) is a production-LAN video transport: send
 msgid "NDI source name"
 msgstr "NDI source name"
 
-#: src/pages/OutputsPage.tsx:201
+#: src/pages/OutputsPage.tsx:218
 msgid "NDI source name to advertise"
 msgstr "NDI source name to advertise"
 
@@ -2810,8 +2835,8 @@ msgstr "New cell"
 msgid "New layout"
 msgstr "New layout"
 
-#: src/pages/OutputsPage.tsx:465
-#: src/pages/OutputsPage.tsx:466
+#: src/pages/OutputsPage.tsx:578
+#: src/pages/OutputsPage.tsx:579
 msgid "New output"
 msgstr "New output"
 
@@ -2887,7 +2912,7 @@ msgstr "No layouts are defined yet."
 msgid "No live tiles yet. They appear once the engine streams a snapshot."
 msgstr "No live tiles yet. They appear once the engine streams a snapshot."
 
-#: src/pages/OutputsPage.tsx:470
+#: src/pages/OutputsPage.tsx:583
 msgid "No outputs configured."
 msgstr "No outputs configured."
 
@@ -2972,7 +2997,7 @@ msgstr "Not in the running engine — no live state. Synthetic sources join live
 msgid "Not static"
 msgstr "Not static"
 
-#: src/pages/OutputsPage.tsx:77
+#: src/pages/OutputsPage.tsx:93
 msgid "Not yet runnable in this build"
 msgstr "Not yet runnable in this build"
 
@@ -3093,8 +3118,8 @@ msgstr "Ours of host total"
 msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
 msgstr "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
 
-#: src/pages/OutputsPage.tsx:124
-#: src/pages/OutputsPage.tsx:151
+#: src/pages/OutputsPage.tsx:141
+#: src/pages/OutputsPage.tsx:168
 msgid "Output path"
 msgstr "Output path"
 
@@ -3103,7 +3128,7 @@ msgstr "Output path"
 #: src/docs/registry.ts:211
 #: src/pages/docs/ConfigPage.tsx:248
 #: src/pages/docs/FeaturesPage.tsx:65
-#: src/pages/OutputsPage.tsx:455
+#: src/pages/OutputsPage.tsx:568
 msgid "Outputs"
 msgstr "Outputs"
 
@@ -3149,7 +3174,7 @@ msgstr "Overview"
 msgid "Page not found"
 msgstr "Page not found"
 
-#: src/pages/OutputsPage.tsx:163
+#: src/pages/OutputsPage.tsx:180
 msgid "Part target (ms)"
 msgstr "Part target (ms)"
 
@@ -3165,6 +3190,10 @@ msgstr "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_
 msgid "Pick a rectangle of squares with the arrow keys (hold Shift to extend) or by click-dragging, then type a name and assign it. Every named area must form a contiguous rectangle."
 msgstr "Pick a rectangle of squares with the arrow keys (hold Shift to extend) or by click-dragging, then type a name and assign it. Every named area must form a contiguous rectangle."
 
+#: src/pages/OutputsPage.tsx:277
+msgid "Pick an exact EDID mode"
+msgstr "Pick an exact EDID mode"
+
 #: src/pages/ProbesPage.tsx:142
 msgid "Pick the cell this probe watches."
 msgstr "Pick the cell this probe watches."
@@ -3178,7 +3207,7 @@ msgstr "Picked up {0}."
 msgid "Pin decode to a specific GPU"
 msgstr "Pin decode to a specific GPU"
 
-#: src/pages/OutputsPage.tsx:347
+#: src/pages/OutputsPage.tsx:460
 msgid "Pin encode to a specific GPU"
 msgstr "Pin encode to a specific GPU"
 
@@ -3240,7 +3269,7 @@ msgstr "PROG"
 msgid "Program"
 msgstr "Program"
 
-#: src/pages/OutputsPage.tsx:311
+#: src/pages/OutputsPage.tsx:424
 msgid "Program bus only"
 msgstr "Program bus only"
 
@@ -3325,6 +3354,10 @@ msgstr "Recovery has not succeeded within the no-signal timeout. The tile switch
 msgid "Red"
 msgstr "Red"
 
+#: src/pages/OutputsPage.tsx:338
+msgid "Refresh (exact rational)"
+msgstr "Refresh (exact rational)"
+
 #: src/pages/docs/DocsLayout.tsx:174
 msgid "Related"
 msgstr "Related"
@@ -3356,7 +3389,7 @@ msgstr "Remove route {row}"
 msgid "Remove row"
 msgstr "Remove row"
 
-#: src/pages/OutputsPage.tsx:481
+#: src/pages/OutputsPage.tsx:594
 #: src/pages/OverlaysPage.tsx:232
 #: src/pages/ProbesPage.tsx:500
 msgid "Removed from the store. The running engine is unchanged until a config export + restart."
@@ -3385,6 +3418,10 @@ msgstr "Replace the current cells?"
 #: src/pages/SettingsPage.tsx:39
 msgid "Requests will be unauthenticated."
 msgstr "Requests will be unauthenticated."
+
+#: src/pages/OutputsPage.tsx:82
+msgid "Requires a display-kms build"
+msgstr "Requires a display-kms build"
 
 #: src/pages/docs/ContainerPage.tsx:96
 msgid "Requires the NVIDIA driver and the NVIDIA Container Toolkit on the host. The modern path requests devices through CDI; NVENC and NVDEC also need the <0>video</0> driver capability."
@@ -3486,7 +3523,7 @@ msgstr "RTSP, NDI, SRT, RTMP, HLS, MPEG-TS, and files: how each carries video an
 msgid "Run Multiview with Docker — single container or the compose stack — with optional GPU access, persistent volumes, and healthchecks."
 msgstr "Run Multiview with Docker — single container or the compose stack — with optional GPU access, persistent volumes, and healthchecks."
 
-#: src/pages/OutputsPage.tsx:66
+#: src/pages/OutputsPage.tsx:71
 msgid "Runnable"
 msgstr "Runnable"
 
@@ -3548,7 +3585,7 @@ msgid "Saved"
 msgstr "Saved"
 
 #. placeholder {0}: result.filename
-#: src/resources/FormControls.tsx:369
+#: src/resources/FormControls.tsx:376
 msgid "Saved as {0}. Restart Multiview with this file to apply stored changes."
 msgstr "Saved as {0}. Restart Multiview with this file to apply stored changes."
 
@@ -3560,6 +3597,10 @@ msgstr "Saving…"
 #: src/layout/components/CellPropertiesPanel.tsx:212
 msgid "Scaler"
 msgstr "Scaler"
+
+#: src/pages/docs/ConfigPage.tsx:292
+msgid "Scan the canvas out to a local HDMI/DisplayPort screen by KMS <0>connector</0> (a <1>display-kms</1> build), with an optional exact <2>mode</2> override or a <3>forced_mode</3> for screens that report no EDID. The refresh is an exact rational like <4>\"60000/1001\"</4>, never a decimal."
+msgstr "Scan the canvas out to a local HDMI/DisplayPort screen by KMS <0>connector</0> (a <1>display-kms</1> build), with an optional exact <2>mode</2> override or a <3>forced_mode</3> for screens that report no EDID. The refresh is an exact rational like <4>\"60000/1001\"</4>, never a decimal."
 
 #: src/pages/AlarmsPage.tsx:219
 msgid "Scope"
@@ -3593,11 +3634,11 @@ msgstr "Seed from a preset"
 msgid "Seeding from a preset replaces every cell in this draft. Nothing is saved until you save the layout."
 msgstr "Seeding from a preset replaces every cell in this draft. Nothing is saved until you save the layout."
 
-#: src/pages/OutputsPage.tsx:174
+#: src/pages/OutputsPage.tsx:191
 msgid "Segment (ms)"
 msgstr "Segment (ms)"
 
-#: src/pages/OutputsPage.tsx:135
+#: src/pages/OutputsPage.tsx:152
 msgid "Segment duration (ms, optional)"
 msgstr "Segment duration (ms, optional)"
 
@@ -3715,7 +3756,7 @@ msgstr "SRT"
 msgid "SRT (Secure Reliable Transport) is an open-source UDP transport built for contribution over unmanaged networks — the public internet included. It recovers lost packets by selective retransmission inside a configurable latency window, encrypts with AES, and connects in caller, listener, or rendezvous mode so either side can initiate through firewalls."
 msgstr "SRT (Secure Reliable Transport) is an open-source UDP transport built for contribution over unmanaged networks — the public internet included. It recovers lost packets by selective retransmission inside a configurable latency window, encrypts with AES, and connects in caller, listener, or rendezvous mode so either side can initiate through firewalls."
 
-#: src/pages/OutputsPage.tsx:365
+#: src/pages/OutputsPage.tsx:478
 #: src/pages/SourcesPage.tsx:404
 msgid "Stable device id"
 msgstr "Stable device id"
@@ -3748,7 +3789,7 @@ msgstr "State"
 msgid "Static source hint"
 msgstr "Static source hint"
 
-#: src/pages/OutputsPage.tsx:419
+#: src/pages/OutputsPage.tsx:532
 msgid "Status"
 msgstr "Status"
 
@@ -3757,7 +3798,7 @@ msgid "Stereo"
 msgstr "Stereo"
 
 #: src/pages/AudioPage.tsx:492
-#: src/pages/OutputsPage.tsx:480
+#: src/pages/OutputsPage.tsx:593
 #: src/pages/OverlaysPage.tsx:231
 #: src/pages/ProbesPage.tsx:499
 msgid "Stored. It goes live via config export + restart; the running engine is unchanged until then."
@@ -3941,7 +3982,7 @@ msgstr "The default image encodes <0>mpeg2video</0> (plays in VLC or ffplay). Fo
 msgid "The default image encodes <0>mpeg2video</0>, which plays in VLC and ffplay. For browser playback, switch to the GPL image and an H.264 codec (see the config section)."
 msgstr "The default image encodes <0>mpeg2video</0>, which plays in VLC and ffplay. For browser playback, switch to the GPL image and an H.264 codec (see the config section)."
 
-#: src/pages/docs/ConfigPage.tsx:311
+#: src/pages/docs/ConfigPage.tsx:321
 msgid "The document is validated as a whole: source and cell ids must be unique, every <0>input_id</0> must resolve to a declared source, every grid cell must reference an existing area, and the cadence must be a usable rational. Because TOML and JSON encode the same model, a config can be authored by hand and exported as JSON over the API, or vice versa."
 msgstr "The document is validated as a whole: source and cell ids must be unique, every <0>input_id</0> must resolve to a declared source, every grid cell must reference an existing area, and the cadence must be a usable rational. Because TOML and JSON encode the same model, a config can be authored by hand and exported as JSON over the API, or vice versa."
 
@@ -3972,6 +4013,10 @@ msgstr "The immutable change log: who changed what, and when, on the engine medi
 #: src/pages/docs/concepts/TimingSyncPage.tsx:63
 msgid "The key idea to keep: a <0>reference</0> is trusted timing infrastructure that carries only rate and phase — it is not a video source. Facilities lock outputs to a reference and then frame-align sources to those outputs; nobody lets program content drive a device's clock, because content can stall or lie. Multiview follows the same discipline in software: its output cadence can be disciplined by a reference, but never by a source."
 msgstr "The key idea to keep: a <0>reference</0> is trusted timing infrastructure that carries only rate and phase — it is not a video source. Facilities lock outputs to a reference and then frame-align sources to those outputs; nobody lets program content drive a device's clock, because content can stall or lie. Multiview follows the same discipline in software: its output cadence can be disciplined by a reference, but never by a source."
+
+#: src/pages/OutputsPage.tsx:292
+msgid "The KMS connector name (DP-1, HDMI-A-1). Use \"auto\" for the first connected screen."
+msgstr "The KMS connector name (DP-1, HDMI-A-1). Use \"auto\" for the first connected screen."
 
 #: src/pages/docs/concepts/TransportsPage.tsx:118
 msgid "The latency window is the key dial: it is the time budget SRT has to repair loss. A small window (~120 ms) keeps the feed snappy but tolerates little loss; a large window (1–4 s) rides out bad networks at the cost of delay. The payload is an MPEG transport stream, so codec choices follow the MPEG-TS rules."
@@ -4120,7 +4165,7 @@ msgstr "The UI will authenticate with this token."
 msgid "The unauthenticated surface is just <0>/</0>, <1>/docs</1>, and <2>/api/v1/openapi.json</2>; every <3>/api/v1</3> data route requires the token. The image must be built with the <4>web</4> feature for the UI to be embedded (the published image is)."
 msgstr "The unauthenticated surface is just <0>/</0>, <1>/docs</1>, and <2>/api/v1/openapi.json</2>; every <3>/api/v1</3> data route requires the token. The image must be built with the <4>web</4> feature for the UI to be embedded (the published image is)."
 
-#: src/pages/OutputsPage.tsx:369
+#: src/pages/OutputsPage.tsx:482
 #: src/pages/SourcesPage.tsx:408
 msgid "The vendor's stable handle (UUID / PCI bus id), never the index."
 msgstr "The vendor's stable handle (UUID / PCI bus id), never the index."
@@ -4177,7 +4222,7 @@ msgstr "This cell declares both an area and a rect — keep exactly one (the eng
 msgid "This cell references an area that is not in the grid."
 msgstr "This cell references an area that is not in the grid."
 
-#: src/resources/FormControls.tsx:376
+#: src/resources/FormControls.tsx:383
 msgid "This control plane does not serve config export yet. Update the server to use it."
 msgstr "This control plane does not serve config export yet. Update the server to use it."
 
@@ -4314,7 +4359,7 @@ msgstr "Track id or language tag"
 msgid "Track title (route {row})"
 msgstr "Track title (route {row})"
 
-#: src/pages/OutputsPage.tsx:330
+#: src/pages/OutputsPage.tsx:443
 msgid "Tracks (comma-separated)"
 msgstr "Tracks (comma-separated)"
 
@@ -4341,8 +4386,8 @@ msgid "Transfer"
 msgstr "Transfer"
 
 #: src/pages/docs/concepts/TransportsPage.tsx:228
-#: src/pages/OutputsPage.tsx:396
-#: src/pages/OutputsPage.tsx:522
+#: src/pages/OutputsPage.tsx:509
+#: src/pages/OutputsPage.tsx:635
 msgid "Transport"
 msgstr "Transport"
 
@@ -4381,7 +4426,7 @@ msgid "Used"
 msgstr "Used"
 
 #: src/docs/registry.ts:158
-#: src/pages/docs/ConfigPage.tsx:309
+#: src/pages/docs/ConfigPage.tsx:319
 msgid "Validation and import / export"
 msgstr "Validation and import / export"
 
@@ -4531,6 +4576,7 @@ msgstr "Width (%)"
 #: src/layout/components/CellPropertiesPanel.tsx:266
 #: src/layout/components/GridLayoutEditor.tsx:302
 #: src/layout/components/LayoutEditor.tsx:214
+#: src/pages/OutputsPage.tsx:314
 msgid "Width (px)"
 msgstr "Width (px)"
 

@@ -6,10 +6,13 @@
 // runnable — `build_outputs` in crates/multiview-cli/src/pipeline.rs warns and
 // skips them — so the table and the form flag those kinds with a clear,
 // non-alarming "Not yet runnable in this build" note (text + icon, never
-// colour alone). hls / ll_hls / rtmp / srt run today.
+// colour alone). hls / ll_hls / rtmp / srt run today; `display` (the local
+// DRM/KMS head, DEV-B1/ADR-0044) runs only in a `display-kms` build and is
+// badged "Requires a display-kms build" (a default build fails the run with a
+// clear error rather than skipping the output).
 import type { JSX } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
-import { CircleCheck, Hourglass } from 'lucide-react';
+import { CircleCheck, Hourglass, MonitorCog } from 'lucide-react';
 import type { ColumnDef } from '@tanstack/react-table';
 
 import { useOutputs } from '../resources/queries';
@@ -25,6 +28,7 @@ import {
   validateOutputForm,
 } from '../resources/forms';
 import type {
+  DisplayModeChoice,
   FieldErrors,
   OutputAudioChoice,
   OutputField,
@@ -55,28 +59,41 @@ function codecChoiceOf(codec: string): CodecChoice {
 
 /** Runnability of an output kind in this build, as text + icon. */
 function RunnabilityNote({ kind }: { readonly kind: OutputKind }): JSX.Element {
-  if (OUTPUT_RUNNABLE[kind]) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-        data-testid="output-runnability"
-        data-runnable="true"
-      >
-        <CircleCheck className="size-3.5" aria-hidden="true" />
-        <Trans>Runnable</Trans>
-      </span>
-    );
+  switch (OUTPUT_RUNNABLE[kind]) {
+    case 'runnable':
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+          data-testid="output-runnability"
+          data-runnable="true"
+        >
+          <CircleCheck className="size-3.5" aria-hidden="true" />
+          <Trans>Runnable</Trans>
+        </span>
+      );
+    case 'requires-feature':
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+          data-testid="output-runnability"
+          data-runnable="feature"
+        >
+          <MonitorCog className="size-3.5" aria-hidden="true" />
+          <Trans>Requires a display-kms build</Trans>
+        </span>
+      );
+    case 'unbuilt':
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+          data-testid="output-runnability"
+          data-runnable="false"
+        >
+          <Hourglass className="size-3.5" aria-hidden="true" />
+          <Trans>Not yet runnable in this build</Trans>
+        </span>
+      );
   }
-  return (
-    <span
-      className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-      data-testid="output-runnability"
-      data-runnable="false"
-    >
-      <Hourglass className="size-3.5" aria-hidden="true" />
-      <Trans>Not yet runnable in this build</Trans>
-    </span>
-  );
 }
 
 /** The kind-specific destination + tuning fields. */
@@ -236,7 +253,102 @@ function OutputKindFields({
           }}
         />
       );
+    case 'display':
+      return <DisplayKindFields form={form} setForm={setForm} errors={errors} />;
   }
+}
+
+/** The display-head fields: connector + the mutually-exclusive mode choice. */
+function DisplayKindFields({
+  form,
+  setForm,
+  errors,
+}: {
+  readonly form: OutputFormState;
+  readonly setForm: (next: OutputFormState) => void;
+  readonly errors: FieldErrors<OutputField>;
+}): JSX.Element {
+  const { t } = useLingui();
+  const modeLabel = (choice: DisplayModeChoice): JSX.Element => {
+    switch (choice) {
+      case 'auto':
+        return <Trans>Automatic (EDID preferred mode)</Trans>;
+      case 'override':
+        return <Trans>Pick an exact EDID mode</Trans>;
+      case 'forced':
+        return <Trans>Forced CVT-RB timing (EDID-less screen)</Trans>;
+    }
+  };
+  return (
+    <>
+      <FormField
+        id="output-connector"
+        label={t`Connector`}
+        value={form.connector}
+        required
+        placeholder="DP-1"
+        error={errors.connector}
+        hint={
+          <Trans>
+            The KMS connector name (DP-1, HDMI-A-1). Use "auto" for the first
+            connected screen.
+          </Trans>
+        }
+        onChange={(next): void => {
+          setForm({ ...form, connector: next });
+        }}
+      />
+      <SelectField<DisplayModeChoice>
+        label={t`Mode`}
+        value={form.displayModeChoice}
+        options={['auto', 'override', 'forced'] as const}
+        optionLabel={modeLabel}
+        onChange={(next): void => {
+          setForm({ ...form, displayModeChoice: next });
+        }}
+      />
+      {form.displayModeChoice === 'auto' ? null : (
+        <div className="grid grid-cols-3 gap-3">
+          <FormField
+            id="output-display-width"
+            label={t`Width (px)`}
+            type="number"
+            value={form.displayModeWidth}
+            required
+            placeholder="1920"
+            error={errors.displayModeWidth}
+            onChange={(next): void => {
+              setForm({ ...form, displayModeWidth: next });
+            }}
+          />
+          <FormField
+            id="output-display-height"
+            label={t`Height (px)`}
+            type="number"
+            value={form.displayModeHeight}
+            required
+            placeholder="1080"
+            error={errors.displayModeHeight}
+            onChange={(next): void => {
+              setForm({ ...form, displayModeHeight: next });
+            }}
+          />
+          <FormField
+            id="output-display-refresh"
+            label={t`Refresh (exact rational)`}
+            value={form.displayModeRefresh}
+            required
+            placeholder="60000/1001"
+            error={errors.displayModeRefresh}
+            hint={<Trans>Exact rational Hz (60000/1001) or a whole number — never a decimal.</Trans>}
+            onChange={(next): void => {
+              setForm({ ...form, displayModeRefresh: next });
+            }}
+          />
+        </div>
+      )}
+    </>
+  );
 }
 
 /** The codec selector with the custom free-entry escape. */
@@ -250,8 +362,9 @@ function CodecFields({
   readonly errors: FieldErrors<OutputField>;
 }): JSX.Element | null {
   const { t } = useLingui();
-  if (form.kind === 'ndi') {
-    // NDI carries frames, not an encoded rendition — no codec field exists.
+  if (form.kind === 'ndi' || form.kind === 'display') {
+    // NDI and the local display head carry frames, not an encoded rendition —
+    // no codec field exists.
     return null;
   }
   const choice = codecChoiceOf(form.codec);

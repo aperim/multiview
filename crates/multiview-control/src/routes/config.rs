@@ -299,6 +299,19 @@ fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value>
         "probes".to_owned(),
         serde_json::Value::Array(collect(&state.probes)?),
     );
+    // Managed devices + sync groups (ADR-M008): config-as-code is the durable
+    // source, so a device or sync group adopted at runtime via the API must
+    // round-trip through the export exactly as sources/outputs do. The runtime
+    // `device_status` registry is a separate `Arc` that is never collected
+    // here, so live status never leaks into the desired-state document.
+    doc.insert(
+        "devices".to_owned(),
+        serde_json::Value::Array(collect(&state.devices)?),
+    );
+    doc.insert(
+        "sync_groups".to_owned(),
+        serde_json::Value::Array(collect(&state.sync_groups)?),
+    );
     // The audio-routing singleton overlays the `audio` key when an operator
     // (or the seeded config) configured it; otherwise the base document's
     // authored block — if any — is left untouched. The whole-document
