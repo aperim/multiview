@@ -1,6 +1,6 @@
 //! The `zowietek` typed JSON-RPC-over-HTTP client (DEV-A4, ADR-M009): the
 //! defensive client that survives the firmware hazards verified on real
-//! ZowieBox units (2026-06-10). Every test drives the client through the
+//! `ZowieBox` units (2026-06-10). Every test drives the client through the
 //! **scripted transport seam** ([`ScriptedTransport`]) so the whole client is
 //! socket-free — no real device, no `zowietek` network feature needed.
 //!
@@ -180,9 +180,8 @@ async fn requests_to_one_device_are_serialized() {
     transport.push("system", login_ok("u"));
     transport.push(
         "venc",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })).with_delay(
-            Duration::from_millis(50),
-        ),
+        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" }))
+            .with_delay(Duration::from_millis(50)),
     );
     transport.push(
         "venc",

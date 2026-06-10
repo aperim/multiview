@@ -35,7 +35,9 @@ fn harness() -> (
 }
 
 fn login_ok() -> ScriptedReply {
-    ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000", "data": { "uuid": "u", "type": 0 } }))
+    ScriptedReply::json(
+        json!({ "rsp": "succeed", "status": "00000", "data": { "uuid": "u", "type": 0 } }),
+    )
 }
 
 #[tokio::test]
@@ -59,7 +61,10 @@ async fn probe_adopts_and_drives_the_lifecycle_to_online() {
         "admin",
         "admin",
     );
-    driver.probe_and_adopt().await.expect("adopt probe succeeds");
+    driver
+        .probe_and_adopt()
+        .await
+        .expect("adopt probe succeeds");
     assert_eq!(
         broadcaster.registry().state("dev-a"),
         Some(DeviceState::Online),
@@ -210,10 +215,7 @@ async fn the_source_facet_enumerates_the_served_rtsp_mounts_as_candidates() {
     let candidates = driver
         .enumerate_source_candidates("[fd00:db8::203]")
         .expect("encoder-mode device enumerates source candidates");
-    let urls: Vec<&str> = candidates
-        .iter()
-        .filter_map(|c| c.url.as_deref())
-        .collect();
+    let urls: Vec<&str> = candidates.iter().filter_map(|c| c.url.as_deref()).collect();
     assert!(
         urls.iter().any(|u| u.contains("/main/av")),
         "the main RTSP mount is a source candidate: {urls:?}"
@@ -336,7 +338,10 @@ async fn mode_convergence_is_close_before_open_with_a_declared_dev_impact() {
             saw_mode = true;
         }
     }
-    assert!(saw_mode, "device.mode (DEV impact) was published on converge");
+    assert!(
+        saw_mode,
+        "device.mode (DEV impact) was published on converge"
+    );
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
-use crate::devices::DeviceStatusRegistry;
+use crate::devices::{DeviceDriverRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
@@ -323,6 +323,14 @@ pub struct AppState {
     /// plane-only, latest-wins — it can never back-pressure the engine
     /// (invariant #10).
     pub device_status: Arc<DeviceStatusRegistry>,
+    /// The latest-wins device **driver** registry (runtime state, never
+    /// persisted/exported): the source-candidate / output-target facets each
+    /// driver (DEV-A4 `zowietek`, …) enumerated for its device, read by the
+    /// `GET /devices/{id}/source-candidates` and `/output-targets` routes
+    /// (ADR-M009). Empty until a driver enumerates — the routes' honest-empty
+    /// fallback. Bounded, control-plane-only — it can never back-pressure the
+    /// engine (invariant #10).
+    pub device_drivers: Arc<DeviceDriverRegistry>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -445,6 +453,7 @@ impl AppState {
             devices: Arc::new(InMemoryDeviceStore::new()),
             sync_groups: Arc::new(InMemorySyncGroupStore::new()),
             device_status: Arc::new(DeviceStatusRegistry::new()),
+            device_drivers: Arc::new(DeviceDriverRegistry::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -629,6 +638,15 @@ impl AppState {
     #[must_use]
     pub fn with_device_status(mut self, device_status: Arc<DeviceStatusRegistry>) -> Self {
         self.device_status = device_status;
+        self
+    }
+
+    /// Replace the device **driver** registry (e.g. to share one with the
+    /// `zowietek` driver actors so their enumerated facets reach the
+    /// source-candidate / output-target routes — ADR-M009, DEV-A4).
+    #[must_use]
+    pub fn with_device_drivers(mut self, device_drivers: Arc<DeviceDriverRegistry>) -> Self {
+        self.device_drivers = device_drivers;
         self
     }
 

@@ -266,8 +266,10 @@ pub(crate) async fn delete_device(
         )));
     }
     state.devices.delete(&id)?;
-    // Drop the runtime status (the device is gone).
+    // Drop the runtime status and any driver-enumerated facets (the device is
+    // gone) — control-plane-only cleanup, off the engine hot loop.
     state.device_status.forget(&id);
+    state.device_drivers.forget(&id);
     state.audit(
         &principal.key_id,
         AuditAction::Delete,
@@ -632,8 +634,10 @@ pub(crate) async fn source_candidates(
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &id)?;
     require_device(&state, &id)?;
-    // No live driver in this slice: the declared projection is honestly empty.
-    Ok(Json(Vec::new()))
+    // The driver registry holds whatever a live driver (DEV-A4 `zowietek`)
+    // enumerated for this device; it is honestly empty until a driver has
+    // enumerated, never fabricated live telemetry (ADR-M009).
+    Ok(Json(state.device_drivers.source_candidates(&id)))
 }
 
 /// `GET /api/v1/devices/{id}/output-targets` — the declared output-binding
@@ -664,6 +668,8 @@ pub(crate) async fn output_targets(
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &id)?;
     require_device(&state, &id)?;
-    // No live driver in this slice: the declared projection is honestly empty.
-    Ok(Json(Vec::new()))
+    // The driver registry holds whatever a live driver (DEV-A4 `zowietek`)
+    // enumerated for this device; it is honestly empty until a driver has
+    // enumerated, never fabricated live telemetry (ADR-M009).
+    Ok(Json(state.device_drivers.output_targets(&id)))
 }
