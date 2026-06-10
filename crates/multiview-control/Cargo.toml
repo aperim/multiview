@@ -98,6 +98,9 @@ tokio = { workspace = true, features = [
     "time",
     "net",
     "io-util",
+    # `test-util` pauses the clock in the zowietek driver/client tests so the
+    # per-device backoff (00009/00010) is exercised without real sleeps.
+    "test-util",
 ] }
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
