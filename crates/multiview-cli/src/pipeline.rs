@@ -4465,21 +4465,26 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
         // `rw_timeout` is expressed in microseconds; libav copies the strings.
         opts.set("rw_timeout", &INGEST_RW_TIMEOUT.as_micros().to_string());
     }
-    // HLS open-time hardening (ADR-T011): a master playlist with a
-    // `TYPE=SUBTITLES` WebVTT rendition is the ABC-News-AU footgun — libav can
-    // fold the rendition into the one shared context, so a corrupt/404/expired
-    // `.vtt` aborts the open or fails the whole read. Defence-in-depth ahead of
-    // the in-loop `discard_unrouted_subtitles` (the primary guard):
-    //   * `strict=normal` — FFmpeg's HLS demuxer (`hls.c` `new_rendition`) drops a
-    //     SUBTITLES rendition pre-probe when `strict_std_compliance > experimental`,
-    //     so a normal/strict open never even adds the WebVTT stream to the context.
-    //     We never widen `allowed_extensions` to admit `.vtt` here — the isolated
-    //     reader is the sole WebVTT path.
+    // HLS open-time hardening (ADR-T011). The ABC-News-AU footgun is a master
+    // playlist with a `TYPE=SUBTITLES` WebVTT rendition that libav folds into the
+    // one shared context, so a corrupt/404/expired `.vtt` aborts the open or fails
+    // the whole read. The PRIMARY guard is the variant-pin pre-open
+    // ([`main_demuxer_open_url`]/[`resolve_hls_variant_url`]): the main demuxer is
+    // pointed at one VIDEO variant media playlist (no SUBTITLES rendition), so
+    // libav never fetches the `.vtt` on EITHER FFmpeg 7.x or 8.x. These knobs are
+    // additional hardening (they also apply to the pinned variant playlist):
     //   * `seg_max_retry` — a transient SEGMENT fetch failure retries instead of
     //     failing the open.
-    //   * `protocol_whitelist` — a sane set so an HTTPS master + AES (`crypto`)
+    //   * `protocol_whitelist` — a sane set so an HTTPS playlist + AES (`crypto`)
     //     segments open, without admitting `file`/`concat`-style surprises beyond
     //     the standard HLS surface.
+    //   * `strict=normal` — DEFENCE-IN-DEPTH ONLY. On FFmpeg 7.x `hls.c`
+    //     `new_rendition` drops a SUBTITLES rendition pre-probe when
+    //     `strict_std_compliance > experimental`; FFmpeg **8.x REMOVED that gate**
+    //     (the "avformat/hls: add WebVTT subtitle support" patch), so on the 8.x
+    //     deploy target this no longer stops the rendition fetch — the variant-pin
+    //     is what makes the fix 8.x-robust. We never widen `allowed_extensions` to
+    //     admit `.vtt`: the isolated `caption_loop` reader is the sole WebVTT path.
     if is_hls_location(location) {
         opts.set("strict", "normal");
         opts.set("seg_max_retry", "8");
@@ -4507,6 +4512,88 @@ fn is_hls_location(location: &SourceLocation) -> bool {
     // An `.m3u8` (with or without a query string) is an HLS playlist.
     let base = url.split(['?', '#']).next().unwrap_or(url);
     base.to_ascii_lowercase().ends_with(".m3u8")
+}
+
+/// Resolve an HLS **master** playlist URL to the **video variant media-playlist**
+/// URL the main demuxer should open instead (ADR-T011, the `FFmpeg`-8.x-robust
+/// fix).
+///
+/// THE fix for the ABC-News-AU footgun on `FFmpeg` 8.x: opening the *master*
+/// playlist lets libav's HLS demuxer surface the `TYPE=SUBTITLES` `WebVTT`
+/// rendition into the one shared `AVFormatContext`. `FFmpeg` 7.x dropped that
+/// rendition at parse when `strict_std_compliance > experimental` (the
+/// `strict=normal` gate), but **`FFmpeg` 8.x removed that gate** (the "avformat/hls:
+/// add `WebVTT` subtitle support" patch), so 8.x ALWAYS tries to load the
+/// rendition's first
+/// `.vtt` segment — which is broken/404/expired on this source — and
+/// `avformat_open_input` ABORTS before any post-open discard can run. Pinning the
+/// main demuxer to ONE video variant media playlist (which carries no SUBTITLES
+/// rendition) stops libav from ever fetching the `.vtt`, on both 7.x and 8.x. The
+/// isolated `caption_loop` reader remains the SOLE `WebVTT` path (it fetches the
+/// `.vtt` rendition on its own context — a broken `.vtt` cannot abort the video).
+///
+/// Returns `Some(variant_url)` when `master_url` is a master playlist with at least
+/// one `#EXT-X-STREAM-INF` variant; the variant is chosen for `target_height`
+/// (decode-at-display-resolution, invariant #6). Returns `None` — leave the URL
+/// unchanged — when the URL is already a media playlist (no variants), or the
+/// master cannot be fetched/parsed (best-effort: the open then falls back to the
+/// original URL, with the post-open discard + reconnect bracket as the remaining
+/// guards; this never fails the build, invariants #1/#10).
+fn resolve_hls_variant_url(master_url: &str, target_height: Option<u32>) -> Option<String> {
+    resolve_hls_variant_url_with(master_url, target_height, &crate::captions::LibavFetcher)
+}
+
+/// [`resolve_hls_variant_url`] with an injectable [`PlaylistFetcher`](crate::captions::PlaylistFetcher)
+/// — the fetch→parse→pick→resolve seam, exercised offline in tests with canned
+/// master bytes (no network, no FFI).
+fn resolve_hls_variant_url_with(
+    master_url: &str,
+    target_height: Option<u32>,
+    fetcher: &dyn crate::captions::PlaylistFetcher,
+) -> Option<String> {
+    let text = match fetcher.fetch(master_url) {
+        Ok(text) => text,
+        Err(reason) => {
+            tracing::warn!(%master_url, %reason, "could not fetch HLS master for variant pin; opening URL as-is");
+            return None;
+        }
+    };
+    let master = match multiview_input::hls::MasterPlaylist::parse(&text) {
+        Ok(master) => master,
+        Err(err) => {
+            tracing::warn!(%master_url, error = %err, "HLS master parse failed for variant pin; opening URL as-is");
+            return None;
+        }
+    };
+    // A media playlist (no variants) has nothing to pin — open the URL as-is.
+    let variant = master.pick_video_variant(target_height)?;
+    let variant_url = crate::captions::resolve_rendition_uri(master_url, &variant.uri);
+    tracing::info!(
+        %master_url,
+        %variant_url,
+        target_height = ?target_height,
+        variant_height = ?variant.resolution_height,
+        "pinned HLS main demuxer to a video variant (WebVTT rendition isolation)"
+    );
+    Some(variant_url)
+}
+
+/// The URL the main video/audio demuxer should actually open for `url`.
+///
+/// For an HLS location ([`is_hls_location`]) this is the variant media-playlist URL
+/// resolved by [`resolve_hls_variant_url`] (so the master's `WebVTT` rendition is
+/// never folded into the main demuxer's shared context — ADR-T011); the
+/// `target_height` is the displayed tile height (decode-at-display-resolution,
+/// invariant #6). For any non-HLS URL, or when the variant resolve is a no-op (the
+/// URL is already a media playlist, or the master could not be fetched/parsed), the
+/// original `url` is returned unchanged. Best-effort: this never fails the open
+/// (invariants #1/#10) — a fall-through to the original URL still has the post-open
+/// discard + reconnect bracket as guards.
+fn main_demuxer_open_url(url: &str, location: &SourceLocation, tile_h: u32) -> String {
+    if !is_hls_location(location) {
+        return url.to_owned();
+    }
+    resolve_hls_variant_url(url, Some(tile_h)).unwrap_or_else(|| url.to_owned())
 }
 
 /// The per-source streaming-ingest loop, run on a dedicated thread (BUG-2 fix).
@@ -4833,10 +4920,22 @@ fn open_and_stream(
             ffmpeg::format::input_with_dictionary(p, opts).map_err(|e| e.to_string())?
         }
         SourceLocation::Url(u) => {
-            ffmpeg::format::input_with_dictionary(&u.as_str(), opts).map_err(|e| e.to_string())?
+            // HLS WebVTT-rendition isolation (ADR-T011, FFmpeg-8.x-robust): if this
+            // is an HLS master, pin the main demuxer to one VIDEO VARIANT media
+            // playlist so libav never fetches the master's `TYPE=SUBTITLES` WebVTT
+            // rendition (8.x dropped the `strict` gate, so a broken `.vtt` would
+            // otherwise ABORT `avformat_open_input` before any post-open discard).
+            // The resolve runs on THIS ingest thread (control/IO plane) and is
+            // best-effort — a fetch/parse miss falls back to the original URL with
+            // the post-open discard + reconnect bracket as the remaining guards
+            // (invariants #1/#10). A non-master / non-HLS URL is unchanged.
+            let open_url = main_demuxer_open_url(u.as_str(), &plan.location, plan.tile_h);
+            ffmpeg::format::input_with_dictionary(&open_url.as_str(), opts)
+                .map_err(|e| e.to_string())?
         }
         // A YouTube source opens the manifest URL resolved above (a network HLS
-        // master) exactly like any other URL.
+        // master) exactly like any other URL — variant-pinned the same way so its
+        // master's WebVTT rendition (if any) is never folded into the main context.
         #[cfg(feature = "youtube")]
         SourceLocation::Youtube { .. } => {
             // `resolved_youtube_url` is `Some` for this arm (set just above for the
@@ -4844,7 +4943,9 @@ fn open_and_stream(
             let Some(url) = resolved_youtube_url.as_deref() else {
                 return Err("youtube source did not resolve a manifest url".to_owned());
             };
-            ffmpeg::format::input_with_dictionary(&url, opts).map_err(|e| e.to_string())?
+            let open_url = main_demuxer_open_url(url, &plan.location, plan.tile_h);
+            ffmpeg::format::input_with_dictionary(&open_url.as_str(), opts)
+                .map_err(|e| e.to_string())?
         }
         // Unreachable: `ingest_loop` routes synthetic sources to the generator
         // before opening any media. Guarded so the match stays exhaustive.
@@ -4918,8 +5019,13 @@ fn open_and_stream(
     #[cfg(feature = "overlay")]
     let mut dvbsub = build_dvbsub_decoder(plan, &input);
 
-    // HLS WebVTT-rendition isolation (ADR-T011): discard unrouted subtitle streams
-    // before the first read (see the fn doc for the footgun + the routed-keep).
+    // HLS WebVTT-rendition isolation (ADR-T011), DEFENCE-IN-DEPTH: the variant-pin
+    // pre-open ([`main_demuxer_open_url`]) already stops the master's SUBTITLES
+    // rendition from ever reaching this context. This discards any unrouted
+    // subtitle stream before the first read regardless — harmless when the pin
+    // succeeded (no subtitle stream to discard), and a backstop on the fall-through
+    // path (master unfetchable / a non-master playlist that still folds in a
+    // subtitle). See the fn doc for the footgun + the routed-keep.
     discard_unrouted_subtitle_streams(plan, &mut input);
 
     // The wall-clock pacer: maps the first frame's PTS to "now" and releases
@@ -5849,9 +5955,10 @@ mod reconnect_tests {
     #[test]
     fn open_options_harden_hls_masters_against_the_webvtt_rendition_footgun() {
         // An HLS master (.m3u8 URL) gets the open-time hardening (ADR-T011): a
-        // normal/strict compliance so libav drops the SUBTITLES rendition
-        // pre-probe, a bounded segment retry, and a sane protocol allowlist — and
-        // it MUST NOT widen `allowed_extensions` to admit `.vtt`.
+        // bounded segment retry and a sane protocol allowlist; plus `strict=normal`
+        // as DEFENCE-IN-DEPTH (it dropped the SUBTITLES rendition pre-probe on
+        // FFmpeg 7.x, but 8.x removed that gate — the variant-pin pre-open is the
+        // 8.x-robust guard). It MUST NOT widen `allowed_extensions` to admit `.vtt`.
         let hls = SourceLocation::Url("https://h.test/live/master.m3u8".to_owned());
         assert!(is_hls_location(&hls), "an .m3u8 URL is an HLS master");
         let opts = ingest_open_options(&hls);
@@ -5877,6 +5984,114 @@ mod reconnect_tests {
         let opts = ingest_open_options(&rtsp);
         assert_eq!(opts.get("strict"), None);
         assert_eq!(opts.get("seg_max_retry"), None);
+    }
+}
+
+/// Tests for the HLS variant-pin pre-open (ADR-T011, the `FFmpeg`-8.x-robust fix):
+/// the MAIN demuxer must open a VIDEO VARIANT media playlist (which carries no
+/// SUBTITLES rendition), never the master with its selectable `TYPE=SUBTITLES`
+/// group — so libav 8.x (which dropped the `strict` rendition gate) never fetches
+/// the broken `.vtt` and aborts the open. The fetch→parse→pick→resolve seam is
+/// exercised offline with a canned master (no network, no FFI).
+#[cfg(test)]
+mod variant_pin_tests {
+    use super::resolve_hls_variant_url_with;
+    use crate::captions::PlaylistFetcher;
+
+    /// A [`PlaylistFetcher`] returning a fixed canned result — drives the
+    /// fetch→parse→pick→resolve seam offline (no network, no FFI).
+    struct CannedFetcher(Result<String, String>);
+    impl PlaylistFetcher for CannedFetcher {
+        fn fetch(&self, _url: &str) -> Result<String, String> {
+            self.0.clone()
+        }
+    }
+
+    /// The ABC-News-AU footgun shape: an ABR master with a `TYPE=SUBTITLES`
+    /// `WebVTT` rendition (`index_7_0.m3u8`) the `FFmpeg`-8.x HLS demuxer would
+    /// otherwise fetch and abort on.
+    const ABR_MASTER_WITH_SUBS: &str = concat!(
+        "#EXTM3U\n",
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",",
+        "LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"index_7_0.m3u8\"\n",
+        "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,SUBTITLES=\"subs\"\n",
+        "index_0.m3u8\n",
+        "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,SUBTITLES=\"subs\"\n",
+        "index_2.m3u8\n",
+    );
+
+    #[test]
+    fn pins_the_main_demuxer_to_a_video_variant_url_for_the_tile_height() {
+        let fetcher = CannedFetcher(Ok(ABR_MASTER_WITH_SUBS.to_owned()));
+        // A 360-px tile pins the 360p rung (decode-at-display-resolution), and the
+        // URL is the variant media playlist (relative URI resolved against the
+        // master's base) — NOT the master, so libav never sees the SUBTITLES group.
+        let pinned = resolve_hls_variant_url_with(
+            "https://c.test/abc-news/master.m3u8",
+            Some(360),
+            &fetcher,
+        )
+        .expect("an ABR master pins a variant");
+        assert_eq!(pinned, "https://c.test/abc-news/index_0.m3u8");
+        // A 700-px tile pins the 720p rung.
+        let pinned = resolve_hls_variant_url_with(
+            "https://c.test/abc-news/master.m3u8",
+            Some(700),
+            &fetcher,
+        )
+        .expect("an ABR master pins a variant");
+        assert_eq!(pinned, "https://c.test/abc-news/index_2.m3u8");
+    }
+
+    #[test]
+    fn an_absolute_variant_uri_is_used_verbatim() {
+        let master = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\n",
+            "https://cdn.test/v/720.m3u8\n",
+        );
+        let fetcher = CannedFetcher(Ok(master.to_owned()));
+        let pinned = resolve_hls_variant_url_with("https://h.test/m.m3u8", Some(720), &fetcher)
+            .expect("variant pinned");
+        assert_eq!(pinned, "https://cdn.test/v/720.m3u8");
+    }
+
+    #[test]
+    fn a_media_playlist_with_no_variants_leaves_the_url_unchanged() {
+        // A direct media playlist (segments, no #EXT-X-STREAM-INF) has nothing to
+        // pin — return None so the caller opens the original URL as-is.
+        let media = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-TARGETDURATION:6\n",
+            "#EXTINF:6.0,\n",
+            "seg0.ts\n",
+        );
+        let fetcher = CannedFetcher(Ok(media.to_owned()));
+        assert!(
+            resolve_hls_variant_url_with("https://h.test/index.m3u8", Some(360), &fetcher)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_fetch_failure_leaves_the_url_unchanged() {
+        // Best-effort: a master that cannot be fetched returns None, so the caller
+        // falls back to opening the original URL (the post-open discard +
+        // reconnect bracket still apply — never fails the build, invariants #1/#10).
+        let fetcher = CannedFetcher(Err("network down".to_owned()));
+        assert!(
+            resolve_hls_variant_url_with("https://h.test/master.m3u8", Some(360), &fetcher)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unparseable_master_text_leaves_the_url_unchanged() {
+        let fetcher = CannedFetcher(Ok("this is not a playlist".to_owned()));
+        assert!(
+            resolve_hls_variant_url_with("https://h.test/master.m3u8", Some(360), &fetcher)
+                .is_none()
+        );
     }
 }
 
