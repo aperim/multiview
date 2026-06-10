@@ -293,22 +293,32 @@ pub(crate) fn submit_accepted(
     idem: &IdempotencyKey,
     build: impl FnOnce(OperationId) -> Command,
 ) -> ControlResult<Response> {
-    let body = submit_accepted_body(state, idem, build)?;
+    let body = submit_accepted_body(state, idem, |op| Ok(build(op)))?;
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 /// [`submit_accepted`]'s core, returning the `202` body instead of a built
 /// response so a handler can decorate it (e.g. `apply-layout`'s
 /// `applied_live`/`carried_only` classes) before serializing.
+///
+/// The `build` closure runs **inside the fresh-reservation arm** and may fail
+/// (e.g. `apply-layout`'s resolve+solve, ADR-W017): a replayed
+/// `Idempotency-Key` therefore answers from the reservation **without**
+/// re-running `build`, and a `build` refusal **releases** the reservation (the
+/// command never reached the engine) so a corrected retry with the same key
+/// can actually submit — exactly the shed-on-full rule.
 pub(crate) fn submit_accepted_body(
     state: &AppState,
     idem: &IdempotencyKey,
-    build: impl FnOnce(OperationId) -> Command,
+    build: impl FnOnce(OperationId) -> ControlResult<Command>,
 ) -> ControlResult<AcceptedBody> {
     match state.idempotency.reserve(idem.0.as_deref()) {
         Reservation::Replay(op) => {
             // A retried request with the same key: return the original id
-            // without re-enqueuing the command.
+            // without re-enqueuing the command (and without re-running
+            // `build` — the original command already reached the engine, so
+            // the honest answer to "did it land?" is this 202 even if the
+            // referenced resource has since changed or been deleted).
             Ok(AcceptedBody {
                 operation_id: op.to_string(),
                 kind: "replay".to_owned(),
@@ -317,7 +327,16 @@ pub(crate) fn submit_accepted_body(
             })
         }
         Reservation::Fresh(op) => {
-            let command = build(op.clone());
+            let command = match build(op.clone()) {
+                Ok(command) => command,
+                Err(refusal) => {
+                    // The command was never built (a pre-submit refusal, e.g.
+                    // a 422): release the reservation so a corrected retry
+                    // with the same key re-reserves and actually submits.
+                    state.idempotency.release(idem.0.as_deref(), &op);
+                    return Err(refusal);
+                }
+            };
             let kind = command.kind().to_owned();
             // The command-outcome correlation key (if any) — computed from the
             // command before it is submitted (and moved). Commands with a single,
@@ -411,14 +430,18 @@ async fn cmd_swap(
 /// The stored layout body is resolved from the layouts repository and solved
 /// **here, at request time** (off the engine hot path): an unknown id, a body
 /// that does not parse as a `{canvas, layout, cells}` document, one that does
-/// not solve (bad grid / geometry), or a pinned-canvas mismatch (a Class-2
-/// change — ADR-R004) is an honest `422` **before** any `202`. On `202` the
+/// not solve (bad grid / geometry), a pinned-canvas mismatch (a Class-2
+/// change — ADR-R004), or an unknown running canvas (no seeded snapshot — the
+/// gate fails closed) is an honest `422` **before** any `202`. On `202` the
 /// command carries the solved layout, so the engine's frame-boundary drain
 /// only swaps (O(cells), no I/O — invariants #1/#10); the `202` body's
 /// `applied_live`/`carried_only` arrays state which per-cell property classes
-/// genuinely apply on screen. The submit itself mirrors [`cmd_swap`]
-/// (idempotency + shed-on-full) and never blocks the engine (invariant #10);
-/// the outcome rides the realtime stream as a `job.progress` event (ADR-W008).
+/// genuinely apply on screen. Idempotency reserves **before** resolution: a
+/// replayed `Idempotency-Key` returns the original operation id (kind
+/// `replay`, undecorated) without re-resolving, and a refused resolve
+/// releases the key. The submit mirrors [`cmd_swap`] (shed-on-full) and never
+/// blocks the engine (invariant #10); the outcome rides the realtime stream
+/// as a `job.progress` event (ADR-W008).
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -430,7 +453,7 @@ async fn cmd_swap(
             (status = 202, description = "Apply-layout accepted: the stored layout was resolved + solved and will swap in at the next frame boundary; `applied_live`/`carried_only` state the property classes. Outcome on the realtime stream (`job.progress`).", body = AcceptedBody),
             (status = 401, description = "Missing or invalid credentials.", body = Problem),
             (status = 403, description = "Not authorized to apply a layout.", body = Problem),
-            (status = 422, description = "The layout id does not exist, its stored body does not parse/solve, or its canvas differs from the running session's pinned canvas (Class-2).", body = Problem),
+            (status = 422, description = "The layout id does not exist, its stored body does not parse/solve, its canvas differs from the running session's pinned canvas (Class-2), or the running canvas is unknown (no seeded snapshot — the gate fails closed).", body = Problem),
             (status = 503, description = "Engine command bus at capacity; shed.", body = Problem),
         ),
     )
@@ -444,50 +467,60 @@ pub(crate) async fn cmd_apply_layout(
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &req.layout)?;
 
-    // Resolve + solve the STORED layout at request time (ADR-W017): repository
-    // read + pure solve, both fine here and forbidden on the render thread.
-    // Every failure is a 422 problem BEFORE any 202 — a 202 is a promise.
-    let versioned = state
-        .repository
-        .get_layout(&req.layout)
-        .map_err(|e| match e {
-            ControlError::NotFound { .. } => ControlError::Validation(format!(
-                "layout {:?} does not exist in the layouts library",
-                req.layout
-            )),
-            other => other,
-        })?;
-    let document =
-        multiview_config::LayoutDocument::from_body(&versioned.layout.body).map_err(|e| {
+    let layout = req.layout.clone();
+    // Resolution runs INSIDE the fresh-reservation arm (pinned semantics,
+    // ADR-W017): a replayed Idempotency-Key answers from the reservation
+    // without re-resolving, and a refused resolve releases the key.
+    let mut body = submit_accepted_body(&state, &idem, |op| {
+        // Resolve + solve the STORED layout at request time: repository read +
+        // pure solve, both fine here and forbidden on the render thread.
+        // Every failure is a 422 problem BEFORE any 202 — a 202 is a promise.
+        let versioned = state
+            .repository
+            .get_layout(&req.layout)
+            .map_err(|e| match e {
+                ControlError::NotFound { .. } => ControlError::Validation(format!(
+                    "layout {:?} does not exist in the layouts library",
+                    req.layout
+                )),
+                other => other,
+            })?;
+        let document = multiview_config::LayoutDocument::from_body(&versioned.layout.body)
+            .map_err(|e| {
+                ControlError::Validation(format!(
+                    "stored layout {:?} does not parse as a {{canvas, layout, cells}} \
+                     document: {e}",
+                    req.layout
+                ))
+            })?;
+        let solved = document.solve_named(&req.layout).map_err(|e| {
             ControlError::Validation(format!(
-                "stored layout {:?} does not parse as a {{canvas, layout, cells}} document: {e}",
+                "stored layout {:?} does not solve: {e}",
                 req.layout
             ))
         })?;
-    let solved = document.solve_named(&req.layout).map_err(|e| {
-        ControlError::Validation(format!(
-            "stored layout {:?} does not solve: {e}",
-            req.layout
-        ))
-    })?;
-    require_class1_canvas(&state, &req.layout, &document)?;
-
-    let layout = req.layout.clone();
-    let resolved = Box::new(crate::command::ResolvedLayout::new(solved, document));
-    let mut body = submit_accepted_body(&state, &idem, |op| Command::ApplyLayout {
-        op,
-        layout: req.layout,
-        document: Some(resolved),
+        require_class1_canvas(&state, &req.layout, &document)?;
+        Ok(Command::ApplyLayout {
+            op,
+            layout: req.layout,
+            document: Some(Box::new(crate::command::ResolvedLayout::new(
+                solved, document,
+            ))),
+        })
     })?;
     // State honestly which per-cell property classes land on screen at the
-    // frame boundary vs are carried-but-not-yet-rendered (ADR-W017).
-    body.applied_live = Some(APPLY_LIVE_CLASSES.iter().map(|s| (*s).to_owned()).collect());
-    body.carried_only = Some(
-        APPLY_CARRIED_CLASSES
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-    );
+    // frame boundary vs are carried-but-not-yet-rendered (ADR-W017). A replay
+    // body stays undecorated: it answers "did the original land?", it does not
+    // re-promise an apply.
+    if body.kind != "replay" {
+        body.applied_live = Some(APPLY_LIVE_CLASSES.iter().map(|s| (*s).to_owned()).collect());
+        body.carried_only = Some(
+            APPLY_CARRIED_CLASSES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+        );
+    }
     // Audit the accepted command (the engine reports its outcome separately on
     // the realtime stream; what we audit here is the operator's request).
     state.audit(
@@ -505,33 +538,34 @@ pub(crate) async fn cmd_apply_layout(
 /// canvas cannot apply live (it is a Class-2 parallel-output migration, not
 /// built yet) — refuse it with `422` here, before any `202`.
 ///
-/// The running canvas is read from the seeded **working layout** (mirrored
-/// from the live config at startup). Deployments with no working layout
-/// (store-only tests) skip this gate; the engine's frame-boundary drain
-/// remains the authoritative backstop (it holds + warns on any mismatch
-/// against the live drive's canvas).
+/// The comparison is against [`AppState::running_canvas`] — the **immutable**
+/// snapshot captured from the loaded config at seed time — never the mutable
+/// layouts repository (whose working-layout body any operator `PUT` can
+/// rewrite). When no snapshot was seeded the gate **fails closed** (422): a
+/// document-carrying apply must never ride a 202 into a silent drain hold.
+/// Cadence equality is by value (`Fps`/`Rational` cross-multiply in `i128`),
+/// so a non-reduced `50/2` matches a running `25/1`. The engine's
+/// frame-boundary drain keeps its own backstop against the live drive's
+/// canvas.
 fn require_class1_canvas(
     state: &AppState,
     id: &str,
     document: &multiview_config::LayoutDocument,
 ) -> ControlResult<()> {
-    let Some(working_id) = state.working_layout_id.as_deref() else {
-        return Ok(());
+    let Some(running) = state.running_canvas.as_ref() else {
+        return Err(ControlError::Validation(format!(
+            "layout {id:?} cannot be applied live: the running canvas is unknown to the \
+             control plane (no pinned-canvas snapshot was seeded), so the Class-1 gate \
+             fails closed (ADR-W017)"
+        )));
     };
-    let Ok(working) = state.repository.get_layout(working_id) else {
-        return Ok(());
-    };
-    let Ok(running) = multiview_config::LayoutDocument::from_body(&working.layout.body) else {
-        return Ok(());
-    };
-    let run = &running.canvas;
     let new = &document.canvas;
-    if run != new {
+    if running != new {
         return Err(ControlError::Validation(format!(
             "layout {id:?} was authored for canvas {}x{}@{} but the running session's canvas \
              is pinned at {}x{}@{} — a Class-2 change (output geometry/cadence cannot change \
              live; ADR-R004)",
-            new.width, new.height, new.fps, run.width, run.height, run.fps
+            new.width, new.height, new.fps, running.width, running.height, running.fps
         )));
     }
     Ok(())

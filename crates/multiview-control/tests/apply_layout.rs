@@ -16,10 +16,7 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::json;
-use support::{
-    body_json, harness, harness_with, harness_with_capacity, post_json, send, OPERATOR_TOKEN,
-    VIEWER_TOKEN,
-};
+use support::{body_json, harness, harness_with, post_json, send, OPERATOR_TOKEN, VIEWER_TOKEN};
 
 /// A valid stored GRID layout body (`{canvas, layout, cells}` — the seeded
 /// working-layout shape): a 320x240 25 fps canvas, two grid areas, two cells.
@@ -75,7 +72,7 @@ async fn create_layout(h: &support::Harness, id: &str, body: &serde_json::Value)
 
 #[tokio::test]
 async fn apply_layout_returns_202_with_op_id() {
-    let mut h = harness();
+    let mut h = apply_harness();
     create_layout(&h, "grid-3x3", &grid_body()).await;
     let resp = send(
         &h.router,
@@ -214,7 +211,7 @@ async fn apply_layout_202_carries_the_solved_document_and_apply_classes() {
     // ADR-W017: the command ships the document SOLVED at the route (the
     // frame-boundary drain only swaps), and the 202 body states which per-cell
     // property classes apply live vs are carried-but-not-yet-rendered.
-    let mut h = harness();
+    let mut h = apply_harness();
     create_layout(&h, "wall-a", &absolute_body()).await;
     let resp = send(
         &h.router,
@@ -271,20 +268,9 @@ async fn apply_layout_canvas_mismatch_is_422_class2() {
     // ADR-R004 / ADR-W017: output geometry + cadence are PINNED for the session.
     // A stored layout authored for a different canvas is a Class-2 change and is
     // refused live (422 naming the mismatch), never silently held.
-    let mut h = harness_with(|state| {
-        // Seed the working layout (the running session's canvas: 320x240@25).
-        state
-            .repository
-            .create_layout(
-                "schema_v1",
-                multiview_control::LayoutInput {
-                    name: "schema_v1".to_owned(),
-                    body: grid_body(),
-                },
-            )
-            .expect("seed working layout");
-        state.with_working_layout_id("schema_v1")
-    });
+    // The running session's pinned canvas: 320x240@25 (the immutable snapshot
+    // the gate compares against — ADR-W017 MAJOR-1).
+    let mut h = apply_harness();
     // A stored layout authored for a DIFFERENT canvas (1920x1080@30).
     let mut other = absolute_body();
     other["canvas"] = json!({ "width": 1920, "height": 1080, "fps": "30/1" });
@@ -620,7 +606,9 @@ async fn apply_layout_sheds_503_when_bus_full() {
     // handler only try_submits and can never back-pressure the engine (inv #10).
     // The layout must exist (resolution happens BEFORE the submit, ADR-W017) so
     // the failure under test is the saturated bus, not a 422.
-    let h = harness_with_capacity(1);
+    let h = support::harness_customized(1, |state| {
+        state.with_running_canvas(running_canvas_320x240_25())
+    });
     create_layout(&h, "grid-3x3", &grid_body()).await;
 
     let resp1 = send(

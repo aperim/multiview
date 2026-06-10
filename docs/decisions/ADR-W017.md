@@ -40,20 +40,38 @@ invalidate the output (invariants #1/#10).
    prior behaviour (re-solve the working config iff the id matches its solved name).
 3. **Class-1 gate: the canvas is pinned (ADR-R004).** A stored layout whose
    width/height/cadence differ from the running session's canvas is a Class-2 change (output
-   geometry/cadence is pinned for the session's life) and is refused with `422` at the route
-   (compared against the seeded working layout's canvas) **and**, authoritatively, held + warned
-   at the drain (compared against the live `drive.layout().canvas`) — the output clock never
+   geometry/cadence is pinned for the session's life) and is refused with `422` at the route —
+   compared against the **immutable pinned-canvas snapshot** (`AppState::running_canvas`)
+   captured from the loaded config at seed time, **never** the mutable layouts repository (a
+   `PUT` on the working layout cannot move the gate). When no snapshot was seeded the gate
+   **fails closed** (`422` "running canvas is unknown") for document-carrying applies — a `202`
+   must never decay into a silent drain hold. Cadence equality is **by value**
+   (`Fps`/`Rational::PartialEq` cross-multiply in `i128`; the drain compares with
+   `Canvas::same_signal`), so a non-reduced `50/2` matches a running `25/1`. The drain keeps the
+   authoritative backstop against the live `drive.layout().canvas` — the output clock never
    adopts a canvas the encoder session was not built for.
-4. **Unknown/unbound sources never falter the output.** `set_layout` swaps bindings wholesale;
+4. **Snapshot semantics.** The command ships the **request-time** resolve: a layout edited (or
+   deleted) between the route fetch and the frame-boundary apply does not affect the in-flight
+   command — there is no `If-Match` on apply; the next apply ships the new body.
+5. **Idempotency reserves before resolution.** A replayed `Idempotency-Key` answers from the
+   reservation — the original operation id, `kind: "replay"`, **no**
+   `applied_live`/`carried_only` decoration — without re-resolving the layout (even if it has
+   since been deleted: the original command already reached the engine, and the retry asks "did
+   it land?"). A fresh request whose resolution is refused (`422`) **releases** the reservation,
+   exactly like the shed-on-full path, so a corrected retry with the same key actually submits.
+6. **Unknown/unbound sources never falter the output.** `set_layout` swaps bindings wholesale;
    a cell bound to a source with no registered `TileStore` (no running ingest) composes its
    per-cell `on_loss` failover slate via the existing `sample_cell` path — never a panic, never a
    stall, consistent with `SwapSource`'s store-gated semantics (which *holds* a re-point; a
    wholesale swap *binds and slates* — the cell is honest about the missing feed).
-5. **Observability.** On a successful swap the drain emits `Event::JobProgress{phase:
+7. **Observability.** On a successful swap the drain emits `Event::JobProgress{phase:
    "apply_layout", pct: 100, message: <id>}` on the `jobs` topic (drop-oldest, inv #10) plus a
-   `tracing::info!`; the proof remains the next composited frame. The event rides uncorrelated
-   (`corr: None`), like the other frame-boundary route commands. The `202` body now states
-   `applied_live` vs `carried_only` property classes.
+   `tracing::info!`; the proof remains the next composited frame. A drain-side **hold** (the
+   pinned-canvas backstop, or a compositor rejection) is equally observable: a
+   `JobProgress{phase: "apply_layout_held", pct: 0}` outcome naming the layout and the reason —
+   a broken promise is never only a log line. Events ride uncorrelated (`corr: None`), like the
+   other frame-boundary route commands. The `202` body states `applied_live` vs `carried_only`
+   property classes.
 
 ### Which per-cell properties apply live
 

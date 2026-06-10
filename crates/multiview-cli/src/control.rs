@@ -390,8 +390,10 @@ fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12I
 ///   cell ids, and per-cell `on_loss` slates — in O(cells) with no I/O and no
 ///   re-solve (the route already solved + validated it), mirrors it into the
 ///   working config, and emits a `job.progress` outcome. A pinned-canvas
-///   mismatch (Class-2, ADR-R004) or a compositor rejection is held + warned,
-///   never adopted. **Without a document** (back-compat) it re-solves +
+///   mismatch (Class-2, ADR-R004 — compared by VALUE via `Canvas::same_signal`,
+///   so an equivalent non-reduced cadence applies) or a compositor rejection is
+///   held — warned AND surfaced as a `job.progress` `apply_layout_held` outcome
+///   — never adopted. **Without a document** (back-compat) it re-solves +
 ///   re-applies the working layout iff `layout` matches the solved working
 ///   layout's name; any other id is a failure — logged via `tracing::warn!`,
 ///   never a panic.
@@ -650,7 +652,8 @@ impl CommandDrain {
     /// fallback address the **active** layout.
     ///
     /// O(cells), no I/O, no `solve_layout`, no `.await` — the render thread
-    /// only swaps (invariants #1/#10). Held (warned, never adopted, never a
+    /// only swaps (invariants #1/#10). Held (warned, surfaced as a
+    /// `job.progress` `apply_layout_held` outcome, never adopted, never a
     /// panic) when:
     /// * the stored canvas (geometry/cadence) differs from the running
     ///   session's pinned canvas — a Class-2 change (ADR-R004). The route
@@ -674,13 +677,20 @@ impl CommandDrain {
     ) {
         let current = &drive.layout().canvas;
         let stored = &resolved.solved.canvas;
-        if stored != current {
+        // Same SIGNAL, by value: geometry equal and cadence cross-multiplied
+        // (`Canvas::same_signal`), so a non-reduced 50/2 against a running 25/1
+        // is never a false Class-2 hold (ADR-W017 MINOR-3).
+        if !current.same_signal(stored) {
             tracing::warn!(
                 layout = %id,
                 running = ?current,
                 stored = ?stored,
                 "apply_layout held: the stored layout's canvas differs from the running \
                  session's pinned canvas (Class-2, ADR-R004); not applied live"
+            );
+            self.publish_apply_held(
+                id,
+                "the stored canvas differs from the running session's pinned canvas (Class-2)",
             );
             return;
         }
@@ -713,8 +723,23 @@ impl CommandDrain {
                     error = %e,
                     "apply_layout: compositor rejected the stored layout; last-good retained"
                 );
+                self.publish_apply_held(id, &format!("the compositor rejected the layout: {e}"));
             }
         }
+    }
+
+    /// Make a HELD stored-layout apply observable on the realtime stream
+    /// (ADR-W017 MINOR-2): the 202 promised a swap, so a drain-side hold (the
+    /// pinned-canvas backstop or a compositor rejection) emits a `job.progress`
+    /// outcome with the held phase and the reason — drop-oldest, never awaits a
+    /// client (inv #10) — alongside the `tracing::warn!`.
+    fn publish_apply_held(&self, id: &str, reason: &str) {
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_layout_held".to_owned(),
+                pct: 0,
+                message: Some(format!("layout {id} not applied: {reason}")),
+            }));
     }
 
     /// Re-solve the working config and hot-swap it onto `drive` (the geometry-
