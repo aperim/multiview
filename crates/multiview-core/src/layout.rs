@@ -200,7 +200,7 @@ impl Canvas {
     /// Whether two canvases denote the **same output signal**: identical pixel
     /// geometry and the same cadence **by value** ([`Rational`]'s `PartialEq`
     /// cross-multiplies in `i128`), so a non-reduced `50/2` cadence equals
-    /// `25/1`. The live-apply pinned-canvas gates (ADR-W017 / ADR-R004)
+    /// `25/1`. The live-apply pinned-canvas gates (ADR-W019 / ADR-R004)
     /// compare with this — never with the structural derived `==`, whose
     /// `fps_num`/`fps_den` fields deliberately distinguish non-reduced forms.
     #[must_use]

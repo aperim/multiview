@@ -359,7 +359,7 @@ impl MultiviewConfig {
 
     /// Resolve one schema cell into a core cell, placing it by grid area or
     /// absolute rect. Shared with [`layout_doc::LayoutDocument::solve_named`]
-    /// (the stored named-layout solve, ADR-W017) so a stored body and the
+    /// (the stored named-layout solve, ADR-W019) so a stored body and the
     /// working config solve cells identically.
     pub(crate) fn solve_cell(
         cell: &Cell,

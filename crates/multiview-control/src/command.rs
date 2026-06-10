@@ -72,7 +72,7 @@ impl fmt::Display for OperationId {
 }
 
 /// A stored named layout **resolved + solved at the route** (off the engine
-/// hot path), carried by [`Command::ApplyLayout`] (ADR-W017).
+/// hot path), carried by [`Command::ApplyLayout`] (ADR-W019).
 ///
 /// The HTTP handler reads the body from the layouts repository at request
 /// time, parses it as a typed [`multiview_config::LayoutDocument`], and solves
@@ -190,7 +190,7 @@ pub enum Command {
         op: OperationId,
         /// The layout id to make active.
         layout: String,
-        /// The stored layout, resolved + solved **at the route** (ADR-W017), so
+        /// The stored layout, resolved + solved **at the route** (ADR-W019), so
         /// the frame-boundary drain never reads the repository or re-solves on
         /// the render thread. [`None`] is the back-compat form: the engine then
         /// falls back to re-solving its working config iff `layout` matches the

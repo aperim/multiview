@@ -101,7 +101,7 @@ export function LayoutEditorPage(): JSX.Element {
   };
 
   // Save & Apply: persist first, then submit the LIVE apply-layout command
-  // (ADR-W017: the route solves the stored body; a 202 means the layout swaps
+  // (ADR-W019: the route solves the stored body; a 202 means the layout swaps
   // in at the engine's next frame boundary — no export, no restart). A failed
   // apply leaves the layout saved — the toast says which step failed and why
   // (the 422 problem detail names the reason, e.g. a pinned-canvas mismatch).

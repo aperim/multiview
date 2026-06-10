@@ -385,7 +385,7 @@ fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12I
 ///   there is no per-source `AudioStore` to re-point onto, the run-side audio
 ///   ingest is RT-5/RT-8b, unbuilt). It is therefore a **surfaced** held action
 ///   (`tracing::warn!` naming the missing crosspoint), never a silent drop.
-/// * [`Command::ApplyLayout`] **with a route-resolved document** (ADR-W017)
+/// * [`Command::ApplyLayout`] **with a route-resolved document** (ADR-W019)
 ///   swaps the STORED layout in at the frame boundary — geometry, bindings,
 ///   cell ids, and per-cell `on_loss` slates — in O(cells) with no I/O and no
 ///   re-solve (the route already solved + validated it), mirrors it into the
@@ -645,7 +645,7 @@ impl CommandDrain {
     }
 
     /// Apply a STORED layout that was resolved + solved **at the route**
-    /// (ADR-W017): swap the active layout at this frame boundary, re-establish
+    /// (ADR-W019): swap the active layout at this frame boundary, re-establish
     /// the O(1) re-point address space (cell ids) and per-cell failover slates
     /// from the stored document, and mirror the document into the working
     /// config so export / salvo recalls / the back-compat `ApplyLayout`
@@ -679,7 +679,7 @@ impl CommandDrain {
         let stored = &resolved.solved.canvas;
         // Same SIGNAL, by value: geometry equal and cadence cross-multiplied
         // (`Canvas::same_signal`), so a non-reduced 50/2 against a running 25/1
-        // is never a false Class-2 hold (ADR-W017 MINOR-3).
+        // is never a false Class-2 hold (ADR-W019 MINOR-3).
         if !current.same_signal(stored) {
             tracing::warn!(
                 layout = %id,
@@ -729,7 +729,7 @@ impl CommandDrain {
     }
 
     /// Make a HELD stored-layout apply observable on the realtime stream
-    /// (ADR-W017 MINOR-2): the 202 promised a swap, so a drain-side hold (the
+    /// (ADR-W019 MINOR-2): the 202 promised a swap, so a drain-side hold (the
     /// pinned-canvas backstop or a compositor rejection) emits a `job.progress`
     /// outcome with the held phase and the reason — drop-oldest, never awaits a
     /// client (inv #10) — alongside the `tracing::warn!`.
@@ -813,7 +813,7 @@ impl CommandDrain {
                 layout, document, ..
             } => {
                 if let Some(resolved) = document {
-                    // ADR-W017: a STORED layout, resolved + solved at the route
+                    // ADR-W019: a STORED layout, resolved + solved at the route
                     // (off this render thread). The frame-boundary work is the
                     // swap: O(cells), no I/O, no re-solve.
                     self.apply_stored_layout(&layout, *resolved, drive);
@@ -1221,7 +1221,7 @@ input_id = "in_b"
     /// Build a stored absolute-layout [`multiview_control::ResolvedLayout`]
     /// named `wall-x` — one full-canvas cell `stored_cell` bound to `source`
     /// with an `on_loss = black` slate — solved exactly as the apply-layout
-    /// route solves it (ADR-W017). `canvas` matches `TWO_CELL_DOC` (64x64@25)
+    /// route solves it (ADR-W019). `canvas` matches `TWO_CELL_DOC` (64x64@25)
     /// unless overridden.
     fn stored_full_canvas(
         source: &str,
@@ -1249,7 +1249,7 @@ input_id = "in_b"
         serde_json::json!({ "width": 64, "height": 64, "fps": "25/1" })
     }
 
-    /// ADR-W017: an `ApplyLayout` carrying a stored, route-solved document swaps
+    /// ADR-W019: an `ApplyLayout` carrying a stored, route-solved document swaps
     /// the ACTIVE layout at the frame boundary — geometry, bindings, per-cell
     /// slates, and the re-point address space (cell ids) all follow the stored
     /// document, regardless of any config-layout name.
@@ -1326,7 +1326,7 @@ input_id = "in_b"
         );
     }
 
-    /// ADR-W017: the next composited frame PROVES the apply — pixels that were
+    /// ADR-W019: the next composited frame PROVES the apply — pixels that were
     /// the left cell's no-signal slate become the stored layout's full-canvas
     /// source on the very next tick.
     #[test]
@@ -1391,7 +1391,7 @@ input_id = "in_b"
         );
     }
 
-    /// ADR-R004 / ADR-W017 guard: the output canvas (geometry + cadence) is
+    /// ADR-R004 / ADR-W019 guard: the output canvas (geometry + cadence) is
     /// PINNED for the session — a stored document authored for a different
     /// canvas is held (warned), never adopted, and the output keeps composing
     /// on the pinned canvas. (The route refuses this with 422; the drain is the
@@ -1431,7 +1431,7 @@ input_id = "in_b"
             "the pinned canvas survives"
         );
 
-        // MINOR-2 (ADR-W017 review): the broken promise must be OBSERVABLE on
+        // MINOR-2 (ADR-W019 review): the broken promise must be OBSERVABLE on
         // the realtime stream, not only a tracing line — a `job.progress`
         // outcome with the held phase, pct < 100, naming the reason.
         let mut saw_held = false;
@@ -1454,7 +1454,7 @@ input_id = "in_b"
         );
     }
 
-    /// MINOR-3 (ADR-W017 review): the drain's pinned-canvas backstop compares
+    /// MINOR-3 (ADR-W019 review): the drain's pinned-canvas backstop compares
     /// cadence by VALUE — a stored `50/2` against the running `25/1` is the
     /// same signal and must apply, never a false Class-2 hold.
     #[test]

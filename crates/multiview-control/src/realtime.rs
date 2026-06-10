@@ -96,7 +96,7 @@ impl CorrKey {
     ///   not known here.
     /// * `SwapSource`/`ApplyLayout`/`SetTallyOverride` → [`None`]: a swap has
     ///   no dedicated outcome event; a stored-layout apply emits a
-    ///   `job.progress` outcome (ADR-W017) but that phase string is not a
+    ///   `job.progress` outcome (ADR-W019) but that phase string is not a
     ///   per-operation key (two applies of the same layout are
     ///   indistinguishable), so it rides uncorrelated rather than
     ///   mis-correlated; and the tally echo is not a command-acknowledgement

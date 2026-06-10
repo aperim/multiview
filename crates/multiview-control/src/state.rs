@@ -80,7 +80,7 @@ pub struct SeededResources {
     /// canvas/layout/cells from.
     pub working_layout_id: String,
     /// The running session's **pinned canvas** (geometry + cadence), captured
-    /// immutably from the loaded config at seed time (ADR-W017 / ADR-R004).
+    /// immutably from the loaded config at seed time (ADR-W019 / ADR-R004).
     /// The apply-layout route's Class-1 gate compares against THIS — never the
     /// mutable layouts repository, which any operator `PUT` can rewrite.
     pub running_canvas: multiview_config::LayoutCanvas,
@@ -190,7 +190,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         working_layout_id,
         // Snapshot the pinned canvas from the LOADED CONFIG (the geometry +
         // cadence the engine session is actually built with), immutably — a
-        // later repository edit cannot move this (ADR-W017 MAJOR-1).
+        // later repository edit cannot move this (ADR-W019 MAJOR-1).
         running_canvas: multiview_config::LayoutCanvas::new(
             config.canvas.width,
             config.canvas.height,
@@ -345,7 +345,7 @@ pub struct AppState {
     /// `canvas`).
     pub working_layout_id: Option<String>,
     /// The running session's **pinned canvas** snapshot (set by seeding,
-    /// immutable thereafter — ADR-W017 / ADR-R004). The apply-layout Class-1
+    /// immutable thereafter — ADR-W019 / ADR-R004). The apply-layout Class-1
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
@@ -574,7 +574,7 @@ impl AppState {
         self
     }
 
-    /// Install the running session's pinned-canvas snapshot (ADR-W017): the
+    /// Install the running session's pinned-canvas snapshot (ADR-W019): the
     /// immutable geometry + cadence the apply-layout Class-1 gate compares
     /// stored layouts against. Set by [`AppState::with_seeded_resources`] in
     /// the binary; exposed separately for store-only deployments and tests.

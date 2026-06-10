@@ -1,4 +1,4 @@
-// The apply-layout engine command (ADR-W017).
+// The apply-layout engine command (ADR-W019).
 //
 // `POST /api/v1/commands/apply-layout` with body `{ layout: <layout id> }`
 // (crates/multiview-control/src/routes/mod.rs `ApplyLayoutRequest`). The route

@@ -97,7 +97,7 @@ export interface paths {
         /**
          * `POST /api/v1/commands/apply-layout` — apply a **stored** layout to the
          *     running multiview, live, at the next frame boundary (role: write;
-         *     per-object authz; 202) — ADR-W017, invariant #11 Class-1.
+         *     per-object authz; 202) — ADR-W019, invariant #11 Class-1.
          * @description The stored layout body is resolved from the layouts repository and solved
          *     **here, at request time** (off the engine hot path): an unknown id, a body
          *     that does not parse as a `{canvas, layout, cells}` document, one that does
@@ -793,13 +793,13 @@ export interface components {
         /** @description A `202 Accepted` body returned for an asynchronously-applied command. */
         AcceptedBody: {
             /**
-             * @description For `apply-layout` (ADR-W017): the per-cell property classes the live
+             * @description For `apply-layout` (ADR-W019): the per-cell property classes the live
              *     apply genuinely applies at the next frame boundary (e.g. `geometry`,
              *     `bindings`, `z_order`, `opacity`, `on_loss`). Absent on other commands.
              */
             applied_live?: string[] | null;
             /**
-             * @description For `apply-layout` (ADR-W017): the property classes that are **carried**
+             * @description For `apply-layout` (ADR-W019): the property classes that are **carried**
              *     in the stored document (persisted, exported) but not yet rendered by the
              *     compositor (e.g. `border`, `qos`, `fit`). Absent on other commands.
              */

@@ -47,12 +47,12 @@ pub struct AcceptedBody {
     pub operation_id: String,
     /// The command kind (e.g. `start`).
     pub kind: String,
-    /// For `apply-layout` (ADR-W017): the per-cell property classes the live
+    /// For `apply-layout` (ADR-W019): the per-cell property classes the live
     /// apply genuinely applies at the next frame boundary (e.g. `geometry`,
     /// `bindings`, `z_order`, `opacity`, `on_loss`). Absent on other commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_live: Option<Vec<String>>,
-    /// For `apply-layout` (ADR-W017): the property classes that are **carried**
+    /// For `apply-layout` (ADR-W019): the property classes that are **carried**
     /// in the stored document (persisted, exported) but not yet rendered by the
     /// compositor (e.g. `border`, `qos`, `fit`). Absent on other commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,7 +60,7 @@ pub struct AcceptedBody {
 }
 
 /// The per-cell property classes a stored-layout live apply **genuinely
-/// applies** at the frame boundary (ADR-W017): the solved geometry (grid/rect),
+/// applies** at the frame boundary (ADR-W019): the solved geometry (grid/rect),
 /// source bindings, z-order, per-cell opacity, and the per-cell `on_loss`
 /// failover slate the compositor drive composites for down tiles.
 const APPLY_LIVE_CLASSES: &[&str] = &["geometry", "bindings", "z_order", "opacity", "on_loss"];
@@ -68,7 +68,7 @@ const APPLY_LIVE_CLASSES: &[&str] = &["geometry", "bindings", "z_order", "opacit
 /// The property classes a stored layout **carries** (persisted, exported,
 /// mirrored into the working config) but the compositor does not yet render —
 /// honestly reported on the `202` so the operator knows what changed on screen
-/// (ADR-W017; the canvas axes are pinned for the session, ADR-R004).
+/// (ADR-W019; the canvas axes are pinned for the session, ADR-R004).
 const APPLY_CARRIED_CLASSES: &[&str] = &[
     "fit",
     "align",
@@ -304,7 +304,7 @@ pub(crate) fn submit_accepted(
 /// `applied_live`/`carried_only` classes) before serializing.
 ///
 /// The `build` closure runs **inside the fresh-reservation arm** and may fail
-/// (e.g. `apply-layout`'s resolve+solve, ADR-W017): a replayed
+/// (e.g. `apply-layout`'s resolve+solve, ADR-W019): a replayed
 /// `Idempotency-Key` therefore answers from the reservation **without**
 /// re-running `build`, and a `build` refusal **releases** the reservation (the
 /// command never reached the engine) so a corrected retry with the same key
@@ -427,7 +427,7 @@ async fn cmd_swap(
 
 /// `POST /api/v1/commands/apply-layout` — apply a **stored** layout to the
 /// running multiview, live, at the next frame boundary (role: write;
-/// per-object authz; 202) — ADR-W017, invariant #11 Class-1.
+/// per-object authz; 202) — ADR-W019, invariant #11 Class-1.
 ///
 /// The stored layout body is resolved from the layouts repository and solved
 /// **here, at request time** (off the engine hot path): an unknown id, a body
@@ -471,7 +471,7 @@ pub(crate) async fn cmd_apply_layout(
 
     let layout = req.layout.clone();
     // Resolution runs INSIDE the fresh-reservation arm (pinned semantics,
-    // ADR-W017): a replayed Idempotency-Key answers from the reservation
+    // ADR-W019): a replayed Idempotency-Key answers from the reservation
     // without re-resolving, and a refused resolve releases the key.
     let mut body = submit_accepted_body(&state, &idem, |op| {
         // Resolve + solve the STORED layout at request time: repository read +
@@ -511,7 +511,7 @@ pub(crate) async fn cmd_apply_layout(
         })
     })?;
     // State honestly which per-cell property classes land on screen at the
-    // frame boundary vs are carried-but-not-yet-rendered (ADR-W017). A replay
+    // frame boundary vs are carried-but-not-yet-rendered (ADR-W019). A replay
     // body stays undecorated: it answers "did the original land?", it does not
     // re-promise an apply.
     if body.kind != "replay" {
@@ -535,7 +535,7 @@ pub(crate) async fn cmd_apply_layout(
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
-/// ADR-R004 / ADR-W017 Class-1 gate: output geometry + cadence are **pinned**
+/// ADR-R004 / ADR-W019 Class-1 gate: output geometry + cadence are **pinned**
 /// for the life of the session, so a stored layout authored for a different
 /// canvas cannot apply live (it is a Class-2 parallel-output migration, not
 /// built yet) — refuse it with `422` here, before any `202`.
@@ -558,7 +558,7 @@ fn require_class1_canvas(
         return Err(ControlError::Validation(format!(
             "layout {id:?} cannot be applied live: the running canvas is unknown to the \
              control plane (no pinned-canvas snapshot was seeded), so the Class-1 gate \
-             fails closed (ADR-W017)"
+             fails closed (ADR-W019)"
         )));
     };
     let new = &document.canvas;

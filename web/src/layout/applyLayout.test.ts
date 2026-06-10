@@ -57,7 +57,7 @@ describe('applyLayoutCommand', () => {
     });
   });
 
-  it('carries the 422 problem detail (the honest pre-202 refusal, ADR-W017)', async () => {
+  it('carries the 422 problem detail (the honest pre-202 refusal, ADR-W019)', async () => {
     server.use(
       http.post('*/api/v1/commands/apply-layout', () =>
         HttpResponse.json(

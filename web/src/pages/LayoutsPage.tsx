@@ -135,7 +135,7 @@ export function LayoutsPage(): JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<Layout | null>(null);
   const [applying, setApplying] = useState(false);
 
-  // Apply is a LIVE action (ADR-W017): the stored layout is resolved + solved
+  // Apply is a LIVE action (ADR-W019): the stored layout is resolved + solved
   // at the route and swaps in at the next frame boundary — no export, no
   // restart. A 422 (unknown id / unsolvable body / pinned-canvas mismatch)
   // carries the reason in the problem detail.

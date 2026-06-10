@@ -513,7 +513,7 @@ async fn control_command_flood_never_falters_the_output_clock() {
 
 #[tokio::test]
 async fn stored_layout_apply_storm_swaps_live_and_never_falters() {
-    // ADR-W017 + invariant #1/#10 soak: a STORM of stored-layout applies (each
+    // ADR-W019 + invariant #1/#10 soak: a STORM of stored-layout applies (each
     // carrying a route-solved document) is drained at frame boundaries through a
     // real bounded run — the stored layout actually becomes the active layout
     // (geometry + bindings swap live), and the output clock still emits exactly

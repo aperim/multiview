@@ -1,5 +1,5 @@
 //! Tests for the `POST /api/v1/commands/apply-layout` command route (CTL-4 /
-//! ADR-W017): the route resolves + solves the STORED layout body at request
+//! ADR-W019): the route resolves + solves the STORED layout body at request
 //! time (off the engine hot path) and only then returns `202 Accepted` + an
 //! operation id, with the solved document riding the command; an unknown id or
 //! a body that does not parse/solve is an honest `422` BEFORE any `202`. Also:
@@ -113,7 +113,7 @@ async fn apply_layout_returns_202_with_op_id() {
 
 #[tokio::test]
 async fn apply_layout_unknown_id_is_422_before_202() {
-    // ADR-W017: the stored layout is resolved AT THE ROUTE; an id that does not
+    // ADR-W019: the stored layout is resolved AT THE ROUTE; an id that does not
     // exist in the layouts repository is an honest 422 problem — never a 202
     // whose command the engine then silently ignores.
     let mut h = harness();
@@ -208,7 +208,7 @@ async fn apply_layout_unparseable_body_is_422_before_202() {
 
 #[tokio::test]
 async fn apply_layout_202_carries_the_solved_document_and_apply_classes() {
-    // ADR-W017: the command ships the document SOLVED at the route (the
+    // ADR-W019: the command ships the document SOLVED at the route (the
     // frame-boundary drain only swaps), and the 202 body states which per-cell
     // property classes apply live vs are carried-but-not-yet-rendered.
     let mut h = apply_harness();
@@ -239,7 +239,7 @@ async fn apply_layout_202_carries_the_solved_document_and_apply_classes() {
         assert!(carried.contains(&class), "carried_only includes {class:?}");
     }
 
-    // The drained command carries the layout SOLVED at the route (ADR-W017):
+    // The drained command carries the layout SOLVED at the route (ADR-W019):
     // the frame-boundary drain only swaps — no repository read, no re-solve.
     let drained = h.commands.try_drain();
     assert_eq!(drained.len(), 1);
@@ -265,11 +265,11 @@ async fn apply_layout_202_carries_the_solved_document_and_apply_classes() {
 
 #[tokio::test]
 async fn apply_layout_canvas_mismatch_is_422_class2() {
-    // ADR-R004 / ADR-W017: output geometry + cadence are PINNED for the session.
+    // ADR-R004 / ADR-W019: output geometry + cadence are PINNED for the session.
     // A stored layout authored for a different canvas is a Class-2 change and is
     // refused live (422 naming the mismatch), never silently held.
     // The running session's pinned canvas: 320x240@25 (the immutable snapshot
-    // the gate compares against — ADR-W017 MAJOR-1).
+    // the gate compares against — ADR-W019 MAJOR-1).
     let mut h = apply_harness();
     // A stored layout authored for a DIFFERENT canvas (1920x1080@30).
     let mut other = absolute_body();
@@ -333,7 +333,7 @@ fn post_json_idem(
 
 #[tokio::test]
 async fn apply_layout_canvas_gate_survives_working_layout_rewrite() {
-    // MAJOR-1 (ADR-W017 review): the Class-1 canvas gate must compare against
+    // MAJOR-1 (ADR-W019 review): the Class-1 canvas gate must compare against
     // an IMMUTABLE pinned-canvas snapshot captured at seed time — NOT the
     // mutable layouts repository. Rewriting the working layout's body (a plain
     // PUT any operator can do) must not smuggle a canvas-mismatched apply past
@@ -399,7 +399,7 @@ async fn apply_layout_canvas_gate_survives_working_layout_rewrite() {
 
 #[tokio::test]
 async fn apply_layout_without_a_running_canvas_fails_closed() {
-    // MAJOR-1 (ADR-W017 review): when the control plane holds NO pinned-canvas
+    // MAJOR-1 (ADR-W019 review): when the control plane holds NO pinned-canvas
     // snapshot, a document-carrying apply must fail CLOSED (422 naming the
     // unknown running canvas) — never 202 into a silent drain hold.
     let mut h = harness();
@@ -429,7 +429,7 @@ async fn apply_layout_without_a_running_canvas_fails_closed() {
 
 #[tokio::test]
 async fn apply_layout_equivalent_cadence_is_class1() {
-    // MINOR-3 (ADR-W017 review): cadence equality is by VALUE (cross-
+    // MINOR-3 (ADR-W019 review): cadence equality is by VALUE (cross-
     // multiplied), not structural num/den — a stored "50/2" against a running
     // "25/1" is the SAME cadence and must apply live, not refuse as Class-2.
     // (Seeds the working layout too, so the gate is active under both the old
@@ -471,7 +471,7 @@ async fn apply_layout_equivalent_cadence_is_class1() {
 
 #[tokio::test]
 async fn apply_layout_replay_returns_original_op_without_re_resolving() {
-    // MINOR-4 (ADR-W017, pinned semantics): the idempotency reservation
+    // MINOR-4 (ADR-W019, pinned semantics): the idempotency reservation
     // happens BEFORE resolution. A retried key answers from the reservation —
     // the original operation id, kind "replay", no applied_live/carried_only —
     // WITHOUT re-resolving the layout, even if the layout has since been
@@ -604,7 +604,7 @@ async fn apply_layout_sheds_503_when_bus_full() {
     // Capacity 1, and the engine never drains: the first command fills the bus,
     // and a second apply-layout must be shed (503), never block — proving the
     // handler only try_submits and can never back-pressure the engine (inv #10).
-    // The layout must exist (resolution happens BEFORE the submit, ADR-W017) so
+    // The layout must exist (resolution happens BEFORE the submit, ADR-W019) so
     // the failure under test is the saturated bus, not a 422.
     let h = support::harness_customized(1, |state| {
         state.with_running_canvas(running_canvas_320x240_25())
