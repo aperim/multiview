@@ -375,6 +375,7 @@ export function LayoutEditor({
               onRotate={editor.rotate}
               onFit={editor.setFit}
               onBindSource={editor.bindSource}
+              onProps={editor.setProps}
               onRemove={editor.remove}
               onMoveDown={editor.moveDown}
               onMoveUp={editor.moveUp}

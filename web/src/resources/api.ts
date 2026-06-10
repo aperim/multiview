@@ -14,6 +14,7 @@ import { getStoredToken } from '../api/token';
 import {
   parseOutputFormKind,
   parseOverlayFormKind,
+  parseProbeFormKind,
   parseSourceFormKind,
 } from './forms';
 import type {
@@ -21,13 +22,15 @@ import type {
   OutputView,
   OverlayKind,
   OverlayView,
+  ProbeKind,
+  ProbeView,
   ResourceInput,
   ResourceKind,
   ResourceRecord,
   SourceKind,
   SourceView,
 } from './types';
-import { OUTPUT_KINDS, OVERLAY_KINDS, SOURCE_KINDS } from './types';
+import { OUTPUT_KINDS, OVERLAY_KINDS, PROBE_KINDS, SOURCE_KINDS } from './types';
 
 /** A failed resource call, normalized to a message + status. */
 export class ResourceApiError extends Error {
@@ -318,6 +321,32 @@ export function toOutputView(record: ResourceRecord): OutputView {
     editable: parseOutputFormKind(raw) !== undefined,
     target: stringField(record.body, outputTargetKey(kind)),
     codec: outputHasCodec(kind) ? stringField(record.body, 'codec') : undefined,
+  };
+}
+
+function asProbeKind(value: string | undefined): ProbeKind {
+  return PROBE_KINDS.find((k) => k === value) ?? 'black';
+}
+
+/**
+ * Project a probe record's opaque body into the {@link ProbeView}.
+ *
+ * `kind` folds an unknown tag for typed consumers, but `rawKind` carries the
+ * authored tag for display and `editable` flags whether the typed form can
+ * round-trip the record (`parseProbeFormKind` refuses unknown kinds).
+ */
+export function toProbeView(record: ResourceRecord): ProbeView {
+  const raw = stringField(record.body, 'kind');
+  return {
+    id: record.id,
+    name: record.name,
+    kind: asProbeKind(raw),
+    rawKind: raw ?? 'black',
+    editable: parseProbeFormKind(raw) !== undefined,
+    cell: stringField(record.body, 'cell') ?? '',
+    // The schema default severity is Cleared; mirror it for an absent field.
+    severity: stringField(record.body, 'severity') ?? 'Cleared',
+    latched: record.body.latched === true,
   };
 }
 

@@ -874,6 +874,82 @@ pub struct OutputAudioDoc {
     pub tracks: Vec<String>,
 }
 
+/// `OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by
+/// `kind`, `snake_case`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AudioChannelsDoc {
+    /// Single channel.
+    Mono,
+    /// Two channels: L, R.
+    Stereo,
+    /// Six channels: L, R, C, LFE, Ls, Rs (the BS.1770 5.1 ordering).
+    FivePointOne,
+}
+
+/// `OpenAPI` mirror of `multiview_config::audio::AudioRoute` — one per-input
+/// route in the audio-routing document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AudioRouteDoc {
+    /// The managed source id (`sources[].id`) this route takes audio from.
+    pub input_id: String,
+    /// The channel layout requested for this input.
+    pub channels: AudioChannelsDoc,
+    /// The named discrete output track (absent ⇒ program bus only). `"prog"`
+    /// is reserved for the mixed program bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_track: Option<String>,
+    /// ISO-639 language tag advertised for the discrete track (e.g. `"eng"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Human-friendly track title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Whether this input contributes to the mixed program bus.
+    #[serde(default)]
+    pub include_in_program_bus: bool,
+    /// Program-bus contribution gain in dB (`0.0` ⇒ unity; must be finite).
+    #[serde(default)]
+    pub gain_db: f32,
+    /// Whether this input is muted on the program bus (its discrete track, if
+    /// any, stays declared).
+    #[serde(default)]
+    pub mute: bool,
+}
+
+/// `OpenAPI` mirror of `multiview_config::AudioRouting` — the body accepted by
+/// `PUT /api/v1/audio-routing` (the whole-document `[audio]` block).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AudioRoutingDoc {
+    /// The working/program-bus sample rate in Hz (exact integer, > 0).
+    pub sample_rate_hz: u32,
+    /// The per-input routes.
+    #[serde(default)]
+    pub routes: Vec<AudioRouteDoc>,
+}
+
+/// The response envelope of `GET`/`PUT /api/v1/audio-routing`.
+///
+/// The GET is **404-free**: an unconfigured deployment answers
+/// `configured: false` with a `null` document and `selectable_tracks` of just
+/// the always-available program bus `"prog"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct AudioRoutingStateDoc {
+    /// Whether an audio-routing document is configured.
+    pub configured: bool,
+    /// The routing document, or `null` when unconfigured.
+    pub routing: Option<AudioRoutingDoc>,
+    /// `"prog"` + every declared discrete track, in declaration order — the
+    /// set per-output `audio.tracks` selections resolve against.
+    pub selectable_tracks: Vec<String>,
+}
+
 /// `OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body
 /// accepted by `POST`/`PUT /api/v1/outputs/{id}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1040,6 +1116,144 @@ pub struct OverlayBodyDoc {
     pub params: serde_json::Map<String, serde_json::Value>,
 }
 
+/// `OpenAPI` mirror of `multiview_config::DetectionZone` (normalized
+/// sub-rectangle of a tile, `0.0..=1.0` on both axes).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DetectionZoneDoc {
+    /// Left edge (fraction of tile width).
+    pub x: f32,
+    /// Top edge (fraction of tile height).
+    pub y: f32,
+    /// Width (fraction of tile width).
+    pub w: f32,
+    /// Height (fraction of tile height).
+    pub h: f32,
+}
+
+impl Default for DetectionZoneDoc {
+    /// The full-frame zone (`x = 0`, `y = 0`, `w = 1`, `h = 1`), mirroring the
+    /// config default.
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        }
+    }
+}
+
+/// `OpenAPI` mirror of `multiview_config::Dwell` (raise/clear debounce
+/// milliseconds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DwellDoc {
+    /// Milliseconds the condition must persist before the alarm **raises**.
+    pub up_ms: u32,
+    /// Milliseconds the condition must clear before the alarm **clears**.
+    pub down_ms: u32,
+}
+
+impl Default for DwellDoc {
+    /// A symmetric one-second dwell up and down, mirroring the config default.
+    fn default() -> Self {
+        Self {
+            up_ms: 1000,
+            down_ms: 1000,
+        }
+    }
+}
+
+/// `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
+/// `snake_case`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LoudnessTargetDoc {
+    /// EBU R128 (default integrated target −23.0 LUFS).
+    R128 {
+        /// Integrated-loudness target in LUFS (e.g. `-23.0`).
+        target_lufs: f32,
+        /// Maximum permitted true-peak in dBTP (e.g. `-1.0`).
+        max_true_peak_dbtp: f32,
+    },
+    /// ATSC A/85 (default integrated target −24.0 LKFS).
+    A85 {
+        /// Integrated-loudness target in LKFS (e.g. `-24.0`).
+        target_lkfs: f32,
+        /// Maximum permitted true-peak in dBTP (e.g. `-2.0`).
+        max_true_peak_dbtp: f32,
+    },
+}
+
+/// `OpenAPI` mirror of `multiview_config::ProbeKind` (tagged by `kind`,
+/// `snake_case`, flattened into the probe body).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ProbeKindDoc {
+    /// Black-picture detection within the zone.
+    Black {
+        /// Luma ceiling (8-bit, `0..=255`) at or below which a pixel is "black".
+        luma_threshold: u8,
+        /// Detection zone within the tile (defaults to the full frame).
+        #[serde(default)]
+        zone: DetectionZoneDoc,
+    },
+    /// Freeze detection within the zone.
+    Freeze {
+        /// Inter-frame difference floor (per-mille, `0..=1000`) below which the
+        /// picture counts as frozen.
+        difference_threshold: u16,
+        /// Detection zone within the tile (defaults to the full frame).
+        #[serde(default)]
+        zone: DetectionZoneDoc,
+    },
+    /// Silence detection on the cell's audio.
+    Silence {
+        /// Level ceiling in dBFS at or below which audio counts as silent.
+        level_dbfs: f32,
+    },
+    /// Loudness-violation detection against a compliance target.
+    Loudness {
+        /// The loudness compliance target.
+        target: LoudnessTargetDoc,
+    },
+}
+
+/// The default probe severity, mirroring the config default
+/// (`PerceivedSeverity::Cleared`).
+fn default_probe_severity() -> PerceivedSeverityDoc {
+    PerceivedSeverityDoc::Cleared
+}
+
+/// `OpenAPI` mirror of `multiview_config::Probe` — the body accepted by
+/// `POST`/`PUT /api/v1/probes/{id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct ProbeBodyDoc {
+    /// Stable probe id; may be omitted (the path id is injected).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The cell id this probe watches.
+    pub cell: String,
+    /// The kind-specific payload (`kind` + its fields sit at top level).
+    #[serde(flatten)]
+    pub kind: ProbeKindDoc,
+    /// Dwell windows (raise/clear debounce; defaults to 1 s each way).
+    #[serde(default)]
+    pub dwell: DwellDoc,
+    /// The perceived severity (X.733) asserted when this probe fires.
+    #[serde(default = "default_probe_severity")]
+    pub severity: PerceivedSeverityDoc,
+    /// Whether the alarm latches (held until explicitly reset).
+    #[serde(default)]
+    pub latched: bool,
+}
+
 /// The request envelope for `POST`/`PUT /api/v1/sources/{id}` (`name` + body).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
@@ -1068,4 +1282,14 @@ pub struct OverlayResourceInputDoc {
     pub name: String,
     /// The overlay document.
     pub body: OverlayBodyDoc,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/probes/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct ProbeResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The probe document.
+    pub body: ProbeBodyDoc,
 }

@@ -14,7 +14,7 @@ import { getStoredToken } from './token';
 /** Options for constructing a {@link MultiviewApiClient}. */
 export interface ApiClientOptions {
   /**
-   * Base URL the API is served from. Defaults to the same origin (`''`), which
+   * Base URL the API is served from. Defaults to the document origin, which
    * the Vite dev server proxies to the control plane and which is correct when
    * the SPA is embedded in the `multiview` binary.
    */
@@ -43,7 +43,11 @@ export function createApiClient(options: ApiClientOptions = {}): MultiviewApiCli
     headers.Authorization = `Bearer ${token}`;
   }
   return createClient<paths>({
-    baseUrl: options.baseUrl ?? '',
+    // Same-origin by default, as the explicit origin rather than ''. The two
+    // are identical in the browser ('/api/v1/…' is root-relative), but
+    // openapi-fetch builds a `new Request(url)` itself and a relative URL is
+    // unparseable outside a real document (jsdom/undici in component tests).
+    baseUrl: options.baseUrl ?? (typeof window === 'undefined' ? '' : window.location.origin),
     headers,
   });
 }
