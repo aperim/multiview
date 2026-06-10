@@ -7,17 +7,19 @@
 // shown via an object URL (revoked on refresh). Alongside the pixels, the real
 // per-tile lifecycle state streams over the WebSocket (`useEngineEvents`). All
 // reads are best-effort and never block the engine (invariant #10).
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
 import { useQuery } from '@tanstack/react-query';
 
 import { getStoredToken } from '../api/token';
 import { ConnectionStatus } from '../components/ConnectionStatus';
+import { HelpLink } from '../components/HelpLink';
 import { PageHeader } from '../components/PageHeader';
 import { TileStateBadge } from '../components/TileStateBadge';
 import { Card, CardContent } from '../components/ui/card';
-import { TILES_QUERY_KEY, useEngineEvents } from '../realtime/useEngineEvents';
+import { useLiveTiles } from '../resources/useLiveTiles';
+import { useEngineEvents } from '../realtime/useEngineEvents';
 import type { LiveTile } from '../realtime/useEngineEvents';
 
 /** Fetch a preview JPEG with the bearer token and expose it as an object URL,
@@ -95,17 +97,6 @@ function usePreviewInputIds(): readonly string[] {
   return query.data ?? [];
 }
 
-/** Read the realtime tile map the WS hook owns (never fetched over HTTP). */
-function useLiveTiles(): Map<string, LiveTile> {
-  const query = useQuery<Record<string, LiveTile>>({
-    queryKey: TILES_QUERY_KEY,
-    queryFn: (): Record<string, LiveTile> => ({}),
-    enabled: false,
-    initialData: {},
-  });
-  return useMemo(() => new Map(Object.entries(query.data)), [query.data]);
-}
-
 /** A single live preview image with a placeholder until the first frame. */
 function PreviewImage(props: {
   readonly src: string | undefined;
@@ -161,8 +152,13 @@ export function MonitoringPage(): JSX.Element {
       </section>
 
       <section aria-labelledby="inputs-heading" className="mt-8">
-        <h2 id="inputs-heading" className="mb-3 text-lg font-semibold">
+        <h2 id="inputs-heading" className="mb-3 flex items-center gap-2 text-lg font-semibold">
           <Trans>Inputs</Trans>
+          <HelpLink
+            to="/help/concepts/resilience#tile-lifecycle"
+            label={t`About tile lifecycle states`}
+            compact
+          />
         </h2>
         {inputIds.length === 0 ? (
           <p className="text-sm text-muted-foreground">

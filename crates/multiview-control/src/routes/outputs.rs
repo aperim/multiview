@@ -19,6 +19,7 @@ use crate::concurrency::IfMatch;
 use crate::error::ControlResult;
 use crate::resource_store::{Resource, ResourceInput, VersionedResource, OUTPUT_KIND};
 use crate::state::AppState;
+use crate::typed_resources::{validated_body, with_apply_restart, TypedCollection};
 
 /// Attach the resource's `ETag` to a successful response carrying an output.
 fn output_response(status: StatusCode, versioned: &VersionedResource) -> Response {
@@ -93,11 +94,12 @@ pub(crate) async fn get_output(
         path = "/api/v1/outputs/{id}",
         tag = "outputs",
         params(("id" = String, Path, description = "Output id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OutputResourceInputDoc,
         responses(
             (status = 201, description = "The created output (ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 422, description = "The body is not a valid output document (detail names the field path).", body = crate::problem::Problem),
         ),
     )
 )]
@@ -109,6 +111,10 @@ pub(crate) async fn create_output(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    let input = ResourceInput {
+        name: input.name,
+        body: validated_body(TypedCollection::Outputs, &id, &input.body)?,
+    };
     let versioned = state.outputs.create(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -117,7 +123,10 @@ pub(crate) async fn create_output(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(output_response(StatusCode::CREATED, &versioned))
+    Ok(with_apply_restart(output_response(
+        StatusCode::CREATED,
+        &versioned,
+    )))
 }
 
 /// `PUT /api/v1/outputs/{id}` — replace an output (role: write; If-Match → 412).
@@ -128,7 +137,7 @@ pub(crate) async fn create_output(
         path = "/api/v1/outputs/{id}",
         tag = "outputs",
         params(("id" = String, Path, description = "Output id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OutputResourceInputDoc,
         responses(
             (status = 200, description = "The replaced output (new ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
@@ -147,8 +156,15 @@ pub(crate) async fn update_output(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // Preconditions are evaluated before request content (RFC 9110 §13.2.2):
+    // a stale `If-Match` (or a missing resource) is reported even when the
+    // submitted body is itself invalid.
     let current = state.outputs.get(&id)?;
     if_match.require(OUTPUT_KIND, &id, current.version)?;
+    let input = ResourceInput {
+        name: input.name,
+        body: validated_body(TypedCollection::Outputs, &id, &input.body)?,
+    };
     let versioned = state.outputs.update(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -157,7 +173,10 @@ pub(crate) async fn update_output(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(output_response(StatusCode::OK, &versioned))
+    Ok(with_apply_restart(output_response(
+        StatusCode::OK,
+        &versioned,
+    )))
 }
 
 /// `DELETE /api/v1/outputs/{id}` — delete an output (role: administer; If-Match).
@@ -182,7 +201,7 @@ pub(crate) async fn delete_output(
     principal: Principal,
     if_match: IfMatch,
     Path(id): Path<String>,
-) -> ControlResult<StatusCode> {
+) -> ControlResult<Response> {
     principal.role.require(Action::Administer)?;
     crate::auth::authorize_object(&principal, &id)?;
     let current = state.outputs.get(&id)?;
@@ -195,5 +214,5 @@ pub(crate) async fn delete_output(
         &id,
         None,
     );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(with_apply_restart(StatusCode::NO_CONTENT.into_response()))
 }

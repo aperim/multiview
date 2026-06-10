@@ -2,7 +2,7 @@
 // valid edit serializes to the expected opaque config body. Drives only the
 // accessible (default) Cells tab so no konva canvas is mounted.
 import { describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { LayoutEditor } from './LayoutEditor';
@@ -13,7 +13,7 @@ import type { SourceView } from '../../resources/types';
 import { renderWithProviders } from '../../test/render';
 
 const SOURCES: readonly SourceView[] = [
-  { id: 'cam-1', name: 'Camera One', kind: 'rtsp', locator: 'rtsp://cam-1' },
+  { id: 'cam-1', name: 'Camera One', kind: 'rtsp', rawKind: 'rtsp', editable: true, locator: 'rtsp://cam-1' },
 ];
 
 function namedLayout(): LayoutModel {
@@ -76,10 +76,17 @@ describe('LayoutEditor', () => {
         onSave={onSave}
       />,
     );
-    expect(screen.queryByRole('group')).not.toBeInTheDocument();
+    // Scope to the accessible Cells region: the editor toolbar now carries its
+    // own fieldsets (canvas controls + preset seeds), which are also `group`s.
+    const cellsRegion = (): HTMLElement => screen.getByRole('region', { name: 'Cells' });
+    expect(within(cellsRegion()).queryByRole('group')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Add cell' }));
-    // A new cell fieldset now exists, and the no-cells issue is cleared.
-    expect(screen.getAllByRole('group')).toHaveLength(1);
+    // A new cell fieldset now exists, and the no-cells issue is cleared. The
+    // row nests further groups (Border fieldset + the property disclosures),
+    // so count the cell rows by their accessible (legend) name.
+    expect(
+      within(cellsRegion()).getAllByRole('group', { name: /New cell/ }),
+    ).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Save layout' })).toBeEnabled();
   });
 });

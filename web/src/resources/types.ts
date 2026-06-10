@@ -10,7 +10,7 @@
 // `as`-casts.
 
 /** The resource collections the SPA manages (the REST path segment). */
-export type ResourceKind = 'sources' | 'outputs' | 'overlays';
+export type ResourceKind = 'sources' | 'outputs' | 'overlays' | 'probes';
 
 /**
  * A persisted resource record, exactly as the control plane returns it: a stable
@@ -44,6 +44,7 @@ export type SourceKind =
   | 'clock'
   | 'rtsp'
   | 'hls'
+  | 'youtube'
   | 'ts'
   | 'srt'
   | 'rtmp'
@@ -64,6 +65,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'clock',
   'rtsp',
   'hls',
+  'youtube',
   'ts',
   'srt',
   'rtmp',
@@ -79,6 +81,18 @@ export interface SourceView {
   readonly name: string;
   /** Transport kind. */
   readonly kind: SourceKind;
+  /**
+   * The kind tag exactly as authored in the stored body (e.g. `aes67` for a
+   * kind this UI has no form for). Display this, never the folded `kind`, so
+   * an unknown-kind document is shown as it is.
+   */
+  readonly rawKind: string;
+  /**
+   * Whether this UI can edit the record (its kind has a typed form). An
+   * unknown kind renders + deletes normally but Edit is refused — editing
+   * through a fold would silently rewrite the authored document.
+   */
+  readonly editable: boolean;
   /**
    * The configured locator for display — the kind's key field: `url` for the
    * network kinds, the source `name` for NDI, the `path` for file. Absent for
@@ -109,6 +123,10 @@ export interface OutputView {
   readonly name: string;
   /** Output transport kind. */
   readonly kind: OutputKind;
+  /** The kind tag exactly as authored in the stored body (wire form). */
+  readonly rawKind: string;
+  /** Whether this UI can edit the record (see {@link SourceView.editable}). */
+  readonly editable: boolean;
   /**
    * The kind's key field for display: the RTSP `mount`, the HLS/LL-HLS `path`,
    * the RTMP/SRT `url`, or the NDI source `name`.
@@ -130,6 +148,36 @@ export const OVERLAY_KINDS: readonly OverlayKind[] = [
   'subtitle',
 ];
 
+/**
+ * The per-cell fail-state probe kinds (config `ProbeKind`, internally tagged
+ * by `kind`, flattened into the probe body). These tags are the literal config
+ * wire kinds (snake_case).
+ */
+export type ProbeKind = 'black' | 'freeze' | 'silence' | 'loudness';
+
+/** All probe kinds, for building selectors. */
+export const PROBE_KINDS: readonly ProbeKind[] = ['black', 'freeze', 'silence', 'loudness'];
+
+/** A configured per-cell fail-state probe. */
+export interface ProbeView {
+  /** Stable probe id. */
+  readonly id: string;
+  /** Operator label. */
+  readonly name: string;
+  /** Probe kind (folded for typed consumers). */
+  readonly kind: ProbeKind;
+  /** The kind tag exactly as authored in the stored body. */
+  readonly rawKind: string;
+  /** Whether this UI can edit the record (see {@link SourceView.editable}). */
+  readonly editable: boolean;
+  /** The cell id the probe watches. */
+  readonly cell: string;
+  /** The X.733 perceived severity the probe asserts (wire form, PascalCase). */
+  readonly severity: string;
+  /** Whether the alarm latches until explicitly reset. */
+  readonly latched: boolean;
+}
+
 /** A configured overlay layer. */
 export interface OverlayView {
   /** Stable overlay id (also draggable onto a cell from the palette). */
@@ -138,6 +186,10 @@ export interface OverlayView {
   readonly name: string;
   /** Overlay kind. */
   readonly kind: OverlayKind;
+  /** The kind tag exactly as authored in the stored body. */
+  readonly rawKind: string;
+  /** Whether this UI can edit the record (see {@link SourceView.editable}). */
+  readonly editable: boolean;
   /** Attachment target (`canvas` or a cell id). */
   readonly target: string;
   /** Stacking order over the program. */

@@ -38,6 +38,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/audio-routing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/audio-routing` — the singleton document (role: read).
+         * @description **404-free**: an unconfigured deployment answers `200` with
+         *     `configured: false`, `routing: null`, and `selectable_tracks: ["prog"]`
+         *     (the program bus is always selectable). The response `ETag` is the document
+         *     version a later `PUT` must present as `If-Match`.
+         */
+        get: operations["get_audio_routing"];
+        /**
+         * `PUT /api/v1/audio-routing` — replace the singleton document (role: write;
+         *     `If-Match` required → `428`/`412`).
+         */
+        put: operations["put_audio_routing"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit": {
         parameters: {
             query?: never;
@@ -50,6 +77,95 @@ export interface paths {
          * @description An optional `?object_id=` filters to a single object's history.
          */
         get: operations["list_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/commands/apply-layout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/commands/apply-layout` — apply a layout to the running
+         *     multiview (role: write; per-object authz; 202).
+         * @description Mirrors [`cmd_swap`]: it only `try_submit`s the command via
+         *     [`submit_accepted`] (idempotency + shed-on-full free) and never blocks the
+         *     engine (invariant #10). The eventual outcome arrives on the realtime stream
+         *     correlated by the returned operation id (ADR-W008).
+         */
+        post: operations["cmd_apply_layout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/config/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/config/export` — render the live resource stores as a complete
+         *     `multiview.toml` document (ADR-W015).
+         * @description Composes the working layout (the id-sorted first layout whose body carries a
+         *     `canvas`) with every stored source/output/overlay/probe into a
+         *     [`multiview_config::MultiviewConfig`], validates the whole document, and
+         *     returns it as TOML. This closes the management loop honestly today: edit in
+         *     the UI → export → persist as the config file → the next start applies it.
+         */
+        get: operations["export_config"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/health` — list the active health warnings (role: read). */
+        get: operations["list_health"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inputs/{id}/streams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/inputs/{id}/streams` — the input's elementary-stream inventory
+         *     (role: read; per-object authz).
+         * @description Returns the cached [`StreamInventory`] for input `id` from the off-engine
+         *     snapshot (inv #10 — the output-clock thread is never touched). `404` when the
+         *     input is unknown or has not been probed yet.
+         */
+        get: operations["get_input_streams"];
         put?: never;
         post?: never;
         delete?: never;
@@ -164,6 +280,204 @@ export interface paths {
         post: operations["create_overlay"];
         /** `DELETE /api/v1/overlays/{id}` — delete an overlay (role: administer; If-Match). */
         delete: operations["delete_overlay"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/preview/inputs/{id}/whep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/preview/inputs/{id}/whep` — open a WHEP focus on input `id`
+         *     (role: write).
+         */
+        post: operations["input_whep_open"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/preview/inputs/{id}/whep/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/preview/inputs/{id}/whep/{session_id}` — release an input
+         *     focus session (role: write).
+         */
+        delete: operations["input_whep_close"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/preview/outputs/{id}/whep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/preview/outputs/{id}/whep` — open a WHEP focus on output `id`
+         *     (role: write).
+         */
+        post: operations["output_whep_open"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/preview/outputs/{id}/whep/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/preview/outputs/{id}/whep/{session_id}` — release an output
+         *     focus session (role: write).
+         */
+        delete: operations["output_whep_close"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/preview/program/whep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/preview/program/whep` — open a WHEP focus on the program
+         *     canvas (role: write). SDP offer in, `201` + answer SDP + `Location` out.
+         */
+        post: operations["program_whep_open"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/preview/program/whep/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/preview/program/whep/{session_id}` — release a program focus
+         *     session (role: write). `204` on success, `404` if unknown.
+         */
+        delete: operations["program_whep_close"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/probes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/probes` — list all probes (role: read). */
+        get: operations["list_probes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/probes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/probes/{id}` — fetch one probe (role: read; per-object authz). */
+        get: operations["get_probe"];
+        /** `PUT /api/v1/probes/{id}` — replace a probe (role: write; If-Match → 412). */
+        put: operations["update_probe"];
+        /** `POST /api/v1/probes/{id}` — create a probe (role: write; per-object authz). */
+        post: operations["create_probe"];
+        /** `DELETE /api/v1/probes/{id}` — delete a probe (role: administer; If-Match). */
+        delete: operations["delete_probe"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/routing/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/routing/plan` — classify a crosspoint take without applying
+         *     (role: read; per-destination authz). Returns the #11 [`RoutePlan`].
+         */
+        post: operations["plan_route"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/routing/{kind}/take": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/routing/{kind}/take` — take (apply) a crosspoint (role: write;
+         *     per-destination authz; Idempotency-Key). `200 {class, applied}` for a hot
+         *     Class-1/Reset-lite re-point; `202 {operation_id}` for a Class-2 migration.
+         */
+        post: operations["take_route"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -576,6 +890,86 @@ export interface components {
             /** @enum {string} */
             kind: "system";
         };
+        /** @description The body of a `POST /commands/apply-layout` request. */
+        ApplyLayoutRequest: {
+            /** @description The layout id to make active on the running multiview. */
+            layout: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by
+         *     `kind`, `snake_case`).
+         */
+        AudioChannelsDoc: {
+            /** @enum {string} */
+            kind: "mono";
+        } | {
+            /** @enum {string} */
+            kind: "stereo";
+        } | {
+            /** @enum {string} */
+            kind: "five_point_one";
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::audio::AudioRoute` — one per-input
+         *     route in the audio-routing document.
+         */
+        AudioRouteDoc: {
+            /** @description The channel layout requested for this input. */
+            channels: components["schemas"]["AudioChannelsDoc"];
+            /**
+             * Format: float
+             * @description Program-bus contribution gain in dB (`0.0` ⇒ unity; must be finite).
+             */
+            gain_db?: number;
+            /** @description Whether this input contributes to the mixed program bus. */
+            include_in_program_bus?: boolean;
+            /** @description The managed source id (`sources[].id`) this route takes audio from. */
+            input_id: string;
+            /** @description ISO-639 language tag advertised for the discrete track (e.g. `"eng"`). */
+            language?: string | null;
+            /**
+             * @description Whether this input is muted on the program bus (its discrete track, if
+             *     any, stays declared).
+             */
+            mute?: boolean;
+            /**
+             * @description The named discrete output track (absent ⇒ program bus only). `"prog"`
+             *     is reserved for the mixed program bus.
+             */
+            target_track?: string | null;
+            /** @description Human-friendly track title. */
+            title?: string | null;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::AudioRouting` — the body accepted by
+         *     `PUT /api/v1/audio-routing` (the whole-document `[audio]` block).
+         */
+        AudioRoutingDoc: {
+            /** @description The per-input routes. */
+            routes?: components["schemas"]["AudioRouteDoc"][];
+            /**
+             * Format: int32
+             * @description The working/program-bus sample rate in Hz (exact integer, > 0).
+             */
+            sample_rate_hz: number;
+        };
+        /**
+         * @description The response envelope of `GET`/`PUT /api/v1/audio-routing`.
+         *
+         *     The GET is **404-free**: an unconfigured deployment answers
+         *     `configured: false` with a `null` document and `selectable_tracks` of just
+         *     the always-available program bus `"prog"`.
+         */
+        AudioRoutingStateDoc: {
+            /** @description Whether an audio-routing document is configured. */
+            configured: boolean;
+            routing?: null | components["schemas"]["AudioRoutingDoc"];
+            /**
+             * @description `"prog"` + every declared discrete track, in declaration order — the
+             *     set per-output `audio.tracks` selections resolve against.
+             */
+            selectable_tracks: string[];
+        };
         /**
          * @description The kind of mutation an audit entry records.
          * @enum {string}
@@ -644,6 +1038,37 @@ export interface components {
             /** @enum {string} */
             kind: "iso";
         };
+        /** @description `OpenAPI` mirror of `multiview_config::CaptionSelector` (tagged by `mode`). */
+        CaptionSelectorDoc: {
+            /** @enum {string} */
+            mode: "auto";
+        } | {
+            /** @enum {string} */
+            mode: "off";
+        } | {
+            /** @enum {string} */
+            mode: "teletext_page";
+            /**
+             * Format: int32
+             * @description Teletext page number (typically `100`–`899`).
+             */
+            page: number;
+        } | {
+            /** @description The track identifier. */
+            id: string;
+            /** @enum {string} */
+            mode: "track";
+        } | {
+            /** @description The caption field/service selector (e.g. `cc1`). */
+            field: string;
+            /** @enum {string} */
+            mode: "embedded_cc";
+        } | {
+            /** @enum {string} */
+            mode: "sidecar";
+            /** @description Filesystem path to the sidecar. */
+            path: string;
+        };
         /**
          * @description An IS-08 **map**: each named output channel → its [`ChannelSource`].
          *
@@ -675,6 +1100,22 @@ export interface components {
         ClearOverrideRequestDoc: {
             /** @description The tally target whose override is cleared. */
             target: components["schemas"]["TallyTargetDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::ClockFaceConfig`.
+         * @enum {string}
+         */
+        ClockFaceDoc: "analog" | "digital";
+        /** @description `OpenAPI` mirror of `multiview_config::ColorOverride` (four color axes). */
+        ColorOverrideDoc: {
+            /** @description Matrix axis. */
+            matrix?: string | null;
+            /** @description Primaries axis (`auto` or an explicit primaries token). */
+            primaries?: string | null;
+            /** @description Range axis. */
+            range?: string | null;
+            /** @description Transfer axis. */
+            transfer?: string | null;
         };
         /** @description The body of a `PUT /config/{target}` commit. */
         CommitRequest: {
@@ -727,6 +1168,37 @@ export interface components {
              */
             staged_at?: string | null;
         };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::DataKind`].
+         * @enum {string}
+         */
+        DataKindDoc: "scte35" | "klv";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::DetectionZone` (normalized
+         *     sub-rectangle of a tile, `0.0..=1.0` on both axes).
+         */
+        DetectionZoneDoc: {
+            /**
+             * Format: float
+             * @description Height (fraction of tile height).
+             */
+            h: number;
+            /**
+             * Format: float
+             * @description Width (fraction of tile width).
+             */
+            w: number;
+            /**
+             * Format: float
+             * @description Left edge (fraction of tile width).
+             */
+            x: number;
+            /**
+             * Format: float
+             * @description Top edge (fraction of tile height).
+             */
+            y: number;
+        };
         /** @description An IS-04 **Device**: a logical grouping of senders/receivers on a node. */
         Device: components["schemas"]["ResourceCore"] & {
             /** @description The id of the node hosting this device. */
@@ -737,6 +1209,13 @@ export interface components {
             senders?: string[];
             /** @description The device type URN (e.g. `urn:x-nmos:device:generic`). */
             type: string;
+        };
+        /** @description `OpenAPI` mirror of `multiview_config::placement::DevicePin`. */
+        DevicePinDoc: {
+            /** @description The vendor's stable device handle (UUID / PCI bus id / registryID). */
+            stable_id: string;
+            /** @description The vendor family. */
+            vendor: components["schemas"]["PinVendorDoc"];
         };
         /**
          * @description The added / removed / changed top-level keys between two documents.
@@ -753,6 +1232,48 @@ export interface components {
             changed: string[];
             /** @description Keys present in the old document but not the new (sorted). */
             removed: string[];
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Dwell` (raise/clear debounce
+         *     milliseconds).
+         */
+        DwellDoc: {
+            /**
+             * Format: int32
+             * @description Milliseconds the condition must clear before the alarm **clears**.
+             */
+            down_ms: number;
+            /**
+             * Format: int32
+             * @description Milliseconds the condition must persist before the alarm **raises**.
+             */
+            up_ms: number;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).
+         *
+         *     The body of `GET /api/v1/health`: an actionable health warning carrying a
+         *     stable `code` + a `remediation`. A round-trip test (`tests/health.rs`) pins
+         *     this shape to the real `multiview_events::HealthWarning` so they cannot drift.
+         */
+        HealthWarningDoc: {
+            /** @description Whether the condition is currently active. */
+            active: boolean;
+            /** @description The stable catalog code — the dedupe key the store + UI coalesce on. */
+            code: components["schemas"]["WarningCodeDoc"];
+            /** @description A clear, human-readable description of the condition. */
+            message: string;
+            /** @description The concrete remediation — what the operator must do to fix it. */
+            remediation: string;
+            /** @description The severity. */
+            severity: components["schemas"]["WarningSeverityDoc"];
+            /**
+             * Format: int64
+             * @description When the condition was first raised (engine monotonic nanoseconds).
+             */
+            since: number;
+            /** @description The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`). */
+            subsystem: string;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::IndexCell`]. */
         IndexCellDoc: {
@@ -822,6 +1343,37 @@ export interface components {
             name: string;
         };
         /**
+         * @description `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
+         *     `snake_case`).
+         */
+        LoudnessTargetDoc: {
+            /** @enum {string} */
+            kind: "r128";
+            /**
+             * Format: float
+             * @description Maximum permitted true-peak in dBTP (e.g. `-1.0`).
+             */
+            max_true_peak_dbtp: number;
+            /**
+             * Format: float
+             * @description Integrated-loudness target in LUFS (e.g. `-23.0`).
+             */
+            target_lufs: number;
+        } | {
+            /** @enum {string} */
+            kind: "a85";
+            /**
+             * Format: float
+             * @description Maximum permitted true-peak in dBTP (e.g. `-2.0`).
+             */
+            max_true_peak_dbtp: number;
+            /**
+             * Format: float
+             * @description Integrated-loudness target in LKFS (e.g. `-24.0`).
+             */
+            target_lkfs: number;
+        };
+        /**
          * @description The media format of a sender/receiver (the IS-04 `format` URN family).
          * @enum {string}
          */
@@ -854,6 +1406,169 @@ export interface components {
          *     on the realtime stream (`corr`) when the command's outcome is known.
          */
         OperationId: string;
+        /** @description `OpenAPI` mirror of `multiview_config::audio::OutputAudio`. */
+        OutputAudioDoc: {
+            /** @description `program` (mixed bus) or `tracks` (explicit selection). */
+            mode: components["schemas"]["OutputAudioModeDoc"];
+            /** @description The selectable-track list (used only in `tracks` mode). */
+            tracks?: string[];
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::audio::OutputAudioMode`.
+         * @enum {string}
+         */
+        OutputAudioModeDoc: "program" | "tracks";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body
+         *     accepted by `POST`/`PUT /api/v1/outputs/{id}`.
+         */
+        OutputBodyDoc: {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description Video codec (`h264`, `hevc`, …). */
+            codec: string;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted (the path id is injected). */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "rtsp_server";
+            /** @description Latency profile hint. */
+            latency_profile?: string | null;
+            /** @description Mount point (e.g. `/multiview`). */
+            mount: string;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description Video codec. */
+            codec: string;
+            /**
+             * Format: int32
+             * @description GOP duration (ms).
+             */
+            gop_ms?: number | null;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "ll_hls";
+            /**
+             * Format: int32
+             * @description Target part duration (ms).
+             */
+            part_target_ms?: number | null;
+            /** @description Output path. */
+            path: string;
+            /**
+             * Format: int32
+             * @description Segment duration (ms).
+             */
+            segment_ms?: number | null;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description Video codec. */
+            codec: string;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "hls";
+            /** @description Output path. */
+            path: string;
+            /**
+             * Format: int32
+             * @description Segment duration (ms).
+             */
+            segment_ms?: number | null;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "ndi";
+            /** @description NDI source name to advertise. */
+            name: string;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description Video codec. */
+            codec: string;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "rtmp";
+            /** @description Destination URL. */
+            url: string;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description Video codec. */
+            codec: string;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "srt";
+            /** @description Destination URL. */
+            url: string;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description PCM depth: `L24` (Class A interop default) or `L16`. */
+            depth?: string | null;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "aes67";
+            /** @description Display name (no mount/path/url to derive one from). */
+            label: string;
+            /** @description Multicast `group:port` to send to (`[ff3e::1]:5004`). */
+            multicast: string;
+            /**
+             * Format: int32
+             * @description Packet time in milliseconds (`1` = Class A).
+             */
+            ptime_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Optional PTP domain (`0..=127`).
+             */
+            ptp_domain?: number | null;
+        };
+        /** @description The request envelope for `POST`/`PUT /api/v1/outputs/{id}` (`name` + body). */
+        OutputResourceInputDoc: {
+            /** @description The output document. */
+            body: components["schemas"]["OutputBodyDoc"];
+            /** @description Human-friendly name. */
+            name: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Overlay` — the body accepted by
+         *     `POST`/`PUT /api/v1/overlays/{id}`.
+         *
+         *     Overlay kinds carry a large, kind-dependent parameter set captured verbatim
+         *     (lossless round-trip), so the schema documents the common envelope and
+         *     leaves the per-kind extras additive.
+         */
+        OverlayBodyDoc: {
+            /** @description Stable overlay id; may be omitted (the path id is injected). */
+            id?: string | null;
+            /** @description Overlay kind (`clock`, `label`, `tally_border`, `image`, `subtitle`, …). */
+            kind: string;
+            /** @description Attachment target (`canvas` or a cell id). */
+            target: string;
+            /**
+             * Format: int32
+             * @description Stacking order.
+             */
+            z?: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** @description The request envelope for `POST`/`PUT /api/v1/overlays/{id}` (`name` + body). */
+        OverlayResourceInputDoc: {
+            /** @description The overlay document. */
+            body: components["schemas"]["OverlayBodyDoc"];
+            /** @description Human-friendly name. */
+            name: string;
+        };
         /** @description `OpenAPI` mirror of [`crate::routes::tally::OverrideRequest`]. */
         OverrideRequestDoc: {
             /** @description The lamp colour to force. */
@@ -868,6 +1583,73 @@ export interface components {
          * @enum {string}
          */
         PerceivedSeverityDoc: "Cleared" | "Indeterminate" | "Warning" | "Minor" | "Major" | "Critical";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::placement::PinVendor`.
+         * @enum {string}
+         */
+        PinVendorDoc: "nvidia" | "intel" | "amd" | "apple";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Probe` — the body accepted by
+         *     `POST`/`PUT /api/v1/probes/{id}`.
+         */
+        ProbeBodyDoc: components["schemas"]["ProbeKindDoc"] & {
+            /** @description The cell id this probe watches. */
+            cell: string;
+            /** @description Dwell windows (raise/clear debounce; defaults to 1 s each way). */
+            dwell?: components["schemas"]["DwellDoc"];
+            /** @description Stable probe id; may be omitted (the path id is injected). */
+            id?: string | null;
+            /** @description Whether the alarm latches (held until explicitly reset). */
+            latched?: boolean;
+            /** @description The perceived severity (X.733) asserted when this probe fires. */
+            severity?: components["schemas"]["PerceivedSeverityDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::ProbeKind` (tagged by `kind`,
+         *     `snake_case`, flattened into the probe body).
+         */
+        ProbeKindDoc: {
+            /** @enum {string} */
+            kind: "black";
+            /**
+             * Format: int32
+             * @description Luma ceiling (8-bit, `0..=255`) at or below which a pixel is "black".
+             */
+            luma_threshold: number;
+            /** @description Detection zone within the tile (defaults to the full frame). */
+            zone?: components["schemas"]["DetectionZoneDoc"];
+        } | {
+            /**
+             * Format: int32
+             * @description Inter-frame difference floor (per-mille, `0..=1000`) below which the
+             *     picture counts as frozen.
+             */
+            difference_threshold: number;
+            /** @enum {string} */
+            kind: "freeze";
+            /** @description Detection zone within the tile (defaults to the full frame). */
+            zone?: components["schemas"]["DetectionZoneDoc"];
+        } | {
+            /** @enum {string} */
+            kind: "silence";
+            /**
+             * Format: float
+             * @description Level ceiling in dBFS at or below which audio counts as silent.
+             */
+            level_dbfs: number;
+        } | {
+            /** @enum {string} */
+            kind: "loudness";
+            /** @description The loudness compliance target. */
+            target: components["schemas"]["LoudnessTargetDoc"];
+        };
+        /** @description The request envelope for `POST`/`PUT /api/v1/probes/{id}` (`name` + body). */
+        ProbeResourceInputDoc: {
+            /** @description The probe document. */
+            body: components["schemas"]["ProbeBodyDoc"];
+            /** @description Human-friendly name. */
+            name: string;
+        };
         /**
          * @description An RFC 9457 problem-details document.
          *
@@ -997,6 +1779,94 @@ export interface components {
             to: number;
         };
         /**
+         * @description The #11 class of a crosspoint take — the three tiers the capability matrix
+         *     defines, surfaced **before** the take applies.
+         *
+         *     Serialised in `snake_case` (`"class1"` / `"reset_lite"` / `"class2"`) and
+         *     **never `untagged`**. `#[non_exhaustive]` for forward compatibility.
+         * @enum {string}
+         */
+        RouteClass: "class1" | "reset_lite" | "class2";
+        /**
+         * @description The classified plan for a crosspoint take: the #11 class plus a
+         *     coerced-degradation flag.
+         */
+        RoutePlan: {
+            /** @description The #11 class of the take. */
+            class: components["schemas"]["RouteClass"];
+            /**
+             * @description Whether the (would-be Class-2) take was **coerced** to Class-1 by an
+             *     operator-confirmed down/up-mix to the destination's pinned layout — a
+             *     Class-1 **with degradation**, surfaced so the operator sees the trade.
+             */
+            coerced: boolean;
+        };
+        /**
+         * @description The body of a `POST /routing/plan` or `/routing/{kind}/take` request.
+         *
+         *     Carries the destination + source, plus optional classifier hints used when the
+         *     engine snapshot does not (yet) carry the source inventory or the destination's
+         *     pinned params (so a plan/take is classifiable before the first probe):
+         *
+         *     * `source_channels` — the source audio track's channel count (used for the
+         *       discrete-track layout comparison when the inventory is absent);
+         *     * `coerce` — the operator confirms a down/up-mix to the destination's pinned
+         *       layout (turns a would-be Class-2 audio mismatch into Class-1-with-degradation);
+         *     * `primed` — whether the video target source is warm (absent ⇒ assumed primed).
+         */
+        RouteTakeRequest: {
+            /** @description Optional operator-confirmed coercion to the pinned layout. */
+            coerce?: boolean;
+            /** @description Optional video-target priming hint (absent ⇒ assumed primed). */
+            primed?: boolean | null;
+            /** @description The source elementary stream feeding the destination. */
+            source: components["schemas"]["StreamRefDoc"];
+            /**
+             * Format: int32
+             * @description Optional source audio channel-count hint (discrete-track layout compare).
+             */
+            source_channels?: number | null;
+            /** @description The destination the take re-points. */
+            target: components["schemas"]["RouteTargetDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_control::routing::RouteTarget`] (RT-11).
+         *
+         *     The destination a crosspoint take re-points — internally tagged on `kind`,
+         *     `snake_case`, never `untagged`.
+         */
+        RouteTargetDoc: {
+            /** @description The destination cell id. */
+            cell: string;
+            /** @enum {string} */
+            kind: "video_cell";
+        } | {
+            /** @description The program-bus channel name. */
+            channel: string;
+            /** @enum {string} */
+            kind: "audio_program_bus";
+        } | {
+            /** @enum {string} */
+            kind: "audio_discrete_track";
+            /**
+             * Format: int32
+             * @description The pinned channel count, if known (the classifier's compare target).
+             */
+            pinned_channels?: number | null;
+            /** @description The discrete-track name. */
+            track: string;
+        } | {
+            /** @enum {string} */
+            kind: "subtitle_layer";
+            /** @description The destination layer id. */
+            layer: string;
+        };
+        /** @description `OpenAPI` mirror of `multiview_config::RtspOptions`. */
+        RtspOptionsDoc: {
+            /** @description Lower-transport selection (`tcp` / `udp`). */
+            transport: string;
+        };
+        /**
          * @description `OpenAPI` mirror of [`multiview_config::Salvo`].
          *
          *     Serde-equivalent field-for-field; the optional fields skip when empty/absent
@@ -1027,6 +1897,108 @@ export interface components {
             /** @description The transport URN (e.g. `urn:x-nmos:transport:rtp.mcast`). */
             transport: string;
         };
+        /** @description `OpenAPI` mirror of `multiview_config::SourceAuth` (reference-only secret). */
+        SourceAuthDoc: {
+            /** @description A secret reference (e.g. `op://Servers/cam/credentials`), never plaintext. */
+            secret_ref: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Source` — the body accepted by
+         *     `POST`/`PUT /api/v1/sources/{id}`.
+         */
+        SourceBodyDoc: components["schemas"]["SourceKindDoc"] & {
+            auth?: null | components["schemas"]["SourceAuthDoc"];
+            captions?: null | components["schemas"]["CaptionSelectorDoc"];
+            color_override?: null | components["schemas"]["ColorOverrideDoc"];
+            /** @description Human-friendly display name. */
+            display_name?: string | null;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable input id; may be omitted (the path id is injected). */
+            id?: string | null;
+            wallclock?: null | components["schemas"]["SourceWallClockDoc"];
+        };
+        /** @description `OpenAPI` mirror of `multiview_config::SourceKind` (tagged by `kind`). */
+        SourceKindDoc: {
+            /** @enum {string} */
+            kind: "bars";
+        } | {
+            /** @description Fill colour as `#RRGGBB`/`#RGB` hex. */
+            color: string;
+            /** @enum {string} */
+            kind: "solid";
+        } | {
+            /** @description Analog (default) or digital face. */
+            face?: components["schemas"]["ClockFaceDoc"];
+            /** @enum {string} */
+            kind: "clock";
+            /** @description 12-hour vs 24-hour mode (default 24-hour). */
+            twelve_hour?: boolean;
+            /**
+             * Format: int32
+             * @description Timezone offset from UTC in minutes (`-720..=840`).
+             */
+            tz_offset_minutes?: number;
+        } | {
+            /** @enum {string} */
+            kind: "rtsp";
+            rtsp?: null | components["schemas"]["RtspOptionsDoc"];
+            /** @description Source URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "hls";
+            /** @description Playlist URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "youtube";
+            /** @description Watch/live/channel URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "ts";
+            /** @description Source URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "srt";
+            /** @description Source URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "rtmp";
+            /** @description Source URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "ndi";
+            /** @description NDI source name. */
+            name: string;
+        } | {
+            /** @enum {string} */
+            kind: "file";
+            /** @description Filesystem path. */
+            path: string;
+        } | {
+            /** @enum {string} */
+            kind: "aes67";
+            /**
+             * Format: int32
+             * @description Optional receive jitter-buffer lead in milliseconds (link offset).
+             */
+            link_offset_ms?: number | null;
+            /** @description Optional multicast `group:port` override (`[ff3e::1]:5004`). */
+            multicast?: string | null;
+            /**
+             * Format: int32
+             * @description Optional PTP domain (`0` ST 2110-30-strict, `1..=127` otherwise).
+             */
+            ptp_domain?: number | null;
+            /** @description Static SDP session description (RFC 4566/8866), as text or a URL. */
+            sdp: string;
+            /** @description Optional SAP session id or NMOS sender id for dynamic discovery. */
+            session_id?: string | null;
+        };
         /** @description `OpenAPI` mirror of [`multiview_config::SourceRecall`]. */
         SourceRecallDoc: {
             /** @description The cell id whose source binding changes. */
@@ -1034,12 +2006,213 @@ export interface components {
             /** @description The managed source id to bind into the cell. */
             input_id: string;
         };
+        /** @description The request envelope for `POST`/`PUT /api/v1/sources/{id}` (`name` + body). */
+        SourceResourceInputDoc: {
+            /** @description The source document. */
+            body: components["schemas"]["SourceBodyDoc"];
+            /** @description Human-friendly name. */
+            name: string;
+        };
+        /** @description `OpenAPI` mirror of `multiview_config::SourceWallClock` (ADR-0038 verb). */
+        SourceWallClockDoc: {
+            /** @description `use` (rebase when Trusted) or `discard` (reclock-to-house). */
+            use?: components["schemas"]["WallClockUseDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::StabilityTier`].
+         *
+         *     Serde-equivalent: a unit enum, `snake_case` (`hard` / `soft`).
+         * @enum {string}
+         */
+        StabilityTierDoc: "hard" | "soft";
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::StableStreamId`].
+         *
+         *     Serde-equivalent field-for-field: a kind-scope discriminant char, the opaque
+         *     stable key string, and the stability tier.
+         */
+        StableStreamIdDoc: {
+            /** @description The opaque, stable key string (kind-scope excluded). */
+            key: string;
+            /** @description The kind-scope discriminant character (`v`/`a`/`s`/`d`/`t`). */
+            kind_scope: string;
+            /** @description How stable the key is. */
+            tier: components["schemas"]["StabilityTierDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::StreamDescriptor`].
+         *
+         *     Serde-equivalent: the [`StreamKindDoc`] is **flattened** (so a descriptor
+         *     carries a single `kind` / `payload` pair at its top level) alongside the
+         *     adjacently-tagged [`StreamDetailDoc`]. `language` is a BCP-47 string or
+         *     `null`.
+         */
+        StreamDescriptorDoc: components["schemas"]["StreamKindDoc"] & {
+            /** @description The codec descriptor name (e.g. `h264`, `aac`, `dvbsub`). */
+            codec: string;
+            /** @description Whether the container flags this stream as default for its kind. */
+            default: boolean;
+            /** @description The kind-specific detail. */
+            detail: components["schemas"]["StreamDetailDoc"];
+            /** @description The stable, kind-scoped identity a crosspoint binds to. */
+            id: components["schemas"]["StableStreamIdDoc"];
+            /** @description The validated BCP-47 language tag, if the container declared a usable one. */
+            language?: string | null;
+            /** @description The track title / handler name, if declared. */
+            title?: string | null;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::StreamDetail`].
+         *
+         *     Serde-equivalent: adjacently tagged (`detail` / `params`), `snake_case` tags.
+         */
+        StreamDetailDoc: {
+            /** @enum {string} */
+            detail: "video";
+            /** @description Video-stream geometry + cadence. */
+            params: {
+                /**
+                 * @description The container's declared average frame rate, if any (exact rational
+                 *     `[num, den]` — never a float fps, invariant #3).
+                 */
+                frame_rate?: number[] | null;
+                /**
+                 * Format: int32
+                 * @description Coded height in pixels (`0` if undeclared).
+                 */
+                height: number;
+                /**
+                 * Format: int32
+                 * @description Coded width in pixels (`0` if undeclared).
+                 */
+                width: number;
+            };
+        } | {
+            /** @enum {string} */
+            detail: "audio";
+            /** @description Audio-track layout. */
+            params: {
+                /**
+                 * Format: int32
+                 * @description Channel count (`0` if undeclared).
+                 */
+                channels: number;
+                /**
+                 * Format: int32
+                 * @description Sample rate in Hz (`0` if undeclared).
+                 */
+                sample_rate: number;
+            };
+        } | {
+            /** @enum {string} */
+            detail: "subtitle";
+            /** @description Subtitle / caption track flags. */
+            params: {
+                /** @description Whether the track is flagged "forced". */
+                forced: boolean;
+            };
+        } | {
+            /** @enum {string} */
+            detail: "passthrough";
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::StreamInventory`].
+         *
+         *     The full, typed list of every elementary stream an input offers (RT-3). This
+         *     is the body of `GET /api/v1/inputs/{id}/streams`.
+         */
+        StreamInventoryDoc: {
+            /** @description The owning input's id, if known. */
+            input_id?: string | null;
+            /** @description Every elementary stream the input offers, in container order. */
+            streams: components["schemas"]["StreamDescriptorDoc"][];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::StreamKind`].
+         *
+         *     Serde-equivalent: internally tagged on `kind` with the payload (for the
+         *     data/timecode variants) under `payload`, `snake_case` tags. This is the same
+         *     `kind`/`payload` pair the descriptor flattens in.
+         */
+        StreamKindDoc: {
+            /** @enum {string} */
+            kind: "video";
+        } | {
+            /** @enum {string} */
+            kind: "audio";
+        } | {
+            /** @enum {string} */
+            kind: "subtitle";
+        } | {
+            /** @enum {string} */
+            kind: "data";
+            /** @description A data elementary stream (SCTE-35 / KLV) — passthrough, never decoded. */
+            payload: components["schemas"]["DataKindDoc"];
+        } | {
+            /** @enum {string} */
+            kind: "timecode";
+            /** @description A timecode elementary stream — carried, not composited. */
+            payload: components["schemas"]["TcSourceKindDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_config::routing::StreamRef`] (RT-4 / RT-11).
+         *
+         *     A reference to **one elementary stream of one input** — the source side of a
+         *     crosspoint take. Serde-equivalent: `kind` is a **nested** adjacently-tagged
+         *     [`StreamKindDoc`] object (`kind = { kind = "video" }`), not flattened — exactly
+         *     as `StreamRef` serialises (a pinned round-trip test guards against drift).
+         */
+        StreamRefDoc: {
+            /** @description The managed input id this stream comes from. */
+            input_id: string;
+            /** @description The canonical kind of the elementary stream (nested `kind`/`payload`). */
+            kind: components["schemas"]["StreamKindDoc"];
+            /** @description Which stream of that kind to use (absent ⇒ `best`). */
+            selector?: components["schemas"]["StreamSelectorDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_config::routing::StreamSelector`] (RT-4).
+         *
+         *     Serde-equivalent: internally tagged on `by`, `snake_case` tags — never
+         *     `untagged` (ADR-0010). Picks **which** elementary stream of a kind a
+         *     [`StreamRefDoc`] addresses.
+         */
+        StreamSelectorDoc: {
+            /** @enum {string} */
+            by: "index";
+            /** @description The 0-based index among same-kind streams. */
+            index: number;
+        } | {
+            /** @enum {string} */
+            by: "language";
+            /** @description The requested BCP-47 / ISO-639 language tag. */
+            language: string;
+        } | {
+            /** @enum {string} */
+            by: "best";
+        } | {
+            /** @enum {string} */
+            by: "stream_id";
+            /** @description The stable stream id string (e.g. `v/pid:256`). */
+            id: string;
+        };
         /** @description The body of a `POST /commands/swap` request. */
         SwapRequest: {
             /** @description The new source/input id to bind. */
             source: string;
             /** @description The tile/cell id whose source binding changes. */
             tile: string;
+        };
+        /** @description The `200` body of a hot (Class-1 / Reset-lite) `/routing/{kind}/take`. */
+        TakeApplied: {
+            /** @description Always `true` for a hot take (the route command was submitted). */
+            applied: boolean;
+            /** @description The #11 class the take resolved to (`class1` / `reset_lite`). */
+            class: components["schemas"]["RouteClass"];
+            /** @description Whether the take was coerced to Class-1 with a down/up-mix degradation. */
+            coerced: boolean;
+            /** @description The operation id correlating the take's outcome on the realtime stream. */
+            operation_id: string;
         };
         /**
          * @description `OpenAPI` mirror of [`multiview_core::tally::TallyColor`] (the TSL UMD palette).
@@ -1108,6 +2281,11 @@ export interface components {
             name: string;
         };
         /**
+         * @description `OpenAPI` mirror of [`multiview_core::stream::TcSourceKind`].
+         * @enum {string}
+         */
+        TcSourceKindDoc: "ltc" | "vitc" | "atc_rp188" | "generated";
+        /**
          * @description One leg's RTP transport parameters (IS-05 supports up to two legs for
          *     ST 2022-7 redundancy; this models one).
          */
@@ -1131,6 +2309,25 @@ export interface components {
             /** @description The label text to display. */
             text: string;
         };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).
+         * @enum {string}
+         */
+        WallClockUseDoc: "use" | "discard";
+        /**
+         * @description `OpenAPI` mirror of [`multiview_events::WarningCode`] (SA-0 catalog).
+         *
+         *     Serde-equivalent: a unit enum rendered as its `kebab-case` variant name.
+         * @enum {string}
+         */
+        WarningCodeDoc: "gpu-present-no-vulkan-adapter";
+        /**
+         * @description `OpenAPI` mirror of [`multiview_events::WarningSeverity`] (SA-0).
+         *
+         *     Serde-equivalent: a unit enum rendered as its `snake_case` variant name.
+         * @enum {string}
+         */
+        WarningSeverityDoc: "info" | "warning" | "critical";
     };
     responses: never;
     parameters: never;
@@ -1253,6 +2450,113 @@ export interface operations {
             };
         };
     };
+    get_audio_routing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The audio-routing document (404-free: `configured: false` + a null document when none is set; ETag in the response header). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioRoutingStateDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_audio_routing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AudioRoutingDoc"];
+            };
+        };
+        responses: {
+            /** @description The replaced document (new ETag in the response header; X-Multiview-Apply: restart — it takes effect via config export + restart). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioRoutingStateDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description If-Match precondition failed. */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid audio-routing document (detail names the field path or the violated routing invariant; references to undeclared sources are checked at config export, not here). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No If-Match precondition was sent. */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_audit: {
         parameters: {
             query?: {
@@ -1285,6 +2589,198 @@ export interface operations {
             };
             /** @description Authenticated but not authorized to read. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cmd_apply_layout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApplyLayoutRequest"];
+            };
+        };
+        responses: {
+            /** @description Apply-layout accepted; outcome on the realtime stream. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to apply a layout. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Engine command bus at capacity; shed. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    export_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The composed configuration as TOML (`application/toml`). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The stores do not compose into a valid configuration (detail names the violation). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_health: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Keep only active (`true`, the default) or include cleared (`false`)
+                 *     warnings.
+                 */
+                active?: boolean | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active health warnings, code-sorted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthWarningDoc"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_input_streams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Input/source id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The input's elementary-stream inventory. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StreamInventoryDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read this input. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such input, or it has not been probed yet. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1647,7 +3143,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResourceInput"];
+                "application/json": components["schemas"]["OutputResourceInputDoc"];
             };
         };
         responses: {
@@ -1710,7 +3206,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResourceInput"];
+                "application/json": components["schemas"]["OutputResourceInputDoc"];
             };
         };
         responses: {
@@ -1734,6 +3230,15 @@ export interface operations {
             };
             /** @description Not authorized to write. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid output document (detail names the field path). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1900,7 +3405,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResourceInput"];
+                "application/json": components["schemas"]["OverlayResourceInputDoc"];
             };
         };
         responses: {
@@ -1963,7 +3468,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResourceInput"];
+                "application/json": components["schemas"]["OverlayResourceInputDoc"];
             };
         };
         responses: {
@@ -1987,6 +3492,15 @@ export interface operations {
             };
             /** @description Not authorized to write. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid overlay document (detail names the field path). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2044,6 +3558,755 @@ export interface operations {
             };
             /** @description If-Match precondition failed. */
             412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    input_whep_open: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The input (source) id to focus. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description SDP offer */
+        requestBody: {
+            content: {
+                "application/sdp": string;
+            };
+        };
+        responses: {
+            /** @description Focus opened; SDP answer in the body, Location at the session resource. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/sdp": unknown;
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to open a focus. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The input id is not focusable. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The offer advertises no supported preview codec. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Focus capacity exhausted; body carries a `fallback` transport hint. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    input_whep_close: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The input (source) id. */
+                id: string;
+                /** @description The WHEP session id. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Focus session released. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to release a focus. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such live focus session. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    output_whep_open: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The output (rendition) id to focus. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description SDP offer */
+        requestBody: {
+            content: {
+                "application/sdp": string;
+            };
+        };
+        responses: {
+            /** @description Focus opened; SDP answer in the body, Location at the session resource. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/sdp": unknown;
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to open a focus. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The output id is not focusable. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The offer advertises no supported preview codec. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Focus capacity exhausted; body carries a `fallback` transport hint. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    output_whep_close: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The output (rendition) id. */
+                id: string;
+                /** @description The WHEP session id. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Focus session released. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to release a focus. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such live focus session. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    program_whep_open: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description SDP offer */
+        requestBody: {
+            content: {
+                "application/sdp": string;
+            };
+        };
+        responses: {
+            /** @description Focus opened; SDP answer in the body, Location at the session resource. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/sdp": unknown;
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to open a focus (a View token cannot). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The offer advertises no supported preview codec. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Focus capacity exhausted; body carries a `fallback` transport hint. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    program_whep_close: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The WHEP session id from the open response's Location. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Focus session released. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to release a focus. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such live focus session. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_probes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All probes, id-sorted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The probe (ETag in the response header). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read this probe. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No probe with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProbeResourceInputDoc"];
+            };
+        };
+        responses: {
+            /** @description The replaced probe (new ETag in the response header). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No probe with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description If-Match precondition failed. */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid probe document (detail names the field path). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProbeResourceInputDoc"];
+            };
+        };
+        responses: {
+            /** @description The created probe (ETag in the response header; X-Multiview-Apply declares how it takes effect). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid probe document (detail names the field path). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The probe was deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to administer. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No probe with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description If-Match precondition failed. */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    plan_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RouteTakeRequest"];
+            };
+        };
+        responses: {
+            /** @description The #11 classification (class1/reset_lite/class2 + coerced). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutePlan"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to plan this crosspoint. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    take_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Crosspoint kind: video | audio | subtitle. */
+                kind: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RouteTakeRequest"];
+            };
+        };
+        responses: {
+            /** @description A hot Class-1/Reset-lite re-point was submitted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TakeApplied"];
+                };
+            };
+            /** @description A Class-2 migration was accepted; outcome on the realtime stream. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description The path kind does not match the target kind. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to take this crosspoint. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown crosspoint kind. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Engine command bus at capacity; shed. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2449,7 +4712,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResourceInput"];
+                "application/json": components["schemas"]["SourceResourceInputDoc"];
             };
         };
         responses: {
@@ -2498,6 +4761,15 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The body is not a valid source document (detail names the field path). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     create_source: {
@@ -2512,11 +4784,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResourceInput"];
+                "application/json": components["schemas"]["SourceResourceInputDoc"];
             };
         };
         responses: {
-            /** @description The created source (ETag in the response header). */
+            /** @description The created source (ETag in the response header; X-Multiview-Apply declares how it takes effect). */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -2536,6 +4808,15 @@ export interface operations {
             };
             /** @description Not authorized to write. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid source document (detail names the field path). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

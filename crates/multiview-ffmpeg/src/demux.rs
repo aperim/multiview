@@ -553,6 +553,61 @@ impl Demuxer {
     }
 }
 
+/// Mark every subtitle-medium stream in `input` `AVDISCARD_ALL` so libav stops
+/// fetching it (HLS: `recheck_discard_flags` drops the rendition on the first
+/// read), **except** the optional routed stream named by `keep` (ADR-T011).
+///
+/// This is **defence-in-depth** against the HLS `WebVTT`-rendition footgun: libav
+/// can fold a `TYPE=SUBTITLES` rendition into the one shared `AVFormatContext` it
+/// opens for the video, so a corrupt/404/expired `.vtt` either aborts the open or
+/// makes `av_read_frame` return that rendition's error for the whole context —
+/// blacking out the video tile. The PRIMARY guard is the caller's **variant-pin
+/// pre-open** (point the main demuxer at one VIDEO variant media playlist, which
+/// carries no SUBTITLES rendition), because on `FFmpeg` **8.x** the open ABORTS while
+/// loading the rendition's first `.vtt` segment — *before* this post-open discard
+/// could run (8.x removed the `strict` rendition gate that 7.x used to drop it
+/// pre-probe). This discard remains as a backstop on the fall-through path (the
+/// master could not be fetched/parsed, or a build still folds a subtitle in): the
+/// main demuxer needs nothing from a `WebVTT` rendition (the isolated
+/// `read_captions` reader is the sole `WebVTT` path), so discarding it loses no
+/// stream while keeping the video alive.
+///
+/// `keep` (a routed in-container DVB-sub stream index — the MPEG-TS DVB-sub
+/// route) is preserved. **Audio renditions are never touched**: the guard keys
+/// strictly on `medium() == Subtitle`, so an HLS audio rendition (also folded
+/// into the shared context) keeps flowing. Returns how many streams were
+/// discarded.
+///
+/// Must be called **before the first `read_packet`**: libav's HLS demuxer fires
+/// `recheck_discard_flags` one-shot on the first packet, so a discard set later
+/// would not stop the rendition fetch.
+#[allow(unsafe_code)]
+#[must_use]
+pub fn discard_unrouted_subtitles(
+    input: &mut ffmpeg::format::context::Input,
+    keep: Option<usize>,
+) -> usize {
+    let mut discarded = 0usize;
+    for mut stream in input.streams_mut() {
+        if stream.parameters().medium() != Type::Subtitle {
+            continue;
+        }
+        if Some(stream.index()) == keep {
+            continue;
+        }
+        // SAFETY: `stream.as_mut_ptr()` is the live `AVStream` this `StreamMut`
+        // wraps (owned by the `AVFormatContext` we hold `&mut`). `discard` is a
+        // plain enum field; we write `AVDISCARD_ALL`. ffmpeg-next 8.1's `StreamMut`
+        // exposes no `set_discard`, so the one-field write is the supported way
+        // (mirrors the `avio_fetch`/`hwframe` raw-field islands in this crate).
+        unsafe {
+            (*stream.as_mut_ptr()).discard = ffmpeg::ffi::AVDiscard::AVDISCARD_ALL;
+        }
+        discarded = discarded.saturating_add(1);
+    }
+    discarded
+}
+
 /// Human-readable codec id name (e.g. `"h264"`), or `"unknown"`.
 fn codec_id_name(id: ffmpeg::codec::Id) -> String {
     // `Id` implements `Debug` as the libav constant name; the canonical short

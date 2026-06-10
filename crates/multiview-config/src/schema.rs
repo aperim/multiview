@@ -18,7 +18,7 @@ use multiview_core::time::Rational;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::audio::OutputAudio;
+use crate::audio::{OutputAudio, OutputAudioCapability, TrackCapacity, TrackDelivery};
 use crate::error::ConfigError;
 use crate::failover::{default_failover_slate, FailoverSlate};
 use crate::grid::{GridLayout, Track};
@@ -286,6 +286,35 @@ pub enum SourceKind {
     File {
         /// Filesystem path.
         path: String,
+    },
+    /// AES67 / SMPTE ST 2110-30 PCM-audio RTP input (open-audio over IP).
+    ///
+    /// Tier 0 binding is a static SDP session (RFC 4566/8866) pasted or fetched
+    /// once at config load; the multicast group, codec (L16/L24), channel count,
+    /// packet time, and PTP reference clock are described there. Tier 1/2
+    /// (SAP/NMOS dynamic discovery) is identified by `session_id` and is a later
+    /// slice. IPv6-first (ADR-0042): the SDP connection line is `c=IN IP6` and
+    /// `multicast` carries a bracketed IPv6 group (`[ff3e::1]:5004`).
+    Aes67 {
+        /// Static SDP session description (RFC 4566/8866), as text or a URL. The
+        /// Tier 0 binding: the codec/clock/PTP/multicast are read from here.
+        sdp: String,
+        /// Optional SAP session id or NMOS sender id for dynamic discovery
+        /// (Tier 1/2, a later slice). Absent ⇒ the static `sdp` is authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Optional multicast `group:port` override (`[ff3e::1]:5004`). Absent ⇒
+        /// derived from the SDP connection + `m=audio` lines at ingest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        multicast: Option<String>,
+        /// Optional receive jitter-buffer lead in milliseconds (the AES67 link
+        /// offset). Absent ⇒ the engine's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link_offset_ms: Option<u32>,
+        /// Optional PTP domain (`0` for ST 2110-30-strict, `1..=127` otherwise).
+        /// Absent ⇒ derived from the SDP `a=ts-refclk` domain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ptp_domain: Option<u8>,
     },
 }
 
@@ -678,8 +707,18 @@ pub enum Output {
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
-        /// Per-output audio selection. RTMP multitrack is endpoint-gated; the
-        /// capability matrix in `multiview-audio` validates this.
+        /// Whether the **endpoint** supports Enhanced-RTMP v2 multitrack audio
+        /// (ADR-R005 §4.2). RTMP's discrete-track capability is *endpoint-gated*,
+        /// not format-gated: the legacy default (`false`) carries one audio track
+        /// only, while `true` declares an endpoint (Enhanced-RTMP v2 + a modern
+        /// `flvenc`) that carries N tracks via `audioTrackId`. Multitrack
+        /// selections are rejected at config time unless this is set — degrade
+        /// explicitly to the mixed bus, never silently drop tracks.
+        #[serde(default)]
+        multitrack: bool,
+        /// Per-output audio selection. RTMP multitrack is endpoint-gated by
+        /// [`multitrack`](Output::Rtmp::multitrack); the capability matrix
+        /// ([`Output::audio_capability`]) validates this.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
@@ -700,6 +739,51 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
+    /// AES67 / SMPTE ST 2110-30 PCM-audio RTP output (open-audio over IP).
+    ///
+    /// The first output with **no encode/GPU stage**: it packetizes the program
+    /// bus to raw L16/L24 PCM and multicasts it. IPv6-first (ADR-0042): the
+    /// `multicast` group is a bracketed IPv6 SSM literal (`[ff3e::1]:5004`).
+    Aes67 {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Display name (AES67 outputs carry an explicit label, since there is no
+        /// mount/path/url to derive one from).
+        label: String,
+        /// Multicast `group:port` to send to (`[ff3e::1]:5004`).
+        multicast: String,
+        /// PCM depth: `"L24"` (Class A interop default) or `"L16"`.
+        #[serde(default = "default_aes67_depth")]
+        depth: String,
+        /// Packet time in milliseconds (`1` = 48 samples @ 48 kHz = Class A).
+        #[serde(default = "default_aes67_ptime_ms")]
+        ptime_ms: u32,
+        /// Optional PTP domain (`0..=127`, `0` = ST 2110-30-strict). Absent ⇒ the
+        /// engine's reference default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ptp_domain: Option<u8>,
+        /// Operator GPU pin. **Always `None`** for AES67 (raw PCM, no encode
+        /// stage); the field exists so every [`Output`] variant exposes
+        /// [`Output::gpu_pin`] uniformly without a hand-coded exception.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection (program bus vs explicit tracks). Absent ⇒
+        /// the mixed program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
+    },
+}
+
+/// Default AES67 output PCM depth (Class A interop): 24-bit L24.
+fn default_aes67_depth() -> String {
+    "L24".to_owned()
+}
+
+/// Default AES67 output packet time: 1 ms (Class A; 48 samples @ 48 kHz).
+const fn default_aes67_ptime_ms() -> u32 {
+    1
 }
 
 impl Output {
@@ -714,7 +798,8 @@ impl Output {
             | Output::Hls { id, .. }
             | Output::Ndi { id, .. }
             | Output::Rtmp { id, .. }
-            | Output::Srt { id, .. } => id.as_deref(),
+            | Output::Srt { id, .. }
+            | Output::Aes67 { id, .. } => id.as_deref(),
         }
     }
 
@@ -743,7 +828,10 @@ impl Output {
             | Output::Hls { gpu_pin, .. }
             | Output::Ndi { gpu_pin, .. }
             | Output::Rtmp { gpu_pin, .. }
-            | Output::Srt { gpu_pin, .. } => gpu_pin.as_ref(),
+            | Output::Srt { gpu_pin, .. }
+            // AES67 carries a `gpu_pin` field that is always `None` (no encode
+            // stage); it is matched uniformly here and returns `None`.
+            | Output::Aes67 { gpu_pin, .. } => gpu_pin.as_ref(),
         }
     }
 
@@ -757,7 +845,60 @@ impl Output {
             | Output::Hls { audio, .. }
             | Output::Ndi { audio, .. }
             | Output::Rtmp { audio, .. }
-            | Output::Srt { audio, .. } => audio.as_ref(),
+            | Output::Srt { audio, .. }
+            | Output::Aes67 { audio, .. } => audio.as_ref(),
+        }
+    }
+
+    /// This output's **audio capability** — the verified per-transport matrix
+    /// from ADR-R005 §4.2 as a first-class, machine-readable value.
+    ///
+    /// - **RTSP** carries N simultaneous `m=audio` subsessions ⇒ unlimited
+    ///   simultaneous discrete tracks.
+    /// - **MPEG-TS over SRT** carries N PIDs ⇒ unlimited simultaneous.
+    /// - **HLS / LL-HLS** carry N renditions but the player plays one at a time
+    ///   ⇒ unlimited but *select-one* (a UI selector, not simultaneous monitors).
+    /// - **NDI** carries no selectable discrete tracks (channel-map only) ⇒ a
+    ///   discrete-track selection is a capability error.
+    /// - **RTMP** is endpoint-gated: legacy carries one track; an endpoint that
+    ///   declares [`multitrack`](Output::Rtmp::multitrack) carries N.
+    ///
+    /// Consumed by config-time validation and by the Web UI routing matrix
+    /// (AUD-8), which greys out cells a transport cannot deliver.
+    #[must_use]
+    pub const fn audio_capability(&self) -> OutputAudioCapability {
+        match self {
+            // RTSP: N simultaneous `m=audio` subsessions. SRT carries MPEG-TS ⇒
+            // N PIDs, also simultaneous (the receiver-dependent first-PID-only
+            // behaviour is a delivery caveat, not a config-time capacity cap).
+            Output::RtspServer { .. } | Output::Srt { .. } => {
+                OutputAudioCapability::new(TrackDelivery::Simultaneous, TrackCapacity::Unlimited)
+            }
+            // HLS/LL-HLS: N renditions, but the player plays one at a time.
+            Output::Hls { .. } | Output::LlHls { .. } => {
+                OutputAudioCapability::new(TrackDelivery::SelectOne, TrackCapacity::Unlimited)
+            }
+            // NDI and AES67 / ST 2110-30 both carry one multiplexed PCM channel-map
+            // flow, never selectable discrete tracks — a discrete-track route is a
+            // capability error for either. (Multiple program tracks would be multiple
+            // NDI senders / AES67 SDP sessions, each its own channel-map flow.)
+            Output::Ndi { .. } | Output::Aes67 { .. } => {
+                OutputAudioCapability::new(TrackDelivery::None, TrackCapacity::AtMost(0))
+            }
+            // RTMP: endpoint-gated. Legacy = one track; Enhanced-RTMP v2 = N.
+            Output::Rtmp { multitrack, .. } => {
+                if *multitrack {
+                    OutputAudioCapability::new(
+                        TrackDelivery::Simultaneous,
+                        TrackCapacity::Unlimited,
+                    )
+                } else {
+                    OutputAudioCapability::new(
+                        TrackDelivery::Simultaneous,
+                        TrackCapacity::AtMost(1),
+                    )
+                }
+            }
         }
     }
 
@@ -773,6 +914,9 @@ impl Output {
             Output::Ndi { name, .. } => format!("ndi {name}"),
             Output::Rtmp { url, .. } => format!("rtmp {url}"),
             Output::Srt { url, .. } => format!("srt {url}"),
+            // AES67 carries an explicit operator label (it has no mount/path/url
+            // to derive one from); use it verbatim.
+            Output::Aes67 { label, .. } => label.clone(),
         }
     }
 }

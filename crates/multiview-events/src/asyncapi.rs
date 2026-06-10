@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 /// servers: { ws-server, sse-server }
 /// channels: { ws, sse }
 /// operations: { subscribe-ws, subscribe-sse }
-/// messages: { Envelope, TileState, AudioMeter, … }
-/// components/schemas: { … all payload schemas … }
+/// components/messages: { Envelope, TileState, AudioMeter, … }
+/// components/schemas:  { … all payload schemas … }
 /// ```
 #[must_use]
 pub fn generate_asyncapi_document() -> String {
@@ -65,8 +65,12 @@ fn build_document() -> Value {
         "servers": build_servers(),
         "channels": build_channels(),
         "operations": build_operations(),
-        "messages": build_messages(),
         "components": {
+            // AsyncAPI 3.0 forbids a top-level `messages` field: reusable message
+            // definitions live under `components.messages`. Channels reference them
+            // via `#/components/messages/<name>` and operations reference the
+            // channel's own message alias (see `build_operations`).
+            "messages": build_messages(),
             "schemas": build_schemas()
         }
     })
@@ -93,8 +97,9 @@ fn build_info() -> Value {
             "url": "https://github.com/aperim/multiview"
         },
         "externalDocs": {
+            // AsyncAPI 3.0 requires `format: uri` — an absolute URL, not a repo-relative path.
             "description": "Realtime API reference",
-            "url": "docs/api/realtime.md"
+            "url": "https://github.com/aperim/multiview/blob/main/docs/api/realtime.md"
         }
     })
 }
@@ -147,7 +152,7 @@ fn build_channels() -> Value {
             ),
             "servers": [{ "$ref": "#/servers/ws-server" }],
             "messages": {
-                "EnvelopeMessage": { "$ref": "#/messages/Envelope" }
+                "EnvelopeMessage": { "$ref": "#/components/messages/Envelope" }
             },
             // WS binding injected here: asyncapi-rust v0.2 lacks bindings support.
             // Spec ref: https://github.com/asyncapi/bindings/blob/master/websockets
@@ -192,13 +197,17 @@ fn build_channels() -> Value {
             ),
             "servers": [{ "$ref": "#/servers/sse-server" }],
             "messages": {
-                "EnvelopeMessage": { "$ref": "#/messages/Envelope" }
+                "EnvelopeMessage": { "$ref": "#/components/messages/Envelope" }
             }
         }
     })
 }
 
 fn build_operations() -> Value {
+    // AsyncAPI 3.0 (`asyncapi3-operation-messages-from-referred-channel`): an
+    // operation's `messages` MUST reference the channel's OWN message aliases,
+    // i.e. `#/channels/<channel>/messages/<alias>`, not the reusable
+    // `#/components/messages/...` entries directly.
     json!({
         "subscribe-ws": {
             "action": "receive",
@@ -208,19 +217,19 @@ fn build_operations() -> Value {
                 "Receive all event types on the WebSocket channel after subscribing to ",
                 "the desired topics via $subscribe control frames.",
             ),
-            "messages": [{ "$ref": "#/messages/Envelope" }]
+            "messages": [{ "$ref": "#/channels/ws/messages/EnvelopeMessage" }]
         },
         "subscribe-sse": {
             "action": "receive",
             "channel": { "$ref": "#/channels/sse" },
             "title": "Receive realtime events (SSE)",
             "description": "Receive all event types on the SSE fallback channel.",
-            "messages": [{ "$ref": "#/messages/Envelope" }]
+            "messages": [{ "$ref": "#/channels/sse/messages/EnvelopeMessage" }]
         }
     })
 }
 
-/// Build the top-level `messages` block.
+/// Build the `components.messages` block.
 ///
 /// Each entry is a named message definition carrying a `payload` schema. The
 /// `Envelope` message carries the full versioned envelope shape; the per-event
@@ -272,6 +281,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/TileState" }
     }));
+    map.insert("TilesSnapshot".to_owned(), tiles_snapshot_message());
     map.insert("AudioMeter".to_owned(), json!({
         "name": "AudioMeter",
         "title": "High-rate audio meter sample",
@@ -356,6 +366,25 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         }),
     );
     map
+}
+
+/// The `tiles` `$snapshot` `AsyncAPI` message definition. Factored out so the
+/// data-events builder stays within the line budget.
+fn tiles_snapshot_message() -> Value {
+    json!({
+        "name": "TilesSnapshot",
+        "title": "Connect-time tiles baseline ($snapshot on topic tiles)",
+        "summary": "Full current per-tile lifecycle state a fresh client rebuilds its tile cache from.",
+        "description": concat!(
+            "Emitted once at connect (after `$hello`) on topic `tiles` with `t` ",
+            "`$snapshot` (realtime.md §5): the snapshot-then-delta baseline ",
+            "(`snapshot ⊕ ordered deltas = current truth`, ADR-RT003). A receiver ",
+            "MUST treat it as a state REBUILD, never a merge. Despite the ",
+            "`$`-prefixed tag it rides its data topic, not `$control`.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/TilesSnapshot" }
+    })
 }
 
 /// The `health.warning.*` (SA-0) `AsyncAPI` message definition. Factored out so
@@ -483,6 +512,7 @@ fn envelope_schema() -> Value {
 fn event_payload_one_of() -> Value {
     json!([
         { "$ref": "#/components/schemas/TileState" },
+        { "$ref": "#/components/schemas/TilesSnapshot" },
         { "$ref": "#/components/schemas/AudioMeter" },
         { "$ref": "#/components/schemas/OutputStatus" },
         { "$ref": "#/components/schemas/Alert" },
@@ -514,6 +544,8 @@ fn build_schemas() -> Value {
     json!({
         "LifecycleState": lifecycle_state_schema(),
         "TileState": tile_state_schema(),
+        "TileSnapshotEntry": tile_snapshot_entry_schema(),
+        "TilesSnapshot": tiles_snapshot_schema(),
         "AudioMeter": audio_meter_schema(),
         "SystemMetrics": system_metrics_schema(),
         "GpuMetrics": gpu_metrics_schema(),
@@ -572,6 +604,54 @@ fn tile_state_schema() -> Value {
             "trigger": {
                 "type": "string",
                 "description": "Short machine-readable trigger label (e.g. `nosignal_timeout`)."
+            }
+        }
+    })
+}
+
+fn tile_snapshot_entry_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "One tile's current lifecycle state inside a `tiles` `$snapshot`. ",
+            "The `id` is the same key the sparse `tile.state` deltas scope their ",
+            "envelope `id` with, so a snapshot-rebuilt cache and its delta ",
+            "patches address the same rows.",
+        ),
+        "required": ["id", "state"],
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The tile id (the bound source id in the run projection)."
+            },
+            "state": { "$ref": "#/components/schemas/LifecycleState" },
+            "input": {
+                "type": "string",
+                "description": "The input bound to the tile, if known."
+            }
+        }
+    })
+}
+
+fn tiles_snapshot_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of the `tiles`-topic `$snapshot` frame: the full current ",
+            "per-tile lifecycle baseline sent once at connect (after `$hello`). ",
+            "A receiver MUST rebuild (replace) its tile state from it, never merge.",
+        ),
+        "required": ["as_of_seq", "tiles"],
+        "properties": {
+            "as_of_seq": {
+                "type": "integer",
+                "format": "uint64",
+                "description": "The engine state sequence this baseline is current as of."
+            },
+            "tiles": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/TileSnapshotEntry" },
+                "description": "Every tile's current lifecycle state."
             }
         }
     })
@@ -917,7 +997,9 @@ fn tally_target_schema() -> Value {
         "type": "object",
         "description": "What a tally state applies to (tagged by `kind`).",
         "required": ["kind"],
-        "discriminator": { "propertyName": "kind" },
+        // AsyncAPI 3.0 Schema Object: `discriminator` is the property NAME (a
+        // string), not the OpenAPI-style `{ propertyName }` object.
+        "discriminator": "kind",
         "oneOf": [
             {
                 "type": "object",

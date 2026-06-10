@@ -1,13 +1,15 @@
 // Docs: feature guide. Explains the multiviewer concepts and is honest about
 // which output paths are available versus on the roadmap.
 import type { JSX } from "react";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 
+import { HelpLink } from "../../components/HelpLink";
 import { PageHeader } from "../../components/PageHeader";
 import { Code, DocList, DocSection, Prose, StatusBadge } from "./components";
 
 /** Feature guide documentation. */
 export function FeaturesPage(): JSX.Element {
+  const { t } = useLingui();
   return (
     <>
       <PageHeader
@@ -20,7 +22,7 @@ export function FeaturesPage(): JSX.Element {
       />
 
       <div className="space-y-4">
-        <DocSection title={<Trans>Layouts</Trans>}>
+        <DocSection id="layouts" title={<Trans>Layouts</Trans>}>
           <Prose>
             <Trans>
               A layout decides where every tile sits on the canvas. Use a factory
@@ -33,7 +35,7 @@ export function FeaturesPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>Sources</Trans>}>
+        <DocSection id="sources" title={<Trans>Sources</Trans>}>
           <Prose>
             <Trans>
               A source is a managed input. Each one owns its ingest, decode, color
@@ -46,9 +48,18 @@ export function FeaturesPage(): JSX.Element {
               of the wall.
             </Trans>
           </Prose>
+          <HelpLink
+            to="/help/concepts/transports#choosing"
+            label={t`About source transports`}
+          />
+          <HelpLink
+            to="/help/concepts/resilience#tile-lifecycle"
+            label={t`About the tile lifecycle`}
+          />
         </DocSection>
 
         <DocSection
+          id="outputs"
           title={
             <span className="inline-flex items-center gap-2">
               <Trans>Outputs</Trans>
@@ -93,9 +104,13 @@ export function FeaturesPage(): JSX.Element {
               </span>
             </li>
           </DocList>
+          <HelpLink
+            to="/help/concepts/codecs#encode-once"
+            label={t`About the encode-once output model`}
+          />
         </DocSection>
 
-        <DocSection title={<Trans>Overlays</Trans>}>
+        <DocSection id="overlays" title={<Trans>Overlays</Trans>}>
           <Prose>
             <Trans>
               Overlays draw on top of the canvas or a single tile: clocks,
@@ -106,7 +121,7 @@ export function FeaturesPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>Tally</Trans>}>
+        <DocSection id="tally" title={<Trans>Tally</Trans>}>
           <Prose>
             <Trans>
               Tally shows which sources are on-air. A tally profile maps the bits
@@ -119,7 +134,7 @@ export function FeaturesPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>Salvos</Trans>}>
+        <DocSection id="salvos" title={<Trans>Salvos</Trans>}>
           <Prose>
             <Trans>
               A salvo is a named, atomically-applied recall. One salvo can switch
@@ -131,7 +146,7 @@ export function FeaturesPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>Alarms</Trans>}>
+        <DocSection id="alarms" title={<Trans>Alarms</Trans>}>
           <Prose>
             <Trans>
               Alarms are raised by content-aware fault probes attached to a tile.

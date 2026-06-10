@@ -44,7 +44,7 @@ async fn asyncapi_json_is_served_with_200() {
 }
 
 /// The document declares `AsyncAPI` 3.0 and contains the two canonical channels
-/// (`ws` and `sse`) plus top-level messages including `Envelope`.
+/// (`ws` and `sse`) plus `components.messages` including `Envelope`.
 #[tokio::test]
 async fn asyncapi_json_contains_channels_and_messages() {
     let h = harness();
@@ -84,16 +84,17 @@ async fn asyncapi_json_contains_channels_and_messages() {
         "ws channel address must be /api/v1/ws"
     );
 
-    // Top-level messages block includes the required entries.
-    let messages = &doc["messages"];
+    // Reusable messages live under components.messages (AsyncAPI 3.0 — a
+    // top-level `messages` block is invalid and was relocated here).
+    let messages = &doc["components"]["messages"];
     assert!(
         messages.get("Envelope").is_some(),
-        "messages.Envelope must be present"
+        "components.messages.Envelope must be present"
     );
     // The tile-state event message must be documented (key realtime topic).
     assert!(
         messages.get("TileState").is_some(),
-        "messages.TileState must be present"
+        "components.messages.TileState must be present"
     );
 }
 

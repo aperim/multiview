@@ -18,8 +18,8 @@ import type { SourceView } from '../../resources/types';
 import { renderWithProviders } from '../../test/render';
 
 const SOURCES: readonly SourceView[] = [
-  { id: 'cam-1', name: 'Camera One', kind: 'rtsp', locator: 'rtsp://cam-1' },
-  { id: 'cam-2', name: 'Camera Two', kind: 'rtsp', locator: 'rtsp://cam-2' },
+  { id: 'cam-1', name: 'Camera One', kind: 'rtsp', rawKind: 'rtsp', editable: true, locator: 'rtsp://cam-1' },
+  { id: 'cam-2', name: 'Camera Two', kind: 'rtsp', rawKind: 'rtsp', editable: true, locator: 'rtsp://cam-2' },
 ];
 
 function seeded() {
@@ -54,6 +54,7 @@ function Harness(): JSX.Element {
         onRotate={editor.rotate}
         onFit={editor.setFit}
         onBindSource={editor.bindSource}
+        onProps={editor.setProps}
         onRemove={(id): void => {
           setRemoved(id);
           editor.remove(id);
@@ -70,9 +71,14 @@ describe('CellsForm (non-canvas editing path)', () => {
     renderWithProviders(<Harness />);
     expect(screen.getByRole('group', { name: /Alpha/ })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: /Bravo/ })).toBeInTheDocument();
-    // Geometry + name controls exist for each cell (2 cells × 5 number fields).
-    expect(screen.getAllByRole('spinbutton')).toHaveLength(10);
+    // Number controls per cell: 5 geometry (x/y/w/h/rotation) + 4 properties
+    // (opacity, corner radius, border width, QoS priority) = 9 × 2 cells.
+    expect(screen.getAllByRole('spinbutton')).toHaveLength(18);
     expect(screen.getAllByLabelText('Cell name')).toHaveLength(2);
+    // The full Cell property surface is mounted per cell (shared panel).
+    expect(screen.getAllByText('On signal loss')).toHaveLength(2);
+    expect(screen.getAllByText('Appearance')).toHaveLength(2);
+    expect(screen.getAllByText('Degradation')).toHaveLength(2);
   });
 
   it('renames a cell through the name input', async () => {

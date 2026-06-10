@@ -17,6 +17,8 @@ import { ArrowDown, ArrowUp, Trash2 } from 'lucide-react';
 
 import { FIT_MODES } from '../model';
 import type { CellModel, FitMode, NormalizedRect } from '../model';
+import type { CellProperties } from '../cellProps';
+import { CellPropertiesPanel } from './CellPropertiesPanel';
 import type { SourceView } from '../../resources/types';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -51,6 +53,8 @@ export interface CellsFormProps {
   readonly onFit: (id: string, fit: FitMode) => void;
   /** Bind/clear a cell's source. */
   readonly onBindSource: (id: string, sourceId: string | undefined) => void;
+  /** Replace a cell's full property set (on_loss / appearance / degradation). */
+  readonly onProps: (id: string, props: CellProperties) => void;
   /** Remove a cell. */
   readonly onRemove: (id: string) => void;
   /** Move a cell one step toward the back (lower z). */
@@ -126,6 +130,7 @@ function CellRow({
   onRotate,
   onFit,
   onBindSource,
+  onProps,
   onRemove,
   onMoveDown,
   onMoveUp,
@@ -157,6 +162,7 @@ function CellRow({
   readonly onRotate: (id: string, degrees: number) => void;
   readonly onFit: (id: string, fit: FitMode) => void;
   readonly onBindSource: (id: string, sourceId: string | undefined) => void;
+  readonly onProps: (id: string, props: CellProperties) => void;
   readonly onRemove: (id: string) => void;
   readonly onMoveDown: (index: number) => void;
   readonly onMoveUp: (index: number) => void;
@@ -295,6 +301,9 @@ function CellRow({
                   <SelectItem key={source.id} value={source.id}>
                     <span lang="" dir="auto">
                       {source.name}
+                    </span>{' '}
+                    <span className="text-xs text-muted-foreground">
+                      ({source.kind} · {source.id})
                     </span>
                   </SelectItem>
                 ))}
@@ -302,6 +311,14 @@ function CellRow({
             </Select>
           </div>
         </div>
+
+        <CellPropertiesPanel
+          idPrefix={cell.id}
+          value={cell.props}
+          onChange={(next): void => {
+            onProps(cell.id, next);
+          }}
+        />
 
         <div className="flex items-center gap-2">
           <Button
@@ -399,6 +416,7 @@ export function CellsForm(props: CellsFormProps): JSX.Element {
           onRotate={props.onRotate}
           onFit={props.onFit}
           onBindSource={props.onBindSource}
+          onProps={props.onProps}
           onRemove={props.onRemove}
           onMoveDown={props.onMoveDown}
           onMoveUp={props.onMoveUp}

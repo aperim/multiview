@@ -19,6 +19,7 @@ use crate::concurrency::IfMatch;
 use crate::error::ControlResult;
 use crate::resource_store::{Resource, ResourceInput, VersionedResource, OVERLAY_KIND};
 use crate::state::AppState;
+use crate::typed_resources::{validated_body, with_apply_restart, TypedCollection};
 
 /// Attach the resource's `ETag` to a successful response carrying an overlay.
 fn overlay_response(status: StatusCode, versioned: &VersionedResource) -> Response {
@@ -93,11 +94,12 @@ pub(crate) async fn get_overlay(
         path = "/api/v1/overlays/{id}",
         tag = "overlays",
         params(("id" = String, Path, description = "Overlay id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
             (status = 201, description = "The created overlay (ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 422, description = "The body is not a valid overlay document (detail names the field path).", body = crate::problem::Problem),
         ),
     )
 )]
@@ -109,6 +111,10 @@ pub(crate) async fn create_overlay(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    let input = ResourceInput {
+        name: input.name,
+        body: validated_body(TypedCollection::Overlays, &id, &input.body)?,
+    };
     let versioned = state.overlays.create(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -117,7 +123,10 @@ pub(crate) async fn create_overlay(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(overlay_response(StatusCode::CREATED, &versioned))
+    Ok(with_apply_restart(overlay_response(
+        StatusCode::CREATED,
+        &versioned,
+    )))
 }
 
 /// `PUT /api/v1/overlays/{id}` — replace an overlay (role: write; If-Match → 412).
@@ -128,7 +137,7 @@ pub(crate) async fn create_overlay(
         path = "/api/v1/overlays/{id}",
         tag = "overlays",
         params(("id" = String, Path, description = "Overlay id.")),
-        request_body = crate::resource_store::ResourceInput,
+        request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
             (status = 200, description = "The replaced overlay (new ETag in the response header).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
@@ -147,8 +156,15 @@ pub(crate) async fn update_overlay(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // Preconditions are evaluated before request content (RFC 9110 §13.2.2):
+    // a stale `If-Match` (or a missing resource) is reported even when the
+    // submitted body is itself invalid.
     let current = state.overlays.get(&id)?;
     if_match.require(OVERLAY_KIND, &id, current.version)?;
+    let input = ResourceInput {
+        name: input.name,
+        body: validated_body(TypedCollection::Overlays, &id, &input.body)?,
+    };
     let versioned = state.overlays.update(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -157,7 +173,10 @@ pub(crate) async fn update_overlay(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(overlay_response(StatusCode::OK, &versioned))
+    Ok(with_apply_restart(overlay_response(
+        StatusCode::OK,
+        &versioned,
+    )))
 }
 
 /// `DELETE /api/v1/overlays/{id}` — delete an overlay (role: administer; If-Match).
@@ -182,7 +201,7 @@ pub(crate) async fn delete_overlay(
     principal: Principal,
     if_match: IfMatch,
     Path(id): Path<String>,
-) -> ControlResult<StatusCode> {
+) -> ControlResult<Response> {
     principal.role.require(Action::Administer)?;
     crate::auth::authorize_object(&principal, &id)?;
     let current = state.overlays.get(&id)?;
@@ -195,5 +214,5 @@ pub(crate) async fn delete_overlay(
         &id,
         None,
     );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(with_apply_restart(StatusCode::NO_CONTENT.into_response()))
 }

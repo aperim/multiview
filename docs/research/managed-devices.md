@@ -393,7 +393,7 @@ GET/POST           /sync-groups ; GET/PUT/DELETE /sync-groups/{id} ; POST /sync-
 
 Action style: **bare verb segments**, matching the shipped routes `/api/v1/salvos/{id}/arm` and
 `/api/v1/alarms/{id}/ack` (`crates/multiview-control/src/routes/mod.rs`); codified in
-[ADR-W015](../decisions/ADR-W015.md) since the capability-matrix brief sketches a `:verb` style
+[ADR-W017](../decisions/ADR-W017.md) since the capability-matrix brief sketches a `:verb` style
 the code never adopted. Long-running actions return `202 Accepted` + an operation id with the
 result on the realtime stream (ADR-W008); errors are RFC 9457 `application/problem+json`;
 `Idempotency-Key` on creates and actions; `ETag`/`If-Match` → `412` everywhere. Examples lead
@@ -625,7 +625,7 @@ per-resource status patterns — no new notification system.
 - [ADR-M010 — Multi-output timing & sync (outbound epoch, link offset, sync groups, published tiers)](../decisions/ADR-M010.md)
 - [ADR-M011 — Cast output driver (protocol stance, legal framing, ephemeral sessions, legacy-IPv4 interop)](../decisions/ADR-M011.md)
 - [ADR-RT007 — Devices realtime topic and event types](../decisions/ADR-RT007.md)
-- [ADR-W015 — Action route style: bare verb segments](../decisions/ADR-W015.md)
+- [ADR-W017 — Action route style: bare verb segments](../decisions/ADR-W017.md)
 
 Related, owned by the sibling brief [display-out](display-out.md):
 [ADR-0044](../decisions/ADR-0044.md) (DRM/KMS display sink) and

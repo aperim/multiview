@@ -618,12 +618,18 @@ impl SoftwareEngine {
                     if f.tick.index % PREVIEW_CAPTURE_EVERY == 0 {
                         preview.store(Some(Arc::new(f.canvas.clone())));
                     }
-                    crate::control::state_snapshot(
+                    let mut snapshot = crate::control::state_snapshot(
                         f.tick.index,
                         f.pts().as_nanos(),
                         f.canvas.width(),
                         f.canvas.height(),
-                    )
+                    );
+                    // Thread the per-tile lifecycle states into the conflated
+                    // blob so a connecting client is seeded with the CURRENT
+                    // tile states (the `tiles` `$snapshot`) instead of waiting
+                    // for the next sparse `tile.state` delta.
+                    crate::control::fold_tile_states(&mut snapshot, &f.source_states);
+                    snapshot
                 },
                 move |f: &multiview_engine::CompositedFrame| -> Option<Event> {
                     for (source, &state) in &f.source_states {

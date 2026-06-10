@@ -206,9 +206,11 @@ ffmpeg = [
 # HLS ingest path, and run an off-data-plane re-resolution loop that refreshes the
 # URL before it expires. OFF by default: it spawns an external resolver process and
 # is network-bound (no CI network), so the default build neither contains nor
-# requires it. Implies `ffmpeg` via `multiview-input/youtube` (the resolved master
-# is opened by the libav/HLS ingest path). LGPL-clean: `yt-dlp` is a subprocess,
-# never vendored or linked.
+# requires it. Enables `ffmpeg` directly here (this crate opens the resolved master
+# via the libav/HLS ingest path); `multiview-input/youtube` is itself libav-free
+# (the pure resolver), so the `ffmpeg` it needs is pulled by this list, NOT by the
+# resolver feature — that keeps `multiview-input --features youtube` lintable on a
+# libav-free runner. LGPL-clean: `yt-dlp` is a subprocess, never vendored or linked.
 youtube = ["ffmpeg", "multiview-input/youtube"]
 
 # NDI® ingest (ADR-0008 / IN-3): wire a `ndi` source into the ingest path via
@@ -246,6 +248,18 @@ nvidia = [
     # forwarded the dependency crates' ffmpeg but not the cli's, so a `--features
     # nvidia` binary could not run a pipeline — surfaced by the on-hardware run).
     "ffmpeg",
+    # Native overlay / caption burn-in. The native HLS-WebVTT caption ingest +
+    # per-tile burn-in path (the `#47` fix) is entirely `#[cfg(feature =
+    # "overlay")]`-gated (`prefetch_caption_plans` / `wire_source_captions` / the
+    # `SubtitleRouter` / the overlay baker), so WITHOUT this the deploy image
+    # silently ships the caption code compiled but inert — no cue stores, no
+    # reader threads, nothing burned in. It is GPU-free and LGPL-clean (the
+    # pure-Rust cosmic-text + swash + bundled OFL text engine via
+    # `multiview-compositor/overlay`; it pulls NO native lib and NO GPL crate, and
+    # `cargo deny` runs `all-features = false` so these opt-in deps never enter the
+    # graph). This is what makes the shipped nvidia/deploy image actually render
+    # captions/clock/tally/meters.
+    "overlay",
     # The cli's own `cuda` feature selects the NVML system-metrics poller.
     "cuda",
     # The cli's own `gpu` feature — gates the RUN-PATH GPU-compositor SELECTION
@@ -271,6 +285,10 @@ nvidia = [
 # (videotoolbox + metal + ffmpeg.)
 apple = [
     "ffmpeg",
+    # Native overlay / caption burn-in (see the `nvidia` preset note). GPU-free,
+    # LGPL-clean pure-Rust text engine; without it the shipped Apple deploy image
+    # would silently render no native captions/overlays.
+    "overlay",
     "multiview-hal/videotoolbox",
     "multiview-compositor/metal",
     "multiview-ffmpeg/ffmpeg",
@@ -283,6 +301,10 @@ apple = [
 # (vaapi + qsv + ffmpeg + wgpu.)
 linux-vaapi = [
     "ffmpeg",
+    # Native overlay / caption burn-in (see the `nvidia` preset note). GPU-free,
+    # LGPL-clean pure-Rust text engine; without it the shipped VAAPI deploy image
+    # would silently render no native captions/overlays.
+    "overlay",
     # `gpu` gates the run-path GPU-compositor SELECTION (see the `nvidia` note);
     # without it the wgpu compositor compiles but the run stays on the CPU backend.
     "gpu",
@@ -304,6 +326,11 @@ full = [
     "linux-vaapi",
     "multiview-hal/videotoolbox",
     "multiview-compositor/metal",
+    # The cli `overlay` feature (the pure-Rust overlay/caption burn-in path) comes
+    # transitively via `nvidia` + `linux-vaapi`; `multiview-overlay/libass` adds
+    # the OPTIONAL native ASS/SSA styling capability ON TOP (a compile-time
+    # capability marker — it links no native lib in-tree today and degrades ASS/SSA
+    # to the pure-Rust text fallback when absent). LGPL/ISC, never GPL.
     "multiview-overlay/libass",
     # NDI I/O: the cli `ndi` feature wires NDI *ingest* (and forwards
     # `multiview-input/ndi`); `multiview-output/ndi` adds the NDI *output* sink.

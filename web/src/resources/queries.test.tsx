@@ -168,6 +168,8 @@ describe('useSources', () => {
       id: 'cam-north',
       name: 'North',
       kind: 'rtsp',
+      rawKind: 'rtsp',
+      editable: true,
       locator: 'rtsp://h/s',
     });
     // NDI binds by source name; file by path — both projected onto `locator`.
@@ -224,6 +226,8 @@ describe('useOutputs / useOverlays projection', () => {
       id: 'prog',
       name: 'Program',
       kind: 'rtsp',
+      rawKind: 'rtsp_server',
+      editable: true,
       target: '/mv',
       codec: 'h264',
     });
@@ -231,6 +235,8 @@ describe('useOutputs / useOverlays projection', () => {
       id: 'hls',
       name: 'HLS',
       kind: 'll-hls',
+      rawKind: 'll_hls',
+      editable: true,
       target: '/var/hls',
       codec: 'hevc',
     });
@@ -248,6 +254,8 @@ describe('useOutputs / useOverlays projection', () => {
       id: 'clk',
       name: 'Clock',
       kind: 'clock',
+      rawKind: 'clock',
+      editable: true,
       target: 'canvas',
       z: 100,
     });

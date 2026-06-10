@@ -40,6 +40,7 @@
 
 pub mod alarm_ingest;
 pub mod alarm_store;
+pub mod audio_routing;
 pub mod audit;
 pub mod auth;
 pub mod command;
@@ -61,6 +62,7 @@ pub mod salvo_store;
 pub mod state;
 pub mod tally_ingest;
 pub mod tally_state;
+pub(crate) mod typed_resources;
 pub mod versioning;
 pub mod warning_ingest;
 pub mod warning_store;
@@ -84,6 +86,7 @@ pub use alarm_ingest::{alarm_transition, ingest_step, run_alarm_ingest, IngestSt
 pub use alarm_store::{
     AlarmFilter, AlarmRepository, InMemoryAlarmStore, VersionedAlarm, ALARM_KIND,
 };
+pub use audio_routing::{AudioRoutingStore, AUDIO_ROUTING_ID, AUDIO_ROUTING_KIND};
 pub use audit::{
     AuditAction, AuditEntry, AuditLog, AuditRepository, InMemoryAuditLog, AUDIT_KIND,
     DEFAULT_AUDIT_CAPACITY,

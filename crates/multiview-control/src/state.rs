@@ -14,6 +14,7 @@ use multiview_engine::EnginePublisher;
 use multiview_events::Event;
 
 use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
+use crate::audio_routing::AudioRoutingStore;
 use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
@@ -22,8 +23,8 @@ use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
 use crate::resource_store::{
-    InMemoryOutputStore, InMemoryOverlayStore, InMemorySourceStore, ResourceInput,
-    ResourceRepository,
+    InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore, InMemorySourceStore,
+    ResourceInput, ResourceRepository,
 };
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
@@ -53,9 +54,9 @@ pub type EngineStateSnapshot = serde_json::Value;
 /// The control-plane resource stores seeded from a loaded [`MultiviewConfig`].
 ///
 /// Produced by [`seed_resources`] and installed onto an [`AppState`] with
-/// [`AppState::with_seeded_resources`], so the web UI Sources/Outputs/Overlays
-/// (and layout) pages are non-empty under a live `multiview run` instead of
-/// starting blank. The stores are ordinary in-memory control-plane state:
+/// [`AppState::with_seeded_resources`], so the web UI
+/// Sources/Outputs/Overlays/Probes (and layout) pages are non-empty under a
+/// live `multiview run` instead of starting blank. The stores are ordinary in-memory control-plane state:
 /// read-mostly, never on the engine's data plane, so they cannot back-pressure
 /// the engine (invariant #10). Seeding happens once at bind time, off the
 /// per-tick hot loop.
@@ -66,8 +67,18 @@ pub struct SeededResources {
     pub outputs: Arc<dyn ResourceRepository>,
     /// The `overlays` store, one resource per `config.overlays`.
     pub overlays: Arc<dyn ResourceRepository>,
+    /// The `probes` store, one resource per `config.probes` (per-cell
+    /// fail-state detection: black / freeze / silence / loudness).
+    pub probes: Arc<dyn ResourceRepository>,
+    /// The audio-routing singleton store, seeded from the config's optional
+    /// `[audio]` block (unconfigured when the config carries none).
+    pub audio: Arc<AudioRoutingStore>,
     /// The layout store carrying the single working layout (canvas + cells).
     pub layouts: Arc<dyn Repository>,
+    /// The id the working layout was seeded under (the solved layout's name,
+    /// else `"working"`) — the layout `GET /api/v1/config/export` composes
+    /// canvas/layout/cells from.
+    pub working_layout_id: String,
 }
 
 /// Map a `serde_json` serialization fault to a repository error.
@@ -135,6 +146,17 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         )?;
     }
 
+    let probes = InMemoryProbeStore::new();
+    for probe in &config.probes {
+        probes.create(
+            &probe.id,
+            ResourceInput {
+                name: probe.id.clone(),
+                body: to_body(probe)?,
+            },
+        )?;
+    }
+
     let outputs = InMemoryOutputStore::new();
     for (index, output) in config.outputs.iter().enumerate() {
         // Outputs carry no intrinsic id in the config schema; assign a stable,
@@ -151,13 +173,16 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
     }
 
     let layouts = InMemoryRepository::new();
-    seed_working_layout(config, &layouts)?;
+    let working_layout_id = seed_working_layout(config, &layouts)?;
 
     Ok(SeededResources {
         sources: Arc::new(sources),
         outputs: Arc::new(outputs),
         overlays: Arc::new(overlays),
+        probes: Arc::new(probes),
+        audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
         layouts: Arc::new(layouts),
+        working_layout_id,
     })
 }
 
@@ -173,7 +198,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
 fn seed_working_layout(
     config: &MultiviewConfig,
     layouts: &InMemoryRepository,
-) -> ControlResult<()> {
+) -> ControlResult<String> {
     let id = config
         .solve_layout()
         .ok()
@@ -190,7 +215,7 @@ fn seed_working_layout(
             body,
         },
     )?;
-    Ok(())
+    Ok(id)
 }
 
 /// The shared application state.
@@ -221,6 +246,13 @@ pub struct AppState {
     pub outputs: Arc<dyn ResourceRepository>,
     /// The overlays store (versioned CRUD over config-as-code overlay layers).
     pub overlays: Arc<dyn ResourceRepository>,
+    /// The probes store (versioned CRUD over config-as-code per-cell
+    /// fail-state detectors: black / freeze / silence / loudness).
+    pub probes: Arc<dyn ResourceRepository>,
+    /// The audio-routing singleton store (the document-level `[audio]` block:
+    /// program-bus membership/gains and discrete-track wiring), managed over
+    /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
+    pub audio_routing: Arc<AudioRoutingStore>,
     /// The alarm mirror store (versioned, fed from the engine event stream).
     pub alarms: Arc<dyn AlarmRepository>,
     /// The health-warning mirror store (SA-0 / ADR-0035): active capability
@@ -289,6 +321,16 @@ pub struct AppState {
     /// [`Principal::local_admin`](crate::auth::Principal::local_admin) without a
     /// token, so the whole API + WS/SSE are open.
     pub auth_disabled: bool,
+    /// The complete configuration document loaded at startup (serialized
+    /// verbatim), used as the baseline for `GET /api/v1/config/export` so
+    /// sections the resource stores do not carry (control, placement, audio,
+    /// salvos, tally profiles, walls, routing) are never destroyed by an
+    /// export round-trip. `None` for store-only deployments (tests).
+    pub base_document: Option<Arc<serde_json::Value>>,
+    /// The layout id `GET /api/v1/config/export` composes canvas/layout/cells
+    /// from (set by seeding; `None` falls back to the first layout carrying a
+    /// `canvas`).
+    pub working_layout_id: Option<String>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -314,9 +356,13 @@ impl AppState {
             engine,
             commands,
             repository,
+            base_document: None,
+            working_layout_id: None,
             sources: Arc::new(InMemorySourceStore::new()),
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
+            probes: Arc::new(InMemoryProbeStore::new()),
+            audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
             salvos: Arc::new(InMemorySalvoStore::new()),
@@ -474,6 +520,21 @@ impl AppState {
         self
     }
 
+    /// Replace the probes store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_probes_store(mut self, probes: Arc<dyn ResourceRepository>) -> Self {
+        self.probes = probes;
+        self
+    }
+
+    /// Replace the audio-routing singleton store (e.g. to share one seeded
+    /// store with a test).
+    #[must_use]
+    pub fn with_audio_routing(mut self, audio_routing: Arc<AudioRoutingStore>) -> Self {
+        self.audio_routing = audio_routing;
+        self
+    }
+
     /// Install resource stores seeded from a loaded config ([`seed_resources`]),
     /// replacing the empty default sources/outputs/overlays stores **and** the
     /// layout repository in one call.
@@ -486,7 +547,26 @@ impl AppState {
         self.sources = seeded.sources;
         self.outputs = seeded.outputs;
         self.overlays = seeded.overlays;
+        self.probes = seeded.probes;
+        self.audio_routing = seeded.audio;
         self.repository = seeded.layouts;
+        self.working_layout_id = Some(seeded.working_layout_id);
+        self
+    }
+
+    /// Install the loaded configuration document as the export baseline
+    /// (`GET /api/v1/config/export` overlays the live stores onto it, so
+    /// authored sections the stores do not carry survive the round-trip).
+    #[must_use]
+    pub fn with_base_document(mut self, document: serde_json::Value) -> Self {
+        self.base_document = Some(Arc::new(document));
+        self
+    }
+
+    /// Designate the layout id the export composes canvas/layout/cells from.
+    #[must_use]
+    pub fn with_working_layout_id(mut self, id: impl Into<String>) -> Self {
+        self.working_layout_id = Some(id.into());
         self
     }
 
@@ -602,12 +682,12 @@ mod seed_tests {
         clippy::panic
     )]
 
-    use multiview_config::{MultiviewConfig, Output, Overlay, Source};
+    use multiview_config::{MultiviewConfig, Output, Overlay, Probe, Source};
 
     use super::seed_resources;
 
-    /// A config carrying 3 sources, 2 outputs, and 1 overlay (plus the
-    /// canvas/layout/cells the parser requires).
+    /// A config carrying 3 sources, 2 outputs, 1 overlay, and 2 probes (plus
+    /// the canvas/layout/cells the parser requires).
     const SEED_DOC: &str = r##"schema_version = 1
 [canvas]
 width = 64
@@ -649,6 +729,16 @@ input_id = "cam_b"
 id = "clock_1"
 kind = "clock"
 target = "canvas"
+[[probes]]
+id = "black_a"
+cell = "cell_a"
+kind = "black"
+luma_threshold = 16
+[[probes]]
+id = "silence_b"
+cell = "cell_b"
+kind = "silence"
+level_dbfs = -60.0
 [[outputs]]
 kind = "rtsp_server"
 mount = "/multiview"
@@ -734,6 +824,25 @@ areas = ["a"]
     }
 
     #[test]
+    fn seeds_probes_with_roundtrip_bodies() {
+        let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        let probes = seeded.probes.list().expect("list probes");
+        let ids: Vec<&str> = probes.iter().map(|v| v.resource.id.as_str()).collect();
+        assert_eq!(ids, vec!["black_a", "silence_b"], "id-sorted config probes");
+        for want in &config.probes {
+            let stored = seeded.probes.get(&want.id).expect("probe present");
+            let got: Probe =
+                serde_json::from_value(stored.resource.body.clone()).expect("body is a Probe");
+            assert_eq!(
+                &got, want,
+                "seeded body must round-trip to the config probe"
+            );
+        }
+    }
+
+    #[test]
     fn empty_config_yields_empty_stores() {
         let config = MultiviewConfig::load_from_toml(EMPTY_DOC).expect("parse empty config");
         let seeded = seed_resources(&config).expect("seed resources");
@@ -741,6 +850,36 @@ areas = ["a"]
         assert!(seeded.sources.list().expect("list").is_empty());
         assert!(seeded.outputs.list().expect("list").is_empty());
         assert!(seeded.overlays.list().expect("list").is_empty());
+        assert!(seeded.probes.list().expect("list").is_empty());
+        let (audio, _) = seeded.audio.snapshot();
+        assert!(
+            audio.is_none(),
+            "no [audio] block seeds no routing document"
+        );
+    }
+
+    #[test]
+    fn seeds_the_audio_routing_singleton_from_the_audio_block() {
+        // SEED_DOC + an [audio] block: the singleton store mirrors it so the
+        // Audio page is non-empty under a live `multiview run`.
+        let doc = format!(
+            "{SEED_DOC}\n[audio]\nsample_rate_hz = 48000\n\n[[audio.routes]]\n\
+             input_id = \"cam_a\"\ntarget_track = \"cam-a-clean\"\n\
+             include_in_program_bus = true\ngain_db = -3.0\n\n\
+             [audio.routes.channels]\nkind = \"stereo\"\n"
+        );
+        let config = MultiviewConfig::load_from_toml(&doc).expect("parse audio config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        let (audio, _) = seeded.audio.snapshot();
+        let routing = audio.expect("the [audio] block is seeded");
+        assert_eq!(routing.sample_rate_hz, 48_000);
+        assert_eq!(routing.routes.len(), 1);
+        assert_eq!(routing.routes[0].input_id, "cam_a");
+        assert_eq!(
+            routing.routes[0].target_track.as_deref(),
+            Some("cam-a-clean")
+        );
     }
 
     #[test]

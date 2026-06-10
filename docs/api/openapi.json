@@ -177,6 +177,127 @@
         }
       }
     },
+    "/api/v1/audio-routing": {
+      "get": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "`GET /api/v1/audio-routing` — the singleton document (role: read).",
+        "description": "**404-free**: an unconfigured deployment answers `200` with\n`configured: false`, `routing: null`, and `selectable_tracks: [\"prog\"]`\n(the program bus is always selectable). The response `ETag` is the document\nversion a later `PUT` must present as `If-Match`.",
+        "operationId": "get_audio_routing",
+        "responses": {
+          "200": {
+            "description": "The audio-routing document (404-free: `configured: false` + a null document when none is set; ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioRoutingStateDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "`PUT /api/v1/audio-routing` — replace the singleton document (role: write;\n`If-Match` required → `428`/`412`).",
+        "operationId": "put_audio_routing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AudioRoutingDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced document (new ETag in the response header; X-Multiview-Apply: restart — it takes effect via config export + restart).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioRoutingStateDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid audio-routing document (detail names the field path or the violated routing invariant; references to undeclared sources are checked at config export, not here).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "No If-Match precondition was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -287,6 +408,58 @@
           },
           "503": {
             "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/export": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`GET /api/v1/config/export` — render the live resource stores as a complete\n`multiview.toml` document (ADR-W015).",
+        "description": "Composes the working layout (the id-sorted first layout whose body carries a\n`canvas`) with every stored source/output/overlay/probe into a\n[`multiview_config::MultiviewConfig`], validates the whole document, and\nreturns it as TOML. This closes the management loop honestly today: edit in\nthe UI → export → persist as the config file → the next start applies it.",
+        "operationId": "export_config",
+        "responses": {
+          "200": {
+            "description": "The composed configuration as TOML (`application/toml`).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The stores do not compose into a valid configuration (detail names the violation).",
             "content": {
               "application/json": {
                 "schema": {
@@ -854,7 +1027,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResourceInput"
+                "$ref": "#/components/schemas/OutputResourceInputDoc"
               }
             }
           },
@@ -934,7 +1107,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResourceInput"
+                "$ref": "#/components/schemas/OutputResourceInputDoc"
               }
             }
           },
@@ -963,6 +1136,16 @@
           },
           "403": {
             "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid output document (detail names the field path).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1163,7 +1346,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResourceInput"
+                "$ref": "#/components/schemas/OverlayResourceInputDoc"
               }
             }
           },
@@ -1243,7 +1426,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResourceInput"
+                "$ref": "#/components/schemas/OverlayResourceInputDoc"
               }
             }
           },
@@ -1272,6 +1455,16 @@
           },
           "403": {
             "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid overlay document (detail names the field path).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1764,6 +1957,335 @@
           },
           "404": {
             "description": "No such live focus session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/probes": {
+      "get": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`GET /api/v1/probes` — list all probes (role: read).",
+        "operationId": "list_probes",
+        "responses": {
+          "200": {
+            "description": "All probes, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/probes/{id}": {
+      "get": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`GET /api/v1/probes/{id}` — fetch one probe (role: read; per-object authz).",
+        "operationId": "get_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The probe (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this probe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No probe with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`PUT /api/v1/probes/{id}` — replace a probe (role: write; If-Match → 412).",
+        "operationId": "update_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProbeResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced probe (new ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No probe with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid probe document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`POST /api/v1/probes/{id}` — create a probe (role: write; per-object authz).",
+        "operationId": "create_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProbeResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created probe (ETag in the response header; X-Multiview-Apply declares how it takes effect).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid probe document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`DELETE /api/v1/probes/{id}` — delete a probe (role: administer; If-Match).",
+        "operationId": "delete_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The probe was deleted."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to administer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No probe with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2443,7 +2965,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResourceInput"
+                "$ref": "#/components/schemas/SourceResourceInputDoc"
               }
             }
           },
@@ -2499,6 +3021,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "The body is not a valid source document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       },
@@ -2523,7 +3055,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResourceInput"
+                "$ref": "#/components/schemas/SourceResourceInputDoc"
               }
             }
           },
@@ -2531,7 +3063,7 @@
         },
         "responses": {
           "201": {
-            "description": "The created source (ETag in the response header).",
+            "description": "The created source (ETag in the response header; X-Multiview-Apply declares how it takes effect).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2552,6 +3084,16 @@
           },
           "403": {
             "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid source document (detail names the field path).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3404,6 +3946,161 @@
           }
         }
       },
+      "AudioChannelsDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mono"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stereo"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "five_point_one"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by\n`kind`, `snake_case`)."
+      },
+      "AudioRouteDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::audio::AudioRoute` — one per-input\nroute in the audio-routing document.",
+        "required": [
+          "input_id",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "$ref": "#/components/schemas/AudioChannelsDoc",
+            "description": "The channel layout requested for this input."
+          },
+          "gain_db": {
+            "type": "number",
+            "format": "float",
+            "description": "Program-bus contribution gain in dB (`0.0` ⇒ unity; must be finite)."
+          },
+          "include_in_program_bus": {
+            "type": "boolean",
+            "description": "Whether this input contributes to the mixed program bus."
+          },
+          "input_id": {
+            "type": "string",
+            "description": "The managed source id (`sources[].id`) this route takes audio from."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO-639 language tag advertised for the discrete track (e.g. `\"eng\"`)."
+          },
+          "mute": {
+            "type": "boolean",
+            "description": "Whether this input is muted on the program bus (its discrete track, if\nany, stays declared)."
+          },
+          "target_track": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The named discrete output track (absent ⇒ program bus only). `\"prog\"`\nis reserved for the mixed program bus."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-friendly track title."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AudioRoutingDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::AudioRouting` — the body accepted by\n`PUT /api/v1/audio-routing` (the whole-document `[audio]` block).",
+        "required": [
+          "sample_rate_hz"
+        ],
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AudioRouteDoc"
+            },
+            "description": "The per-input routes."
+          },
+          "sample_rate_hz": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The working/program-bus sample rate in Hz (exact integer, > 0).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AudioRoutingStateDoc": {
+        "type": "object",
+        "description": "The response envelope of `GET`/`PUT /api/v1/audio-routing`.\n\nThe GET is **404-free**: an unconfigured deployment answers\n`configured: false` with a `null` document and `selectable_tracks` of just\nthe always-available program bus `\"prog\"`.",
+        "required": [
+          "configured",
+          "selectable_tracks"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether an audio-routing document is configured."
+          },
+          "routing": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioRoutingDoc",
+                "description": "The routing document, or `null` when unconfigured."
+              }
+            ]
+          },
+          "selectable_tracks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`\"prog\"` + every declared discrete track, in declaration order — the\nset per-output `audio.tracks` selections resolve against."
+          }
+        }
+      },
       "AuditAction": {
         "type": "string",
         "description": "The kind of mutation an audit entry records.",
@@ -3551,6 +4248,123 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_core::tally::BusSource`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
       },
+      "CaptionSelectorDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Auto-select the first usable caption track.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "auto"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Captions explicitly disabled.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "off"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "DVB teletext, addressed by page.",
+            "required": [
+              "page",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "teletext_page"
+                ]
+              },
+              "page": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Teletext page number (typically `100`–`899`).",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A subtitle track by stream id or language tag.",
+            "required": [
+              "id",
+              "mode"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The track identifier."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "track"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Embedded CEA-608/708 captions by field/service.",
+            "required": [
+              "field",
+              "mode"
+            ],
+            "properties": {
+              "field": {
+                "type": "string",
+                "description": "The caption field/service selector (e.g. `cc1`)."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "embedded_cc"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An external sidecar subtitle file (SRT/WebVTT).",
+            "required": [
+              "path",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "sidecar"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "description": "Filesystem path to the sidecar."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::CaptionSelector` (tagged by `mode`)."
+      },
       "ChannelMap": {
         "type": "object",
         "description": "An IS-08 **map**: each named output channel → its [`ChannelSource`].\n\nA `BTreeMap` so the serialised map and any listing is deterministically\nordered (stable diagnostics + golden tests).",
@@ -3606,6 +4420,48 @@
           "target": {
             "$ref": "#/components/schemas/TallyTargetDoc",
             "description": "The tally target whose override is cleared."
+          }
+        }
+      },
+      "ClockFaceDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::ClockFaceConfig`.",
+        "enum": [
+          "analog",
+          "digital"
+        ]
+      },
+      "ColorOverrideDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::ColorOverride` (four color axes).",
+        "properties": {
+          "matrix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Matrix axis."
+          },
+          "primaries": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Primaries axis (`auto` or an explicit primaries token)."
+          },
+          "range": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Range axis."
+          },
+          "transfer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Transfer axis."
           }
         }
       },
@@ -3741,6 +4597,39 @@
           "klv"
         ]
       },
+      "DetectionZoneDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::DetectionZone` (normalized\nsub-rectangle of a tile, `0.0..=1.0` on both axes).",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "h": {
+            "type": "number",
+            "format": "float",
+            "description": "Height (fraction of tile height)."
+          },
+          "w": {
+            "type": "number",
+            "format": "float",
+            "description": "Width (fraction of tile width)."
+          },
+          "x": {
+            "type": "number",
+            "format": "float",
+            "description": "Left edge (fraction of tile width)."
+          },
+          "y": {
+            "type": "number",
+            "format": "float",
+            "description": "Top edge (fraction of tile height)."
+          }
+        },
+        "additionalProperties": false
+      },
       "Device": {
         "allOf": [
           {
@@ -3781,6 +4670,24 @@
         ],
         "description": "An IS-04 **Device**: a logical grouping of senders/receivers on a node."
       },
+      "DevicePinDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::placement::DevicePin`.",
+        "required": [
+          "vendor",
+          "stable_id"
+        ],
+        "properties": {
+          "stable_id": {
+            "type": "string",
+            "description": "The vendor's stable device handle (UUID / PCI bus id / registryID)."
+          },
+          "vendor": {
+            "$ref": "#/components/schemas/PinVendorDoc",
+            "description": "The vendor family."
+          }
+        }
+      },
       "DocumentDiff": {
         "type": "object",
         "description": "The added / removed / changed top-level keys between two documents.\n\nA pragmatic, UI-facing structural diff over JSON objects: it reports which\ntop-level keys were added, removed, or whose value changed. Non-object\ndocuments (or a type change at the root) are reported as a single synthetic\n`<root>` change so the diff is always total.",
@@ -3812,6 +4719,29 @@
             "description": "Keys present in the old document but not the new (sorted)."
           }
         }
+      },
+      "DwellDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::Dwell` (raise/clear debounce\nmilliseconds).",
+        "required": [
+          "up_ms",
+          "down_ms"
+        ],
+        "properties": {
+          "down_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Milliseconds the condition must clear before the alarm **clears**.",
+            "minimum": 0
+          },
+          "up_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Milliseconds the condition must persist before the alarm **raises**.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "HealthWarningDoc": {
         "type": "object",
@@ -3957,6 +4887,65 @@
           }
         }
       },
+      "LoudnessTargetDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "EBU R128 (default integrated target −23.0 LUFS).",
+            "required": [
+              "target_lufs",
+              "max_true_peak_dbtp",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "r128"
+                ]
+              },
+              "max_true_peak_dbtp": {
+                "type": "number",
+                "format": "float",
+                "description": "Maximum permitted true-peak in dBTP (e.g. `-1.0`)."
+              },
+              "target_lufs": {
+                "type": "number",
+                "format": "float",
+                "description": "Integrated-loudness target in LUFS (e.g. `-23.0`)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "ATSC A/85 (default integrated target −24.0 LKFS).",
+            "required": [
+              "target_lkfs",
+              "max_true_peak_dbtp",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "a85"
+                ]
+              },
+              "max_true_peak_dbtp": {
+                "type": "number",
+                "format": "float",
+                "description": "Maximum permitted true-peak in dBTP (e.g. `-2.0`)."
+              },
+              "target_lkfs": {
+                "type": "number",
+                "format": "float",
+                "description": "Integrated-loudness target in LKFS (e.g. `-24.0`)."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,\n`snake_case`)."
+      },
       "MediaFormat": {
         "type": "string",
         "description": "The media format of a sender/receiver (the IS-04 `format` URN family).",
@@ -4023,6 +5012,550 @@
         "type": "string",
         "description": "A correlation id for an asynchronously-applied control command.\n\nReturned to the client in a `202 Accepted` response and echoed by the engine\non the realtime stream (`corr`) when the command's outcome is known."
       },
+      "OutputAudioDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::audio::OutputAudio`.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/OutputAudioModeDoc",
+            "description": "`program` (mixed bus) or `tracks` (explicit selection)."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The selectable-track list (used only in `tracks` mode)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "OutputAudioModeDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::audio::OutputAudioMode`.",
+        "enum": [
+          "program",
+          "tracks"
+        ]
+      },
+      "OutputBodyDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "RTSP server.",
+            "required": [
+              "mount",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec (`h264`, `hevc`, …)."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted (the path id is injected)."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rtsp_server"
+                ]
+              },
+              "latency_profile": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Latency profile hint."
+              },
+              "mount": {
+                "type": "string",
+                "description": "Mount point (e.g. `/multiview`)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Low-latency HLS packager.",
+            "required": [
+              "path",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec."
+              },
+              "gop_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "GOP duration (ms).",
+                "minimum": 0
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ll_hls"
+                ]
+              },
+              "part_target_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Target part duration (ms).",
+                "minimum": 0
+              },
+              "path": {
+                "type": "string",
+                "description": "Output path."
+              },
+              "segment_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Segment duration (ms).",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "HLS packager.",
+            "required": [
+              "path",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "hls"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "description": "Output path."
+              },
+              "segment_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Segment duration (ms).",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "NDI output.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Frame-source GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ndi"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "NDI source name to advertise."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "RTMP push.",
+            "required": [
+              "url",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rtmp"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Destination URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "SRT push.",
+            "required": [
+              "url",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "srt"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Destination URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "AES67 / ST 2110-30 audio-over-IP send (raw PCM multicast, no encode).",
+            "required": [
+              "label",
+              "multicast",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "depth": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "PCM depth: `L24` (Class A interop default) or `L16`."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Always absent for AES67 (raw PCM, no encode stage)."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "aes67"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "description": "Display name (no mount/path/url to derive one from)."
+              },
+              "multicast": {
+                "type": "string",
+                "description": "Multicast `group:port` to send to (`[ff3e::1]:5004`)."
+              },
+              "ptime_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Packet time in milliseconds (`1` = Class A).",
+                "minimum": 0
+              },
+              "ptp_domain": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional PTP domain (`0..=127`).",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body\naccepted by `POST`/`PUT /api/v1/outputs/{id}`."
+      },
+      "OutputResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/outputs/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/OutputBodyDoc",
+            "description": "The output document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
+      "OverlayBodyDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::Overlay` — the body accepted by\n`POST`/`PUT /api/v1/overlays/{id}`.\n\nOverlay kinds carry a large, kind-dependent parameter set captured verbatim\n(lossless round-trip), so the schema documents the common envelope and\nleaves the per-kind extras additive.",
+        "required": [
+          "kind",
+          "target"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable overlay id; may be omitted (the path id is injected)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Overlay kind (`clock`, `label`, `tally_border`, `image`, `subtitle`, …)."
+          },
+          "target": {
+            "type": "string",
+            "description": "Attachment target (`canvas` or a cell id)."
+          },
+          "z": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Stacking order."
+          }
+        },
+        "additionalProperties": {
+          "description": "Kind-specific parameters, captured verbatim."
+        }
+      },
+      "OverlayResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/overlays/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/OverlayBodyDoc",
+            "description": "The overlay document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
       "OverrideRequestDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`crate::routes::tally::OverrideRequest`].",
@@ -4052,6 +5585,172 @@
           "Major",
           "Critical"
         ]
+      },
+      "PinVendorDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::placement::PinVendor`.",
+        "enum": [
+          "nvidia",
+          "intel",
+          "amd",
+          "apple"
+        ]
+      },
+      "ProbeBodyDoc": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProbeKindDoc",
+            "description": "The kind-specific payload (`kind` + its fields sit at top level)."
+          },
+          {
+            "type": "object",
+            "required": [
+              "cell"
+            ],
+            "properties": {
+              "cell": {
+                "type": "string",
+                "description": "The cell id this probe watches."
+              },
+              "dwell": {
+                "$ref": "#/components/schemas/DwellDoc",
+                "description": "Dwell windows (raise/clear debounce; defaults to 1 s each way)."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable probe id; may be omitted (the path id is injected)."
+              },
+              "latched": {
+                "type": "boolean",
+                "description": "Whether the alarm latches (held until explicitly reset)."
+              },
+              "severity": {
+                "$ref": "#/components/schemas/PerceivedSeverityDoc",
+                "description": "The perceived severity (X.733) asserted when this probe fires."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::Probe` — the body accepted by\n`POST`/`PUT /api/v1/probes/{id}`."
+      },
+      "ProbeKindDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Black-picture detection within the zone.",
+            "required": [
+              "luma_threshold",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "black"
+                ]
+              },
+              "luma_threshold": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Luma ceiling (8-bit, `0..=255`) at or below which a pixel is \"black\".",
+                "minimum": 0
+              },
+              "zone": {
+                "$ref": "#/components/schemas/DetectionZoneDoc",
+                "description": "Detection zone within the tile (defaults to the full frame)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Freeze detection within the zone.",
+            "required": [
+              "difference_threshold",
+              "kind"
+            ],
+            "properties": {
+              "difference_threshold": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Inter-frame difference floor (per-mille, `0..=1000`) below which the\npicture counts as frozen.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "freeze"
+                ]
+              },
+              "zone": {
+                "$ref": "#/components/schemas/DetectionZoneDoc",
+                "description": "Detection zone within the tile (defaults to the full frame)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Silence detection on the cell's audio.",
+            "required": [
+              "level_dbfs",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "silence"
+                ]
+              },
+              "level_dbfs": {
+                "type": "number",
+                "format": "float",
+                "description": "Level ceiling in dBFS at or below which audio counts as silent."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Loudness-violation detection against a compliance target.",
+            "required": [
+              "target",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "loudness"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/LoudnessTargetDoc",
+                "description": "The loudness compliance target."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::ProbeKind` (tagged by `kind`,\n`snake_case`, flattened into the probe body)."
+      },
+      "ProbeResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/probes/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/ProbeBodyDoc",
+            "description": "The probe document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
       },
       "Problem": {
         "type": "object",
@@ -4427,6 +6126,19 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_control::routing::RouteTarget`] (RT-11).\n\nThe destination a crosspoint take re-points — internally tagged on `kind`,\n`snake_case`, never `untagged`."
       },
+      "RtspOptionsDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RtspOptions`.",
+        "required": [
+          "transport"
+        ],
+        "properties": {
+          "transport": {
+            "type": "string",
+            "description": "Lower-transport selection (`tcp` / `udp`)."
+          }
+        }
+      },
       "SalvoDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::Salvo`].\n\nSerde-equivalent field-for-field; the optional fields skip when empty/absent\nexactly as the config type does.",
@@ -4515,6 +6227,393 @@
         ],
         "description": "An IS-04 **Sender**: an egress flow (a Multiview program/preview output)."
       },
+      "SourceAuthDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::SourceAuth` (reference-only secret).",
+        "required": [
+          "secret_ref"
+        ],
+        "properties": {
+          "secret_ref": {
+            "type": "string",
+            "description": "A secret reference (e.g. `op://Servers/cam/credentials`), never plaintext."
+          }
+        }
+      },
+      "SourceBodyDoc": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SourceKindDoc",
+            "description": "The kind-specific payload (`kind` + its fields sit at top level)."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "auth": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SourceAuthDoc",
+                    "description": "Reference-only credentials."
+                  }
+                ]
+              },
+              "captions": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CaptionSelectorDoc",
+                    "description": "Caption/subtitle selector."
+                  }
+                ]
+              },
+              "color_override": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ColorOverrideDoc",
+                    "description": "Per-source color override."
+                  }
+                ]
+              },
+              "display_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Human-friendly display name."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Operator decode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable input id; may be omitted (the path id is injected)."
+              },
+              "wallclock": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SourceWallClockDoc",
+                    "description": "Wall-clock Use/Discard verb."
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::Source` — the body accepted by\n`POST`/`PUT /api/v1/sources/{id}`."
+      },
+      "SourceKindDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Built-in colour bars (`test` is a back-compat alias).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bars"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A solid-colour slate.",
+            "required": [
+              "color",
+              "kind"
+            ],
+            "properties": {
+              "color": {
+                "type": "string",
+                "description": "Fill colour as `#RRGGBB`/`#RGB` hex."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "solid"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A full-frame clock.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "face": {
+                "$ref": "#/components/schemas/ClockFaceDoc",
+                "description": "Analog (default) or digital face."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clock"
+                ]
+              },
+              "twelve_hour": {
+                "type": "boolean",
+                "description": "12-hour vs 24-hour mode (default 24-hour)."
+              },
+              "tz_offset_minutes": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Timezone offset from UTC in minutes (`-720..=840`)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "RTSP pull.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rtsp"
+                ]
+              },
+              "rtsp": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RtspOptionsDoc",
+                    "description": "RTSP transport options."
+                  }
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Source URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "HLS / M3U pull.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "hls"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Playlist URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`YouTube` live, resolved to HLS at runtime.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "youtube"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Watch/live/channel URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "MPEG-TS input.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ts"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Source URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "SRT input.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "srt"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Source URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "RTMP input.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rtmp"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Source URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "NDI input, bound by source name.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ndi"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "NDI source name."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "File input.",
+            "required": [
+              "path",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "description": "Filesystem path."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "AES67 / ST 2110-30 audio-over-IP receive (SDP-bound).",
+            "required": [
+              "sdp",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "aes67"
+                ]
+              },
+              "link_offset_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional receive jitter-buffer lead in milliseconds (link offset).",
+                "minimum": 0
+              },
+              "multicast": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional multicast `group:port` override (`[ff3e::1]:5004`)."
+              },
+              "ptp_domain": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional PTP domain (`0` ST 2110-30-strict, `1..=127` otherwise).",
+                "minimum": 0
+              },
+              "sdp": {
+                "type": "string",
+                "description": "Static SDP session description (RFC 4566/8866), as text or a URL."
+              },
+              "session_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional SAP session id or NMOS sender id for dynamic discovery."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::SourceKind` (tagged by `kind`)."
+      },
       "SourceRecallDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::SourceRecall`].",
@@ -4530,6 +6629,34 @@
           "input_id": {
             "type": "string",
             "description": "The managed source id to bind into the cell."
+          }
+        }
+      },
+      "SourceResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/sources/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/SourceBodyDoc",
+            "description": "The source document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
+      "SourceWallClockDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::SourceWallClock` (ADR-0038 verb).",
+        "properties": {
+          "use": {
+            "$ref": "#/components/schemas/WallClockUseDoc",
+            "description": "`use` (rebase when Trusted) or `discard` (reclock-to-house)."
           }
         }
       },
@@ -5221,6 +7348,14 @@
           }
         }
       },
+      "WallClockUseDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).",
+        "enum": [
+          "use",
+          "discard"
+        ]
+      },
       "WarningCodeDoc": {
         "type": "string",
         "description": "`OpenAPI` mirror of [`multiview_events::WarningCode`] (SA-0 catalog).\n\nSerde-equivalent: a unit enum rendered as its `kebab-case` variant name.",
@@ -5259,6 +7394,14 @@
     {
       "name": "overlays",
       "description": "Overlay (managed overlay layer) resource CRUD"
+    },
+    {
+      "name": "probes",
+      "description": "Probe (per-cell fail-state detection: black/freeze/silence/loudness) resource CRUD"
+    },
+    {
+      "name": "audio",
+      "description": "Audio routing: the document-level program-bus membership + discrete-track wiring per-output selections resolve against"
     },
     {
       "name": "commands",

@@ -12,6 +12,8 @@ import { MonitoringPage } from "../pages/MonitoringPage";
 import { TallyPage } from "../pages/TallyPage";
 import { SalvosPage } from "../pages/SalvosPage";
 import { AlarmsPage } from "../pages/AlarmsPage";
+import { AudioPage } from "../pages/AudioPage";
+import { ProbesPage } from "../pages/ProbesPage";
 import { AuditPage } from "../pages/AuditPage";
 import { SystemPage } from "../pages/SystemPage";
 import { SettingsPage } from "../pages/SettingsPage";
@@ -45,6 +47,8 @@ export const router = createBrowserRouter([
       { path: "sources", element: <SourcesPage /> },
       { path: "outputs", element: <OutputsPage /> },
       { path: "overlays", element: <OverlaysPage /> },
+      { path: "audio", element: <AudioPage /> },
+      { path: "probes", element: <ProbesPage /> },
       { path: "monitoring", element: <MonitoringPage /> },
       { path: "tally", element: <TallyPage /> },
       { path: "salvos", element: <SalvosPage /> },
@@ -54,6 +58,9 @@ export const router = createBrowserRouter([
       { path: "settings", element: <SettingsPage /> },
       // In-app documentation under /help. (/docs is the backend Scalar API
       // playground, so the SPA guide deliberately avoids that path.)
+      //
+      // Concept articles are route-level lazy chunks (router `lazy()`), so
+      // the management UI bundle does not carry the concept library.
       {
         path: "help",
         element: <DocsLayout />,
@@ -64,6 +71,55 @@ export const router = createBrowserRouter([
           { path: "config", element: <ConfigPage /> },
           { path: "api", element: <ApiPage /> },
           { path: "features", element: <FeaturesPage /> },
+          {
+            path: "concepts/transports",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/TransportsPage"))
+                .TransportsPage,
+            }),
+          },
+          {
+            path: "concepts/timing-sync",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/TimingSyncPage"))
+                .TimingSyncPage,
+            }),
+          },
+          {
+            path: "concepts/codecs",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/CodecsPage"))
+                .CodecsPage,
+            }),
+          },
+          {
+            path: "concepts/color",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/ColorPage"))
+                .ColorPage,
+            }),
+          },
+          {
+            path: "concepts/resilience",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/ResiliencePage"))
+                .ResiliencePage,
+            }),
+          },
+          {
+            path: "concepts/latency",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/LatencyPage"))
+                .LatencyPage,
+            }),
+          },
+          {
+            path: "concepts/glossary",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/concepts/GlossaryPage"))
+                .GlossaryPage,
+            }),
+          },
         ],
       },
       { path: "*", element: <NotFoundPage /> },

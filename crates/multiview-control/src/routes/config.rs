@@ -142,3 +142,179 @@ pub(crate) async fn rollback_revision(
     );
     Ok((StatusCode::CREATED, Json(revision)))
 }
+
+/// `GET /api/v1/config/export` — render the live resource stores as a complete
+/// `multiview.toml` document (ADR-W015).
+///
+/// Composes the working layout (the id-sorted first layout whose body carries a
+/// `canvas`) with every stored source/output/overlay/probe into a
+/// [`multiview_config::MultiviewConfig`], validates the whole document, and
+/// returns it as TOML. This closes the management loop honestly today: edit in
+/// the UI → export → persist as the config file → the next start applies it.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/config/export",
+        tag = "config",
+        responses(
+            (status = 200, description = "The composed configuration as TOML (`application/toml`).", body = String),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read.", body = crate::problem::Problem),
+            (status = 422, description = "The stores do not compose into a valid configuration (detail names the violation).", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn export_config(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> ControlResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    principal.role.require(Action::Read)?;
+
+    let document = compose_export_document(&state)?;
+    let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(document)
+        .map_err(|err| {
+            let path = err.path().to_string();
+            crate::error::ControlError::Validation(format!(
+                "stored resources do not compose into a valid configuration at `{path}`: {}",
+                err.into_inner()
+            ))
+        })?;
+    config.validate().map_err(|err| {
+        crate::error::ControlError::Validation(format!(
+            "composed configuration failed validation: {err}"
+        ))
+    })?;
+    let toml = config.to_toml().map_err(|err| {
+        crate::error::ControlError::Repository(format!("TOML render failed: {err}"))
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/toml"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"multiview.toml\"",
+            ),
+        ],
+        toml,
+    )
+        .into_response())
+}
+
+/// Compose the export JSON document: the loaded base configuration (when one
+/// was installed) overlaid with everything the live stores own — the working
+/// layout's canvas/layout/cells and the source/output/overlay/probe
+/// collections.
+fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value> {
+    // The working layout carries { canvas, layout, cells }. Prefer the
+    // designated working layout (set at seed time); fall back to the id-sorted
+    // first layout document that declares a canvas (store-only deployments).
+    let layouts = state.repository.list_layouts()?;
+    let working = state
+        .working_layout_id
+        .as_deref()
+        .and_then(|id| {
+            layouts
+                .iter()
+                .map(|v| &v.layout)
+                .find(|layout| layout.id == id && layout.body.get("canvas").is_some())
+        })
+        .or_else(|| {
+            layouts
+                .iter()
+                .map(|v| &v.layout)
+                .find(|layout| layout.body.get("canvas").is_some())
+        })
+        .ok_or_else(|| {
+            crate::error::ControlError::Validation(
+                "no working layout (a layout body carrying `canvas`) to export".to_owned(),
+            )
+        })?;
+
+    let collect = |repo: &std::sync::Arc<dyn crate::resource_store::ResourceRepository>|
+     -> ControlResult<Vec<serde_json::Value>> {
+        Ok(repo
+            .list()?
+            .into_iter()
+            .map(|v| v.resource.body)
+            .collect())
+    };
+
+    // Start from the loaded configuration document (so authored sections the
+    // stores do not carry — control, placement, audio, salvos, tally
+    // profiles, walls, routing — survive the round-trip verbatim), then
+    // overlay everything the live stores own.
+    let mut document = state
+        .base_document
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(doc) = document.as_object_mut() else {
+        return Err(crate::error::ControlError::Repository(
+            "the export base document is not a JSON object".to_owned(),
+        ));
+    };
+    doc.entry("schema_version").or_insert(serde_json::json!(1));
+    doc.insert(
+        "canvas".to_owned(),
+        working
+            .body
+            .get("canvas")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    doc.insert(
+        "layout".to_owned(),
+        working
+            .body
+            .get("layout")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    doc.insert(
+        "cells".to_owned(),
+        working
+            .body
+            .get("cells")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    );
+    doc.insert(
+        "sources".to_owned(),
+        serde_json::Value::Array(collect(&state.sources)?),
+    );
+    doc.insert(
+        "outputs".to_owned(),
+        serde_json::Value::Array(collect(&state.outputs)?),
+    );
+    doc.insert(
+        "overlays".to_owned(),
+        serde_json::Value::Array(collect(&state.overlays)?),
+    );
+    doc.insert(
+        "probes".to_owned(),
+        serde_json::Value::Array(collect(&state.probes)?),
+    );
+    // The audio-routing singleton overlays the `audio` key when an operator
+    // (or the seeded config) configured it; otherwise the base document's
+    // authored block — if any — is left untouched. The whole-document
+    // validation below this composition is where routes are cross-checked
+    // against the declared sources (the check `PUT /api/v1/audio-routing`
+    // intentionally defers).
+    let (audio, _) = state.audio_routing.snapshot();
+    if let Some(routing) = audio {
+        doc.insert(
+            "audio".to_owned(),
+            serde_json::to_value(&routing).map_err(|e| {
+                crate::error::ControlError::Repository(format!(
+                    "serializing the audio-routing document: {e}"
+                ))
+            })?,
+        );
+    }
+    Ok(document)
+}

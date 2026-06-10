@@ -57,7 +57,51 @@ pub enum AudioError {
 }
 
 impl From<AudioError> for multiview_core::Error {
+    /// Fold an audio fault into the workspace taxonomy. The audio stage is
+    /// first-class alongside video decode/encode, so it routes to the dedicated
+    /// [`multiview_core::Error::Audio`] arm rather than being flattened into
+    /// [`multiview_core::Error::Config`]; the human-readable detail is preserved.
     fn from(value: AudioError) -> Self {
-        multiview_core::Error::Config(value.to_string())
+        multiview_core::Error::Audio(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioError;
+
+    /// The crate boundary folds every audio fault into the workspace-wide
+    /// [`multiview_core::Error::Audio`] arm — the first-class audio stage owns a
+    /// dedicated arm rather than being flattened into
+    /// [`multiview_core::Error::Config`]. Guards the routing against regression
+    /// to `Config` and proves the human-readable detail survives.
+    #[test]
+    fn audio_error_routes_to_core_audio_arm() {
+        let err: multiview_core::Error = AudioError::UnknownInput(7).into();
+        match err {
+            multiview_core::Error::Audio(msg) => {
+                assert!(
+                    msg.contains("unknown mixer input id: 7"),
+                    "detail must survive the conversion, got: {msg}"
+                );
+            }
+            other => panic!("expected Error::Audio, got {other:?}"),
+        }
+    }
+
+    /// A second, structurally different audio fault also lands on the `Audio`
+    /// arm (not just one hand-picked variant), so the whole `From` impl — not a
+    /// special case — is rerouted.
+    #[test]
+    fn ragged_block_also_routes_to_audio_arm() {
+        let err: multiview_core::Error = AudioError::RaggedBlock {
+            samples: 3,
+            channels: 2,
+        }
+        .into();
+        assert!(
+            matches!(err, multiview_core::Error::Audio(_)),
+            "expected Error::Audio, got {err:?}"
+        );
     }
 }

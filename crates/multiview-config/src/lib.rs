@@ -51,7 +51,8 @@ use multiview_core::stream::StreamKind as CoreStreamKind;
 
 use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
 pub use audio::{
-    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioMode, PROGRAM_TRACK,
+    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
+    TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
@@ -287,46 +288,7 @@ impl MultiviewConfig {
     /// `clock` timezone offset must be a real UTC offset (`-720..=840` minutes).
     fn validate_sources(&self) -> Result<(), ConfigError> {
         for source in &self.sources {
-            if let Some(pin) = &source.gpu_pin {
-                pin.validate().map_err(|e| {
-                    ConfigError::Validation(format!("source {:?} gpu_pin: {e}", source.id))
-                })?;
-            }
-            match &source.kind {
-                SourceKind::Solid { color } => {
-                    if parse_hex_color(color).is_none() {
-                        return Err(ConfigError::Validation(format!(
-                            "source {:?}: solid color {color:?} is not a #RGB / #RRGGBB hex color",
-                            source.id
-                        )));
-                    }
-                }
-                SourceKind::Clock {
-                    tz_offset_minutes, ..
-                } => {
-                    if !(-720..=840).contains(tz_offset_minutes) {
-                        return Err(ConfigError::Validation(format!(
-                            "source {:?}: clock tz_offset_minutes {tz_offset_minutes} is out of \
-                             range (real UTC offsets span -720..=840)",
-                            source.id
-                        )));
-                    }
-                }
-                // Network/synthetic kinds carry no kind-specific field that can be
-                // validated structurally here (a URL's reachability is a runtime
-                // concern, not a config one). The `youtube` URL is resolved at
-                // ingest by an external `yt-dlp` (ADR-0015), so like the other URL
-                // kinds it is accepted as-is at config time.
-                SourceKind::Bars
-                | SourceKind::Rtsp { .. }
-                | SourceKind::Hls { .. }
-                | SourceKind::Youtube { .. }
-                | SourceKind::Ts { .. }
-                | SourceKind::Srt { .. }
-                | SourceKind::Rtmp { .. }
-                | SourceKind::Ndi { .. }
-                | SourceKind::File { .. } => {}
-            }
+            source.validate()?;
         }
         Ok(())
     }
@@ -520,38 +482,12 @@ impl MultiviewConfig {
         }
         let mut seen_ids: HashSet<String> = HashSet::with_capacity(self.outputs.len());
         for output in &self.outputs {
-            let codec = match output {
-                Output::RtspServer { codec, .. }
-                | Output::LlHls { codec, .. }
-                | Output::Hls { codec, .. }
-                | Output::Rtmp { codec, .. }
-                | Output::Srt { codec, .. } => Some(codec),
-                Output::Ndi { .. } => None,
-            };
-            if let Some(codec) = codec {
-                if codec.is_empty() {
-                    return Err(ConfigError::Validation(
-                        "an output declares an empty codec".to_owned(),
-                    ));
-                }
-            }
-            if let Some(explicit) = output.explicit_id() {
-                if explicit.is_empty() {
-                    return Err(ConfigError::Validation(format!(
-                        "output {:?} declares an empty id",
-                        output.label()
-                    )));
-                }
-            }
+            output.validate()?;
             let id = output.id();
             if !seen_ids.insert(id.clone()) {
                 return Err(ConfigError::Validation(format!(
                     "duplicate output id {id:?} (output ids must be unique)"
                 )));
-            }
-            if let Some(pin) = output.gpu_pin() {
-                pin.validate()
-                    .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
             }
         }
         Ok(())
@@ -579,7 +515,14 @@ impl MultiviewConfig {
 
         for output in &self.outputs {
             if let Some(selection) = output.audio() {
-                selection.validate(&output.label(), &selectable)?;
+                // Cross-check the selection against the transport's verified
+                // capability matrix (ADR-R005 §4.2): reference consistency plus
+                // the discrete-track count the transport can actually deliver.
+                selection.validate_against_capability(
+                    &output.label(),
+                    &selectable,
+                    output.audio_capability(),
+                )?;
             }
         }
 
@@ -878,5 +821,110 @@ fn parse_fit(fit: Option<&str>) -> FitMode {
         Some("cover") => FitMode::Cover,
         Some("fill") => FitMode::Fill,
         _ => FitMode::Contain,
+    }
+}
+
+impl Source {
+    /// Validate this source's per-item semantics — the same checks
+    /// [`MultiviewConfig::validate`] applies per source (id non-empty, GPU pin,
+    /// solid hex colour, clock timezone bounds). Document-level rules
+    /// (id uniqueness, cell references) remain on the document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] naming the violated rule.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.id.is_empty() {
+            return Err(ConfigError::Validation(
+                "a source has an empty id".to_owned(),
+            ));
+        }
+        if let Some(pin) = &self.gpu_pin {
+            pin.validate().map_err(|e| {
+                ConfigError::Validation(format!("source {:?} gpu_pin: {e}", self.id))
+            })?;
+        }
+        match &self.kind {
+            SourceKind::Solid { color } => {
+                if parse_hex_color(color).is_none() {
+                    return Err(ConfigError::Validation(format!(
+                        "source {:?}: solid color {color:?} is not a #RGB / #RRGGBB hex color",
+                        self.id
+                    )));
+                }
+            }
+            SourceKind::Clock {
+                tz_offset_minutes, ..
+            } => {
+                if !(-720..=840).contains(tz_offset_minutes) {
+                    return Err(ConfigError::Validation(format!(
+                        "source {:?}: clock tz_offset_minutes {tz_offset_minutes} is out of \
+                         range (real UTC offsets span -720..=840)",
+                        self.id
+                    )));
+                }
+            }
+            // Network/synthetic kinds carry no kind-specific field that can be
+            // validated structurally here (a URL's reachability is a runtime
+            // concern, not a config one). The `youtube` URL is resolved at
+            // ingest by an external `yt-dlp` (ADR-0015), so like the other URL
+            // kinds it is accepted as-is at config time.
+            SourceKind::Bars
+            | SourceKind::Rtsp { .. }
+            | SourceKind::Hls { .. }
+            | SourceKind::Youtube { .. }
+            | SourceKind::Ts { .. }
+            | SourceKind::Srt { .. }
+            | SourceKind::Rtmp { .. }
+            | SourceKind::Ndi { .. }
+            | SourceKind::File { .. }
+            // AES67's binding (SDP / multicast group / PTP domain) is a runtime
+            // ingest concern, like the network URL kinds — accepted as authored.
+            | SourceKind::Aes67 { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+impl Output {
+    /// Validate this output's per-item semantics — the same checks
+    /// [`MultiviewConfig::validate`] applies per output (non-empty codec where
+    /// the kind carries one, non-empty explicit id, GPU pin). Document-level
+    /// rules (id uniqueness, audio track resolution) remain on the document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] naming the violated rule.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let codec = match self {
+            Output::RtspServer { codec, .. }
+            | Output::LlHls { codec, .. }
+            | Output::Hls { codec, .. }
+            | Output::Rtmp { codec, .. }
+            | Output::Srt { codec, .. } => Some(codec),
+            // NDI carries a channel-map, AES67 sends raw PCM — neither has a
+            // (video) codec to validate.
+            Output::Ndi { .. } | Output::Aes67 { .. } => None,
+        };
+        if let Some(codec) = codec {
+            if codec.is_empty() {
+                return Err(ConfigError::Validation(
+                    "an output declares an empty codec".to_owned(),
+                ));
+            }
+        }
+        if let Some(explicit) = self.explicit_id() {
+            if explicit.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "output {:?} declares an empty id",
+                    self.label()
+                )));
+            }
+        }
+        if let Some(pin) = self.gpu_pin() {
+            pin.validate()
+                .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
+        }
+        Ok(())
     }
 }

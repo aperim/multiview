@@ -9,6 +9,7 @@ import { useCallback, useMemo, useState } from 'react';
 
 import {
   addCell,
+  applyPreset as applyPresetToModel,
   bindCellSource,
   DEFAULT_SNAP,
   emptyLayout,
@@ -17,17 +18,22 @@ import {
   reorderCell,
   resizeCell,
   rotateCell,
+  setCanvas as setCanvasOnModel,
   setCellFit,
   setCellLabel,
+  setCellProps,
   validateLayout,
 } from './model';
 import type {
+  CanvasModel,
   CellModel,
   FitMode,
   LayoutModel,
+  LayoutPreset,
   NormalizedRect,
   ValidationIssue,
 } from './model';
+import type { CellProperties } from './cellProps';
 
 let cellCounter = 0;
 
@@ -56,6 +62,10 @@ export interface LayoutEditorState {
   readonly setModel: (next: LayoutModel) => void;
   /** Rename the layout. */
   readonly setName: (name: string) => void;
+  /** Replace the canvas geometry/cadence (validated live). */
+  readonly setCanvas: (canvas: CanvasModel) => void;
+  /** Seed the cells from a preset (replaces the current cells). */
+  readonly applyPreset: (preset: LayoutPreset) => void;
   /** Select a cell (or clear with `undefined`). */
   readonly select: (id: string | undefined) => void;
   /** Toggle snap-to-grid on/off. */
@@ -75,6 +85,8 @@ export interface LayoutEditorState {
   readonly setFit: (id: string, fit: FitMode) => void;
   /** Set/clear a cell's source binding. */
   readonly bindSource: (id: string, sourceId: string | undefined) => void;
+  /** Replace a cell's full property set (on_loss / appearance / degradation). */
+  readonly setProps: (id: string, props: CellProperties) => void;
   /** Rename a cell. */
   readonly rename: (id: string, label: string) => void;
   /** Reorder a cell within the list (renumbers z). */
@@ -108,6 +120,15 @@ export function useLayoutEditor(initial?: LayoutModel): LayoutEditorState {
 
   const setName = useCallback((name: string): void => {
     setModelState((current) => ({ ...current, name }));
+  }, []);
+
+  const setCanvas = useCallback((canvas: CanvasModel): void => {
+    setModelState((current) => setCanvasOnModel(current, canvas));
+  }, []);
+
+  const applyPreset = useCallback((preset: LayoutPreset): void => {
+    setModelState((current) => applyPresetToModel(current, preset));
+    setSelectedId(undefined);
   }, []);
 
   const setSnapEnabled = useCallback((enabled: boolean): void => {
@@ -158,6 +179,10 @@ export function useLayoutEditor(initial?: LayoutModel): LayoutEditorState {
     [],
   );
 
+  const setProps = useCallback((id: string, props: CellProperties): void => {
+    setModelState((current) => setCellProps(current, id, props));
+  }, []);
+
   const rename = useCallback((id: string, label: string): void => {
     setModelState((current) => setCellLabel(current, id, label));
   }, []);
@@ -192,6 +217,8 @@ export function useLayoutEditor(initial?: LayoutModel): LayoutEditorState {
     isValid: issues.length === 0,
     setModel,
     setName,
+    setCanvas,
+    applyPreset,
     select,
     setSnapEnabled,
     add,
@@ -201,6 +228,7 @@ export function useLayoutEditor(initial?: LayoutModel): LayoutEditorState {
     rotate,
     setFit,
     bindSource,
+    setProps,
     rename,
     reorder,
     moveDown,
