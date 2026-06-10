@@ -78,7 +78,7 @@ IPv6 URLs); the gaps are **defaults, examples, and the SDP/multicast handling th
 The audit's sites become the `IPV6-0..` backlog ([ipv6-first-backlog](../development/ipv6-first-backlog.md)),
 TDD-first, each with an IPv6 (or dual-stack) test. Priority order: (1) the canonical convention +
 this ADR (done in this change); (2) the IPv4-first text in the merged multicast/SAP docs (done here);
-(3) the `is05` SDP parser `IN IP6` support + the unified SDP model from [ADR-0041](ADR-0041.md);
+(3) the `is05` SDP parser `IN IP6` support + the unified SDP model from [ADR-0041](../decisions/ADR-0041.md);
 (4) dual-stack `[::]` binds (control, telemetry, preview, HA); (5) the WHEP answer `IN IP6`; (6) the
 IPv6 multicast join path; (7) IPv6-led example configs. None of these change a data-plane invariant.
 

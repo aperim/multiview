@@ -157,6 +157,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-G002](ADR-G002.md) — TDD-first with a mutation-testing gate and protected tests (anti-reward-hacking)
 - [ADR-G003](ADR-G003.md) — Mandatory adversarial cross-vendor review in a fresh context; human is the final approver
 - [ADR-G004](ADR-G004.md) — Scope discipline, no-silent-suppression, secrets, and supply-chain guardrails for agents
+- [ADR-0044](ADR-0044.md) — Skip the heavy CI matrix on **prose-docs-only** PRs via a fail-safe `dorny/paths-filter` `changes` job: `code = '**'` minus a strict prose allowlist under `predicate-quantifier: every`, so any non-prose file (incl. `docs/api/**` specs, lockfiles, configs, new extensions) keeps `code=true` → full matrix; only `.md`/`.txt`/images/`LICENSE*`/`NOTICE` outside `docs/api/**` can skip. Heavy jobs gate on `code=='true'` (and only on `pull_request`; pushes to `main` always run full); `inclusive-language` + a new dependency-free `docs-sanity` link check always run so docs PRs still get a green signal (and stay required-check-safe if branch protection is added). No code/config/spec/web PR loses any check — only *when* the unchanged jobs run changes *(Accepted)*
 
 ## Broadcast Multiviewer
 

@@ -11,15 +11,117 @@ concurrency:
 
 permissions:
   contents: read
+  # paths-filter reads the PR diff via the API on pull_request events.
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # ── change classification (CI efficiency, ADR-0044) ──────────────────────────
+  # Classify the PR diff as "code" (anything that can affect build/test/lint or a
+  # generated spec) vs "docs-only" (a STRICT prose allowlist). The heavy matrix
+  # below is gated on `code == 'true'`; a docs-only PR skips it and only the
+  # always-run light jobs (inclusive-language, docs-sanity) report green.
+  #
+  # SAFETY: this can only ever SKIP work for a PR whose entire diff is prose docs
+  # that cannot influence the build/test/lint/spec surface. The `code` filter is
+  # built to FAIL SAFE — it matches `**` (every changed file) and then negates
+  # ONLY the strict prose allowlist, under `predicate-quantifier: every`. The
+  # documented effect (see dorny/paths-filter README) is: a changed file makes
+  # `code` true unless it matches one of the prose negations. Therefore ANY file
+  # type we did not explicitly allowlist as prose (a new extension, a dotfile, a
+  # config, a lockfile, a spec under docs/api/**, anything under web/ .github/
+  # xtask/ deploy/ crates/) → `code = true` → the FULL matrix runs. "When in
+  # doubt, run everything" is the default, not the exception.
+  #
+  # On `push` to main (no PR base to diff against) we do NOT gate: the heavy jobs
+  # below also key on `github.event_name == 'pull_request'` so a push always runs
+  # the full matrix. This also means that if branch protection is later added,
+  # required checks on a docs-only PR are satisfied by the always-run light jobs,
+  # while every code PR still runs (and reports) the full set unchanged.
+  changes:
+    name: classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      # 'true' when at least one changed file is NOT in the prose allowlist.
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # Default `some` would treat the leading `!` negations as ordinary
+          # match patterns; `every` makes a file count for `code` only when it
+          # matches `**` AND none of the prose negations — i.e. it is non-prose.
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              # ─── Prose allowlist (negations) — files that CANNOT affect the
+              # build/test/lint/spec surface. Every negation is scoped narrowly:
+              # docs/api/** (the generated OpenAPI/AsyncAPI specs) is NEVER
+              # excluded, and same-extension files that ARE build/test inputs
+              # (proptest-regressions *.txt, bundled crate assets/font licences,
+              # web/ images) stay `code`. When in doubt the file stays `code`.
+              # Verified empirically against all tracked files: the only files
+              # classified docs-only are .md / .txt / images / LICENSE* / NOTICE
+              # outside docs/api/** (see ADR-0044 truth table).
+              #
+              # Markdown prose. docs/!(api)/** excludes the docs tree EXCEPT the
+              # docs/api spec dir, so docs/api/*.md prose pages stay `code` (the
+              # task treats all of docs/api/** as code). No *.md is embedded via
+              # include_str!/bytes! anywhere in this repo (verified).
+              - '!docs/!(api)/**/*.md'
+              - '!docs/*.md'
+              - '!*.md'
+              - '!crates/**/*.md'
+              - '!web/**/*.md'
+              - '!examples/**/*.md'
+              - '!.github/**/*.md'
+              # Plain-text docs + licence/notice in the docs tree (NOT docs/api/)
+              # or at the repo root. Crate/test *.txt (proptest regressions,
+              # bundled font OFL.txt) deliberately stay `code`.
+              - '!docs/!(api)/**/*.txt'
+              - '!docs/*.txt'
+              - '!*.txt'
+              - '!LICENSE'
+              - '!LICENSE-COMMERCIAL'
+              - '!NOTICE'
+              - '!docs/**/LICENSE*'
+              - '!docs/**/NOTICE'
+              # Documentation images in the docs tree (NOT docs/api/) or at the
+              # repo root. Crate/web asset images stay `code` (compiled-in or
+              # part of the SPA build).
+              - '!docs/!(api)/**/*.png'
+              - '!docs/!(api)/**/*.jpg'
+              - '!docs/!(api)/**/*.jpeg'
+              - '!docs/!(api)/**/*.gif'
+              - '!docs/!(api)/**/*.svg'
+              - '!docs/!(api)/**/*.webp'
+              - '!docs/*.png'
+              - '!docs/*.jpg'
+              - '!docs/*.jpeg'
+              - '!docs/*.gif'
+              - '!docs/*.svg'
+              - '!docs/*.webp'
+              - '!*.png'
+              - '!*.jpg'
+              - '!*.jpeg'
+              - '!*.gif'
+              - '!*.svg'
+              - '!*.webp'
+              # docs/api/** (openapi.json/asyncapi.json + the *.md spec pages) is
+              # excluded nowhere above → matches `**`, fails no negation →
+              # `code = true` → spec validation runs. (asyncapi.json is also
+              # include_str!'d into the multiview-control binary.)
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -33,6 +135,8 @@ jobs:
 
   test:
     name: check + test (${{ matrix.os }})
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +184,8 @@ jobs:
   feature-clippy:
     name: feature-gated clippy (${{ matrix.crate }}, ${{ matrix.feature }})
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -147,6 +253,10 @@ jobs:
   asyncapi-validate:
     name: AsyncAPI 3.0 spec validation
     runs-on: ubuntu-latest
+    needs: changes
+    # A docs/api/** spec change keeps `code == 'true'` (the spec is NOT in the
+    # prose allowlist), so this validation always runs whenever a spec moves.
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -162,6 +272,8 @@ jobs:
   deny:
     name: cargo-deny (licenses + advisories)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v4
       # Run cargo-deny on the runner — the action's musl Docker image cannot
@@ -174,6 +286,11 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
+  # ── always-run light jobs ────────────────────────────────────────────────
+  # These run on EVERY push and PR — including docs-only PRs that skip the heavy
+  # matrix above — so a prose-docs PR still gets a real green signal (and stays
+  # safe as a required check if branch protection is later added). They are
+  # intentionally NOT gated on `changes`.
   inclusive-language:
     name: inclusive language
     runs-on: ubuntu-latest
@@ -181,9 +298,25 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/check-inclusive-language.sh
 
+  docs-sanity:
+    name: docs link sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check relative markdown links resolve
+        # Lightweight, dependency-free link check: for every committed Markdown
+        # file, resolve each inline relative link target [..](path) against the
+        # repo and fail if a referenced file/dir is missing. Skips external
+        # (http/https/mailto/tel), in-page anchors (#…), and template/example
+        # placeholders. Catches the common docs-PR breakage (renamed/moved brief
+        # or ADR) without pulling a Node/Ruby link-checker toolchain.
+        run: ./scripts/check-markdown-links.sh
+
   web:
     name: web build
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
