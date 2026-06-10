@@ -1296,6 +1296,29 @@ export interface components {
             kind: "srt";
             /** @description Destination URL. */
             url: string;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description PCM depth: `L24` (Class A interop default) or `L16`. */
+            depth?: string | null;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "aes67";
+            /** @description Display name (no mount/path/url to derive one from). */
+            label: string;
+            /** @description Multicast `group:port` to send to (`[ff3e::1]:5004`). */
+            multicast: string;
+            /**
+             * Format: int32
+             * @description Packet time in milliseconds (`1` = Class A).
+             */
+            ptime_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Optional PTP domain (`0..=127`).
+             */
+            ptp_domain?: number | null;
         };
         /** @description The request envelope for `POST`/`PUT /api/v1/outputs/{id}` (`name` + body). */
         OutputResourceInputDoc: {
@@ -1682,6 +1705,25 @@ export interface components {
             kind: "file";
             /** @description Filesystem path. */
             path: string;
+        } | {
+            /** @enum {string} */
+            kind: "aes67";
+            /**
+             * Format: int32
+             * @description Optional receive jitter-buffer lead in milliseconds (link offset).
+             */
+            link_offset_ms?: number | null;
+            /** @description Optional multicast `group:port` override (`[ff3e::1]:5004`). */
+            multicast?: string | null;
+            /**
+             * Format: int32
+             * @description Optional PTP domain (`0` ST 2110-30-strict, `1..=127` otherwise).
+             */
+            ptp_domain?: number | null;
+            /** @description Static SDP session description (RFC 4566/8866), as text or a URL. */
+            sdp: string;
+            /** @description Optional SAP session id or NMOS sender id for dynamic discovery. */
+            session_id?: string | null;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::SourceRecall`]. */
         SourceRecallDoc: {

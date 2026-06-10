@@ -248,6 +248,7 @@ fn openapi_mirrors_accept_what_the_config_types_accept() {
         json!({ "id": "s", "kind": "rtmp", "url": "rtmp://example.com/live/x" }),
         json!({ "id": "s", "kind": "ndi", "name": "STUDIO (CAM 1)" }),
         json!({ "id": "s", "kind": "file", "path": "/media/loop.ts" }),
+        json!({ "id": "s", "kind": "aes67", "sdp": "v=0\r\n...", "multicast": "[ff3e::1]:5004", "ptp_domain": 0 }),
         json!({
             "id": "s", "kind": "rtsp", "url": "rtsp://h/x",
             "display_name": "Cam",
@@ -275,6 +276,8 @@ fn openapi_mirrors_accept_what_the_config_types_accept() {
         json!({ "kind": "srt", "url": "srt://[2001:db8::3]:7000", "codec": "h264",
                 "gpu_pin": { "vendor": "intel", "stable_id": "pci-0000:00:02.0" },
                 "audio": { "mode": "program" } }),
+        json!({ "kind": "aes67", "label": "PGM AES67", "multicast": "[ff3e::1]:5004",
+                "depth": "L24", "ptime_ms": 1 }),
     ];
     for doc in &outputs {
         let real: Result<multiview_config::Output, _> = serde_json::from_value(doc.clone());

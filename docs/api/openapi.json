@@ -4684,6 +4684,85 @@
                 "description": "Destination URL."
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "AES67 / ST 2110-30 audio-over-IP send (raw PCM multicast, no encode).",
+            "required": [
+              "label",
+              "multicast",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "depth": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "PCM depth: `L24` (Class A interop default) or `L16`."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Always absent for AES67 (raw PCM, no encode stage)."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "aes67"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "description": "Display name (no mount/path/url to derive one from)."
+              },
+              "multicast": {
+                "type": "string",
+                "description": "Multicast `group:port` to send to (`[ff3e::1]:5004`)."
+              },
+              "ptime_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Packet time in milliseconds (`1` = Class A).",
+                "minimum": 0
+              },
+              "ptp_domain": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional PTP domain (`0..=127`).",
+                "minimum": 0
+              }
+            }
           }
         ],
         "description": "`OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body\naccepted by `POST`/`PUT /api/v1/outputs/{id}`."
@@ -5601,6 +5680,58 @@
               "path": {
                 "type": "string",
                 "description": "Filesystem path."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "AES67 / ST 2110-30 audio-over-IP receive (SDP-bound).",
+            "required": [
+              "sdp",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "aes67"
+                ]
+              },
+              "link_offset_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional receive jitter-buffer lead in milliseconds (link offset).",
+                "minimum": 0
+              },
+              "multicast": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional multicast `group:port` override (`[ff3e::1]:5004`)."
+              },
+              "ptp_domain": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional PTP domain (`0` ST 2110-30-strict, `1..=127` otherwise).",
+                "minimum": 0
+              },
+              "sdp": {
+                "type": "string",
+                "description": "Static SDP session description (RFC 4566/8866), as text or a URL."
+              },
+              "session_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional SAP session id or NMOS sender id for dynamic discovery."
               }
             }
           }

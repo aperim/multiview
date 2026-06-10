@@ -780,6 +780,23 @@ pub enum SourceKindDoc {
         /// Filesystem path.
         path: String,
     },
+    /// AES67 / ST 2110-30 audio-over-IP receive (SDP-bound).
+    Aes67 {
+        /// Static SDP session description (RFC 4566/8866), as text or a URL.
+        sdp: String,
+        /// Optional SAP session id or NMOS sender id for dynamic discovery.
+        #[serde(default)]
+        session_id: Option<String>,
+        /// Optional multicast `group:port` override (`[ff3e::1]:5004`).
+        #[serde(default)]
+        multicast: Option<String>,
+        /// Optional receive jitter-buffer lead in milliseconds (link offset).
+        #[serde(default)]
+        link_offset_ms: Option<u32>,
+        /// Optional PTP domain (`0` ST 2110-30-strict, `1..=127` otherwise).
+        #[serde(default)]
+        ptp_domain: Option<u8>,
+    },
 }
 
 /// `OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).
@@ -966,6 +983,31 @@ pub enum OutputBodyDoc {
         /// Video codec.
         codec: String,
         /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// AES67 / ST 2110-30 audio-over-IP send (raw PCM multicast, no encode).
+    Aes67 {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Display name (no mount/path/url to derive one from).
+        label: String,
+        /// Multicast `group:port` to send to (`[ff3e::1]:5004`).
+        multicast: String,
+        /// PCM depth: `L24` (Class A interop default) or `L16`.
+        #[serde(default)]
+        depth: Option<String>,
+        /// Packet time in milliseconds (`1` = Class A).
+        #[serde(default)]
+        ptime_ms: Option<u32>,
+        /// Optional PTP domain (`0..=127`).
+        #[serde(default)]
+        ptp_domain: Option<u8>,
+        /// Always absent for AES67 (raw PCM, no encode stage).
         #[serde(default)]
         gpu_pin: Option<DevicePinDoc>,
         /// Per-output audio selection.
