@@ -93,7 +93,7 @@ export interface paths {
          * `GET /api/v1/config/export` — render the live resource stores as a complete
          *     `multiview.toml` document (ADR-W015).
          * @description Composes the working layout (the id-sorted first layout whose body carries a
-         *     `canvas`) with every stored source/output/overlay into a
+         *     `canvas`) with every stored source/output/overlay/probe into a
          *     [`multiview_config::MultiviewConfig`], validates the whole document, and
          *     returns it as TOML. This closes the management loop honestly today: edit in
          *     the UI → export → persist as the config file → the next start applies it.
@@ -373,6 +373,43 @@ export interface paths {
          *     session (role: write). `204` on success, `404` if unknown.
          */
         delete: operations["program_whep_close"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/probes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/probes` — list all probes (role: read). */
+        get: operations["list_probes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/probes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/probes/{id}` — fetch one probe (role: read; per-object authz). */
+        get: operations["get_probe"];
+        /** `PUT /api/v1/probes/{id}` — replace a probe (role: write; If-Match → 412). */
+        put: operations["update_probe"];
+        /** `POST /api/v1/probes/{id}` — create a probe (role: write; per-object authz). */
+        post: operations["create_probe"];
+        /** `DELETE /api/v1/probes/{id}` — delete a probe (role: administer; If-Match). */
+        delete: operations["delete_probe"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1034,6 +1071,32 @@ export interface components {
          * @enum {string}
          */
         DataKindDoc: "scte35" | "klv";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::DetectionZone` (normalized
+         *     sub-rectangle of a tile, `0.0..=1.0` on both axes).
+         */
+        DetectionZoneDoc: {
+            /**
+             * Format: float
+             * @description Height (fraction of tile height).
+             */
+            h: number;
+            /**
+             * Format: float
+             * @description Width (fraction of tile width).
+             */
+            w: number;
+            /**
+             * Format: float
+             * @description Left edge (fraction of tile width).
+             */
+            x: number;
+            /**
+             * Format: float
+             * @description Top edge (fraction of tile height).
+             */
+            y: number;
+        };
         /** @description An IS-04 **Device**: a logical grouping of senders/receivers on a node. */
         Device: components["schemas"]["ResourceCore"] & {
             /** @description The id of the node hosting this device. */
@@ -1067,6 +1130,22 @@ export interface components {
             changed: string[];
             /** @description Keys present in the old document but not the new (sorted). */
             removed: string[];
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Dwell` (raise/clear debounce
+         *     milliseconds).
+         */
+        DwellDoc: {
+            /**
+             * Format: int32
+             * @description Milliseconds the condition must clear before the alarm **clears**.
+             */
+            down_ms: number;
+            /**
+             * Format: int32
+             * @description Milliseconds the condition must persist before the alarm **raises**.
+             */
+            up_ms: number;
         };
         /**
          * @description `OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).
@@ -1160,6 +1239,37 @@ export interface components {
             body: unknown;
             /** @description Human-friendly name. */
             name: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
+         *     `snake_case`).
+         */
+        LoudnessTargetDoc: {
+            /** @enum {string} */
+            kind: "r128";
+            /**
+             * Format: float
+             * @description Maximum permitted true-peak in dBTP (e.g. `-1.0`).
+             */
+            max_true_peak_dbtp: number;
+            /**
+             * Format: float
+             * @description Integrated-loudness target in LUFS (e.g. `-23.0`).
+             */
+            target_lufs: number;
+        } | {
+            /** @enum {string} */
+            kind: "a85";
+            /**
+             * Format: float
+             * @description Maximum permitted true-peak in dBTP (e.g. `-2.0`).
+             */
+            max_true_peak_dbtp: number;
+            /**
+             * Format: float
+             * @description Integrated-loudness target in LKFS (e.g. `-24.0`).
+             */
+            target_lkfs: number;
         };
         /**
          * @description The media format of a sender/receiver (the IS-04 `format` URN family).
@@ -1376,6 +1486,68 @@ export interface components {
          * @enum {string}
          */
         PinVendorDoc: "nvidia" | "intel" | "amd" | "apple";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::Probe` — the body accepted by
+         *     `POST`/`PUT /api/v1/probes/{id}`.
+         */
+        ProbeBodyDoc: components["schemas"]["ProbeKindDoc"] & {
+            /** @description The cell id this probe watches. */
+            cell: string;
+            /** @description Dwell windows (raise/clear debounce; defaults to 1 s each way). */
+            dwell?: components["schemas"]["DwellDoc"];
+            /** @description Stable probe id; may be omitted (the path id is injected). */
+            id?: string | null;
+            /** @description Whether the alarm latches (held until explicitly reset). */
+            latched?: boolean;
+            /** @description The perceived severity (X.733) asserted when this probe fires. */
+            severity?: components["schemas"]["PerceivedSeverityDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::ProbeKind` (tagged by `kind`,
+         *     `snake_case`, flattened into the probe body).
+         */
+        ProbeKindDoc: {
+            /** @enum {string} */
+            kind: "black";
+            /**
+             * Format: int32
+             * @description Luma ceiling (8-bit, `0..=255`) at or below which a pixel is "black".
+             */
+            luma_threshold: number;
+            /** @description Detection zone within the tile (defaults to the full frame). */
+            zone?: components["schemas"]["DetectionZoneDoc"];
+        } | {
+            /**
+             * Format: int32
+             * @description Inter-frame difference floor (per-mille, `0..=1000`) below which the
+             *     picture counts as frozen.
+             */
+            difference_threshold: number;
+            /** @enum {string} */
+            kind: "freeze";
+            /** @description Detection zone within the tile (defaults to the full frame). */
+            zone?: components["schemas"]["DetectionZoneDoc"];
+        } | {
+            /** @enum {string} */
+            kind: "silence";
+            /**
+             * Format: float
+             * @description Level ceiling in dBFS at or below which audio counts as silent.
+             */
+            level_dbfs: number;
+        } | {
+            /** @enum {string} */
+            kind: "loudness";
+            /** @description The loudness compliance target. */
+            target: components["schemas"]["LoudnessTargetDoc"];
+        };
+        /** @description The request envelope for `POST`/`PUT /api/v1/probes/{id}` (`name` + body). */
+        ProbeResourceInputDoc: {
+            /** @description The probe document. */
+            body: components["schemas"]["ProbeBodyDoc"];
+            /** @description Human-friendly name. */
+            name: string;
+        };
         /**
          * @description An RFC 9457 problem-details document.
          *
@@ -3532,6 +3704,277 @@ export interface operations {
             };
             /** @description No such live focus session. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_probes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All probes, id-sorted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The probe (ETag in the response header). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read this probe. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No probe with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProbeResourceInputDoc"];
+            };
+        };
+        responses: {
+            /** @description The replaced probe (new ETag in the response header). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No probe with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description If-Match precondition failed. */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid probe document (detail names the field path). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProbeResourceInputDoc"];
+            };
+        };
+        responses: {
+            /** @description The created probe (ETag in the response header; X-Multiview-Apply declares how it takes effect). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid probe document (detail names the field path). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The probe was deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to administer. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No probe with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description If-Match precondition failed. */
+            412: {
                 headers: {
                     [name: string]: unknown;
                 };

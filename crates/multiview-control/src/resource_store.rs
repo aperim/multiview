@@ -1,7 +1,7 @@
 //! Generic versioned-document persistence for the simple management resources
-//! (sources, outputs, overlays).
+//! (sources, outputs, overlays, probes).
 //!
-//! These three resources mirror **layouts** exactly: each is stored as an
+//! These resources mirror **layouts** exactly: each is stored as an
 //! opaque, validated document (`id` + `name` + `body`) carrying a monotonic
 //! [`Version`] for `ETag`/`If-Match` optimistic concurrency (ADR-W006). The
 //! `body` is the config-as-code shape (`multiview_config::Source` / `Output` /
@@ -36,6 +36,9 @@ pub const OUTPUT_KIND: &str = "output";
 /// The resource collection name used in problem documents and not-found errors
 /// for the `overlays` resource.
 pub const OVERLAY_KIND: &str = "overlay";
+/// The resource collection name used in problem documents and not-found errors
+/// for the `probes` resource.
+pub const PROBE_KIND: &str = "probe";
 
 /// A marker selecting which resource collection a store serves, supplying the
 /// stable kind name used in errors and audit records.
@@ -63,6 +66,13 @@ impl ResourceKind for OutputKind {
 pub struct OverlayKind;
 impl ResourceKind for OverlayKind {
     const KIND: &'static str = OVERLAY_KIND;
+}
+
+/// The `probes` resource marker (per-cell fail-state detection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeKind;
+impl ResourceKind for ProbeKind {
+    const KIND: &'static str = PROBE_KIND;
 }
 
 /// A persisted management resource: a stable `id`, a display `name`, and the
@@ -169,6 +179,8 @@ pub type InMemorySourceStore = InMemoryResourceStore<SourceKind>;
 pub type InMemoryOutputStore = InMemoryResourceStore<OutputKind>;
 /// An in-memory `overlays` store.
 pub type InMemoryOverlayStore = InMemoryResourceStore<OverlayKind>;
+/// An in-memory `probes` store.
+pub type InMemoryProbeStore = InMemoryResourceStore<ProbeKind>;
 
 impl<K: ResourceKind> Default for InMemoryResourceStore<K> {
     fn default() -> Self {
@@ -276,8 +288,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        InMemoryOutputStore, InMemoryOverlayStore, InMemorySourceStore, ResourceInput,
-        ResourceRepository, OUTPUT_KIND, OVERLAY_KIND, SOURCE_KIND,
+        InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore, InMemorySourceStore,
+        ResourceInput, ResourceRepository, OUTPUT_KIND, OVERLAY_KIND, PROBE_KIND, SOURCE_KIND,
     };
     use crate::concurrency::Version;
     use crate::error::ControlError;
@@ -352,5 +364,6 @@ mod tests {
         assert_eq!(InMemorySourceStore::new().kind(), SOURCE_KIND);
         assert_eq!(InMemoryOutputStore::new().kind(), OUTPUT_KIND);
         assert_eq!(InMemoryOverlayStore::new().kind(), OVERLAY_KIND);
+        assert_eq!(InMemoryProbeStore::new().kind(), PROBE_KIND);
     }
 }

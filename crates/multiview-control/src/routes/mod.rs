@@ -31,6 +31,7 @@ pub mod inputs;
 pub mod outputs;
 pub mod overlays;
 pub mod preview;
+pub mod probes;
 pub mod routing;
 pub mod salvos;
 pub mod sources;
@@ -433,9 +434,11 @@ fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String>
         .map(str::to_owned)
 }
 
-/// Build the `/api/v1` resource + command routes (without the realtime or docs
-/// routes, which are wired by [`crate::router()`]).
-pub fn api_router() -> Router<AppState> {
+/// Build the versioned-document resource CRUD routes (layouts plus the
+/// config-as-code stores: sources, outputs, overlays, probes) and the
+/// read-only input stream inventory. Split from [`api_router`] so each stays
+/// a readable size.
+fn resource_router() -> Router<AppState> {
     Router::new()
         .route("/layouts", get(list_layouts))
         .route(
@@ -475,6 +478,23 @@ pub fn api_router() -> Router<AppState> {
                 .put(overlays::update_overlay)
                 .delete(overlays::delete_overlay),
         )
+        // Probes resource CRUD (per-cell fail-state detection), mirroring
+        // sources.
+        .route("/probes", get(probes::list_probes))
+        .route(
+            "/probes/{id}",
+            get(probes::get_probe)
+                .post(probes::create_probe)
+                .put(probes::update_probe)
+                .delete(probes::delete_probe),
+        )
+}
+
+/// Build the `/api/v1` resource + command routes (without the realtime or docs
+/// routes, which are wired by [`crate::router()`]).
+pub fn api_router() -> Router<AppState> {
+    Router::new()
+        .merge(resource_router())
         .route("/commands/start", post(cmd_start))
         .route("/commands/stop", post(cmd_stop))
         .route("/commands/swap", post(cmd_swap))

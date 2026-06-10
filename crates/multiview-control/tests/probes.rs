@@ -132,11 +132,7 @@ async fn update_with_stale_if_match_is_412() {
     let h = harness();
     send(
         &h.router,
-        post_json(
-            "/api/v1/probes/probe-1",
-            OPERATOR_TOKEN,
-            &probe_body("V1"),
-        ),
+        post_json("/api/v1/probes/probe-1", OPERATOR_TOKEN, &probe_body("V1")),
     )
     .await;
     send(
@@ -175,11 +171,7 @@ async fn update_without_if_match_is_precondition_required() {
     let h = harness();
     send(
         &h.router,
-        post_json(
-            "/api/v1/probes/probe-1",
-            OPERATOR_TOKEN,
-            &probe_body("V1"),
-        ),
+        post_json("/api/v1/probes/probe-1", OPERATOR_TOKEN, &probe_body("V1")),
     )
     .await;
     let resp = send(
@@ -502,4 +494,69 @@ async fn stale_if_match_wins_over_an_invalid_body_on_update() {
         StatusCode::PRECONDITION_FAILED,
         "stale If-Match is reported before body validation"
     );
+}
+
+// ---- OpenAPI mirror drift pins (ADR-W015) ------------------------------------
+
+/// Pin the `OpenAPI` mirror schemas (`openapi_schemas`) to the real
+/// `multiview_config::Probe`: every representative document must be accepted by
+/// BOTH (a mirror that drifts fails here).
+#[test]
+fn openapi_probe_mirror_accepts_what_the_config_type_accepts() {
+    let probes = [
+        json!({ "id": "p", "cell": "c", "kind": "black", "luma_threshold": 16 }),
+        json!({ "id": "p", "cell": "c", "kind": "black", "luma_threshold": 0,
+                "zone": { "x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5 } }),
+        json!({ "id": "p", "cell": "c", "kind": "freeze", "difference_threshold": 5,
+                "dwell": { "up_ms": 3000, "down_ms": 500 } }),
+        json!({ "id": "p", "cell": "c", "kind": "silence", "level_dbfs": -60.0,
+                "severity": "Critical", "latched": true }),
+        json!({ "id": "p", "cell": "c", "kind": "loudness",
+                "target": { "kind": "r128", "target_lufs": -23.0, "max_true_peak_dbtp": -1.0 } }),
+        json!({ "id": "p", "cell": "c", "kind": "loudness",
+                "target": { "kind": "a85", "target_lkfs": -24.0, "max_true_peak_dbtp": -2.0 },
+                "severity": "Minor" }),
+    ];
+    for doc in &probes {
+        let real: Result<multiview_config::Probe, _> = serde_json::from_value(doc.clone());
+        let mirror: Result<multiview_control::openapi_schemas::ProbeBodyDoc, _> =
+            serde_json::from_value(doc.clone());
+        assert!(real.is_ok(), "config rejects {doc}: {:?}", real.err());
+        assert!(mirror.is_ok(), "mirror rejects {doc}: {:?}", mirror.err());
+    }
+}
+
+/// Reject-fixtures: the mirror must REJECT what the config type rejects (the
+/// both-accept fixture alone cannot catch a mirror looser than the real type).
+#[test]
+fn openapi_probe_mirror_rejects_what_the_config_type_rejects() {
+    let bad_probes = [
+        // Unknown kind tag.
+        json!({ "id": "p", "cell": "c", "kind": "sparkle" }),
+        // Luma threshold beyond the u8 scale.
+        json!({ "id": "p", "cell": "c", "kind": "black", "luma_threshold": 256 }),
+        // A zone with an unknown field (DetectionZone is deny_unknown_fields).
+        json!({ "id": "p", "cell": "c", "kind": "black", "luma_threshold": 16,
+                "zone": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "depth": 1.0 } }),
+        // Dwell with an unknown field (Dwell is deny_unknown_fields).
+        json!({ "id": "p", "cell": "c", "kind": "silence", "level_dbfs": -60.0,
+                "dwell": { "up_ms": 1, "down_ms": 1, "sideways_ms": 1 } }),
+        // An unknown severity variant.
+        json!({ "id": "p", "cell": "c", "kind": "silence", "level_dbfs": -60.0,
+                "severity": "Catastrophic" }),
+        // A loudness target with the wrong field for its standard.
+        json!({ "id": "p", "cell": "c", "kind": "loudness",
+                "target": { "kind": "r128", "target_lkfs": -24.0, "max_true_peak_dbtp": -1.0 } }),
+    ];
+    for doc in &bad_probes {
+        assert!(
+            serde_json::from_value::<multiview_config::Probe>(doc.clone()).is_err(),
+            "config must reject {doc}"
+        );
+        assert!(
+            serde_json::from_value::<multiview_control::openapi_schemas::ProbeBodyDoc>(doc.clone())
+                .is_err(),
+            "mirror must reject {doc}"
+        );
+    }
 }

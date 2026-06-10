@@ -273,7 +273,21 @@ impl ProbeKind {
     /// Validate the kind-specific parameters (zone geometry, sane thresholds).
     fn validate(&self, probe_id: &str) -> Result<(), ConfigError> {
         match self {
-            Self::Black { zone, .. } | Self::Freeze { zone, .. } => zone.validate(probe_id),
+            Self::Black { zone, .. } => zone.validate(probe_id),
+            Self::Freeze {
+                difference_threshold,
+                zone,
+            } => {
+                // The threshold is a per-mille of full-scale luma (`0..=1000`);
+                // the u16 representation admits more, so bound it here.
+                if *difference_threshold > 1000 {
+                    return Err(ConfigError::Validation(format!(
+                        "probe {probe_id:?}: freeze difference_threshold must be \
+                         0..=1000 per-mille (got {difference_threshold})"
+                    )));
+                }
+                zone.validate(probe_id)
+            }
             Self::Silence { level_dbfs } => {
                 if !level_dbfs.is_finite() {
                     return Err(ConfigError::Validation(format!(
