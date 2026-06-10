@@ -622,13 +622,151 @@ describe('validateOutputForm', () => {
 describe('OUTPUT_RUNNABLE', () => {
   it('mirrors build_outputs in multiview-cli pipeline.rs', () => {
     // hls / ll_hls / rtmp / srt are runnable today; rtsp_server and ndi are
-    // accepted by config but warned + skipped by build_outputs.
-    expect(OUTPUT_RUNNABLE.hls).toBe(true);
-    expect(OUTPUT_RUNNABLE['ll-hls']).toBe(true);
-    expect(OUTPUT_RUNNABLE.rtmp).toBe(true);
-    expect(OUTPUT_RUNNABLE.srt).toBe(true);
-    expect(OUTPUT_RUNNABLE.rtsp).toBe(false);
-    expect(OUTPUT_RUNNABLE.ndi).toBe(false);
+    // accepted by config but warned + skipped by build_outputs; display is
+    // built by build_outputs ONLY in a `display-kms` build (a default build
+    // fails the run with a clear error rather than skipping it — DEV-B1).
+    expect(OUTPUT_RUNNABLE.hls).toBe('runnable');
+    expect(OUTPUT_RUNNABLE['ll-hls']).toBe('runnable');
+    expect(OUTPUT_RUNNABLE.rtmp).toBe('runnable');
+    expect(OUTPUT_RUNNABLE.srt).toBe('runnable');
+    expect(OUTPUT_RUNNABLE.rtsp).toBe('unbuilt');
+    expect(OUTPUT_RUNNABLE.ndi).toBe('unbuilt');
+    expect(OUTPUT_RUNNABLE.display).toBe('requires-feature');
+  });
+});
+
+describe('display output form (DEV-B1 / ADR-0044)', () => {
+  it('builds a minimal display body (connector only, no codec field)', () => {
+    const body = outputFormToBody(outputForm({ kind: 'display', connector: 'DP-1' }));
+    expect(body).toEqual({ kind: 'display', connector: 'DP-1' });
+  });
+
+  it('builds the mode override table from the exact-rational refresh', () => {
+    const body = outputFormToBody(
+      outputForm({
+        kind: 'display',
+        connector: 'HDMI-A-1',
+        displayModeChoice: 'override',
+        displayModeWidth: '1920',
+        displayModeHeight: '1080',
+        displayModeRefresh: '60000/1001',
+      }),
+    );
+    expect(body).toEqual({
+      kind: 'display',
+      connector: 'HDMI-A-1',
+      mode: { width: 1920, height: 1080, refresh: '60000/1001' },
+    });
+  });
+
+  it('builds the forced_mode table for EDID-less heads, normalizing integer refresh', () => {
+    const body = outputFormToBody(
+      outputForm({
+        kind: 'display',
+        connector: 'DP-2',
+        displayModeChoice: 'forced',
+        displayModeWidth: '1920',
+        displayModeHeight: '1080',
+        displayModeRefresh: '50',
+      }),
+    );
+    expect(body).toEqual({
+      kind: 'display',
+      connector: 'DP-2',
+      forced_mode: { width: 1920, height: 1080, refresh: '50/1' },
+    });
+  });
+
+  it('round-trips a stored display record including mode + advanced fields', () => {
+    const form = defined(
+      outputFormFromRecord({
+        id: 'output-3',
+        name: 'Left monitor',
+        body: {
+          kind: 'display',
+          connector: 'DP-1',
+          mode: { width: 1920, height: 1080, refresh: '60000/1001' },
+          audio: { mode: 'program', tracks: [] },
+          gpu_pin: { vendor: 'amd', stable_id: '0000:00:01.0' },
+        },
+      }),
+    );
+    expect(form.kind).toBe('display');
+    expect(form.connector).toBe('DP-1');
+    expect(form.displayModeChoice).toBe('override');
+    expect(form.displayModeWidth).toBe('1920');
+    expect(form.displayModeHeight).toBe('1080');
+    expect(form.displayModeRefresh).toBe('60000/1001');
+    expect(form.audioMode).toBe('program');
+    expect(form.gpuPinEnabled).toBe(true);
+    expect(outputFormToBody(form)).toMatchObject({
+      kind: 'display',
+      connector: 'DP-1',
+      mode: { width: 1920, height: 1080, refresh: '60000/1001' },
+      audio: { mode: 'program', tracks: [] },
+      gpu_pin: { vendor: 'amd', stable_id: '0000:00:01.0' },
+    });
+  });
+
+  it('round-trips a forced_mode record onto the forced choice', () => {
+    const form = defined(
+      outputFormFromRecord({
+        id: 'output-4',
+        name: 'EDID-less head',
+        body: {
+          kind: 'display',
+          connector: 'DP-2',
+          forced_mode: { width: 1920, height: 1080, refresh: '50/1' },
+        },
+      }),
+    );
+    expect(form.displayModeChoice).toBe('forced');
+    expect(form.displayModeRefresh).toBe('50/1');
+    expect(outputFormToBody(form)).toEqual({
+      kind: 'display',
+      connector: 'DP-2',
+      forced_mode: { width: 1920, height: 1080, refresh: '50/1' },
+    });
+  });
+
+  it('validates the connector and the mode fields', () => {
+    expect(
+      validateOutputForm(outputForm({ kind: 'display', connector: '  ' }), true).connector,
+    ).toBe('required');
+    const bad = validateOutputForm(
+      outputForm({
+        kind: 'display',
+        connector: 'DP-1',
+        displayModeChoice: 'override',
+        displayModeWidth: '0',
+        displayModeHeight: '',
+        displayModeRefresh: '59.94',
+      }),
+      true,
+    );
+    expect(bad.displayModeWidth).toBe('positive-int');
+    expect(bad.displayModeHeight).toBe('positive-int');
+    // A float refresh is rejected: refresh is an exact-rational string
+    // (`60000/1001`) or a bare integer, never a float (invariant #3).
+    expect(bad.displayModeRefresh).toBe('rational-fps');
+    // A display output never carries a codec; codec validation must not fire.
+    expect(bad.codec).toBeUndefined();
+  });
+
+  it('passes a complete, correct display form', () => {
+    expect(
+      validateOutputForm(
+        outputForm({
+          kind: 'display',
+          connector: 'auto',
+          displayModeChoice: 'forced',
+          displayModeWidth: '1920',
+          displayModeHeight: '1080',
+          displayModeRefresh: '60000/1001',
+        }),
+        true,
+      ),
+    ).toEqual({});
   });
 });
 
