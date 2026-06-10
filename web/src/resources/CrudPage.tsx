@@ -15,6 +15,7 @@ import { Pencil, Plus, Trash2 } from 'lucide-react';
 import type { ColumnDef } from '@tanstack/react-table';
 
 import { getResource } from './api';
+import type { ApplySemantics } from './api';
 import { useDeleteResource, useSaveResource } from './queries';
 import type { ResourceContext, SaveResourceVars } from './queries';
 import type { ResourceKind, ResourceRecord } from './types';
@@ -133,8 +134,15 @@ export interface CrudPageProps<View, Form, Field extends string> {
   readonly headerExtras?: ReactNode;
   /** An informational callout rendered above the table (apply semantics). */
   readonly callout?: ReactNode;
-  /** The success-toast description (the honest apply-semantics line). */
-  readonly savedDescription: string;
+  /**
+   * The success-toast description (the honest apply-semantics line). A
+   * function receives the save response's `X-Multiview-Apply` semantics
+   * (ADR-W018) so the toast states how THIS save actually applied — `live`
+   * (running engine, frame boundary) vs `restart` (config export + restart).
+   */
+  readonly savedDescription:
+    | string
+    | ((apply: ApplySemantics | undefined) => string);
   readonly deletedDescription: string;
   readonly columns: (
     onEdit: (row: View) => void,
@@ -231,10 +239,13 @@ export function CrudPage<View, Form, Field extends string>(
       return;
     }
     save.mutate(props.toSaveVars(form, creating), {
-      onSuccess: (): void => {
+      onSuccess: (saved): void => {
         toast({
           title: creating ? t`Created` : t`Saved`,
-          description: props.savedDescription,
+          description:
+            typeof props.savedDescription === 'function'
+              ? props.savedDescription(saved.apply)
+              : props.savedDescription,
         });
         closeForm();
       },

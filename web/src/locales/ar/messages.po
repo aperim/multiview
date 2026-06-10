@@ -337,7 +337,7 @@ msgstr ""
 
 #: src/pages/docs/FeaturesPage.tsx:53
 #: src/pages/SourcesPage.tsx:513
-#: src/pages/SourcesPage.tsx:588
+#: src/pages/SourcesPage.tsx:600
 msgid "About source transports"
 msgstr ""
 
@@ -606,6 +606,10 @@ msgstr ""
 msgid "Apple"
 msgstr ""
 
+#: src/pages/SourcesPage.tsx:546
+msgid "Applied to the running engine immediately (the response declared live apply)."
+msgstr ""
+
 #: src/pages/LayoutsPage.tsx:101
 msgid "Apply"
 msgstr ""
@@ -827,8 +831,8 @@ msgstr ""
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
 #: src/pages/TallyPage.tsx:432
-#: src/resources/CrudPage.tsx:342
-#: src/resources/CrudPage.tsx:387
+#: src/resources/CrudPage.tsx:353
+#: src/resources/CrudPage.tsx:398
 msgid "Cancel"
 msgstr ""
 
@@ -1197,11 +1201,11 @@ msgstr ""
 msgid "Could not apply layout"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:243
+#: src/resources/CrudPage.tsx:254
 msgid "Could not create"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:262
+#: src/resources/CrudPage.tsx:273
 msgid "Could not delete"
 msgstr ""
 
@@ -1225,7 +1229,7 @@ msgstr ""
 msgid "Could not load alarms:"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:210
+#: src/resources/CrudPage.tsx:218
 msgid "Could not load for editing"
 msgstr ""
 
@@ -1273,7 +1277,7 @@ msgstr ""
 msgid "Could not reach the control plane. Is it running?"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:243
+#: src/resources/CrudPage.tsx:254
 msgid "Could not save"
 msgstr ""
 
@@ -1309,7 +1313,7 @@ msgstr ""
 msgid "CPU utilisation trend: ours over host total"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:345
+#: src/resources/CrudPage.tsx:356
 msgid "Create"
 msgstr ""
 
@@ -1321,7 +1325,7 @@ msgstr ""
 msgid "Create your first salvo"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:236
+#: src/resources/CrudPage.tsx:244
 msgid "Created"
 msgstr ""
 
@@ -1429,8 +1433,8 @@ msgstr ""
 #: src/pages/SalvosPage.tsx:436
 #: src/pages/TallyPage.tsx:392
 #: src/pages/TallyPage.tsx:435
-#: src/resources/CrudPage.tsx:109
-#: src/resources/CrudPage.tsx:394
+#: src/resources/CrudPage.tsx:110
+#: src/resources/CrudPage.tsx:405
 msgid "Delete"
 msgstr ""
 
@@ -1474,11 +1478,11 @@ msgstr ""
 msgid "Delete tally profile?"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:364
+#: src/resources/CrudPage.tsx:375
 msgid "Delete this resource?"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:258
+#: src/resources/CrudPage.tsx:269
 msgid "Deleted"
 msgstr ""
 
@@ -1581,7 +1585,7 @@ msgstr ""
 msgid "e.g. black-cam-1"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:565
+#: src/pages/SourcesPage.tsx:577
 msgid "e.g. cam-north"
 msgstr ""
 
@@ -1652,7 +1656,7 @@ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:106
 #: src/pages/SalvosPage.tsx:296
-#: src/resources/CrudPage.tsx:97
+#: src/resources/CrudPage.tsx:98
 msgid "Edit"
 msgstr ""
 
@@ -1869,7 +1873,7 @@ msgstr ""
 msgid "Fit"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:337
+#: src/resources/CrudPage.tsx:348
 msgid "Fix the highlighted fields, then save again."
 msgstr ""
 
@@ -2188,7 +2192,7 @@ msgstr ""
 #: src/pages/ProbesPage.tsx:520
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
-#: src/pages/SourcesPage.tsx:561
+#: src/pages/SourcesPage.tsx:573
 #: src/pages/TallyPage.tsx:364
 msgid "Identifier"
 msgstr ""
@@ -2290,7 +2294,7 @@ msgstr ""
 #: src/pages/ProbesPage.tsx:419
 #: src/pages/ProbesPage.tsx:542
 #: src/pages/SourcesPage.tsx:457
-#: src/pages/SourcesPage.tsx:582
+#: src/pages/SourcesPage.tsx:594
 msgid "Kind"
 msgstr ""
 
@@ -2777,7 +2781,7 @@ msgstr ""
 #: src/pages/ProbesPage.tsx:532
 #: src/pages/SalvosPage.tsx:210
 #: src/pages/SourcesPage.tsx:452
-#: src/pages/SourcesPage.tsx:573
+#: src/pages/SourcesPage.tsx:585
 #: src/pages/TallyPage.tsx:241
 msgid "Name"
 msgstr ""
@@ -2981,7 +2985,7 @@ msgstr ""
 msgid "None needed"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:201
+#: src/resources/CrudPage.tsx:209
 msgid "Not editable in this UI"
 msgstr ""
 
@@ -2990,7 +2994,11 @@ msgstr ""
 #~ msgstr ""
 
 #: src/pages/SourcesPage.tsx:83
-msgid "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgid "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgstr ""
+
+#: src/pages/SourcesPage.tsx:83
+msgid "Not in the running engine — no live state. Synthetic, network and file sources join a running full engine when saved; NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:252
@@ -3395,7 +3403,7 @@ msgstr ""
 msgid "Removed from the store. The running engine is unchanged until a config export + restart."
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:541
+#: src/pages/SourcesPage.tsx:553
 msgid "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
 msgstr ""
 
@@ -3562,7 +3570,7 @@ msgstr ""
 
 #: src/pages/SalvosPage.tsx:398
 #: src/pages/SettingsPage.tsx:118
-#: src/resources/CrudPage.tsx:345
+#: src/resources/CrudPage.tsx:356
 msgid "Save"
 msgstr ""
 
@@ -3580,13 +3588,17 @@ msgstr ""
 msgid "Save layout"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:236
+#: src/resources/CrudPage.tsx:244
 msgid "Saved"
 msgstr ""
 
 #. placeholder {0}: result.filename
 #: src/resources/FormControls.tsx:376
 msgid "Saved as {0}. Restart Multiview with this file to apply stored changes."
+msgstr ""
+
+#: src/pages/SourcesPage.tsx:530
+msgid "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
 msgstr ""
 
 #: src/layout/components/GridLayoutEditor.tsx:268
@@ -3805,7 +3817,15 @@ msgid "Stored. It goes live via config export + restart; the running engine is u
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:540
-msgid "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
+#~ msgid "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
+#~ msgstr ""
+
+#: src/pages/SourcesPage.tsx:548
+msgid "Stored. The running engine cannot apply this kind live on this run; it goes live via config export + restart."
+msgstr ""
+
+#: src/pages/SourcesPage.tsx:550
+msgid "Stored. The save response declared no apply semantics; it goes live at the latest via config export + restart."
 msgstr ""
 
 #: src/pages/docs/concepts/GlossaryPage.tsx:40
@@ -3849,8 +3869,8 @@ msgid "Switch the interface language and text direction."
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:530
-msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
-msgstr ""
+#~ msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
+#~ msgstr ""
 
 #: src/app/navigation.tsx:47
 #: src/pages/SystemPage.tsx:236
@@ -4226,7 +4246,7 @@ msgstr ""
 msgid "This control plane does not serve config export yet. Update the server to use it."
 msgstr ""
 
-#: src/resources/CrudPage.tsx:202
+#: src/resources/CrudPage.tsx:210
 msgid "This entry's kind has no form here; the stored document is preserved as authored."
 msgstr ""
 
@@ -4290,7 +4310,7 @@ msgstr ""
 msgid "This permanently removes the salvo definition."
 msgstr ""
 
-#: src/resources/CrudPage.tsx:367
+#: src/resources/CrudPage.tsx:378
 msgid "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 msgstr ""
 
@@ -4303,7 +4323,11 @@ msgstr ""
 #~ msgstr ""
 
 #: src/pages/SourcesPage.tsx:79
-msgid "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgid "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgstr ""
+
+#: src/pages/SourcesPage.tsx:79
+msgid "This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:170

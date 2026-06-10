@@ -76,14 +76,14 @@ function SourceStatusCell({ tile }: { readonly tile: LiveTile | undefined }): JS
     return (
       <span
         className="text-sm text-muted-foreground"
-        title={t`This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart.`}
+        title={t`This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart.`}
       >
         <span aria-hidden="true">—</span>
         <span className="sr-only">
           <Trans>
-            Not in the running engine — no live state. Synthetic sources join
-            live once a tile binds them; other kinds join after a config export
-            + restart.
+            Not in the running engine — no live state. Synthetic, network and
+            file sources join a running full engine when saved; NDI, YouTube
+            and AES67 sources join after a config export + restart.
           </Trans>
         </span>
       </span>
@@ -528,16 +528,28 @@ export function SourcesPage(): JSX.Element {
           helpLabel={t`How configuration applies`}
           message={
             <Trans>
-              Synthetic sources (bars, solid colour, clock) apply to the running
-              engine immediately when saved, and deleting any source removes it
-              from the running engine immediately. Network and file sources are
-              stored and go live via config export + restart. Each save response
-              declares which applied (X-Multiview-Apply: live or restart).
+              Saves apply to the running engine immediately where it can ingest
+              the kind: synthetic sources (bars, solid colour, clock) always,
+              and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a
+              full engine run. NDI, YouTube and AES67 sources — and every kind
+              on a software run — are stored and go live via config export +
+              restart. Deleting any source removes it from the running engine
+              immediately. Each save response declares which applied
+              (X-Multiview-Apply: live or restart); the save toast echoes it.
             </Trans>
           }
         />
       }
-      savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart.`}
+      savedDescription={(apply): string => {
+        switch (apply) {
+          case 'live':
+            return t`Applied to the running engine immediately (the response declared live apply).`;
+          case 'restart':
+            return t`Stored. The running engine cannot apply this kind live on this run; it goes live via config export + restart.`;
+          default:
+            return t`Stored. The save response declared no apply semantics; it goes live at the latest via config export + restart.`;
+        }
+      }}
       deletedDescription={t`Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed.`}
       list={sources.data ?? []}
       isPending={sources.isPending}

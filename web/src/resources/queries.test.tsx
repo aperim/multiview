@@ -280,7 +280,7 @@ describe('useSaveResource', () => {
     });
     expect(lastMethod).toBe('POST');
     expect(lastPath).toBe('/api/v1/sources/cam-1');
-    expect(saved.id).toBe('cam-1');
+    expect(saved.record.id).toBe('cam-1');
     expect(lastBody).toEqual({ name: 'Cam 1', body: { kind: 'rtsp', url: 'rtsp://h/1' } });
   });
 
