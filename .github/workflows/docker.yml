@@ -33,6 +33,11 @@ jobs:
   # ── per (variant, arch) build → push by digest ──────────────────────────────
   build:
     name: build (${{ matrix.variant }}/${{ matrix.arch }})
+    # Heaviest leg in the repo: a full multi-stage Docker build (cargo release
+    # build of the whole workspace inside the image) + push by digest, on native
+    # amd64/arm64 runners. A cold build cache + arm64 native runner can run long;
+    # 90min is generous headroom while still capping a wedged runner far below 6h.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -125,6 +130,10 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    # No image build — imagetools manifest create + provenance/SBOM verify +
+    # attest + keyless cosign sign. Network/registry-bound (a few min); 30min
+    # absorbs a slow registry round-trip while failing a wedge fast.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

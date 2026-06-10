@@ -23,6 +23,11 @@ permissions:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    # Per-target release build: FFmpeg install (apt PPA / brew) + a `--release
+    # --locked` cargo build, plus (macOS) codesign + notarytool --wait, which can
+    # block on Apple's notarization service. 60min covers a cold cache + a slow
+    # notarization round-trip while still capping a wedged runner well under 6h.
+    timeout-minutes: 60
     permissions:
       contents: write # attach assets to the Release
       id-token: write # provenance attestation
