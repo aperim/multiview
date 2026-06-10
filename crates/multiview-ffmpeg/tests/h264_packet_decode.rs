@@ -311,7 +311,7 @@ fn non_vcl_spam_keeps_the_pending_buffer_bounded() {
     // 64 KiB SEI NAL (type 6): header 0x06 + payload. 400 pushes ≈ 25 MiB —
     // far past the 8 MiB cap if nothing bounds the non-VCL path.
     let mut sei = vec![0x06u8];
-    sei.extend(std::iter::repeat(0xAA).take(64 * 1024));
+    sei.extend(std::iter::repeat_n(0xAA, 64 * 1024));
     for i in 0..400 {
         dec.push(&sei, Some(i)).unwrap();
         assert!(

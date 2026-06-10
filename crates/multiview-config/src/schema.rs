@@ -855,9 +855,11 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
         /// The **program rendition to consume** — not an encode to spawn
-        /// (ADR-0049). `"h264"` is the only v1 value (default); the consumed
-        /// rendition must carry B-frames off + repeat-headers on, validated at
-        /// config-file load.
+        /// (ADR-0049). `"h264"` is the only v1 value (default; enforced by
+        /// `Output::validate`). ADR-0049 additionally requires the consumed
+        /// rendition to carry B-frames off + repeat-headers on — enforced
+        /// where the encoder settings live (the cli rendition builder), since
+        /// this schema has no rendition-settings surface to check.
         #[serde(
             default = "default_webrtc_codec",
             skip_serializing_if = "is_default_webrtc_codec"

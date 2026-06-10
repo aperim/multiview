@@ -157,8 +157,16 @@ impl H264PacketDecoder {
             }
             if self.pending.len().saturating_add(nal.len()) > MAX_PENDING_AU_BYTES {
                 // Drop-never-grow: a boundary-free pusher gets the oversized
-                // AU submitted at the cap; the decoder conceals.
+                // AU submitted at the cap (the decoder conceals). A pending
+                // buffer with NO VCL cannot be submitted (libav rejects
+                // slice-less packets), so an over-cap non-VCL head — SEI /
+                // parameter-set spam — is DROPPED outright instead; holding it
+                // would grow without bound.
                 self.submit_pending()?;
+                if !self.pending_has_vcl {
+                    self.pending.clear();
+                    self.pending_pts = None;
+                }
             }
             if self.pending.is_empty() {
                 self.pending_pts = raw_pts;
@@ -170,6 +178,14 @@ impl H264PacketDecoder {
             }
         }
         Ok(())
+    }
+
+    /// Bytes currently buffered in the pending (not-yet-submitted) access
+    /// unit. Observability for telemetry and the bounded-memory contract:
+    /// always `<=` [`MAX_PENDING_AU_BYTES`] plus one in-flight NAL.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     /// Pull the next decoded frame (NV12, SPS geometry, VUI colour), or
@@ -196,8 +212,10 @@ impl H264PacketDecoder {
     /// Submit the pending access unit to libav as one packet, stamped with the
     /// AU's raw PTS. A pending buffer with **no** VCL NAL is *not* submitted:
     /// libav rejects slice-less packets (`"no frame!"`), and loose parameter
-    /// sets belong to the *next* access unit — they stay pending (or, at EOF,
-    /// are dropped: there is nothing they could decode).
+    /// sets belong to the *next* access unit — they stay pending up to
+    /// [`MAX_PENDING_AU_BYTES`] (past the cap, [`Self::push`] drops the
+    /// non-VCL head; at EOF they are dropped: there is nothing they could
+    /// decode).
     fn submit_pending(&mut self) -> Result<()> {
         if !self.pending_has_vcl {
             // Parameter sets / SEI only: keep them as the head of the next AU
@@ -224,8 +242,9 @@ fn is_vcl(nal: &[u8]) -> bool {
 /// Whether this NAL starts a **new** access unit when it follows a VCL NAL
 /// (H.264 §7.4.1.2.3/.4):
 ///
-/// * SEI (6), SPS (7), PPS (8), AUD (9) — and the 10/11 end-of-seq/stream
-///   delimiters — always precede the next AU's slices;
+/// * SEI (6), SPS (7), PPS (8), AUD (9) always precede the next AU's slices;
+///   end-of-sequence/stream (10/11) *terminate the current* AU (§7.4.1.2.3) —
+///   grouping them with the close boundary yields the same AU submissions;
 /// * a VCL NAL whose `first_mb_in_slice == 0` starts a new picture. The field
 ///   is the slice header's leading `ue(v)`; the value 0 codes as a single `1`
 ///   bit, so the test is the MSB of the first payload byte.
