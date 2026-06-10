@@ -426,7 +426,10 @@ async fn source_candidates_returns_declared_projection_for_known_device() {
     seed_device(&h, "dev-foyer").await;
     let resp = send(
         &h.router,
-        get("/api/v1/devices/dev-foyer/source-candidates", OPERATOR_TOKEN),
+        get(
+            "/api/v1/devices/dev-foyer/source-candidates",
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -455,10 +458,7 @@ async fn projection_of_unknown_device_is_404() {
     let h = harness();
     let resp = send(
         &h.router,
-        get(
-            "/api/v1/devices/missing/source-candidates",
-            OPERATOR_TOKEN,
-        ),
+        get("/api/v1/devices/missing/source-candidates", OPERATOR_TOKEN),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

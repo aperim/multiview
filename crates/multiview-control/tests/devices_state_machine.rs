@@ -43,7 +43,11 @@ fn online_to_degraded_on_device_fault_and_back_on_recover() {
     lc.apply(LifecycleEvent::DeviceFault);
     assert_eq!(lc.state(), DeviceState::Degraded);
     lc.apply(LifecycleEvent::Recover);
-    assert_eq!(lc.state(), DeviceState::Online, "DEGRADED recovers to ONLINE");
+    assert_eq!(
+        lc.state(),
+        DeviceState::Online,
+        "DEGRADED recovers to ONLINE"
+    );
 }
 
 #[test]

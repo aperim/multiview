@@ -57,7 +57,11 @@ async fn resume_after_gap_replays_lifecycle_losslessly() {
         d_mode.envelope.payload
     );
 
-    let d_removed = session.next_delta().await.unwrap().expect("removed replays");
+    let d_removed = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("removed replays");
     assert!(
         matches!(d_removed.envelope.payload, Event::DeviceRemoved(_)),
         "device.removed replays after the gap, got {:?}",
@@ -88,14 +92,13 @@ async fn resume_after_gap_excludes_conflated_status_from_the_ring() {
     // the lossless lifecycle event (`device.error`) is delivered.
     let mut delivered: Vec<&'static str> = Vec::new();
     for _ in 0..8 {
-        match session.next_delta().await.unwrap() {
-            Some(frame) => match frame.envelope.payload {
+        if let Some(frame) = session.next_delta().await.unwrap() {
+            match frame.envelope.payload {
                 Event::DeviceStatus(_) => delivered.push("device.status"),
                 Event::DeviceError(_) => delivered.push("device.error"),
                 Event::DeviceAdopted(_) => delivered.push("device.adopted"),
                 _ => delivered.push("other"),
-            },
-            None => {}
+            }
         }
     }
     assert!(
@@ -109,7 +112,9 @@ async fn resume_after_gap_excludes_conflated_status_from_the_ring() {
 
     // The fresh snapshot the resuming client rebuilds from carries the LATEST
     // conflated status (latest-wins), not a stale gap sample.
-    let snap = registry.snapshot("dev-a").expect("a snapshot for the live device");
+    let snap = registry
+        .snapshot("dev-a")
+        .expect("a snapshot for the live device");
     assert_eq!(
         snap.state,
         DeviceState::Online,
@@ -143,7 +148,11 @@ async fn fresh_connection_delivers_a_device_snapshot_then_live_status_deltas() {
 
     // A live status sample after connect flows through as a delta.
     broadcaster.status("dev-a", DeviceState::Degraded);
-    let d = session.next_delta().await.unwrap().expect("a live status delta");
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("a live status delta");
     assert!(matches!(d.envelope.payload, Event::DeviceStatus(_)));
 }
 

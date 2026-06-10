@@ -63,7 +63,11 @@ async fn create_then_get_round_trips_with_etag() {
 #[tokio::test]
 async fn get_unknown_group_is_404_problem_json() {
     let h = harness();
-    let resp = send(&h.router, get("/api/v1/sync-groups/missing", OPERATOR_TOKEN)).await;
+    let resp = send(
+        &h.router,
+        get("/api/v1/sync-groups/missing", OPERATOR_TOKEN),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let problem = body_json(resp).await;
     assert_eq!(problem["status"], 404);
@@ -138,13 +142,21 @@ async fn delete_requires_admin_and_if_match() {
     .await;
     let resp = send(
         &h.router,
-        delete_if_match("/api/v1/sync-groups/lobby-wall", OPERATOR_TOKEN, Some("W/\"1\"")),
+        delete_if_match(
+            "/api/v1/sync-groups/lobby-wall",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let resp = send(
         &h.router,
-        delete_if_match("/api/v1/sync-groups/lobby-wall", ADMIN_TOKEN, Some("W/\"1\"")),
+        delete_if_match(
+            "/api/v1/sync-groups/lobby-wall",
+            ADMIN_TOKEN,
+            Some("W/\"1\""),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);

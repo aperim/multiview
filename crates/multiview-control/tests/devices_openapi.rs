@@ -1,4 +1,4 @@
-//! OpenAPI registration assertions for the Devices + sync-groups surface
+//! `OpenAPI` registration assertions for the Devices + sync-groups surface
 //! (ADR-M008/M009/W017): every route and request/response schema must be in the
 //! generated 3.1 document so the SPA's generated client (DEV-A6) sees them.
 #![allow(
