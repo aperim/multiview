@@ -69,6 +69,10 @@ off-by-default Cargo features** so the default `cargo check` builds the pure-Rus
 **Dependency direction:** `core` ← everything; leaf crates depend on `core` (+ `hal`, `ffmpeg`,
 `events` as needed); `engine` depends on the media crates; `control`/`preview` depend on `engine` +
 `events`; `webrtc` depends on `preview` + `input` (+ `core`); `cli` depends on all. No cycles.
+Documented exception: `config` depends on `overlay` for the shared IANA-timezone model
+(`clock::{parse_tz, resolve_offset, WallTime}`) that both config validation (clock/timer sources,
+ADR-0047) and render-time consume — one source of truth for DST math; acyclic. If a third consumer
+appears, the tz module's long-term home is `core`.
 
 ---
 

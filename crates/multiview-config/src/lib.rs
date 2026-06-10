@@ -1076,8 +1076,13 @@ impl Source {
     ///
     /// The one current advisory: when a clock sets **both** `timezone` (IANA) and
     /// `tz_offset_minutes`, the IANA zone wins (DST-correct per instant) and the
-    /// fixed offset is ignored — surfaced here so the operator/UI can flag the
-    /// redundant field without failing the config (both-present is legal).
+    /// fixed offset is ignored — both-present is legal, never an error.
+    ///
+    /// Surfacing: `multiview validate` renders each advisory as a `WARN` line in
+    /// its report, and `multiview run` emits each via `tracing::warn!` at startup
+    /// (both through the cli's `config_warnings` collector). The control API's
+    /// typed validation rejects invalid bodies but carries no warnings channel,
+    /// so advisories are not part of REST responses today.
     #[must_use]
     pub fn clock_warnings(&self) -> Vec<String> {
         let mut out = Vec::new();

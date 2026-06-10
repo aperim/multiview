@@ -598,6 +598,9 @@ fn load_subtitles(path: &Path) -> anyhow::Result<multiview_overlay::subtitle::Cu
 }
 
 /// Load and validate a config, failing with a clear error if it is invalid.
+/// Non-fatal advisories (e.g. a clock setting both `timezone` and
+/// `tz_offset_minutes`) are surfaced to the operator via `tracing::warn!`
+/// before the engine starts — they never fail the load.
 fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
@@ -606,5 +609,8 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
     config
         .validate()
         .with_context(|| format!("validating config {}", path.display()))?;
+    for warning in multiview_cli::validate::config_warnings(&config) {
+        tracing::warn!(advisory = %warning, "config advisory");
+    }
     Ok(config)
 }

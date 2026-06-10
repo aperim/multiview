@@ -1292,20 +1292,30 @@ segment_ms = 1000
     #[cfg(feature = "overlay")]
     #[test]
     fn show_offset_badge_differs_across_a_dst_boundary_for_one_zone() {
-        // Same Sydney clock, two instants either side of the austral DST change:
-        // the resolved offset (UTC+11:00 vs UTC+10:00) changes the badge text, so
-        // the rendered strip must differ. Inject both instants (deterministic).
+        // Two checks, both deterministic (injected instants, no system clock):
+        //
+        // 1. The badge block DRAWS: at the SAME instant, `show_offset: true` vs
+        //    `false` must render different planes (the `labeled_clock_differs_
+        //    from_unlabeled` pattern — comparing across instants is tautological
+        //    because the displayed time itself changes). A label is set on BOTH
+        //    renders so the metadata strip is reserved either way (`has_strip`
+        //    depends on the flag); the only delta is the badge glyphs themselves,
+        //    so deleting the badge-draw block fails this assert. Checked at BOTH
+        //    DST states so the badge is proven in summer and winter alike.
+        //
+        // 2. The badge TEXT follows DST: the resolved Sydney offset reads
+        //    UTC+11:00 in the austral summer and UTC+10:00 in winter.
         let c = canvas();
         let syd = multiview_overlay::clock::parse_tz("Australia/Sydney").expect("zone");
-        let make = |unix: i64| {
+        let make = |unix: i64, show_offset: bool| {
             render(
                 &SyntheticKind::Clock {
                     mode: ClockFaceMode::Dual,
                     twelve_hour: false,
                     tz: Some(syd),
                     tz_offset_minutes: 0,
-                    label: None,
-                    show_offset: true,
+                    label: Some("Sydney".to_owned()),
+                    show_offset,
                     show_reference: false,
                     numerals: false,
                 },
@@ -1316,13 +1326,63 @@ segment_ms = 1000
             )
             .expect("sydney clock")
         };
-        // 2026-01-15 00:00 UTC (DST, +11) vs 2026-07-15 00:00 UTC (standard, +10).
-        let jan = make(1_768_435_200);
-        let jul = make(1_784_073_600);
+        // 2026-01-15 00:00 UTC (DST, +11) and 2026-07-15 00:00 UTC (standard, +10).
+        let jan = 1_768_435_200_i64;
+        let jul = 1_784_073_600_i64;
+        for at in [jan, jul] {
+            assert_ne!(
+                make(at, true).y_plane(),
+                make(at, false).y_plane(),
+                "the UTC-offset badge must draw glyphs at instant {at} that the \
+                 badge-less clock does not"
+            );
+        }
+        let badge_at = |unix: i64| {
+            multiview_overlay::clock::resolve_offset(syd, WallTime::from_unix_seconds(unix))
+                .utc_badge()
+        };
+        assert_eq!(badge_at(jan), "UTC+11:00", "Sydney is on DST in January");
+        assert_eq!(
+            badge_at(jul),
+            "UTC+10:00",
+            "Sydney is on standard time in July"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn show_reference_badge_differs_from_unbadged_at_the_same_instant() {
+        // The disciplined-reference badge (display only, ADR-T012) must DRAW:
+        // at the SAME injected instant, `show_reference: true` vs `false` render
+        // different planes (same-instant comparison — the `labeled_clock_differs_
+        // from_unlabeled` pattern). A label is set on BOTH renders so the metadata
+        // strip is reserved either way (`has_strip` depends on the flag); the only
+        // delta is the badge glyphs, so deleting the badge-draw block fails this.
+        let c = canvas();
+        let at = WallTime::from_unix_seconds(9 * 3600);
+        let make = |show_reference: bool| {
+            render(
+                &SyntheticKind::Clock {
+                    mode: ClockFaceMode::Dual,
+                    twelve_hour: false,
+                    tz: None,
+                    tz_offset_minutes: 0,
+                    label: Some("Sydney".to_owned()),
+                    show_offset: false,
+                    show_reference,
+                    numerals: false,
+                },
+                320,
+                320,
+                c,
+                at,
+            )
+            .expect("reference clock")
+        };
         assert_ne!(
-            jan.y_plane(),
-            jul.y_plane(),
-            "the UTC-offset badge follows DST (UTC+11:00 in Jan vs UTC+10:00 in Jul)"
+            make(true).y_plane(),
+            make(false).y_plane(),
+            "the reference badge drew glyphs that the badge-less clock did not"
         );
     }
 
