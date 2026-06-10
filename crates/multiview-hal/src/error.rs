@@ -72,3 +72,51 @@ impl From<Error> for multiview_core::Error {
         multiview_core::Error::Config(value.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+    use crate::capability::Stage;
+    use multiview_core::traits::BackendKind;
+
+    /// The crate boundary folds every HAL fault — capability detection, registry
+    /// negotiation, and admission against an engine budget — into the
+    /// workspace-wide [`multiview_core::Error::Backend`] arm, *not*
+    /// [`multiview_core::Error::Config`]: the operator's request was structurally
+    /// valid; the host simply cannot satisfy it. Guards the routing and proves
+    /// the detail survives.
+    #[test]
+    fn backend_unavailable_routes_to_core_backend_arm() {
+        let err: multiview_core::Error = Error::BackendUnavailable {
+            kind: BackendKind::Cuda,
+            reason: "cuda feature not enabled",
+        }
+        .into();
+        match err {
+            multiview_core::Error::Backend(msg) => {
+                assert!(
+                    msg.contains("cuda feature not enabled"),
+                    "detail must survive the conversion, got: {msg}"
+                );
+            }
+            other => panic!("expected Error::Backend, got {other:?}"),
+        }
+    }
+
+    /// An admission/budget denial also lands on the `Backend` arm (the planner's
+    /// "host cannot satisfy this as asked" failure), confirming the whole `From`
+    /// impl is rerouted rather than a single variant.
+    #[test]
+    fn budget_exceeded_also_routes_to_backend_arm() {
+        let err: multiview_core::Error = Error::BudgetExceeded {
+            stage: Stage::Decode,
+            requested_mpps: 500.0,
+            budget_mpps: 250.0,
+        }
+        .into();
+        assert!(
+            matches!(err, multiview_core::Error::Backend(_)),
+            "expected Error::Backend, got {err:?}"
+        );
+    }
+}
