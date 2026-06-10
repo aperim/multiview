@@ -18,7 +18,6 @@ use crate::auth::{Action, Principal};
 use crate::command::{Command, OperationId};
 use crate::concurrency::{IdempotencyKey, IfMatch, Reservation};
 use crate::error::{ControlError, ControlResult};
-#[cfg(feature = "openapi")]
 use crate::problem::Problem;
 use crate::repository::{Layout, LayoutInput, VersionedLayout, LAYOUT_KIND};
 use crate::state::AppState;
@@ -380,13 +379,45 @@ pub(crate) fn submit_accepted_body(
     }
 }
 
+/// The exact operator/portal copy the Conspect startup gate (S1) refuses a NEW
+/// program-output start with at the `block-new-instance` rung (ADR-0050 §5/§6.2).
+/// **Verbatim** — the cli's `BLOCK_NEW_INSTANCE_REASON` and the portal show the
+/// same words; the trailing clause is the never-off-air promise.
+const BLOCK_NEW_INSTANCE_REASON: &str =
+    "Lease expired — new engine instances won't start; running ones untouched";
+
 /// `POST /api/v1/commands/start` — start program output (role: write; 202).
+///
+/// Gated by the Conspect startup gate (S1, ADR-0050 §5): when the entitlement
+/// ladder is at the `block-new-instance` rung, a NEW start is refused with a
+/// `409 lease_expired` RFC-9457 problem carrying [`BLOCK_NEW_INSTANCE_REASON`].
+/// A **running** program is never touched — `stop` and every operational command
+/// stay reachable; this blocks only a *new* start (the never-off-air promise).
+/// The gate is a lock-free read of the entitlement store off the engine hot loop.
 async fn cmd_start(
     State(state): State<AppState>,
     principal: Principal,
     idem: IdempotencyKey,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
+    // S1 startup gate: refuse a NEW start at the block-new-instance rung (the
+    // lock fires only on positive evidence of a lapsed lease — an unlicensed /
+    // compliant machine starts normally, fail-toward-leniency).
+    let blocked = state
+        .licence
+        .store
+        .status()
+        .is_some_and(|status| status.blocks_new_instances);
+    if blocked {
+        return Ok(Problem::new(
+            StatusCode::CONFLICT.as_u16(),
+            "lease_expired",
+            "Lease expired (new starts blocked)",
+        )
+        .with_detail(BLOCK_NEW_INSTANCE_REASON)
+        .with_instance("/settings/licence")
+        .into_response());
+    }
     submit_accepted(&state, &idem, |op| Command::Start { op })
 }
 
