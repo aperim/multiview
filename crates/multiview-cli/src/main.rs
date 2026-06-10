@@ -176,6 +176,56 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     })
 }
 
+/// Bring up the management control plane for a run (one wiring for BOTH run
+/// paths — ADR-W013/ADR-W018): the live-source hub over the run's per-source
+/// stop registry + the shared (live-updatable) preview store map, the preview
+/// provider, the bounded command bus, and the bound server.
+///
+/// Returns the server task handle, the engine-side [`multiview_control::CommandReceiver`]
+/// (the caller builds its path-specific frame-boundary drain from it), and the
+/// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
+/// returns). The hub shares `registry`, so a live remove can tear down a
+/// startup producer (generator or ingest thread) too.
+async fn serve_control_plane(
+    listen: &str,
+    config: &MultiviewConfig,
+    publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    program_slot: multiview_cli::preview::ProgramSlot,
+    stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
+    registry: multiview_cli::live_sources::StopRegistry,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<(
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    multiview_control::CommandReceiver,
+    multiview_cli::live_sources::LiveSourceHub,
+)> {
+    let (commands, command_rx) = command_bus(64);
+    // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
+    // the SHARED, live-updatable preview store map, off the clock thread.
+    let shared_stores = multiview_cli::live_sources::shared_stores(stores);
+    let hub =
+        multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
+    // The live-preview provider reads the program slot the run loop fills + the
+    // shared per-input store map — read-only for control (invariant #10).
+    let provider: multiview_control::SharedPreview = Arc::new(
+        multiview_cli::preview::CliPreviewProvider::new(program_slot, shared_stores),
+    );
+    let (addr, handle) = control::bind_and_serve(
+        listen,
+        config,
+        Arc::clone(publisher),
+        commands,
+        provider,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    )
+    .await
+    .with_context(|| format!("binding the control plane on {listen}"))?;
+    tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
+    Ok((handle, command_rx, hub))
+}
+
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
 /// serving the control plane, the embedded web UI, and the live program/input
 /// previews from the SAME run (when `[control]` is configured) — ingestion,
@@ -196,51 +246,48 @@ async fn run_pipeline_until_ctrl_c(
     let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
-        let (commands, command_rx) = command_bus(64);
-        // The live-preview provider reads the program slot the run loop fills + the
-        // pipeline's per-source stores (the decoded input frames).
-        let provider: multiview_control::SharedPreview =
-            Arc::new(multiview_cli::preview::CliPreviewProvider::new(
+    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
+        if let Some(cfg) = config.control.as_ref() {
+            let (handle, command_rx, hub) = serve_control_plane(
+                &cfg.listen,
+                config,
+                &publisher,
                 Arc::clone(&preview_slot),
                 pipeline.preview_stores(),
+                pipeline.stop_registry(),
+                shutdown_rx,
+            )
+            .await?;
+            // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
+            // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
+            // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
+            // drive start, and the drain reads it wait-free (inv #1/#10). Only under
+            // `overlay` (without it the run renders no subtitles, so there is no layer).
+            // The live-source seam (ADR-W018) rides both variants.
+            #[cfg(feature = "overlay")]
+            let drain: ControlDrain = Box::new(control::command_drain_with_seams(
+                command_rx,
+                config.clone(),
+                Arc::clone(&publisher),
+                pipeline.subtitle_route_slot(),
+                hub.handle(),
             ));
-        let (addr, handle) = control::bind_and_serve(
-            &cfg.listen,
-            config,
-            Arc::clone(&publisher),
-            commands,
-            provider,
-            async move {
-                let _ = shutdown_rx.await;
-            },
-        )
-        .await
-        .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
-        tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
-        // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
-        // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
-        // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
-        // drive start, and the drain reads it wait-free (inv #1/#10). Only under
-        // `overlay` (without it the run renders no subtitles, so there is no layer).
-        #[cfg(feature = "overlay")]
-        let drain: ControlDrain = Box::new(control::command_drain_with_seams(
-            command_rx,
-            config.clone(),
-            Arc::clone(&publisher),
-            pipeline.subtitle_route_slot(),
-        ));
-        #[cfg(not(feature = "overlay"))]
-        let drain: ControlDrain = Box::new(control::command_drain(
-            command_rx,
-            config.clone(),
-            Arc::clone(&publisher),
-        ));
-        (Some(handle), drain)
-    } else {
-        drop(shutdown_rx);
-        (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))
-    };
+            #[cfg(not(feature = "overlay"))]
+            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+                command_rx,
+                config.clone(),
+                Arc::clone(&publisher),
+                hub.handle(),
+            ));
+            (Some(handle), drain, Some(hub))
+        } else {
+            drop(shutdown_rx);
+            (
+                None,
+                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+                None,
+            )
+        };
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
@@ -293,8 +340,12 @@ async fn run_pipeline_until_ctrl_c(
             .await?;
 
     // The pipeline loop returned; stop the metrics poller (it also self-stops on
-    // the StopSignal within one sample period).
+    // the StopSignal within one sample period) and tear down the live-source hub
+    // (it stops + joins every runtime producer).
     metrics_task.abort();
+    if let Some(hub) = live_hub {
+        hub.shutdown();
+    }
 
     let _ = shutdown_tx.send(());
     if let Some(handle) = server {
@@ -451,40 +502,33 @@ async fn run_software_until_ctrl_c(
     // control plane is up, a no-op otherwise. The server serves until
     // `shutdown_rx` resolves (once the engine loop returns).
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain): (Option<_>, ControlDrain) = if let Some(cfg) = config.control.as_ref() {
-        let (commands, command_rx) = command_bus(64);
-        // The engine-backed live-preview provider (program slot + per-input
-        // stores), shared read-only with the control plane (invariant #10).
-        let preview: multiview_control::SharedPreview =
-            Arc::new(multiview_cli::preview::CliPreviewProvider::new(
+    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
+        if let Some(cfg) = config.control.as_ref() {
+            let (handle, command_rx, hub) = serve_control_plane(
+                &cfg.listen,
+                config,
+                &publisher,
                 engine.program_preview(),
                 engine.preview_stores(),
-            ));
-        let (addr, handle) = control::bind_and_serve(
-            &cfg.listen,
-            config,
-            Arc::clone(&publisher),
-            commands,
-            preview,
-            async move {
-                let _ = shutdown_rx.await;
-            },
-        )
-        .await
-        .with_context(|| format!("binding the control plane on {}", cfg.listen))?;
-        tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
-        (
-            Some(handle),
-            Box::new(control::command_drain(
+                engine.stop_registry(),
+                shutdown_rx,
+            )
+            .await?;
+            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
                 command_rx,
                 config.clone(),
                 Arc::clone(&publisher),
-            )),
-        )
-    } else {
-        drop(shutdown_rx);
-        (None, Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}))
-    };
+                hub.handle(),
+            ));
+            (Some(handle), drain, Some(hub))
+        } else {
+            drop(shutdown_rx);
+            (
+                None,
+                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+                None,
+            )
+        };
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
@@ -515,8 +559,12 @@ async fn run_software_until_ctrl_c(
         .context("headless run until Ctrl-C")?;
 
     // The engine loop returned; stop the metrics poller (it also self-stops on the
-    // StopSignal within one sample period) and bring the control server down.
+    // StopSignal within one sample period), tear down the live-source hub (it
+    // stops + joins every runtime producer), and bring the control server down.
     metrics_task.abort();
+    if let Some(hub) = live_hub {
+        hub.shutdown();
+    }
     let _ = shutdown_tx.send(());
     if let Some(handle) = server {
         match handle.await {

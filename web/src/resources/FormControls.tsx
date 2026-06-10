@@ -312,16 +312,20 @@ export function AdvancedSection({
 }
 
 /**
- * The honest apply-semantics callout (ADR-W015 §4): stored resource edits take
- * effect via config export + restart; the live actions (swap, apply-layout,
- * routing, salvos) stay live. Text + icon, never colour alone.
+ * The honest apply-semantics callout (ADR-W015 §4, ADR-W018): each page states
+ * exactly how its saved edits reach the running engine. The default copy is
+ * the stored-resource text (true for outputs); the sources page overrides it
+ * with the per-kind live/restart truth. Text + icon, never colour alone.
  */
 export function ApplySemanticsCallout({
   helpTo,
   helpLabel,
+  message,
 }: {
   readonly helpTo: string;
   readonly helpLabel: string;
+  /** Page-specific apply-semantics copy (defaults to the stored-resource text). */
+  readonly message?: ReactNode;
 }): JSX.Element {
   return (
     <div
@@ -330,12 +334,14 @@ export function ApplySemanticsCallout({
     >
       <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       <p>
-        <Trans>
-          Changes saved here are stored, not yet live: the engine does not
-          hot-add sources or outputs. Apply them by exporting the configuration
-          and restarting Multiview. Layout apply, source swap, routing, and
-          salvos act on the running engine immediately.
-        </Trans>{' '}
+        {message ?? (
+          <Trans>
+            Changes saved here are stored, not yet live: the engine does not
+            hot-add outputs. Apply them by exporting the configuration and
+            restarting Multiview. Layout apply, source swap, routing, and
+            salvos act on the running engine immediately.
+          </Trans>
+        )}{' '}
         <HelpLink to={helpTo} label={helpLabel} />
       </p>
     </div>

@@ -228,6 +228,30 @@ pub enum Command {
         /// The output head this recall targets, if scoped to one head.
         head: Option<String>,
     },
+    /// Create **or replace** a managed source on the **running** engine
+    /// (ADR-W018 live apply, invariant #11). Carries the full, already-validated
+    /// (ADR-W015) config document; the engine drain registers the source's frame
+    /// store + route key at a frame boundary and hands the heavy producer
+    /// spawn/teardown to an off-thread hub. An upsert under an existing id is a
+    /// live **edit**: the registered `TileStore` is reused so the bound tile
+    /// holds last-good through the producer swap.
+    UpsertSource {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The validated source document to apply (boxed: the source document
+        /// is much larger than the other command variants).
+        source: Box<multiview_config::Source>,
+    },
+    /// Remove a managed source from the **running** engine (ADR-W018): the
+    /// frame store unregisters at a frame boundary (bound cells composite their
+    /// `on_loss` slate from the next tick) and the producer is torn down off the
+    /// clock thread (bounded).
+    RemoveSource {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The source id to remove.
+        id: String,
+    },
     /// Force (or clear) a manual tally override on a tile/element, taking
     /// precedence over the arbitrated bus state until released. A `color` of
     /// [`None`] clears the override and returns the element to arbitration.
@@ -256,6 +280,8 @@ impl Command {
             | Self::ArmSalvo { op, .. }
             | Self::TakeSalvo { op, .. }
             | Self::CancelSalvo { op, .. }
+            | Self::UpsertSource { op, .. }
+            | Self::RemoveSource { op, .. }
             | Self::SetTallyOverride { op, .. } => op,
         }
     }
@@ -274,6 +300,8 @@ impl Command {
             Self::ArmSalvo { .. } => "arm_salvo",
             Self::TakeSalvo { .. } => "take_salvo",
             Self::CancelSalvo { .. } => "cancel_salvo",
+            Self::UpsertSource { .. } => "upsert_source",
+            Self::RemoveSource { .. } => "remove_source",
             Self::SetTallyOverride { .. } => "set_tally_override",
         }
     }

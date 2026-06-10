@@ -12,10 +12,16 @@
 //!   windows + atomically publishes the `.m3u8` on each closed segment and prunes
 //!   the evicted `.ts` from disk. The only part of this module that performs I/O
 //!   (filesystem only — no native dependency).
+//! - [`http`] — the **delivery surface** (ADR-0032 §6, DEV-D1): an axum router
+//!   serving an output directory's playlists/segments/init with explicit
+//!   Content-Type, the Cache-Control tiers, Range/206, and Origin-reflecting
+//!   CORS (a Cast receiver fetches cross-origin from a Google origin; every
+//!   browser player benefits identically). Pure Rust, default build.
 //!
-//! The CMAF segmenter and the blocking-reload HTTP origin server live behind
-//! the off-by-default transport features; they feed segment/part metadata into
-//! these builders. The pure-text builders here perform no I/O.
+//! The CMAF segmenter and the blocking-reload LL-HLS origin (held GETs) live
+//! behind the off-by-default transport features; they feed segment/part
+//! metadata into these builders and will mount behind [`http`]'s CORS layer.
+pub mod http;
 mod live;
 mod master;
 mod media;

@@ -293,11 +293,16 @@ async fn run_capturing(
     // The PRODUCTION drain, threaded with the run's live subtitle-route slot (so a
     // `RouteSubtitle` reaches the running pipeline's layer — the RT-10b seam).
     let subtitle_slot = pipeline.subtitle_route_slot();
+    let live_hub = multiview_cli::live_sources::LiveSourceHub::start(
+        pipeline.stop_registry(),
+        multiview_cli::live_sources::shared_stores(std::collections::HashMap::new()),
+    );
     let mut drain = control::command_drain_with_seams(
         command_rx,
         config.clone(),
         Arc::clone(&publisher),
         subtitle_slot,
+        live_hub.handle(),
     );
 
     // The capture/relay task: wait for the run to publish frames, snapshot the
@@ -418,11 +423,16 @@ async fn run_command_to_hls(pipeline: &mut Pipeline, config: &MultiviewConfig, c
     let stop = StopSignal::new();
 
     let subtitle_slot = pipeline.subtitle_route_slot();
+    let live_hub = multiview_cli::live_sources::LiveSourceHub::start(
+        pipeline.stop_registry(),
+        multiview_cli::live_sources::shared_stores(std::collections::HashMap::new()),
+    );
     let mut drain = control::command_drain_with_seams(
         command_rx,
         config.clone(),
         Arc::clone(&publisher),
         subtitle_slot,
+        live_hub.handle(),
     );
 
     let stop_for_relay = stop.clone();

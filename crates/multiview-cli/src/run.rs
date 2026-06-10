@@ -176,6 +176,10 @@ pub struct SoftwareEngine {
     /// composited program frame into, for the control plane's live preview. Read
     /// by the preview provider off the hot loop (invariant #10).
     program_preview: crate::preview::ProgramSlot,
+    /// The per-source producer stop flags (ADR-W018): every startup generator
+    /// registers its flag here, and the live-source hub shares the same
+    /// registry, so a live `RemoveSource` can tear down exactly one producer.
+    stop_registry: crate::live_sources::StopRegistry,
 }
 
 /// An animated synthetic source recorded for a generator thread: its store, the
@@ -200,25 +204,30 @@ struct AnimatedSource {
 /// those stores, so a generator can neither pace nor stall the output clock
 /// (invariant #1) nor back-pressure the engine (invariant #10).
 ///
-/// [`GeneratorSupervisor::shutdown`] raises the shared stop flag and joins every
-/// thread; the chunked `sleep_until` inside `generator_loop` makes teardown
-/// prompt (a thread observes the flag within ≤25 ms).
+/// Each thread carries its **own** stop flag (ADR-W018), registered in the
+/// engine's shared [`StopRegistry`](crate::live_sources::StopRegistry) so a
+/// live `RemoveSource` can tear down exactly one startup generator;
+/// [`GeneratorSupervisor::shutdown`] raises every flag and joins every thread.
+/// The chunked `sleep_until` inside `generator_loop` makes teardown prompt (a
+/// thread observes its flag within ≤25 ms).
 #[must_use = "the generators run until shutdown; drop without shutdown leaks threads"]
 pub struct GeneratorSupervisor {
-    /// The shared cooperative stop flag every generator thread polls.
-    stop: Arc<AtomicBool>,
-    /// One join handle per spawned generator thread.
-    handles: Vec<JoinHandle<()>>,
+    /// One (stop flag, join handle) per spawned generator thread.
+    producers: Vec<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
 
 impl GeneratorSupervisor {
-    /// Raise the shared stop flag and join every generator thread.
+    /// Raise every generator's stop flag and join every generator thread.
     ///
     /// Idempotent-shaped: consumes the supervisor. A thread that failed to spawn
-    /// was never recorded, so this only joins live threads.
+    /// was never recorded, so this only joins live threads. A generator already
+    /// torn down by a live remove (its flag raised via the registry) has exited;
+    /// its join returns immediately.
     pub fn shutdown(self) {
-        self.stop.store(true, Ordering::Release);
-        for handle in self.handles {
+        for (stop, _) in &self.producers {
+            stop.store(true, Ordering::Release);
+        }
+        for (_, handle) in self.producers {
             // A generator thread only ever *writes* a lock-free store it shares by
             // `Arc` and owns no external resource, so a join error (a panicked
             // thread) cannot corrupt the produced output; log and continue so one
@@ -316,7 +325,16 @@ impl SoftwareEngine {
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
             publish_test_frames: true,
             program_preview: crate::preview::program_slot(),
+            stop_registry: crate::live_sources::stop_registry(),
         })
+    }
+
+    /// The shared per-source producer stop registry (ADR-W018): hand this to
+    /// the [`LiveSourceHub`](crate::live_sources::LiveSourceHub) so a live
+    /// remove can tear down a startup generator.
+    #[must_use]
+    pub fn stop_registry(&self) -> crate::live_sources::StopRegistry {
+        Arc::clone(&self.stop_registry)
     }
 
     /// The wait-free program-preview slot (shared with the control plane's
@@ -382,24 +400,28 @@ impl SoftwareEngine {
     // without `shutdown` would leak threads), so a redundant `#[must_use]` here
     // would trip `clippy::double_must_use`.
     pub fn spawn_generators(&self) -> GeneratorSupervisor {
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::with_capacity(self.animated.len());
+        let mut producers = Vec::with_capacity(self.animated.len());
         if !self.publish_test_frames {
-            return GeneratorSupervisor { stop, handles };
+            return GeneratorSupervisor { producers };
         }
         for source in &self.animated {
-            let stop = Arc::clone(&stop);
+            // Per-source stop flag (ADR-W018): registered in the shared stop
+            // registry so a live RemoveSource tears down exactly this producer;
+            // shutdown still raises every flag.
+            let stop = Arc::new(AtomicBool::new(false));
             let store = Arc::clone(&source.store);
             let kind = source.kind;
             let (width, height) = (source.width, source.height);
             let canvas = self.canvas_color;
             let cadence = self.cadence;
             let id = store.id().to_owned();
+            crate::live_sources::register_stop(&self.stop_registry, &id, &stop);
+            let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-synth-{id}"));
             match builder.spawn(move || {
-                generator_loop(kind, &store, width, height, canvas, cadence, &stop);
+                generator_loop(kind, &store, width, height, canvas, cadence, &thread_stop);
             }) {
-                Ok(handle) => handles.push(handle),
+                Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A generator that cannot spawn is logged and skipped: its tile
                     // simply rides the slate rather than failing the run (invariant
@@ -408,7 +430,7 @@ impl SoftwareEngine {
                 }
             }
         }
-        GeneratorSupervisor { stop, handles }
+        GeneratorSupervisor { producers }
     }
 
     /// Drive the engine for exactly `max_ticks` ticks under an injected,

@@ -135,6 +135,12 @@ impl CorrKey {
             | Command::RouteAudio { .. }
             | Command::RouteSubtitle { .. }
             | Command::ApplyLayout { .. }
+            // Live source upsert/remove (ADR-W018): the observable outcome is
+            // the tile state machine itself (`tile.state` events + the conflated
+            // snapshot), not a dedicated ack event — left uncorrelated rather
+            // than mis-correlated.
+            | Command::UpsertSource { .. }
+            | Command::RemoveSource { .. }
             | Command::SetTallyOverride { .. } => None,
         }
     }

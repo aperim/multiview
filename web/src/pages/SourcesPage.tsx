@@ -76,13 +76,14 @@ function SourceStatusCell({ tile }: { readonly tile: LiveTile | undefined }): JS
     return (
       <span
         className="text-sm text-muted-foreground"
-        title={t`This source is not part of the running engine, so it has no live state. It joins after a config export + restart binds it to a tile.`}
+        title={t`This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart.`}
       >
         <span aria-hidden="true">—</span>
         <span className="sr-only">
           <Trans>
-            Not in the running engine — no live state until a config export +
-            restart binds it to a tile.
+            Not in the running engine — no live state. Synthetic sources join
+            live once a tile binds them; other kinds join after a config export
+            + restart.
           </Trans>
         </span>
       </span>
@@ -525,10 +526,19 @@ export function SourcesPage(): JSX.Element {
         <ApplySemanticsCallout
           helpTo="/help/config#sources"
           helpLabel={t`How configuration applies`}
+          message={
+            <Trans>
+              Synthetic sources (bars, solid colour, clock) apply to the running
+              engine immediately when saved, and deleting any source removes it
+              from the running engine immediately. Network and file sources are
+              stored and go live via config export + restart. Each save response
+              declares which applied (X-Multiview-Apply: live or restart).
+            </Trans>
+          }
         />
       }
-      savedDescription={t`Stored. It goes live via config export + restart; the running engine is unchanged until then.`}
-      deletedDescription={t`Removed from the store. The running engine is unchanged until a config export + restart.`}
+      savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart.`}
+      deletedDescription={t`Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed.`}
       list={sources.data ?? []}
       isPending={sources.isPending}
       isError={sources.isError}
