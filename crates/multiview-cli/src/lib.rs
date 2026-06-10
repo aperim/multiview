@@ -42,6 +42,12 @@ pub mod capability_warn;
 pub mod cli;
 pub mod control;
 pub mod live_sources;
+/// The CONSPECT local-metrics retention feed (engine-seam S5; ADR-0052 §3): an
+/// off-hot-loop, read-only subscriber that mirrors live engine events
+/// (utilisation / per-input reconnect / incident markers) into the
+/// consent-independent [`multiview_telemetry::retention::RetentionStore`].
+/// Independent of telemetry consent.
+pub mod metrics_retention;
 /// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
 /// `display` output must FAIL a non-`display-kms` build with a clear error —
 /// never be silently skipped. Always compiled, so the default build tests the
