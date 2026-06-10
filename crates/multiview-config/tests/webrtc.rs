@@ -119,7 +119,10 @@ fn source_webrtc_roundtrip_json_skips_defaults() {
     assert!(json.contains("\"kind\":\"webrtc\""), "{json}");
     // Default-valued fields do not serialize.
     assert!(!json.contains("token"), "absent token stays absent: {json}");
-    assert!(!json.contains("audio"), "default audio=true is skipped: {json}");
+    assert!(
+        !json.contains("audio"),
+        "default audio=true is skipped: {json}"
+    );
 }
 
 #[test]
@@ -135,7 +138,9 @@ fn source_webrtc_is_not_synthetic() {
 fn source_webrtc_empty_token_rejected() {
     let src: Source = toml::from_str("id = \"cam\"\nkind = \"webrtc\"\ntoken = \"\"\n")
         .expect("parses structurally");
-    let err = src.validate().expect_err("empty token must fail validation");
+    let err = src
+        .validate()
+        .expect_err("empty token must fail validation");
     assert!(
         err.to_string().contains("token"),
         "error should name the token, got: {err}"
@@ -214,7 +219,11 @@ audio = { mode = "program" }
     // Explicit label, like Aes67 (no mount/path/url to derive one from).
     assert_eq!(out.label(), "Program WHEP");
     assert_eq!(out.explicit_id(), None);
-    assert_eq!(out.id(), "Program WHEP", "id derives from label when absent");
+    assert_eq!(
+        out.id(),
+        "Program WHEP",
+        "id derives from label when absent"
+    );
     assert!(out.gpu_pin().is_none());
     assert!(matches!(
         out.audio(),
@@ -247,7 +256,10 @@ fn output_webrtc_roundtrip_json_skips_defaults() {
     assert_eq!(original, reparsed, "JSON round-trip identity");
     assert!(json.contains("\"kind\":\"webrtc\""), "{json}");
     // Default-valued fields do not serialize.
-    assert!(!json.contains("max_viewers"), "default 8 is skipped: {json}");
+    assert!(
+        !json.contains("max_viewers"),
+        "default 8 is skipped: {json}"
+    );
     assert!(!json.contains("codec"), "default h264 is skipped: {json}");
     assert!(!json.contains("token"), "absent token stays absent: {json}");
 }
@@ -334,21 +346,22 @@ token = "push-secret"
 
 #[test]
 fn output_whip_push_label_and_id_derivation() {
-    let out: Output = toml::from_str(
-        "kind = \"whip_push\"\nurl = \"https://[2001:db8::15]:8443/whip/pgm1\"\n",
-    )
-    .expect("valid whip_push output");
-    assert_eq!(out.label(), "whip_push https://[2001:db8::15]:8443/whip/pgm1");
+    let out: Output =
+        toml::from_str("kind = \"whip_push\"\nurl = \"https://[2001:db8::15]:8443/whip/pgm1\"\n")
+            .expect("valid whip_push output");
+    assert_eq!(
+        out.label(),
+        "whip_push https://[2001:db8::15]:8443/whip/pgm1"
+    );
     assert_eq!(out.explicit_id(), None);
     assert_eq!(out.id(), out.label(), "id derives from label when absent");
 }
 
 #[test]
 fn output_whip_push_audio_capability_is_single_track() {
-    let out: Output = toml::from_str(
-        "kind = \"whip_push\"\nurl = \"https://[2001:db8::15]:8443/whip/pgm1\"\n",
-    )
-    .expect("valid whip_push output");
+    let out: Output =
+        toml::from_str("kind = \"whip_push\"\nurl = \"https://[2001:db8::15]:8443/whip/pgm1\"\n")
+            .expect("valid whip_push output");
     let cap = out.audio_capability();
     assert_eq!(cap.delivery, TrackDelivery::Simultaneous);
     assert_eq!(cap.discrete_capacity, TrackCapacity::AtMost(1));
@@ -365,7 +378,11 @@ fn output_whip_push_http_url_accepted_https_recommended() {
 
 #[test]
 fn output_whip_push_non_http_scheme_rejected() {
-    for bad in ["rtmp://origin.example/whip", "ws://origin.example/whip", "not a url"] {
+    for bad in [
+        "rtmp://origin.example/whip",
+        "ws://origin.example/whip",
+        "not a url",
+    ] {
         let out: Output = toml::from_str(&format!("kind = \"whip_push\"\nurl = \"{bad}\"\n"))
             .expect("parses structurally");
         let err = out
@@ -440,7 +457,11 @@ fn absent_webrtc_section_yields_full_defaults() {
         vec!["*".to_owned()],
         "cors_allow_origins defaults to [\"*\"] (§9)"
     );
-    assert_eq!(*w, WebrtcConfig::default(), "absent ⇒ fully-defaulted struct");
+    assert_eq!(
+        *w,
+        WebrtcConfig::default(),
+        "absent ⇒ fully-defaulted struct"
+    );
 }
 
 #[test]
@@ -558,7 +579,12 @@ fn webrtc_advertised_addresses_accept_ips_and_hostnames() {
 fn webrtc_advertised_address_garbage_rejected() {
     // A bracketed literal is the URL form, not the bare-address form this
     // field carries; same for a port suffix or whitespace.
-    for bad in ["[2001:db8::15]", "2001:db8::15]:5004", "not a host name", ""] {
+    for bad in [
+        "[2001:db8::15]",
+        "2001:db8::15]:5004",
+        "not a host name",
+        "",
+    ] {
         let doc = format!("{BASE}\n[webrtc]\nadvertised_addresses = [\"{bad}\"]\n");
         let cfg = MultiviewConfig::load_from_toml(&doc).expect("parses");
         let err = match cfg.validate() {
@@ -623,7 +649,7 @@ fn duration_string_rejects_non_string_toml_value() {
 #[test]
 fn document_with_webrtc_source_outputs_and_section_validates() {
     let doc = format!(
-        r##"{BASE}
+        r#"{BASE}
 [[sources]]
 id = "cam-field-1"
 kind = "webrtc"
@@ -642,7 +668,7 @@ token = "push-secret"
 [webrtc]
 udp_port = 8189
 advertised_addresses = ["2001:db8::15"]
-"##
+"#
     );
     let cfg = MultiviewConfig::load_from_toml(&doc).expect("parses");
     cfg.validate().expect("the combined document validates");
@@ -661,7 +687,7 @@ fn webrtc_outputs_reject_multitrack_audio_selection() {
     // ADR-0049: both kinds are single-track (one Opus m-line) — a two-track
     // discrete selection is a config-time capability error.
     let doc = format!(
-        r##"{BASE}
+        r#"{BASE}
 [[sources]]
 id = "in_x"
 kind = "bars"
@@ -683,7 +709,7 @@ target_track = "crew"
 kind = "webrtc"
 label = "Two tracks"
 audio = {{ mode = "tracks", tracks = ["talent", "crew"] }}
-"##
+"#
     );
     let cfg = MultiviewConfig::load_from_toml(&doc).expect("parses");
     let err = cfg

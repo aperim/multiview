@@ -44,6 +44,7 @@ pub mod schema;
 pub mod sync_group;
 pub mod tally;
 pub mod wall;
+pub mod webrtc;
 
 use std::collections::{HashMap, HashSet};
 
@@ -76,6 +77,7 @@ pub use schema::{
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
+pub use webrtc::{DurationString, WebrtcConfig};
 
 /// The management control-plane listener.
 ///
@@ -152,6 +154,14 @@ pub struct MultiviewConfig {
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlConfig>,
+    /// The shared WebRTC transport endpoint section (ADR-0048 §9): the single
+    /// dual-stack UDP media socket every WebRTC role multiplexes onto — WHIP
+    /// ingest (ADR-T014), WHEP preview, WHEP output viewers and the
+    /// `whip_push` client (ADR-0049). An absent `[webrtc]` table yields the
+    /// fully-defaulted [`WebrtcConfig`], and a default-valued section does not
+    /// serialize.
+    #[serde(default, skip_serializing_if = "WebrtcConfig::is_default")]
+    pub webrtc: WebrtcConfig,
     /// The GPU work-placement policy (ADR-0018). Absent ⇒ the engine uses its
     /// conservative built-in defaults (single-GPU hosts add zero behaviour).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,7 +279,10 @@ impl MultiviewConfig {
     ///   declared output / wall head;
     /// - sync-group ids are unique, every member references a declared
     ///   device, no device belongs to two groups, and skew/offset bounds are
-    ///   sane.
+    ///   sane;
+    /// - the `[webrtc]` section (ADR-0048 §9) carries a usable non-zero media
+    ///   port, session pool, idle-GC horizon, advertised addresses and CORS
+    ///   origins.
     ///
     /// # Errors
     ///
@@ -294,6 +307,7 @@ impl MultiviewConfig {
         self.validate_devices()?;
         self.validate_sync_groups()?;
         self.validate_control()?;
+        self.validate_webrtc()?;
         self.validate_placement()?;
         self.validate_routing()?;
 
@@ -436,6 +450,14 @@ impl MultiviewConfig {
                 })?;
         }
         Ok(())
+    }
+
+    /// Validate the `[webrtc]` section (ADR-0048 §9): a non-zero media port, a
+    /// non-empty session pool, a non-zero idle-GC horizon, and advertised
+    /// addresses / CORS origins that are structurally usable. The defaulted
+    /// (absent) section always validates.
+    fn validate_webrtc(&self) -> Result<(), ConfigError> {
+        self.webrtc.validate()
     }
 
     /// Flatten this document into a validated-shape [`multiview_core::layout::Layout`].
@@ -1013,6 +1035,20 @@ impl Source {
                     }
                 }
             }
+            SourceKind::Webrtc { token, .. } => {
+                // The WHIP endpoint URL is derived from the source id
+                // (ADR-T014 §1), so only the bearer needs a structural check:
+                // an authored-but-empty token is a misconfiguration, not
+                // "no token" (omit the field to require a Write-scope API key
+                // — publishing is never anonymous).
+                if matches!(token.as_deref(), Some("")) {
+                    return Err(ConfigError::Validation(format!(
+                        "source {:?}: webrtc token, when set, must be non-empty (omit `token` \
+                         to require a Write-scope API key instead — ADR-T014)",
+                        self.id
+                    )));
+                }
+            }
             // Network/synthetic kinds carry no kind-specific field that can be
             // validated structurally here (a URL's reachability is a runtime
             // concern, not a config one). The `youtube` URL is resolved at
@@ -1078,7 +1114,9 @@ impl Output {
             | Output::LlHls { codec, .. }
             | Output::Hls { codec, .. }
             | Output::Rtmp { codec, .. }
-            | Output::Srt { codec, .. } => Some(codec),
+            | Output::Srt { codec, .. }
+            | Output::Webrtc { codec, .. }
+            | Output::WhipPush { codec, .. } => Some(codec),
             // NDI carries a channel-map, AES67 sends raw PCM — neither has a
             // (video) codec to validate.
             Output::Ndi { .. } | Output::Aes67 { .. } => None,
@@ -1102,6 +1140,99 @@ impl Output {
             pin.validate()
                 .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
         }
+        self.validate_webrtc_rules()
+    }
+
+    /// The WebRTC-kind-specific rules (ADR-0049): `codec = "h264"` is the only
+    /// v1 value (the variant names a program rendition to consume, never an
+    /// encode to spawn), a WHEP output needs at least one viewer slot, a
+    /// `whip_push` destination must be an `http(s)` URL (https recommended),
+    /// and an authored bearer token may not be empty.
+    fn validate_webrtc_rules(&self) -> Result<(), ConfigError> {
+        match self {
+            Output::Webrtc {
+                max_viewers,
+                token,
+                codec,
+                ..
+            } => {
+                Self::validate_webrtc_codec(&self.label(), codec)?;
+                if *max_viewers == 0 {
+                    return Err(ConfigError::Validation(format!(
+                        "output {:?}: max_viewers must be >= 1 (ADR-0049 defaults to 8)",
+                        self.label()
+                    )));
+                }
+                Self::validate_webrtc_token(&self.label(), token.as_deref())
+            }
+            Output::WhipPush {
+                url, token, codec, ..
+            } => {
+                Self::validate_webrtc_codec(&self.label(), codec)?;
+                Self::validate_whip_push_url(&self.label(), url)?;
+                Self::validate_webrtc_token(&self.label(), token.as_deref())
+            }
+            // The non-WebRTC kinds carry none of these fields.
+            Output::RtspServer { .. }
+            | Output::LlHls { .. }
+            | Output::Hls { .. }
+            | Output::Ndi { .. }
+            | Output::Rtmp { .. }
+            | Output::Srt { .. }
+            | Output::Aes67 { .. } => Ok(()),
+        }
+    }
+
+    /// Reject any WebRTC output codec other than `"h264"` (the only v1 value,
+    /// ADR-0049: the field names an existing program rendition to consume).
+    fn validate_webrtc_codec(label: &str, codec: &str) -> Result<(), ConfigError> {
+        // The shared empty-codec rule already fired in `validate`; this names
+        // the v1 constraint precisely for a present-but-unsupported value.
+        if codec.is_empty() || codec == "h264" {
+            return Ok(());
+        }
+        Err(ConfigError::Validation(format!(
+            "output {label:?}: codec {codec:?} is not supported — v1 WebRTC outputs consume an \
+             existing \"h264\" program rendition (a rendition to consume, not an encode to \
+             spawn; ADR-0049)"
+        )))
+    }
+
+    /// Reject an authored-but-empty WebRTC bearer token (omit the field to
+    /// require an API key instead).
+    fn validate_webrtc_token(label: &str, token: Option<&str>) -> Result<(), ConfigError> {
+        if matches!(token, Some("")) {
+            return Err(ConfigError::Validation(format!(
+                "output {label:?}: token, when set, must be non-empty (omit `token` to require \
+                 an API key instead)"
+            )));
+        }
         Ok(())
+    }
+
+    /// Reject a `whip_push` destination that is not an `http(s)` URL with a
+    /// host. `https` is recommended (the push client follows redirects
+    /// https-only and aborts on a plaintext downgrade, ADR-0049); plain `http`
+    /// still validates. IPv6 literals are bracketed
+    /// (`https://[2001:db8::15]:8443/whip/pgm1`, ADR-0042).
+    fn validate_whip_push_url(label: &str, url: &str) -> Result<(), ConfigError> {
+        // Schemes are case-insensitive (RFC 3986 §3.1).
+        let rest = ["https://", "http://"].iter().find_map(|scheme| {
+            url.get(..scheme.len())
+                .filter(|prefix| prefix.eq_ignore_ascii_case(scheme))
+                .and_then(|_| url.get(scheme.len()..))
+        });
+        match rest {
+            Some(authority) if !authority.is_empty() && !authority.starts_with('/') => Ok(()),
+            Some(_) => Err(ConfigError::Validation(format!(
+                "output {label:?}: whip_push url {url:?} has no host — expected e.g. \
+                 \"https://[2001:db8::15]:8443/whip/pgm1\""
+            ))),
+            None => Err(ConfigError::Validation(format!(
+                "output {label:?}: whip_push url {url:?} must be an http(s) URL (https \
+                 recommended) addressing an RFC 9725 WHIP endpoint, e.g. \
+                 \"https://[2001:db8::15]:8443/whip/pgm1\""
+            ))),
+        }
     }
 }
