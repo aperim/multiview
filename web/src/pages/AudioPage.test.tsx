@@ -3,7 +3,7 @@
 // the selectable tracks ("prog" + declared), validates inline, and saves the
 // whole document with PUT + If-Match.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -131,7 +131,12 @@ describe("AudioPage", () => {
     await userEvent.clear(rate);
     await userEvent.type(rate, "44100");
     await userEvent.click(screen.getByTestId("audio-save"));
-    await screen.findByText(/stored/i);
+    // The save confirmation lands in the page's live status region (not a
+    // toast — the region is announced by AT and visible next to the button).
+    const status = screen.getByRole("status");
+    await waitFor(() => {
+      expect(status).toHaveTextContent(/stored\. it goes live via config export/i);
+    });
     expect(lastPut).toBeDefined();
     expect(lastPut?.ifMatch).toBe('W/"7"');
     expect(lastPut?.body).toMatchObject({
