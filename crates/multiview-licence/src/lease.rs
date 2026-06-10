@@ -40,6 +40,20 @@ impl LeaseSource {
             LeaseSource::File => LEASE_HARD_DAYS,
         }
     }
+
+    /// The heartbeat **transport** label this grant arrived over, as the
+    /// heartbeat-status surface reports it (brief §7/§11): an `Online` grant came
+    /// over a `"direct"` licence-server contact, a `Relay` grant over a mesh
+    /// `"relay"`, and a `File` grant from a dropped offline lease `"file"`. A
+    /// stable lowercase slug the API + portal share.
+    #[must_use]
+    pub const fn transport(self) -> &'static str {
+        match self {
+            LeaseSource::Online => "direct",
+            LeaseSource::Relay => "relay",
+            LeaseSource::File => "file",
+        }
+    }
 }
 
 /// A dated entitlement lease. All bounds are derived from `granted_at` + the

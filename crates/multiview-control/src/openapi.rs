@@ -98,6 +98,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::licence::get_licence,
         crate::routes::licence::install_lease,
         crate::routes::licence::get_challenge,
+        crate::routes::licence::get_heartbeat_status,
         crate::routes::salvos::list_salvos,
         crate::routes::salvos::put_salvo,
         crate::routes::salvos::arm_salvo,
@@ -196,6 +197,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         // multiview-licence serde shapes (pinned by a round-trip test).
         crate::routes::licence::LicenceResource,
         crate::routes::licence::LeaseInstalled,
+        crate::routes::licence::HeartbeatStatus,
         crate::openapi_schemas::LicenceStatusDoc,
         crate::openapi_schemas::LeaseSourceDoc,
         crate::openapi_schemas::HardwareClassDoc,
@@ -359,6 +361,7 @@ impl ApiDoc {
             ("GET", "/api/v1/licence"),
             ("POST", "/api/v1/licence/lease"),
             ("GET", "/api/v1/licence/challenge"),
+            ("GET", "/api/v1/licensing/heartbeat-status"),
             ("GET", "/api/v1/salvos"),
             ("GET", "/api/v1/salvos/{id}"),
             ("PUT", "/api/v1/salvos/{id}"),

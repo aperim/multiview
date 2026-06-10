@@ -731,6 +731,13 @@ pub fn api_router() -> Router<AppState> {
         .route("/licence", get(licence::get_licence))
         .route("/licence/lease", post(licence::install_lease))
         .route("/licence/challenge", get(licence::get_challenge))
+        // The read-only heartbeat-status surface (Conspect Hook 4, ADR-0050 §3):
+        // the honest local heartbeat status (transport + last/next contact +
+        // payload fields). The spec mandates NO mutating endpoint — `get` only.
+        .route(
+            "/licensing/heartbeat-status",
+            get(licence::get_heartbeat_status),
+        )
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(
