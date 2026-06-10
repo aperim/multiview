@@ -4,8 +4,10 @@
 # with no network and no GPL/native deps (ADR-0027):
 #   - bars   : SMPTE/EBU 75% colour bars (`test` is a back-compat alias for it).
 #   - solid  : a solid-colour slate (`color` = #RRGGBB hex).
-#   - clock  : a full-frame clock; `face` = analog | digital, with the digital
-#              `twelve_hour` flag and a `tz_offset_minutes` UTC offset.
+#   - clock  : a full-frame clock; `face` = analog | digital | dual, with the
+#              `twelve_hour` flag and either a `tz_offset_minutes` UTC offset or
+#              an IANA `timezone` (DST-correct). See examples/world-clock.toml for
+#              the dual-face, labelled, multi-zone "world-clock wall" (ADR-0047).
 #
 # bars/solid render in every build; the clock face needs the `overlay` feature in
 # the full pipeline (it reuses the clock rasterizer). The bars audio companion

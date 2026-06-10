@@ -189,8 +189,9 @@ pub struct SourceAuth {
 /// The face a [`SourceKind::Clock`] source renders (config-level mirror of the
 /// overlay clock face; mapped onto `multiview_overlay`'s model at render time).
 ///
-/// A plain string enum (`analog` / `digital`); the digital-only `twelve_hour`
-/// flag rides alongside it on the [`SourceKind::Clock`] payload.
+/// A plain string enum (`analog` / `digital` / `dual`); the `twelve_hour` flag
+/// rides alongside it on the [`SourceKind::Clock`] payload. `dual` draws both an
+/// analogue face and a digital readout in one source (ADR-0047).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -200,6 +201,8 @@ pub enum ClockFaceConfig {
     Analog,
     /// Digital `HH:MM:SS` readout (see `twelve_hour`).
     Digital,
+    /// Both: an analogue face with a digital readout beneath it.
+    Dual,
 }
 
 /// The kind-specific payload of a managed input, internally tagged by `kind`.
@@ -223,7 +226,7 @@ pub enum SourceKind {
     },
     /// A full-frame clock disciplined by the system wall clock.
     Clock {
-        /// Analog (default) or digital face.
+        /// Analog (default), digital, or dual face.
         #[serde(default)]
         face: ClockFaceConfig,
         /// Selects 12-hour vs 24-hour mode for **both** faces: a digital readout
@@ -232,10 +235,31 @@ pub enum SourceKind {
         /// (`false`, 24 ticks, one revolution/day). Defaults to `false` (24-hour).
         #[serde(default)]
         twelve_hour: bool,
-        /// Timezone offset from UTC in minutes (e.g. `600` = UTC+10). Real
-        /// offsets span `-720..=840`.
+        /// IANA timezone id (e.g. `Australia/Sydney`). **Preferred** over
+        /// `tz_offset_minutes`: the displayed offset is resolved DST-correct per
+        /// instant. Absent ⇒ the fixed `tz_offset_minutes` is used. If both are
+        /// present, `timezone` wins and `tz_offset_minutes` is ignored (a
+        /// validation warning is emitted via [`Source::clock_warnings`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+        /// Fixed timezone offset from UTC in minutes (e.g. `600` = UTC+10), the
+        /// legacy / no-DST field. Real offsets span `-720..=840`. Ignored when
+        /// `timezone` is set.
         #[serde(default)]
         tz_offset_minutes: i32,
+        /// Operator location/label drawn on the face (e.g. `Sydney`, `Studio A`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Draw a `UTC±HH:MM` offset badge for the displayed instant.
+        #[serde(default)]
+        show_offset: bool,
+        /// Draw the disciplined-reference badge (PTP/NTP/SYS lock). Display only —
+        /// never paces (ADR-T012). Default off.
+        #[serde(default)]
+        show_reference: bool,
+        /// Draw hour numerals on the analogue / dual face.
+        #[serde(default)]
+        numerals: bool,
     },
     /// RTSP pull.
     Rtsp {

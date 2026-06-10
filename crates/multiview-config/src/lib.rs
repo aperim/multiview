@@ -983,14 +983,34 @@ impl Source {
                 }
             }
             SourceKind::Clock {
-                tz_offset_minutes, ..
+                timezone,
+                tz_offset_minutes,
+                ..
             } => {
-                if !(-720..=840).contains(tz_offset_minutes) {
-                    return Err(ConfigError::Validation(format!(
-                        "source {:?}: clock tz_offset_minutes {tz_offset_minutes} is out of \
-                         range (real UTC offsets span -720..=840)",
-                        self.id
-                    )));
+                match timezone {
+                    // An IANA zone is authoritative (DST-resolved at render); it
+                    // must be a known id. The fixed `tz_offset_minutes` is ignored
+                    // when a zone is set, so its range is NOT checked here (a
+                    // both-present clock warns via `clock_warnings`, never errors).
+                    Some(tz) => {
+                        if multiview_overlay::clock::parse_tz(tz).is_none() {
+                            return Err(ConfigError::Validation(format!(
+                                "source {:?}: timezone {tz:?} is not a known IANA timezone id \
+                                 (e.g. \"Australia/Sydney\", \"America/New_York\", \"UTC\")",
+                                self.id
+                            )));
+                        }
+                    }
+                    // No zone ⇒ the fixed offset is authoritative; range-check it.
+                    None => {
+                        if !(-720..=840).contains(tz_offset_minutes) {
+                            return Err(ConfigError::Validation(format!(
+                                "source {:?}: clock tz_offset_minutes {tz_offset_minutes} is out \
+                                 of range (real UTC offsets span -720..=840)",
+                                self.id
+                            )));
+                        }
+                    }
                 }
             }
             // Network/synthetic kinds carry no kind-specific field that can be
@@ -1012,6 +1032,34 @@ impl Source {
             | SourceKind::Aes67 { .. } => {}
         }
         Ok(())
+    }
+
+    /// Non-fatal advisories for this source's clock configuration (empty for a
+    /// non-clock source or a clock with no conflicts).
+    ///
+    /// The one current advisory: when a clock sets **both** `timezone` (IANA) and
+    /// `tz_offset_minutes`, the IANA zone wins (DST-correct per instant) and the
+    /// fixed offset is ignored — surfaced here so the operator/UI can flag the
+    /// redundant field without failing the config (both-present is legal).
+    #[must_use]
+    pub fn clock_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let SourceKind::Clock {
+            timezone: Some(tz),
+            tz_offset_minutes,
+            ..
+        } = &self.kind
+        {
+            if *tz_offset_minutes != 0 {
+                out.push(format!(
+                    "source {:?}: both timezone ({tz:?}) and tz_offset_minutes \
+                     ({tz_offset_minutes}) are set; timezone wins (DST-correct) and \
+                     tz_offset_minutes is ignored",
+                    self.id
+                ));
+            }
+        }
+        out
     }
 }
 

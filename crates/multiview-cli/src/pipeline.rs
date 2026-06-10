@@ -5196,7 +5196,7 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
     // reconnect; the generator publishes into the store at cadence until `stop`.
     if let SourceLocation::Synthetic(kind) = &plan.location {
         crate::synth::generator_loop(
-            *kind,
+            kind.clone(),
             &plan.store,
             plan.tile_w,
             plan.tile_h,

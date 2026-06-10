@@ -20,6 +20,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The IANA timezone type ([`chrono_tz::Tz`]) re-exported so downstream crates
+/// (the synthetic-source generator, the control plane) can name a resolved zone
+/// without taking a direct `chrono-tz` dependency. Parse one with [`parse_tz`].
+pub use chrono_tz::Tz;
+
 /// Seconds in a day.
 const SECONDS_PER_DAY: i64 = 86_400;
 
@@ -84,6 +89,61 @@ impl TimeZoneOffset {
     pub fn seconds(self) -> i64 {
         i64::from(self.minutes) * 60
     }
+
+    /// The human `UTC±HH:MM` badge for this offset (the `show_offset` text drawn
+    /// on a clock face): e.g. `UTC+11:00`, `UTC-04:00`, `UTC+00:00`.
+    ///
+    /// The sign is on the hours/minutes block; the magnitude is split into whole
+    /// hours and the remaining whole minutes (integer arithmetic, never float).
+    #[must_use]
+    pub fn utc_badge(self) -> String {
+        let sign = if self.minutes < 0 { '-' } else { '+' };
+        // `i32::MIN.unsigned_abs()` is well-defined; real offsets are small.
+        let mag = self.minutes.unsigned_abs();
+        let hours = mag / 60;
+        let mins = mag % 60;
+        format!("UTC{sign}{hours:02}:{mins:02}")
+    }
+}
+
+/// Parse an IANA timezone id (e.g. `Australia/Sydney`, `America/New_York`,
+/// `UTC`) to a concrete [`chrono_tz::Tz`].
+///
+/// Returns [`None`] for an unknown or malformed id (IANA ids are case-sensitive)
+/// — callers turn that into a typed configuration error; this never panics. The
+/// tz database is bundled at build time by `chrono-tz` (no runtime I/O).
+#[must_use]
+pub fn parse_tz(name: &str) -> Option<chrono_tz::Tz> {
+    name.parse::<chrono_tz::Tz>().ok()
+}
+
+/// Resolve an IANA [`chrono_tz::Tz`] to the concrete [`TimeZoneOffset`] in effect
+/// at the displayed instant `at` — **DST-correct**.
+///
+/// This is the upstream resolver the model's [`TimeZoneOffset`] doc anticipates:
+/// it picks the right offset for the instant, so a `Australia/Sydney` clock reads
+/// `UTC+11:00` in the austral summer and `UTC+10:00` in winter automatically, and
+/// the `show_offset` badge reflects the resolved value. Pure (a function of
+/// `(Tz, instant)`) and unit-testable with injected instants; no system clock.
+///
+/// Offsets are whole minutes on the modern tz database; a (historical)
+/// sub-minute offset is truncated toward zero to whole minutes, matching the
+/// model's whole-minute [`TimeZoneOffset`].
+#[must_use]
+pub fn resolve_offset(tz: chrono_tz::Tz, at: WallTime) -> TimeZoneOffset {
+    use chrono::{Offset, TimeZone};
+    // Map Unix seconds → a UTC datetime, then ask the zone for the offset at that
+    // UTC instant (DST-aware). `from_timestamp` is `None` only for out-of-range
+    // values far outside any real clock instant; fall back to UTC then.
+    let Some(utc) = chrono::DateTime::from_timestamp(at.unix_seconds(), 0) else {
+        return TimeZoneOffset::UTC;
+    };
+    let offset_seconds = tz
+        .offset_from_utc_datetime(&utc.naive_utc())
+        .fix()
+        .local_minus_utc();
+    // Whole minutes (truncating any historical sub-minute remainder toward zero).
+    TimeZoneOffset::from_minutes(offset_seconds / 60)
 }
 
 /// Local wall-clock fields for a single day: seconds since local midnight,
@@ -186,6 +246,40 @@ impl ClockFace {
                 )
             }
         }
+    }
+}
+
+/// The face a clock **source** renders: an analogue dial, a digital readout, or
+/// **both** (`Dual`, an analogue face with a digital readout beneath it).
+///
+/// This is the 3-state widening of the original `analog`/`digital` boolean
+/// (ADR-0047): `Dual` is a placement of the two existing faces, not a new
+/// renderer. Serialised tagged on the variant name (`snake_case`), never
+/// `untagged` (repo serde policy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ClockFaceMode {
+    /// Analogue dial only (hour / minute / second hands on a ticked bezel).
+    #[default]
+    Analog,
+    /// Digital `HH:MM:SS` readout only.
+    Digital,
+    /// Both: an analogue face with a digital readout beneath it.
+    Dual,
+}
+
+impl ClockFaceMode {
+    /// Whether this mode draws the analogue dial (`Analog` or `Dual`).
+    #[must_use]
+    pub const fn has_analog(self) -> bool {
+        matches!(self, Self::Analog | Self::Dual)
+    }
+
+    /// Whether this mode draws the digital readout (`Digital` or `Dual`).
+    #[must_use]
+    pub const fn has_digital(self) -> bool {
+        matches!(self, Self::Digital | Self::Dual)
     }
 }
 

@@ -28,6 +28,7 @@ const EXAMPLES: &[&str] = &[
     "pip.toml",
     "public-streams-2x2.toml",
     "broadcast-monitor.toml",
+    "world-clock.toml",
 ];
 
 #[test]

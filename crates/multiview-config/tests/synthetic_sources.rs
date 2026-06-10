@@ -115,6 +115,7 @@ fn clock_source_defaults_to_analog_utc_and_round_trips() {
             face,
             twelve_hour,
             tz_offset_minutes,
+            ..
         } => {
             assert_eq!(*face, ClockFaceConfig::Analog, "clock defaults to analog");
             assert!(!*twelve_hour, "12-hour defaults off");
@@ -136,6 +137,7 @@ fn digital_clock_with_tz_round_trips() {
             face,
             twelve_hour,
             tz_offset_minutes,
+            ..
         } => {
             assert_eq!(*face, ClockFaceConfig::Digital);
             assert!(*twelve_hour);
@@ -161,6 +163,154 @@ fn clock_rejects_an_out_of_range_tz_offset() {
         msg.contains("tz") || msg.contains("offset") || msg.contains("timezone"),
         "the error must name the tz offset: {msg}"
     );
+}
+
+#[test]
+fn dual_clock_with_iana_timezone_and_metadata_round_trips() {
+    // The operator-requested world-clock tile: dual face, IANA zone, label, and a
+    // visible UTC-offset badge.
+    let doc = config_with_source(
+        "kind = \"clock\"\nface = \"dual\"\ntimezone = \"Australia/Sydney\"\nlabel = \"Sydney\"\n\
+         show_offset = true\nshow_reference = true\nnumerals = true",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    cfg.validate().expect("validates");
+    match &cfg.sources[0].kind {
+        SourceKind::Clock {
+            face,
+            timezone,
+            label,
+            show_offset,
+            show_reference,
+            numerals,
+            ..
+        } => {
+            assert_eq!(*face, ClockFaceConfig::Dual, "dual face parsed");
+            assert_eq!(timezone.as_deref(), Some("Australia/Sydney"));
+            assert_eq!(label.as_deref(), Some("Sydney"));
+            assert!(*show_offset);
+            assert!(*show_reference);
+            assert!(*numerals);
+        }
+        other => panic!("expected Clock, got {other:?}"),
+    }
+    let toml = cfg.to_toml().expect("to_toml");
+    assert!(toml.contains("face = \"dual\""), "dual round-trips: {toml}");
+    assert!(
+        toml.contains("timezone = \"Australia/Sydney\""),
+        "timezone round-trips: {toml}"
+    );
+    assert!(toml.contains("label = \"Sydney\""));
+    assert!(toml.contains("show_offset = true"));
+    // Round-trip through JSON too (robust across both serde formats).
+    let json = cfg.to_json().expect("to_json");
+    let back = MultiviewConfig::load_from_json(&json).expect("json round-trip");
+    assert_eq!(back.sources[0].kind, cfg.sources[0].kind);
+}
+
+#[test]
+fn clock_metadata_defaults_are_absent_and_skip_serializing() {
+    // A plain clock carries no metadata: the new optionals default to None/false
+    // and must NOT appear in the canonical serialization (skip_serializing_if).
+    let doc = config_with_source("kind = \"clock\"");
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    match &cfg.sources[0].kind {
+        SourceKind::Clock {
+            timezone,
+            label,
+            show_offset,
+            show_reference,
+            numerals,
+            ..
+        } => {
+            assert!(timezone.is_none(), "timezone defaults absent");
+            assert!(label.is_none(), "label defaults absent");
+            assert!(!*show_offset);
+            assert!(!*show_reference);
+            assert!(!*numerals);
+        }
+        other => panic!("expected Clock, got {other:?}"),
+    }
+    let toml = cfg.to_toml().expect("to_toml");
+    assert!(
+        !toml.contains("timezone"),
+        "absent timezone must not serialize: {toml}"
+    );
+    assert!(
+        !toml.contains("label"),
+        "absent label must not serialize: {toml}"
+    );
+}
+
+#[test]
+fn clock_rejects_an_unknown_iana_timezone() {
+    let doc = config_with_source("kind = \"clock\"\ntimezone = \"Mars/Olympus_Mons\"");
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    let err = cfg
+        .validate()
+        .expect_err("an unknown IANA timezone must fail validation");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("timezone") || msg.contains("iana") || msg.contains("zone"),
+        "the error must name the timezone: {msg}"
+    );
+    assert!(
+        msg.contains("mars/olympus_mons"),
+        "the error must echo the bad id: {msg}"
+    );
+}
+
+#[test]
+fn clock_with_valid_iana_timezone_validates() {
+    for tz in [
+        "UTC",
+        "Australia/Sydney",
+        "America/New_York",
+        "Europe/London",
+    ] {
+        let doc = config_with_source(&format!("kind = \"clock\"\ntimezone = \"{tz}\""));
+        let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+        cfg.validate()
+            .unwrap_or_else(|e| panic!("zone {tz:?} must validate: {e}"));
+    }
+}
+
+#[test]
+fn clock_timezone_wins_over_tz_offset_minutes_and_warns() {
+    // When both are set, `timezone` (IANA, DST-correct) is authoritative and
+    // `tz_offset_minutes` is reported as ignored via a validation warning. The
+    // config still validates (both-present is legal, just redundant).
+    let doc = config_with_source(
+        "kind = \"clock\"\ntimezone = \"Australia/Sydney\"\ntz_offset_minutes = 123",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    cfg.validate().expect("both-present still validates");
+    let warnings = cfg.sources[0].clock_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("timezone")
+                && w.to_lowercase().contains("tz_offset_minutes")),
+        "a both-present clock must warn that timezone wins: {warnings:?}"
+    );
+    // An out-of-range tz_offset_minutes is NOT an error when a timezone is set
+    // (the offset is ignored), but the warning still fires.
+    let doc2 = config_with_source(
+        "kind = \"clock\"\ntimezone = \"Australia/Sydney\"\ntz_offset_minutes = 5000",
+    );
+    let cfg2 = MultiviewConfig::load_from_toml(&doc2).expect("parse");
+    cfg2.validate()
+        .expect("an ignored out-of-range offset does not fail when timezone wins");
+}
+
+#[test]
+fn clock_without_timezone_still_range_checks_the_offset() {
+    // Back-compat: with no `timezone`, `tz_offset_minutes` is authoritative and an
+    // out-of-range value still fails (the existing rule is preserved).
+    let doc = config_with_source("kind = \"clock\"\ntz_offset_minutes = 5000");
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    cfg.validate()
+        .expect_err("an out-of-range offset with no timezone must still fail");
 }
 
 #[test]
