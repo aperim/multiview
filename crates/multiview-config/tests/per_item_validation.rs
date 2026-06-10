@@ -23,9 +23,7 @@ fn solid_source_with_bad_hex_fails_validation() {
 
 #[test]
 fn clock_source_with_out_of_range_tz_fails_validation() {
-    let s = source(
-        serde_json::json!({ "id": "s", "kind": "clock", "tz_offset_minutes": 99999 }),
-    );
+    let s = source(serde_json::json!({ "id": "s", "kind": "clock", "tz_offset_minutes": 99999 }));
     let err = s.validate().expect_err("tz out of range must fail");
     assert!(err.to_string().contains("tz_offset_minutes"), "{err}");
 }

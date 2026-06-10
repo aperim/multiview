@@ -4300,7 +4300,7 @@
         ],
         "properties": {
           "mode": {
-            "type": "string",
+            "$ref": "#/components/schemas/OutputAudioModeDoc",
             "description": "`program` (mixed bus) or `tracks` (explicit selection)."
           },
           "tracks": {
@@ -4310,7 +4310,16 @@
             },
             "description": "The selectable-track list (used only in `tracks` mode)."
           }
-        }
+        },
+        "additionalProperties": false
+      },
+      "OutputAudioModeDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::audio::OutputAudioMode`.",
+        "enum": [
+          "program",
+          "tracks"
+        ]
       },
       "OutputBodyDoc": {
         "oneOf": [
@@ -4721,10 +4730,7 @@
             "description": "Attachment target (`canvas` or a cell id)."
           },
           "z": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32",
             "description": "Stacking order."
           }
@@ -5407,15 +5413,8 @@
             ],
             "properties": {
               "face": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ClockFaceDoc",
-                    "description": "Analog (default) or digital face."
-                  }
-                ]
+                "$ref": "#/components/schemas/ClockFaceDoc",
+                "description": "Analog (default) or digital face."
               },
               "kind": {
                 "type": "string",
@@ -5424,17 +5423,11 @@
                 ]
               },
               "twelve_hour": {
-                "type": [
-                  "boolean",
-                  "null"
-                ],
+                "type": "boolean",
                 "description": "12-hour vs 24-hour mode (default 24-hour)."
               },
               "tz_offset_minutes": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
+                "type": "integer",
                 "format": "int32",
                 "description": "Timezone offset from UTC in minutes (`-720..=840`)."
               }
@@ -5655,10 +5648,7 @@
         "description": "`OpenAPI` mirror of `multiview_config::SourceWallClock` (ADR-0038 verb).",
         "properties": {
           "use": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "$ref": "#/components/schemas/WallClockUseDoc",
             "description": "`use` (rebase when Trusted) or `discard` (reclock-to-house)."
           }
         }
@@ -6350,6 +6340,14 @@
             "description": "The label text to display."
           }
         }
+      },
+      "WallClockUseDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).",
+        "enum": [
+          "use",
+          "discard"
+        ]
       },
       "WarningCodeDoc": {
         "type": "string",

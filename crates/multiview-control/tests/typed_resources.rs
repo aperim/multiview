@@ -436,8 +436,8 @@ fn openapi_mirrors_reject_what_the_config_types_reject() {
         "audio": { "mode": "both" }
     });
     assert!(serde_json::from_value::<multiview_config::Output>(bad_output.clone()).is_err());
-    assert!(serde_json::from_value::<multiview_control::openapi_schemas::OutputBodyDoc>(
-        bad_output
-    )
-    .is_err());
+    assert!(
+        serde_json::from_value::<multiview_control::openapi_schemas::OutputBodyDoc>(bad_output)
+            .is_err()
+    );
 }

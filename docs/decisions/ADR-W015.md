@@ -67,3 +67,8 @@ same push, so no shipped client regresses. Doc mirror types must track schema.rs
 fixture test). Export omits secrets by construction (`SourceAuth` is a `secret_ref`, never a
 secret). The `youtube` source kind and per-kind output fields (codec, LL-HLS part/segment/GOP,
 RTSP latency profile, per-output audio) become visible API contract — the SPA must render them.
+
+Amendment (2026-06-10, post-review): the literal `export` segment is **reserved** in the
+config-versioning namespace — `/api/v1/config/export` (static route) wins over
+`/config/{target}`, so a versioning target named `export` cannot be read (GET returns the
+export document) or committed (PUT is `405`). Pinned by test.

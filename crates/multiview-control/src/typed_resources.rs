@@ -72,28 +72,49 @@ pub(crate) fn validated_body(
         )));
     };
     let mut map = map.clone();
-    match map.get("id").and_then(Value::as_str) {
-        Some(body_id) if body_id != id => {
-            return Err(ControlError::Validation(format!(
-                "{} body id {body_id:?} does not match the resource id {id:?}",
-                collection.name()
-            )));
-        }
-        Some(_) => {}
-        None => {
-            if map.contains_key("id") {
+    // Sources/overlays: the body `id` IS the resource address — inject the path
+    // id when omitted, reject a mismatch. Outputs are a DIFFERENT namespace:
+    // their config-level `id` is optional, label-derived, and routable
+    // (`OutputRef`), so it is preserved verbatim and never compared to the
+    // store id.
+    if collection != TypedCollection::Outputs {
+        match map.get("id").and_then(Value::as_str) {
+            Some(body_id) if body_id != id => {
                 return Err(ControlError::Validation(format!(
-                    "{} body `id` must be a string",
+                    "{} body id {body_id:?} does not match the resource id {id:?}",
                     collection.name()
                 )));
             }
-            map.insert("id".to_owned(), Value::String(id.to_owned()));
+            Some(_) => {}
+            None => {
+                if map.contains_key("id") {
+                    return Err(ControlError::Validation(format!(
+                        "{} body `id` must be a string",
+                        collection.name()
+                    )));
+                }
+                map.insert("id".to_owned(), Value::String(id.to_owned()));
+            }
         }
     }
     let candidate = Value::Object(map);
+    // Typed deserialization first (field path on failure), then the per-item
+    // semantic checks `MultiviewConfig::validate()` would apply — a well-typed
+    // but semantically invalid document must not enter the store, where it
+    // would poison `GET /config/export` for every client.
     match collection {
-        TypedCollection::Sources => typecheck::<multiview_config::Source>(collection, &candidate)?,
-        TypedCollection::Outputs => typecheck::<multiview_config::Output>(collection, &candidate)?,
+        TypedCollection::Sources => {
+            let source = typecheck::<multiview_config::Source>(collection, &candidate)?;
+            source
+                .validate()
+                .map_err(|err| ControlError::Validation(format!("source body invalid: {err}")))?;
+        }
+        TypedCollection::Outputs => {
+            let output = typecheck::<multiview_config::Output>(collection, &candidate)?;
+            output
+                .validate()
+                .map_err(|err| ControlError::Validation(format!("output body invalid: {err}")))?;
+        }
         TypedCollection::Overlays => {
             typecheck::<multiview_config::Overlay>(collection, &candidate)?;
         }
@@ -106,19 +127,17 @@ pub(crate) fn validated_body(
 fn typecheck<T: DeserializeOwned>(
     collection: TypedCollection,
     candidate: &Value,
-) -> Result<(), ControlError> {
+) -> Result<T, ControlError> {
     let deserializer = candidate.clone();
-    serde_path_to_error::deserialize::<_, T>(deserializer)
-        .map(|_| ())
-        .map_err(|err| {
-            let path = err.path().to_string();
-            let message = err.into_inner().to_string();
-            ControlError::Validation(if path == "." {
-                format!("{} body invalid: {message}", collection.name())
-            } else {
-                format!("{} body invalid at `{path}`: {message}", collection.name())
-            })
+    serde_path_to_error::deserialize::<_, T>(deserializer).map_err(|err| {
+        let path = err.path().to_string();
+        let message = err.into_inner().to_string();
+        ControlError::Validation(if path == "." {
+            format!("{} body invalid: {message}", collection.name())
+        } else {
+            format!("{} body invalid at `{path}`: {message}", collection.name())
         })
+    })
 }
 
 #[cfg(test)]

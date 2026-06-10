@@ -701,11 +701,12 @@ pub struct RtspOptionsDoc {
 }
 
 /// `OpenAPI` mirror of `multiview_config::ClockFaceConfig`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClockFaceDoc {
     /// Analog face.
+    #[default]
     Analog,
     /// Digital readout.
     Digital,
@@ -728,13 +729,13 @@ pub enum SourceKindDoc {
     Clock {
         /// Analog (default) or digital face.
         #[serde(default)]
-        face: Option<ClockFaceDoc>,
+        face: ClockFaceDoc,
         /// 12-hour vs 24-hour mode (default 24-hour).
         #[serde(default)]
-        twelve_hour: Option<bool>,
+        twelve_hour: bool,
         /// Timezone offset from UTC in minutes (`-720..=840`).
         #[serde(default)]
-        tz_offset_minutes: Option<i32>,
+        tz_offset_minutes: i32,
     },
     /// RTSP pull.
     Rtsp {
@@ -781,13 +782,25 @@ pub enum SourceKindDoc {
     },
 }
 
+/// `OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WallClockUseDoc {
+    /// Use the detected wall-clock (rebase when Trusted). The default.
+    #[default]
+    Use,
+    /// Discard it (reclock-to-house).
+    Discard,
+}
+
 /// `OpenAPI` mirror of `multiview_config::SourceWallClock` (ADR-0038 verb).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
 pub struct SourceWallClockDoc {
     /// `use` (rebase when Trusted) or `discard` (reclock-to-house).
     #[serde(rename = "use", default)]
-    pub use_: Option<String>,
+    pub use_: WallClockUseDoc,
 }
 
 /// `OpenAPI` mirror of `multiview_config::Source` — the body accepted by
@@ -821,12 +834,24 @@ pub struct SourceBodyDoc {
     pub wallclock: Option<SourceWallClockDoc>,
 }
 
+/// `OpenAPI` mirror of `multiview_config::audio::OutputAudioMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OutputAudioModeDoc {
+    /// Carry only the mixed program bus.
+    Program,
+    /// Carry an explicit list of selectable tracks.
+    Tracks,
+}
+
 /// `OpenAPI` mirror of `multiview_config::audio::OutputAudio`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct OutputAudioDoc {
     /// `program` (mixed bus) or `tracks` (explicit selection).
-    pub mode: String,
+    pub mode: OutputAudioModeDoc,
     /// The selectable-track list (used only in `tracks` mode).
     #[serde(default)]
     pub tracks: Vec<String>,
@@ -967,7 +992,7 @@ pub struct OverlayBodyDoc {
     pub target: String,
     /// Stacking order.
     #[serde(default)]
-    pub z: Option<i32>,
+    pub z: i32,
     /// Kind-specific parameters, captured verbatim.
     #[serde(flatten)]
     pub params: serde_json::Map<String, serde_json::Value>,

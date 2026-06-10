@@ -13,7 +13,7 @@ mod support;
 
 use axum::http::{header, StatusCode};
 use serde_json::json;
-use support::{get, harness, post_json, send, OPERATOR_TOKEN, VIEWER_TOKEN};
+use support::{get, harness, post_json, put_json, send, OPERATOR_TOKEN, VIEWER_TOKEN};
 
 /// Seed a working layout + one source + one output through the public API,
 /// mirroring what `seed_resources` does for a config-driven run.
@@ -151,7 +151,7 @@ async fn export_retains_base_config_sections_the_stores_do_not_carry() {
         "sources": [],
         "outputs": [ { "kind": "hls", "path": "/srv/hls", "codec": "h264" } ],
         "control": { "listen": "[::1]:8087" },
-        "placement": { "policy": {} },
+        "placement": { "reserve_headroom": 0.2 },
         "probes": []
     });
     let h = support::harness_with(|state| state.with_base_document(base.clone()));
@@ -237,7 +237,7 @@ async fn export_prefers_the_seeded_working_layout_over_alphabetical_order() {
         .await
         .unwrap();
     let parsed: multiview_config::MultiviewConfig =
-        toml::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+        toml::from_str(core::str::from_utf8(&body).unwrap()).unwrap();
     assert_eq!(
         parsed.canvas.width, 3840,
         "the designated working layout wins over the alphabetical decoy"
@@ -258,4 +258,24 @@ async fn export_carries_a_download_disposition() {
             .unwrap(),
         "attachment; filename=\"multiview.toml\""
     );
+}
+
+#[tokio::test]
+async fn the_export_segment_is_reserved_in_the_versioning_namespace() {
+    // `/api/v1/config/export` (static) wins over `/config/{target}` — the
+    // literal target name "export" is reserved by design (ADR-W015): GET
+    // returns the export document, and committing to a target named "export"
+    // is a 405, never a silent versioning write.
+    let h = harness();
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/config/export",
+            OPERATOR_TOKEN,
+            None,
+            &json!({ "document": {}, "message": "nope" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }

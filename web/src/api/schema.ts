@@ -1197,10 +1197,15 @@ export interface components {
         /** @description `OpenAPI` mirror of `multiview_config::audio::OutputAudio`. */
         OutputAudioDoc: {
             /** @description `program` (mixed bus) or `tracks` (explicit selection). */
-            mode: string;
+            mode: components["schemas"]["OutputAudioModeDoc"];
             /** @description The selectable-track list (used only in `tracks` mode). */
             tracks?: string[];
         };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::audio::OutputAudioMode`.
+         * @enum {string}
+         */
+        OutputAudioModeDoc: "program" | "tracks";
         /**
          * @description `OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body
          *     accepted by `POST`/`PUT /api/v1/outputs/{id}`.
@@ -1318,7 +1323,7 @@ export interface components {
              * Format: int32
              * @description Stacking order.
              */
-            z?: number | null;
+            z?: number;
         } & {
             [key: string]: unknown;
         };
@@ -1625,16 +1630,17 @@ export interface components {
             /** @enum {string} */
             kind: "solid";
         } | {
-            face?: null | components["schemas"]["ClockFaceDoc"];
+            /** @description Analog (default) or digital face. */
+            face?: components["schemas"]["ClockFaceDoc"];
             /** @enum {string} */
             kind: "clock";
             /** @description 12-hour vs 24-hour mode (default 24-hour). */
-            twelve_hour?: boolean | null;
+            twelve_hour?: boolean;
             /**
              * Format: int32
              * @description Timezone offset from UTC in minutes (`-720..=840`).
              */
-            tz_offset_minutes?: number | null;
+            tz_offset_minutes?: number;
         } | {
             /** @enum {string} */
             kind: "rtsp";
@@ -1694,7 +1700,7 @@ export interface components {
         /** @description `OpenAPI` mirror of `multiview_config::SourceWallClock` (ADR-0038 verb). */
         SourceWallClockDoc: {
             /** @description `use` (rebase when Trusted) or `discard` (reclock-to-house). */
-            use?: string | null;
+            use?: components["schemas"]["WallClockUseDoc"];
         };
         /**
          * @description `OpenAPI` mirror of [`multiview_core::stream::StabilityTier`].
@@ -1987,6 +1993,11 @@ export interface components {
             /** @description The label text to display. */
             text: string;
         };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).
+         * @enum {string}
+         */
+        WallClockUseDoc: "use" | "discard";
         /**
          * @description `OpenAPI` mirror of [`multiview_events::WarningCode`] (SA-0 catalog).
          *

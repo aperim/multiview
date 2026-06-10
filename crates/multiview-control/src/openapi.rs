@@ -124,6 +124,8 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::openapi_schemas::RtspOptionsDoc,
         crate::openapi_schemas::ClockFaceDoc,
         crate::openapi_schemas::SourceWallClockDoc,
+        crate::openapi_schemas::WallClockUseDoc,
+        crate::openapi_schemas::OutputAudioModeDoc,
         crate::openapi_schemas::OutputBodyDoc,
         crate::openapi_schemas::OutputAudioDoc,
         crate::openapi_schemas::OverlayBodyDoc,

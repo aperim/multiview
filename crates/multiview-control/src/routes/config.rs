@@ -173,38 +173,7 @@ pub(crate) async fn export_config(
 
     principal.role.require(Action::Read)?;
 
-    // The working layout carries { canvas, layout, cells }: pick the id-sorted
-    // first layout document that declares a canvas (the seeded shape).
-    let layouts = state.repository.list_layouts()?;
-    let working = layouts
-        .iter()
-        .map(|v| &v.layout)
-        .find(|layout| layout.body.get("canvas").is_some())
-        .ok_or_else(|| {
-            crate::error::ControlError::Validation(
-                "no working layout (a layout body carrying `canvas`) to export".to_owned(),
-            )
-        })?;
-
-    let collect = |repo: &std::sync::Arc<dyn crate::resource_store::ResourceRepository>|
-     -> ControlResult<Vec<serde_json::Value>> {
-        Ok(repo
-            .list()?
-            .into_iter()
-            .map(|v| v.resource.body)
-            .collect())
-    };
-
-    let document = serde_json::json!({
-        "schema_version": 1,
-        "canvas": working.body.get("canvas").cloned().unwrap_or(serde_json::Value::Null),
-        "layout": working.body.get("layout").cloned().unwrap_or(serde_json::Value::Null),
-        "cells": working.body.get("cells").cloned().unwrap_or_else(|| serde_json::json!([])),
-        "sources": serde_json::Value::Array(collect(&state.sources)?),
-        "outputs": serde_json::Value::Array(collect(&state.outputs)?),
-        "overlays": serde_json::Value::Array(collect(&state.overlays)?),
-    });
-
+    let document = compose_export_document(&state)?;
     let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(document)
         .map_err(|err| {
             let path = err.path().to_string();
@@ -224,8 +193,106 @@ pub(crate) async fn export_config(
 
     Ok((
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/toml")],
+        [
+            (axum::http::header::CONTENT_TYPE, "application/toml"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"multiview.toml\"",
+            ),
+        ],
         toml,
     )
         .into_response())
+}
+
+/// Compose the export JSON document: the loaded base configuration (when one
+/// was installed) overlaid with everything the live stores own — the working
+/// layout's canvas/layout/cells and the source/output/overlay collections.
+fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value> {
+    // The working layout carries { canvas, layout, cells }. Prefer the
+    // designated working layout (set at seed time); fall back to the id-sorted
+    // first layout document that declares a canvas (store-only deployments).
+    let layouts = state.repository.list_layouts()?;
+    let working = state
+        .working_layout_id
+        .as_deref()
+        .and_then(|id| {
+            layouts
+                .iter()
+                .map(|v| &v.layout)
+                .find(|layout| layout.id == id && layout.body.get("canvas").is_some())
+        })
+        .or_else(|| {
+            layouts
+                .iter()
+                .map(|v| &v.layout)
+                .find(|layout| layout.body.get("canvas").is_some())
+        })
+        .ok_or_else(|| {
+            crate::error::ControlError::Validation(
+                "no working layout (a layout body carrying `canvas`) to export".to_owned(),
+            )
+        })?;
+
+    let collect = |repo: &std::sync::Arc<dyn crate::resource_store::ResourceRepository>|
+     -> ControlResult<Vec<serde_json::Value>> {
+        Ok(repo
+            .list()?
+            .into_iter()
+            .map(|v| v.resource.body)
+            .collect())
+    };
+
+    // Start from the loaded configuration document (so authored sections the
+    // stores do not carry — control, placement, audio, probes, salvos, tally
+    // profiles, walls, routing — survive the round-trip verbatim), then
+    // overlay everything the live stores own.
+    let mut document = state
+        .base_document
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(doc) = document.as_object_mut() else {
+        return Err(crate::error::ControlError::Repository(
+            "the export base document is not a JSON object".to_owned(),
+        ));
+    };
+    doc.entry("schema_version").or_insert(serde_json::json!(1));
+    doc.insert(
+        "canvas".to_owned(),
+        working
+            .body
+            .get("canvas")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    doc.insert(
+        "layout".to_owned(),
+        working
+            .body
+            .get("layout")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    doc.insert(
+        "cells".to_owned(),
+        working
+            .body
+            .get("cells")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    );
+    doc.insert(
+        "sources".to_owned(),
+        serde_json::Value::Array(collect(&state.sources)?),
+    );
+    doc.insert(
+        "outputs".to_owned(),
+        serde_json::Value::Array(collect(&state.outputs)?),
+    );
+    doc.insert(
+        "overlays".to_owned(),
+        serde_json::Value::Array(collect(&state.overlays)?),
+    );
+    Ok(document)
 }

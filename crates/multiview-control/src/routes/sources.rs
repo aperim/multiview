@@ -159,12 +159,15 @@ pub(crate) async fn update_source(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // Preconditions are evaluated before request content (RFC 9110 §13.2.2):
+    // a stale `If-Match` (or a missing resource) is reported even when the
+    // submitted body is itself invalid.
+    let current = state.sources.get(&id)?;
+    if_match.require(SOURCE_KIND, &id, current.version)?;
     let input = ResourceInput {
         name: input.name,
         body: validated_body(TypedCollection::Sources, &id, &input.body)?,
     };
-    let current = state.sources.get(&id)?;
-    if_match.require(SOURCE_KIND, &id, current.version)?;
     let versioned = state.sources.update(&id, input)?;
     state.audit(
         &principal.key_id,
