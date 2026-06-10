@@ -919,9 +919,11 @@ pub struct Pipeline {
     /// Per-source last-good **audio** stores (AUD-2), keyed by source id. Shared
     /// (`Arc`) between each source's audio decode thread (writer) and the
     /// [`ProgramBus`](multiview_audio::program::ProgramBus) the bake consumer
-    /// samples per tick (reader). Built for every file/URL source — a synthetic /
-    /// NDI / audio-free source simply rides silence (the store silence-fills past
-    /// what was published). Empty when this run did not opt into program audio.
+    /// samples per tick (reader). Built for every file/URL source AND for the
+    /// `bars` synthetic source (its 1 kHz line-up tone, AUD-5) — a `solid`/`clock`
+    /// synthetic / NDI / audio-free source simply rides silence (the store
+    /// silence-fills past what was published). Empty when this run did not opt into
+    /// program audio.
     audio_stores: std::collections::HashMap<String, Arc<multiview_audio::store::AudioStore>>,
     /// Per-source **audio** ingest plans (AUD-2): how to open + decode each
     /// source's audio. The drive starts one audio decode thread per plan
@@ -929,6 +931,13 @@ pub struct Pipeline {
     /// Built only for libav-openable (file/URL) sources; empty when this run did
     /// not opt into program audio.
     audio_ingest_plans: Vec<crate::audio::AudioIngestPlan>,
+    /// Per-source synthetic **tone** plans (AUD-5): the `bars` line-up tone
+    /// companion. The drive starts one tone publish thread per plan, writing the
+    /// 1 kHz reference sine into that source's [`Self::audio_stores`] entry (which
+    /// is routed onto the program bus exactly like a decoded source's audio).
+    /// Built only for `bars` synthetic sources; empty when this run did not opt
+    /// into program audio.
+    tone_ingest_plans: Vec<crate::audio::ToneIngestPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -1080,6 +1089,8 @@ impl Pipeline {
             Arc<multiview_audio::store::AudioStore>,
         > = std::collections::HashMap::new();
         let mut audio_ingest_plans: Vec<crate::audio::AudioIngestPlan> = Vec::new();
+        // AUD-5: synthetic line-up tone plans (the `bars` source's 1 kHz companion).
+        let mut tone_ingest_plans: Vec<crate::audio::ToneIngestPlan> = Vec::new();
 
         // Per-source native caption stores + reader plans. Built best-effort: a
         // source whose selector resolves to an HLS WebVTT rendition gets a store
@@ -1141,6 +1152,18 @@ impl Pipeline {
             if let Some(audio_plan) = audio_ingest_plan_for(source) {
                 audio_stores.insert(source.id.clone(), crate::audio::new_store());
                 audio_ingest_plans.push(audio_plan);
+            }
+            // AUD-5: the `bars` synthetic source emits a 1 kHz line-up tone (its
+            // colour-bars companion), so it contributes a real audio store on the
+            // bus rather than silence. Build the store the same way an audio-bearing
+            // source does (so the existing bus-routing below picks it up) and queue
+            // a tone publish plan; a tone thread fills the store at cadence. `solid`
+            // / `clock` synthetic sources carry no audio and stay silent.
+            if let Some(tone_plan) = tone_ingest_plan_for(source, cadence) {
+                audio_stores
+                    .entry(source.id.clone())
+                    .or_insert_with(crate::audio::new_store);
+                tone_ingest_plans.push(tone_plan);
             }
         }
 
@@ -1241,6 +1264,7 @@ impl Pipeline {
             ingest_plans,
             audio_stores,
             audio_ingest_plans,
+            tone_ingest_plans,
             inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
@@ -1350,9 +1374,11 @@ impl Pipeline {
     /// The program bus mixes the **real decoded audio** of every audio-bearing
     /// source (AUD-2): a per-source decode thread resamples each source's audio to
     /// the canonical 48 kHz stereo and publishes it into a lock-free `AudioStore`
-    /// the bus samples per tick. A source with no audio (synthetic / NDI /
-    /// audio-free) contributes silence. The AAC encoder runs at 48 kHz stereo /
-    /// 128 kbps (the canonical program format).
+    /// the bus samples per tick. The `bars` synthetic source contributes a 1 kHz
+    /// **line-up tone** the same way (AUD-5) — its colour-bars companion. A source
+    /// with no audio (the `solid`/`clock` synthetic kinds, NDI, an audio-free clip)
+    /// contributes silence. The AAC encoder runs at 48 kHz stereo / 128 kbps (the
+    /// canonical program format).
     pub fn enable_program_audio(&mut self) {
         self.encode_cfg.audio = Some(multiview_output::AudioEncodeConfig::aac(48_000, 2, 128_000));
     }
@@ -1764,7 +1790,27 @@ impl Pipeline {
         } else {
             Vec::new()
         };
-        let supervisor = IngestSupervisor::start(plans, audio_plans, caption_plans);
+        // AUD-5: synthetic tone publish plans (the `bars` line-up tone). Spawned
+        // ONLY when this run opted into program audio (otherwise there is no
+        // `ProgramBus` consuming the stores). Each pairs the `bars` source's tone
+        // plan with its `AudioStore` (already routed onto the bus below); the
+        // thread fills the store with the 1 kHz tone, the bus samples it.
+        let tone_plans: Vec<(
+            crate::audio::ToneIngestPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )> = if self.encode_cfg.audio.is_some() {
+            std::mem::take(&mut self.tone_ingest_plans)
+                .into_iter()
+                .filter_map(|plan| {
+                    self.audio_stores
+                        .get(&plan.id)
+                        .map(|store| (plan, Arc::clone(store)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let supervisor = IngestSupervisor::start(plans, audio_plans, tone_plans, caption_plans);
 
         // Prime the first frame per tile BEFORE constructing the runtime (whose
         // `new` seeds tick 0 to "now") and therefore before the output clock's
@@ -1784,9 +1830,12 @@ impl Pipeline {
         // audio config's sample rate + channel layout, paced by the pipeline
         // cadence. AUD-2: every per-source `AudioStore` is routed onto the bus at
         // unity gain, so the bus mixes the REAL decoded audio the per-source decode
-        // threads (spawned above) publish — not silence. A source with no audio
-        // (synthetic / NDI / audio-free) has no store here and simply does not
-        // contribute (its absence reads as silence on the mix). The bus moves into
+        // threads (spawned above) publish — not silence. AUD-5: the `bars`
+        // synthetic source's store carries its 1 kHz line-up tone (published by its
+        // tone thread) and is routed here identically. A source with no audio (the
+        // `solid`/`clock` synthetic kinds, NDI, an audio-free clip) has no store
+        // here and simply does not contribute (its absence reads as silence on the
+        // mix). The bus moves into
         // the bake consumer (it is `Send`); it is ticked off the hot path, never on
         // the output-clock loop. `None` (audio off) means the consumer encodes no
         // audio at all, so the run is byte-identical to the video-only path.
@@ -3625,6 +3674,10 @@ impl IngestSupervisor {
             crate::audio::AudioIngestPlan,
             Arc<multiview_audio::store::AudioStore>,
         )>,
+        tone_plans: Vec<(
+            crate::audio::ToneIngestPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )>,
         caption_plans: Vec<crate::captions::CaptionPlan>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -3632,6 +3685,7 @@ impl IngestSupervisor {
             plans
                 .len()
                 .saturating_add(audio_plans.len())
+                .saturating_add(tone_plans.len())
                 .saturating_add(caption_plans.len()),
         );
         for plan in plans {
@@ -3660,6 +3714,21 @@ impl IngestSupervisor {
                     // silence-fills) rather than failing the run — audio is
                     // best-effort and never gates the output clock (invariant #1).
                     tracing::error!(error = %e, source = %id, "could not spawn audio decode thread");
+                }
+            }
+        }
+        for (plan, store) in tone_plans {
+            let stop = Arc::clone(&stop);
+            let id = plan.id.clone();
+            let builder = std::thread::Builder::new().name(format!("multiview-tone-{id}"));
+            match builder.spawn(move || crate::audio::tone_publish_loop(&plan, &store, &stop)) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // A tone thread that cannot spawn is logged and skipped: the
+                    // `bars` source rides silence on the program bus (the store
+                    // silence-fills) rather than failing the run — the line-up tone
+                    // is best-effort and never gates the output clock (invariant #1).
+                    tracing::error!(error = %e, source = %id, "could not spawn tone publish thread");
                 }
             }
         }
@@ -4557,6 +4626,27 @@ fn audio_ingest_plan_for(source: &Source) -> Option<crate::audio::AudioIngestPla
         location,
         live,
     })
+}
+
+/// Resolve a `bars` synthetic source's **line-up tone** plan (AUD-5): the source
+/// id + the output cadence the 1 kHz reference tone is paced to.
+///
+/// Returns `Some` **only** for [`SourceKind::Bars`] — the SMPTE/EBU colour-bars
+/// card's audible companion is a 1 kHz tone. Every other source (the other
+/// synthetic kinds `solid`/`clock`, and all decoded/NDI sources) returns `None`:
+/// `solid`/`clock` carry no audio, and a decoded source's real audio is handled
+/// by [`audio_ingest_plan_for`]. So this never double-routes a decoded source.
+fn tone_ingest_plan_for(
+    source: &Source,
+    cadence: Rational,
+) -> Option<crate::audio::ToneIngestPlan> {
+    match &source.kind {
+        SourceKind::Bars => Some(crate::audio::ToneIngestPlan {
+            id: source.id.clone(),
+            cadence,
+        }),
+        _ => None,
+    }
 }
 
 /// Resolve every source's HLS `WebVTT` caption plan concurrently (#48) and index
