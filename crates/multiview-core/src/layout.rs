@@ -197,6 +197,19 @@ impl Canvas {
         Rational::new(self.fps_num, self.fps_den)
     }
 
+    /// Whether two canvases denote the **same output signal**: identical pixel
+    /// geometry and the same cadence **by value** ([`Rational`]'s `PartialEq`
+    /// cross-multiplies in `i128`), so a non-reduced `50/2` cadence equals
+    /// `25/1`. The live-apply pinned-canvas gates (ADR-W017 / ADR-R004)
+    /// compare with this — never with the structural derived `==`, whose
+    /// `fps_num`/`fps_den` fields deliberately distinguish non-reduced forms.
+    #[must_use]
+    pub fn same_signal(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.cadence() == other.cadence()
+    }
+
     /// Validate this canvas in isolation.
     ///
     /// Enforces positive pixel dimensions and a valid positive rational cadence

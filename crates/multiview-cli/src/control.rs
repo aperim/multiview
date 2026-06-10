@@ -1379,6 +1379,7 @@ input_id = "in_b"
         let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
         let mut drive = test_drive(&test_config());
         let before = drive.layout().name.clone();
+        let mut sub = publisher.subscribe();
 
         // Same document shape, WRONG canvas (128x128@30 vs the running 64x64@25).
         let mismatched = stored_full_canvas(
@@ -1403,6 +1404,60 @@ input_id = "in_b"
             drive.layout().canvas.width,
             64,
             "the pinned canvas survives"
+        );
+
+        // MINOR-2 (ADR-W017 review): the broken promise must be OBSERVABLE on
+        // the realtime stream, not only a tracing line — a `job.progress`
+        // outcome with the held phase, pct < 100, naming the reason.
+        let mut saw_held = false;
+        while let Ok(seq) = sub.try_recv() {
+            if let Event::JobProgress(progress) = seq.event.as_ref() {
+                if progress.phase == "apply_layout_held" {
+                    assert!(progress.pct < 100, "a held apply is not 100% complete");
+                    let message = progress.message.as_deref().unwrap_or_default();
+                    assert!(
+                        message.contains("wall-x") && message.contains("canvas"),
+                        "the held outcome names the layout and the reason, got {message:?}"
+                    );
+                    saw_held = true;
+                }
+            }
+        }
+        assert!(
+            saw_held,
+            "a held stored-layout apply emits an apply_layout_held outcome (inv #10 drop-oldest)"
+        );
+    }
+
+    /// MINOR-3 (ADR-W017 review): the drain's pinned-canvas backstop compares
+    /// cadence by VALUE — a stored `50/2` against the running `25/1` is the
+    /// same signal and must apply, never a false Class-2 hold.
+    #[test]
+    fn apply_layout_with_equivalent_cadence_applies() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        // Identical geometry, equivalent non-reduced cadence (50/2 == 25/1).
+        let equivalent = stored_full_canvas(
+            "in_b",
+            &serde_json::json!({ "width": 64, "height": 64, "fps": "50/2" }),
+        );
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(equivalent)),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        assert_eq!(
+            drive.layout().name,
+            "wall-x",
+            "an equivalent (non-reduced) cadence is the SAME pinned signal and must apply"
         );
     }
 

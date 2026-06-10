@@ -72,6 +72,11 @@ pub struct SeededResources {
     /// else `"working"`) — the layout `GET /api/v1/config/export` composes
     /// canvas/layout/cells from.
     pub working_layout_id: String,
+    /// The running session's **pinned canvas** (geometry + cadence), captured
+    /// immutably from the loaded config at seed time (ADR-W017 / ADR-R004).
+    /// The apply-layout route's Class-1 gate compares against THIS — never the
+    /// mutable layouts repository, which any operator `PUT` can rewrite.
+    pub running_canvas: multiview_config::LayoutCanvas,
 }
 
 /// Map a `serde_json` serialization fault to a repository error.
@@ -163,6 +168,14 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         overlays: Arc::new(overlays),
         layouts: Arc::new(layouts),
         working_layout_id,
+        // Snapshot the pinned canvas from the LOADED CONFIG (the geometry +
+        // cadence the engine session is actually built with), immutably — a
+        // later repository edit cannot move this (ADR-W017 MAJOR-1).
+        running_canvas: multiview_config::LayoutCanvas::new(
+            config.canvas.width,
+            config.canvas.height,
+            config.canvas.fps,
+        ),
     })
 }
 
@@ -304,6 +317,11 @@ pub struct AppState {
     /// from (set by seeding; `None` falls back to the first layout carrying a
     /// `canvas`).
     pub working_layout_id: Option<String>,
+    /// The running session's **pinned canvas** snapshot (set by seeding,
+    /// immutable thereafter — ADR-W017 / ADR-R004). The apply-layout Class-1
+    /// gate compares stored layouts against this; when [`None`] (no seeded
+    /// snapshot) the gate **fails closed** for document-carrying applies.
+    pub running_canvas: Option<multiview_config::LayoutCanvas>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -331,6 +349,7 @@ impl AppState {
             repository,
             base_document: None,
             working_layout_id: None,
+            running_canvas: None,
             sources: Arc::new(InMemorySourceStore::new()),
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
@@ -505,6 +524,17 @@ impl AppState {
         self.overlays = seeded.overlays;
         self.repository = seeded.layouts;
         self.working_layout_id = Some(seeded.working_layout_id);
+        self.running_canvas = Some(seeded.running_canvas);
+        self
+    }
+
+    /// Install the running session's pinned-canvas snapshot (ADR-W017): the
+    /// immutable geometry + cadence the apply-layout Class-1 gate compares
+    /// stored layouts against. Set by [`AppState::with_seeded_resources`] in
+    /// the binary; exposed separately for store-only deployments and tests.
+    #[must_use]
+    pub fn with_running_canvas(mut self, canvas: multiview_config::LayoutCanvas) -> Self {
+        self.running_canvas = Some(canvas);
         self
     }
 

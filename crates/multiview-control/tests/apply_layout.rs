@@ -313,6 +313,287 @@ async fn apply_layout_canvas_mismatch_is_422_class2() {
     assert!(h.commands.try_drain().is_empty());
 }
 
+/// The running session's pinned canvas used across these tests (matches
+/// `grid_body`/`absolute_body`): 320x240 @ 25/1.
+fn running_canvas_320x240_25() -> multiview_config::LayoutCanvas {
+    multiview_config::LayoutCanvas::new(320, 240, "25/1".parse().expect("fps parses"))
+}
+
+/// A harness carrying the immutable pinned-canvas snapshot (as `multiview run`
+/// seeds it), so document-carrying applies pass the fail-closed Class-1 gate.
+fn apply_harness() -> support::Harness {
+    harness_with(|state| state.with_running_canvas(running_canvas_320x240_25()))
+}
+
+/// Build a `POST` request with a Bearer token, JSON body, and an
+/// `Idempotency-Key` header.
+fn post_json_idem(
+    path: &str,
+    token: &str,
+    key: &str,
+    body: &serde_json::Value,
+) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", key)
+        .body(axum::body::Body::from(
+            serde_json::to_vec(body).expect("serialize body"),
+        ))
+        .expect("request should build")
+}
+
+#[tokio::test]
+async fn apply_layout_canvas_gate_survives_working_layout_rewrite() {
+    // MAJOR-1 (ADR-W017 review): the Class-1 canvas gate must compare against
+    // an IMMUTABLE pinned-canvas snapshot captured at seed time — NOT the
+    // mutable layouts repository. Rewriting the working layout's body (a plain
+    // PUT any operator can do) must not smuggle a canvas-mismatched apply past
+    // the gate into a silent post-202 drain hold.
+    let mut h = harness_with(|state| {
+        state
+            .repository
+            .create_layout(
+                "schema_v1",
+                multiview_control::LayoutInput {
+                    name: "schema_v1".to_owned(),
+                    body: grid_body(),
+                },
+            )
+            .expect("seed working layout");
+        state
+            .with_working_layout_id("schema_v1")
+            .with_running_canvas(running_canvas_320x240_25())
+    });
+
+    // Rewrite the WORKING layout's stored body to claim an HD canvas.
+    let current = send(
+        &h.router,
+        support::get("/api/v1/layouts/schema_v1", OPERATOR_TOKEN),
+    )
+    .await;
+    let tag = support::etag(&current).expect("working layout etag");
+    let mut hd = grid_body();
+    hd["canvas"] = json!({ "width": 1920, "height": 1080, "fps": "30/1" });
+    let rewrite = send(
+        &h.router,
+        support::put_json(
+            "/api/v1/layouts/schema_v1",
+            OPERATOR_TOKEN,
+            Some(&tag),
+            &json!({ "name": "schema_v1", "body": hd }),
+        ),
+    )
+    .await;
+    assert_eq!(rewrite.status(), StatusCode::OK, "working layout rewritten");
+
+    // A stored layout matching the REWRITTEN body (but not the running canvas)
+    // must still be refused: the pinned canvas is 320x240@25, immutably.
+    let mut other = absolute_body();
+    other["canvas"] = json!({ "width": 1920, "height": 1080, "fps": "30/1" });
+    create_layout(&h, "hd-wall", &other).await;
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            &json!({ "layout": "hd-wall" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "rewriting the working layout must not bypass the pinned-canvas gate"
+    );
+    assert!(h.commands.try_drain().is_empty());
+}
+
+#[tokio::test]
+async fn apply_layout_without_a_running_canvas_fails_closed() {
+    // MAJOR-1 (ADR-W017 review): when the control plane holds NO pinned-canvas
+    // snapshot, a document-carrying apply must fail CLOSED (422 naming the
+    // unknown running canvas) — never 202 into a silent drain hold.
+    let mut h = harness();
+    create_layout(&h, "wall-a", &absolute_body()).await;
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            &json!({ "layout": "wall-a" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no pinned-canvas snapshot ⇒ the Class-1 gate fails closed"
+    );
+    let problem = body_json(resp).await;
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("running canvas"),
+        "the problem names the unknown running canvas, got {detail:?}"
+    );
+    assert!(h.commands.try_drain().is_empty());
+}
+
+#[tokio::test]
+async fn apply_layout_equivalent_cadence_is_class1() {
+    // MINOR-3 (ADR-W017 review): cadence equality is by VALUE (cross-
+    // multiplied), not structural num/den — a stored "50/2" against a running
+    // "25/1" is the SAME cadence and must apply live, not refuse as Class-2.
+    // (Seeds the working layout too, so the gate is active under both the old
+    // repository-read implementation and the immutable-snapshot one.)
+    let mut h = harness_with(|state| {
+        state
+            .repository
+            .create_layout(
+                "schema_v1",
+                multiview_control::LayoutInput {
+                    name: "schema_v1".to_owned(),
+                    body: grid_body(),
+                },
+            )
+            .expect("seed working layout");
+        state
+            .with_working_layout_id("schema_v1")
+            .with_running_canvas(running_canvas_320x240_25())
+    });
+    let mut body = absolute_body();
+    body["canvas"] = json!({ "width": 320, "height": 240, "fps": "50/2" });
+    create_layout(&h, "fifty-over-two", &body).await;
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            &json!({ "layout": "fifty-over-two" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "an equivalent (non-reduced) cadence is Class-1, not a canvas mismatch"
+    );
+    assert_eq!(h.commands.try_drain().len(), 1);
+}
+
+#[tokio::test]
+async fn apply_layout_replay_returns_original_op_without_re_resolving() {
+    // MINOR-4 (ADR-W017, pinned semantics): the idempotency reservation
+    // happens BEFORE resolution. A retried key answers from the reservation —
+    // the original operation id, kind "replay", no applied_live/carried_only —
+    // WITHOUT re-resolving the layout, even if the layout has since been
+    // deleted (the original command was already enqueued; the retry asks
+    // "did it land?", and the honest answer is yes).
+    let mut h = apply_harness();
+    create_layout(&h, "wall-a", &absolute_body()).await;
+    let key = "apply-key-1";
+
+    let resp1 = send(
+        &h.router,
+        post_json_idem(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            key,
+            &json!({ "layout": "wall-a" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp1.status(), StatusCode::ACCEPTED);
+    let body1 = body_json(resp1).await;
+    let op1 = body1["operation_id"].as_str().expect("op id").to_owned();
+    assert_eq!(h.commands.try_drain().len(), 1, "enqueued exactly once");
+
+    // Delete the layout out from under the reservation (admin + If-Match).
+    let current = send(
+        &h.router,
+        support::get("/api/v1/layouts/wall-a", OPERATOR_TOKEN),
+    )
+    .await;
+    let tag = support::etag(&current).expect("layout etag");
+    let deleted = send(
+        &h.router,
+        support::delete_if_match("/api/v1/layouts/wall-a", support::ADMIN_TOKEN, Some(&tag)),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+    // The replay still answers 202 with the ORIGINAL op id and no re-enqueue.
+    let resp2 = send(
+        &h.router,
+        post_json_idem(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            key,
+            &json!({ "layout": "wall-a" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp2.status(),
+        StatusCode::ACCEPTED,
+        "a replayed key answers from the reservation, never re-resolves"
+    );
+    let body2 = body_json(resp2).await;
+    assert_eq!(body2["kind"], "replay");
+    assert_eq!(body2["operation_id"].as_str(), Some(op1.as_str()));
+    assert!(
+        body2.get("applied_live").is_none(),
+        "a replay body carries no applied_live classes"
+    );
+    assert!(
+        h.commands.try_drain().is_empty(),
+        "a replay never re-enqueues"
+    );
+}
+
+#[tokio::test]
+async fn apply_layout_resolve_failure_releases_the_idempotency_key() {
+    // MINOR-4 guard: a refused apply (422 — the command never reached the
+    // engine) must NOT consume the idempotency key; a corrected retry with the
+    // same key must actually submit (mirrors the shed-release rule).
+    let mut h = apply_harness();
+    let key = "apply-key-2";
+
+    let refused = send(
+        &h.router,
+        post_json_idem(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            key,
+            &json!({ "layout": "ghost" }),
+        ),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(h.commands.try_drain().is_empty());
+
+    create_layout(&h, "ghost", &absolute_body()).await;
+    let retried = send(
+        &h.router,
+        post_json_idem(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            key,
+            &json!({ "layout": "ghost" }),
+        ),
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::ACCEPTED);
+    let body = body_json(retried).await;
+    assert_eq!(
+        body["kind"], "apply_layout",
+        "the corrected retry is a FRESH submit, not a stale replay"
+    );
+    assert_eq!(h.commands.try_drain().len(), 1);
+}
+
 #[tokio::test]
 async fn apply_layout_requires_write_role() {
     let h = harness();

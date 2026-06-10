@@ -43,6 +43,23 @@ pub struct LayoutCanvas {
     pub fps: Fps,
 }
 
+impl LayoutCanvas {
+    /// Build a pinned-canvas value (the type is `#[non_exhaustive]`, so
+    /// downstream crates construct it here — e.g. the control plane capturing
+    /// the running session's canvas snapshot at seed time, ADR-W017).
+    #[must_use]
+    pub const fn new(width: u32, height: u32, fps: Fps) -> Self {
+        Self { width, height, fps }
+    }
+}
+
+// NOTE (ADR-W017 MINOR-3): `LayoutCanvas`'s derived `PartialEq` is already a
+// same-signal comparison BY VALUE — `Fps` delegates to
+// [`multiview_core::time::Rational`]'s `PartialEq`, which cross-multiplies in
+// `i128` — so a non-reduced `50/2` equals `25/1` and the Class-1 gate never
+// falsely refuses an equivalent cadence (pinned by the
+// `cadence_equality_is_by_value` test below).
+
 /// The serde default for an omitted `layout` strategy: absolute placement
 /// (per-cell `rect`), the only kind the `WebUI` editor writes.
 fn default_strategy() -> Layout {
@@ -246,6 +263,16 @@ mod tests {
         });
         let doc = LayoutDocument::from_body(&body).expect("parses");
         assert!(doc.solve_named("bad").is_err(), "unknown area must fail");
+    }
+
+    #[test]
+    fn cadence_equality_is_by_value() {
+        // ADR-W017 MINOR-3: a non-reduced cadence is the SAME pinned signal.
+        let a = LayoutCanvas::new(320, 240, "25/1".parse().expect("fps"));
+        let b = LayoutCanvas::new(320, 240, "50/2".parse().expect("fps"));
+        let c = LayoutCanvas::new(320, 240, "30000/1001".parse().expect("fps"));
+        assert_eq!(a, b, "50/2 == 25/1 by value (cross-multiplied)");
+        assert_ne!(a, c, "30000/1001 is a genuinely different cadence");
     }
 
     #[test]
