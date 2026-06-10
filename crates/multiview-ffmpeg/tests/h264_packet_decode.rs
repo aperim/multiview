@@ -298,3 +298,26 @@ fn empty_push_is_a_harmless_no_op() {
     dec.push(&[], Some(0)).expect("empty push must not error");
     assert!(dec.receive_frame().expect("receive").is_none());
 }
+
+/// A stream of ONLY non-VCL NALs (SEI/parameter-set spam) must never grow the
+/// pending access-unit buffer past [`MAX_PENDING_AU_BYTES`]: `submit_pending`
+/// deliberately refuses to send a slice-less packet, so the cap branch itself
+/// must DROP the over-cap non-VCL head (drop-never-grow, CLAUDE.md safety
+/// rule 5). Found by adversarial review of PR #83.
+#[test]
+fn non_vcl_spam_keeps_the_pending_buffer_bounded() {
+    use multiview_ffmpeg::packet_decode::MAX_PENDING_AU_BYTES;
+    let mut dec = multiview_ffmpeg::H264PacketDecoder::new(RTP_VIDEO_TB).unwrap();
+    // 64 KiB SEI NAL (type 6): header 0x06 + payload. 400 pushes ≈ 25 MiB —
+    // far past the 8 MiB cap if nothing bounds the non-VCL path.
+    let mut sei = vec![0x06u8];
+    sei.extend(std::iter::repeat(0xAA).take(64 * 1024));
+    for i in 0..400 {
+        dec.push(&sei, Some(i)).unwrap();
+        assert!(
+            dec.pending_len() <= MAX_PENDING_AU_BYTES,
+            "pending grew past the cap on push {i}: {} bytes",
+            dec.pending_len()
+        );
+    }
+}
