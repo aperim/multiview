@@ -30,6 +30,18 @@
 //!   accounts the cross-GPU host round-trip explicitly, and is gated by a
 //!   minimum-gain threshold so a live pipeline is never churned for a marginal
 //!   improvement.
+//! - [`scanout`] — KMS scanout discovery ([`scanout::ScanoutInventory`],
+//!   DEV-B2 / ADR-0044 §3): per DRM card node, the display connectors it owns
+//!   and the GPU behind it, so a local display sink's composite can be pinned to
+//!   the connector-owning GPU ([`select::PipelineDemand::with_sink_locality`]).
+//!   The owning [`load::DeviceId`] is **reconciled** against the canonical device
+//!   set by PCI bus id and reused verbatim ([`scanout::ScanoutInventory::from_drm_cards`]),
+//!   so a scanout locality matches placement's identities for the same physical
+//!   GPU — never a re-derived id that would silently miss. The pure
+//!   reconciliation + the injectable [`scanout::ScanoutProbe`] seam always
+//!   compile and are CI-tested; the real DRM enumeration
+//!   ([`scanout::DrmScanoutProbe`]) is feature-gated behind `display-kms` and is
+//!   empty on a GPU-less host.
 //! - [`failure`] — the failure-learning ledger ([`failure::FailureLedger`],
 //!   Tier-2 gap P1c): a pure, decaying per-`(Stage, HardwareId)` penalty the
 //!   data plane bumps with typed [`failure::FailureSignal`]s, so a placement
@@ -65,6 +77,7 @@ pub mod perf;
 pub mod planner;
 pub mod probe;
 pub mod registry;
+pub mod scanout;
 pub mod select;
 pub mod split;
 
@@ -85,8 +98,8 @@ pub use failure::{
 #[cfg(feature = "cuda")]
 pub use load::NvmlLoadPoller;
 pub use load::{
-    DeviceId, DeviceLoad, GpuTargetInfo, LoadPoller, LoadProbe, LoadSample, LoadSource,
-    NullLoadPoller, PollInterval, SelfShare, Vendor,
+    normalize_pci_bus_id, DeviceId, DeviceLoad, GpuTargetInfo, LoadPoller, LoadProbe, LoadSample,
+    LoadSource, NullLoadPoller, PollInterval, SelfShare, Vendor,
 };
 pub use perf::{PerfClass, PerfSignals, ARCH_TABLE, DEFAULT_PERF_CLASS};
 pub use planner::{Admission, Plan, Planner, StageUsage};
@@ -95,6 +108,10 @@ pub use probe::{
     StageSupport,
 };
 pub use registry::BackendRegistry;
+pub use scanout::{
+    CardNode, ConnectionStatus, Connector, ConnectorId, DrmCardDescriptor, DrmScanoutProbe,
+    ScanoutInventory, ScanoutProbe,
+};
 pub use select::{
     select_device, GpuCandidate, LoadWeights, Pins, PipelineDemand, PlacementPolicy, RejectReason,
     ScoreWeight, SelectOutcome, Selection, StageCaps,
