@@ -372,7 +372,11 @@ impl MultiviewConfig {
     /// group (two groups disagreeing about one device's presentation trim is
     /// unsatisfiable).
     fn validate_sync_groups(&self) -> Result<(), ConfigError> {
-        let devices: HashSet<&str> = self.devices.iter().map(|d| d.id.as_str()).collect();
+        let devices: HashMap<&str, &DeviceDriver> = self
+            .devices
+            .iter()
+            .map(|d| (d.id.as_str(), &d.driver))
+            .collect();
         let mut seen: HashSet<&str> = HashSet::with_capacity(self.sync_groups.len());
         // Which group already claimed each member device.
         let mut membership: HashMap<&str, &str> = HashMap::new();
@@ -385,11 +389,22 @@ impl MultiviewConfig {
                 )));
             }
             for member in &group.members {
-                if !devices.contains(member.device.as_str()) {
-                    return Err(ConfigError::Validation(format!(
-                        "sync group {:?} references unknown device {:?}",
-                        group.id, member.device
-                    )));
+                match devices.get(member.device.as_str()) {
+                    None => {
+                        return Err(ConfigError::Validation(format!(
+                            "sync group {:?} references unknown device {:?}",
+                            group.id, member.device
+                        )));
+                    }
+                    Some(DeviceDriver::Cast) => {
+                        return Err(ConfigError::Validation(format!(
+                            "sync group {:?} includes cast device {:?}: cast outputs are Tier D \
+                             (seconds of receiver buffering, no sync surface) and are never sync \
+                             participants (ADR-M011)",
+                            group.id, member.device
+                        )));
+                    }
+                    Some(_) => {}
                 }
                 if let Some(previous) = membership.insert(member.device.as_str(), &group.id) {
                     return Err(ConfigError::Validation(format!(

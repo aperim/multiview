@@ -146,7 +146,11 @@ pub enum DisplayAssign {
     /// ([`crate::schema::Output::id`]).
     Output(String),
     /// Present one head of a declared video wall, referenced by head id
-    /// ([`crate::wall::HeadConfig::id`]).
+    /// ([`crate::wall::HeadConfig::id`]). Allowed for **any** display-capable
+    /// device, including Tier-C vendor decoders (a decoder's HDMI out counts
+    /// as a display head — ADR-M009 facet (c)); a sync group containing such
+    /// a member simply reports the weakest-member tier, it is never
+    /// over-claimed.
     WallHead(String),
 }
 
@@ -166,6 +170,7 @@ pub struct DeviceDisplay {
 /// the registry the control plane keeps at runtime is seeded from these
 /// entries exactly as sources/outputs are today.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Device {
     /// Stable device id (referenced by `[[sync_groups]]` members and by
@@ -189,7 +194,8 @@ pub struct Device {
     /// The X.733 severity of the alarm raised when the device stays offline
     /// beyond the dwell, written as the lowercase device token (`"major"`;
     /// the core `PascalCase` form `"Major"` is tolerated on input). Absent ⇒
-    /// no offline alarm; an inactive severity (`"cleared"`) is rejected.
+    /// no offline alarm; inactive (`"cleared"`) and `"indeterminate"`
+    /// severities are rejected — an authored offline alarm must be definite.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -256,10 +262,10 @@ impl Device {
             }
         }
         if let Some(severity) = self.alarm_on_offline {
-            if !severity.is_active() {
+            if !severity.is_active() || severity == PerceivedSeverity::Indeterminate {
                 return Err(ConfigError::Validation(format!(
-                    "device {:?}: alarm_on_offline must be an active severity (warning / minor \
-                     / major / critical); omit the field to disable the offline alarm",
+                    "device {:?}: alarm_on_offline must be a definite active severity (warning \
+                     / minor / major / critical); omit the field to disable the offline alarm",
                     self.id
                 )));
             }

@@ -861,6 +861,8 @@ fn build_device_fragment(n: u8, target_skew_ms: u16, offsets: &[u16]) -> String 
     writeln!(s, "id = \"g\"").unwrap();
     writeln!(s, "target_skew_ms = {target_skew_ms}").unwrap();
     let members = (0..n)
+        // Cast devices (i % 3 == 2) are never sync participants (ADR-M011).
+        .filter(|i| i % 3 != 2)
         .map(|i| {
             let offset = offsets.get(usize::from(i)).copied().unwrap_or(0);
             format!("{{ device = \"dev-{i}\", offset_ms = {offset} }}")
@@ -893,4 +895,69 @@ proptest! {
         let from_json = MultiviewConfig::load_from_json(&json_text).expect("re-parses JSON");
         prop_assert_eq!(&cfg, &from_json);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial-review regressions (review of ship/dev-a1-device-config)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unknown_device_key_is_rejected_at_parse() {
+    // A typo'd or misplaced key must fail loudly: an inline `password`
+    // (instead of `auth.secret_ref`) or a typo like `alarm_on_offine` must
+    // never be silently dropped.
+    let text =
+        doc(&["[[devices]]\nid = \"d\"\ndriver = \"displaynode\"\npassword = \"hunter2\"\n"]);
+    let err =
+        MultiviewConfig::load_from_toml(&text).expect_err("unknown device key must not parse");
+    assert!(err.to_string().contains("password"), "names the key: {err}");
+}
+
+#[test]
+fn unknown_sync_group_key_is_rejected_at_parse() {
+    let text = doc(&[
+        "[[devices]]\nid = \"d\"\ndriver = \"displaynode\"\n\n[[sync_groups]]\nid = \"g\"\n\
+         target_skew_ms = 50\nmembers = [{ device = \"d\" }]\nmode_extra = true\n",
+    ]);
+    let err =
+        MultiviewConfig::load_from_toml(&text).expect_err("unknown sync-group key must not parse");
+    assert!(
+        err.to_string().contains("mode_extra"),
+        "names the key: {err}"
+    );
+}
+
+#[test]
+fn cast_devices_are_rejected_as_sync_group_members() {
+    // Cast is Tier D (seconds of receiver buffering, no sync surface) and is
+    // never a sync participant (ADR-M011).
+    let text = doc(&[
+        "[[devices]]\nid = \"tv\"\ndriver = \"cast\"\naddress = \"[2001:db8::9]:8009\"\n\n\
+         [[sync_groups]]\nid = \"g\"\ntarget_skew_ms = 50\nmembers = [{ device = \"tv\" }]\n",
+    ]);
+    let cfg = MultiviewConfig::load_from_toml(&text).expect("document parses");
+    let err = cfg
+        .validate()
+        .expect_err("cast member must fail (Tier D, ADR-M011)");
+    assert!(
+        err.to_string().contains("never sync participants"),
+        "states the rule: {err}"
+    );
+}
+
+#[test]
+fn indeterminate_offline_alarm_severity_is_rejected() {
+    // `indeterminate` parses (it is a real X.733 severity token) but an
+    // authored offline alarm must be definite.
+    let text = doc(&[
+        "[[devices]]\nid = \"d\"\ndriver = \"displaynode\"\nalarm_on_offline = \"indeterminate\"\n",
+    ]);
+    let cfg = MultiviewConfig::load_from_toml(&text).expect("document parses");
+    let err = cfg
+        .validate()
+        .expect_err("indeterminate severity must fail");
+    assert!(
+        err.to_string().contains("definite active severity"),
+        "states the rule: {err}"
+    );
 }

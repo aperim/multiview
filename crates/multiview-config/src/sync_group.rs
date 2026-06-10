@@ -54,6 +54,7 @@ pub struct SyncMember {
 /// versioned resource (ADR-M008), seeded into the control plane from config
 /// exactly as devices are.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SyncGroup {
     /// Stable sync-group id (unique within the document).
@@ -68,7 +69,9 @@ pub struct SyncGroup {
     /// The member devices with their per-member trims. A device may belong
     /// to **at most one** group (enforced by
     /// [`crate::MultiviewConfig::validate`]); a group must have at least one
-    /// member.
+    /// member. `cast` devices cannot be members: Cast is Tier D — seconds of
+    /// receiver-side buffering with no sync surface, never a sync
+    /// participant (ADR-M011).
     pub members: Vec<SyncMember>,
 }
 
