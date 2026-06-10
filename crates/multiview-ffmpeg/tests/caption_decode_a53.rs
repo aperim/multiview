@@ -195,6 +195,72 @@ fn malformed_a53_side_data_degrades_gracefully_and_keeps_decoding() {
 }
 
 #[test]
+fn selecting_a_708_service_is_refused_honestly_not_silently_empty() {
+    // The linked libav `cc_dec` (FFmpeg 7.1) decodes EIA-608 to text but does
+    // **not** decode CEA-708 service blocks to text — DTVCC (cc_type 2/3) data is
+    // discarded. Building an embedded-CC decoder for a 708 service must therefore
+    // FAIL FAST with a descriptive error rather than open a decoder that silently
+    // emits nothing forever (which would look like "no captions" while really
+    // meaning "this caption form is not decodable here"). The honest refusal lets
+    // the caller fall back (608 field, teletext, sidecar) instead of staring at a
+    // dead, cue-less decoder (captions.md §3 row 3; ADR-R007).
+    let Err(err) = CaptionDecoder::for_embedded(
+        CaptionSource::EmbeddedCc {
+            channel: CcChannel::Service(1),
+        },
+        ts_time_base(),
+    ) else {
+        panic!("opening a 708-service embedded-CC decoder must be refused");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("708") && msg.contains("service"),
+        "the refusal names the unsupported CEA-708 service path, got {msg:?}"
+    );
+}
+
+#[test]
+fn from_parameters_also_refuses_a_708_service_selector() {
+    // The refusal must guard the shared open path, not just `for_embedded`: a
+    // stream-backed `from_parameters` construction for a 708 service is equally
+    // undecodable and must be rejected the same way (no silent cue-less decoder).
+    let params = ffmpeg_next::codec::Parameters::new();
+    let Err(err) = CaptionDecoder::from_parameters(
+        CaptionSource::EmbeddedCc {
+            channel: CcChannel::Service(63),
+        },
+        params,
+        ts_time_base(),
+    ) else {
+        panic!("from_parameters for a 708 service must be refused too");
+    };
+    assert!(
+        err.to_string().contains("708"),
+        "the refusal names CEA-708, got {err}"
+    );
+}
+
+#[test]
+fn supported_608_fields_still_open_and_decode_after_the_708_guard() {
+    // The 708 refusal must not regress the supported 608 fields: every CC1–CC4
+    // field still opens, and the primary CC1 field still decodes a known caption.
+    for channel in [CcChannel::Cc1, CcChannel::Cc2, CcChannel::Cc3, CcChannel::Cc4] {
+        CaptionDecoder::for_embedded(
+            CaptionSource::EmbeddedCc { channel },
+            ts_time_base(),
+        )
+        .unwrap_or_else(|e| panic!("608 field {channel:?} must still open: {e}"));
+    }
+    let cues = decode_caption("HELLO WORLD", 90_000, 3_000);
+    let (lines, _, _) = one_text(&cues.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        lines,
+        vec!["HELLO WORLD".to_owned()],
+        "the supported 608 CC1 path is unaffected by the 708 guard"
+    );
+}
+
+#[test]
 fn ass_packet_decodes_to_text_cue_and_strips_styling() {
     // The ASS/SSA text path (`CaptionSource::Ass`): a Dialogue event body with
     // inline override tags decodes to the markup-stripped display line. The `ass`
