@@ -74,6 +74,15 @@ pub mod synth;
 #[cfg(feature = "ffmpeg")]
 pub mod pipeline;
 
+/// Per-source **runtime audio ingest** (AUD-2): the audio peer of the video
+/// decode thread. Opens + decodes each file/URL source's audio on its own
+/// thread into a lock-free per-source `AudioStore` (canonical 48 kHz stereo),
+/// under the same supervised-reconnect bracket the video ingest uses. The output
+/// clock samples those stores via the `ProgramBus` per tick — never paced or
+/// stalled by a source (invariants #1/#10). Behind the `ffmpeg` feature.
+#[cfg(feature = "ffmpeg")]
+pub mod audio;
+
 /// Native in-pipeline **HLS WebVTT caption ingest**: resolve a source's subtitle
 /// rendition from its HLS master playlist, demux + decode it on an isolated
 /// reader thread, and publish cues into a per-source store the overlay baker

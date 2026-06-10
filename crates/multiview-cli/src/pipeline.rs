@@ -916,6 +916,19 @@ pub struct Pipeline {
     /// thread per plan; the threads publish into [`Self::stores`] as frames
     /// arrive (never buffered ahead of the clock — the BUG-2 fix).
     ingest_plans: Vec<IngestPlan>,
+    /// Per-source last-good **audio** stores (AUD-2), keyed by source id. Shared
+    /// (`Arc`) between each source's audio decode thread (writer) and the
+    /// [`ProgramBus`](multiview_audio::program::ProgramBus) the bake consumer
+    /// samples per tick (reader). Built for every file/URL source — a synthetic /
+    /// NDI / audio-free source simply rides silence (the store silence-fills past
+    /// what was published). Empty when this run did not opt into program audio.
+    audio_stores: std::collections::HashMap<String, Arc<multiview_audio::store::AudioStore>>,
+    /// Per-source **audio** ingest plans (AUD-2): how to open + decode each
+    /// source's audio. The drive starts one audio decode thread per plan
+    /// (alongside the video decode thread) writing into [`Self::audio_stores`].
+    /// Built only for libav-openable (file/URL) sources; empty when this run did
+    /// not opt into program audio.
+    audio_ingest_plans: Vec<crate::audio::AudioIngestPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -1057,6 +1070,16 @@ impl Pipeline {
         // places tiles 1:1 at the cell origin).
         let mut stores: HashMapStores = std::collections::HashMap::new();
         let mut ingest_plans: Vec<IngestPlan> = Vec::with_capacity(config.sources.len());
+        // Per-source audio stores + decode plans (AUD-2). Built for every
+        // libav-openable (file/URL) source so program audio — when this run opts
+        // in via `enable_program_audio` — has a per-source store to route onto the
+        // bus and a plan to spawn a decode thread from. A synthetic / NDI /
+        // audio-free source contributes none and simply rides silence on the bus.
+        let mut audio_stores: std::collections::HashMap<
+            String,
+            Arc<multiview_audio::store::AudioStore>,
+        > = std::collections::HashMap::new();
+        let mut audio_ingest_plans: Vec<crate::audio::AudioIngestPlan> = Vec::new();
 
         // Per-source native caption stores + reader plans. Built best-effort: a
         // source whose selector resolves to an HLS WebVTT rendition gets a store
@@ -1109,6 +1132,16 @@ impl Pipeline {
 
             stores.insert(source.id.clone(), store);
             ingest_plans.push(plan);
+
+            // AUD-2: resolve this source's audio decode plan (a libav-openable
+            // file/URL location + its live flag). A synthetic/NDI/unsupported
+            // source yields `None` (no audio thread; it rides silence on the bus).
+            // The store is built per audio-bearing source so the bus can route it;
+            // it stays empty (silence-filling) until the decode thread fills it.
+            if let Some(audio_plan) = audio_ingest_plan_for(source) {
+                audio_stores.insert(source.id.clone(), crate::audio::new_store());
+                audio_ingest_plans.push(audio_plan);
+            }
         }
 
         let nosignal_card =
@@ -1206,6 +1239,8 @@ impl Pipeline {
             program_spec,
             stores,
             ingest_plans,
+            audio_stores,
+            audio_ingest_plans,
             inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
@@ -1312,10 +1347,12 @@ impl Pipeline {
     /// `None` and the run is byte-identical to the video-only path (no bus, no
     /// audio packets, `run_av` delegates to the old single-stream `run`).
     ///
-    /// The program bus carries **silence** until per-source audio decode is wired
-    /// in a later slice; silence is a valid AAC stream, so this still produces a
-    /// real dual-stream container. The AAC encoder runs at 48 kHz stereo / 128
-    /// kbps (the canonical program format).
+    /// The program bus mixes the **real decoded audio** of every audio-bearing
+    /// source (AUD-2): a per-source decode thread resamples each source's audio to
+    /// the canonical 48 kHz stereo and publishes it into a lock-free `AudioStore`
+    /// the bus samples per tick. A source with no audio (synthetic / NDI /
+    /// audio-free) contributes silence. The AAC encoder runs at 48 kHz stereo /
+    /// 128 kbps (the canonical program format).
     pub fn enable_program_audio(&mut self) {
         self.encode_cfg.audio = Some(multiview_output::AudioEncodeConfig::aac(48_000, 2, 128_000));
     }
@@ -1706,7 +1743,28 @@ impl Pipeline {
         let caption_plans = std::mem::take(&mut self.caption_plans);
         #[cfg(not(feature = "overlay"))]
         let caption_plans: Vec<crate::captions::CaptionPlan> = Vec::new();
-        let supervisor = IngestSupervisor::start(plans, caption_plans);
+        // AUD-2: spawn a per-source audio decode thread (the peer of the video
+        // ingest) ONLY when this run opted into program audio — otherwise there is
+        // no `ProgramBus` to consume the stores, so a decode thread would be pure
+        // waste. Each pairs the source's plan with its `AudioStore` (already routed
+        // onto the bus below); the thread fills the store, the bus samples it. When
+        // audio is off, the plans are left in place (untouched) and no thread runs.
+        let audio_plans: Vec<(
+            crate::audio::AudioIngestPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )> = if self.encode_cfg.audio.is_some() {
+            std::mem::take(&mut self.audio_ingest_plans)
+                .into_iter()
+                .filter_map(|plan| {
+                    self.audio_stores
+                        .get(&plan.id)
+                        .map(|store| (plan, Arc::clone(store)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let supervisor = IngestSupervisor::start(plans, audio_plans, caption_plans);
 
         // Prime the first frame per tile BEFORE constructing the runtime (whose
         // `new` seeds tick 0 to "now") and therefore before the output clock's
@@ -1724,17 +1782,29 @@ impl Pipeline {
         // The program-audio bus (AUD-4): built ONLY when this run opted into audio
         // (`encode_cfg.audio` is `Some`). It mixes one block per output tick at the
         // audio config's sample rate + channel layout, paced by the pipeline
-        // cadence. No sources are routed onto it in this slice — program audio is
-        // SILENCE until per-source decode loops are wired (a valid AAC stream, and
-        // the correct behaviour here). The bus moves into the bake consumer (it is
-        // `Send`); it is ticked off the hot path, never on the output-clock loop.
-        // `None` (audio off) means the consumer encodes no audio at all, so the run
-        // is byte-identical to the video-only path.
-        let audio_bus = self
-            .encode_cfg
-            .audio
-            .as_ref()
-            .map(|cfg| program_audio_bus(cfg, self.cadence));
+        // cadence. AUD-2: every per-source `AudioStore` is routed onto the bus at
+        // unity gain, so the bus mixes the REAL decoded audio the per-source decode
+        // threads (spawned above) publish — not silence. A source with no audio
+        // (synthetic / NDI / audio-free) has no store here and simply does not
+        // contribute (its absence reads as silence on the mix). The bus moves into
+        // the bake consumer (it is `Send`); it is ticked off the hot path, never on
+        // the output-clock loop. `None` (audio off) means the consumer encodes no
+        // audio at all, so the run is byte-identical to the video-only path.
+        let audio_bus = self.encode_cfg.audio.as_ref().map(|cfg| {
+            let mut bus = program_audio_bus(cfg, self.cadence);
+            // Route every per-source store onto the program bus at unity gain. The
+            // route key is the source id; per-source gains / breakaways are a
+            // control-plane concern (AUD-7) that re-points/re-gains these routes at
+            // runtime. Sorted for a deterministic route order across runs.
+            let mut ids: Vec<&String> = self.audio_stores.keys().collect();
+            ids.sort_unstable();
+            for id in ids {
+                if let Some(store) = self.audio_stores.get(id) {
+                    let _ = bus.add_source(id.clone(), Arc::clone(store), 1.0);
+                }
+            }
+            bus
+        });
         // The program-bus loudness normaliser (AUD-6): pair one with the audio bus
         // so the mixed program is normalised toward the target LUFS with a
         // true-peak ceiling BEFORE encode, while discrete tracks stay unaltered
@@ -3538,16 +3608,32 @@ struct IngestSupervisor {
 }
 
 impl IngestSupervisor {
-    /// Spawn one decode thread per video plan **and** one caption reader thread
-    /// per caption plan, then return the running supervisor.
+    /// Spawn one decode thread per video plan, one **audio** decode thread per
+    /// audio plan (AUD-2), and one caption reader thread per caption plan, then
+    /// return the running supervisor.
     ///
-    /// A caption reader is just another best-effort writer of a lock-free store
-    /// (the cue store) — it shares the same stop flag and is joined the same way,
-    /// so it can neither pace nor stall the output clock (invariant #1) nor
-    /// back-pressure the engine (invariant #10).
-    fn start(plans: Vec<IngestPlan>, caption_plans: Vec<crate::captions::CaptionPlan>) -> Self {
+    /// Each is just another best-effort writer of a lock-free store (the tile
+    /// store, the per-source [`AudioStore`](multiview_audio::store::AudioStore),
+    /// or the cue store) — all share the same stop flag and are joined the same
+    /// way, so none can pace or stall the output clock (invariant #1) nor
+    /// back-pressure the engine (invariant #10). The audio thread is the peer of
+    /// the video decode thread: it decodes the SAME source's audio (its own libav
+    /// context) into the source's `AudioStore`, which the program bus samples.
+    fn start(
+        plans: Vec<IngestPlan>,
+        audio_plans: Vec<(
+            crate::audio::AudioIngestPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )>,
+        caption_plans: Vec<crate::captions::CaptionPlan>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::with_capacity(plans.len().saturating_add(caption_plans.len()));
+        let mut handles = Vec::with_capacity(
+            plans
+                .len()
+                .saturating_add(audio_plans.len())
+                .saturating_add(caption_plans.len()),
+        );
         for plan in plans {
             let stop = Arc::clone(&stop);
             let id = plan.id.clone();
@@ -3559,6 +3645,21 @@ impl IngestSupervisor {
                     // simply rides NO_SIGNAL (slate) rather than failing the run
                     // (invariant #1 — the output clock is independent of inputs).
                     tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
+                }
+            }
+        }
+        for (plan, store) in audio_plans {
+            let stop = Arc::clone(&stop);
+            let id = plan.id.clone();
+            let builder = std::thread::Builder::new().name(format!("multiview-audio-{id}"));
+            match builder.spawn(move || crate::audio::audio_ingest_loop(&plan, &store, &stop)) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // An audio thread that cannot spawn is logged and skipped: its
+                    // source rides silence on the program bus (the store
+                    // silence-fills) rather than failing the run — audio is
+                    // best-effort and never gates the output clock (invariant #1).
+                    tracing::error!(error = %e, source = %id, "could not spawn audio decode thread");
                 }
             }
         }
@@ -4415,6 +4516,46 @@ fn ingest_plan_for(
         // plan before the ingest threads spawn. `None` is the default-device /
         // GPU-free path, in lockstep with the compositor's `None`.
         cuda_ordinal: None,
+    })
+}
+
+/// Resolve a source's **audio** decode plan (AUD-2): the libav-openable location
+/// (file path or network URL) its audio is decoded from, plus its live flag.
+///
+/// Returns `None` for sources with no libav audio path — a synthetic
+/// (bars/solid/clock) source carries no audio, and an NDI source's audio is a
+/// separate host-memory concern not wired here. Such a source rides silence on
+/// the program bus (the store silence-fills). A network URL whose container has
+/// no audio stream still yields a plan; its decode loop simply ends at open time
+/// (no audio stream found) and the source rides silence — never an error.
+///
+/// The location mirrors the video [`ingest_plan_for`] mapping so a source's audio
+/// is decoded from the SAME media as its video (the audio peer opens its own
+/// libav context — the contexts are `!Send` and must not be shared).
+fn audio_ingest_plan_for(source: &Source) -> Option<crate::audio::AudioIngestPlan> {
+    let (location, live) = match &source.kind {
+        // Synthetic sources render video in-process and carry no audio.
+        SourceKind::Bars | SourceKind::Solid { .. } | SourceKind::Clock { .. } => return None,
+        SourceKind::File { path } => (path.clone(), false),
+        SourceKind::Rtsp { url, .. }
+        | SourceKind::Hls { url }
+        | SourceKind::Ts { url }
+        | SourceKind::Srt { url }
+        | SourceKind::Rtmp { url } => (url.clone(), true),
+        // YouTube/NDI audio is not wired through the libav file decoder here:
+        // YouTube needs the watch-URL resolve step (deferred to its own slice) and
+        // NDI audio is a host-memory receive. Both ride silence on the bus for now.
+        #[cfg(feature = "youtube")]
+        SourceKind::Youtube { .. } => return None,
+        #[cfg(feature = "ndi")]
+        SourceKind::Ndi { .. } => return None,
+        // Any other (incl. NDI without the feature, future kinds): no audio path.
+        _ => return None,
+    };
+    Some(crate::audio::AudioIngestPlan {
+        id: source.id.clone(),
+        location,
+        live,
     })
 }
 
