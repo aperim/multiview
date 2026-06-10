@@ -6,9 +6,12 @@ criteria, then sequenced for a **dependency‑ and conflict‑aware parallel fan
 
 **How to mark off:** flip the box in **Part 2** (`[ ]` → `[x]`) and set the item's `Status:` in
 Part 3 when its *Acceptance* criteria are met (tests written + green, invariants re‑asserted).
-48 items across 8 work‑streams: **AUD** audio · **OUT** output servers · **IN** inputs ·
+107 items across 11 work‑streams (originally 48 across 8; the NDI, AES67/Dante and **DEV**
+streams plus discovered follow‑on slices were added as they landed): **AUD** audio ·
+**OUT** output servers · **NDI** live NDI/NDI|HX · **AES67/DANTE** audio‑over‑IP · **IN** inputs ·
 **CTL** control→engine · **PRV** preview/WebRTC · **ENG** engine timing/resilience ·
-**GPU** compositor/efficiency/hardware · **SUR** captions/NMOS/web‑codegen.
+**GPU** compositor/efficiency/hardware · **SUR** captions/NMOS/web‑codegen ·
+**DEV** managed devices & display out.
 
 ---
 
@@ -234,6 +237,35 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **GPU-5c** `L` — Wire `PlacementController` (GPU-5b) into the engine runtime: a `LoadPoller` poll thread publishing the `arc_swap` `Vec<DeviceLoad>` snapshot, execute `Migrate`/`Split` proposals through the make-before-break supervisor + scene-swap, call `PlacementCounters::record_*`, resolve config `DevicePin`→`multiview_hal::DeviceId`. Touches the protected output core.  ·  _deps: GPU-5b_
 - [x] **ENG-4c** `S` — i915 PMU `perf_event_open` GPU-busy path behind a tiny FFI-shim leaf crate (deny+SAFETY, like `multiview-ntpsys`), feeding the same `DeviceLoad` enc/dec fields on Intel where fdinfo is unavailable  ·  _deps: ENG-4b_  · _`4a45c46`: NEW `multiview-i915pmu` FFI crate — 3 `// SAFETY:` `unsafe` syscalls (`perf_event_open`/`read`/`close`) + a hand-rolled correct `PERF_ATTR_SIZE_VER1` (72-byte) `perf_event_attr`; hal `i915-pmu` feature folds busy-ns→frac into `DeviceLoad`. Pure diff tested; live `perf_event_open` gated. Poller call = ENG-4 infra_
 - [x] **GPU-1b** `L` — Wire the `ProgramEncoder` into the cli bake consumer (encode-once-mux-many)  ·  _deps: GPU-1_  · _`a1af76c`: consumer owns one `ProgramEncoder`; `RunnableOutput`/`build_outputs`/`run_one_output`→`PacketMuxSink`; `StreamingPacketSource`; test seam evolved frame→packet (no assertion weakened); per-sink encoders retired; aspirational comments fixed. Completes GPU-1 / inv #7_
+
+### DEV — Managed devices & display out (briefs: [display-out](../research/display-out.md) · [managed-devices](../research/managed-devices.md); ADR-0044/0045, ADR-M008..M011, ADR-RT007, ADR-W015)
+
+> **Hardware gating (updated 2026-06-10):** two NDI-licensed ZowieBox units and a
+> multi-generation Cast fleet are available in the test environment, and the HP t630 test unit is
+> approved as a dedicated display-node target (its incumbent signage stack may be taken over) —
+> those validation legs are unblocked. Still gated: the Raspberry Pi legs (a Pi 4 is being
+> provisioned; no Pi 5 exists). The build itself was never blocked.
+
+- [ ] **DEV-A1** `M` — `multiview-config`: `Device` + `SyncGroup` types, validation, export semantics (ADR-M008 lands with it)  ·  _deps: —_
+- [ ] **DEV-A2** `S` — `multiview-events`: `Topic::Devices` + device/timing event types (ADR-RT007)  ·  _deps: —_
+- [ ] **DEV-A3** `L` — `multiview-control`: devices + sync-groups stores, CRUD routes, OpenAPI, audit, bare-verb actions (ADR-W015)  ·  _deps: DEV-A1, DEV-A2_
+- [ ] **DEV-A4** `XL` — `zowietek` driver: typed HTTP client + poller actor + three facets + device state machine (feature-gated; socket-free tests) (ADR-M009)  ·  _deps: DEV-A3_
+- [ ] **DEV-A5** `M` — Discovery infra: mDNS browse (new — none exists in-repo) + `/discovery/devices` endpoints + untrusted-inventory confirm-adopt flow  ·  _deps: DEV-A3_
+- [ ] **DEV-A6** `L` — SPA: DevicesPage, adopt flow, detail tabs, "From device" pickers, help pages  ·  _deps: DEV-A3, DEV-A4_
+- [ ] **DEV-B1** `XL` — `multiview-output/src/display/` behind `display-kms`: drm-rs sink + mailbox/atomic-flip loop + TEST_ONLY probe + EDID/forced-mode policy; `Output::Display` wired through the five config matches + cli `build_outputs` + SPA form (ADR-0044)  ·  _deps: — (1-day fence spike first)_
+- [ ] **DEV-B2** `L` — HAL/placement scanout affinity: KMS connector discovery in probe, sink-locality constraint in select, placement migration gate  ·  _deps: DEV-B1_
+- [ ] **DEV-B3** `L` — Render path: wgpu NV12→XRGB into a GBM/dmabuf scanout buffer (AMD/fallback) + NV12 direct scanout (Intel/Pi) + the wgpu version-pin decision  ·  _deps: DEV-B1_
+- [ ] **DEV-B4** `L` — ALSA HDMI audio sink: ELD gating, hdmi:/vc4 card config, buffer-level servo + adaptive resampler  ·  _deps: DEV-B1_
+- [ ] **DEV-B5** `L` — `multiview node` subcommand: single-ingest display-node mode + systemd unit + bare-metal/container deploy (kernel-uevent listener; rootless polling fallback) (ADR-0045)  ·  _deps: DEV-B1, DEV-B2, DEV-B3, DEV-B4_
+- [ ] **DEV-B6** `M` — Node enrollment/pairing + `displaynode` driver + Display-tab assignment + wall-head binding  ·  _deps: DEV-A3, DEV-B5_
+- [ ] **DEV-C1** `L` — Outbound presentation epoch: per-program `WallClockRef` on the control WS + RTCP SR on RTSP + `EXT-X-PROGRAM-DATE-TIME` on HLS + optional RFC 7273 SDP attrs (ADR-M010)  ·  _deps: DEV-A2_
+- [ ] **DEV-C2** `M` — Node presentation discipline: epoch+link-offset frame chooser at vblank + skew telemetry  ·  _deps: DEV-B5, DEV-C1_
+- [ ] **DEV-C3** `M` — Sync groups: apply/measure/test-pattern, weakest-member tier computation, drift alarms  ·  _deps: DEV-A3, DEV-C2_
+- [ ] **DEV-C4** `M` — Clock-layer telemetry + deployment guidance: ptp4l/chrony configs, servo offset export, acceptance-soak harness (soak is hardware-gated)  ·  _deps: DEV-C2_
+- [ ] **DEV-D1** `S` — CORS on the HLS HTTP endpoints (standalone; benefits all browser consumers)  ·  _deps: —_
+- [ ] **DEV-D2** `L` — Cast spike (`rust_cast` vs hand-rolled prost/tokio-rustls) → session actor + `cast` driver (ADR-M011)  ·  _deps: DEV-A3, DEV-A5, DEV-D1_
+- [ ] **DEV-D3** `M` — SPA cast flow: ad-hoc sheet, ephemeral sessions, save-as-device, latency badge, help page  ·  _deps: DEV-D2_
+- [ ] **DEV-D4** `M` — Cast hardware validation across ≥2 device generations + firmware-pinned notes (**gated on hardware acquisition**)  ·  _deps: DEV-D2, DEV-D3_
 
 
 ---
@@ -981,6 +1013,127 @@ SUR-4 → SUR-5 (web layouts swap) form the shortest grounded win. SUR-1 and SUR
 - /workspaces/mosaic/crates/multiview-control/src/routes/mod.rs
 - /workspaces/mosaic/web/src/api/layouts.ts
 - /workspaces/mosaic/web/src/realtime/envelope.ts
+
+
+---
+
+## DEV — Managed devices & display out
+
+**Grounding summary.** Designed 2026-06-10, not yet started. Briefs: [display-out](../research/display-out.md)
+(the F1 `display-kms` sink + display nodes + the F3 presentation model) and
+[managed-devices](../research/managed-devices.md) (the Devices domain: registry, `zowietek`/`displaynode`/`cast`
+drivers, discovery, sync groups). Decisions: ADR-0044/0045, ADR-M008..M011, ADR-RT007, ADR-W015. Four lanes:
+**A** Devices-domain core (serial spine A1→A3, then fan out) · **B** display out (B1 is the long pole) ·
+**C** timing/sync (after B1; C1 is independent) · **D** Cast (stretch; after A3/A5/D1). Invariant posture: the
+display sink consumes the **pre-encode NV12 canvas** via the preview-tap mailbox pattern (the engine never
+awaits a sink — inv #1/#10); device drivers are control-plane pollers, so the engine only ever sees ordinary
+Sources and Outputs. Coordination points: after **A3+B1** the Devices/`Output` schema surfaces freeze; after
+**B5+C2** the F3 acceptance soak gates calling display nodes "frame-accurate". **Hardware gating (updated 2026-06-10):** ZowieBox
+(×2, NDI-licensed) and multi-generation Cast validation hardware are available, and the HP t630 test unit is
+approved as a dedicated display-node target; only the Raspberry Pi legs remain gated (Pi 4 being provisioned;
+no Pi 5 exists).
+
+---
+
+### `[ ]` DEV-A1 — `multiview-config`: `Device` + `SyncGroup` types, validation, export · effort: M · deps: none
+- **Goal:** Config-as-code is the durable source for devices: typed `Device` (driver, address, auth `secret_ref`, `desired_mode`, reconnect, display assignment) + `SyncGroup` (mode, `target_skew_ms`, members with per-member `offset_ms`).
+- **Touches:** `crates/multiview-config/src/` (new `device.rs`, `sync_group.rs`, registered beside `schema.rs`/`wall.rs`).
+- **Acceptance (done when):** serde round-trip (TOML + JSON, internally tagged, never `untagged`; exact integers, no float) for all three driver variants; validation rejects duplicate ids, unknown drivers, dangling sync-group members; export emits desired state only (no runtime status, no discovered-unadopted devices, no ad-hoc Cast sessions; secrets as `ref|redact`). ADR-M008 commits in the same push.
+
+### `[ ]` DEV-A2 — `multiview-events`: `Topic::Devices` + device/timing event types (ADR-RT007) · effort: S · deps: none
+- **Goal:** One coarse ids-filtered `Topic::Devices` carrying `device.status` (conflated latest-wins: state/mode/streams/temperature), `device.adopted/.removed/.mode/.error/.sync` (lossless low-rate), `device.discovered` (during scans), plus `TimingStatus` for F3.
+- **Touches:** `crates/multiview-events/src/` (topic + event types + envelope registration).
+- **Acceptance (done when):** versioned-envelope serde round-trip tests for every new event type; topic ids-filtering tested; no new engine→outside channel (drivers publish from the control plane — inv #10 untouched).
+
+### `[ ]` DEV-A3 — `multiview-control`: devices + sync-groups stores, CRUD, OpenAPI, actions · effort: L · deps: DEV-A1, DEV-A2
+- **Goal:** The Devices domain REST surface: registry stores + CRUD + bare-verb actions, OpenAPI-first.
+- **Touches:** `crates/multiview-control/src/resource_store.rs` (add `DeviceKind`/`SyncGroupKind` markers), new `crates/multiview-control/src/devices/mod.rs` (registry + state machine), new routes + `openapi.rs` registration.
+- **Acceptance (done when):** `/devices` + `/sync-groups` CRUD with ETag/If-Match→412 + Idempotency-Key; `DELETE /devices/{id}` 409s while sources/outputs are bound; bare-verb actions (`probe`, `set-mode` → 202+operation id with declared impact, `reboot` → 202, `identify`/`test-pattern` → 204) per ADR-W015; the DISCOVERED→ADOPTING→ONLINE/DEGRADED/AUTH_FAILED/UNREACHABLE state machine unit-tested; handlers tested socket-free via `tower::oneshot`; `cargo xtask gen-openapi` regenerated; audit entries on every mutation; IPv6-first examples (bracketed literals).
+
+### `[ ]` DEV-A4 — `zowietek` driver: typed client + poller + three facets (ADR-M009) · effort: XL · deps: DEV-A3
+- **Goal:** First vendor driver, clean-room over the vendor-published HTTP API; devices stay a control-plane concern (no engine/`multiview-input` feature).
+- **Touches:** new `crates/multiview-control/src/devices/{driver,zowietek}.rs`; per-driver off-by-default feature (`zowietek` / `devices-net` umbrella).
+- **Acceptance (done when):** typed JSON-RPC client survives the verified doc hazards (per-device request serialization; backoff on busy codes; `"00000"` vs `"000000"` + `rsp` text drift tolerated; no-HTTP-response on LAN/mDNS/port sets handled as expected reboot); poll-only status ≤1 Hz per status group; the three facets produce **ordinary** managed Sources/Outputs carrying a `device_ref`; `desired_mode` convergence declares device-side (DEV-class) impact before apply (close-before-open semantics); default `cargo check` stays pure-Rust/socket-free with the model compiled + fake-transport tests; bitrate-unit ambiguity recorded as a hardware-verification item, never guessed into the schema. (Hardware leg: typed client validated on a real ZowieBox — **gated on purchase**.)
+
+### `[ ]` DEV-A5 — Discovery infra: mDNS browse + `/discovery/devices` + confirm-adopt · effort: M · deps: DEV-A3
+- **Goal:** New shared discovery infrastructure (verified: no working mDNS code exists in-repo) for zowietek/cast/displaynode browsing.
+- **Touches:** new mDNS module in `multiview-control` (an `mdns-sd`-class crate behind the net feature), `/discovery/devices` routes.
+- **Acceptance (done when):** `POST /discovery/devices/scan` → 202 + results as events; `GET /discovery/devices` returns an **untrusted inventory** requiring explicit confirm-adopt (ADR-0041 doctrine — never auto-ingest); results AAAA-first with IPv4 entries labelled *legacy*; browse task bounded + off the engine path; socket-free tests via an injected browser seam.
+
+### `[ ]` DEV-A6 — SPA: DevicesPage, adopt flow, detail tabs, pickers, help · effort: L · deps: DEV-A3, DEV-A4
+- **Goal:** Devices nav entry (between Outputs and Monitoring) + full device management UX.
+- **Touches:** `web/src/pages/` (DevicesPage, device detail tabs, Sync Groups page), `web/src/layout/components/SourcePalette.tsx` ("From device" picker), generated OpenAPI client, in-app help.
+- **Acceptance (done when):** list shows state badge (never colour-alone), mode, firmware chip, temperature, sync-group chip, last-seen; adopt flow from discovery inventory; detail tabs (Overview/Display/Streams/Sync/Maintenance/Events); Sources/Outputs pickers gain "From device" sections; 202 actions ride `submitOperation`; `/help/devices`, `/help/devices/adopt`, `/help/display-nodes`, `/help/sync` pages exist; vitest component tests + `tsc`/`eslint` clean.
+
+### `[ ]` DEV-B1 — `display-kms` sink + `Output::Display` wired end-to-end (ADR-0044) · effort: XL · deps: none (1-day fence spike first: IN_FENCE_FD/OUT_FENCE_PTR via the drm-rs property API; syncobjs fallback)
+- **Goal:** The raw-frame DRM/KMS display sink — the long pole of lane B.
+- **Touches:** new `crates/multiview-output/src/display/` behind a new off-by-default `display-kms` feature (drm + gbm crates; `cargo deny` green); `crates/multiview-config/src/schema.rs` `Output::Display` threaded through the five exhaustive same-crate matches (`explicit_id`/`gpu_pin`/`audio`/`label`/`validate_outputs`); `crates/multiview-cli/src/pipeline.rs` `build_outputs` (pipeline.rs:3724); the SPA output form (a schema-only edit would be a parseable-but-skipped output — ships fully wired).
+- **Acceptance (done when):** a dedicated sink thread owns the DRM fd; flip loop = page-flip-complete → take latest mailbox frame → `atomic_commit(NONBLOCK | PAGE_FLIP_EVENT)`, at most one in-flight commit per CRTC, no-new-frame → do nothing (KMS repeats); a wedged display provably cannot stall the canvas publish (mailbox conflation test — inv #1/#10); `ALLOW_MODESET` never on the frame path; `TEST_ONLY` probes validate plane formats/modifiers at startup; EDID preferred mode chosen by **exact-rational** refresh match (never float fps) + CVT-RB forced-mode fallback for EDID-less heads (per-connector config override); `Output::Display` parses, round-trips, and is built (not skipped) by `build_outputs`; KMS-less CI green via a fake-DRM seam.
+
+### `[ ]` DEV-B2 — HAL/placement scanout affinity · effort: L · deps: DEV-B1
+- **Goal:** The display sink is the first GPU-resident raw-frame consumer; the framebuffer must live on the connector-owning GPU.
+- **Touches:** `crates/multiview-hal/src/probe.rs` (KMS card-node/connector discovery), `crates/multiview-hal/src/select.rs` (sink-locality constraint), `crates/multiview-engine/src/placement.rs` (migration/split awareness).
+- **Acceptance (done when):** probe reports connector-owning card nodes; selection pins composite to the display GPU when a Display sink exists; the placement controller never proposes migrating composite off the scanout GPU (which would force the per-frame GPU→host→GPU copy ADR-0018 forbids) — unit-tested on multi-GPU fixtures; trivially satisfied single-GPU. (Hardware leg: multi-GPU affinity gate exercised on the GPU test server.)
+
+### `[ ]` DEV-B3 — Render path: NV12 direct scanout + wgpu NV12→XRGB fallback · effort: L · deps: DEV-B1
+- **Goal:** Per-hardware buffer strategy, verified per display block.
+- **Touches:** `crates/multiview-output/src/display/` (+ wgpu interop, GBM allocation path).
+- **Acceptance (done when):** Intel Gen9+/Pi vc4 path does NV12 (Pi: NV12/P030 + SAND modifier) decoder-dmabuf → `ADDFB2` → plane with **0 copies/0 render passes**; AMD DCE11 path (no NV12 scanout exists — confirmed in kernel source) runs exactly one wgpu NV12→XRGB pass into a GBM-allocated scanout buffer (dmabuf import; `SurfaceTargetUnsafe::Drm` fallback), budget documented (~0.7 GB/s @ 1080p60); NVIDIA documented as wgpu-DRM-surface-only tier-2 (no raw-KMS GBM path); the workspace wgpu version pin is decided + recorded. (Hardware legs: Pi golden NV12-scanout test on the deploy kernel — **gated on Pi acquisition**; t630 RGB-pass validation — runs on the dedicated t630 test target.)
+
+### `[ ]` DEV-B4 — ALSA HDMI audio sink (ELD-gated) + buffer servo · effort: L · deps: DEV-B1
+- **Goal:** HDMI audio for display heads, reconciling three independent clocks (engine tick, pixel clock, sample clock).
+- **Touches:** new ALSA sink under `crates/multiview-output/src/display/` (feature-gated); reuses the adaptive resampler carried in `crates/multiview-audio`.
+- **Acceptance (done when):** opens the `hdmi:CARD=…` PCM (sets IEC958 channel status; Pi vc4-hdmi via the alsa-lib card config, not raw `hw:`); ELD-gated via `/proc/asound/cardN/eld#C.P` — audio flows only while the pipe is lit (our always-lit sink guarantees it), EDID-less heads get **no** audio path (documented); bounded audio FIFO + buffer-level servo drives the resampler (the mpv/Kodi display-resample technique); the audio path can never block the flip loop; CI tests over fake ELD/PCM seams.
+
+### `[ ]` DEV-B5 — `multiview node` display-node mode + deployment (ADR-0045) · effort: L · deps: DEV-B1, DEV-B2, DEV-B3, DEV-B4
+- **Goal:** Tier-1 display node: the box behaves like a hardware decoder built from commodity hardware, inheriting the product's resilience doctrine for free.
+- **Touches:** `crates/multiview-cli/src/` (new `node` subcommand), `deploy/` (systemd unit, container notes), operator docs.
+- **Acceptance (done when):** `multiview node` runs one supervised ingest (RTSP/SRT/HLS) → hardware decode → single-source full-canvas → display sink, reusing the **unchanged** multiview-input pacer/jitter/reconnect + framestore tile ladder (last-good, then local slate); systemd unit (`User=multiview` + `video render audio` groups, implicit DRM master on first open, masked getty, watchdog + sd_notify, fbcon restore on crash); container support: rootful `--device /dev/dri --device /dev/snd` takes DRM master and listens on the **kernel** netlink uevent group for hotplug (rootless falls back to `force_probe` polling); ADR-0045 commits in the same push. (Hardware leg: t630 24 h node soak — runs on the dedicated t630 test target.)
+
+### `[ ]` DEV-B6 — Node enrollment/pairing + `displaynode` driver + head binding · effort: M · deps: DEV-A3, DEV-B5
+- **Goal:** Nodes become managed devices: enrollment, pairing, and display-head assignment.
+- **Touches:** `multiview-control` devices module (`displaynode` driver variant), `/devices/enroll` + `/devices/pair` routes, SPA Display tab, wall-head binding against `crates/multiview-config/src/wall.rs` (`WallConfig`/`HeadConfig`).
+- **Acceptance (done when):** enroll = node→controller with a TTL'd token bound to a node keypair; pair = operator completes screen pairing (6-char code + QR); a paired node appears as a device projecting display heads; head assignment binds `{ wall_head }` / `{ program }` / `{ output }` per the config sketch; enrollment tokens one-time-display + hashed at rest.
+
+### `[ ]` DEV-C1 — Outbound presentation epoch (ADR-M010) · effort: L · deps: DEV-A2
+- **Goal:** One outbound `WallClockRef` per program so consumers can present against a common wall timeline — the core new outbound timing work.
+- **Touches:** `crates/multiview-engine/src/` (epoch derivation from the existing `ptp.rs` servo / `sysref.rs` chrony estimate), reuse of `crates/multiview-core/src/wallclock.rs` `WallClockRef`, `multiview-events` publication, `crates/multiview-output/` (RTCP SR on RTSP — today the crate emits no RTCP; `EXT-X-PROGRAM-DATE-TIME` field on `hls/media.rs` segments; optional RFC 7273 `ts-refclk`/`mediaclk` SDP attributes).
+- **Acceptance (done when):** `{stream_id, WallClockRef, link_offset, clock_source/quality}` published per program on the control WS (conflated, drop-oldest — inv #10); RTCP SR NTP↔RTP pairs and HLS PDT are stamped from the **same** epoch; chaos test kills PTP/WS mid-run and the output cadence is unaffected (PTP disciplines an estimate, never paces the tick loop — inv #1); exact-integer arithmetic throughout (never float).
+
+### `[ ]` DEV-C2 — Node presentation discipline + skew telemetry · effort: M · deps: DEV-B5, DEV-C1
+- **Goal:** Frame-accurate presentation on nodes: pure pull-side frame choice, never engine feedback.
+- **Touches:** the node-mode presentation loop (DEV-B5) + node telemetry.
+- **Acceptance (done when):** node decodes into a 2–3-frame queue and at each flip presents the frame whose `wall_at(pts) + link_offset` is closest to the predicted next vblank (KMS vblank timestamps); repeat-if-early/drop-if-late; link offset is a fixed per-deployment receiver delay (uniformity matters, not smallness); WS loss → node keeps the last epoch and free-runs drift-bounded (output never falters); flip-timestamp skew telemetry exported.
+
+### `[ ]` DEV-C3 — Sync groups: apply/measure/test-pattern + drift alarms · effort: M · deps: DEV-A3, DEV-C2
+- **Goal:** Sync groups as a first-class resource with honest tier reporting.
+- **Touches:** `multiview-control` sync-groups module + actions; events.
+- **Acceptance (done when):** achieved tier = **weakest member** (S/A/B/C/D), displayed immediately and never over-claimed; per-member `offset_ms` applies as a node buffer trim at a frame boundary (Class-1; engine cadence untouched); `test-pattern` emits the burnt-in frame counter + flash; a drift alarm raises after `target_skew_ms` + dwell and clears on recovery.
+
+### `[ ]` DEV-C4 — Clock-layer telemetry + deployment guidance + acceptance soak · effort: M · deps: DEV-C2
+- **Goal:** Make the clock layer observable and the sync claims testable.
+- **Touches:** `crates/multiview-telemetry/` (servo offset/ppb export), deployment docs (ptp4l preferred / chrony fallback configs), the soak harness.
+- **Acceptance (done when):** servo offset/ppb exported via telemetry with documented pass thresholds (99th-pct |offset| ≤100 µs PTP / ≤1 ms chrony over 24 h); the acceptance soak — 2 nodes on a non-PTP GbE switch, 24 h, burnt-in counter + photo/OCR validation, plus the invariant-#1 chaos extension (kill PTP/WS mid-soak; cadence unaffected; nodes degrade to free-run) — is scripted and documented. **Soak execution is hardware-gated** (needs ≥2 real nodes; the dedicated t630 test target covers one — the second arrives with the Pi 4).
+
+### `[ ]` DEV-D1 — CORS on the HLS HTTP endpoints · effort: S · deps: none
+- **Goal:** Cast's Default Media Receiver (and any browser player) fetches playlists/segments cross-origin; CORS is currently absent (`rg`-verified zero hits).
+- **Touches:** the HLS HTTP serving surface (the ADR-0032 Cache-Control/CORS header contract) wherever playlists/segments/init are served, + the reference fronting config docs.
+- **Acceptance (done when):** playlist/segment/init responses carry the ADR-0032 CORS contract headers; a cross-origin fetch test passes; standalone — no Cast dependency, benefits all browser consumers.
+
+### `[ ]` DEV-D2 — Cast session actor + `cast` driver (ADR-M011) · effort: L · deps: DEV-A3, DEV-A5, DEV-D1
+- **Goal:** Thin control-plane Cast output: point the device at an existing HLS rendition (encode-once preserved; zero engine contact).
+- **Touches:** new `cast` driver in `crates/multiview-control/src/devices/` behind an off-by-default `cast` feature; discovery shared with DEV-A5.
+- **Acceptance (done when):** the spike outcome is recorded (`rust_cast` 0.21 toolchain check vs a hand-rolled prost/tokio-rustls channel from the BSD-3-Clause Open Screen sources) and one path chosen; session actor: discover `_googlecast._tcp` → TLS:8009 → LAUNCH the Default Media Receiver (`CC1AD845`) → LOAD an H.264 High@≤4.1 + AAC HLS rendition URL (device-reachable/dual-stack — Cast is effectively IPv4-only, documented as conventions-§10 legacy interop); heartbeat per ADR-M011 (PING every 10 s, session dead after 20 s without PONG, reconnect retry every 5 s re-resolving by mDNS UUID), receiver-preempted surfaced; sessions are ephemeral (never exported) with save-as-device promotion; fake-channel tests CI-green; Tier-D (seconds; LL-HLS does not auto-engage) stated in docs/ADR.
+
+### `[ ]` DEV-D3 — SPA cast flow · effort: M · deps: DEV-D2
+- **Goal:** Operator-facing casting with honest latency expectations.
+- **Touches:** `web/src/` (cast sheet, device list integration), `/help/casting`.
+- **Acceptance (done when):** ad-hoc cast sheet (pick device → pick rendition → cast), ephemeral session list with a seconds-class "Tier D" latency badge, save-as-device, manual `address:8009` escape hatch for cross-VLAN mDNS invisibility; component tests + `tsc`/`eslint` clean; help page present.
+
+### `[ ]` DEV-D4 — Cast hardware validation (≥2 device generations) · effort: M · deps: DEV-D2, DEV-D3 · **gated on hardware acquisition**
+- **Goal:** Validate the session actor and real glass-to-glass behaviour on physical devices.
+- **Touches:** validation notes/docs only (firmware-pinned).
+- **Acceptance (done when):** session lifecycle validated across ≥2 Cast device generations on current firmware (versions pinned in the notes); measured glass-to-glass latency documented (expect 6–30 s; LL-HLS does not auto-engage on the Default Media Receiver); failure drills pass (device sleep/IP change → re-resolve by mDNS UUID; sender hijack → "preempted" surfaced). **Blocked until ≥2 Cast devices are acquired.**
 
 
 ---
