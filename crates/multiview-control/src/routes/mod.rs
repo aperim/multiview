@@ -534,6 +534,8 @@ pub fn api_router() -> Router<AppState> {
         )
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
+        // Config-as-code export: the live stores rendered as multiview.toml.
+        .route("/config/export", get(config::export_config))
         // Config versioning: history + commit, single revision, diff, rollback.
         .route(
             "/config/{target}",

@@ -30,7 +30,7 @@ export function ContainerPage(): JSX.Element {
       />
 
       <div className="space-y-4">
-        <DocSection title={<Trans>Images</Trans>}>
+        <DocSection id="images" title={<Trans>Images</Trans>}>
           <Prose>
             <Trans>
               Two image families are published. The default image is LGPL-clean
@@ -63,7 +63,7 @@ export function ContainerPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>docker run</Trans>}>
+        <DocSection id="docker-run" title={<Trans>docker run</Trans>}>
           <Prose>
             <Trans>
               Mount a config file and an output directory, then point the binary
@@ -80,7 +80,7 @@ export function ContainerPage(): JSX.Element {
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>GPU access</Trans>}>
+        <DocSection id="gpu-access" title={<Trans>GPU access</Trans>}>
           <Prose>
             <Trans>
               GPU acceleration is opt-in. The compose stack ships two overlay
@@ -128,7 +128,7 @@ export function ContainerPage(): JSX.Element {
           </CodeBlock>
         </DocSection>
 
-        <DocSection title={<Trans>Volumes</Trans>}>
+        <DocSection id="volumes" title={<Trans>Volumes</Trans>}>
           <DocList>
             <li>
               <Trans>
@@ -146,7 +146,7 @@ export function ContainerPage(): JSX.Element {
           </DocList>
         </DocSection>
 
-        <DocSection title={<Trans>Healthcheck</Trans>}>
+        <DocSection id="healthcheck" title={<Trans>Healthcheck</Trans>}>
           <Prose>
             <Trans>
               The compose stack uses a real liveness check: the HLS playlist must
@@ -163,6 +163,7 @@ test -f "$f" && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 30 ]`}
         </DocSection>
 
         <DocSection
+          id="api-token"
           title={
             <span className="inline-flex items-center gap-2">
               <Trans>API access token</Trans>

@@ -322,6 +322,78 @@ function defaultRect(index: number): NormalizedRect {
   return clampRect({ x: 0.1 + offset, y: 0.1 + offset, w: 0.35, h: 0.35 });
 }
 
+// --- Canvas ------------------------------------------------------------------
+
+/** Replace the canvas geometry/cadence (pure; cells untouched). */
+export function setCanvas(model: LayoutModel, canvas: CanvasModel): LayoutModel {
+  return { ...model, canvas };
+}
+
+// --- Presets -----------------------------------------------------------------
+
+/** The seedable layout presets (mirrors the config preset names). */
+export type LayoutPreset = '2x2' | '3x3' | '1+5' | 'pip';
+
+/** All presets in display order, for building the seed buttons. */
+export const LAYOUT_PRESETS: readonly LayoutPreset[] = ['2x2', '3x3', '1+5', 'pip'];
+
+/** Build a cell with the preset defaults (contain fit, no rotation/binding). */
+function presetCell(id: string, rect: NormalizedRect, z: number): CellModel {
+  return { id, label: id, rect, z, rotation: 0, fit: 'contain', sourceId: undefined };
+}
+
+/** A uniform rows×cols grid of cells covering the whole canvas. */
+function gridCells(rows: number, cols: number): CellModel[] {
+  const cells: CellModel[] = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      cells.push(
+        presetCell(
+          `cell-r${String(row + 1)}c${String(col + 1)}`,
+          { x: col / cols, y: row / rows, w: 1 / cols, h: 1 / rows },
+          cells.length,
+        ),
+      );
+    }
+  }
+  return cells;
+}
+
+/** The cells a preset seeds (pure; ids are unique within the preset). */
+export function presetCells(preset: LayoutPreset): readonly CellModel[] {
+  switch (preset) {
+    case '2x2':
+      return gridCells(2, 2);
+    case '3x3':
+      return gridCells(3, 3);
+    case '1+5': {
+      // One 2/3 hero top-left + five 1/3 satellites down the right column and
+      // along the bottom row (the classic 1+5 monitor wall).
+      const third = 1 / 3;
+      return [
+        presetCell('cell-hero', { x: 0, y: 0, w: 2 * third, h: 2 * third }, 0),
+        presetCell('cell-s1', { x: 2 * third, y: 0, w: third, h: third }, 1),
+        presetCell('cell-s2', { x: 2 * third, y: third, w: third, h: third }, 2),
+        presetCell('cell-s3', { x: 0, y: 2 * third, w: third, h: third }, 3),
+        presetCell('cell-s4', { x: third, y: 2 * third, w: third, h: third }, 4),
+        presetCell('cell-s5', { x: 2 * third, y: 2 * third, w: third, h: third }, 5),
+      ];
+    }
+    case 'pip':
+      // A full-frame program with an inset picture-in-picture, bottom-right,
+      // stacked above the program.
+      return [
+        presetCell('cell-program', { x: 0, y: 0, w: 1, h: 1 }, 0),
+        presetCell('cell-pip', { x: 0.66, y: 0.66, w: 0.3, h: 0.3 }, 1),
+      ];
+  }
+}
+
+/** Replace the model's cells with a preset's seed (pure). */
+export function applyPreset(model: LayoutModel, preset: LayoutPreset): LayoutModel {
+  return { ...model, cells: [...presetCells(preset)] };
+}
+
 // --- Validation ------------------------------------------------------------
 
 /** A single validation finding tied to a specific field (for inline display). */

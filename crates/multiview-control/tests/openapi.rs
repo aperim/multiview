@@ -137,9 +137,11 @@ fn openapi_document_emits_layout_and_resource_write_ops() {
     // verbs (PUT/DELETE) carry the If-Match `412` response (ADR-W006).
     let write_paths: &[(&str, &str)] = &[
         ("/api/v1/layouts/{id}", "LayoutInput"),
-        ("/api/v1/sources/{id}", "ResourceInput"),
-        ("/api/v1/outputs/{id}", "ResourceInput"),
-        ("/api/v1/overlays/{id}", "ResourceInput"),
+        // ADR-W015: the resource bodies are documented with TYPED per-kind
+        // schemas (mirrors in `openapi_schemas`), no longer an opaque input.
+        ("/api/v1/sources/{id}", "SourceResourceInputDoc"),
+        ("/api/v1/outputs/{id}", "OutputResourceInputDoc"),
+        ("/api/v1/overlays/{id}", "OverlayResourceInputDoc"),
     ];
 
     for (path, input_schema) in write_paths {

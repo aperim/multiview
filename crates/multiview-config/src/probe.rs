@@ -5,8 +5,11 @@
 //! silence, and loudness-violation, each with a detection **zone**, a level
 //! **threshold**, and **dwell** windows (up/down) so a transient blip does not
 //! raise (or clear) an alarm. The actual X.733 state machine lives in
-//! `multiview-engine` in a later wave; this crate only owns the *declarative shape*
-//! and its validation.
+//! `multiview-engine`
+//! ([`AlarmStateMachine`](../../multiview_engine/alarm/state/struct.AlarmStateMachine.html)),
+//! which builds one of these declarations into a driveable machine via
+//! `AlarmStateMachine::from_probe`; this crate owns the *declarative shape*, its
+//! validation, and the programmatic constructors the engine consumes.
 //!
 //! All unions are **internally tagged** by `kind` (`#[serde(tag = "kind")]`),
 //! never `untagged` (ADR-0010).
@@ -48,6 +51,18 @@ impl Default for DetectionZone {
 }
 
 impl DetectionZone {
+    /// Construct a detection zone from explicit fractional edges.
+    ///
+    /// The result is **not** validated; call [`DetectionZone::validate`] (or
+    /// validate the owning [`Probe`]) before using it. This is the programmatic
+    /// constructor the engine and tests use to build a zone without going through
+    /// TOML (the type is `#[non_exhaustive]`, so a struct literal is not
+    /// constructable downstream).
+    #[must_use]
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
     /// Validate that the zone is finite, within the unit square, and has
     /// positive extent.
     ///
@@ -109,6 +124,14 @@ impl Default for Dwell {
             up_ms: 1000,
             down_ms: 1000,
         }
+    }
+}
+
+impl Dwell {
+    /// Construct dwell windows from explicit raise/clear debounce milliseconds.
+    #[must_use]
+    pub const fn new(up_ms: u32, down_ms: u32) -> Self {
+        Self { up_ms, down_ms }
     }
 }
 
@@ -205,6 +228,37 @@ pub enum ProbeKind {
 }
 
 impl ProbeKind {
+    /// A black-picture probe over the given luma ceiling and detection zone.
+    #[must_use]
+    pub const fn black(luma_threshold: u8, zone: DetectionZone) -> Self {
+        Self::Black {
+            luma_threshold,
+            zone,
+        }
+    }
+
+    /// A freeze probe over the given inter-frame difference floor (per-mille) and
+    /// detection zone.
+    #[must_use]
+    pub const fn freeze(difference_threshold: u16, zone: DetectionZone) -> Self {
+        Self::Freeze {
+            difference_threshold,
+            zone,
+        }
+    }
+
+    /// A silence probe over the given level ceiling in dBFS.
+    #[must_use]
+    pub const fn silence(level_dbfs: f32) -> Self {
+        Self::Silence { level_dbfs }
+    }
+
+    /// A loudness-violation probe against the given compliance target.
+    #[must_use]
+    pub const fn loudness(target: LoudnessTarget) -> Self {
+        Self::Loudness { target }
+    }
+
     /// The [`multiview_core::alarm::AlarmKind`] this probe raises.
     #[must_use]
     pub const fn alarm_kind(&self) -> multiview_core::alarm::AlarmKind {
@@ -269,6 +323,30 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// Construct a probe from its declarative parts.
+    ///
+    /// The result is **not** validated; call [`Probe::validate`] (or
+    /// [`crate::MultiviewConfig::validate`] for cell-reference resolution) before
+    /// using it.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        cell: impl Into<String>,
+        kind: ProbeKind,
+        dwell: Dwell,
+        severity: multiview_core::alarm::PerceivedSeverity,
+        latched: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            cell: cell.into(),
+            kind,
+            dwell,
+            severity,
+            latched,
+        }
+    }
+
     /// Validate this probe's geometry and thresholds in isolation.
     ///
     /// Cell-reference resolution is the document's responsibility (it needs the
@@ -291,5 +369,95 @@ impl Probe {
             )));
         }
         self.kind.validate(&self.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+    use super::*;
+    use multiview_core::alarm::PerceivedSeverity;
+
+    #[test]
+    fn detection_zone_new_carries_the_edges_and_validates() {
+        let zone = DetectionZone::new(0.0, 0.0, 0.5, 1.0);
+        // Exact-bit compare: the constructor stores the literals verbatim, so the
+        // bit patterns must match (avoids the float-`==` lint without weakening
+        // the assertion to a tolerance).
+        assert_eq!(zone.x.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(zone.y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(zone.w.to_bits(), 0.5_f32.to_bits());
+        assert_eq!(zone.h.to_bits(), 1.0_f32.to_bits());
+        zone.validate("p").unwrap();
+        // An out-of-square zone is constructable but fails validation.
+        assert!(DetectionZone::new(0.6, 0.0, 0.5, 1.0)
+            .validate("p")
+            .is_err());
+    }
+
+    #[test]
+    fn dwell_new_carries_the_windows() {
+        let d = Dwell::new(250, 750);
+        assert_eq!(d.up_ms, 250);
+        assert_eq!(d.down_ms, 750);
+    }
+
+    #[test]
+    fn probe_new_builds_a_validatable_probe() {
+        let probe = Probe::new(
+            "probe-1",
+            "cam-1",
+            ProbeKind::black(16, DetectionZone::default()),
+            Dwell::new(100, 200),
+            PerceivedSeverity::Major,
+            true,
+        );
+        assert_eq!(probe.id, "probe-1");
+        assert_eq!(probe.cell, "cam-1");
+        assert_eq!(probe.dwell, Dwell::new(100, 200));
+        assert_eq!(probe.severity, PerceivedSeverity::Major);
+        assert!(probe.latched);
+        assert_eq!(
+            probe.kind.alarm_kind(),
+            multiview_core::alarm::AlarmKind::Black
+        );
+        probe.validate().unwrap();
+    }
+
+    #[test]
+    fn probe_kind_constructors_map_to_alarm_kinds() {
+        use multiview_core::alarm::AlarmKind;
+        assert_eq!(
+            ProbeKind::black(16, DetectionZone::default()).alarm_kind(),
+            AlarmKind::Black
+        );
+        assert_eq!(
+            ProbeKind::freeze(5, DetectionZone::default()).alarm_kind(),
+            AlarmKind::Freeze
+        );
+        assert_eq!(ProbeKind::silence(-60.0).alarm_kind(), AlarmKind::Silence);
+        assert_eq!(
+            ProbeKind::loudness(LoudnessTarget::R128 {
+                target_lufs: -23.0,
+                max_true_peak_dbtp: -1.0,
+            })
+            .alarm_kind(),
+            AlarmKind::LoudnessViolation
+        );
+    }
+
+    #[test]
+    fn constructed_probe_round_trips_through_toml() {
+        let probe = Probe::new(
+            "p",
+            "c",
+            ProbeKind::silence(-50.0),
+            Dwell::new(10, 20),
+            PerceivedSeverity::Warning,
+            false,
+        );
+        let toml = toml::to_string(&probe).unwrap();
+        let back: Probe = toml::from_str(&toml).unwrap();
+        assert_eq!(probe, back);
     }
 }

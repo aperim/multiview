@@ -12,12 +12,14 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import type { ColumnDef } from '@tanstack/react-table';
-import { Pencil, Plus, Trash2 } from 'lucide-react';
+import { Pencil, Plus, Send, Trash2 } from 'lucide-react';
 
 import { createApiClient } from '../api/client';
 import { useDeleteLayout, useLayouts } from '../api/queries';
 import type { Layout } from '../api/queries';
+import { applyLayoutCommand } from '../layout/applyLayout';
 import { fromLayoutBody } from '../layout/model';
+import { HelpLink } from '../components/HelpLink';
 import { PageHeader } from '../components/PageHeader';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -48,6 +50,8 @@ function cellCount(layout: Layout): number {
 
 function useColumns(
   onRequestDelete: (layout: Layout) => void,
+  onApply: (layout: Layout) => void,
+  applying: boolean,
 ): ColumnDef<Layout>[] {
   const { t } = useLingui();
   return useMemo<ColumnDef<Layout>[]>(
@@ -84,6 +88,18 @@ function useColumns(
           const layout = ctx.row.original;
           return (
             <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={applying}
+                aria-label={`${t`Apply layout to engine`}: ${layout.name}`}
+                onClick={(): void => {
+                  onApply(layout);
+                }}
+              >
+                <Send aria-hidden="true" />
+                <Trans>Apply</Trans>
+              </Button>
               <Button asChild variant="outline" size="sm">
                 <Link to={`/layouts/${encodeURIComponent(layout.id)}`}>
                   <Pencil aria-hidden="true" />
@@ -106,7 +122,7 @@ function useColumns(
         },
       },
     ],
-    [t, onRequestDelete],
+    [t, onRequestDelete, onApply, applying],
   );
 }
 
@@ -117,8 +133,32 @@ export function LayoutsPage(): JSX.Element {
   const layouts = useLayouts(client);
   const deleteLayout = useDeleteLayout({ api: client });
   const [pendingDelete, setPendingDelete] = useState<Layout | null>(null);
+  const [applying, setApplying] = useState(false);
 
-  const columns = useColumns(setPendingDelete);
+  // Apply is a LIVE action (202 + operation id; the outcome arrives on the
+  // realtime stream) — unlike stored-resource edits, which need export+restart.
+  const applyLayout = (layout: Layout): void => {
+    setApplying(true);
+    applyLayoutCommand(layout.id)
+      .then((accepted): void => {
+        toast({
+          title: t`Apply-layout accepted`,
+          description: `${t`Operation id`}: ${accepted.operation_id}`,
+        });
+      })
+      .catch((error: unknown): void => {
+        toast({
+          title: t`Could not apply layout`,
+          description: error instanceof Error ? error.message : String(error),
+          variant: 'destructive',
+        });
+      })
+      .finally((): void => {
+        setApplying(false);
+      });
+  };
+
+  const columns = useColumns(setPendingDelete, applyLayout, applying);
   const data = useMemo<Layout[]>(() => layouts.data ?? [], [layouts.data]);
 
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table instance is a leaf; see prior note.
@@ -153,10 +193,14 @@ export function LayoutsPage(): JSX.Element {
       <PageHeader
         title={<Trans>Layouts</Trans>}
         description={
-          <Trans>
-            Multiview layouts. The accessible editor offers a form-based path
-            equivalent to the drag-and-drop canvas.
-          </Trans>
+          <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">
+            <Trans>
+              Multiview layouts. The accessible editor offers a form-based path
+              equivalent to the drag-and-drop canvas. Apply is live on the
+              running engine.
+            </Trans>
+            <HelpLink to="/help/features#layouts" label={t`About layouts`} />
+          </span>
         }
         actions={
           <Button asChild>
