@@ -57,8 +57,12 @@ pub enum AudioError {
 }
 
 impl From<AudioError> for multiview_core::Error {
+    /// Fold an audio fault into the workspace taxonomy. The audio stage is
+    /// first-class alongside video decode/encode, so it routes to the dedicated
+    /// [`multiview_core::Error::Audio`] arm rather than being flattened into
+    /// [`multiview_core::Error::Config`]; the human-readable detail is preserved.
     fn from(value: AudioError) -> Self {
-        multiview_core::Error::Config(value.to_string())
+        multiview_core::Error::Audio(value.to_string())
     }
 }
 
