@@ -4,12 +4,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addCell,
+  applyPreset,
   bindCellSource,
   clamp,
   clampRect,
   emptyLayout,
   fromLayoutBody,
   isLayoutValid,
+  LAYOUT_PRESETS,
   MIN_CELL_EXTENT,
   moveCell,
   normalizeRotation,
@@ -18,6 +20,7 @@ import {
   reorderCell,
   resizeCell,
   rotateCell,
+  setCanvas,
   setCellZ,
   snap,
   toLayoutBody,
@@ -231,5 +234,75 @@ describe('body <-> view-model mapping', () => {
     expect(m.cells).toHaveLength(0);
     expect(m.canvas.width).toBeGreaterThan(0);
     expect(validateLayout(m).map((i) => i.code)).toContain('no-cells');
+  });
+});
+
+describe('layout presets', () => {
+  it('2x2 fills the canvas with four quarter cells', () => {
+    const m = applyPreset(model([]), '2x2');
+    expect(m.cells).toHaveLength(4);
+    expect(m.cells[0]?.rect).toEqual({ x: 0, y: 0, w: 0.5, h: 0.5 });
+    expect(m.cells[3]?.rect).toEqual({ x: 0.5, y: 0.5, w: 0.5, h: 0.5 });
+    expect(isLayoutValid({ ...m, name: 'n' })).toBe(true);
+  });
+
+  it('3x3 fills the canvas with nine cells', () => {
+    const m = applyPreset(model([]), '3x3');
+    expect(m.cells).toHaveLength(9);
+    const last = m.cells[8];
+    expect(last?.rect.x).toBeCloseTo(2 / 3, 9);
+    expect(last?.rect.y).toBeCloseTo(2 / 3, 9);
+    expect(last?.rect.w).toBeCloseTo(1 / 3, 9);
+  });
+
+  it('1+5 is one hero cell plus five satellites covering the canvas edges', () => {
+    const m = applyPreset(model([]), '1+5');
+    expect(m.cells).toHaveLength(6);
+    const hero = m.cells[0];
+    expect(hero?.rect).toEqual({ x: 0, y: 0, w: 2 / 3, h: 2 / 3 });
+    // The satellites tile the right column and the bottom row.
+    const xs = m.cells.slice(1).map((c) => c.rect);
+    expect(xs).toHaveLength(5);
+    for (const r of xs) {
+      expect(r.w).toBeCloseTo(1 / 3, 9);
+      expect(r.h).toBeCloseTo(1 / 3, 9);
+    }
+  });
+
+  it('pip is a full-frame program with an inset picture-in-picture on top', () => {
+    const m = applyPreset(model([]), 'pip');
+    expect(m.cells).toHaveLength(2);
+    expect(m.cells[0]?.rect).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+    const pip = m.cells[1];
+    expect(pip).toBeDefined();
+    expect(pip !== undefined && pip.z > (m.cells[0]?.z ?? 0)).toBe(true);
+    expect(pip !== undefined && pip.rect.w < 0.5 && pip.rect.h < 0.5).toBe(true);
+  });
+
+  it('replaces any existing cells and renumbers z from the bottom', () => {
+    const m = applyPreset(model([cell('old')]), '2x2');
+    expect(m.cells.some((c) => c.id === 'old')).toBe(false);
+    expect(m.cells.map((c) => c.z)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('preset cell ids are unique', () => {
+    for (const preset of LAYOUT_PRESETS) {
+      const m = applyPreset(model([]), preset);
+      expect(new Set(m.cells.map((c) => c.id)).size).toBe(m.cells.length);
+    }
+  });
+});
+
+describe('setCanvas', () => {
+  it('replaces the canvas geometry/cadence without touching the cells', () => {
+    const before = model([cell('a')]);
+    const after = setCanvas(before, { width: 3840, height: 2160, fps: '30000/1001' });
+    expect(after.canvas).toEqual({ width: 3840, height: 2160, fps: '30000/1001' });
+    expect(after.cells).toBe(before.cells);
+  });
+
+  it('a float fps string still fails validation (invariant #3: exact rationals)', () => {
+    const m = setCanvas(model([cell('a')]), { width: 1920, height: 1080, fps: '29.97' });
+    expect(validateLayout(m).map((i) => i.code)).toContain('fps-format');
   });
 });

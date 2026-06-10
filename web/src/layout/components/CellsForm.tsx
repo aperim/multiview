@@ -295,6 +295,9 @@ function CellRow({
                   <SelectItem key={source.id} value={source.id}>
                     <span lang="" dir="auto">
                       {source.name}
+                    </span>{' '}
+                    <span className="text-xs text-muted-foreground">
+                      ({source.kind} · {source.id})
                     </span>
                   </SelectItem>
                 ))}

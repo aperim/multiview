@@ -44,6 +44,7 @@ export type SourceKind =
   | 'clock'
   | 'rtsp'
   | 'hls'
+  | 'youtube'
   | 'ts'
   | 'srt'
   | 'rtmp'
@@ -64,6 +65,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'clock',
   'rtsp',
   'hls',
+  'youtube',
   'ts',
   'srt',
   'rtmp',
