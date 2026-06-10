@@ -14,9 +14,46 @@
 //! (NV12 direct scanout on Intel/vc4; one wgpu pass elsewhere); the math here
 //! is the portable, hardware-free baseline and is golden-tested in CI.
 
+use std::os::fd::BorrowedFd;
+
 use thiserror::Error;
 
-use super::strategy::CanvasDelivery;
+use super::strategy::{CanvasDelivery, DrmFormat};
+
+/// One plane of an importable dmabuf-backed canvas: the borrowed prime fd plus
+/// where that plane starts and how wide its rows are. Borrowed for the
+/// duration of one scan-out submission — the canvas owns the fd, the backend
+/// imports it (`prime_fd_to_buffer`) and adds a framebuffer over it.
+#[derive(Debug, Clone, Copy)]
+pub struct DmabufPlane<'a> {
+    /// The prime (dmabuf) file descriptor backing this plane (planes may share
+    /// one fd at different offsets, as NV12 typically does).
+    pub fd: BorrowedFd<'a>,
+    /// Byte offset of this plane within the dmabuf.
+    pub offset: u32,
+    /// Row pitch (stride) in bytes.
+    pub pitch: u32,
+}
+
+/// A dmabuf-backed canvas image ready for **NV12-direct** scanout: the format,
+/// modifier, geometry, and per-plane fds/layout the backend needs to
+/// `ADDFB2`-import it and flip it with **0 copies, 0 render passes**
+/// (display-out.md §2). Only meaningful when the format is plane-scannable
+/// (NV12/P010) and the modifier matches the plane (the
+/// [`super::strategy::select_buffer_strategy`] gate).
+#[derive(Debug, Clone)]
+pub struct DmabufImage<'a> {
+    /// The dmabuf pixel format (NV12/P010 for direct scanout).
+    pub format: DrmFormat,
+    /// The dmabuf modifier (`None` == linear); SAND128 for vc4 decoder buffers.
+    pub modifier: Option<u64>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// The planes (1–4), in fourcc plane order (NV12 = [Y, UV]).
+    pub planes: Vec<DmabufPlane<'a>>,
+}
 
 /// An NV12 frame the display sink can scan out: tightly-packed planes
 /// (`y.len() == width*height`, `uv.len() == width*height/2`), even
@@ -44,6 +81,19 @@ pub trait DisplayCanvas {
     /// fallback path even for a dmabuf-backed canvas).
     fn delivery(&self) -> CanvasDelivery {
         CanvasDelivery::CpuPlanes
+    }
+
+    /// The borrowed dmabuf fds + plane layout for **NV12-direct** scanout, or
+    /// [`None`] for a CPU-planes canvas. Consistent with [`Self::delivery`]: a
+    /// canvas that reports [`CanvasDelivery::Dmabuf`] returns `Some` here, and
+    /// the NV12-direct backend path (`ADDFB2`-import + flip) uses it. The fds
+    /// are borrowed for the call only — the backend imports a GEM handle from
+    /// them synchronously and never retains the borrow.
+    ///
+    /// The default is [`None`] (the CPU-planes path); only a dmabuf-backed
+    /// canvas overrides it.
+    fn dmabuf_image(&self) -> Option<DmabufImage<'_>> {
+        None
     }
 }
 
