@@ -1,7 +1,6 @@
 # Architecture Decision Records
 
-These ADRs capture the load-bearing decisions for the Multiview engine. 100 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
-These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Multiview engine. 144 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -153,6 +152,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs
 - [ADR-W016](ADR-W016.md) — In-app docs system: registry-derived MiniSearch keyword search, stable anchors, `HelpLink` deep links from the UI, operator concept library
 - [ADR-W018](ADR-W018.md) — Live source apply: `UpsertSource`/`RemoveSource` on the command bus, frame-boundary registration + off-thread producer hub, per-response `X-Multiview-Apply` live/restart per kind, placement pinned to the running island
 - [ADR-W019](ADR-W019.md) — Live apply of stored layouts: resolve+solve at the route (422 before 202), command carries the solved artifact, frame-boundary swap (Class-1; pinned-canvas mismatches refused)
+- [ADR-W021](ADR-W021.md) — Live overlay apply: `UpsertOverlay`/`RemoveOverlay` on the command bus, frame-boundary set swap into a lock-free slot the bake consumer re-derives from, per-collection `LiveApplyCaps` on `AppState` for header honesty (non-rendering kinds store + warn, never lie)
 - [ADR-W017](ADR-W017.md) — Action route style: bare verb path segments (codify shipped practice) *(Proposed)*
 
 ## Dev Container
