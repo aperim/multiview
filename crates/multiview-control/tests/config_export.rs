@@ -26,10 +26,21 @@ async fn seed(h: &support::Harness) {
             &json!({
                 "name": "working",
                 "body": {
-                    "canvas": { "width": 1920, "height": 1080, "fps": "30/1" },
-                    "layout": { "kind": "grid", "columns": 2, "rows": 2 },
+                    "canvas": {
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": "30/1",
+                        "pixel_format": "nv12",
+                        "background": "#101014",
+                        "color": { "profile": "sdr-bt709-limited" }
+                    },
+                    "layout": { "kind": "absolute" },
                     "cells": [
-                        { "id": "a", "source": "cam1" }
+                        {
+                            "id": "a",
+                            "rect": { "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5 },
+                            "source": { "input_id": "cam1" }
+                        }
                     ]
                 }
             }),
@@ -95,7 +106,11 @@ async fn export_renders_the_stores_as_valid_toml() {
     assert_eq!(parsed.sources.len(), 1, "the created source is exported");
     assert_eq!(parsed.sources[0].id, "cam1");
     assert_eq!(parsed.outputs.len(), 1, "the created output is exported");
-    assert_eq!(parsed.cells.len(), 1, "the working layout cells are exported");
+    assert_eq!(
+        parsed.cells.len(),
+        1,
+        "the working layout cells are exported"
+    );
 }
 
 #[tokio::test]

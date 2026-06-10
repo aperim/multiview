@@ -142,3 +142,90 @@ pub(crate) async fn rollback_revision(
     );
     Ok((StatusCode::CREATED, Json(revision)))
 }
+
+/// `GET /api/v1/config/export` — render the live resource stores as a complete
+/// `multiview.toml` document (ADR-W015).
+///
+/// Composes the working layout (the id-sorted first layout whose body carries a
+/// `canvas`) with every stored source/output/overlay into a
+/// [`multiview_config::MultiviewConfig`], validates the whole document, and
+/// returns it as TOML. This closes the management loop honestly today: edit in
+/// the UI → export → persist as the config file → the next start applies it.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/config/export",
+        tag = "config",
+        responses(
+            (status = 200, description = "The composed configuration as TOML (`application/toml`).", body = String),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read.", body = crate::problem::Problem),
+            (status = 422, description = "The stores do not compose into a valid configuration (detail names the violation).", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn export_config(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> ControlResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    principal.role.require(Action::Read)?;
+
+    // The working layout carries { canvas, layout, cells }: pick the id-sorted
+    // first layout document that declares a canvas (the seeded shape).
+    let layouts = state.repository.list_layouts()?;
+    let working = layouts
+        .iter()
+        .map(|v| &v.layout)
+        .find(|layout| layout.body.get("canvas").is_some())
+        .ok_or_else(|| {
+            crate::error::ControlError::Validation(
+                "no working layout (a layout body carrying `canvas`) to export".to_owned(),
+            )
+        })?;
+
+    let collect = |repo: &std::sync::Arc<dyn crate::resource_store::ResourceRepository>|
+     -> ControlResult<Vec<serde_json::Value>> {
+        Ok(repo
+            .list()?
+            .into_iter()
+            .map(|v| v.resource.body)
+            .collect())
+    };
+
+    let document = serde_json::json!({
+        "schema_version": 1,
+        "canvas": working.body.get("canvas").cloned().unwrap_or(serde_json::Value::Null),
+        "layout": working.body.get("layout").cloned().unwrap_or(serde_json::Value::Null),
+        "cells": working.body.get("cells").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "sources": serde_json::Value::Array(collect(&state.sources)?),
+        "outputs": serde_json::Value::Array(collect(&state.outputs)?),
+        "overlays": serde_json::Value::Array(collect(&state.overlays)?),
+    });
+
+    let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(document)
+        .map_err(|err| {
+            let path = err.path().to_string();
+            crate::error::ControlError::Validation(format!(
+                "stored resources do not compose into a valid configuration at `{path}`: {}",
+                err.into_inner()
+            ))
+        })?;
+    config.validate().map_err(|err| {
+        crate::error::ControlError::Validation(format!(
+            "composed configuration failed validation: {err}"
+        ))
+    })?;
+    let toml = config.to_toml().map_err(|err| {
+        crate::error::ControlError::Repository(format!("TOML render failed: {err}"))
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/toml")],
+        toml,
+    )
+        .into_response())
+}

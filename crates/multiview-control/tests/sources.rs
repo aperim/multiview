@@ -186,12 +186,20 @@ async fn list_returns_created_sources_sorted() {
     let h = harness();
     send(
         &h.router,
-        post_json("/api/v1/sources/bbb", OPERATOR_TOKEN, &source_body("B")),
+        post_json(
+            "/api/v1/sources/bbb",
+            OPERATOR_TOKEN,
+            &json!({ "name": "B", "body": { "kind": "bars" } }),
+        ),
     )
     .await;
     send(
         &h.router,
-        post_json("/api/v1/sources/aaa", OPERATOR_TOKEN, &source_body("A")),
+        post_json(
+            "/api/v1/sources/aaa",
+            OPERATOR_TOKEN,
+            &json!({ "name": "A", "body": { "kind": "bars" } }),
+        ),
     )
     .await;
     let resp = send(&h.router, get("/api/v1/sources", OPERATOR_TOKEN)).await;

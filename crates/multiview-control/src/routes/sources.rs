@@ -5,9 +5,11 @@
 //! ([`crate::routes`]) over the [`ResourceRepository`](crate::resource_store::ResourceRepository)
 //! trait, with `ETag`/`If-Match` optimistic concurrency on every mutation
 //! (ADR-W006), RBAC via [`Principal`], and an audit record after each successful
-//! write. The stored `body` is the opaque config-as-code document; engine-side
-//! validation against `multiview-config` happens before it is applied. Errors
-//! are RFC 9457 problem documents.
+//! write. The stored `body` is the config-as-code document, **validated against
+//! `multiview_config::Source` at this boundary** (ADR-W015): an invalid
+//! document is rejected with `422 /problems/validation` naming the field path,
+//! and every accepted mutation declares its apply semantics via
+//! `X-Multiview-Apply`. Errors are RFC 9457 problem documents.
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -19,6 +21,7 @@ use crate::concurrency::IfMatch;
 use crate::error::ControlResult;
 use crate::resource_store::{Resource, ResourceInput, VersionedResource, SOURCE_KIND};
 use crate::state::AppState;
+use crate::typed_resources::{validated_body, with_apply_restart, TypedCollection};
 
 /// Attach the resource's `ETag` to a successful response carrying a source.
 fn source_response(status: StatusCode, versioned: &VersionedResource) -> Response {
@@ -95,9 +98,10 @@ pub(crate) async fn get_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::resource_store::ResourceInput,
         responses(
-            (status = 201, description = "The created source (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 201, description = "The created source (ETag in the response header; X-Multiview-Apply declares how it takes effect).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 422, description = "The body is not a valid source document (detail names the field path).", body = crate::problem::Problem),
         ),
     )
 )]
@@ -109,6 +113,10 @@ pub(crate) async fn create_source(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    let input = ResourceInput {
+        name: input.name,
+        body: validated_body(TypedCollection::Sources, &id, &input.body)?,
+    };
     let versioned = state.sources.create(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -117,7 +125,10 @@ pub(crate) async fn create_source(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(source_response(StatusCode::CREATED, &versioned))
+    Ok(with_apply_restart(source_response(
+        StatusCode::CREATED,
+        &versioned,
+    )))
 }
 
 /// `PUT /api/v1/sources/{id}` — replace a source (role: write; If-Match → 412).
@@ -135,6 +146,7 @@ pub(crate) async fn create_source(
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 404, description = "No source with that id.", body = crate::problem::Problem),
             (status = 412, description = "If-Match precondition failed.", body = crate::problem::Problem),
+            (status = 422, description = "The body is not a valid source document (detail names the field path).", body = crate::problem::Problem),
         ),
     )
 )]
@@ -147,6 +159,10 @@ pub(crate) async fn update_source(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    let input = ResourceInput {
+        name: input.name,
+        body: validated_body(TypedCollection::Sources, &id, &input.body)?,
+    };
     let current = state.sources.get(&id)?;
     if_match.require(SOURCE_KIND, &id, current.version)?;
     let versioned = state.sources.update(&id, input)?;
@@ -157,7 +173,10 @@ pub(crate) async fn update_source(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(source_response(StatusCode::OK, &versioned))
+    Ok(with_apply_restart(source_response(
+        StatusCode::OK,
+        &versioned,
+    )))
 }
 
 /// `DELETE /api/v1/sources/{id}` — delete a source (role: administer; If-Match).
@@ -182,7 +201,7 @@ pub(crate) async fn delete_source(
     principal: Principal,
     if_match: IfMatch,
     Path(id): Path<String>,
-) -> ControlResult<StatusCode> {
+) -> ControlResult<Response> {
     principal.role.require(Action::Administer)?;
     crate::auth::authorize_object(&principal, &id)?;
     let current = state.sources.get(&id)?;
@@ -195,5 +214,5 @@ pub(crate) async fn delete_source(
         &id,
         None,
     );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(with_apply_restart(StatusCode::NO_CONTENT.into_response()))
 }

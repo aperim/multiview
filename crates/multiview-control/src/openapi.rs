@@ -82,6 +82,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::tally::set_override,
         crate::routes::tally::clear_override,
         crate::routes::audit::list_audit,
+        crate::routes::config::export_config,
         crate::routes::preview::program_whep_open,
         crate::routes::preview::program_whep_close,
         crate::routes::preview::input_whep_open,
