@@ -458,4 +458,113 @@ mod tests {
         assert!(!ConnectionStatus::Disconnected.is_connected());
         assert!(!ConnectionStatus::Unknown.is_connected());
     }
+
+    /// The governing cross-probe identity test (the MAJOR review finding).
+    ///
+    /// The placement controller reasons over `DeviceId` `(vendor, stable_id)`
+    /// equality, and the candidate/current `DeviceId`s come from the **render-node
+    /// load probe** (on NVIDIA: vendor `Nvidia`, stable_id the GPU UUID). The
+    /// scanout probe reads `/sys/class/drm` and only knows a card's PCI slot — it
+    /// must therefore **reuse the canonical render-node `DeviceId` for the same
+    /// physical GPU verbatim**, matched on the PCI bus id, NOT re-derive its own
+    /// `(vendor, stable_id)`. If it re-derived, the locality `DeviceId` would
+    /// differ from the candidate `DeviceId` for the SAME GPU and
+    /// `satisfies_sink_locality` would silently MISS, re-opening the migrate/split
+    /// path this slice forbids.
+    #[test]
+    fn scanout_locality_reuses_the_render_node_device_id_for_the_same_gpu() {
+        // The canonical render-node DeviceId, exactly as the NVML load probe
+        // builds it: identity is (Nvidia, UUID); the PCI bus id is the non-identity
+        // cross-probe matching key (NVML's 8-hex-digit-domain form).
+        let render_node =
+            DeviceId::new(Vendor::Nvidia, "GPU-9f1e-uuid", 0).with_pci_bus_id("00000000:03:00.0");
+
+        // The same physical GPU as the SCANOUT probe sees it: a DRM card whose only
+        // handle is the kernel PCI slot (4-hex-digit-domain form, the `nouveau`
+        // driver — a vendor the driver-name heuristic would mislabel as AMD).
+        let drm_card = DrmCardDescriptor {
+            card_name: "card0".to_owned(),
+            pci_slot: Some("0000:03:00.0".to_owned()),
+            connectors: vec![Connector::new(
+                ConnectorId::new("DP-1"),
+                ConnectionStatus::Connected,
+                true,
+            )],
+        };
+
+        // Build the inventory by reconciling the DRM card against the canonical
+        // device set — reusing the render-node DeviceId, never re-deriving.
+        let inv = ScanoutInventory::from_drm_cards(&[drm_card], &[render_node.clone()]);
+
+        // The scanout-sourced owning device MUST be byte-identical to the
+        // render-node DeviceId (same vendor, same stable_id, same pci) — so a
+        // HashMap/equality lookup against placement's `current`/candidates hits.
+        let owner = inv
+            .owning_device(&ConnectorId::new("DP-1"))
+            .expect("the DP-1 connector resolves to its reconciled owner");
+        assert_eq!(owner.vendor(), Vendor::Nvidia, "vendor reused, not guessed");
+        assert_eq!(owner.stable_id(), "GPU-9f1e-uuid", "the UUID stable id is reused");
+        assert_eq!(owner, &render_node);
+
+        // The end-to-end consequence: the locality this produces satisfies the
+        // sink-locality gate against the render-node candidate for the same GPU.
+        let locality = inv.locality_for(&[ConnectorId::new("DP-1")]);
+        assert_eq!(locality, vec![render_node.clone()]);
+        let demand = crate::select::PipelineDemand::new(
+            multiview_core::time::Rational::new(30, 1),
+            Vec::new(),
+            crate::Resolution::HD1080,
+            multiview_core::pixel::PixelFormat::Nv12,
+            0,
+            true,
+        )
+        .with_sink_locality(locality);
+        assert!(
+            demand.satisfies_sink_locality(&render_node),
+            "the reconciled locality matches the render-node candidate — no silent miss"
+        );
+    }
+
+    /// PCI-bus-id matching is domain-width insensitive: NVML's 8-hex-digit domain
+    /// and the kernel sysfs 4-hex-digit domain for the SAME slot reconcile.
+    #[test]
+    fn drm_card_reconciliation_normalizes_pci_domain_width() {
+        let render_node =
+            DeviceId::new(Vendor::Nvidia, "GPU-uuid", 0).with_pci_bus_id("00000000:0a:00.0");
+        let drm_card = DrmCardDescriptor {
+            card_name: "card0".to_owned(),
+            pci_slot: Some("0000:0A:00.0".to_owned()), // upper-case, 4-digit domain
+            connectors: vec![Connector::new(
+                ConnectorId::new("HDMI-A-1"),
+                ConnectionStatus::Connected,
+                false,
+            )],
+        };
+        let inv = ScanoutInventory::from_drm_cards(&[drm_card], &[render_node.clone()]);
+        assert_eq!(
+            inv.owning_device(&ConnectorId::new("HDMI-A-1")),
+            Some(&render_node)
+        );
+    }
+
+    /// A DRM card with no canonical match (the GPU the render-node probe could not
+    /// enumerate, or a PCI slot that matches nothing) is dropped rather than
+    /// fabricating a re-derived identity that would never equal any candidate.
+    #[test]
+    fn drm_card_with_no_render_node_match_is_dropped() {
+        let render_node =
+            DeviceId::new(Vendor::Nvidia, "GPU-uuid", 0).with_pci_bus_id("0000:03:00.0");
+        let orphan = DrmCardDescriptor {
+            card_name: "card9".to_owned(),
+            pci_slot: Some("0000:99:00.0".to_owned()),
+            connectors: vec![Connector::new(
+                ConnectorId::new("DP-9"),
+                ConnectionStatus::Connected,
+                true,
+            )],
+        };
+        let inv = ScanoutInventory::from_drm_cards(&[orphan], &[render_node]);
+        assert!(inv.cards().is_empty(), "an unmatched DRM card owns nothing");
+        assert_eq!(inv.owning_device(&ConnectorId::new("DP-9")), None);
+    }
 }

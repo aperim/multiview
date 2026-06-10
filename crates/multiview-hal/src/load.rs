@@ -1994,6 +1994,33 @@ mod tests {
     }
 
     #[test]
+    fn pci_bus_id_is_carried_but_is_not_part_of_identity() {
+        // The PCI bus id is the cross-probe MATCHING key (scanout ↔ render-node),
+        // not part of `(vendor, stable_id)` identity. Two DeviceIds with the same
+        // identity but different/absent pci must stay equal + hash-equal so adding
+        // it never changes the placement key, and the normalized accessor maps
+        // both NVML's 8-digit-domain and sysfs's 4-digit-domain onto one form.
+        let bare = nv("GPU-uuid", 0);
+        let with_pci = nv("GPU-uuid", 0).with_pci_bus_id("00000000:03:00.0");
+        assert_eq!(bare, with_pci, "pci is NOT part of identity equality");
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        bare.hash(&mut h1);
+        with_pci.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish(), "pci is NOT part of identity hash");
+        // The raw value is preserved; the normalized accessor canonicalizes it.
+        assert_eq!(with_pci.pci_bus_id(), Some("00000000:03:00.0"));
+        assert_eq!(
+            with_pci.pci_bus_id_normalized().as_deref(),
+            Some("0000:03:00.0")
+        );
+        assert_eq!(bare.pci_bus_id(), None);
+        assert_eq!(bare.pci_bus_id_normalized(), None);
+    }
+
+    #[test]
     fn device_target_default_is_none_for_a_source_with_no_handles() {
         // A source with no per-device hardware-handle signal (the no-GPU poller,
         // any vendor that exposes none) cannot pin a device: `device_target` must
