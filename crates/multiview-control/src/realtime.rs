@@ -34,7 +34,8 @@ use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
 use multiview_engine::{EventSubscription, RecvError};
 use multiview_events::{
-    Envelope, Event, FrameKind, Hello, OutputRunState, SalvoPhase, SchemaVersion, Seq, Topic,
+    Envelope, Event, FrameKind, Hello, OutputRunState, SalvoPhase, SchemaVersion, Seq,
+    TileSnapshotEntry, TilesSnapshot, Topic,
 };
 
 use crate::auth::{Action, Principal};
@@ -408,6 +409,42 @@ impl SessionStream {
         }
     }
 
+    /// Build the connect-time `tiles` `$snapshot` frame from the engine's
+    /// latest-state blob, or [`None`] when the blob carries no usable `tiles`
+    /// array (nothing published yet, or an older engine that does not fold
+    /// tile states in) — then nothing extra is sent and the client falls back
+    /// to the sparse `tile.state` deltas, exactly as before.
+    ///
+    /// Emitted right after [`SessionStream::snapshot_frame`] on both
+    /// transports so a fresh client REBUILDS its tile cache to the current
+    /// truth (realtime-api §5; `snapshot ⊕ ordered deltas = current truth`,
+    /// ADR-RT003). `snapshot_seq` is the engine state sequence the baseline is
+    /// current as of (`as_of_seq` + the envelope `ts`, mirroring `$hello`).
+    /// Reading the blob is a wait-free latest-state load — never a request the
+    /// engine services (invariant #10).
+    #[must_use]
+    pub fn tiles_snapshot_frame(
+        &mut self,
+        snapshot: &EngineStateSnapshot,
+        snapshot_seq: u64,
+    ) -> Option<RealtimeFrame> {
+        let tiles = tiles_from_engine_snapshot(snapshot)?;
+        let seq = self.issue_seq();
+        let envelope = Envelope::new(
+            Topic::Tiles,
+            seq,
+            MediaTime::from_nanos(i64::try_from(snapshot_seq).unwrap_or(i64::MAX)),
+            Event::TilesSnapshot(TilesSnapshot {
+                as_of_seq: snapshot_seq,
+                tiles,
+            }),
+        );
+        Some(RealtimeFrame {
+            kind: FrameKind::Snapshot,
+            envelope,
+        })
+    }
+
     /// Receive the next delta frame, applying **lagged-skip** isolation.
     ///
     /// Returns:
@@ -480,6 +517,21 @@ impl SessionStream {
     }
 }
 
+/// Parse the per-tile lifecycle entries out of the engine's opaque
+/// latest-state blob, or [`None`] when it carries no `tiles` array (an older
+/// engine, or nothing published yet). Malformed entries are skipped — a partial
+/// baseline from a well-formed remainder beats none — and a blob whose entries
+/// are ALL malformed yields an empty (still well-formed) baseline.
+fn tiles_from_engine_snapshot(snapshot: &EngineStateSnapshot) -> Option<Vec<TileSnapshotEntry>> {
+    let tiles = snapshot.get("tiles")?.as_array()?;
+    Some(
+        tiles
+            .iter()
+            .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+            .collect(),
+    )
+}
+
 /// The resource-scope id (the `Envelope::id`) a client keys an event delta by.
 /// For a tile-state change it is the bound input/tile id, which the monitoring
 /// UI uses to address the tile. Other events carry their scope in the envelope
@@ -496,7 +548,7 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
 #[must_use]
 pub fn topic_for_event(event: &Event) -> Topic {
     match event {
-        Event::TileState(_) => Topic::Tiles,
+        Event::TileState(_) | Event::TilesSnapshot(_) => Topic::Tiles,
         Event::AudioMeter(_) => Topic::AudioMeters,
         // High-rate whole-system metrics (cpu/gpu/encoder) ride the conflated
         // `system` lane the footer subscribes to — NOT the control firehose.
@@ -675,11 +727,21 @@ async fn run_ws_session(mut socket: WebSocket, state: AppState) {
     let mut session =
         SessionStream::new(sub, session_id, None).with_corr_registry(Arc::clone(&state.corr));
 
-    let (_snapshot, snapshot_seq) = current_engine_snapshot(&state);
+    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let hello = session.snapshot_frame(snapshot_seq);
     if let Ok(text) = hello.to_json() {
         if socket.send(Message::Text(text.into())).await.is_err() {
             return;
+        }
+    }
+    // Seed the tile cache: the current per-tile lifecycle baseline, when the
+    // engine blob carries one (realtime-api §5). Without it the client falls
+    // back to the sparse deltas, exactly as before.
+    if let Some(frame) = session.tiles_snapshot_frame(&snapshot, snapshot_seq) {
+        if let Ok(text) = frame.to_json() {
+            if socket.send(Message::Text(text.into())).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -730,12 +792,20 @@ pub async fn sse_handler(
     let session_id = uuid_session_id();
     let mut session =
         SessionStream::new(sub, session_id, None).with_corr_registry(Arc::clone(&state.corr));
-    let (_snapshot, snapshot_seq) = current_engine_snapshot(&state);
+    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
 
     let stream = async_stream::stream! {
         let hello = session.snapshot_frame(snapshot_seq);
         if let Ok(text) = hello.to_json() {
             yield Ok::<_, Infallible>(SseEvent::default().event("snapshot").data(text));
+        }
+        // Seed the tile cache: the current per-tile lifecycle baseline, when
+        // the engine blob carries one (realtime-api §5) — labelled
+        // `event: snapshot` exactly like `$hello`.
+        if let Some(frame) = session.tiles_snapshot_frame(&snapshot, snapshot_seq) {
+            if let Ok(text) = frame.to_json() {
+                yield Ok(SseEvent::default().event("snapshot").data(text));
+            }
         }
         loop {
             match session.next_delta().await {

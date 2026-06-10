@@ -43,8 +43,8 @@ pub use error::{Error, Result};
 pub use event::{
     AlarmTransition, Alert, AlertSeverity, AudioMeter, Event, GpuMetrics, GpuVendor, HealthWarning,
     InputConnection, InputStreams, JobProgress, LifecycleState, OutputRunState, OutputStatus,
-    SalvoEvent, SalvoPhase, SystemMetrics, TallyEvent, TallyTarget, TileState, WarningCode,
-    WarningSeverity,
+    SalvoEvent, SalvoPhase, SystemMetrics, TallyEvent, TallyTarget, TileSnapshotEntry, TileState,
+    TilesSnapshot, WarningCode, WarningSeverity,
 };
 pub use ordering::{Accepted, TopicCursor};
 pub use seq::{Seq, SeqCounter};

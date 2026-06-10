@@ -368,6 +368,25 @@ Covered fully in §2.2 (Layout) — overlays are first-class layers in the layou
 | ConfigManagement | rollback | POST .../versions/{rev}:rollback?dry_run | History > Rollback | Hot/Class-2 | Reset preview. |
 | ConfigManagement | import/export | GET :export?secrets=ref\|redact; POST :import | Import/Export | Hot/Class-2 | Never plaintext. |
 
+### 2.10 MANAGED DEVICES & DISPLAY NODES *(planned)*
+
+**Planned capability area — nothing in this section is implemented yet.** It is designed in [managed-devices](managed-devices.md) + [display-out](display-out.md) and decided in [ADR-M008](../decisions/ADR-M008.md) (device registry + compiled-in driver model) and [ADR-M009](../decisions/ADR-M009.md) (device stream binding); rows gain the full Entity/Parameter/API/UI columns of §2.1–§2.9 as the surface ships. The Class column maps onto §1.3 with one addition: **CP** = control-plane only (registry/state writes that, like "listener-restart", are physically incapable of touching media output); **C1** = Class-1 (hot/seamless at a frame boundary); **C2** = Class-2 (controlled reset, make-before-break); **DEV** = a *device-side* reset — the managed device restarts its own pipeline while the Multiview program output is unaffected (bound sources ride the normal tile ladder). Devices are inventory, never themselves Sources or Outputs: a device *projects* source candidates / output targets / display heads, and the engine only ever sees ordinary Sources and Outputs (invariant #10 by construction).
+
+| Operation | Class | Notes |
+|---|---|---|
+| Adopt / remove / edit device record | CP | Registry only |
+| Probe / status / identify / test-pattern | CP | — |
+| Bind device stream as Source | C1 | Additive input; normal tile ladder |
+| Send program to device (existing rendition) | C1 | Free fan-out; "shares encoder" badge |
+| Send program to device (new rendition) | C1-additive | Admission-gated (409 if budget exceeded); placement re-assess per the instant-apply doctrine |
+| Display-node content/layout reassignment | C1 | Node-local make-before-break; engine untouched |
+| Sync-group offset change | C1 | Node buffer trim at a frame boundary; engine cadence untouched |
+| Local display head modeset (resolution/refresh) | C2 | ALLOW_MODESET blanks that head briefly; program output unaffected |
+| Device mode convergence (encoder⇄decoder) | DEV | Device pipeline restarts; declared impact pre-apply |
+| Device LAN/mDNS/port change; reboot; firmware | DEV | Device reboots (some vendor sets return no HTTP response) |
+| Cast session start/stop | CP + C1 | Free fan-out of an existing HLS output |
+| Scheduled vendor-decoder re-sync | DEV (opt-in) | Blanks that device 1–3 s at the scheduled instant |
+
 ---
 
 ## 3. Key Resource Schemas

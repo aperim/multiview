@@ -281,6 +281,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/TileState" }
     }));
+    map.insert("TilesSnapshot".to_owned(), tiles_snapshot_message());
     map.insert("AudioMeter".to_owned(), json!({
         "name": "AudioMeter",
         "title": "High-rate audio meter sample",
@@ -365,6 +366,25 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         }),
     );
     map
+}
+
+/// The `tiles` `$snapshot` `AsyncAPI` message definition. Factored out so the
+/// data-events builder stays within the line budget.
+fn tiles_snapshot_message() -> Value {
+    json!({
+        "name": "TilesSnapshot",
+        "title": "Connect-time tiles baseline ($snapshot on topic tiles)",
+        "summary": "Full current per-tile lifecycle state a fresh client rebuilds its tile cache from.",
+        "description": concat!(
+            "Emitted once at connect (after `$hello`) on topic `tiles` with `t` ",
+            "`$snapshot` (realtime.md §5): the snapshot-then-delta baseline ",
+            "(`snapshot ⊕ ordered deltas = current truth`, ADR-RT003). A receiver ",
+            "MUST treat it as a state REBUILD, never a merge. Despite the ",
+            "`$`-prefixed tag it rides its data topic, not `$control`.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/TilesSnapshot" }
+    })
 }
 
 /// The `health.warning.*` (SA-0) `AsyncAPI` message definition. Factored out so
@@ -492,6 +512,7 @@ fn envelope_schema() -> Value {
 fn event_payload_one_of() -> Value {
     json!([
         { "$ref": "#/components/schemas/TileState" },
+        { "$ref": "#/components/schemas/TilesSnapshot" },
         { "$ref": "#/components/schemas/AudioMeter" },
         { "$ref": "#/components/schemas/OutputStatus" },
         { "$ref": "#/components/schemas/Alert" },
@@ -523,6 +544,8 @@ fn build_schemas() -> Value {
     json!({
         "LifecycleState": lifecycle_state_schema(),
         "TileState": tile_state_schema(),
+        "TileSnapshotEntry": tile_snapshot_entry_schema(),
+        "TilesSnapshot": tiles_snapshot_schema(),
         "AudioMeter": audio_meter_schema(),
         "SystemMetrics": system_metrics_schema(),
         "GpuMetrics": gpu_metrics_schema(),
@@ -581,6 +604,54 @@ fn tile_state_schema() -> Value {
             "trigger": {
                 "type": "string",
                 "description": "Short machine-readable trigger label (e.g. `nosignal_timeout`)."
+            }
+        }
+    })
+}
+
+fn tile_snapshot_entry_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "One tile's current lifecycle state inside a `tiles` `$snapshot`. ",
+            "The `id` is the same key the sparse `tile.state` deltas scope their ",
+            "envelope `id` with, so a snapshot-rebuilt cache and its delta ",
+            "patches address the same rows.",
+        ),
+        "required": ["id", "state"],
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The tile id (the bound source id in the run projection)."
+            },
+            "state": { "$ref": "#/components/schemas/LifecycleState" },
+            "input": {
+                "type": "string",
+                "description": "The input bound to the tile, if known."
+            }
+        }
+    })
+}
+
+fn tiles_snapshot_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of the `tiles`-topic `$snapshot` frame: the full current ",
+            "per-tile lifecycle baseline sent once at connect (after `$hello`). ",
+            "A receiver MUST rebuild (replace) its tile state from it, never merge.",
+        ),
+        "required": ["as_of_seq", "tiles"],
+        "properties": {
+            "as_of_seq": {
+                "type": "integer",
+                "format": "uint64",
+                "description": "The engine state sequence this baseline is current as of."
+            },
+            "tiles": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/TileSnapshotEntry" },
+                "description": "Every tile's current lifecycle state."
             }
         }
     })

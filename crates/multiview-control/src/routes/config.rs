@@ -147,7 +147,7 @@ pub(crate) async fn rollback_revision(
 /// `multiview.toml` document (ADR-W015).
 ///
 /// Composes the working layout (the id-sorted first layout whose body carries a
-/// `canvas`) with every stored source/output/overlay into a
+/// `canvas`) with every stored source/output/overlay/probe into a
 /// [`multiview_config::MultiviewConfig`], validates the whole document, and
 /// returns it as TOML. This closes the management loop honestly today: edit in
 /// the UI → export → persist as the config file → the next start applies it.
@@ -207,7 +207,8 @@ pub(crate) async fn export_config(
 
 /// Compose the export JSON document: the loaded base configuration (when one
 /// was installed) overlaid with everything the live stores own — the working
-/// layout's canvas/layout/cells and the source/output/overlay collections.
+/// layout's canvas/layout/cells and the source/output/overlay/probe
+/// collections.
 fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value> {
     // The working layout carries { canvas, layout, cells }. Prefer the
     // designated working layout (set at seed time); fall back to the id-sorted
@@ -244,7 +245,7 @@ fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value>
     };
 
     // Start from the loaded configuration document (so authored sections the
-    // stores do not carry — control, placement, audio, probes, salvos, tally
+    // stores do not carry — control, placement, audio, salvos, tally
     // profiles, walls, routing — survive the round-trip verbatim), then
     // overlay everything the live stores own.
     let mut document = state
@@ -294,5 +295,26 @@ fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value>
         "overlays".to_owned(),
         serde_json::Value::Array(collect(&state.overlays)?),
     );
+    doc.insert(
+        "probes".to_owned(),
+        serde_json::Value::Array(collect(&state.probes)?),
+    );
+    // The audio-routing singleton overlays the `audio` key when an operator
+    // (or the seeded config) configured it; otherwise the base document's
+    // authored block — if any — is left untouched. The whole-document
+    // validation below this composition is where routes are cross-checked
+    // against the declared sources (the check `PUT /api/v1/audio-routing`
+    // intentionally defers).
+    let (audio, _) = state.audio_routing.snapshot();
+    if let Some(routing) = audio {
+        doc.insert(
+            "audio".to_owned(),
+            serde_json::to_value(&routing).map_err(|e| {
+                crate::error::ControlError::Repository(format!(
+                    "serializing the audio-routing document: {e}"
+                ))
+            })?,
+        );
+    }
     Ok(document)
 }

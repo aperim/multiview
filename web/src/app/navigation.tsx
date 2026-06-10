@@ -13,9 +13,11 @@ import {
   MonitorPlay,
   CircleDot,
   Zap,
+  ShieldAlert,
   Bell,
   ScrollText,
   Settings,
+  Volume2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -36,9 +38,11 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { path: "/sources", label: <Trans>Sources</Trans>, Icon: Radio },
   { path: "/outputs", label: <Trans>Outputs</Trans>, Icon: Send },
   { path: "/overlays", label: <Trans>Overlays</Trans>, Icon: Layers },
+  { path: "/audio", label: <Trans>Audio</Trans>, Icon: Volume2 },
   { path: "/monitoring", label: <Trans>Monitoring</Trans>, Icon: MonitorPlay },
   { path: "/tally", label: <Trans>Tally</Trans>, Icon: CircleDot },
   { path: "/salvos", label: <Trans>Salvos</Trans>, Icon: Zap },
+  { path: "/probes", label: <Trans>Probes</Trans>, Icon: ShieldAlert },
   { path: "/alarms", label: <Trans>Alarms</Trans>, Icon: Bell },
   { path: "/system", label: <Trans>System</Trans>, Icon: Activity },
   { path: "/audit", label: <Trans>Audit</Trans>, Icon: ScrollText },

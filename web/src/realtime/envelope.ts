@@ -6,9 +6,11 @@
 // are kept only where the generated schema does not cover the shape exactly:
 //   - `Envelope` itself (hand-owned per ADR-RT006 — the transport layer must be
 //     able to tolerate unknown `t` values and unknown majors defensively).
-//   - `TileSnapshotEntry`/`TilesSnapshotData` — a frame-level composite type
-//     (the `$snapshot` frame structure) not modelled as a standalone message in
-//     the AsyncAPI spec, which only documents per-tick delta event payloads.
+//   - `TileSnapshotEntry`/`TilesSnapshotData` — the AsyncAPI spec declares the
+//     wire-minimal `TilesSnapshot`/`TileSnapshotEntry` (id, state, input?);
+//     these hand-modelled composites extend them with the `fps`/`since_ts`/
+//     `reason` fields the snapshot/delta reconciliation logic carries (parsed
+//     defensively when present, silently absent otherwise, per §2).
 //   - `TileStateDeltaData` — extends the generated `TileState` payload with the
 //     `showing` and `since_ts` fields used internally by the snapshot/delta
 //     reconciliation logic; kept hand-modelled to preserve forward-compatibility
