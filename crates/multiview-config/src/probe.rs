@@ -293,3 +293,79 @@ impl Probe {
         self.kind.validate(&self.id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+    use super::*;
+    use multiview_core::alarm::PerceivedSeverity;
+
+    #[test]
+    fn dwell_new_carries_the_windows() {
+        let d = Dwell::new(250, 750);
+        assert_eq!(d.up_ms, 250);
+        assert_eq!(d.down_ms, 750);
+    }
+
+    #[test]
+    fn probe_new_builds_a_validatable_probe() {
+        let probe = Probe::new(
+            "probe-1",
+            "cam-1",
+            ProbeKind::black(16, DetectionZone::default()),
+            Dwell::new(100, 200),
+            PerceivedSeverity::Major,
+            true,
+        );
+        assert_eq!(probe.id, "probe-1");
+        assert_eq!(probe.cell, "cam-1");
+        assert_eq!(probe.dwell, Dwell::new(100, 200));
+        assert_eq!(probe.severity, PerceivedSeverity::Major);
+        assert!(probe.latched);
+        assert_eq!(
+            probe.kind.alarm_kind(),
+            multiview_core::alarm::AlarmKind::Black
+        );
+        probe.validate().unwrap();
+    }
+
+    #[test]
+    fn probe_kind_constructors_map_to_alarm_kinds() {
+        use multiview_core::alarm::AlarmKind;
+        assert_eq!(
+            ProbeKind::black(16, DetectionZone::default()).alarm_kind(),
+            AlarmKind::Black
+        );
+        assert_eq!(
+            ProbeKind::freeze(5, DetectionZone::default()).alarm_kind(),
+            AlarmKind::Freeze
+        );
+        assert_eq!(
+            ProbeKind::silence(-60.0).alarm_kind(),
+            AlarmKind::Silence
+        );
+        assert_eq!(
+            ProbeKind::loudness(LoudnessTarget::R128 {
+                target_lufs: -23.0,
+                max_true_peak_dbtp: -1.0,
+            })
+            .alarm_kind(),
+            AlarmKind::LoudnessViolation
+        );
+    }
+
+    #[test]
+    fn constructed_probe_round_trips_through_toml() {
+        let probe = Probe::new(
+            "p",
+            "c",
+            ProbeKind::silence(-50.0),
+            Dwell::new(10, 20),
+            PerceivedSeverity::Warning,
+            false,
+        );
+        let toml = toml::to_string(&probe).unwrap();
+        let back: Probe = toml::from_str(&toml).unwrap();
+        assert_eq!(probe, back);
+    }
+}
