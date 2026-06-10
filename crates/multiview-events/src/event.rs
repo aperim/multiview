@@ -323,6 +323,16 @@ pub enum WarningCode {
     /// loader/ICD. **Latched** (a build-time fact; raised once, cleared on
     /// reconfigure/restart — it cannot flap).
     GpuPresentNoVulkanAdapter,
+    /// The watched boot config file changed on disk but the new document does
+    /// not parse/validate, so NOTHING was applied — the run keeps the
+    /// last-good configuration (ADR-W020). Remediation: fix the file; the
+    /// next valid write applies and clears this warning.
+    ConfigFileInvalid,
+    /// The watched boot config file changed sections that cannot hot-apply
+    /// (e.g. canvas geometry — Class-2 — or outputs/control), so the running
+    /// process differs from the file until a restart (ADR-W020). **Latched**
+    /// until restart; the message names the pending sections.
+    ConfigFileRequiresRestart,
 }
 
 /// An actionable health warning — a richer *sibling* of [`Alert`].
@@ -372,6 +382,8 @@ impl WarningCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GpuPresentNoVulkanAdapter => "gpu-present-no-vulkan-adapter",
+            Self::ConfigFileInvalid => "config-file-invalid",
+            Self::ConfigFileRequiresRestart => "config-file-requires-restart",
         }
     }
 }

@@ -3,9 +3,9 @@
 //!
 //! Exhaustive over every `MultiviewConfig` section: sources (by id —
 //! added/changed/removed), canvas (pinned signal vs cosmetic axes),
-//! layout+cells, and the restart-only sections (outputs, overlays, probes,
-//! audio, control, placement, salvos, tally_profiles, walls, devices,
-//! sync_groups, routing, schema_version).
+//! layout+cells, and the restart-only sections (`outputs`, `overlays`,
+//! `probes`, `audio`, `control`, `placement`, `salvos`, `tally_profiles`,
+//! `walls`, `devices`, `sync_groups`, `routing`, `schema_version`).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -70,7 +70,10 @@ fn parsed(doc: &str) -> MultiviewConfig {
 #[test]
 fn identical_documents_diff_empty() {
     let diff = ConfigDiff::between(&base(), &base());
-    assert!(diff.is_empty(), "identical documents must diff empty: {diff:?}");
+    assert!(
+        diff.is_empty(),
+        "identical documents must diff empty: {diff:?}"
+    );
     assert!(diff.sources.is_empty());
     assert!(!diff.canvas_signal_changed);
     assert!(!diff.canvas_cosmetic_changed);
@@ -110,11 +113,19 @@ fn a_changed_source_carries_previous_and_next() {
     }
 }
 
+/// Drop the `in_b` source and rebind `cell_b` onto `in_a` so the perturbed
+/// document still validates (a cell may not bind an undeclared source).
+fn without_in_b(doc: &str) -> String {
+    doc.replace("[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n", "")
+        .replace(
+            "[[cells]]\nid = \"cell_b\"\narea = \"b\"\n[cells.source]\ninput_id = \"in_b\"",
+            "[[cells]]\nid = \"cell_b\"\narea = \"b\"\n[cells.source]\ninput_id = \"in_a\"",
+        )
+}
+
 #[test]
 fn a_removed_source_is_reported_by_id() {
-    let next = parsed(
-        &BASE_DOC.replace("[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n", ""),
-    );
+    let next = parsed(&without_in_b(BASE_DOC));
     let diff = ConfigDiff::between(&base(), &next);
     assert_eq!(diff.sources.len(), 1);
     match &diff.sources[0] {
@@ -129,9 +140,7 @@ fn add_change_and_remove_report_together_deterministically() {
     // declaration order, then Removed in `running` declaration order.
     let next = parsed(&format!(
         "{}[[sources]]\nid = \"in_c\"\nkind = \"bars\"\n",
-        BASE_DOC
-            .replace("#103050", "#f0f0f0")
-            .replace("[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n", "")
+        without_in_b(&BASE_DOC.replace("#103050", "#f0f0f0"))
     ));
     let diff = ConfigDiff::between(&base(), &next);
     let kinds: Vec<&str> = diff
@@ -191,7 +200,10 @@ fn canvas_background_change_is_cosmetic_not_signal() {
     let next = parsed(&BASE_DOC.replace("#101014", "#000000"));
     let diff = ConfigDiff::between(&base(), &next);
     assert!(!diff.canvas_signal_changed);
-    assert!(diff.canvas_cosmetic_changed, "background is a cosmetic axis");
+    assert!(
+        diff.canvas_cosmetic_changed,
+        "background is a cosmetic axis"
+    );
 }
 
 #[test]
@@ -321,8 +333,10 @@ fn a_walls_change_is_reported() {
 
 #[test]
 fn a_routing_change_is_reported() {
+    // Consistent with the authored cell binding (a both-populated document
+    // must agree); the explicit table's PRESENCE is the change.
     let next = parsed(&format!(
-        "{BASE_DOC}\n[[routing.video]]\ncell = \"cell_a\"\n[routing.video.source]\ninput_id = \"in_b\"\nkind = \"video\"\n"
+        "{BASE_DOC}\n[[routing.video]]\ncell = \"cell_a\"\n[routing.video.source]\ninput_id = \"in_a\"\nkind = {{ kind = \"video\" }}\n"
     ));
     let diff = ConfigDiff::between(&base(), &next);
     assert!(

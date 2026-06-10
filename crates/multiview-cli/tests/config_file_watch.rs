@@ -30,7 +30,6 @@ use multiview_control::{
     EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, WarningFilter,
     WarningRepository,
 };
-use multiview_core::time::MediaTime;
 use multiview_engine::{CompositorDrive, EnginePublisher};
 use multiview_events::Event;
 use multiview_framestore::TileStore;
@@ -41,7 +40,7 @@ const TEST_POLL: Duration = Duration::from_millis(80);
 /// How long assertions wait for the watcher/hub to act.
 const SETTLE: Duration = Duration::from_secs(10);
 
-/// The boot document: in_a a dark solid, in_b bars, two cells, one output.
+/// The boot document: `in_a` a dark solid, `in_b` bars, two cells, one output.
 const INITIAL_DOC: &str = r##"schema_version = 1
 [canvas]
 width = 64
@@ -231,14 +230,12 @@ async fn live_file_edit_changes_the_engine_picture_and_the_stores() {
     );
     let in_a = drive.store("in_a").cloned().expect("in_a store");
     // The hub-swapped producer publishes the NEW near-white solid into the
-    // reused in_a store — the picture proof.
+    // reused in_a store — the picture proof (read the newest published frame;
+    // the store's slate policy is irrelevant to what the producer wrote).
     let bright = wait_until(SETTLE, || {
-        let read = in_a.read_at(MediaTime::from_nanos(i64::MAX / 2));
-        read.frame().is_some_and(|frame| {
-            frame
-                .sample(8, 8)
-                .is_some_and(|(y, _, _)| y > 150)
-        })
+        in_a.slot()
+            .load()
+            .is_some_and(|frame| frame.sample(8, 8).is_some_and(|(y, _, _)| y > 150))
     })
     .await;
     assert!(
@@ -249,12 +246,20 @@ async fn live_file_edit_changes_the_engine_picture_and_the_stores() {
     // The control stores follow the file (the UI's truth).
     let live9_stored = r.state.sources.get("live9").expect("live9 in the store");
     assert_eq!(
-        live9_stored.resource.body.get("kind").and_then(|v| v.as_str()),
+        live9_stored
+            .resource
+            .body
+            .get("kind")
+            .and_then(|v| v.as_str()),
         Some("bars")
     );
     let in_a_stored = r.state.sources.get("in_a").expect("in_a in the store");
     assert_eq!(
-        in_a_stored.resource.body.get("color").and_then(|v| v.as_str()),
+        in_a_stored
+            .resource
+            .body
+            .get("color")
+            .and_then(|v| v.as_str()),
         Some("#f0f0f0"),
         "the sources store mirrors the edited colour"
     );
@@ -431,7 +436,11 @@ async fn an_output_change_reseeds_the_store_and_warns_restart() {
     );
     let output = r.state.outputs.get("output-0").expect("seeded output");
     assert_eq!(
-        output.resource.body.get("segment_ms").and_then(|v| v.as_i64()),
+        output
+            .resource
+            .body
+            .get("segment_ms")
+            .and_then(serde_json::Value::as_i64),
         Some(2000),
         "the outputs store must follow the file"
     );
@@ -466,10 +475,7 @@ async fn editor_multi_writes_settle_to_one_apply() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     std::fs::write(
         &r.path,
-        format!(
-            "{}\n# settled\n",
-            INITIAL_DOC.replace("#101418", "#f0f0f0")
-        ),
+        format!("{}\n# settled\n", INITIAL_DOC.replace("#101418", "#f0f0f0")),
     )
     .expect("write B");
 

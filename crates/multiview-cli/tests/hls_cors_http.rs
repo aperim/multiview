@@ -141,7 +141,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     // IPv6-first: the control plane binds `[::1]` (conventions §10).
-    let (addr, handle) = bind_and_serve(
+    let (addr, handle, _state) = bind_and_serve(
         "[::1]:0",
         &config,
         publisher,

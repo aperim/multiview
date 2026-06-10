@@ -481,6 +481,48 @@
         }
       }
     },
+    "/api/v1/config/watch-status": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`GET /api/v1/config/watch-status` — the config-file watch status\n(ADR-W020; role: read).",
+        "description": "Reports whether this process watches its boot config file for external\nedits, the watched path, the last applied/rejected loads, and the\nrestart-pending section names. A store-only deployment (no watcher)\nhonestly reports `active: false`.",
+        "operationId": "watch_status",
+        "responses": {
+          "200": {
+            "description": "The config-file watch status: active flag, watched path, last applied/rejected loads, restart-pending sections.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchStatusBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/devices": {
       "get": {
         "tags": [
@@ -8969,6 +9011,82 @@
           "warning",
           "critical"
         ]
+      },
+      "WatchStamp": {
+        "type": "object",
+        "description": "One recorded watch event: when it happened and what it was.",
+        "required": [
+          "at_ms",
+          "detail"
+        ],
+        "properties": {
+          "at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the load was applied/rejected, as Unix milliseconds (UTC)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What happened: an applied-change summary, or the rejection reason."
+          }
+        }
+      },
+      "WatchStatusBody": {
+        "type": "object",
+        "description": "The body of `GET /api/v1/config/watch-status`.",
+        "required": [
+          "active",
+          "applied_count",
+          "restart_pending"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether a config-file watcher is running for this process."
+          },
+          "applied_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many file changes have been successfully applied since start.",
+            "minimum": 0
+          },
+          "last_applied": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WatchStamp",
+                "description": "The most recent successfully applied load, if any."
+              }
+            ]
+          },
+          "last_rejected": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WatchStamp",
+                "description": "The most recent rejected (invalid) load, if any."
+              }
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The watched config file path (absent when not watching)."
+          },
+          "restart_pending": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Section names changed on disk that only apply on restart (sorted,\ndeduplicated; latched until restart — ADR-W020)."
+          }
+        }
       }
     }
   },

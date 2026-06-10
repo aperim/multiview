@@ -53,7 +53,7 @@ describe("SettingsPage configuration-file card", () => {
     renderSettings();
     // The card exists…
     expect(
-      await screen.findByText(/configuration file/i),
+      await screen.findByRole("heading", { name: /configuration file/i }),
     ).toBeInTheDocument();
     // …and reflects the live watch status from the API.
     expect(
@@ -93,7 +93,7 @@ describe("SettingsPage configuration-file card", () => {
     );
     renderSettings();
     expect(
-      await screen.findByText(/configuration file/i),
+      await screen.findByRole("heading", { name: /configuration file/i }),
     ).toBeInTheDocument();
     expect(await screen.findByText(/not watched/i)).toBeInTheDocument();
   });

@@ -146,6 +146,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/config/watch-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/config/watch-status` — the config-file watch status
+         *     (ADR-W020; role: read).
+         * @description Reports whether this process watches its boot config file for external
+         *     edits, the watched path, the last applied/rejected loads, and the
+         *     restart-pending section names. A store-only deployment (no watcher)
+         *     honestly reports `active: false`.
+         */
+        get: operations["watch_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/devices": {
         parameters: {
             query?: never;
@@ -2825,6 +2849,35 @@ export interface components {
          * @enum {string}
          */
         WarningSeverityDoc: "info" | "warning" | "critical";
+        /** @description One recorded watch event: when it happened and what it was. */
+        WatchStamp: {
+            /**
+             * Format: int64
+             * @description When the load was applied/rejected, as Unix milliseconds (UTC).
+             */
+            at_ms: number;
+            /** @description What happened: an applied-change summary, or the rejection reason. */
+            detail: string;
+        };
+        /** @description The body of `GET /api/v1/config/watch-status`. */
+        WatchStatusBody: {
+            /** @description Whether a config-file watcher is running for this process. */
+            active: boolean;
+            /**
+             * Format: int64
+             * @description How many file changes have been successfully applied since start.
+             */
+            applied_count: number;
+            last_applied?: null | components["schemas"]["WatchStamp"];
+            last_rejected?: null | components["schemas"]["WatchStamp"];
+            /** @description The watched config file path (absent when not watching). */
+            path?: string | null;
+            /**
+             * @description Section names changed on disk that only apply on restart (sorted,
+             *     deduplicated; latched until restart — ADR-W020).
+             */
+            restart_pending: string[];
+        };
     };
     responses: never;
     parameters: never;
@@ -3193,6 +3246,44 @@ export interface operations {
             };
             /** @description The stores do not compose into a valid configuration (detail names the violation). */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    watch_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The config-file watch status: active flag, watched path, last applied/rejected loads, restart-pending sections. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WatchStatusBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
