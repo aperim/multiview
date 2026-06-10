@@ -35,6 +35,14 @@ chrono = { workspace = true, features = ["serde"] }
 # and only `alloc` (for the `Signature`/key parsing surface) is enabled; the
 # `rand_core` keygen feature is pulled in dev-dependencies for test keypairs only.
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+# CBOR encode/decode for the local lease lifecycle: the dropped lease/binding
+# file (the directory-watcher reads it) and the `<host>.challenge` export (salted
+# digests + counters only — data minimisation, brief §3/§8). `ciborium` and its
+# closure (`ciborium-io`, `ciborium-ll`, `half`) are `Apache-2.0` / `MIT OR
+# Apache-2.0`, all already on the deny.toml allowlist; pure Rust, no native deps,
+# stays in the CI-green default build. CBOR (RFC 8949) is canonical and compact —
+# the portal and the machine agree byte-for-byte on the challenge format.
+ciborium = "0.2.2"
 
 [dev-dependencies]
 proptest = "1.11.0"
