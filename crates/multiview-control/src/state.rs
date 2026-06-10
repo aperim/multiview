@@ -14,6 +14,7 @@ use multiview_engine::EnginePublisher;
 use multiview_events::Event;
 
 use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
+use crate::audio_routing::AudioRoutingStore;
 use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
@@ -66,6 +67,9 @@ pub struct SeededResources {
     pub outputs: Arc<dyn ResourceRepository>,
     /// The `overlays` store, one resource per `config.overlays`.
     pub overlays: Arc<dyn ResourceRepository>,
+    /// The audio-routing singleton store, seeded from the config's optional
+    /// `[audio]` block (unconfigured when the config carries none).
+    pub audio: Arc<AudioRoutingStore>,
     /// The layout store carrying the single working layout (canvas + cells).
     pub layouts: Arc<dyn Repository>,
     /// The id the working layout was seeded under (the solved layout's name,
@@ -161,6 +165,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         sources: Arc::new(sources),
         outputs: Arc::new(outputs),
         overlays: Arc::new(overlays),
+        audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
         layouts: Arc::new(layouts),
         working_layout_id,
     })
@@ -226,6 +231,10 @@ pub struct AppState {
     pub outputs: Arc<dyn ResourceRepository>,
     /// The overlays store (versioned CRUD over config-as-code overlay layers).
     pub overlays: Arc<dyn ResourceRepository>,
+    /// The audio-routing singleton store (the document-level `[audio]` block:
+    /// program-bus membership/gains and discrete-track wiring), managed over
+    /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
+    pub audio_routing: Arc<AudioRoutingStore>,
     /// The alarm mirror store (versioned, fed from the engine event stream).
     pub alarms: Arc<dyn AlarmRepository>,
     /// The health-warning mirror store (SA-0 / ADR-0035): active capability
@@ -334,6 +343,7 @@ impl AppState {
             sources: Arc::new(InMemorySourceStore::new()),
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
+            audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
             salvos: Arc::new(InMemorySalvoStore::new()),
@@ -491,6 +501,14 @@ impl AppState {
         self
     }
 
+    /// Replace the audio-routing singleton store (e.g. to share one seeded
+    /// store with a test).
+    #[must_use]
+    pub fn with_audio_routing(mut self, audio_routing: Arc<AudioRoutingStore>) -> Self {
+        self.audio_routing = audio_routing;
+        self
+    }
+
     /// Install resource stores seeded from a loaded config ([`seed_resources`]),
     /// replacing the empty default sources/outputs/overlays stores **and** the
     /// layout repository in one call.
@@ -503,6 +521,7 @@ impl AppState {
         self.sources = seeded.sources;
         self.outputs = seeded.outputs;
         self.overlays = seeded.overlays;
+        self.audio_routing = seeded.audio;
         self.repository = seeded.layouts;
         self.working_layout_id = Some(seeded.working_layout_id);
         self
@@ -775,6 +794,35 @@ areas = ["a"]
         assert!(seeded.sources.list().expect("list").is_empty());
         assert!(seeded.outputs.list().expect("list").is_empty());
         assert!(seeded.overlays.list().expect("list").is_empty());
+        let (audio, _) = seeded.audio.snapshot();
+        assert!(
+            audio.is_none(),
+            "no [audio] block seeds no routing document"
+        );
+    }
+
+    #[test]
+    fn seeds_the_audio_routing_singleton_from_the_audio_block() {
+        // SEED_DOC + an [audio] block: the singleton store mirrors it so the
+        // Audio page is non-empty under a live `multiview run`.
+        let doc = format!(
+            "{SEED_DOC}\n[audio]\nsample_rate_hz = 48000\n\n[[audio.routes]]\n\
+             input_id = \"cam_a\"\ntarget_track = \"cam-a-clean\"\n\
+             include_in_program_bus = true\ngain_db = -3.0\n\n\
+             [audio.routes.channels]\nkind = \"stereo\"\n"
+        );
+        let config = MultiviewConfig::load_from_toml(&doc).expect("parse audio config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        let (audio, _) = seeded.audio.snapshot();
+        let routing = audio.expect("the [audio] block is seeded");
+        assert_eq!(routing.sample_rate_hz, 48_000);
+        assert_eq!(routing.routes.len(), 1);
+        assert_eq!(routing.routes[0].input_id, "cam_a");
+        assert_eq!(
+            routing.routes[0].target_track.as_deref(),
+            Some("cam-a-clean")
+        );
     }
 
     #[test]

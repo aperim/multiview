@@ -284,7 +284,10 @@ async fn export_overlays_the_stored_audio_routing_when_configured() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     let parsed: multiview_config::MultiviewConfig =
         toml::from_str(&text).expect("export with audio is a valid document");
-    let audio = parsed.audio.as_ref().expect("the [audio] block is exported");
+    let audio = parsed
+        .audio
+        .as_ref()
+        .expect("the [audio] block is exported");
     assert_eq!(audio.sample_rate_hz, 48_000);
     assert_eq!(audio.routes.len(), 1);
     assert_eq!(audio.routes[0].input_id, "cam1");
@@ -367,7 +370,10 @@ async fn export_preserves_the_base_documents_audio_when_the_store_is_unconfigure
         .unwrap();
     let parsed: multiview_config::MultiviewConfig =
         toml::from_str(core::str::from_utf8(&body).unwrap()).unwrap();
-    let audio = parsed.audio.as_ref().expect("the authored [audio] survives");
+    let audio = parsed
+        .audio
+        .as_ref()
+        .expect("the authored [audio] survives");
     assert_eq!(
         audio.sample_rate_hz, 96_000,
         "the base document's audio block is untouched"

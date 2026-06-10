@@ -415,6 +415,101 @@ async fn viewer_may_read_but_not_write() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+/// Accept-fixtures: the `OpenAPI` mirror schemas must accept every document the
+/// real `multiview_config` types accept (ADR-W015 drift pin).
+#[test]
+fn openapi_mirrors_accept_what_the_config_types_accept() {
+    let docs = [
+        json!({ "sample_rate_hz": 48_000 }),
+        json!({ "sample_rate_hz": 48_000, "routes": [] }),
+        routing_doc(),
+        json!({
+            "sample_rate_hz": 96_000,
+            "routes": [
+                { "input_id": "fx", "channels": { "kind": "five_point_one" },
+                  "target_track": "fx-bed", "include_in_program_bus": true,
+                  "gain_db": 1.5, "mute": false }
+            ]
+        }),
+    ];
+    for doc in &docs {
+        let real: Result<multiview_config::AudioRouting, _> = serde_json::from_value(doc.clone());
+        let mirror: Result<multiview_control::openapi_schemas::AudioRoutingDoc, _> =
+            serde_json::from_value(doc.clone());
+        assert!(real.is_ok(), "config rejects {doc}: {:?}", real.err());
+        assert!(mirror.is_ok(), "mirror rejects {doc}: {:?}", mirror.err());
+    }
+}
+
+/// Reject-fixtures: the mirrors must REJECT what the config types reject (a
+/// both-accept fixture alone cannot catch a mirror looser than the real type).
+#[test]
+fn openapi_mirrors_reject_what_the_config_types_reject() {
+    let docs = [
+        // Missing the required sample rate.
+        json!({ "routes": [] }),
+        // Unknown top-level field (deny_unknown_fields).
+        json!({ "sample_rate_hz": 48_000, "routes": [], "bitrate": 256 }),
+        // Unknown channel layout tag.
+        json!({
+            "sample_rate_hz": 48_000,
+            "routes": [ { "input_id": "a", "channels": { "kind": "octophonic" } } ]
+        }),
+        // Unknown per-route field (deny_unknown_fields on the route).
+        json!({
+            "sample_rate_hz": 48_000,
+            "routes": [
+                { "input_id": "a", "channels": { "kind": "stereo" }, "pan": -1.0 }
+            ]
+        }),
+    ];
+    for doc in &docs {
+        assert!(
+            serde_json::from_value::<multiview_config::AudioRouting>(doc.clone()).is_err(),
+            "config must reject {doc}"
+        );
+        assert!(
+            serde_json::from_value::<multiview_control::openapi_schemas::AudioRoutingDoc>(
+                doc.clone()
+            )
+            .is_err(),
+            "mirror must reject {doc}"
+        );
+    }
+}
+
+/// The generated document lists both verbs of the singleton path and registers
+/// the mirror schemas.
+#[test]
+fn openapi_document_lists_the_audio_routing_surface() {
+    use multiview_control::openapi::ApiDoc;
+    use utoipa::OpenApi;
+
+    let doc = ApiDoc::openapi();
+    let api = serde_json::to_value(&doc).expect("OpenAPI serializes");
+    for verb in ["get", "put"] {
+        assert!(
+            api["paths"]["/api/v1/audio-routing"].get(verb).is_some(),
+            "{} /api/v1/audio-routing documented",
+            verb.to_uppercase()
+        );
+    }
+    for schema in [
+        "AudioChannelsDoc",
+        "AudioRouteDoc",
+        "AudioRoutingDoc",
+        "AudioRoutingStateDoc",
+    ] {
+        assert!(
+            api["components"]["schemas"].get(schema).is_some(),
+            "{schema} schema registered"
+        );
+    }
+    let routes: Vec<(&str, &str)> = ApiDoc::rest_routes().to_vec();
+    assert!(routes.contains(&("GET", "/api/v1/audio-routing")));
+    assert!(routes.contains(&("PUT", "/api/v1/audio-routing")));
+}
+
 #[tokio::test]
 async fn a_successful_put_is_audited() {
     let h = harness();
