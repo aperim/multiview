@@ -165,6 +165,12 @@ pub enum RejectReason {
     },
     /// No candidate GPUs were supplied at all.
     NoCandidates,
+    /// The pipeline feeds a GPU-resident display sink whose scanout locality
+    /// (the connector-owning GPUs, ADR-0044 §3) is not among the viable
+    /// candidates — so composite cannot be placed where the framebuffer must
+    /// live. Surfaced rather than silently placed off the scanout GPU (which
+    /// would force the per-frame GPU→host→GPU copy ADR-0018 forbids).
+    SinkLocalityUnsatisfied,
 }
 
 /// A chosen placement: the winning device plus its computed load score.
@@ -200,6 +206,11 @@ pub struct PipelineDemand {
     format: PixelFormat,
     predicted_pool_bytes: u64,
     opens_encode_session: bool,
+    /// The scanout-locality constraint (ADR-0044 §3): when non-empty, the
+    /// pipeline feeds a GPU-resident display sink and its composite **must** be
+    /// placed on one of these connector-owning GPUs. Empty = no display sink, no
+    /// constraint (every existing call path).
+    sink_localities: Vec<DeviceId>,
 }
 
 impl PipelineDemand {
@@ -226,7 +237,40 @@ impl PipelineDemand {
             format,
             predicted_pool_bytes,
             opens_encode_session,
+            sink_localities: Vec::new(),
         }
+    }
+
+    /// Constrain this demand to a **scanout locality**: the set of
+    /// connector-owning GPUs a local display sink ([ADR-0044](../../../docs/decisions/ADR-0044.md)
+    /// §3) requires the composite to be co-located with.
+    ///
+    /// A display [`crate::scanout::ScanoutInventory::locality_for`] produces this
+    /// set from the sink's connectors. With it set, [`select_device`] rejects
+    /// every candidate not in the set ([`RejectReason::SinkLocalityUnsatisfied`])
+    /// — composite cannot be placed off the GPU the scanout framebuffer must live
+    /// on. An empty locality (the default) imposes no constraint. On a single-GPU
+    /// display host the set is `{that GPU}`, so the constraint is trivially
+    /// satisfied yet still modelled.
+    #[must_use]
+    pub fn with_sink_locality(mut self, localities: Vec<DeviceId>) -> Self {
+        self.sink_localities = localities;
+        self
+    }
+
+    /// The scanout-locality constraint, if this pipeline feeds a display sink
+    /// (empty otherwise).
+    #[must_use]
+    pub fn sink_localities(&self) -> &[DeviceId] {
+        &self.sink_localities
+    }
+
+    /// Whether `device` satisfies this demand's scanout-locality constraint: an
+    /// empty constraint admits every device; a non-empty one admits only its
+    /// members (the connector-owning GPUs).
+    #[must_use]
+    pub fn satisfies_sink_locality(&self, device: &DeviceId) -> bool {
+        self.sink_localities.is_empty() || self.sink_localities.contains(device)
     }
 
     /// The plan this demand presents to a candidate GPU's [`Planner`].
@@ -398,11 +442,13 @@ impl Default for PlacementPolicy {
 ///
 /// Returns a [`RejectReason`] (the `Err` arm of [`SelectOutcome`]) — never a
 /// panic — when no single GPU can host the whole pipeline: [`RejectReason::NoCandidates`]
-/// (none supplied), [`RejectReason::PinUnsatisfiable`] (an operator pin names a
-/// non-viable device), [`RejectReason::NoCandidateFitsWholePipeline`] (every
-/// candidate failed a hard gate), or [`RejectReason::AllOverHeadroomCeiling`]
-/// (gate-passing candidates all exceed the headroom ceiling). Each hands off to
-/// the caller's no-fit ladder (degrade-to-fit, then the deliberate split).
+/// (none supplied), [`RejectReason::SinkLocalityUnsatisfied`] (the pipeline
+/// feeds a display sink but no candidate owns its connector — ADR-0044 §3),
+/// [`RejectReason::PinUnsatisfiable`] (an operator pin names a non-viable
+/// device), [`RejectReason::NoCandidateFitsWholePipeline`] (every candidate
+/// failed a hard gate), or [`RejectReason::AllOverHeadroomCeiling`] (gate-passing
+/// candidates all exceed the headroom ceiling). Each hands off to the caller's
+/// no-fit ladder (degrade-to-fit, then the deliberate split).
 pub fn select_device(
     candidates: &[GpuCandidate],
     demand: &PipelineDemand,
@@ -416,10 +462,27 @@ pub fn select_device(
         return Err(RejectReason::NoCandidates);
     }
 
-    // Stage 2 (computed first so a pin can be checked against it): the set of
-    // GPUs that pass every hard gate as a whole-island host.
-    let viable: Vec<&GpuCandidate> = candidates
+    // Stage 0 — scanout affinity (ADR-0044 §3, a HARD gate, checked first). A
+    // display-bound pipeline's composite must live on a connector-owning GPU; a
+    // candidate outside the locality set is not a legal host *at any load*.
+    // Filtering here (before the load/cost gates) lets the locality cause be
+    // surfaced distinctly: if no candidate owns the display, that is the reason,
+    // not a generic no-fit.
+    let local: Vec<&GpuCandidate> = candidates
         .iter()
+        .filter(|candidate| demand.satisfies_sink_locality(&candidate.device_id))
+        .collect();
+    if local.is_empty() {
+        // There were candidates, but none owns the display the sink targets.
+        return Err(RejectReason::SinkLocalityUnsatisfied);
+    }
+
+    // Stage 2 (computed first so a pin can be checked against it): the set of
+    // GPUs that pass every hard gate as a whole-island host. Only the
+    // locality-satisfying candidates are considered.
+    let viable: Vec<&GpuCandidate> = local
+        .iter()
+        .copied()
         .filter(|candidate| {
             passes_hard_gates(
                 candidate,

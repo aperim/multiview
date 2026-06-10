@@ -29,9 +29,14 @@
 //!    controller (reused verbatim — no new anti-flap math). A **transient** spike
 //!    never trips it; only a smoothed value that crosses the hysteresis-high
 //!    threshold and stays there for `>= dwell` ticks raises an overload.
-//! 2. **A pin always wins.** A pipeline pinned (by stable [`DeviceId`]) to its
-//!    current device is never migrated off it — the operator override is
-//!    absolute (ADR-0018 §2.1). It may still *shed* locally.
+//! 2. **A pin always wins; scanout affinity is just as absolute.** A pipeline
+//!    pinned (by stable [`DeviceId`]) to its current device is never migrated off
+//!    it — the operator override is absolute (ADR-0018 §2.1). A pipeline whose
+//!    composite feeds a **local display sink** is likewise affinity-pinned to the
+//!    connector-owning GPU ([ADR-0044](../../../docs/decisions/ADR-0044.md) §3):
+//!    the scanout framebuffer must live on that GPU, so migrating or splitting
+//!    composite off it would force the per-frame GPU→host→GPU copy ADR-0018
+//!    forbids. Both may still *shed* locally.
 //! 3. **SHED vs MIGRATE.** On a sustained overload the controller re-runs
 //!    [`select_device`](multiview_hal::select_device) over the *other* candidate
 //!    GPUs. If a materially-better home exists (its score beats the current
@@ -66,6 +71,11 @@ pub enum ShedReason {
     /// The pipeline is pinned to its (overloaded) device, so it may not migrate;
     /// the cheap local lever is the only available relief.
     Pinned,
+    /// The pipeline feeds a **local display sink** whose framebuffer must live on
+    /// the connector-owning GPU (ADR-0044 §3): migrating or splitting composite
+    /// off that GPU would force the per-frame GPU→host→GPU copy ADR-0018 forbids,
+    /// so the scanout affinity is absolute and the only relief is a local shed.
+    DisplayBound,
     /// No other candidate GPU is a materially-better home (the imbalance cannot
     /// be cured by moving — the whole host is loaded), so shed locally.
     NoBetterHome,
@@ -319,6 +329,19 @@ impl PlacementController {
         self.pins.pipeline() == Some(&self.current)
     }
 
+    /// Whether the pipeline feeds a local display sink anchored to its current
+    /// device — i.e. the current device is in the demand's scanout-locality set
+    /// (ADR-0044 §3), so composite may never be migrated/split off it.
+    ///
+    /// A pipeline with no display sink (empty locality) is never display-bound.
+    /// The check is by membership, so on a multi-GPU host the affinity binds
+    /// composite to whichever connector-owning GPU currently hosts it.
+    #[must_use]
+    pub fn is_display_bound_here(&self) -> bool {
+        let localities = self.demand.sink_localities();
+        !localities.is_empty() && localities.contains(&self.current)
+    }
+
     /// Observe one wait-free [`DeviceLoad`] snapshot and propose an action.
     ///
     /// This is the entire control step. It is pure and synchronous: it updates
@@ -351,6 +374,20 @@ impl PlacementController {
         if self.is_pinned_here() {
             return PlacementProposal::Shed {
                 reason: ShedReason::Pinned,
+            };
+        }
+
+        // 3b. A display-bound pipeline (its composite feeds a local KMS scanout
+        //     sink) is affinity-pinned to the connector-owning GPU (ADR-0044 §3):
+        //     migrating or splitting composite off it would force the per-frame
+        //     GPU→host→GPU copy ADR-0018 forbids. So the scanout affinity is a
+        //     HARD constraint, never a soft weight — the only relief is a local
+        //     shed. On a single-GPU display host this is trivially satisfied
+        //     (current IS the only/locality device); the type-level machinery
+        //     still models it for the multi-GPU host.
+        if self.is_display_bound_here() {
+            return PlacementProposal::Shed {
+                reason: ShedReason::DisplayBound,
             };
         }
 
