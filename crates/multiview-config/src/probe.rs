@@ -51,6 +51,18 @@ impl Default for DetectionZone {
 }
 
 impl DetectionZone {
+    /// Construct a detection zone from explicit fractional edges.
+    ///
+    /// The result is **not** validated; call [`DetectionZone::validate`] (or
+    /// validate the owning [`Probe`]) before using it. This is the programmatic
+    /// constructor the engine and tests use to build a zone without going through
+    /// TOML (the type is `#[non_exhaustive]`, so a struct literal is not
+    /// constructable downstream).
+    #[must_use]
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
     /// Validate that the zone is finite, within the unit square, and has
     /// positive extent.
     ///
@@ -365,6 +377,23 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
     use super::*;
     use multiview_core::alarm::PerceivedSeverity;
+
+    #[test]
+    fn detection_zone_new_carries_the_edges_and_validates() {
+        let zone = DetectionZone::new(0.0, 0.0, 0.5, 1.0);
+        // Exact-bit compare: the constructor stores the literals verbatim, so the
+        // bit patterns must match (avoids the float-`==` lint without weakening
+        // the assertion to a tolerance).
+        assert_eq!(zone.x.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(zone.y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(zone.w.to_bits(), 0.5_f32.to_bits());
+        assert_eq!(zone.h.to_bits(), 1.0_f32.to_bits());
+        zone.validate("p").unwrap();
+        // An out-of-square zone is constructable but fails validation.
+        assert!(DetectionZone::new(0.6, 0.0, 0.5, 1.0)
+            .validate("p")
+            .is_err());
+    }
 
     #[test]
     fn dwell_new_carries_the_windows() {

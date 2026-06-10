@@ -889,6 +889,16 @@ pub struct Pipeline {
     /// source id — the text drawn bottom-left of each tile.
     #[cfg(feature = "overlay")]
     tile_labels: std::collections::HashMap<String, String>,
+    /// Operator-declared content-fault probes, resolved from `config.probes`
+    /// (M10). Each probe `watches` a cell; this resolves that cell to its bound
+    /// **source** so the per-tick [`FaultDetector`] can build that source's fault
+    /// machine from the operator's *declared* threshold / zone / dwell / severity
+    /// (via the engine [`ProbeRunner`](multiview_engine::ProbeRunner)) instead of
+    /// the hardcoded defaults. A source with no declared probe keeps the default
+    /// behaviour. Multiple probes of the same kind on one source: the first wins
+    /// (config validation already rejects duplicate probe ids).
+    #[cfg(feature = "overlay")]
+    declared_probes: Vec<multiview_config::probe::Probe>,
     /// An optional **analog** clock face requested by a `[[overlays]]` entry with
     /// `kind = "clock"` + `face = "analog"`. `None` ⇒ only the default digital
     /// clock label is drawn.
@@ -1188,6 +1198,8 @@ impl Pipeline {
             meter_db_timelines,
             #[cfg(feature = "overlay")]
             tile_labels,
+            #[cfg(feature = "overlay")]
+            declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
             analog_clock,
         })
@@ -1753,11 +1765,20 @@ impl Pipeline {
         #[cfg(feature = "overlay")]
         self.subtitle_route
             .store(Some(Arc::new(subtitle_router.handle())));
+        // Resolve each operator-declared probe's watched CELL to its bound SOURCE
+        // via the solved layout, so the per-tick fault detector can build that
+        // source's fault machine from the declared threshold/zone/dwell/severity
+        // (M10 — the config→analyser → X.733 driver). A probe whose cell is unbound
+        // is skipped (no source to sample). This runs once at run start, off the
+        // hot loop.
+        #[cfg(feature = "overlay")]
+        let source_probes = resolve_source_probes(&self.layout, &self.declared_probes);
         #[cfg(feature = "overlay")]
         let mut fault_detector = FaultDetector::new(
             self.stores.clone(),
             self.meter_db_timelines.clone(),
             self.cadence,
+            source_probes,
         );
         // RT-3 read-only stream-inventory discovery (off the hot loop, inv #10):
         // the per-input inventories were probed ONCE at build time. Emit one
@@ -2955,6 +2976,75 @@ fn sample_caption_bitmaps(
     out
 }
 
+/// An operator-declared probe override for one source, resolved from
+/// `config.probes` (M10): the config [`Probe`](multiview_config::probe::Probe) the
+/// engine builds a config-derived analyser + X.733 lifecycle from, per fault
+/// class. A `None` entry means "no declared probe for this class — use the
+/// hardcoded default".
+///
+/// The first declared probe of each kind for a source wins (duplicate probe ids
+/// are already rejected by config validation; two probes of the same kind on one
+/// source is an unusual config and deterministically resolves to the first).
+#[cfg(feature = "overlay")]
+#[derive(Default, Clone)]
+struct SourceProbeOverride {
+    /// The declared black probe (its `luma_threshold` + `zone` + dwell + severity).
+    black: Option<multiview_config::probe::Probe>,
+    /// The declared freeze probe (its `difference_threshold` + `zone` + dwell + …).
+    freeze: Option<multiview_config::probe::Probe>,
+    /// The declared silence probe (its dwell + severity; the level threshold is
+    /// applied by the meter pipeline, [`SILENCE_FLOOR_DB`]).
+    silence: Option<multiview_config::probe::Probe>,
+}
+
+/// Resolve `config.probes` into per-**source** overrides by mapping each probe's
+/// watched **cell** to its bound source via the solved `layout` (M10).
+///
+/// A probe whose cell is unbound (no `source`) or absent from the layout is
+/// skipped — there is no picture/audio to analyse. Runs once at run start, off the
+/// hot loop.
+#[cfg(feature = "overlay")]
+fn resolve_source_probes(
+    layout: &Layout,
+    probes: &[multiview_config::probe::Probe],
+) -> std::collections::HashMap<String, SourceProbeOverride> {
+    use multiview_config::probe::ProbeKind;
+    let mut out: std::collections::HashMap<String, SourceProbeOverride> =
+        std::collections::HashMap::new();
+    for probe in probes {
+        // The config carries cell ids only on the raw cells, not the solved
+        // `Layout`; the layout cell binds a `source`, and a probe's `cell` field
+        // names a config cell id. The desugared run binds cell id == source id for
+        // the common single-source-per-cell case, so resolve by matching the
+        // probe's cell against a layout cell whose bound source equals it, falling
+        // back to treating the probe's `cell` as the source id directly when no
+        // distinct cell id is carried. Either way an unbound name is skipped.
+        let source = layout
+            .cells
+            .iter()
+            .filter_map(|c| c.source.clone())
+            .find(|s| s == &probe.cell)
+            .unwrap_or_else(|| probe.cell.clone());
+        let entry = out.entry(source).or_default();
+        match probe.kind {
+            ProbeKind::Black { .. } if entry.black.is_none() => {
+                entry.black = Some(probe.clone());
+            }
+            ProbeKind::Freeze { .. } if entry.freeze.is_none() => {
+                entry.freeze = Some(probe.clone());
+            }
+            ProbeKind::Silence { .. } if entry.silence.is_none() => {
+                entry.silence = Some(probe.clone());
+            }
+            // A loudness probe (or a duplicate of an already-captured kind, or a
+            // future kind) does not override one of the three content-fault badge
+            // classes; the loudness alarm rides the meter path elsewhere.
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The dBFS floor at/below which the per-input meter is treated as **silent**
 /// for the audio-loss fault. Just above the meter's true floor so a genuinely
 /// quiet-but-present programme does not trip it; sustained past the silence
@@ -3029,6 +3119,20 @@ struct FaultDetector {
     hysteresis_black: multiview_engine::AlarmHysteresis,
     hysteresis_freeze: multiview_engine::AlarmHysteresis,
     hysteresis_silence: multiview_engine::AlarmHysteresis,
+    /// Operator-declared probe overrides, keyed by source id (M10). When a source
+    /// has a declared probe for a fault class, that class's analyser **and** X.733
+    /// lifecycle (dwell/severity/latch) come from the config probe via the engine
+    /// [`ProbeRunner`](multiview_engine::ProbeRunner) instead of the hardcoded
+    /// default — the config→analyser → alarm seam. Empty (the default) keeps the
+    /// prior behaviour byte-for-byte.
+    source_probes: std::collections::HashMap<String, SourceProbeOverride>,
+    /// Per-source config-derived **black** analyser, built once from the declared
+    /// probe's `luma_threshold` + `zone`. Present only for sources with a declared
+    /// black probe; others fall back to the shared default [`Self::black`].
+    declared_black: std::collections::HashMap<String, multiview_engine::BlackProbe>,
+    /// Per-source config-derived **freeze** analyser (declared `difference_threshold`
+    /// + `zone`). Present only for sources with a declared freeze probe.
+    declared_freeze: std::collections::HashMap<String, multiview_engine::FreezeProbe>,
 }
 
 /// The number of recent sampled frames over which the instantaneous freeze
@@ -3064,9 +3168,11 @@ impl FaultDetector {
         stores: HashMapStores,
         meter_db_timelines: std::collections::HashMap<String, Vec<f64>>,
         _cadence: Rational,
+        source_probes: std::collections::HashMap<String, SourceProbeOverride>,
     ) -> Self {
         use multiview_engine::{
-            AlarmHysteresis, BlackConfig, BlackProbe, FreezeConfig, FreezeProbe,
+            black_config_from_kind, freeze_config_from_kind, AlarmHysteresis, BlackConfig,
+            BlackProbe, FreezeConfig, FreezeProbe,
         };
         // Dwell windows on the media timeline. Black/silence raise after ~0.5 s of
         // the condition and clear after ~0.3 s of its absence; freeze needs a
@@ -3092,6 +3198,34 @@ impl FaultDetector {
                                  // The two residual per-GOP spikes the frozen source still shows are absorbed
                                  // by the debounce window below, not by a looser threshold.
         let freeze_cfg = FreezeConfig::default().with_tolerance(6);
+        // Build the per-source config-derived analysers ONCE from any declared
+        // black/freeze probe (its operator-authored threshold + zone). A declared
+        // freeze probe is honoured verbatim — the CLI's codec-noise tolerance/
+        // debounce defaults still apply to it via the shared sample path, but its
+        // change threshold + zone are the operator's. Sources without a declared
+        // probe never appear here and fall back to the shared defaults.
+        let mut declared_black = std::collections::HashMap::new();
+        let mut declared_freeze = std::collections::HashMap::new();
+        for (source, ov) in &source_probes {
+            if let Some(cfg) = ov
+                .black
+                .as_ref()
+                .and_then(|p| black_config_from_kind(&p.kind))
+            {
+                declared_black.insert(source.clone(), BlackProbe::new(cfg));
+            }
+            if let Some(cfg) = ov
+                .freeze
+                .as_ref()
+                .and_then(|p| freeze_config_from_kind(&p.kind))
+            {
+                // Preserve the CLI's wider per-sample tolerance for real encoded
+                // sources; only the operator-authored change threshold + zone come
+                // from config (the engine `from_kind` keeps the default tolerance,
+                // which we override to the CLI's 6 to match the default path).
+                declared_freeze.insert(source.clone(), FreezeProbe::new(cfg.with_tolerance(6)));
+            }
+        }
         Self {
             stores,
             meter_db_timelines,
@@ -3103,16 +3237,27 @@ impl FaultDetector {
             hysteresis_black: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
             hysteresis_freeze: AlarmHysteresis::new(dwell(2, 1), down), // 2 s up
             hysteresis_silence: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
+            source_probes,
+            declared_black,
+            declared_freeze,
         }
     }
 
     /// Get-or-create the dwell machines for `id` (one per fault class).
+    ///
+    /// When the source has an operator-declared probe for a fault class (M10), that
+    /// class's machine is built from the config probe via
+    /// [`AlarmStateMachine::from_probe`](multiview_engine::AlarmStateMachine::from_probe)
+    /// — honouring the declared dwell, severity, latch and scope. Classes with no
+    /// declared probe use the hardcoded default machine, so an undeclared source is
+    /// byte-for-byte the prior behaviour.
     fn machines_for(&mut self, id: &str) -> &mut SourceFaultMachines {
         use multiview_core::alarm::{AlarmId, AlarmKind, AlarmScope, PerceivedSeverity};
         use multiview_engine::{AlarmHysteresis, AlarmStateMachine};
         let hb = self.hysteresis_black;
         let hf = self.hysteresis_freeze;
         let hs = self.hysteresis_silence;
+        let ov = self.source_probes.get(id).cloned().unwrap_or_default();
         self.machines.entry(id.to_owned()).or_insert_with(|| {
             let mk = |kind: AlarmKind, sev: PerceivedSeverity, hyst: AlarmHysteresis| {
                 AlarmStateMachine::new(
@@ -3123,10 +3268,31 @@ impl FaultDetector {
                     hyst,
                 )
             };
+            // A declared probe's full X.733 lifecycle (id/scope/severity/dwell/
+            // latch) via `from_probe`; otherwise the hardcoded default machine.
+            let from_or_default = |probe: &Option<multiview_config::probe::Probe>,
+                                   kind: AlarmKind,
+                                   sev: PerceivedSeverity,
+                                   hyst: AlarmHysteresis| {
+                match probe {
+                    Some(p) => AlarmStateMachine::from_probe(p),
+                    None => mk(kind, sev, hyst),
+                }
+            };
             SourceFaultMachines {
-                black: mk(AlarmKind::Black, PerceivedSeverity::Major, hb),
-                freeze: mk(AlarmKind::Freeze, PerceivedSeverity::Major, hf),
-                silence: mk(AlarmKind::Silence, PerceivedSeverity::Minor, hs),
+                black: from_or_default(&ov.black, AlarmKind::Black, PerceivedSeverity::Major, hb),
+                freeze: from_or_default(
+                    &ov.freeze,
+                    AlarmKind::Freeze,
+                    PerceivedSeverity::Major,
+                    hf,
+                ),
+                silence: from_or_default(
+                    &ov.silence,
+                    AlarmKind::Silence,
+                    PerceivedSeverity::Minor,
+                    hs,
+                ),
             }
         })
     }
@@ -3218,12 +3384,17 @@ impl FaultDetector {
                 return (false, false);
             }
         };
-        let black = self.black.detect(&current).condition_present;
+        // Prefer this source's config-derived analyser (the operator-declared
+        // threshold + zone, M10); fall back to the shared default when no probe was
+        // declared for it.
+        let black_probe = self.declared_black.get(id).unwrap_or(&self.black);
+        let freeze_probe = self.declared_freeze.get(id).unwrap_or(&self.freeze);
+        let black = black_probe.detect(&current).condition_present;
         // Freeze needs the previous sampled frame; if none yet (first frame or a
         // gap), it is not frozen this tick (fail-safe toward "live").
         let frozen = match self.previous.get(id) {
             Some(prev) => match LumaView::packed(prev.y_plane(), prev.width(), prev.height()) {
-                Ok(prev_view) => self.freeze.detect(&current, &prev_view).condition_present,
+                Ok(prev_view) => freeze_probe.detect(&current, &prev_view).condition_present,
                 Err(_) => false,
             },
             None => false,
@@ -5423,11 +5594,123 @@ mod fault_detector_tests {
         s
     }
 
+    /// A per-source override map naming `id`'s declared probes (M10).
+    fn source_probes_for(
+        id: &str,
+        probes: &[multiview_config::probe::Probe],
+    ) -> std::collections::HashMap<String, SourceProbeOverride> {
+        let layout = Layout {
+            name: "t".to_owned(),
+            canvas: multiview_core::layout::Canvas {
+                width: 64,
+                height: 64,
+                fps_num: 25,
+                fps_den: 1,
+            },
+            cells: vec![Cell {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                fit: multiview_core::layout::FitMode::Contain,
+                source: Some(id.to_owned()),
+                ..Cell::default()
+            }],
+        };
+        resolve_source_probes(&layout, probes)
+    }
+
+    #[test]
+    fn declared_black_probe_threshold_and_dwell_drive_the_fault() {
+        use multiview_config::probe::{DetectionZone, Dwell, Probe, ProbeKind};
+        use multiview_core::alarm::PerceivedSeverity;
+        let id = "blk";
+        let (stores, store) = store_for(id);
+        // The operator declares a black probe with a HIGH luma ceiling (100) and a
+        // short 80 ms dwell-up (2 ticks at 25 fps). A Y=80 field is "black" under
+        // this declared threshold but NOT under the hardcoded default (16), and it
+        // must raise within ~2 ticks — far sooner than the default 0.5 s (12 ticks).
+        let probe = Probe::new(
+            "blk-probe",
+            id,
+            ProbeKind::black(100, DetectionZone::default()),
+            Dwell::new(80, 80),
+            PerceivedSeverity::Critical,
+            false,
+        );
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            source_probes_for(id, &[probe]),
+        );
+        let states = live_states(id);
+
+        // Tick 0: present, dwell not yet served. Tick 1 (40 ms) still pending.
+        store.publish(solid(80), pts_of(0));
+        let t0 = det.sample(pts_of(0), 0, &states);
+        assert_eq!(
+            t0.get(id).copied().unwrap_or(TileFault::None),
+            TileFault::None,
+            "Y=80 under the declared threshold 100 is black, but the 80 ms dwell has not elapsed"
+        );
+        store.publish(solid(80), pts_of(1));
+        let t1 = det.sample(pts_of(1), 1, &states);
+        assert_eq!(
+            t1.get(id).copied().unwrap_or(TileFault::None),
+            TileFault::None,
+            "still within the declared dwell-up at 40 ms"
+        );
+        // Tick 2 (80 ms): the declared dwell-up elapses → BLACK raises. The default
+        // threshold (16) would NEVER call Y=80 black, so this proves the config
+        // threshold is what drove the detection.
+        store.publish(solid(80), pts_of(2));
+        let t2 = det.sample(pts_of(2), 2, &states);
+        assert_eq!(
+            t2.get(id).copied(),
+            Some(TileFault::Black),
+            "the declared black probe (threshold 100, 80 ms dwell) raises on Y=80 at 80 ms"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_source_keeps_the_default_black_threshold() {
+        // Regression guard for the seam: a Y=80 field with NO declared probe is NOT
+        // black under the hardcoded default threshold (16) — the override path must
+        // not change undeclared sources. (A silence fault may fire from the absent
+        // meter timeline — orthogonal default behaviour — so we assert specifically
+        // that BLACK never raises, which is what the threshold drives.)
+        let id = "blk";
+        let (stores, store) = store_for(id);
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            std::collections::HashMap::new(),
+        );
+        let states = live_states(id);
+        for i in 0..40 {
+            store.publish(solid(80), pts_of(i));
+            let last = det.sample(pts_of(i), i, &states);
+            assert_ne!(
+                last.get(id).copied(),
+                Some(TileFault::Black),
+                "Y=80 is above the default black threshold (16) → no BLACK fault for an undeclared source"
+            );
+        }
+    }
+
     #[test]
     fn sustained_all_black_frames_raise_a_black_fault() {
         let id = "blk";
         let (stores, store) = store_for(id);
-        let mut det = FaultDetector::new(stores, std::collections::HashMap::new(), cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Drive 40 ticks (1.6 s > the 0.5 s black dwell) publishing an all-black
@@ -5448,7 +5731,12 @@ mod fault_detector_tests {
     fn sustained_identical_frames_raise_a_frozen_fault() {
         let id = "frz";
         let (stores, store) = store_for(id);
-        let mut det = FaultDetector::new(stores, std::collections::HashMap::new(), cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Publish the SAME bright, non-black content every tick (Y=200 solid):
@@ -5473,7 +5761,12 @@ mod fault_detector_tests {
         // A meter timeline pinned below the silence floor for every tick.
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-80.0_f64; 80]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Publish a MOVING, bright picture so neither black nor freeze fires —
@@ -5497,7 +5790,12 @@ mod fault_detector_tests {
         // A loud meter timeline (well above the silence floor) for every tick.
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-6.0_f64; 80]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Publish a MOVING, bright picture (changes every tick) and a loud meter:
@@ -5526,7 +5824,12 @@ mod fault_detector_tests {
         // Loud meter so silence never fires — freeze must be the only fault.
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-6.0_f64; 120]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Drive 90 ticks (3.6 s > the 2 s freeze dwell), crossing >=3 simulated
@@ -5553,7 +5856,12 @@ mod fault_detector_tests {
         let (stores, store) = store_for(id);
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-80.0_f64; 120]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         let mut last = std::collections::HashMap::new();
@@ -5576,7 +5884,12 @@ mod fault_detector_tests {
         let (stores, store) = store_for(id);
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-80.0_f64; 80]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         let mut last = std::collections::HashMap::new();

@@ -22,10 +22,15 @@
 //! the alarm state is not advanced, never that a frame is delayed. The
 //! penalty-box action is *returned* as a [`PenaltyAction`] for the engine to
 //! apply at a frame boundary; this module never reaches into the engine itself.
+pub mod driver;
 pub mod penalty_box;
 pub mod rollup;
 pub mod state;
 
+pub use driver::{
+    black_config_from_kind, engine_zone, freeze_config_from_kind, AlarmDriver, ProbeFrame,
+    ProbeRunner,
+};
 pub use penalty_box::{PenaltyAction, PenaltyBox, PenaltyConfig, PenaltyState};
 pub use rollup::{BoolOp, RollupNode, VirtualAlarm};
 pub use state::{AlarmHysteresis, AlarmStateMachine, AlarmTransition, Phase};
