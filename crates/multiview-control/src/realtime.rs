@@ -94,9 +94,13 @@ impl CorrKey {
     ///   `Salvo { salvo, phase }`. A salvo `None` (take/cancel the *armed*
     ///   salvo) is not keyed: the outcome's name is resolved engine-side and is
     ///   not known here.
-    /// * `SwapSource`/`ApplyLayout`/`SetTallyOverride` → [`None`]: the first two
-    ///   have no dedicated outcome event, and the tally echo is not a
-    ///   command-acknowledgement outcome.
+    /// * `SwapSource`/`ApplyLayout`/`SetTallyOverride` → [`None`]: a swap has
+    ///   no dedicated outcome event; a stored-layout apply emits a
+    ///   `job.progress` outcome (ADR-W017) but that phase string is not a
+    ///   per-operation key (two applies of the same layout are
+    ///   indistinguishable), so it rides uncorrelated rather than
+    ///   mis-correlated; and the tally echo is not a command-acknowledgement
+    ///   outcome.
     #[must_use]
     pub fn for_command(command: &Command) -> Option<Self> {
         match command {

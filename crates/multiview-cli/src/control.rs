@@ -18,13 +18,15 @@ use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_control::{
     provision_admin_keys, run_warning_ingest, AppState, Command, CommandReceiver, CommandSender,
-    EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, SharedPreview,
+    EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, ResolvedLayout, SharedPreview,
     WarningRepository,
 };
 use multiview_engine::{
     CompositorDrive, EnginePublisher, RouteApplier, RouteIntent, RouteResolution,
 };
-use multiview_events::{Event, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent};
+use multiview_events::{
+    Event, JobProgress, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent,
+};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -383,10 +385,16 @@ fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12I
 ///   there is no per-source `AudioStore` to re-point onto, the run-side audio
 ///   ingest is RT-5/RT-8b, unbuilt). It is therefore a **surfaced** held action
 ///   (`tracing::warn!` naming the missing crosspoint), never a silent drop.
-/// * [`Command::ApplyLayout`] re-solves + re-applies the working layout iff
-///   `layout` matches the solved working layout's name (geometry CAN change, so it
-///   keeps the re-solve path); any other id is a failure (there is no named-layout
-///   library yet) — logged via `tracing::warn!`, never a panic.
+/// * [`Command::ApplyLayout`] **with a route-resolved document** (ADR-W017)
+///   swaps the STORED layout in at the frame boundary — geometry, bindings,
+///   cell ids, and per-cell `on_loss` slates — in O(cells) with no I/O and no
+///   re-solve (the route already solved + validated it), mirrors it into the
+///   working config, and emits a `job.progress` outcome. A pinned-canvas
+///   mismatch (Class-2, ADR-R004) or a compositor rejection is held + warned,
+///   never adopted. **Without a document** (back-compat) it re-solves +
+///   re-applies the working layout iff `layout` matches the solved working
+///   layout's name; any other id is a failure — logged via `tracing::warn!`,
+///   never a panic.
 /// * [`Command::ArmSalvo`] stages a named salvo and emits [`Event::SalvoArmed`];
 ///   [`Command::TakeSalvo`] enqueues the named-or-armed salvo's source recalls as
 ///   coalesced re-points (one capped pass, O(1) each) and emits
@@ -562,7 +570,9 @@ impl CommandDrain {
     pub fn apply(&mut self, drive: &mut CompositorDrive<Nv12Image>) -> usize {
         // First tick: hand the drive the cell ids (in config-cell order, which is
         // exactly `solve_layout`'s core-cell order) so `rebind_cell` can address
-        // cells by id. One-shot, off the hot composite.
+        // cells by id, and the per-cell `on_loss` failover-slate policy (ADR-0027
+        // / ADR-0030) so a down tile composites the slate its config declares.
+        // One-shot, off the hot composite.
         if !self.cell_ids_set {
             let ids: Vec<Option<String>> = self
                 .config
@@ -571,6 +581,7 @@ impl CommandDrain {
                 .map(|c| Some(c.id.clone()))
                 .collect();
             drive.set_cell_ids(ids);
+            drive.set_cell_slates(self.config.cells.iter().map(|c| c.on_loss).collect());
             self.cell_ids_set = true;
         }
 
@@ -629,6 +640,81 @@ impl CommandDrain {
             cell: cell.to_owned(),
             source: source.clone(),
         });
+    }
+
+    /// Apply a STORED layout that was resolved + solved **at the route**
+    /// (ADR-W017): swap the active layout at this frame boundary, re-establish
+    /// the O(1) re-point address space (cell ids) and per-cell failover slates
+    /// from the stored document, and mirror the document into the working
+    /// config so export / salvo recalls / the back-compat `ApplyLayout`
+    /// fallback address the **active** layout.
+    ///
+    /// O(cells), no I/O, no `solve_layout`, no `.await` — the render thread
+    /// only swaps (invariants #1/#10). Held (warned, never adopted, never a
+    /// panic) when:
+    /// * the stored canvas (geometry/cadence) differs from the running
+    ///   session's pinned canvas — a Class-2 change (ADR-R004). The route
+    ///   refuses this with `422`; this is the authoritative backstop;
+    /// * the compositor rejects the layout (`set_layout` re-validates and
+    ///   retains the last-good layout on error).
+    ///
+    /// A cell bound to a source with **no registered store** (no running
+    /// ingest) stays bound and composites its per-cell `on_loss` slate until
+    /// the source appears — the output never stalls and never panics
+    /// (consistent with how an unbound/down tile already composes).
+    ///
+    /// On success the apply is observable: a `job.progress` outcome event
+    /// (phase `apply_layout`, drop-oldest — inv #10) plus a `tracing::info!`;
+    /// the proof is the next composited frame.
+    fn apply_stored_layout(
+        &mut self,
+        id: &str,
+        resolved: ResolvedLayout,
+        drive: &mut CompositorDrive<Nv12Image>,
+    ) {
+        let current = &drive.layout().canvas;
+        let stored = &resolved.solved.canvas;
+        if stored != current {
+            tracing::warn!(
+                layout = %id,
+                running = ?current,
+                stored = ?stored,
+                "apply_layout held: the stored layout's canvas differs from the running \
+                 session's pinned canvas (Class-2, ADR-R004); not applied live"
+            );
+            return;
+        }
+        let cells = resolved.solved.cells.len();
+        match drive.set_layout(Arc::new(resolved.solved)) {
+            Ok(()) => {
+                drive.set_cell_ids(resolved.document.cell_ids());
+                drive.set_cell_slates(resolved.document.cell_slates());
+                // Mirror the document into the working config so the other
+                // management surfaces follow the ACTIVE layout, not the boot one.
+                self.config.layout = resolved.document.layout;
+                self.config.cells = resolved.document.cells;
+                tracing::info!(
+                    layout = %id,
+                    cells,
+                    "apply_layout: stored layout applied live at the frame boundary"
+                );
+                self.publisher
+                    .publish_event(Event::JobProgress(JobProgress {
+                        phase: "apply_layout".to_owned(),
+                        pct: 100,
+                        message: Some(format!("layout {id} applied live at the frame boundary")),
+                    }));
+            }
+            Err(e) => {
+                // Unreachable for a route-solved document (the route validated the
+                // same pure invariants), but held honestly rather than panicking.
+                tracing::warn!(
+                    layout = %id,
+                    error = %e,
+                    "apply_layout: compositor rejected the stored layout; last-good retained"
+                );
+            }
+        }
     }
 
     /// Re-solve the working config and hot-swap it onto `drive` (the geometry-
@@ -698,23 +784,30 @@ impl CommandDrain {
             } => {
                 self.route_subtitle(layer, source);
             }
-            Command::ApplyLayout { layout, .. } => {
-                // There is no named-layout library in the software engine: the
-                // working config carries a single solved layout named
-                // `schema_v{N}`. Applying that name (the only valid id) re-solves +
-                // re-applies the working layout; any other id is a failure (no
-                // panic). A layout change CAN alter geometry, so this keeps the
-                // re-solve path (counted by the test spy).
-                // FOLLOW-UP (CTL-4/CTL-2): resolve `layout` against a real layout
-                // library once one exists.
-                let working = self.config.solve_layout().ok().map(|l| l.name);
-                if working.as_deref() == Some(layout.as_str()) {
-                    let _ = self.resolve_and_apply(drive);
+            Command::ApplyLayout {
+                layout, document, ..
+            } => {
+                if let Some(resolved) = document {
+                    // ADR-W017: a STORED layout, resolved + solved at the route
+                    // (off this render thread). The frame-boundary work is the
+                    // swap: O(cells), no I/O, no re-solve.
+                    self.apply_stored_layout(&layout, *resolved, drive);
                 } else {
-                    tracing::warn!(
-                        layout = %layout,
-                        "apply_layout: unknown layout id (no named-layout library yet); ignored"
-                    );
+                    // Back-compat (no document): the working config carries a
+                    // single solved layout named `schema_v{N}`. Applying that
+                    // name re-solves + re-applies the working layout; any other
+                    // id is a failure (no panic). A layout change CAN alter
+                    // geometry, so this keeps the re-solve path (counted by the
+                    // test spy).
+                    let working = self.config.solve_layout().ok().map(|l| l.name);
+                    if working.as_deref() == Some(layout.as_str()) {
+                        let _ = self.resolve_and_apply(drive);
+                    } else {
+                        tracing::warn!(
+                            layout = %layout,
+                            "apply_layout: unknown layout id (no stored document on the command); ignored"
+                        );
+                    }
                 }
             }
             Command::ArmSalvo { salvo, head, .. } => {
@@ -1107,7 +1200,7 @@ input_id = "in_b"
     /// unless overridden.
     fn stored_full_canvas(
         source: &str,
-        canvas: serde_json::Value,
+        canvas: &serde_json::Value,
     ) -> multiview_control::ResolvedLayout {
         let body = serde_json::json!({
             "canvas": canvas,
@@ -1148,7 +1241,7 @@ input_id = "in_b"
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
                 layout: "wall-x".to_owned(),
-                document: Some(Box::new(stored_full_canvas("in_b", matching_canvas()))),
+                document: Some(Box::new(stored_full_canvas("in_b", &matching_canvas()))),
             })
             .expect("submit apply-layout");
         let _ = drain.apply(&mut drive);
@@ -1191,7 +1284,11 @@ input_id = "in_b"
                 if progress.phase == "apply_layout" {
                     assert_eq!(progress.pct, 100);
                     assert!(
-                        progress.message.as_deref().unwrap_or_default().contains("wall-x"),
+                        progress
+                            .message
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains("wall-x"),
                         "the outcome names the stored layout id"
                     );
                     saw_apply = true;
@@ -1231,7 +1328,9 @@ input_id = "in_b"
         .expect("bright frame");
         // Reach the in_b store through a fresh drive build is not possible here;
         // publish via a store registered on the drive instead.
-        let store = Arc::new(multiview_framestore::TileStore::<Nv12Image>::with_defaults("in_b"));
+        let store = Arc::new(multiview_framestore::TileStore::<Nv12Image>::with_defaults(
+            "in_b",
+        ));
         store.publish(bright, MediaTime::from_nanos(0));
         drive.insert_store("in_b", Arc::clone(&store));
 
@@ -1251,7 +1350,7 @@ input_id = "in_b"
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
                 layout: "wall-x".to_owned(),
-                document: Some(Box::new(stored_full_canvas("in_b", matching_canvas()))),
+                document: Some(Box::new(stored_full_canvas("in_b", &matching_canvas()))),
             })
             .expect("submit apply-layout");
         let _ = drain.apply(&mut drive);
@@ -1282,8 +1381,10 @@ input_id = "in_b"
         let before = drive.layout().name.clone();
 
         // Same document shape, WRONG canvas (128x128@30 vs the running 64x64@25).
-        let mismatched =
-            stored_full_canvas("in_b", serde_json::json!({ "width": 128, "height": 128, "fps": "30/1" }));
+        let mismatched = stored_full_canvas(
+            "in_b",
+            &serde_json::json!({ "width": 128, "height": 128, "fps": "30/1" }),
+        );
         sender
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
@@ -1298,7 +1399,11 @@ input_id = "in_b"
             before,
             "a pinned-canvas mismatch must be held, never adopted (Class-2)"
         );
-        assert_eq!(drive.layout().canvas.width, 64, "the pinned canvas survives");
+        assert_eq!(
+            drive.layout().canvas.width,
+            64,
+            "the pinned canvas survives"
+        );
     }
 
     #[test]

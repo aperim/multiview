@@ -1,5 +1,5 @@
 //! The stored **named-layout document** — the `{ canvas, layout, cells }` body
-//! the control plane's layouts repository holds and the WebUI layout editor
+//! the control plane's layouts repository holds and the `WebUI` layout editor
 //! saves (ADR-W017).
 //!
 //! This is the typed, solvable view of one stored layout: the same `layout` +
@@ -44,7 +44,7 @@ pub struct LayoutCanvas {
 }
 
 /// The serde default for an omitted `layout` strategy: absolute placement
-/// (per-cell `rect`), the only kind the WebUI editor writes.
+/// (per-cell `rect`), the only kind the `WebUI` editor writes.
 fn default_strategy() -> Layout {
     Layout::Absolute
 }
@@ -52,7 +52,7 @@ fn default_strategy() -> Layout {
 /// One stored named-layout document: `{ canvas, layout, cells }`.
 ///
 /// Deserializes both the seeded working-layout body (full authored canvas, any
-/// layout strategy) and the WebUI editor's minimal absolute body. Solve it with
+/// layout strategy) and the `WebUI` editor's minimal absolute body. Solve it with
 /// [`LayoutDocument::solve_named`]; read the parallel per-cell extras the
 /// engine drive needs with [`LayoutDocument::cell_ids`] /
 /// [`LayoutDocument::cell_slates`].
@@ -163,7 +163,7 @@ mod tests {
 
     use super::*;
 
-    /// The minimal absolute body the WebUI editor saves.
+    /// The minimal absolute body the `WebUI` editor saves.
     fn editor_body() -> serde_json::Value {
         serde_json::json!({
             "schema_version": 1,
@@ -190,7 +190,10 @@ mod tests {
         assert_eq!(solved.canvas.width, 320);
         assert_eq!(solved.canvas.fps_num, 25);
         assert_eq!(solved.cells.len(), 1);
-        assert_eq!(solved.cells.first().unwrap().source.as_deref(), Some("in_a"));
+        assert_eq!(
+            solved.cells.first().unwrap().source.as_deref(),
+            Some("in_a")
+        );
         assert_eq!(doc.cell_ids(), vec![Some("full".to_owned())]);
         assert_eq!(doc.cell_slates(), vec![FailoverSlate::Bars]);
     }

@@ -45,7 +45,43 @@ pub struct AcceptedBody {
     pub operation_id: String,
     /// The command kind (e.g. `start`).
     pub kind: String,
+    /// For `apply-layout` (ADR-W017): the per-cell property classes the live
+    /// apply genuinely applies at the next frame boundary (e.g. `geometry`,
+    /// `bindings`, `z_order`, `opacity`, `on_loss`). Absent on other commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_live: Option<Vec<String>>,
+    /// For `apply-layout` (ADR-W017): the property classes that are **carried**
+    /// in the stored document (persisted, exported) but not yet rendered by the
+    /// compositor (e.g. `border`, `qos`, `fit`). Absent on other commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_only: Option<Vec<String>>,
 }
+
+/// The per-cell property classes a stored-layout live apply **genuinely
+/// applies** at the frame boundary (ADR-W017): the solved geometry (grid/rect),
+/// source bindings, z-order, per-cell opacity, and the per-cell `on_loss`
+/// failover slate the compositor drive composites for down tiles.
+const APPLY_LIVE_CLASSES: &[&str] = &["geometry", "bindings", "z_order", "opacity", "on_loss"];
+
+/// The property classes a stored layout **carries** (persisted, exported,
+/// mirrored into the working config) but the compositor does not yet render —
+/// honestly reported on the `202` so the operator knows what changed on screen
+/// (ADR-W017; the canvas axes are pinned for the session, ADR-R004).
+const APPLY_CARRIED_CLASSES: &[&str] = &[
+    "fit",
+    "align",
+    "border",
+    "qos",
+    "corner_radius",
+    "scaler",
+    "visible",
+    "static_friendly",
+    "label",
+    "rotation",
+    "canvas_pixel_format",
+    "canvas_background",
+    "canvas_color",
+];
 
 /// The body of a `POST /commands/swap` request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,15 +293,28 @@ pub(crate) fn submit_accepted(
     idem: &IdempotencyKey,
     build: impl FnOnce(OperationId) -> Command,
 ) -> ControlResult<Response> {
+    let body = submit_accepted_body(state, idem, build)?;
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+}
+
+/// [`submit_accepted`]'s core, returning the `202` body instead of a built
+/// response so a handler can decorate it (e.g. `apply-layout`'s
+/// `applied_live`/`carried_only` classes) before serializing.
+pub(crate) fn submit_accepted_body(
+    state: &AppState,
+    idem: &IdempotencyKey,
+    build: impl FnOnce(OperationId) -> Command,
+) -> ControlResult<AcceptedBody> {
     match state.idempotency.reserve(idem.0.as_deref()) {
         Reservation::Replay(op) => {
             // A retried request with the same key: return the original id
             // without re-enqueuing the command.
-            let body = AcceptedBody {
+            Ok(AcceptedBody {
                 operation_id: op.to_string(),
                 kind: "replay".to_owned(),
-            };
-            Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+                applied_live: None,
+                carried_only: None,
+            })
         }
         Reservation::Fresh(op) => {
             let command = build(op.clone());
@@ -297,11 +346,12 @@ pub(crate) fn submit_accepted(
             if let Some(key) = corr_key {
                 state.corr.record(key, op.clone());
             }
-            let body = AcceptedBody {
+            Ok(AcceptedBody {
                 operation_id: op.to_string(),
                 kind,
-            };
-            Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+                applied_live: None,
+                carried_only: None,
+            })
         }
     }
 }
@@ -354,13 +404,21 @@ async fn cmd_swap(
     Ok(response)
 }
 
-/// `POST /api/v1/commands/apply-layout` — apply a layout to the running
-/// multiview (role: write; per-object authz; 202).
+/// `POST /api/v1/commands/apply-layout` — apply a **stored** layout to the
+/// running multiview, live, at the next frame boundary (role: write;
+/// per-object authz; 202) — ADR-W017, invariant #11 Class-1.
 ///
-/// Mirrors [`cmd_swap`]: it only `try_submit`s the command via
-/// [`submit_accepted`] (idempotency + shed-on-full free) and never blocks the
-/// engine (invariant #10). The eventual outcome arrives on the realtime stream
-/// correlated by the returned operation id (ADR-W008).
+/// The stored layout body is resolved from the layouts repository and solved
+/// **here, at request time** (off the engine hot path): an unknown id, a body
+/// that does not parse as a `{canvas, layout, cells}` document, one that does
+/// not solve (bad grid / geometry), or a pinned-canvas mismatch (a Class-2
+/// change — ADR-R004) is an honest `422` **before** any `202`. On `202` the
+/// command carries the solved layout, so the engine's frame-boundary drain
+/// only swaps (O(cells), no I/O — invariants #1/#10); the `202` body's
+/// `applied_live`/`carried_only` arrays state which per-cell property classes
+/// genuinely apply on screen. The submit itself mirrors [`cmd_swap`]
+/// (idempotency + shed-on-full) and never blocks the engine (invariant #10);
+/// the outcome rides the realtime stream as a `job.progress` event (ADR-W008).
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -369,9 +427,10 @@ async fn cmd_swap(
         tag = "commands",
         request_body = ApplyLayoutRequest,
         responses(
-            (status = 202, description = "Apply-layout accepted; outcome on the realtime stream.", body = AcceptedBody),
+            (status = 202, description = "Apply-layout accepted: the stored layout was resolved + solved and will swap in at the next frame boundary; `applied_live`/`carried_only` state the property classes. Outcome on the realtime stream (`job.progress`).", body = AcceptedBody),
             (status = 401, description = "Missing or invalid credentials.", body = Problem),
             (status = 403, description = "Not authorized to apply a layout.", body = Problem),
+            (status = 422, description = "The layout id does not exist, its stored body does not parse/solve, or its canvas differs from the running session's pinned canvas (Class-2).", body = Problem),
             (status = 503, description = "Engine command bus at capacity; shed.", body = Problem),
         ),
     )
@@ -384,12 +443,51 @@ pub(crate) async fn cmd_apply_layout(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &req.layout)?;
+
+    // Resolve + solve the STORED layout at request time (ADR-W017): repository
+    // read + pure solve, both fine here and forbidden on the render thread.
+    // Every failure is a 422 problem BEFORE any 202 — a 202 is a promise.
+    let versioned = state
+        .repository
+        .get_layout(&req.layout)
+        .map_err(|e| match e {
+            ControlError::NotFound { .. } => ControlError::Validation(format!(
+                "layout {:?} does not exist in the layouts library",
+                req.layout
+            )),
+            other => other,
+        })?;
+    let document =
+        multiview_config::LayoutDocument::from_body(&versioned.layout.body).map_err(|e| {
+            ControlError::Validation(format!(
+                "stored layout {:?} does not parse as a {{canvas, layout, cells}} document: {e}",
+                req.layout
+            ))
+        })?;
+    let solved = document.solve_named(&req.layout).map_err(|e| {
+        ControlError::Validation(format!(
+            "stored layout {:?} does not solve: {e}",
+            req.layout
+        ))
+    })?;
+    require_class1_canvas(&state, &req.layout, &document)?;
+
     let layout = req.layout.clone();
-    let response = submit_accepted(&state, &idem, |op| Command::ApplyLayout {
+    let resolved = Box::new(crate::command::ResolvedLayout::new(solved, document));
+    let mut body = submit_accepted_body(&state, &idem, |op| Command::ApplyLayout {
         op,
         layout: req.layout,
-        document: None,
+        document: Some(resolved),
     })?;
+    // State honestly which per-cell property classes land on screen at the
+    // frame boundary vs are carried-but-not-yet-rendered (ADR-W017).
+    body.applied_live = Some(APPLY_LIVE_CLASSES.iter().map(|s| (*s).to_owned()).collect());
+    body.carried_only = Some(
+        APPLY_CARRIED_CLASSES
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    );
     // Audit the accepted command (the engine reports its outcome separately on
     // the realtime stream; what we audit here is the operator's request).
     state.audit(
@@ -399,7 +497,44 @@ pub(crate) async fn cmd_apply_layout(
         &layout,
         Some(serde_json::json!({ "command": "apply_layout" })),
     );
-    Ok(response)
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+}
+
+/// ADR-R004 / ADR-W017 Class-1 gate: output geometry + cadence are **pinned**
+/// for the life of the session, so a stored layout authored for a different
+/// canvas cannot apply live (it is a Class-2 parallel-output migration, not
+/// built yet) — refuse it with `422` here, before any `202`.
+///
+/// The running canvas is read from the seeded **working layout** (mirrored
+/// from the live config at startup). Deployments with no working layout
+/// (store-only tests) skip this gate; the engine's frame-boundary drain
+/// remains the authoritative backstop (it holds + warns on any mismatch
+/// against the live drive's canvas).
+fn require_class1_canvas(
+    state: &AppState,
+    id: &str,
+    document: &multiview_config::LayoutDocument,
+) -> ControlResult<()> {
+    let Some(working_id) = state.working_layout_id.as_deref() else {
+        return Ok(());
+    };
+    let Ok(working) = state.repository.get_layout(working_id) else {
+        return Ok(());
+    };
+    let Ok(running) = multiview_config::LayoutDocument::from_body(&working.layout.body) else {
+        return Ok(());
+    };
+    let run = &running.canvas;
+    let new = &document.canvas;
+    if run != new {
+        return Err(ControlError::Validation(format!(
+            "layout {id:?} was authored for canvas {}x{}@{} but the running session's canvas \
+             is pinned at {}x{}@{} — a Class-2 change (output geometry/cadence cannot change \
+             live; ADR-R004)",
+            new.width, new.height, new.fps, run.width, run.height, run.fps
+        )));
+    }
+    Ok(())
 }
 
 impl axum::extract::FromRequestParts<AppState> for Principal {

@@ -39,7 +39,7 @@ fn grid_body() -> serde_json::Value {
     })
 }
 
-/// A valid stored ABSOLUTE layout body — the minimal shape the WebUI layout
+/// A valid stored ABSOLUTE layout body — the minimal shape the `WebUI` layout
 /// editor saves (canvas `width`/`height`/`fps` only, per-cell `rect`).
 fn absolute_body() -> serde_json::Value {
     json!({
@@ -337,7 +337,10 @@ async fn apply_layout_sheds_503_when_bus_full() {
     // Capacity 1, and the engine never drains: the first command fills the bus,
     // and a second apply-layout must be shed (503), never block — proving the
     // handler only try_submits and can never back-pressure the engine (inv #10).
+    // The layout must exist (resolution happens BEFORE the submit, ADR-W017) so
+    // the failure under test is the saturated bus, not a 422.
     let h = harness_with_capacity(1);
+    create_layout(&h, "grid-3x3", &grid_body()).await;
 
     let resp1 = send(
         &h.router,
