@@ -336,7 +336,7 @@ fn resolve_encoder(codec_token: &str) -> Result<ResolvedEncoder, PipelineError> 
     if let Some(name) = select_encoder(requested) {
         return Ok(ResolvedEncoder {
             name: name.to_owned(),
-            format: Pixel::YUV420P,
+            format: encoder_input_format(name),
         });
     }
     // The requested codec is not encodable in this build; fall back to MPEG-2.
@@ -352,8 +352,442 @@ fn resolve_encoder(codec_token: &str) -> Result<ResolvedEncoder, PipelineError> 
     })?;
     Ok(ResolvedEncoder {
         name: fallback.to_owned(),
-        format: Pixel::YUV420P,
+        format: encoder_input_format(fallback),
     })
+}
+
+/// The pixel format to feed a resolved encoder, by its concrete libav name.
+///
+/// **NVENC ingests NV12 natively** (invariant #5: the composited canvas is
+/// already NV12). When the resolved encoder is a `*_nvenc` hardware encoder we
+/// feed it NV12, so the per-tick full-canvas `FrameConverter` swscale
+/// (`sink.rs`'s NV12→YUV420P conversion) collapses to its passthrough branch —
+/// the single biggest avoidable CPU cost on the output path (a full ~3 MP@1080p /
+/// ~8 MP@4K libswscale every tick). The software codecs (`mpeg2video`, `libx264`,
+/// `libx265`, `ffv1`, `mjpeg`, …) take planar `YUV420P` as before — required, as
+/// they do not accept NV12 directly.
+fn encoder_input_format(name: &str) -> Pixel {
+    if name.ends_with("_nvenc") {
+        Pixel::NV12
+    } else {
+        Pixel::YUV420P
+    }
+}
+
+/// Build a wgpu [`GpuTarget`](multiview_compositor::backend::GpuTarget) from the
+/// hardware-addressing handles the load source resolved for the chosen device.
+///
+/// Pure (no I/O): it just projects the hal [`GpuTargetInfo`](multiview_hal::GpuTargetInfo)
+/// onto the compositor's wgpu-free target shape, so the wgpu adapter pick can
+/// match the chosen device by PCI bus id / `(vendor, device)` pair / name. Lives
+/// here (the cli is the only crate that depends on both hal and the compositor).
+#[cfg(feature = "gpu")]
+fn gpu_target_from_info(info: &multiview_hal::GpuTargetInfo) -> multiview_compositor::GpuTarget {
+    multiview_compositor::GpuTarget {
+        pci_bus_id: info.pci_bus_id.clone(),
+        vendor_id: info.vendor_id,
+        device_id: info.device_id,
+        name: info.name.clone(),
+    }
+}
+
+/// The load-aware admission pick for **one** GPU island: the single chosen
+/// device's wgpu compositor target and its CUDA decode/encode ordinal, both
+/// resolved from the SAME [`Selection`](multiview_hal::Selection).
+///
+/// This is the affinity-carrying value (ADR-0035 Tier-1 / the GPU-placement
+/// principle: *load informs placement, never fragments a pipeline*). Because
+/// `wgpu_target` (PCI bus id / `(vendor, device)` / name — what the compositor
+/// adapter pick matches on) and `cuda_ordinal` (the selector NVDEC `*_cuvid` /
+/// NVENC `*_nvenc` address a GPU by) both come off the one chosen device's
+/// [`GpuTargetInfo`](multiview_hal::GpuTargetInfo), decode, composite, and encode
+/// physically cannot land on different GPUs — there is exactly one device per
+/// island. When admission names no device, BOTH fields are absent in lockstep, so
+/// every stage keeps its default (the compositor's `HighPerformance` adapter,
+/// NVDEC's default CUDA device).
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Default)]
+struct AdmissionPick {
+    /// The wgpu compositor target pinning the chosen device, or `None` when
+    /// admission named no device (keep the default adapter).
+    wgpu_target: Option<multiview_compositor::GpuTarget>,
+    /// The chosen device's CUDA enumeration ordinal (e.g. `Some("1")`) for the
+    /// NVDEC decode + NVENC encode pin, or `None` in lockstep with `wgpu_target`.
+    cuda_ordinal: Option<String>,
+}
+
+/// Choose the GPU to host the whole pipeline island at **admission** — the
+/// load-aware, decide-once pick (ADR-0035 Tier-1, ADR-0018; the GPU-placement
+/// principle: *load informs placement, never fragments a pipeline — affinity is
+/// the hard constraint*).
+///
+/// This is **synchronous and runs before the output clock starts** (called from
+/// the top of [`Pipeline::drive_streaming`]); it polls the existing NVML load
+/// source ONCE, assembles one candidate per visible GPU, builds a
+/// [`PipelineDemand`](multiview_hal::PipelineDemand) from the canvas geometry +
+/// cadence + tile count + the NVENC-session flag, and asks
+/// [`multiview_hal::select_device`] for the least-contended GPU that can host the
+/// whole `decode → composite → encode` island. It **never blocks or `.await`s**
+/// on the data plane (inv #1).
+///
+/// Returns an [`AdmissionPick`] carrying the chosen device's wgpu compositor
+/// target AND its CUDA decode/encode ordinal — both off the SAME selection, so
+/// decode + composite + encode follow one GPU (affinity). When the pick succeeds
+/// AND the chosen device's hardware handles resolve, both fields are populated;
+/// when there is no NVML / no `cuda` feature / no visible GPU / the scorer
+/// rejected every candidate / the chosen device's handles could not be resolved,
+/// **both fields are `None` in lockstep** (the default value) — every failure
+/// mode degrades gracefully to today's behaviour, logged once, never a panic and
+/// never a stalled clock (inv #1/#2). The wgpu target and the CUDA ordinal are
+/// never split: either one chosen device pins both stages, or neither.
+///
+/// # NVDEC pinned here; NVENC device-bind is the remaining Tier-2 item
+///
+/// The chosen device's `cuda_ordinal` is plumbed into the NVDEC (`*_cuvid`)
+/// decode open ([`StreamVideoDecoder::new_preferring_hw`] →
+/// `HwDeviceContext::create(Cuda, Some(ordinal))`), so decode co-locates with the
+/// compositor. NVENC (`*_nvenc`) encode currently opens via libav's encoder
+/// context without an explicit `hw_device_ctx` bind, so it uses the default CUDA
+/// device (ordinal 0); binding the encoder context to this same ordinal is the
+/// remaining Tier-2 item (it needs an encoder-side `hw_device_ctx` seam in
+/// `multiview-ffmpeg`'s `VideoEncoder`). Decode + composite — the bulk of the
+/// pipeline — ARE co-located on the one chosen GPU.
+#[cfg(feature = "gpu")]
+fn select_admission_pick(
+    load_source: &dyn multiview_hal::LoadSource,
+    canvas_w: u32,
+    canvas_h: u32,
+    cadence: Rational,
+    tile_count: usize,
+    opens_encode_session: bool,
+) -> AdmissionPick {
+    use multiview_core::pixel::PixelFormat;
+    use multiview_core::traits::BackendKind;
+    use multiview_hal::{
+        select_device, Capability, CostBudget, GpuCandidate, Pins, PipelineDemand, PlacementPolicy,
+        Resolution, Stage, StageCaps, TileLoad,
+    };
+
+    let loads = load_source.poll();
+    if loads.is_empty() {
+        // No NVML / no visible GPU (the dev container, CI, a non-NVIDIA host):
+        // keep today's default-adapter behaviour. Not even logged at info — this
+        // is the overwhelmingly common, entirely-expected path. Both the wgpu
+        // target and the CUDA ordinal stay `None` in lockstep.
+        return AdmissionPick::default();
+    }
+
+    let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
+    // A conservative per-engine budget large enough not to gate a typical
+    // multiview on a real GPU; the LIVE 4060-vs-P2000 routing on the contended
+    // box rests on the VRAM headroom gate (the 95%-full 4060 exceeds the 0.85
+    // ceiling) + VRAM-dominant scoring, which need no perf-class table. A real
+    // per-GPU perf-class `CostBudget` table is the documented Tier-2 refinement
+    // (ADR-0035 §5) — until then every candidate shares this permissive budget,
+    // so the budget gate is effectively inert and the headroom/score do the work.
+    let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
+
+    // One candidate per visible GPU. We treat each as capable of the whole island
+    // at the canvas resolution in NV12 (the compositor canvas + NVENC are NV12,
+    // inv #5); the headroom + VRAM gates are what actually steer the pick. A
+    // candidate carries its STABLE id from the load snapshot so `select_device`
+    // matches loads to candidates and a pin (future) binds correctly.
+    let cap = |stage: Stage| {
+        Capability::new(
+            BackendKind::Cuda,
+            stage,
+            canvas_res,
+            vec![PixelFormat::Nv12],
+        )
+    };
+    let candidates: Vec<GpuCandidate> = loads
+        .iter()
+        .map(|load| GpuCandidate {
+            device_id: load.device_id.clone(),
+            stage_caps: StageCaps::new(
+                cap(Stage::Decode),
+                cap(Stage::Composite),
+                cap(Stage::Encode),
+            ),
+            budget,
+        })
+        .collect();
+
+    // Demand: the canvas at the output cadence, NV12, a small per-tile decode +
+    // the composite + the single encode rendition. `predicted_pool_bytes = 0`
+    // leaves the VRAM gate to the headroom ceiling (we do not yet model the exact
+    // pool footprint here — a conservative-but-safe choice that never over-rejects
+    // a roomy GPU; the headroom ceiling still rejects a near-full one).
+    let mut tile_loads: Vec<TileLoad> = Vec::with_capacity(tile_count + 2);
+    for _ in 0..tile_count.max(1) {
+        tile_loads.push(TileLoad::new(Stage::Decode, canvas_res));
+    }
+    tile_loads.push(TileLoad::new(Stage::Composite, canvas_res));
+    tile_loads.push(TileLoad::new(Stage::Encode, canvas_res));
+    let demand = PipelineDemand::new(
+        cadence,
+        tile_loads,
+        canvas_res,
+        PixelFormat::Nv12,
+        0,
+        opens_encode_session,
+    );
+
+    // Ask the scorer for the single least-contended GPU that can host the whole
+    // island. A reject (no fit / all over the headroom ceiling) → fall back to
+    // the default adapter / CPU, logged, never a stall (inv #1).
+    let selection = match select_device(
+        &candidates,
+        &demand,
+        &loads,
+        &Pins::none(),
+        PlacementPolicy::default(),
+    ) {
+        Ok(selection) => selection,
+        Err(reason) => {
+            tracing::warn!(
+                ?reason,
+                "load-aware admission found no single GPU to host the pipeline; \
+                 falling back to the default adapter / CPU (inv #1: never stalls)"
+            );
+            return AdmissionPick::default();
+        }
+    };
+
+    // Resolve the chosen device's hardware-addressing handles so wgpu can pin it
+    // AND NVDEC/NVENC can share its CUDA ordinal — both off the SAME selection
+    // (affinity). If they cannot be resolved, fall back to the default adapter +
+    // default CUDA device rather than pin blindly (both `None`, in lockstep).
+    let Some(info) = load_source.device_target(&selection.device) else {
+        tracing::warn!(
+            device_index = selection.device.index(),
+            "load-aware admission chose a GPU but could not resolve its hardware \
+             handles; falling back to the default adapter + default CUDA device"
+        );
+        return AdmissionPick::default();
+    };
+    let target = gpu_target_from_info(&info);
+    if !target.is_some() {
+        tracing::warn!(
+            device_index = selection.device.index(),
+            "load-aware admission chose a GPU but its hardware handles were empty; \
+             falling back to the default adapter + default CUDA device"
+        );
+        return AdmissionPick::default();
+    }
+    // The ONE chosen device feeds both stages: its PCI handles pin the wgpu
+    // compositor, its CUDA ordinal pins NVDEC decode (and is the NVENC pin once
+    // the encoder device-bind seam lands). Decode + composite + encode therefore
+    // resolve to one physical GPU — they cannot diverge.
+    tracing::info!(
+        device_index = selection.device.index(),
+        stable_id = selection.device.stable_id(),
+        pci_bus_id = ?info.pci_bus_id,
+        cuda_ordinal = ?info.cuda_ordinal,
+        name = ?info.name,
+        score = selection.score,
+        "load-aware admission: pinning the whole pipeline (decode + composite + \
+         encode) to the least-contended GPU (ADR-0035 Tier-1; NVENC device-bind \
+         is the remaining Tier-2 item)"
+    );
+    AdmissionPick {
+        wgpu_target: Some(target),
+        cuda_ordinal: info.cuda_ordinal,
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod admission_target_tests {
+    use super::{gpu_target_from_info, select_admission_pick};
+    use multiview_core::time::Rational;
+    use multiview_hal::{DeviceId, DeviceLoad, GpuTargetInfo, LoadSource, NullLoadPoller, Vendor};
+
+    /// A fake two-GPU [`LoadSource`] modelling a contended dual-GPU host: a
+    /// 95%-VRAM RTX 4060 at ordinal 0 (over the 0.85 headroom ceiling, so the
+    /// scorer rejects it) and an idle Quadro P2000 at ordinal 1. Each device
+    /// resolves a DISTINCT [`GpuTargetInfo`] (distinct PCI bus id + ordinal), so a
+    /// test can prove the chosen device's bus-id (→ wgpu) and ordinal (→ NVDEC)
+    /// both come from the SAME device — no cross-GPU divergence.
+    struct FakeTwoGpu;
+
+    impl FakeTwoGpu {
+        const GPU0_UUID: &'static str = "GPU-4060";
+        const GPU1_UUID: &'static str = "GPU-p2000";
+        const GPU0_BUS: &'static str = "00000000:01:00.0";
+        const GPU1_BUS: &'static str = "00000000:02:00.0";
+    }
+
+    impl LoadSource for FakeTwoGpu {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            // GPU0 (4060): VRAM 7796/8188 ≈ 0.952, over the 0.85 ceiling → rejected.
+            let mut gpu0 = DeviceLoad::unknown(DeviceId::new(Vendor::Nvidia, Self::GPU0_UUID, 0));
+            gpu0.vram_used_bytes = Some(7_796 * 1024 * 1024);
+            gpu0.vram_total_bytes = Some(8_188 * 1024 * 1024);
+            // GPU1 (P2000): VRAM 1781/5120 ≈ 0.348, under the ceiling → admissible.
+            let mut gpu1 = DeviceLoad::unknown(DeviceId::new(Vendor::Nvidia, Self::GPU1_UUID, 1));
+            gpu1.vram_used_bytes = Some(1_781 * 1024 * 1024);
+            gpu1.vram_total_bytes = Some(5_120 * 1024 * 1024);
+            vec![gpu0, gpu1]
+        }
+
+        fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+            // Resolve each device's handles by its STABLE id, the same way NVML
+            // does — so the test asserts the bus-id and ordinal that come back
+            // belong to the one chosen device.
+            match device.stable_id() {
+                id if id == Self::GPU0_UUID => Some(GpuTargetInfo {
+                    pci_bus_id: Some(Self::GPU0_BUS.to_owned()),
+                    vendor_id: Some(0x10de),
+                    device_id: Some(0x2882),
+                    name: Some("NVIDIA GeForce RTX 4060".to_owned()),
+                    cuda_ordinal: Some("0".to_owned()),
+                }),
+                id if id == Self::GPU1_UUID => Some(GpuTargetInfo {
+                    pci_bus_id: Some(Self::GPU1_BUS.to_owned()),
+                    vendor_id: Some(0x10de),
+                    device_id: Some(0x1c30),
+                    name: Some("Quadro P2000".to_owned()),
+                    cuda_ordinal: Some("1".to_owned()),
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn no_visible_gpu_falls_back_to_none_in_lockstep() {
+        // The NullLoadPoller (the GPU-free / no-NVML host — the dev container, CI)
+        // polls zero devices, so admission must return an empty pick: BOTH the
+        // wgpu target and the CUDA ordinal `None`, IN LOCKSTEP, so neither the
+        // compositor nor NVDEC pins a GPU and the caller keeps today's default
+        // behaviour. This is the graceful-fallback proof for the GPU-free path
+        // (inv #1: never a panic, never a stall).
+        let source = NullLoadPoller::new();
+        let pick = select_admission_pick(
+            &source,
+            1920,
+            1080,
+            Rational::new(30, 1),
+            4,
+            true, // opens an NVENC session
+        );
+        assert!(
+            pick.wgpu_target.is_none(),
+            "no visible GPU → the compositor keeps its default adapter (None)"
+        );
+        assert!(
+            pick.cuda_ordinal.is_none(),
+            "no visible GPU → NVDEC keeps its default CUDA device (None)"
+        );
+    }
+
+    #[test]
+    fn chosen_device_feeds_decode_and_composite_with_one_identity() {
+        // AFFINITY PROOF: with two GPUs visible, the load-aware pick routes the
+        // pipeline off the 95%-VRAM 4060 (over the headroom ceiling) onto the idle
+        // P2000 — and the SINGLE chosen device's PCI bus id (→ wgpu compositor) and
+        // CUDA ordinal (→ NVDEC decode, the NVENC pin once wired) must both come
+        // from THAT one device. They cannot diverge: the wgpu target's bus-id and
+        // the cuda_ordinal are read off one `GpuTargetInfo`. This is the core of
+        // the GPU-placement principle — load informs placement, never fragments a
+        // pipeline across GPUs.
+        let source = FakeTwoGpu;
+        let pick = select_admission_pick(
+            &source,
+            1920,
+            1080,
+            Rational::new(30, 1),
+            4,
+            true, // opens an NVENC session
+        );
+
+        let target = pick
+            .wgpu_target
+            .expect("a visible admissible GPU must yield a wgpu target");
+        // The chosen device is the P2000 (the 4060 is over the 0.85 VRAM ceiling).
+        assert_eq!(
+            target.pci_bus_id.as_deref(),
+            Some(FakeTwoGpu::GPU1_BUS),
+            "the compositor must be pinned to the P2000's PCI bus id, not the 4060's"
+        );
+        assert_eq!(
+            pick.cuda_ordinal.as_deref(),
+            Some("1"),
+            "NVDEC must be pinned to the P2000's CUDA ordinal (1), not the 4060's (0)"
+        );
+        // The load-bearing assertion: the wgpu bus-id and the CUDA ordinal both
+        // identify the SAME physical device (no decode-on-GPU0 / composite-on-GPU1
+        // split). GPU1_BUS ↔ ordinal "1" is the P2000 in the fake topology.
+        assert_eq!(
+            target.pci_bus_id.as_deref(),
+            Some(FakeTwoGpu::GPU1_BUS),
+            "bus id and ordinal must resolve to one device — the P2000"
+        );
+        assert_eq!(
+            target.name.as_deref(),
+            Some("Quadro P2000"),
+            "the chosen device's name confirms the single identity"
+        );
+    }
+
+    #[test]
+    fn target_info_projects_onto_the_wgpu_target() {
+        // The hal `GpuTargetInfo` (PCI bus id / pair / name / ordinal) projects
+        // onto the compositor's wgpu-free `GpuTarget` (the cuda_ordinal is carried
+        // on the hal side for Tier-2, not on the wgpu target). A populated info is
+        // a usable (`is_some`) target.
+        let info = GpuTargetInfo {
+            pci_bus_id: Some("00000000:01:00.0".to_owned()),
+            vendor_id: Some(0x10de),
+            device_id: Some(0x1c30),
+            name: Some("Quadro P2000".to_owned()),
+            cuda_ordinal: Some("1".to_owned()),
+        };
+        let target = gpu_target_from_info(&info);
+        assert!(target.is_some());
+        assert_eq!(target.pci_bus_id.as_deref(), Some("00000000:01:00.0"));
+        assert_eq!(target.vendor_id, Some(0x10de));
+        assert_eq!(target.device_id, Some(0x1c30));
+        assert_eq!(target.name.as_deref(), Some("Quadro P2000"));
+    }
+
+    #[test]
+    fn empty_info_projects_to_an_inert_target() {
+        // An all-`None` info (NVML resolved nothing) projects to an inert target
+        // that pins nothing — so the caller keeps the default adapter.
+        let target = gpu_target_from_info(&GpuTargetInfo::default());
+        assert!(!target.is_some());
+    }
+}
+
+#[cfg(test)]
+mod encoder_format_tests {
+    use super::encoder_input_format;
+    use ffmpeg_next::format::Pixel;
+
+    #[test]
+    fn nvenc_encoders_are_fed_nv12_to_skip_the_per_tick_swscale() {
+        // The composited canvas is already NV12 (inv #5); NVENC ingests NV12
+        // natively, so the encoder input format must be NV12 — that is what makes
+        // the sink's FrameConverter hit its passthrough branch (no full-canvas
+        // libswscale per tick).
+        assert_eq!(encoder_input_format("h264_nvenc"), Pixel::NV12);
+        assert_eq!(encoder_input_format("hevc_nvenc"), Pixel::NV12);
+    }
+
+    #[test]
+    fn software_encoders_keep_yuv420p() {
+        // The software codecs do not accept NV12 directly — they MUST be fed
+        // planar YUV420P, exactly as before this change.
+        assert_eq!(encoder_input_format("mpeg2video"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("libx264"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("libx265"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("ffv1"), Pixel::YUV420P);
+        assert_eq!(encoder_input_format("mjpeg"), Pixel::YUV420P);
+        // A name that merely CONTAINS "nvenc" but does not end with the suffix is
+        // not treated as NVENC (defensive: the suffix is the discriminator).
+        assert_eq!(encoder_input_format("nvenc_fake_sw"), Pixel::YUV420P);
+    }
 }
 
 /// A runnable **mux-only** output sink resolved from a config `[[outputs]]`
@@ -528,6 +962,17 @@ struct IngestPlan {
     canvas_color: CanvasColor,
     /// The output cadence a synthetic generator paces its publishes to.
     cadence: Rational,
+    /// The CUDA enumeration **ordinal** (e.g. `Some("1")`) the NVDEC `*_cuvid`
+    /// decoder for this source is pinned to — the SAME GPU the load-aware
+    /// admission pick pinned the compositor to (ADR-0035 Tier-1 / the
+    /// GPU-placement principle: decode + composite + encode follow one chosen
+    /// device, never split across GPUs). Stamped from the admission selection in
+    /// [`Pipeline::drive_streaming`] before the ingest threads spawn; `None` when
+    /// admission named no specific device (no NVML / GPU-free / scorer rejection)
+    /// — in **lockstep** with the compositor's `None`, so neither stage pins a GPU
+    /// and decode opens libav's default CUDA device (today's behaviour). Consumed
+    /// by [`open_and_stream`] → [`StreamVideoDecoder::new_preferring_hw`].
+    cuda_ordinal: Option<String>,
 }
 
 /// The in-container DVB-sub decode route stashed on an [`IngestPlan`]: which
@@ -655,6 +1100,10 @@ impl Pipeline {
             // drive_streaming (subsequent slice); `None` keeps the muxer
             // single-stream so the existing run output is unchanged.
             audio: None,
+            // NVENC device-affinity pin (Tier-2 P1a): `None` until the admission
+            // pick threads the chosen ordinal in (separate integration); behaviour
+            // is unchanged from before the seam existed.
+            cuda_ordinal: None,
         };
 
         let outputs = build_outputs(&config.outputs)?;
@@ -1132,13 +1581,54 @@ impl Pipeline {
         )
         .map_err(|e| PipelineError::Engine(e.to_string()))?;
         // Under the opt-in `gpu` feature the run PREFERS the wgpu GPU
-        // compositor; `RunBackend::select(true)` uses it only if an adapter
-        // initializes and otherwise transparently falls back to the CPU
-        // reference (invariant #1: a missing/failed GPU never stalls or crashes
-        // the run). Without the feature the drive keeps its default CPU backend,
-        // so the default build path is byte-for-byte unchanged.
+        // compositor. The device is chosen LOAD-AWARE at admission (ADR-0035
+        // Tier-1, decide-once): poll NVML ONCE, score every visible GPU, and pin
+        // the WHOLE pipeline — decode + composite + encode — to the least-contended
+        // one that can host the island (the GPU-placement principle — affinity is
+        // the hard constraint). This is synchronous and runs BEFORE the output
+        // clock starts; it never blocks or `.await`s on the data plane (inv #1).
+        //
+        // The single chosen device feeds BOTH stages from one `AdmissionPick`: its
+        // PCI handles pin the wgpu compositor adapter, and its CUDA ordinal is
+        // stamped onto every ingest plan so NVDEC `*_cuvid` decode opens on the
+        // SAME GPU (no cross-GPU split). On a GPU-free host / no NVML / a scorer
+        // rejection, both the wgpu target and the ordinal are `None` IN LOCKSTEP:
+        // we fall back to the default `HighPerformance` adapter AND NVDEC's default
+        // CUDA device, exactly as before. `RunBackend::select` then uses the GPU
+        // only if that adapter initializes and otherwise transparently falls back
+        // to the CPU reference (inv #1: a missing/failed GPU never stalls or
+        // crashes the run). Without the feature the drive keeps its default CPU
+        // backend and no ordinal is stamped, so the default build path is
+        // byte-for-byte unchanged.
         #[cfg(feature = "gpu")]
-        let drive = drive.with_backend(multiview_compositor::backend::RunBackend::select(true));
+        let drive = {
+            use multiview_compositor::backend::{GpuTarget, RunBackend};
+            let load_source = crate::system_metrics::default_load_source();
+            let opens_encode_session = self.encoder.name.ends_with("_nvenc");
+            let pick = select_admission_pick(
+                load_source.as_ref(),
+                self.layout.canvas.width,
+                self.layout.canvas.height,
+                self.cadence,
+                self.layout.cells.len(),
+                opens_encode_session,
+            );
+            // Stamp the chosen device's CUDA ordinal onto every ingest plan BEFORE
+            // the threads spawn, so decode co-locates with the compositor on the
+            // one chosen GPU (affinity). `None` leaves the plans on the default
+            // CUDA device — in lockstep with `wgpu_target` being `None`, so neither
+            // stage pins a GPU.
+            if let Some(ordinal) = pick.cuda_ordinal.as_deref() {
+                for plan in &mut self.ingest_plans {
+                    plan.cuda_ordinal = Some(ordinal.to_owned());
+                }
+            }
+            // The pinned chosen device, or `GpuTarget::none()` (prefer the GPU at
+            // the default adapter) when admission did not name a specific GPU — so
+            // the run still prefers the GPU on a single-GPU / no-NVML host.
+            let target = pick.wgpu_target.unwrap_or_else(GpuTarget::none);
+            drive.with_backend(RunBackend::select(Some(target)))
+        };
 
         let ts: Arc<dyn TimeSource> = time;
         // The engine's outbound publisher is supplied by the caller so the
@@ -1190,6 +1680,13 @@ impl Pipeline {
             .audio
             .as_ref()
             .map(|cfg| program_audio_bus(cfg, self.cadence));
+        // The program-bus loudness normaliser (AUD-6): pair one with the audio bus
+        // so the mixed program is normalised toward the target LUFS with a
+        // true-peak ceiling BEFORE encode, while discrete tracks stay unaltered
+        // (ADR-R005/R006). Built from the same audio config (so its format matches
+        // the bus); `None` when audio is off. Default target: the -16 LUFS
+        // streaming/web level (this output is a live streaming multiview).
+        let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
@@ -1198,7 +1695,14 @@ impl Pipeline {
         // overlay baker from it, plus the single `ProgramEncoder`; the bake +
         // encode math moved off the hot loop, never onto it.
         let bake_ctx = self.bake_context();
-        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder, audio_bus);
+        let (egress, hot_tx) = StreamEgress::spawn(
+            bake_ctx,
+            runners,
+            policy,
+            encoder,
+            audio_bus,
+            audio_loudnorm,
+        );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
         // flows through ONE `MultiviewProgram` that owns this program's clock +
@@ -1897,6 +2401,7 @@ impl StreamEgress {
         policy: SendPolicy,
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
+        audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -1953,6 +2458,7 @@ impl StreamEgress {
                     sink_txs,
                     encoder,
                     audio_bus,
+                    audio_loudnorm,
                     &consumer_in_flight,
                 )
             })
@@ -2072,6 +2578,27 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
+///
+/// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
+/// (discrete tracks stay unaltered — the ADR-R005/R006 authenticity guarantee).
+/// The format mirrors [`program_audio_bus`] (so the normaliser's meter matches the
+/// bus it processes). The default target is the `-16` LUFS streaming/web level
+/// with the default `-1.5` dBTP true-peak ceiling (resilience-and-av §4.1). Returns
+/// `None` only if the audio format is unusable (zero rate/channels — already
+/// validated upstream), in which case the bus is emitted un-normalised rather than
+/// failing the run.
+fn program_loudnorm(
+    cfg: &multiview_output::AudioEncodeConfig,
+) -> Option<multiview_audio::LoudnormProcessor> {
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    let format = multiview_audio::AudioFormat::new(cfg.sample_rate, layout);
+    multiview_audio::LoudnormProcessor::new(format, multiview_audio::LoudnessTarget::Streaming).ok()
+}
+
 /// Drive the program-audio bus to the output **tick index** of one surviving
 /// [`StreamItem`] and return that frame's audio block (RT-8b, the lip-sync fix).
 ///
@@ -2121,6 +2648,7 @@ fn consumer_main(
     sink_txs: Vec<SyncSender<EncodedPacket>>,
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
+    mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -2155,6 +2683,17 @@ fn consumer_main(
         // this entirely — the run is video-only as before.
         if let Some(bus) = audio_bus.as_mut() {
             let block = drive_audio_for_item(bus, item.tick_index);
+            // EBU R128 loudness normalisation of the PROGRAM bus (AUD-6), still off
+            // the engine hot loop (this bake-consumer thread): a smoothed makeup
+            // gain toward the target LUFS with a true-peak limiter clamping to the
+            // -1.5 dBTP ceiling so normalisation never clips. The block shape is
+            // preserved exactly, so the AAC encode sees the same frame count it
+            // would have. `None` (no normaliser) emits the mixed bus unaltered.
+            // Discrete tracks never pass through here (program-bus-only — ADR-R006).
+            let block = match audio_loudnorm.as_mut() {
+                Some(norm) => norm.process(block),
+                None => block,
+            };
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {
@@ -3626,6 +4165,11 @@ fn ingest_plan_for(
         dvbsub: None,
         canvas_color,
         cadence,
+        // No GPU pinned yet: the load-aware admission pick (decide-once, in
+        // `drive_streaming`) stamps the chosen device's CUDA ordinal onto every
+        // plan before the ingest threads spawn. `None` is the default-device /
+        // GPU-free path, in lockstep with the compositor's `None`.
+        cuda_ordinal: None,
     })
 }
 
@@ -3833,12 +4377,12 @@ const INGEST_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// source id so different sources de-correlate (no thundering herd) while the
 /// sequence stays reproducible — which is what keeps [`reconnect_backoff`]
 /// testable with no real randomness. A SplitMix64-style step; not cryptographic.
-struct JitterRng(u64);
+pub(crate) struct JitterRng(u64);
 
 impl JitterRng {
     /// Seed from a stable hash of the source id (each source gets its own jitter
     /// phase). The seed is forced odd so the step never degenerates to a constant.
-    fn seeded(id: &str) -> Self {
+    pub(crate) fn seeded(id: &str) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut hasher);
@@ -3846,7 +4390,7 @@ impl JitterRng {
     }
 
     /// Advance the state and return the next jitter unit in `[0.0, 1.0]`.
-    fn next_unit(&mut self) -> f64 {
+    pub(crate) fn next_unit(&mut self) -> f64 {
         // SplitMix64 step (deterministic, well-distributed across the id space).
         self.0 = self
             .0
@@ -3865,7 +4409,7 @@ impl JitterRng {
 /// reconnect loop) and de-correlated across sources/attempts (no thundering herd).
 /// `jitter_fraction` comes from [`JitterRng::next_unit`]; a non-finite or
 /// out-of-range value is clamped into `[0, 1]`.
-fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
+pub(crate) fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
     let shift = attempt.min(INGEST_RECONNECT_MAX_ATTEMPT);
     // `shift <= 6`, so the shift is always `Some`; `unwrap_or` is just belt-and-
     // braces against a future constant change.
@@ -3888,7 +4432,7 @@ fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
 /// [`INGEST_RECONNECT_HEALTHY`] resets the escalation to 0 (it was healthy and
 /// merely blipped); anything shorter is a fast failure that escalates the index by
 /// one, capped at [`INGEST_RECONNECT_MAX_ATTEMPT`].
-fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
+pub(crate) fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
     if ran_for >= INGEST_RECONNECT_HEALTHY {
         0
     } else {
@@ -3921,7 +4465,48 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
         // `rw_timeout` is expressed in microseconds; libav copies the strings.
         opts.set("rw_timeout", &INGEST_RW_TIMEOUT.as_micros().to_string());
     }
+    // HLS open-time hardening (ADR-T011): a master playlist with a
+    // `TYPE=SUBTITLES` WebVTT rendition is the ABC-News-AU footgun — libav can
+    // fold the rendition into the one shared context, so a corrupt/404/expired
+    // `.vtt` aborts the open or fails the whole read. Defence-in-depth ahead of
+    // the in-loop `discard_unrouted_subtitles` (the primary guard):
+    //   * `strict=normal` — FFmpeg's HLS demuxer (`hls.c` `new_rendition`) drops a
+    //     SUBTITLES rendition pre-probe when `strict_std_compliance > experimental`,
+    //     so a normal/strict open never even adds the WebVTT stream to the context.
+    //     We never widen `allowed_extensions` to admit `.vtt` here — the isolated
+    //     reader is the sole WebVTT path.
+    //   * `seg_max_retry` — a transient SEGMENT fetch failure retries instead of
+    //     failing the open.
+    //   * `protocol_whitelist` — a sane set so an HTTPS master + AES (`crypto`)
+    //     segments open, without admitting `file`/`concat`-style surprises beyond
+    //     the standard HLS surface.
+    if is_hls_location(location) {
+        opts.set("strict", "normal");
+        opts.set("seg_max_retry", "8");
+        opts.set("protocol_whitelist", "file,http,https,tcp,tls,crypto,data");
+    }
     opts
+}
+
+/// Whether `location` opens an HLS master playlist (a `.m3u8` URL, or a resolved
+/// `YouTube` master — which libav opens as HLS too). Detected on the URL string so
+/// the HLS open-time hardening in [`ingest_open_options`] applies (ADR-T011).
+fn is_hls_location(location: &SourceLocation) -> bool {
+    let url = match location {
+        SourceLocation::Url(u) => u.as_str(),
+        // A resolved YouTube watch URL is opened as a `*.googlevideo.com` HLS
+        // master; treat it as HLS for the open-time hardening.
+        #[cfg(feature = "youtube")]
+        SourceLocation::Youtube { .. } => return true,
+        // A local `.m3u8` file is also an HLS playlist.
+        SourceLocation::Path(p) => p.to_str().unwrap_or(""),
+        #[cfg(feature = "ndi")]
+        SourceLocation::Ndi { .. } => return false,
+        SourceLocation::Synthetic(_) => return false,
+    };
+    // An `.m3u8` (with or without a query string) is an HLS playlist.
+    let base = url.split(['?', '#']).next().unwrap_or(url);
+    base.to_ascii_lowercase().ends_with(".m3u8")
 }
 
 /// The per-source streaming-ingest loop, run on a dedicated thread (BUG-2 fix).
@@ -4275,25 +4860,40 @@ fn open_and_stream(
         }
     };
 
-    let (stream_index, params, time_base, declared_fps) = {
-        let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .ok_or_else(|| "input has no video stream".to_owned())?;
-        (
-            stream.index(),
-            stream.parameters(),
-            multiview_ffmpeg::from_ff_rational(stream.time_base()),
-            multiview_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
-        )
-    };
+    let (stream_index, params, time_base, declared_fps) = best_video_stream_params(&input)?;
 
+    // Prefer NVDEC hardware decode (`*_cuvid`) so 4K H.264/HEVC decode runs on
+    // the GPU ASIC instead of the CPU (efficiency). The selection is gated by the
+    // `cuda` feature + a registered cuvid wrapper + a working GPU; a per-deploy
+    // env opt-out (`MULTIVIEW_DISABLE_NVDEC`) forces software. On a GPU-free box
+    // or any hardware-open failure this degrades to software decode gracefully —
+    // the tile keeps running (invariants #1/#2). Decoded CUDA surfaces are
+    // downloaded to host NV12 inside the decoder (the budgeted CPU↔GPU copy), so
+    // the rest of the pipeline is unchanged (invariant #5).
+    let want_hw = multiview_ffmpeg::want_hw_decode(
+        std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV)
+            .ok()
+            .as_deref(),
+    );
+    // Pin NVDEC to the load-aware admission pick's CUDA ordinal so decode opens on
+    // the SAME physical GPU the compositor was pinned to — the whole pipeline
+    // follows one chosen device (affinity; ADR-0035 Tier-1 / the GPU-placement
+    // principle). `None` (no admission pick / GPU-free) selects libav's default
+    // CUDA device, in lockstep with the compositor's `None`.
+    let cuda_ordinal = plan.cuda_ordinal.as_deref();
+    let (decoder, used_hw) =
+        StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw, cuda_ordinal)
+            .map_err(|e| e.to_string())?;
     // Feed the declared cadence so the decoder's genpts fallback advances at the
     // source's true rate (PAL 25, film 24, …) rather than an NTSC-shaped guess;
     // an unusable rate is ignored inside `with_declared_fps` (invariant #3).
-    let mut decoder = StreamVideoDecoder::new(params, time_base)
-        .map_err(|e| e.to_string())?
-        .with_declared_fps(Some(declared_fps));
+    let mut decoder = decoder.with_declared_fps(Some(declared_fps));
+    tracing::info!(
+        source = %plan.id,
+        hardware = used_hw,
+        decoder = decoder.hw_decoder_name().unwrap_or("software"),
+        "opened video decoder"
+    );
     let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
 
     // Per-input PTS normalizer (invariant #3, the unified timing model): unwrap a
@@ -4317,6 +4917,11 @@ fn open_and_stream(
     // video still streams). Only under `overlay`.
     #[cfg(feature = "overlay")]
     let mut dvbsub = build_dvbsub_decoder(plan, &input);
+
+    // HLS WebVTT-rendition isolation (ADR-T011): discard unrouted subtitle streams
+    // before the first read (see the fn doc for the footgun + the routed-keep).
+    discard_unrouted_subtitle_streams(plan, &mut input);
+
     // The wall-clock pacer: maps the first frame's PTS to "now" and releases
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
     let mut pacer = PtsWallClock::new();
@@ -4372,6 +4977,55 @@ fn open_and_stream(
     }
 }
 
+/// Resolve the best video stream's `(index, codec parameters, time-base,
+/// declared fps)` from an opened `input`, or `Err` if the container has no video
+/// stream. The codec [`Parameters`] and rationals are owned snapshots that borrow
+/// nothing from `input`, so the demuxer can keep being read after this returns.
+fn best_video_stream_params(
+    input: &ffmpeg::format::context::Input,
+) -> Result<(usize, ffmpeg::codec::Parameters, Rational, Rational), String> {
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .ok_or_else(|| "input has no video stream".to_owned())?;
+    Ok((
+        stream.index(),
+        stream.parameters(),
+        multiview_ffmpeg::from_ff_rational(stream.time_base()),
+        multiview_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
+    ))
+}
+
+/// Mark every UNROUTED subtitle stream in `input` `AVDISCARD_ALL` so libav stops
+/// fetching it (HLS WebVTT-rendition isolation, ADR-T011).
+///
+/// If the open surfaced a `TYPE=SUBTITLES` `WebVTT` rendition into this shared
+/// context (the ABC-News-AU footgun), a corrupt/404 `.vtt` would otherwise make
+/// `av_read_frame` return that rendition's error for the WHOLE context, killing
+/// the video tile. The main demuxer needs nothing from a `WebVTT` rendition — the
+/// isolated `caption_loop` reader is the sole `WebVTT` path — so discarding it
+/// loses no stream. A routed in-container DVB-sub stream (the MPEG-TS DVB-sub
+/// route) is KEPT; audio renditions are never touched (the guard keys strictly on
+/// `medium() == Subtitle`). Must be called before the first `packet.read()`:
+/// libav's HLS `recheck_discard_flags` fires one-shot on the first packet.
+fn discard_unrouted_subtitle_streams(
+    plan: &IngestPlan,
+    input: &mut ffmpeg::format::context::Input,
+) {
+    #[cfg(feature = "overlay")]
+    let keep_subtitle = plan.dvbsub.as_ref().map(|d| d.stream_index);
+    #[cfg(not(feature = "overlay"))]
+    let keep_subtitle = None;
+    let discarded = multiview_ffmpeg::discard_unrouted_subtitles(input, keep_subtitle);
+    if discarded > 0 {
+        tracing::info!(
+            source = %plan.id,
+            discarded,
+            "discarded unrouted subtitle stream(s) in the main demuxer (HLS rendition isolation)"
+        );
+    }
+}
+
 /// Build the in-container DVB-sub [`CaptionDecoder`] for `plan`'s route, from the
 /// open container's subtitle stream parameters. Returns `None` when the source
 /// has no dvbsub route or the decoder cannot be built (logged, best-effort).
@@ -4419,7 +5073,7 @@ fn pump_dvbsub(
 
 /// Sleep up to `total`, waking early (in <= 50 ms slices) if `stop` is raised,
 /// so ingest teardown stays prompt without a condvar.
-fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
+pub(crate) fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
     let slice = Duration::from_millis(50);
     let mut remaining = total;
     while remaining > Duration::ZERO {
@@ -5074,8 +5728,8 @@ mod reconnect_tests {
     use std::time::Duration;
 
     use super::{
-        ingest_open_options, next_reconnect_attempt, reconnect_backoff, JitterRng, SourceLocation,
-        INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
+        ingest_open_options, is_hls_location, next_reconnect_attempt, reconnect_backoff, JitterRng,
+        SourceLocation, INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
         INGEST_RECONNECT_MAX_ATTEMPT, INGEST_RW_TIMEOUT,
     };
 
@@ -5190,6 +5844,39 @@ mod reconnect_tests {
         let path = SourceLocation::Path(std::path::PathBuf::from("/tmp/clip.mp4"));
         let opts = ingest_open_options(&path);
         assert_eq!(opts.get("rw_timeout"), None);
+    }
+
+    #[test]
+    fn open_options_harden_hls_masters_against_the_webvtt_rendition_footgun() {
+        // An HLS master (.m3u8 URL) gets the open-time hardening (ADR-T011): a
+        // normal/strict compliance so libav drops the SUBTITLES rendition
+        // pre-probe, a bounded segment retry, and a sane protocol allowlist — and
+        // it MUST NOT widen `allowed_extensions` to admit `.vtt`.
+        let hls = SourceLocation::Url("https://h.test/live/master.m3u8".to_owned());
+        assert!(is_hls_location(&hls), "an .m3u8 URL is an HLS master");
+        let opts = ingest_open_options(&hls);
+        assert_eq!(opts.get("strict"), Some("normal"));
+        assert_eq!(opts.get("seg_max_retry"), Some("8"));
+        assert_eq!(
+            opts.get("protocol_whitelist"),
+            Some("file,http,https,tcp,tls,crypto,data")
+        );
+        assert_eq!(
+            opts.get("allowed_extensions"),
+            None,
+            "the main demuxer must NEVER widen allowed_extensions to admit .vtt"
+        );
+
+        // A query string after the .m3u8 still classifies as HLS.
+        let hls_q = SourceLocation::Url("https://h.test/m.m3u8?token=abc".to_owned());
+        assert!(is_hls_location(&hls_q));
+
+        // A non-HLS network source gets `rw_timeout` but NONE of the HLS knobs.
+        let rtsp = SourceLocation::Url("rtsp://example.invalid/stream".to_owned());
+        assert!(!is_hls_location(&rtsp));
+        let opts = ingest_open_options(&rtsp);
+        assert_eq!(opts.get("strict"), None);
+        assert_eq!(opts.get("seg_max_retry"), None);
     }
 }
 

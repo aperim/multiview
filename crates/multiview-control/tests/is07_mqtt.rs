@@ -126,14 +126,14 @@ mod live_broker {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::collections::HashMap;
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::net::{Ipv6Addr, SocketAddr, TcpListener};
     use std::time::Duration;
 
     use multiview_control::is07::mqtt::{BrokerConfig, MqttSubscriber, Qos};
     use multiview_control::is07::{GpiEvent, Is07Message, Is07Payload, Is07Timing};
 
     fn free_port() -> u16 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind ephemeral port");
         listener.local_addr().expect("local addr").port()
     }
 
@@ -143,7 +143,7 @@ mod live_broker {
             "v4-1".to_owned(),
             rumqttd::ServerSettings {
                 name: "v4-1".to_owned(),
-                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                listen: SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
                 tls: None,
                 next_connection_delay_ms: 0,
                 connections: rumqttd::ConnectionSettings {
@@ -181,14 +181,14 @@ mod live_broker {
         // Give the listener a moment to bind.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let cfg = BrokerConfig::new(Ipv4Addr::LOCALHOST.to_string(), port, "mv-sub")
+        let cfg = BrokerConfig::new(Ipv6Addr::LOCALHOST.to_string(), port, "mv-sub")
             .with_qos(Qos::AtLeastOnce)
             .with_capacity(16);
         // Subscriber first so the retained-free message is seen.
         let mut subscriber = MqttSubscriber::connect(&cfg).await.expect("subscriber");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let pub_cfg = BrokerConfig::new(Ipv4Addr::LOCALHOST.to_string(), port, "mv-pub")
+        let pub_cfg = BrokerConfig::new(Ipv6Addr::LOCALHOST.to_string(), port, "mv-pub")
             .with_qos(Qos::AtLeastOnce)
             .with_capacity(16);
         let publisher = multiview_control::is07::mqtt::MqttPublisher::connect(&pub_cfg)

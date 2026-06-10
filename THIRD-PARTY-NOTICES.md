@@ -137,24 +137,23 @@ with the SDK vendor.
 - **Distribution:** never vendored; runtime-loaded only. Mandatory NDI attribution
   applies when the feature is used.
 
-### 4b. Native Dante™ (Audinate) — proprietary, licence-gated (not built by default)
+### 4b. Audio over IP — AES67 / SMPTE ST 2110-30 (open standard, no proprietary SDK)
 
-Multiview's open audio-over-IP interop is **AES67 / SMPTE ST 2110-30**, which is
-royalty-free and is Audinate's own licence-free bridge to Dante networks; that open
-path is what the default build implements. A **native Dante™** integration is a
-**proprietary, licence-gated** component that is **not vendored** and requires the
-**Audinate Dante SDK under Audinate's own licence**. As with NDI, the native Dante
-SDK is never bundled or distributed with Multiview; you must obtain and license it
-yourself from the vendor.
+Multiview transports audio over IP using **AES67 / SMPTE ST 2110-30** — open,
+royalty-free industry standards (RTP + L16/L24 PCM + SDP + SAP + PTP). This is
+included in the public build with **no proprietary SDK**. It is also Audinate's own
+licence-free bridge to Dante networks, so it interoperates with Dante devices that
+support Dante's AES67 mode. **Native Dante integration is NOT supported** (per
+[ADR-T010](docs/decisions/ADR-T010.md)); there is no Audinate SDK in any Multiview
+build. References to Dante here are for interoperability and identification only.
 
-- **Vendor:** Dante™ is a trademark of Audinate Pty Ltd.
-- **License:** proprietary Audinate Dante SDK licence (vendor-supplied; not granted
-  by Multiview).
-- **Distribution:** never vendored. The default, open interop path (AES67 / ST
-  2110-30) does **not** use or require the Dante SDK.
+> Dante® and Audinate® are registered trademarks of Audinate Pty Ltd; other
+> Dante-family product names are trademarks of Audinate Pty Ltd. Multiview is an
+> independent project of Aperim Pty Ltd, not affiliated with, endorsed by, or
+> sponsored by Audinate; the marks are used nominatively, for identification only.
 
-See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md) for how these proprietary
-components relate to a commercial deployment.
+See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md) for how the remaining proprietary
+components (NDI) relate to a commercial deployment.
 
 ---
 

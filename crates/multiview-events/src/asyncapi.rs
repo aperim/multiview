@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 /// servers: { ws-server, sse-server }
 /// channels: { ws, sse }
 /// operations: { subscribe-ws, subscribe-sse }
-/// messages: { Envelope, TileState, AudioMeter, … }
-/// components/schemas: { … all payload schemas … }
+/// components/messages: { Envelope, TileState, AudioMeter, … }
+/// components/schemas:  { … all payload schemas … }
 /// ```
 #[must_use]
 pub fn generate_asyncapi_document() -> String {
@@ -65,8 +65,12 @@ fn build_document() -> Value {
         "servers": build_servers(),
         "channels": build_channels(),
         "operations": build_operations(),
-        "messages": build_messages(),
         "components": {
+            // AsyncAPI 3.0 forbids a top-level `messages` field: reusable message
+            // definitions live under `components.messages`. Channels reference them
+            // via `#/components/messages/<name>` and operations reference the
+            // channel's own message alias (see `build_operations`).
+            "messages": build_messages(),
             "schemas": build_schemas()
         }
     })
@@ -93,8 +97,9 @@ fn build_info() -> Value {
             "url": "https://github.com/aperim/multiview"
         },
         "externalDocs": {
+            // AsyncAPI 3.0 requires `format: uri` — an absolute URL, not a repo-relative path.
             "description": "Realtime API reference",
-            "url": "docs/api/realtime.md"
+            "url": "https://github.com/aperim/multiview/blob/main/docs/api/realtime.md"
         }
     })
 }
@@ -108,8 +113,8 @@ fn build_servers() -> Value {
             "description": "WebSocket endpoint (bidirectional). Primary transport.",
             "variables": {
                 "host": {
-                    "description": "Hostname and optional port of the Multiview daemon.",
-                    "default": "localhost:8080"
+                    "description": "Hostname and optional port of the Multiview daemon. IPv6-first: the default is the IPv6 loopback `[::1]`; override with your host.",
+                    "default": "[::1]:8080"
                 }
             }
         },
@@ -120,8 +125,8 @@ fn build_servers() -> Value {
             "description": "Server-Sent Events endpoint (server→client only). Fallback transport.",
             "variables": {
                 "host": {
-                    "description": "Hostname and optional port of the Multiview daemon.",
-                    "default": "localhost:8080"
+                    "description": "Hostname and optional port of the Multiview daemon. IPv6-first: the default is the IPv6 loopback `[::1]`; override with your host.",
+                    "default": "[::1]:8080"
                 }
             }
         }
@@ -147,7 +152,7 @@ fn build_channels() -> Value {
             ),
             "servers": [{ "$ref": "#/servers/ws-server" }],
             "messages": {
-                "EnvelopeMessage": { "$ref": "#/messages/Envelope" }
+                "EnvelopeMessage": { "$ref": "#/components/messages/Envelope" }
             },
             // WS binding injected here: asyncapi-rust v0.2 lacks bindings support.
             // Spec ref: https://github.com/asyncapi/bindings/blob/master/websockets
@@ -192,13 +197,17 @@ fn build_channels() -> Value {
             ),
             "servers": [{ "$ref": "#/servers/sse-server" }],
             "messages": {
-                "EnvelopeMessage": { "$ref": "#/messages/Envelope" }
+                "EnvelopeMessage": { "$ref": "#/components/messages/Envelope" }
             }
         }
     })
 }
 
 fn build_operations() -> Value {
+    // AsyncAPI 3.0 (`asyncapi3-operation-messages-from-referred-channel`): an
+    // operation's `messages` MUST reference the channel's OWN message aliases,
+    // i.e. `#/channels/<channel>/messages/<alias>`, not the reusable
+    // `#/components/messages/...` entries directly.
     json!({
         "subscribe-ws": {
             "action": "receive",
@@ -208,19 +217,19 @@ fn build_operations() -> Value {
                 "Receive all event types on the WebSocket channel after subscribing to ",
                 "the desired topics via $subscribe control frames.",
             ),
-            "messages": [{ "$ref": "#/messages/Envelope" }]
+            "messages": [{ "$ref": "#/channels/ws/messages/EnvelopeMessage" }]
         },
         "subscribe-sse": {
             "action": "receive",
             "channel": { "$ref": "#/channels/sse" },
             "title": "Receive realtime events (SSE)",
             "description": "Receive all event types on the SSE fallback channel.",
-            "messages": [{ "$ref": "#/messages/Envelope" }]
+            "messages": [{ "$ref": "#/channels/sse/messages/EnvelopeMessage" }]
         }
     })
 }
 
-/// Build the top-level `messages` block.
+/// Build the `components.messages` block.
 ///
 /// Each entry is a named message definition carrying a `payload` schema. The
 /// `Envelope` message carries the full versioned envelope shape; the per-event
@@ -917,7 +926,9 @@ fn tally_target_schema() -> Value {
         "type": "object",
         "description": "What a tally state applies to (tagged by `kind`).",
         "required": ["kind"],
-        "discriminator": { "propertyName": "kind" },
+        // AsyncAPI 3.0 Schema Object: `discriminator` is the property NAME (a
+        // string), not the OpenAPI-style `{ propertyName }` object.
+        "discriminator": "kind",
         "oneOf": [
             {
                 "type": "object",

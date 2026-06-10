@@ -188,7 +188,7 @@ test -f "$f" && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 30 ]`}
   -e MULTIVIEW_CONTROL_TOKEN="$MULTIVIEW_CONTROL_TOKEN" \\
   ghcr.io/aperim/multiview:latest \\
   run /etc/multiview/multiview.toml
-# then open http://localhost:8080/ (UI) and /docs (API playground)`}
+# then open http://[::1]:8080/ (UI) and /docs (API playground)`}
           </CodeBlock>
           <Prose>
             <Trans>

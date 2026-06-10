@@ -91,6 +91,7 @@ fn ts_config(codec: &str, fps: i64, gop: u32) -> EncodeConfig {
         gop,
         bit_rate: 800_000,
         audio: None,
+        cuda_ordinal: None,
     }
 }
 
@@ -178,12 +179,12 @@ fn push_protocol_maps_to_the_expected_libav_muxer() {
 fn push_to_unreachable_peer_fails_gracefully() {
     // A push needs a listening peer; with none, opening the muxer must surface a
     // typed Error (libav connect failure) rather than hang or panic. Port 1 on
-    // loopback is reliably refused. UDP is connectionless so we use a TCP-based
-    // transport (RTMP) which fails fast on a refused connection.
+    // the IPv6 loopback is reliably refused. UDP is connectionless so we use a
+    // TCP-based transport (RTMP) which fails fast on a refused connection.
     let sink = PushSink::new(
         ts_config("mpeg2video", 25, 25),
         PushProtocol::Rtmp,
-        "rtmp://127.0.0.1:1/live/none",
+        "rtmp://[::1]:1/live/none",
     );
     let mut source = GrayNv12Source::new(5);
     match sink.run(&mut source) {

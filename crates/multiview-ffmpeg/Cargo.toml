@@ -53,6 +53,21 @@ libc = { version = "0.2", optional = true }
 # need a real dvbsub clip. `#[doc(hidden)]`; not part of the public API.
 "test-fixtures" = ["ffmpeg"]
 
+[build-dependencies]
+# Compile the libav log-callback C shim (`csrc/log_shim.c`) under the `ffmpeg`
+# feature. The shim owns the libav `va_list` so the Rust side never spells that
+# ABI-fragile type in function-parameter position (fixes the x86-64 SysV
+# ingest-thread SIGSEGV). Both build-deps are already in the lockfile via
+# `ffmpeg-sys-next` — they add NO new dependency or license surface, and the
+# build.rs only invokes them when `CARGO_FEATURE_FFMPEG` is set, so the default
+# pure-Rust build does no native compilation. MIT OR Apache-2.0 (cc) / MIT OR
+# Apache-2.0 (pkg-config) — both LGPL-clean.
+cc = "1"
+# Locates the libav include path (`<libavutil/log.h>`) for the shim compile; the
+# deploy build points it at our FFmpeg via PKG_CONFIG_PATH, the same headers
+# `ffmpeg-sys-next` itself binds against.
+pkg-config = "0.3"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"

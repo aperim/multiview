@@ -44,6 +44,7 @@ fn target(codec: &str) -> VideoEncodeTarget {
         time_base: Rational::new(1, 25),
         bit_rate: 500_000,
         gop: 12,
+        cuda_device: None,
     }
 }
 

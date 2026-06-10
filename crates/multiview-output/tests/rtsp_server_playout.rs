@@ -11,7 +11,7 @@
 //! ```
 //!
 //! The full client-pull assertion (an `ffprobe`/`gst-launch rtspsrc` reading
-//! `rtsp://127.0.0.1:<port>/<mount>` and checking codec/geometry + a gap-free
+//! `rtsp://[::1]:<port>/<mount>` and checking codec/geometry + a gap-free
 //! frame run, plus a second simultaneous client proving `set_shared(true)`
 //! fan-out and a slow/abandoned client not stalling the others) is the
 //! GStreamer-runner acceptance for OUT-2 and is sketched in the body — it
@@ -42,7 +42,8 @@ use multiview_output::rtsp_server::{BoundedPacketQueue, RtspCodec, RtspMount, Rt
 fn rtsp_server_binds_and_feeds_from_sink() {
     let mount = RtspMount::new("program").unwrap();
     let config = RtspServerConfig {
-        host: "127.0.0.1".to_owned(),
+        // IPv6-first: bind the IPv6 loopback (bracketed in the served URL).
+        host: "[::1]".to_owned(),
         port: 8554,
         mount,
         codec: RtspCodec::H264,

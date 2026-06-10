@@ -13,9 +13,9 @@
 | File | What |
 |---|---|
 | [`../../LICENSE`](../../LICENSE) | **The license** (final, Version 1.0, PolyForm-Noncommercial-derived) — commercial definition, the three free exceptions, the use-trigger and licensor-reservation clauses. Aperim Pty Ltd (ABN 46 150 699 737), NSW law. |
-| [`../../LICENSE-COMMERCIAL.md`](../../LICENSE-COMMERCIAL.md) | Commercial-license pointer (contact, OEM/appliance tier, codec/NDI/Dante notes). |
+| [`../../LICENSE-COMMERCIAL.md`](../../LICENSE-COMMERCIAL.md) | Commercial-license pointer (contact, OEM/appliance tier, codec/NDI notes; native Dante is NOT supported — AES67/ST 2110-30 is the open Dante interop path). |
 | [`relicense-advisory.md`](relicense-advisory.md) | The full legal/licensing advisory — feasibility, base instrument, the three exceptions, the GPL crux, tooling, the exact repo-change checklist, enforcement & trademark, open decisions. Multi-agent researched + adversarially reviewed. |
-| [`build-and-distribution.md`](build-and-distribution.md) | Engineering companion: the **public-vs-private build/distribution matrix** (codecs / NDI / Dante), LGPL container hygiene, and the **CI fan-out workstream** to generate & publish distinct public/non-public artifacts. |
+| [`build-and-distribution.md`](build-and-distribution.md) | Engineering companion: the **public-vs-private build/distribution matrix** (codecs / NDI; native Dante is not a planned feature, AES67/ST 2110-30 is public), LGPL container hygiene, and the **CI fan-out workstream** to generate & publish distinct public/non-public artifacts. |
 
 ## TL;DR
 
@@ -41,8 +41,9 @@ definitions. And: it is **source-available, not "open source"** (fails OSD §§5
 3. **Aperim is the sole licensor and is not bound by its own license** — explicit Reservation of the
    Licensor's rights (`LICENSE` §10.1). This is *why* the **CLA** matters for keeping dual-licensing.
 4. **Multiple builds; encumbered artifacts stay private** — see `build-and-distribution.md`. Encumbered:
-   **`libx264`/`libx265` (GPL), NDI, native Dante**; everything else (incl. all *hardware* H.264/H.265
-   and the **AES67/ST 2110-30** route to Dante audio) is public.
+   **`libx264`/`libx265` (GPL), NDI**; native Dante is NOT supported (ADR-T010); everything else (incl.
+   all *hardware* H.264/H.265 and the **AES67/ST 2110-30** route to Dante audio, the clean public path)
+   is public.
 
 ## Rollout — three coordinated workstreams
 
@@ -59,7 +60,7 @@ workstreams follow (they touch many files and partly need coordination with othe
    doc + `THIRD-PARTY-NOTICES`.
 3. **CI/release split (fan-out).** Generate & publish **distinct public/non-public** binaries and
    containers, with a hard "no-leak" gate on the public lane. Teams A–D + gating in
-   `build-and-distribution.md` §6. Additionally blocked on the NDI/Dante features existing.
+   `build-and-distribution.md` §6. Additionally blocked on the NDI feature existing (native Dante is NOT a planned feature — ADR-T010).
 
 ## Open decisions (full list in advisory §10)
 
@@ -76,6 +77,6 @@ workstreams follow (they touch many files and partly need coordination with othe
 
 Produced by a 9-agent research workflow (5 parallel research tracks → synthesis → 2 adversarial
 reviewers → final edit; 21 corrections applied), then extended by the operator's refinements
-(use-trigger, reservation-of-rights, build/distribution split incl. Dante, three-workstream rollout)
+(use-trigger, reservation-of-rights, build/distribution split, three-workstream rollout)
 and finalized with the registered entity details. Worked entirely in the `docs/license-noncommercial`
 worktree branch; the root working tree was not touched.

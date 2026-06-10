@@ -25,7 +25,7 @@
 //! # The publish URL
 //!
 //! A deploy configures a publish *base* (host + port of the RTSP sidecar, e.g.
-//! the `MediaMTX` default `rtsp://127.0.0.1:8554`) and each output names a *mount*
+//! the `MediaMTX` default `rtsp://[::1]:8554`) and each output names a *mount*
 //! (the RTSP path the program is published under). [`RtspPublishTarget`] joins
 //! them into the `rtsp://host:port/mount` URL the `PushSink`
 //! opens, using **checked string formatting only** — no panics, no indexing, no
@@ -67,11 +67,13 @@ impl RtspPublishTarget {
     /// The default publish base: a local [MediaMTX] sidecar's RTSP listener.
     ///
     /// `MediaMTX` (and most RTSP servers) listen on TCP `8554` by default; the
-    /// loopback address keeps the baseline a local publish hop. A deploy overrides
-    /// this via its `[system.rtsp] publish_base` configuration (wired by the CLI).
+    /// IPv6 loopback (`[::1]`) keeps the baseline a local publish hop. IPv6-first
+    /// (operator directive): a user-supplied IPv4 base (`rtsp://127.0.0.1:8554`)
+    /// still builds, but is never the default. A deploy overrides this via its
+    /// `[system.rtsp] publish_base` configuration (wired by the CLI).
     ///
     /// [MediaMTX]: https://github.com/bluenviron/mediamtx
-    pub const DEFAULT_BASE: &'static str = "rtsp://127.0.0.1:8554";
+    pub const DEFAULT_BASE: &'static str = "rtsp://[::1]:8554";
 
     /// Build a publish target from `base` (`rtsp://host:port`) and `mount` (the
     /// RTSP path the program is published under).

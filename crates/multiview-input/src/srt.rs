@@ -284,8 +284,24 @@ impl SrtConfig {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("&");
-        Ok(format!("srt://{}:{}?{query}", self.host, self.port))
+        // IPv6-first: an IPv6 literal host must be bracketed (`srt://[::1]:port`)
+        // so the `:` of the address is not read as the port separator. Already
+        // bracketed or non-IPv6 hosts pass through unchanged.
+        let host = bracket_ipv6_host(&self.host);
+        Ok(format!("srt://{host}:{}?{query}", self.port))
     }
+}
+
+/// Wrap a bare IPv6 literal host in `[...]` for use in a `host:port` URL; leave
+/// hostnames, IPv4 literals, and already-bracketed hosts untouched.
+fn bracket_ipv6_host(host: &str) -> std::borrow::Cow<'_, str> {
+    if host.starts_with('[') {
+        return std::borrow::Cow::Borrowed(host);
+    }
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        return std::borrow::Cow::Owned(format!("[{host}]"));
+    }
+    std::borrow::Cow::Borrowed(host)
 }
 
 /// Percent-encode the characters that would break an SRT URL query value

@@ -220,6 +220,14 @@ pub struct EncodeConfig {
     /// existing video-only sink/test is unchanged. `Some` adds a second (audio)
     /// elementary stream carrying the mixed program bus.
     pub audio: Option<AudioEncodeConfig>,
+    /// Optional CUDA device ordinal (e.g. `Some("1")`) to pin a `*_nvenc` encoder
+    /// onto, threaded into the `multiview-ffmpeg` [`VideoEncodeTarget`] so encode
+    /// lands on the admission-selected GPU instead of libav's default CUDA device
+    /// (ordinal 0) — the NVENC device-affinity seam (Tier-2 P1a). `None` is the
+    /// default-device behaviour, and the pin is **inert** for any non-`*_nvenc`
+    /// codec (the encoder gates the bind on the codec-name suffix). A bind
+    /// failure degrades gracefully to a default-device open, never a panic.
+    pub cuda_ordinal: Option<String>,
 }
 
 /// Configuration for the optional program-audio encoder (AUD-4).
@@ -299,6 +307,9 @@ impl EncodeConfig {
             gop: 30,
             bit_rate: 2_000_000,
             audio: None,
+            // No device pin by default — behaviour is unchanged from before the
+            // NVENC affinity seam (Tier-2 P1a); the pin is opt-in.
+            cuda_ordinal: None,
         }
     }
 
@@ -319,6 +330,9 @@ impl EncodeConfig {
             time_base: self.time_base(),
             bit_rate: self.bit_rate,
             gop: self.gop,
+            // NVENC device-affinity pin (Tier-2 P1a): inert for software codecs;
+            // the encoder gates the bind on the `*_nvenc` codec-name suffix.
+            cuda_device: self.cuda_ordinal.clone(),
         }
     }
 

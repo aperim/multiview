@@ -90,6 +90,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-T007](ADR-T007.md) — Codec edge-case & decode/encode policy: one bad input never stalls the multiview
 - [ADR-T008](ADR-T008.md) — A/V sync & per-input jitter-buffer model
 - [ADR-T009](ADR-T009.md) — Per-tile media-time ring uses O(capacity) copy-on-write publish, not an in-place O(1) ring
+- [ADR-T011](ADR-T011.md) — HLS rendition isolation: discard unrouted subtitle streams in the main demuxer; the isolated WebVTT reader is the sole WebVTT path
 - [ADR-0020](ADR-0020.md) — Layered timing: monotonic pacing + optional reference-lock + per-input frame-sync *(Proposed)*
 - [ADR-0021](ADR-0021.md) — Input timing & frame-sync: best-effort PTS normalisation + wall-clock pacer + sample-at-tick *(Proposed)*
 

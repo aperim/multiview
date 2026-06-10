@@ -39,7 +39,7 @@ use multiview_core::color::{
 /// Acquire a GPU compositor, or `None` (with a printed reason) when there is no
 /// usable adapter — the graceful-skip path for GPU-free CI.
 fn try_gpu() -> Option<GpuCompositor> {
-    match GpuCompositor::new() {
+    match GpuCompositor::new(None) {
         Ok(gpu) => Some(gpu),
         Err(Error::NoAdapter(reason) | Error::DeviceRequest(reason)) => {
             println!("SKIP: no usable GPU adapter ({reason})");
@@ -118,7 +118,7 @@ fn allocation_count_is_bounded_not_proportional_to_ticks() {
     for &n in &runs {
         // A fresh compositor per run so the per-run total reflects exactly that
         // run's allocations (the first `gpu` proved an adapter exists).
-        let Ok(gpu2) = GpuCompositor::new() else {
+        let Ok(gpu2) = GpuCompositor::new(None) else {
             return; // adapter vanished mid-test; skip
         };
         let _ = &gpu;

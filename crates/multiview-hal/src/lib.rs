@@ -30,6 +30,13 @@
 //!   accounts the cross-GPU host round-trip explicitly, and is gated by a
 //!   minimum-gain threshold so a live pipeline is never churned for a marginal
 //!   improvement.
+//! - [`failure`] — the failure-learning ledger ([`failure::FailureLedger`],
+//!   Tier-2 gap P1c): a pure, decaying per-`(Stage, HardwareId)` penalty the
+//!   data plane bumps with typed [`failure::FailureSignal`]s, so a placement
+//!   that keeps *flapping* on a piece of hardware is deprioritised (or, when
+//!   extreme, excluded) on the next selection — and decays back toward zero when
+//!   it stops failing (never a permanent ban). The scorer adds the penalty to a
+//!   candidate's cost.
 //!
 //! Hardware probing ([`probe`]) is the only seam that touches vendors. It
 //! follows the three-layer model (core-engine §6.2): the injectable
@@ -52,7 +59,9 @@ pub mod composite_probe;
 pub mod cost;
 pub mod degradation;
 pub mod error;
+pub mod failure;
 pub mod load;
+pub mod perf;
 pub mod planner;
 pub mod probe;
 pub mod registry;
@@ -69,12 +78,17 @@ pub use degradation::{
     actions_at_level, DegradationAction, Hysteresis, HysteresisConfig, LadderMove, MAX_LEVEL,
 };
 pub use error::{Error, Result};
+pub use failure::{
+    FailureLedger, FailureSignal, HardwareId, LedgerConfig, DEFAULT_EXCLUSION_THRESHOLD,
+    DEFAULT_HALF_LIFE_NS, DEFAULT_MAX_KEYS, PENALTY_CEILING,
+};
 #[cfg(feature = "cuda")]
 pub use load::NvmlLoadPoller;
 pub use load::{
-    DeviceId, DeviceLoad, LoadPoller, LoadProbe, LoadSample, LoadSource, NullLoadPoller,
-    PollInterval, SelfShare, Vendor,
+    DeviceId, DeviceLoad, GpuTargetInfo, LoadPoller, LoadProbe, LoadSample, LoadSource,
+    NullLoadPoller, PollInterval, SelfShare, Vendor,
 };
+pub use perf::{PerfClass, PerfSignals, ARCH_TABLE, DEFAULT_PERF_CLASS};
 pub use planner::{Admission, Plan, Planner, StageUsage};
 pub use probe::{
     detect, software_capability, DeviceCaps, DeviceProbe, EnvProbe, HardwareKind, ProbeOutcome,

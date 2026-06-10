@@ -279,8 +279,11 @@ pub struct UdpClusterTransport {
 
 impl UdpClusterTransport {
     /// Bind a non-blocking UDP socket to `bind_addr` and address the given
-    /// `peers`. Pass `"127.0.0.1:0"` for an OS-assigned ephemeral port (read it
-    /// back with [`local_addr`](Self::local_addr)).
+    /// `peers`. IPv6-first: pass `"[::1]:0"` (loopback) or `"[::]:0"` (all
+    /// interfaces) for an OS-assigned ephemeral port (read it back with
+    /// [`local_addr`](Self::local_addr)); a user-supplied IPv4 `bind_addr` still
+    /// works but is never the default. `bind_addr` and `peers` must share an
+    /// address family.
     ///
     /// # Errors
     ///
