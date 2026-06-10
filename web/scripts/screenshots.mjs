@@ -36,6 +36,13 @@ const PAGES = [
   ["help-config", "/help/config", 400],
   ["help-api", "/help/api", 400],
   ["help-features", "/help/features", 400],
+  ["help-concepts-transports", "/help/concepts/transports", 600],
+  ["help-concepts-timing", "/help/concepts/timing-sync", 600],
+  ["help-concepts-codecs", "/help/concepts/codecs", 600],
+  ["help-concepts-color", "/help/concepts/color", 600],
+  ["help-concepts-resilience", "/help/concepts/resilience", 600],
+  ["help-concepts-latency", "/help/concepts/latency", 600],
+  ["help-concepts-glossary", "/help/concepts/glossary", 600],
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
