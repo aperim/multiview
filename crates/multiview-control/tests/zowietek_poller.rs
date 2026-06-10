@@ -289,6 +289,211 @@ async fn set_mode_command_dispatches_convergence() {
     );
 }
 
+/// A device adopted with `desired_mode` set re-converges onto that mode once
+/// adopt reaches ONLINE: the close-before-open `/streamplay` switch is issued
+/// without any operator `set-mode`, making the documented "re-converges
+/// desired_mode on adopt" behaviour real.
+#[tokio::test]
+async fn adopt_converges_desired_mode_after_online() {
+    let (engine, broadcaster, status, drivers) = harness();
+    let mut sub = engine.subscribe();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    // The box powers up in encoder mode; desired_mode is decoder → must switch.
+    transport.push("venc", venc_encoder());
+    // The decode-table enumeration the encoder poller skips is not pushed (an
+    // encoder has no decode table). The convergence to decoder issues a close
+    // then an open (each a /streamplay request).
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
+    );
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
+    );
+    let driver = ZowietekDriver::new(
+        "dev-a",
+        Arc::new(transport.clone()),
+        broadcaster.clone(),
+        Arc::clone(&drivers),
+        "admin",
+        "admin",
+    );
+    let mut poller = ZowietekPoller::new(
+        "dev-a",
+        driver,
+        Arc::clone(&status),
+        "[fd00:db8::1]",
+        PollerConfig::test_fast(),
+    )
+    .with_desired_mode(Some("decoder".to_owned()));
+
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    assert_eq!(
+        status.state("dev-a"),
+        Some(DeviceState::Online),
+        "adopt drove the lifecycle to ONLINE"
+    );
+    // Convergence ran: a close preceded an open on /streamplay — driven by
+    // desired_mode, NOT by an operator set-mode command.
+    let order = transport.streamplay_request_order();
+    assert!(
+        order.len() >= 2,
+        "desired_mode convergence issued a close then an open after adopt"
+    );
+    // A device.mode (DEV-class) convergence event was published.
+    let mut saw_mode = false;
+    while let Ok(evt) = sub.try_recv() {
+        if let Event::DeviceMode(m) = &*evt.event {
+            assert_eq!(m.impact, multiview_events::ImpactClass::Device);
+            saw_mode = true;
+        }
+    }
+    assert!(
+        saw_mode,
+        "desired_mode convergence on adopt published a device.mode event"
+    );
+}
+
+/// A device with NO `desired_mode` does not converge on adopt: no `/streamplay`
+/// close/open switch is issued (the device keeps whatever mode it powered up in).
+#[tokio::test]
+async fn adopt_without_desired_mode_does_not_converge() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    transport.push("venc", venc_encoder());
+    // No desired_mode → the convergence path must not run; the poller helper
+    // builds a poller with desired_mode None.
+    let mut poller = poller("dev-a", &transport, &broadcaster, &status, &drivers);
+
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    assert_eq!(
+        transport.request_count("streamplay"),
+        0,
+        "no desired_mode ⇒ adopt issues no mode-convergence /streamplay switch"
+    );
+}
+
+/// `desired_mode` convergence is suppressed while the AUTH_FAILED breaker is
+/// open: a bad-credential adopt opens the breaker and issues NO convergence
+/// (only a state that actually reached ONLINE may converge).
+#[tokio::test]
+async fn auth_failed_suppresses_desired_mode_convergence() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    // Adopt login rejected → AUTH_FAILED (the breaker opens).
+    transport.push(
+        "system",
+        ScriptedReply::json(json!({ "rsp": "login failed", "status": "00002" })),
+    );
+    let driver = ZowietekDriver::new(
+        "dev-a",
+        Arc::new(transport.clone()),
+        broadcaster.clone(),
+        Arc::clone(&drivers),
+        "admin",
+        "admin",
+    );
+    let mut poller = ZowietekPoller::new(
+        "dev-a",
+        driver,
+        Arc::clone(&status),
+        "[fd00:db8::1]",
+        PollerConfig::test_fast(),
+    )
+    .with_desired_mode(Some("decoder".to_owned()));
+
+    assert_eq!(poller.adopt_step().await, PollerStep::AuthFailed);
+    assert_eq!(
+        status.state("dev-a"),
+        Some(DeviceState::AuthFailed),
+        "bad credentials opened the breaker"
+    );
+    assert_eq!(
+        transport.request_count("streamplay"),
+        0,
+        "AUTH_FAILED ⇒ no convergence (the device never reached ONLINE)"
+    );
+}
+
+/// A supervised reconnect that reaches ONLINE re-converges `desired_mode`: the
+/// driver re-applies the desired mode after the channel comes back, so the
+/// device is restored to its declared mode without an operator command.
+#[tokio::test]
+async fn reconnect_reconverges_desired_mode() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    // Adopt: the box is ALREADY in decoder mode, so adopt converges no-op.
+    transport.push("system", login_ok());
+    transport.push(
+        "venc",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "decoder" } }),
+        ),
+    );
+    // Adopt enumerates the decoder output targets (decode-mode box).
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "entries": [] } }),
+        ),
+    );
+    // Poll drops the socket → UNREACHABLE.
+    transport.push("streamplay", ScriptedReply::socket_dropped());
+    // Reconnect: the box came back in ENCODER mode (it rebooted) → reconnect
+    // must re-converge it to decoder (close + open).
+    transport.push("system", login_ok());
+    transport.push("venc", venc_encoder());
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
+    );
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
+    );
+    let driver = ZowietekDriver::new(
+        "dev-a",
+        Arc::new(transport.clone()),
+        broadcaster.clone(),
+        Arc::clone(&drivers),
+        "admin",
+        "admin",
+    );
+    let mut poller = ZowietekPoller::new(
+        "dev-a",
+        driver,
+        Arc::clone(&status),
+        "[fd00:db8::1]",
+        PollerConfig::test_fast(),
+    )
+    .with_desired_mode(Some("decoder".to_owned()));
+
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    let after_adopt = transport.request_count("streamplay");
+    assert_eq!(poller.poll_step().await, PollerStep::Unreachable);
+
+    assert_eq!(poller.reconnect_step().await, PollerStep::Online);
+    // Reconnect re-converged: at least the close + open switch beyond the adopt
+    // enumeration and the dropped poll.
+    let order = transport.streamplay_request_order();
+    let close = order
+        .iter()
+        .filter(|r| r.body.get("opt").and_then(serde_json::Value::as_str) == Some("stop"))
+        .count();
+    let open = order
+        .iter()
+        .filter(|r| r.body.get("opt").and_then(serde_json::Value::as_str) == Some("start"))
+        .count();
+    assert!(
+        close >= 1 && open >= 1,
+        "reconnect re-converged desired_mode (close-before-open) after returning ONLINE; \
+         before-reconnect streamplay count was {after_adopt}, order = {order:?}"
+    );
+}
+
 /// The spawned actor task drives the full lifecycle end-to-end over its control
 /// channel and stops cleanly when the handle is dropped (no leaked task).
 #[tokio::test]

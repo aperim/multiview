@@ -163,6 +163,12 @@ pub(crate) async fn create_device(
         name: input.name,
         body: validated_body(TypedCollection::Devices, &id, &input.body)?,
     };
+    // A fresh create clears any delete tombstone for this id BEFORE the store
+    // insert (the ordering that keeps the registry's stop/start race-free: a
+    // delete that races THIS create tombstones only after observing the insert
+    // below, so this clear can never erase that delete's tombstone — see
+    // `DevicePollerRegistry::clear_tombstone`).
+    state.device_pollers.clear_tombstone(&id);
     let versioned = state.devices.create(&id, input)?;
     // Seed the runtime status in ADOPTING (idempotent), so the read-only status
     // snapshot answers before any driver probe — the conflated status lane's
@@ -288,10 +294,13 @@ pub(crate) async fn delete_device(
     }
     state.devices.delete(&id)?;
     // Stop the supervised driver poller (DEV-A4): the device is gone, so its
-    // poller must not keep probing — the registry aborts the task and forgets
-    // the handle. Then drop the runtime status and any driver-enumerated facets
-    // — control-plane-only cleanup, off the engine hot loop (invariant #10).
-    state.device_pollers.stop(&id);
+    // poller must not keep probing — the registry tombstones the id (a racing
+    // adopt's late `start` is rejected, never a ghost poller), aborts the task,
+    // and awaits its termination, so the forgets below cannot be raced by a
+    // final in-flight publish. Then drop the runtime status and any
+    // driver-enumerated facets — control-plane-only cleanup, off the engine hot
+    // loop (invariant #10).
+    state.device_pollers.stop(&id).await;
     state.device_status.forget(&id);
     state.device_drivers.forget(&id);
     state.audit(
@@ -483,11 +492,14 @@ pub struct SetModeAccepted {
 /// the device restarts its pipeline; bound sources ride the tile ladder to
 /// `NO_SIGNAL` during the switch; no Multiview output is interrupted. The route
 /// mints the operation id, `202`s, and **dispatches** the convergence to the
-/// device's running driver poller (DEV-A4), which runs `plan_mode_convergence`
-/// → `converge_mode` (close-before-open) and publishes the `device.mode`
-/// outcome on the realtime stream. When no live poller is running (the default
-/// build / a device with no spawned driver), the `202` still declares the
-/// impact and the driver re-converges `desired_mode` on its next adopt pass.
+/// device's running driver poller (DEV-A4), which records the requested mode as
+/// its desired mode, runs `plan_mode_convergence` → `converge_mode`
+/// (close-before-open), and publishes the `device.mode` outcome on the realtime
+/// stream; a failed apply is re-converged on the poller's next adopt/reconnect
+/// pass. When no live poller is running (the default build / a device with no
+/// spawned driver), the `202` still declares the impact but nothing applies the
+/// change: the device's configured `desired_mode` is what a later-spawned
+/// poller converges onto when its adopt/reconnect reaches `ONLINE`.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -523,13 +535,15 @@ pub(crate) async fn set_mode(
         Some(serde_json::json!({ "action": "set-mode", "mode": request.mode })),
     );
     // Dispatch the convergence to the device's running driver/poller (DEV-A4):
-    // the actor runs `plan_mode_convergence` → `converge_mode` (close-before-open)
-    // and publishes the DEV-class `device.mode` outcome on the realtime stream.
+    // the actor records the requested mode as its desired mode, runs
+    // `plan_mode_convergence` → `converge_mode` (close-before-open), and
+    // publishes the DEV-class `device.mode` outcome on the realtime stream (a
+    // failed apply re-converges on its next adopt/reconnect pass).
     // Non-blocking `try_send` — the route never awaits the actor (invariant #10).
     // When no poller is running (the default build's no-op factory, a device
     // whose driver was not spawned, or its control channel is momentarily full),
-    // the 202 still declares the impact and the outcome lands once the poller
-    // re-converges; the contract (202 + op id + declared impact) is unchanged.
+    // the 202 still declares the impact but nothing applies this request; the
+    // configured `desired_mode` is what a later-spawned poller converges onto.
     let dispatched = state.device_pollers.dispatch(
         &id,
         crate::devices::PollerControl::SetMode {
@@ -541,7 +555,8 @@ pub(crate) async fn set_mode(
             device = %id,
             mode = %request.mode,
             "set-mode: no running poller to dispatch to (no live driver on this build/device); \
-             the 202 declares the impact and the driver re-converges desired_mode on adopt"
+             the 202 declares the impact but nothing applies this request — the configured \
+             desired_mode converges when a poller next adopts"
         );
     }
     // The declared DEV-class impact is the SAME statement the driver's

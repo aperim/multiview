@@ -14,8 +14,9 @@
 //!   and publish the conflated `device.status` snapshot. A device-reported
 //!   fault degrades the device; a dropped channel rides to `UNREACHABLE`.
 //! * **Supervised reconnect** — on `UNREACHABLE`, exponential backoff + jitter +
-//!   a breaker (the same shape inputs use); on reconnect the driver re-converges
-//!   desired mode/bindings.
+//!   a breaker (the same shape inputs use); a reconnect (or adopt) that reaches
+//!   `ONLINE` re-converges the device onto its declared `desired_mode` (the
+//!   [`poller`](self::poller) runs [`ZowietekDriver::converge_mode`]).
 //! * **Three facets** (ADR-M009) — the source facet enumerates the served
 //!   RTSP/NDI mounts as [`SourceCandidate`]s; the output facet exposes the
 //!   decode-table slots as [`OutputTarget`]s; the management facet covers
@@ -26,7 +27,9 @@
 //!   encoder/decoder mode endpoint and no vendor SDK is present in this repo, so
 //!   the driver converges `desired_mode` close-before-open through the decode
 //!   table (see [`ModeConvergence`] for the honest gap), declaring the
-//!   device-side (DEV-class) impact **before** apply.
+//!   device-side (DEV-class) impact **before** apply. The poller runs this
+//!   convergence whenever adopt/reconnect reaches `ONLINE` and on an operator
+//!   `set-mode`.
 //!
 //! ## Isolation (invariant #10)
 //!

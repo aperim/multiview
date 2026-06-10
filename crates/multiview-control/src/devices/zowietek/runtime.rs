@@ -21,6 +21,16 @@
 //! is on. Tests inject a scripted factory, so the whole runtime path is driven
 //! socket-free.
 //!
+//! ## Deterministic start/stop
+//!
+//! `start` is check-then-spawn under the registry lock and `stop` tombstones
+//! the id and **joins** the aborted task, so a delete that races an adopt
+//! deterministically wins: after `stop` returns no poller for that id is
+//! running or can get started (a late `start` is rejected before any task is
+//! spawned), and no ghost `device_status`/driver entries can be re-created. A
+//! later legitimate re-adopt clears the tombstone (the create route does this
+//! before its store insert) and starts fresh. See [`DevicePollerRegistry`].
+//!
 //! ## Isolation (invariant #10)
 //!
 //! Every handle here is control-plane: the registry is a `Mutex`-guarded map the
@@ -87,9 +97,34 @@ impl DevicePollerFactory for NoPollerFactory {
 /// Holds the [`DevicePollerFactory`] (how to spawn one) and the live
 /// [`PollerHandle`]s (the running tasks + their control channels). All methods
 /// are control-plane only and never touch the engine (invariant #10).
+///
+/// ## Deterministic start/stop (no ghost pollers)
+///
+/// `start` and `stop` are serialized through one lock, and a [`stop`]
+/// **tombstones** the id: a `start` for a tombstoned id is rejected *before any
+/// task is spawned* (check-then-spawn under the lock), so a delete's `stop`
+/// that interleaves with an adopt's in-flight `start` deterministically wins —
+/// after `stop` returns, no poller for that id is running or can get started,
+/// and nothing can re-create the `device_status`/driver entries the delete
+/// forgets. A later legitimate re-adopt clears the tombstone via
+/// [`clear_tombstone`] **before** its store insert (see that method for why the
+/// ordering makes the clear safe), then starts fresh.
+///
+/// [`stop`]: DevicePollerRegistry::stop
+/// [`clear_tombstone`]: DevicePollerRegistry::clear_tombstone
 pub struct DevicePollerRegistry {
     factory: Arc<dyn DevicePollerFactory>,
-    handles: Mutex<HashMap<String, PollerHandle>>,
+    inner: Mutex<RegistryInner>,
+}
+
+/// The lock-guarded registry state: the live handles plus the tombstoned ids.
+#[derive(Default)]
+struct RegistryInner {
+    /// The running poller actors, keyed by device id.
+    handles: HashMap<String, PollerHandle>,
+    /// Ids whose poller was stopped (the device deleted): a `start` for a
+    /// tombstoned id is rejected until a fresh create clears it.
+    tombstones: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for DevicePollerRegistry {
@@ -120,14 +155,14 @@ impl DevicePollerRegistry {
     pub fn with_factory(factory: Arc<dyn DevicePollerFactory>) -> Self {
         Self {
             factory,
-            handles: Mutex::new(HashMap::new()),
+            inner: Mutex::new(RegistryInner::default()),
         }
     }
 
-    /// Lock the handle map, recovering from a poisoned lock (a panic in one
+    /// Lock the registry state, recovering from a poisoned lock (a panic in one
     /// request must not wedge the control plane).
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, PollerHandle>> {
-        match self.handles.lock() {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RegistryInner> {
+        match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -136,40 +171,87 @@ impl DevicePollerRegistry {
     /// The number of currently-running poller actors.
     #[must_use]
     pub fn running_count(&self) -> usize {
-        self.lock().len()
+        self.lock().handles.len()
     }
 
     /// Whether a poller is currently running for `device_id`.
     #[must_use]
     pub fn is_running(&self, device_id: &str) -> bool {
-        self.lock().contains_key(device_id)
+        self.lock().handles.contains_key(device_id)
     }
 
     /// Start (or restart) a supervised poller for `device`, wiring it through
     /// `wiring`. A no-op when the factory does not manage this device (e.g. the
     /// default no-op factory, a non-`zowietek` driver, or a missing address).
     ///
-    /// Idempotent by id: an existing poller for the same device id is **stopped
-    /// first** (its task aborted) and replaced, so an adopt/edit re-converges on
-    /// a fresh task rather than leaking the old one.
+    /// **Rejected for a tombstoned id** (a [`stop`](DevicePollerRegistry::stop)
+    /// for this id happened and no fresh create has
+    /// [cleared](DevicePollerRegistry::clear_tombstone) it): a delete's stop
+    /// that completed while this start was still in flight must win — no ghost
+    /// poller. The tombstone check **and** the factory spawn run under the one
+    /// registry lock (check-then-spawn), so no task is ever spawned for a
+    /// tombstoned id and a concurrent `stop` is fully ordered against this
+    /// start: either it tombstones first (this start spawns nothing) or it runs
+    /// after the insert (it removes and joins the fresh poller). The factory
+    /// spawn is brief, synchronous, control-plane-only work, so holding the
+    /// lock across it trades a moment of start/stop serialization for
+    /// determinism (invariant #10 untouched — the engine never takes this lock).
+    ///
+    /// Idempotent by id: an existing poller for the same device id is replaced
+    /// (the previous handle's drop aborts its task), so an adopt/edit
+    /// re-converges on a fresh task rather than leaking the old one.
     ///
     /// Returns `true` when a poller was spawned.
     pub fn start(&self, device: &Device, wiring: &PollerWiring) -> bool {
+        let mut guard = self.lock();
+        if guard.tombstones.contains(&device.id) {
+            // The device was stopped/deleted after this start began: reject
+            // before spawning anything — the delete wins, no ghost poller.
+            return false;
+        }
         let Some(handle) = self.factory.spawn(device, wiring) else {
             return false;
         };
         // Replace-by-id: dropping the previous handle aborts its task.
-        let mut guard = self.lock();
-        let _previous = guard.insert(device.id.clone(), handle);
+        let _previous = guard.handles.insert(device.id.clone(), handle);
         true
     }
 
-    /// Stop the poller for `device_id` (the device was removed): abort its task
-    /// (via [`PollerHandle`]'s `Drop`) and forget the handle. A no-op when none
-    /// is running.
-    pub fn stop(&self, device_id: &str) {
-        // Removing the handle drops it, which aborts the task.
-        let _handle = self.lock().remove(device_id);
+    /// Stop the poller for `device_id` (the device was removed): tombstone the
+    /// id (so an in-flight `start` for it is rejected — see
+    /// [`start`](DevicePollerRegistry::start)), abort its task, and **await the
+    /// task's termination** before returning. A no-op when none is running
+    /// (still tombstones, so a late racing start cannot resurrect it).
+    ///
+    /// Awaiting the aborted task's join (outside the lock) guarantees that once
+    /// `stop` returns the actor can no longer publish anything — the delete
+    /// route's subsequent `device_status`/driver `forget`s cannot be raced by a
+    /// final in-flight publish, so no ghost entries survive the delete.
+    pub async fn stop(&self, device_id: &str) {
+        let handle = {
+            let mut guard = self.lock();
+            guard.tombstones.insert(device_id.to_owned());
+            guard.handles.remove(device_id)
+        };
+        if let Some(handle) = handle {
+            let task = handle.into_join_handle();
+            task.abort();
+            // The join completes with a cancellation error — expected; what
+            // matters is that the task is fully terminated when we return.
+            let _ = task.await;
+        }
+    }
+
+    /// Clear the tombstone for `device_id` — a **fresh legitimate create** is
+    /// beginning. The create route calls this **before** its resource-store
+    /// insert; that ordering is what keeps the tombstone sound: any delete's
+    /// tombstone is set *after* its store delete, which required some create's
+    /// store insert, which this clear *precedes* — so a clear can never erase
+    /// the tombstone of a delete that raced the same create, and only a create
+    /// that starts entirely after the delete (a real re-adopt) starts with a
+    /// clean slate. A no-op when the id is not tombstoned.
+    pub fn clear_tombstone(&self, device_id: &str) {
+        let _was_tombstoned = self.lock().tombstones.remove(device_id);
     }
 
     /// Dispatch a control command to the running poller for `device_id` without
@@ -180,6 +262,7 @@ impl DevicePollerRegistry {
     /// (drop-newest — the route never blocks on the actor, invariant #10).
     pub fn dispatch(&self, device_id: &str, command: PollerControl) -> bool {
         self.lock()
+            .handles
             .get(device_id)
             .is_some_and(|handle| handle.try_dispatch(command))
     }
@@ -278,7 +361,10 @@ impl DevicePollerFactory for ReqwestPollerFactory {
             Arc::clone(wiring.broadcaster.registry()),
             &host,
             config,
-        );
+        )
+        // Thread the config-as-code desired_mode: the poller converges the
+        // device onto it whenever adopt/reconnect reaches ONLINE.
+        .with_desired_mode(device.desired_mode.clone());
         Some(poller.spawn())
     }
 }
@@ -329,8 +415,8 @@ mod tests {
         .expect("a valid device")
     }
 
-    #[test]
-    fn no_poller_factory_starts_nothing() {
+    #[tokio::test]
+    async fn no_poller_factory_starts_nothing() {
         let reg = DevicePollerRegistry::new();
         let engine = Arc::new(multiview_engine::EnginePublisher::new(8));
         let status = Arc::new(crate::devices::DeviceStatusRegistry::new());
@@ -352,8 +438,10 @@ mod tests {
                 mode: "decoder".to_owned()
             }
         ));
-        // Stop is a no-op when none is running.
-        reg.stop("dev-a");
+        // Stop aborts nothing when none is running (it still tombstones, so a
+        // racing late start cannot resurrect a deleted device).
+        reg.stop("dev-a").await;
+        assert!(!reg.start(&dev, &wiring));
     }
 
     #[test]

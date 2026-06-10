@@ -13,11 +13,25 @@
 //! (→ `UNREACHABLE`); a credential rejection is `AuthRejected` (→ `AUTH_FAILED`).
 //! The published `device.status` is exactly the lifecycle's output state.
 //!
+//! ## `desired_mode` convergence on adopt and reconnect
+//!
+//! A device declared with `desired_mode` (the config-as-code field) is
+//! **re-converged onto that mode** whenever an adopt or reconnect step reaches
+//! `ONLINE`: the actor runs the driver's close-before-open
+//! [`converge_mode`](super::ZowietekDriver::converge_mode) (declared DEV-class
+//! impact, `device.mode` published) without any operator command, so a box that
+//! powered up — or came back from a reboot — in the wrong mode is restored to
+//! its declared mode. Convergence never runs unless `ONLINE` was actually
+//! reached (in particular, never after `AUTH_FAILED`), and a convergence
+//! failure is logged and retried on the next adopt/reconnect pass — it never
+//! crashes the actor. An operator `set-mode` updates the actor's desired mode,
+//! so the last operator intent is what later passes re-converge onto.
+//!
 //! ## Supervised reconnect + the `AUTH_FAILED` breaker
 //!
 //! On `UNREACHABLE` the actor reconnects with **capped exponential backoff plus
 //! full jitter** (the same scheme inputs use — `multiview-input`'s `reconnect`),
-//! re-converging desired mode/bindings on success. The breaker is the A3 state
+//! re-converging `desired_mode` on success (above). The breaker is the A3 state
 //! machine: a `Reconnect` from `AUTH_FAILED` is a no-op (the transition table
 //! ignores it), so after a credential rejection the actor issues **no** further
 //! login — no reconnect storm against a device that rejected our secret. Only a
@@ -289,6 +303,11 @@ pub struct ZowietekPoller<T: ZowietekTransport> {
     host: String,
     config: PollerConfig,
     backoff: Backoff,
+    /// The mode this device is converged onto whenever an adopt/reconnect step
+    /// reaches `ONLINE` — seeded from the config-as-code `desired_mode` field
+    /// (threaded by the factory) and updated by an operator `set-mode`. `None`
+    /// means the device keeps whatever mode it is in (no convergence).
+    desired_mode: Option<String>,
 }
 
 impl<T: ZowietekTransport> ZowietekPoller<T> {
@@ -314,7 +333,18 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
             host: host.to_owned(),
             config,
             backoff,
+            desired_mode: None,
         }
+    }
+
+    /// Set the `desired_mode` this poller converges the device onto whenever an
+    /// adopt/reconnect step reaches `ONLINE` (the config-as-code
+    /// `Device::desired_mode`, threaded by the factory). `None` (the default)
+    /// performs no convergence — the device keeps the mode it powered up in.
+    #[must_use]
+    pub fn with_desired_mode(mut self, desired_mode: Option<String>) -> Self {
+        self.desired_mode = desired_mode;
+        self
     }
 
     /// The device id this poller manages.
@@ -339,11 +369,15 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
     }
 
     /// Adopt the device: login → probe → enumerate the facets → drive the
-    /// lifecycle to `ONLINE` (or `AUTH_FAILED` / `UNREACHABLE`) and publish.
+    /// lifecycle to `ONLINE` (or `AUTH_FAILED` / `UNREACHABLE`) and publish,
+    /// then converge `desired_mode` (when declared) onto the freshly-ONLINE
+    /// device — close-before-open, DEV-class impact, `device.mode` published.
     ///
     /// Refuses to re-login while the breaker is open (`AUTH_FAILED`): the lifecycle
     /// only re-arms a probe on a [`secret_updated`](ZowietekPoller::secret_updated),
     /// so an adopt step in `AUTH_FAILED` is a [`PollerStep::BreakerOpen`] no-op.
+    /// `desired_mode` convergence runs **only** when this step actually reached
+    /// `ONLINE` — never after `AUTH_FAILED`/`UNREACHABLE`.
     pub async fn adopt_step(&mut self) -> PollerStep {
         if self.breaker_open() {
             return PollerStep::BreakerOpen;
@@ -355,6 +389,9 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
                 // at runtime (the source facet is I/O-free; the output facet is
                 // best-effort — an encoder-mode box has no decode table).
                 self.enumerate_facets().await;
+                if step == PollerStep::Online {
+                    self.converge_desired_mode().await;
+                }
                 step
             }
             Err(err) => self.drive_from_error(&err),
@@ -382,13 +419,17 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
         }
     }
 
-    /// Attempt one supervised reconnect: re-establish the channel and
-    /// re-converge to `ONLINE` (driving `Reconnect`).
+    /// Attempt one supervised reconnect: re-establish the channel, re-converge
+    /// to `ONLINE` (driving `Reconnect`), then re-converge `desired_mode` (when
+    /// declared) — a box that came back from a reboot in the wrong mode is
+    /// restored to its declared mode without an operator command.
     ///
     /// While the breaker is open (`AUTH_FAILED`) this is a **no-op** — it issues no
     /// login (the `Reconnect` event is ignored by the transition table), so a
     /// device that rejected our secret is never hammered. The next
     /// [`secret_updated`](ZowietekPoller::secret_updated) re-arms a probe.
+    /// `desired_mode` convergence runs **only** when this step actually reached
+    /// `ONLINE`.
     pub async fn reconnect_step(&mut self) -> PollerStep {
         if self.breaker_open() {
             // The A3 breaker: no login, no storm. Drive the (ignored) Reconnect
@@ -401,7 +442,11 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
         match self.driver.reconnect().await {
             Ok(()) => {
                 self.backoff.reset();
-                self.drive(LifecycleEvent::Reconnect)
+                let step = self.drive(LifecycleEvent::Reconnect);
+                if step == PollerStep::Online {
+                    self.converge_desired_mode().await;
+                }
+                step
             }
             Err(err) => self.drive_from_error(&err),
         }
@@ -420,20 +465,45 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
     pub async fn handle_control(&mut self, command: PollerControl) {
         match command {
             PollerControl::SetMode { mode } => {
+                // The operator's set-mode is the new desired mode: record it so
+                // every later adopt/reconnect pass re-converges onto the last
+                // operator intent (and a failed apply below is retried there).
+                self.desired_mode = Some(mode.clone());
                 // Run the close-before-open convergence; the driver declares the
                 // DEV-class impact and publishes the device.mode outcome. A
                 // failure is published as a device.mode Failed by the driver and
-                // surfaced here — the next convergence pass retries.
+                // surfaced here — re-converged on the next adopt/reconnect pass
+                // (the desired mode recorded above).
                 if let Err(err) = self.driver.converge_mode(&mode).await {
                     tracing::warn!(
                         device = %self.device_id,
                         mode = %mode,
                         error = %err,
-                        "zowietek set-mode convergence failed; the driver re-converges on the next pass"
+                        "zowietek set-mode convergence failed; re-converges on the next adopt/reconnect pass"
                     );
                 }
             }
             PollerControl::SecretUpdated => self.secret_updated(),
+        }
+    }
+
+    /// Converge the device onto its declared `desired_mode`, if any — the pass
+    /// run after an adopt/reconnect step reaches `ONLINE`. A no-op when no
+    /// desired mode is declared or the device is already in it (the driver's
+    /// plan short-circuits). A convergence failure is logged and left for the
+    /// next adopt/reconnect pass — it never crashes the poller.
+    async fn converge_desired_mode(&mut self) {
+        let Some(desired) = self.desired_mode.clone() else {
+            return;
+        };
+        if let Err(err) = self.driver.converge_mode(&desired).await {
+            tracing::warn!(
+                device = %self.device_id,
+                mode = %desired,
+                error = %err,
+                "zowietek desired_mode convergence failed after coming ONLINE; \
+                 re-converges on the next adopt/reconnect pass"
+            );
         }
     }
 

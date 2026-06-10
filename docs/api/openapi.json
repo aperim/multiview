@@ -681,7 +681,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}` — adopt/create a device (role: write).",
-        "description": "Validates the body against `multiview_config::Device` (`422` on an invalid\ndocument) and seeds the runtime status registry in `ADOPTING` so\n`GET /devices/{id}/status` answers immediately — the first probe lands with\nthe driver actors (DEV-A4/A5).",
+        "description": "Validates the body against `multiview_config::Device` (`422` on an invalid\ndocument), seeds the runtime status registry in `ADOPTING` so\n`GET /devices/{id}/status` answers immediately, and **starts the device's\nsupervised driver poller** (DEV-A4) — which performs the first probe and\ndrives the device to `ONLINE`/`AUTH_FAILED`/`UNREACHABLE`. The poller is a\nno-op for devices the factory does not manage (the default build / a\nnon-`zowietek` driver).",
         "operationId": "create_device",
         "parameters": [
           {
@@ -882,8 +882,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "`GET /api/v1/devices/{id}/output-targets` — the declared output-binding\nprojection (ADR-M009 facet (b)).",
-        "description": "Honestly empty until a driver enumerates decode slots (no live driver in this\nslice): never fabricated live telemetry.",
+        "summary": "`GET /api/v1/devices/{id}/output-targets` — the output-binding projection\n(ADR-M009 facet (b)).",
+        "description": "Returns the device's running driver's enumerated targets (DEV-A4: a\ndecoder-mode `zowietek` box's decode-table slots). Honestly empty until a\ndriver has enumerated — and on a build/device with no live driver — never\nfabricated live telemetry.",
         "operationId": "output_targets",
         "parameters": [
           {
@@ -949,7 +949,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).",
-        "description": "A synchronous management verb (ADR-W017): in this slice (no driver actor) it\nconfirms the device exists and acknowledges the probe request (`200`). The\nreal probe round-trip lands with the driver actors (DEV-A4/A5).",
+        "description": "A synchronous management verb (ADR-W017): it confirms the device exists and\nacknowledges the probe request (`200`). The device's supervised driver poller\n(DEV-A4) is already probing on its own ≤1 Hz cadence and re-probing on\nreconnect, so the latest status is read via `GET /devices/{id}/status`; this\nverb is the operator's explicit \"I looked\" acknowledgement.",
         "operationId": "probe_device",
         "parameters": [
           {
@@ -1068,7 +1068,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}/set-mode` — converge the device to a mode\n(role: write; `202` + operation id + declared DEV-class impact).",
-        "description": "The device-side impact is **declared in the body before apply** (ADR-M009):\nthe device restarts its pipeline; bound sources ride the tile ladder to\n`NO_SIGNAL` during the switch; no Multiview output is interrupted. In this\nslice the operation id is minted and `202`'d; the `device.mode` outcome\narrives on the realtime stream once the driver actor lands.",
+        "description": "The device-side impact is **declared in the body before apply** (ADR-M009):\nthe device restarts its pipeline; bound sources ride the tile ladder to\n`NO_SIGNAL` during the switch; no Multiview output is interrupted. The route\nmints the operation id, `202`s, and **dispatches** the convergence to the\ndevice's running driver poller (DEV-A4), which records the requested mode as\nits desired mode, runs `plan_mode_convergence` → `converge_mode`\n(close-before-open), and publishes the `device.mode` outcome on the realtime\nstream; a failed apply is re-converged on the poller's next adopt/reconnect\npass. When no live poller is running (the default build / a device with no\nspawned driver), the `202` still declares the impact but nothing applies the\nchange: the device's configured `desired_mode` is what a later-spawned\npoller converges onto when its adopt/reconnect reaches `ONLINE`.",
         "operationId": "set_mode",
         "parameters": [
           {
@@ -1140,8 +1140,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "`GET /api/v1/devices/{id}/source-candidates` — the declared source-binding\nprojection (ADR-M009 facet (a)).",
-        "description": "Honestly empty until a driver enumerates streams (no live driver in this\nslice): never fabricated live telemetry.",
+        "summary": "`GET /api/v1/devices/{id}/source-candidates` — the source-binding projection\n(ADR-M009 facet (a)).",
+        "description": "Returns the device's running driver's enumerated candidates (DEV-A4: a\n`zowietek` device's served RTSP mounts). Honestly empty until a driver has\nenumerated — and on a build/device with no live driver — never fabricated\nlive telemetry.",
         "operationId": "source_candidates",
         "parameters": [
           {
