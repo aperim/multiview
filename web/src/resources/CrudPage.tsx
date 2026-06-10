@@ -77,6 +77,7 @@ export function RowActions<View>({
       <Button
         variant="outline"
         size="sm"
+        data-testid="row-edit"
         aria-label={
           editRefused
             ? `${editLabel}: ${name} — ${editDisabledReason}`
@@ -98,6 +99,7 @@ export function RowActions<View>({
       <Button
         variant="ghost"
         size="sm"
+        data-testid="row-delete"
         aria-label={`${deleteLabel}: ${name}`}
         onClick={(): void => {
           onDelete(row);
@@ -276,7 +278,7 @@ export function CrudPage<View, Form, Field extends string>(
         actions={
           <>
             {props.headerExtras}
-            <Button onClick={openCreate}>
+            <Button data-testid="crud-new" onClick={openCreate}>
               <Plus aria-hidden="true" />
               {props.newLabel}
             </Button>

@@ -1,4 +1,4 @@
-//! Typed validation of source/output/overlay resource bodies (ADR-W015).
+//! Typed validation of source/output/overlay/probe resource bodies (ADR-W015).
 //!
 //! The resource stores keep bodies as opaque JSON so optional fields round-trip
 //! losslessly, but the API boundary refuses documents the engine could never
@@ -64,6 +64,8 @@ pub(crate) enum TypedCollection {
     Outputs,
     /// `multiview_config::Overlay`.
     Overlays,
+    /// `multiview_config::Probe`.
+    Probes,
 }
 
 impl TypedCollection {
@@ -73,6 +75,7 @@ impl TypedCollection {
             Self::Sources => "source",
             Self::Outputs => "output",
             Self::Overlays => "overlay",
+            Self::Probes => "probe",
         }
     }
 }
@@ -97,8 +100,8 @@ pub(crate) fn validated_body(
         )));
     };
     let mut map = map.clone();
-    // Sources/overlays: the body `id` IS the resource address — inject the path
-    // id when omitted, reject a mismatch. Outputs are a DIFFERENT namespace:
+    // Sources/overlays/probes: the body `id` IS the resource address — inject
+    // the path id when omitted, reject a mismatch. Outputs are a DIFFERENT namespace:
     // their config-level `id` is optional, label-derived, and routable
     // (`OutputRef`), so it is preserved verbatim and never compared to the
     // store id.
@@ -142,6 +145,16 @@ pub(crate) fn validated_body(
         }
         TypedCollection::Overlays => {
             typecheck::<multiview_config::Overlay>(collection, &candidate)?;
+        }
+        TypedCollection::Probes => {
+            let probe = typecheck::<multiview_config::Probe>(collection, &candidate)?;
+            // Per-item semantic checks (zone geometry, threshold ranges, finite
+            // levels). Cell-reference resolution needs the cell set and stays a
+            // document-level concern (`MultiviewConfig::validate`, run by
+            // `GET /config/export` before render).
+            probe
+                .validate()
+                .map_err(|err| ControlError::Validation(format!("probe body invalid: {err}")))?;
         }
     }
     Ok(candidate)

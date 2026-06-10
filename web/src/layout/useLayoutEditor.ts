@@ -21,6 +21,7 @@ import {
   setCanvas as setCanvasOnModel,
   setCellFit,
   setCellLabel,
+  setCellProps,
   validateLayout,
 } from './model';
 import type {
@@ -32,6 +33,7 @@ import type {
   NormalizedRect,
   ValidationIssue,
 } from './model';
+import type { CellProperties } from './cellProps';
 
 let cellCounter = 0;
 
@@ -83,6 +85,8 @@ export interface LayoutEditorState {
   readonly setFit: (id: string, fit: FitMode) => void;
   /** Set/clear a cell's source binding. */
   readonly bindSource: (id: string, sourceId: string | undefined) => void;
+  /** Replace a cell's full property set (on_loss / appearance / degradation). */
+  readonly setProps: (id: string, props: CellProperties) => void;
   /** Rename a cell. */
   readonly rename: (id: string, label: string) => void;
   /** Reorder a cell within the list (renumbers z). */
@@ -175,6 +179,10 @@ export function useLayoutEditor(initial?: LayoutModel): LayoutEditorState {
     [],
   );
 
+  const setProps = useCallback((id: string, props: CellProperties): void => {
+    setModelState((current) => setCellProps(current, id, props));
+  }, []);
+
   const rename = useCallback((id: string, label: string): void => {
     setModelState((current) => setCellLabel(current, id, label));
   }, []);
@@ -220,6 +228,7 @@ export function useLayoutEditor(initial?: LayoutModel): LayoutEditorState {
     rotate,
     setFit,
     bindSource,
+    setProps,
     rename,
     reorder,
     moveDown,
