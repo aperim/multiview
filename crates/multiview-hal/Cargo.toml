@@ -39,6 +39,15 @@ proptest = "1.11.0"
 "vaapi" = []
 "qsv" = []
 "videotoolbox" = []
+# KMS scanout discovery: enable the REAL DRM card-node / connector enumeration
+# (`scanout::DrmScanoutProbe`) for the local display sink's scanout affinity
+# (DEV-B2 / ADR-0044 §3). Read-only `/sys/class/drm` reads with std ONLY — no
+# native link, no extra dependency — so this carries no `cargo deny` exposure and
+# stays `forbid(unsafe_code)`. OFF by default: the connector -> owning-GPU
+# mapping + the `ScanoutProbe` seam are always compiled and CI-tested via an
+# injected mock; with the feature off the real probe returns an EMPTY inventory
+# (the GPU-less CI contract). Named to mirror `multiview-output/display-kms`.
+"display-kms" = []
 # Intel-only per-engine encode/decode utilisation via the i915 PMU
 # (`perf_event_open`), the fallback for hosts where the per-process DRM fdinfo
 # enc/dec counters are unavailable. Builds on the sysfs probe (`vaapi`/`qsv`)
