@@ -14,7 +14,8 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::float_cmp
 )]
 
 use multiview_audio::adaptive::RatioPpm;

@@ -11,7 +11,11 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::manual_div_ceil,
+    clippy::doc_markdown
 )]
 
 use multiview_output::display::audio::{parse_eld, EldCapability};
@@ -42,9 +46,12 @@ fn lpcm_eld(monitor: &str, channels: u8) -> Vec<u8> {
     eld[2] = baseline_words as u8; // baseline_eld_len, in 4-byte words
                                    // 16-byte baseline header block:
     let mut baseline = vec![0u8; 16];
-    baseline[0] = ((2u8 & 0x1f) << 3) | (mnl as u8 & 0x07) | (((mnl as u8) >> 3) << 5).min(0); // CEA ver + mnl low
-    baseline[0] = (baseline[0] & 0xf8) | (mnl as u8 & 0x07);
-    baseline[4] = (sad_count & 0x0f) << 4; // SAD_count in the high nibble
+    // baseline byte 0 (= ELD byte 4): (CEA_EDID_ver << 5) | (monitor-name
+    // length in the low 5 bits) — kernel GRAB_BITS(buf, 4, 0, 5)/(4, 5, 3).
+    baseline[0] = (2u8 << 5) | (mnl as u8 & 0x1f);
+    // baseline byte 1 (= ELD byte 5): SAD_count in the high nibble — kernel
+    // GRAB_BITS(buf, 5, 4, 4); the low bits (conn_type/s_ai/hdcp) stay 0.
+    baseline[1] = (sad_count & 0x0f) << 4;
     eld.extend_from_slice(&baseline);
     eld.extend_from_slice(&monitor.as_bytes()[..mnl]);
     eld.extend_from_slice(&sad);

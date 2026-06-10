@@ -12,7 +12,10 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
 )]
 
 use multiview_audio::adaptive::{AdaptiveResampler, RatioPpm};
