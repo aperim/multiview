@@ -42,20 +42,28 @@ The control plane submits them **after** the resource-store write succeeds; the 
 at the frame boundary. A full bus sheds the submit (`SubmitError::Full`) — the store write stands,
 and the response then *honestly* declares `restart` (the stored doc still applies on restart).
 
-### 2. Per-response apply classification (inv #11)
+### 2. Per-response apply classification (inv #11) — capability-driven (level 2 shipped)
 
-The mutation response's `X-Multiview-Apply` header is computed per request:
+The mutation response's `X-Multiview-Apply` header is computed per request **from the run's
+declared capability** (`LiveSourceCapability` on the control `AppState` — the honesty keystone,
+added with level 2). The binary derives the capability from the seams it actually wired:
+`network = true` **iff** a real decoded-ingest spawner was handed to the live-source hub (the
+full-pipeline/`ffmpeg` run path); the software run declares `synthetic_only`, and the control
+crate's default is `synthetic_only` (never over-claims). The header therefore never says `live`
+for a kind the running engine cannot ingest:
 
 | Mutation | Condition | Header |
 |---|---|---|
-| POST/PUT | new kind is **synthetic** (`bars`/`solid`/`clock`) and the `UpsertSource` was enqueued | `live` |
-| PUT | previous stored kind synthetic, new kind not → `RemoveSource` enqueued (the running generator stops; the new doc applies on restart) | `restart` |
-| POST/PUT | network kind (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`/`ndi`/`youtube`) | `restart` (level 2, designed below, not in this slice) |
+| POST/PUT | new kind is **live-appliable on this run** — synthetic (`bars`/`solid`/`clock`) on every run; network/file (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`) on a run with the ingest spawner — and the `UpsertSource` was enqueued | `live` |
+| PUT | previous stored kind live-appliable, new kind not (e.g. `rtsp` → `ndi`) → `RemoveSource` enqueued (the running producer stops; the new doc applies on restart) | `restart` |
+| POST/PUT | `ndi`/`youtube`/`aes67` (never live in this slice), or a network kind on a run without the spawner (software engine) | `restart` |
 | DELETE | `RemoveSource` enqueued (any kind — teardown is a stop-flag raise + store unregister) | `live` |
 | any | bus full/closed, or no engine drains (no `[control]` run) | `restart` |
 
-`SourceKind::is_synthetic()` (new, on `multiview-config`) is the single classification point —
-the same predicate `SyntheticKind::from_source_kind` implements in the CLI.
+`SourceKind::is_synthetic()` and `SourceKind::is_network_media()` (both on `multiview-config`)
+are the two classification points; `LiveSourceCapability::is_live(kind)` combines them with the
+run's declared truth. The SPA's saved toast echoes the per-response header value (the page can
+not know the build flavour; the response is the source of truth).
 
 Two honesty bounds on the header: **(a)** a submit that succeeds but is never drained (the engine
 stops before the next frame boundary) converges on restart semantics — the stored document remains
@@ -92,9 +100,30 @@ The split is **register-on-the-drain, produce-on-the-hub**:
 ### 4. One uniform producer path + per-source stop flags
 
 A hub-spawned synthetic producer runs the **same** `synth::generator_loop` the startup path runs
-(same cadence pacing, same lock-free `TileStore` publish, same chunked stop-poll). When level 2
-lands, a hub-spawned network producer runs the **same** `ingest_loop` (same supervised reconnect
-with jittered backoff, jitter handling, PTS normalization, rw-timeout) — never a parallel ingest.
+(same cadence pacing, same lock-free `TileStore` publish, same chunked stop-poll). A hub-spawned
+**network/file** producer (level 2, shipped) runs the **same** `ingest_loop` (same supervised
+reconnect with jittered backoff, jitter handling, PTS normalization, rw-timeout) — never a
+parallel ingest. The single per-source construction is shared by extraction:
+`ingest_plan_for` builds the plan and `spawn_ingest_producer` (one fn) creates + registers the
+per-source stop flag and spawns the named thread — `IngestSupervisor::start` (startup) and the
+hub's `IngestSpawner` (`Pipeline::live_ingest_spawner`, the `LiveIngestSpawner`) both call it.
+
+Two as-built notes on the level-2 spawn:
+
+- **Tile geometry** comes from the *startup* solved layout (`cell_pixel_size`, canvas fallback) —
+  a freshly added source is typically unbound until the follow-up route, so it decodes at canvas
+  size, exactly like an unbound startup source (decode-at-display-resolution is an efficiency
+  lever; the compositor scales either way).
+- **Registration pattern (decided):** the drain registers the store and bindings immediately at
+  the frame boundary and the tile rides `NO_SIGNAL → LIVE` as the hub-spawned ingest comes up —
+  the same pattern the synthetic flow shipped with. No "hub reports ready" handshake exists or is
+  needed: ADR-T002's state machine covers the warm-up window, and a spawn that ultimately fails
+  leaves an honest slate.
+- **Captions gap (honest):** a live-added network source gets **no** native caption reader or
+  burn-in until restart — the run's `SubtitleRouter`/baker layer set is built at drive start, so
+  spawning a reader would publish cues nothing samples. Caption-reader *teardown* on remove/edit
+  is wired (the `{id}/`-prefixed flags); live caption *attach* is a follow-up that needs a
+  runtime-extensible subtitle router.
 
 Teardown needs per-source granularity, so the startup supervisors move from one shared stop flag
 to **one stop flag per producer thread**, registered in a shared **stop registry**
@@ -143,16 +172,38 @@ operator re-routes that cell — held, never a panic, never a falter.
 - **Synthetic add/edit/remove (this slice):** zero decode/GPU demand — there is nothing for the
   placement engine to place (CPU raster into a shared frame, one bake/s for a clock). Consulting
   the planner would be a fabricated no-op; we state that instead of pretending.
-- **Network add (level 2 — designed here, ships with level 2):** the hub consults the **same**
-  scorer the startup admission uses (`multiview_hal::select_device`, the exact
-  `select_admission_pick` path in `pipeline.rs`), with two changes honouring the placement
-  principle: candidates/pins are **pinned to the running island's device**
-  (`Pins::pin_pipeline(island_device)`) — a runtime add may never fragment or migrate the island —
-  and the demand is the island's current tile set **plus** the new decode (`TileLoad::new(Decode,
-  …)`), re-polling NVML at decision time. An admit stamps the island's `cuda_ordinal` on the new
-  `IngestPlan` (NVDEC co-located, ADR-0035 Tier-1/Tier-2 affinity + perf-class budget); a reject
-  (budget/headroom) degrades **that source only** to software decode (`cuda_ordinal: None`) with a
-  loud warning — the island is never overcommitted and the output never falters.
+- **Network add (level 2 — SHIPPED):** the hub consults the **same** scorer the startup
+  admission uses (`multiview_hal::select_device`, the exact `select_admission_pick` path in
+  `pipeline.rs` — implemented as `select_live_decode_pick`), with two changes honouring the
+  placement principle: the **candidate set is exactly the running island's device** — a runtime
+  add may never fragment or migrate the island — and the demand is the island's current tile set
+  **plus** the new decode (`TileLoad::new(Decode, …)`), re-polling NVML at decision time. An
+  admit stamps the island's `cuda_ordinal` on the new `IngestPlan` (NVDEC co-located, ADR-0035
+  Tier-1/Tier-2 affinity + perf-class budget); a reject (budget/headroom/island absent from the
+  snapshot) degrades **that source only** to software decode (`cuda_ordinal: None`) with a loud
+  warning — the island is never overcommitted and the output never falters.
+
+  *Amendments where reality diverged from the sketch above:*
+  - The sketch named `Pins::pin_pipeline(island_device)`. As built, the consult **restricts the
+    candidate set to the island device with no pin** instead: a hal pin deliberately *bypasses*
+    the headroom ceiling (operator-pins-always-win, by design), which would have defeated this
+    section's reject → software-decode ladder. The single-candidate set preserves the
+    never-fragment guarantee identically (the scorer physically cannot name another GPU) while
+    keeping the headroom gate live.
+  - The live demand sets `opens_encode_session = false`: a decode-only add opens no NEW NVENC
+    session, and the island's running session is already in the *measured* snapshot — modelling
+    it again would double-count it against the session ceiling. (The demand still carries the
+    island's composite + encode tile loads, as startup models them; the budget gate sees the
+    same shape.)
+  - The island identity (`LiveIsland`: device id + CUDA ordinal + startup tile count) is
+    published by `drive_streaming` into a lock-free slot (`ArcSwapOption`) after the decide-once
+    admission pick; the spawner reads it per spawn. No pinned island (GPU-free host, no NVML, a
+    startup scorer rejection) ⇒ no consult and `cuda_ordinal: None` — in lockstep with the
+    startup plans, exactly the degrade ladder above.
+  - The demand's "current tile set" is the **startup** tile count + the one new decode.
+    Previously live-added decodes are not re-modelled in the demand: they are already in the
+    *measured* NVML load the scorer reads (re-modelling them would double-count). This is the
+    same measured-load stance as removal, below.
 - **Removal returns its budget implicitly:** the startup path books nothing — placement decisions
   read *measured* NVML load per decision, so a removed source's NVDEC/VRAM consumption disappears
   from the next decision's inputs when its decoder closes. There is **no allocation ledger** to
@@ -172,16 +223,25 @@ operator re-routes that cell — held, never a panic, never a falter.
 
 ## Scope shipped vs designed
 
-Shipped in this slice (vertical, end-to-end, soak-gated): **level 1** (live add, synthetic kinds),
-**level 3** (live remove, any kind whose producer is registry-known; composition-plane removal for
-all kinds), **level 4** (live edit synthetic→synthetic via store-reuse upsert). The UI copy and
-OpenAPI descriptions state exactly this per-kind split.
+Shipped (vertical, end-to-end, soak-gated): **level 1** (live add, synthetic kinds), **level 2**
+(live add/edit of network/file kinds — rtsp/hls/ts/srt/rtmp/file — via the hub-spawned
+`ingest_loop` + the island-pinned placement consult above, on the full-pipeline run; the
+`LiveSourceCapability` signal keeps the software run's header at `restart`), **level 3** (live
+remove, any kind whose producer is registry-known; composition-plane removal for all kinds),
+**level 4** (live edit via store-reuse upsert — synthetic↔synthetic, network↔network, and
+synthetic↔network on a network-capable run). The UI copy, the per-save toast (echoing the
+response header) and OpenAPI descriptions state exactly this per-kind split.
 
-Designed but **not** shipped here (header stays `restart` — truthful): **level 2** network-kind
-live add (rtsp/hls/ts/srt/rtmp/file via hub-spawned `ingest_loop` + the pinned placement consult
-above), `ndi`/`youtube` kinds, and the placement booking ledger. Caption-reader teardown on
-remove/edit **is** shipped: readers register under `{id}/captions` and the hub raises every
-`{id}`-rooted flag.
+Not shipped (header stays `restart` — truthful, with the per-kind reason):
+
+- `ndi` — bypasses libav entirely (runtime-loaded host-memory receive; the SDK-backed receiver
+  bind is itself still the deferred live-only half of NDI ingest);
+- `youtube` — needs the external `yt-dlp` resolver behind the off-by-default `youtube` feature;
+  wiring its capability honestly needs a per-feature signal + resolver-availability check;
+- `aes67` — audio-only; the CLI pipeline has no video ingest plan for it at all;
+- the placement **booking ledger** (in-flight spawns not yet visible to NVML counters);
+- live caption attach for runtime-added sources (see §4 — the subtitle router is built at drive
+  start; teardown of caption readers **is** shipped via the `{id}/`-rooted flags).
 
 ## Alternatives considered
 
@@ -211,5 +271,7 @@ remove/edit **is** shipped: readers register under `{id}/captions` and the hub r
   live adds/removes.
 - Startup supervisors carry one stop flag per producer (same join semantics; `shutdown` raises
   all), enabling targeted teardown forever after.
-- When level 2 lands, the header flips to `live` for network kinds with **no path change** —
-  exactly the per-class flip ADR-W015 anticipated.
+- Level 2 flipped the header to `live` for network kinds with **no path change** — exactly the
+  per-class flip ADR-W015 anticipated — and introduced the `LiveSourceCapability` run signal:
+  any future kind that gains a live spawn path flips its header by widening the capability the
+  binary derives from its wired seams, never by re-classifying in the control plane.
