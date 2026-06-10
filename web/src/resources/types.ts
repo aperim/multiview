@@ -10,7 +10,7 @@
 // `as`-casts.
 
 /** The resource collections the SPA manages (the REST path segment). */
-export type ResourceKind = 'sources' | 'outputs' | 'overlays';
+export type ResourceKind = 'sources' | 'outputs' | 'overlays' | 'probes';
 
 /**
  * A persisted resource record, exactly as the control plane returns it: a stable
@@ -147,6 +147,36 @@ export const OVERLAY_KINDS: readonly OverlayKind[] = [
   'image',
   'subtitle',
 ];
+
+/**
+ * The per-cell fail-state probe kinds (config `ProbeKind`, internally tagged
+ * by `kind`, flattened into the probe body). These tags are the literal config
+ * wire kinds (snake_case).
+ */
+export type ProbeKind = 'black' | 'freeze' | 'silence' | 'loudness';
+
+/** All probe kinds, for building selectors. */
+export const PROBE_KINDS: readonly ProbeKind[] = ['black', 'freeze', 'silence', 'loudness'];
+
+/** A configured per-cell fail-state probe. */
+export interface ProbeView {
+  /** Stable probe id. */
+  readonly id: string;
+  /** Operator label. */
+  readonly name: string;
+  /** Probe kind (folded for typed consumers). */
+  readonly kind: ProbeKind;
+  /** The kind tag exactly as authored in the stored body. */
+  readonly rawKind: string;
+  /** Whether this UI can edit the record (see {@link SourceView.editable}). */
+  readonly editable: boolean;
+  /** The cell id the probe watches. */
+  readonly cell: string;
+  /** The X.733 perceived severity the probe asserts (wire form, PascalCase). */
+  readonly severity: string;
+  /** Whether the alarm latches until explicitly reset. */
+  readonly latched: boolean;
+}
 
 /** A configured overlay layer. */
 export interface OverlayView {

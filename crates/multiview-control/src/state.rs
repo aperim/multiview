@@ -23,8 +23,8 @@ use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
 use crate::resource_store::{
-    InMemoryOutputStore, InMemoryOverlayStore, InMemorySourceStore, ResourceInput,
-    ResourceRepository,
+    InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore, InMemorySourceStore,
+    ResourceInput, ResourceRepository,
 };
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
@@ -54,9 +54,9 @@ pub type EngineStateSnapshot = serde_json::Value;
 /// The control-plane resource stores seeded from a loaded [`MultiviewConfig`].
 ///
 /// Produced by [`seed_resources`] and installed onto an [`AppState`] with
-/// [`AppState::with_seeded_resources`], so the web UI Sources/Outputs/Overlays
-/// (and layout) pages are non-empty under a live `multiview run` instead of
-/// starting blank. The stores are ordinary in-memory control-plane state:
+/// [`AppState::with_seeded_resources`], so the web UI
+/// Sources/Outputs/Overlays/Probes (and layout) pages are non-empty under a
+/// live `multiview run` instead of starting blank. The stores are ordinary in-memory control-plane state:
 /// read-mostly, never on the engine's data plane, so they cannot back-pressure
 /// the engine (invariant #10). Seeding happens once at bind time, off the
 /// per-tick hot loop.
@@ -67,6 +67,9 @@ pub struct SeededResources {
     pub outputs: Arc<dyn ResourceRepository>,
     /// The `overlays` store, one resource per `config.overlays`.
     pub overlays: Arc<dyn ResourceRepository>,
+    /// The `probes` store, one resource per `config.probes` (per-cell
+    /// fail-state detection: black / freeze / silence / loudness).
+    pub probes: Arc<dyn ResourceRepository>,
     /// The audio-routing singleton store, seeded from the config's optional
     /// `[audio]` block (unconfigured when the config carries none).
     pub audio: Arc<AudioRoutingStore>,
@@ -143,6 +146,17 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         )?;
     }
 
+    let probes = InMemoryProbeStore::new();
+    for probe in &config.probes {
+        probes.create(
+            &probe.id,
+            ResourceInput {
+                name: probe.id.clone(),
+                body: to_body(probe)?,
+            },
+        )?;
+    }
+
     let outputs = InMemoryOutputStore::new();
     for (index, output) in config.outputs.iter().enumerate() {
         // Outputs carry no intrinsic id in the config schema; assign a stable,
@@ -165,6 +179,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         sources: Arc::new(sources),
         outputs: Arc::new(outputs),
         overlays: Arc::new(overlays),
+        probes: Arc::new(probes),
         audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
         layouts: Arc::new(layouts),
         working_layout_id,
@@ -231,6 +246,9 @@ pub struct AppState {
     pub outputs: Arc<dyn ResourceRepository>,
     /// The overlays store (versioned CRUD over config-as-code overlay layers).
     pub overlays: Arc<dyn ResourceRepository>,
+    /// The probes store (versioned CRUD over config-as-code per-cell
+    /// fail-state detectors: black / freeze / silence / loudness).
+    pub probes: Arc<dyn ResourceRepository>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -306,8 +324,8 @@ pub struct AppState {
     /// The complete configuration document loaded at startup (serialized
     /// verbatim), used as the baseline for `GET /api/v1/config/export` so
     /// sections the resource stores do not carry (control, placement, audio,
-    /// probes, salvos, tally profiles, walls, routing) are never destroyed by
-    /// an export round-trip. `None` for store-only deployments (tests).
+    /// salvos, tally profiles, walls, routing) are never destroyed by an
+    /// export round-trip. `None` for store-only deployments (tests).
     pub base_document: Option<Arc<serde_json::Value>>,
     /// The layout id `GET /api/v1/config/export` composes canvas/layout/cells
     /// from (set by seeding; `None` falls back to the first layout carrying a
@@ -343,6 +361,7 @@ impl AppState {
             sources: Arc::new(InMemorySourceStore::new()),
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
+            probes: Arc::new(InMemoryProbeStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -501,6 +520,13 @@ impl AppState {
         self
     }
 
+    /// Replace the probes store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_probes_store(mut self, probes: Arc<dyn ResourceRepository>) -> Self {
+        self.probes = probes;
+        self
+    }
+
     /// Replace the audio-routing singleton store (e.g. to share one seeded
     /// store with a test).
     #[must_use]
@@ -521,6 +547,7 @@ impl AppState {
         self.sources = seeded.sources;
         self.outputs = seeded.outputs;
         self.overlays = seeded.overlays;
+        self.probes = seeded.probes;
         self.audio_routing = seeded.audio;
         self.repository = seeded.layouts;
         self.working_layout_id = Some(seeded.working_layout_id);
@@ -655,12 +682,12 @@ mod seed_tests {
         clippy::panic
     )]
 
-    use multiview_config::{MultiviewConfig, Output, Overlay, Source};
+    use multiview_config::{MultiviewConfig, Output, Overlay, Probe, Source};
 
     use super::seed_resources;
 
-    /// A config carrying 3 sources, 2 outputs, and 1 overlay (plus the
-    /// canvas/layout/cells the parser requires).
+    /// A config carrying 3 sources, 2 outputs, 1 overlay, and 2 probes (plus
+    /// the canvas/layout/cells the parser requires).
     const SEED_DOC: &str = r##"schema_version = 1
 [canvas]
 width = 64
@@ -702,6 +729,16 @@ input_id = "cam_b"
 id = "clock_1"
 kind = "clock"
 target = "canvas"
+[[probes]]
+id = "black_a"
+cell = "cell_a"
+kind = "black"
+luma_threshold = 16
+[[probes]]
+id = "silence_b"
+cell = "cell_b"
+kind = "silence"
+level_dbfs = -60.0
 [[outputs]]
 kind = "rtsp_server"
 mount = "/multiview"
@@ -787,6 +824,25 @@ areas = ["a"]
     }
 
     #[test]
+    fn seeds_probes_with_roundtrip_bodies() {
+        let config = MultiviewConfig::load_from_toml(SEED_DOC).expect("parse seed config");
+        let seeded = seed_resources(&config).expect("seed resources");
+
+        let probes = seeded.probes.list().expect("list probes");
+        let ids: Vec<&str> = probes.iter().map(|v| v.resource.id.as_str()).collect();
+        assert_eq!(ids, vec!["black_a", "silence_b"], "id-sorted config probes");
+        for want in &config.probes {
+            let stored = seeded.probes.get(&want.id).expect("probe present");
+            let got: Probe =
+                serde_json::from_value(stored.resource.body.clone()).expect("body is a Probe");
+            assert_eq!(
+                &got, want,
+                "seeded body must round-trip to the config probe"
+            );
+        }
+    }
+
+    #[test]
     fn empty_config_yields_empty_stores() {
         let config = MultiviewConfig::load_from_toml(EMPTY_DOC).expect("parse empty config");
         let seeded = seed_resources(&config).expect("seed resources");
@@ -794,6 +850,7 @@ areas = ["a"]
         assert!(seeded.sources.list().expect("list").is_empty());
         assert!(seeded.outputs.list().expect("list").is_empty());
         assert!(seeded.overlays.list().expect("list").is_empty());
+        assert!(seeded.probes.list().expect("list").is_empty());
         let (audio, _) = seeded.audio.snapshot();
         assert!(
             audio.is_none(),

@@ -1116,6 +1116,144 @@ pub struct OverlayBodyDoc {
     pub params: serde_json::Map<String, serde_json::Value>,
 }
 
+/// `OpenAPI` mirror of `multiview_config::DetectionZone` (normalized
+/// sub-rectangle of a tile, `0.0..=1.0` on both axes).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DetectionZoneDoc {
+    /// Left edge (fraction of tile width).
+    pub x: f32,
+    /// Top edge (fraction of tile height).
+    pub y: f32,
+    /// Width (fraction of tile width).
+    pub w: f32,
+    /// Height (fraction of tile height).
+    pub h: f32,
+}
+
+impl Default for DetectionZoneDoc {
+    /// The full-frame zone (`x = 0`, `y = 0`, `w = 1`, `h = 1`), mirroring the
+    /// config default.
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        }
+    }
+}
+
+/// `OpenAPI` mirror of `multiview_config::Dwell` (raise/clear debounce
+/// milliseconds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DwellDoc {
+    /// Milliseconds the condition must persist before the alarm **raises**.
+    pub up_ms: u32,
+    /// Milliseconds the condition must clear before the alarm **clears**.
+    pub down_ms: u32,
+}
+
+impl Default for DwellDoc {
+    /// A symmetric one-second dwell up and down, mirroring the config default.
+    fn default() -> Self {
+        Self {
+            up_ms: 1000,
+            down_ms: 1000,
+        }
+    }
+}
+
+/// `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
+/// `snake_case`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LoudnessTargetDoc {
+    /// EBU R128 (default integrated target −23.0 LUFS).
+    R128 {
+        /// Integrated-loudness target in LUFS (e.g. `-23.0`).
+        target_lufs: f32,
+        /// Maximum permitted true-peak in dBTP (e.g. `-1.0`).
+        max_true_peak_dbtp: f32,
+    },
+    /// ATSC A/85 (default integrated target −24.0 LKFS).
+    A85 {
+        /// Integrated-loudness target in LKFS (e.g. `-24.0`).
+        target_lkfs: f32,
+        /// Maximum permitted true-peak in dBTP (e.g. `-2.0`).
+        max_true_peak_dbtp: f32,
+    },
+}
+
+/// `OpenAPI` mirror of `multiview_config::ProbeKind` (tagged by `kind`,
+/// `snake_case`, flattened into the probe body).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ProbeKindDoc {
+    /// Black-picture detection within the zone.
+    Black {
+        /// Luma ceiling (8-bit, `0..=255`) at or below which a pixel is "black".
+        luma_threshold: u8,
+        /// Detection zone within the tile (defaults to the full frame).
+        #[serde(default)]
+        zone: DetectionZoneDoc,
+    },
+    /// Freeze detection within the zone.
+    Freeze {
+        /// Inter-frame difference floor (per-mille, `0..=1000`) below which the
+        /// picture counts as frozen.
+        difference_threshold: u16,
+        /// Detection zone within the tile (defaults to the full frame).
+        #[serde(default)]
+        zone: DetectionZoneDoc,
+    },
+    /// Silence detection on the cell's audio.
+    Silence {
+        /// Level ceiling in dBFS at or below which audio counts as silent.
+        level_dbfs: f32,
+    },
+    /// Loudness-violation detection against a compliance target.
+    Loudness {
+        /// The loudness compliance target.
+        target: LoudnessTargetDoc,
+    },
+}
+
+/// The default probe severity, mirroring the config default
+/// (`PerceivedSeverity::Cleared`).
+fn default_probe_severity() -> PerceivedSeverityDoc {
+    PerceivedSeverityDoc::Cleared
+}
+
+/// `OpenAPI` mirror of `multiview_config::Probe` — the body accepted by
+/// `POST`/`PUT /api/v1/probes/{id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct ProbeBodyDoc {
+    /// Stable probe id; may be omitted (the path id is injected).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The cell id this probe watches.
+    pub cell: String,
+    /// The kind-specific payload (`kind` + its fields sit at top level).
+    #[serde(flatten)]
+    pub kind: ProbeKindDoc,
+    /// Dwell windows (raise/clear debounce; defaults to 1 s each way).
+    #[serde(default)]
+    pub dwell: DwellDoc,
+    /// The perceived severity (X.733) asserted when this probe fires.
+    #[serde(default = "default_probe_severity")]
+    pub severity: PerceivedSeverityDoc,
+    /// Whether the alarm latches (held until explicitly reset).
+    #[serde(default)]
+    pub latched: bool,
+}
+
 /// The request envelope for `POST`/`PUT /api/v1/sources/{id}` (`name` + body).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
@@ -1144,4 +1282,14 @@ pub struct OverlayResourceInputDoc {
     pub name: String,
     /// The overlay document.
     pub body: OverlayBodyDoc,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/probes/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct ProbeResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The probe document.
+    pub body: ProbeBodyDoc,
 }
