@@ -130,6 +130,10 @@ where
         Arc::new(api_keys),
     )
     .with_seeded_resources(seeded)
+    .with_base_document(
+        serde_json::to_value(config)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
+    )
     .with_preview(preview)
     .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);

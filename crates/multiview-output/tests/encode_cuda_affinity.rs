@@ -56,6 +56,7 @@ fn gray_nv12_frame(width: u32, height: u32) -> DecodedVideoFrame {
             color: ColorInfo::default(),
         },
         raw_pts: None,
+        a53_cc: None,
     }
 }
 

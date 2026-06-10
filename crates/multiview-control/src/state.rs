@@ -68,6 +68,10 @@ pub struct SeededResources {
     pub overlays: Arc<dyn ResourceRepository>,
     /// The layout store carrying the single working layout (canvas + cells).
     pub layouts: Arc<dyn Repository>,
+    /// The id the working layout was seeded under (the solved layout's name,
+    /// else `"working"`) — the layout `GET /api/v1/config/export` composes
+    /// canvas/layout/cells from.
+    pub working_layout_id: String,
 }
 
 /// Map a `serde_json` serialization fault to a repository error.
@@ -151,13 +155,14 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
     }
 
     let layouts = InMemoryRepository::new();
-    seed_working_layout(config, &layouts)?;
+    let working_layout_id = seed_working_layout(config, &layouts)?;
 
     Ok(SeededResources {
         sources: Arc::new(sources),
         outputs: Arc::new(outputs),
         overlays: Arc::new(overlays),
         layouts: Arc::new(layouts),
+        working_layout_id,
     })
 }
 
@@ -173,7 +178,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
 fn seed_working_layout(
     config: &MultiviewConfig,
     layouts: &InMemoryRepository,
-) -> ControlResult<()> {
+) -> ControlResult<String> {
     let id = config
         .solve_layout()
         .ok()
@@ -190,7 +195,7 @@ fn seed_working_layout(
             body,
         },
     )?;
-    Ok(())
+    Ok(id)
 }
 
 /// The shared application state.
@@ -289,6 +294,16 @@ pub struct AppState {
     /// [`Principal::local_admin`](crate::auth::Principal::local_admin) without a
     /// token, so the whole API + WS/SSE are open.
     pub auth_disabled: bool,
+    /// The complete configuration document loaded at startup (serialized
+    /// verbatim), used as the baseline for `GET /api/v1/config/export` so
+    /// sections the resource stores do not carry (control, placement, audio,
+    /// probes, salvos, tally profiles, walls, routing) are never destroyed by
+    /// an export round-trip. `None` for store-only deployments (tests).
+    pub base_document: Option<Arc<serde_json::Value>>,
+    /// The layout id `GET /api/v1/config/export` composes canvas/layout/cells
+    /// from (set by seeding; `None` falls back to the first layout carrying a
+    /// `canvas`).
+    pub working_layout_id: Option<String>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -314,6 +329,8 @@ impl AppState {
             engine,
             commands,
             repository,
+            base_document: None,
+            working_layout_id: None,
             sources: Arc::new(InMemorySourceStore::new()),
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
@@ -487,6 +504,23 @@ impl AppState {
         self.outputs = seeded.outputs;
         self.overlays = seeded.overlays;
         self.repository = seeded.layouts;
+        self.working_layout_id = Some(seeded.working_layout_id);
+        self
+    }
+
+    /// Install the loaded configuration document as the export baseline
+    /// (`GET /api/v1/config/export` overlays the live stores onto it, so
+    /// authored sections the stores do not carry survive the round-trip).
+    #[must_use]
+    pub fn with_base_document(mut self, document: serde_json::Value) -> Self {
+        self.base_document = Some(Arc::new(document));
+        self
+    }
+
+    /// Designate the layout id the export composes canvas/layout/cells from.
+    #[must_use]
+    pub fn with_working_layout_id(mut self, id: impl Into<String>) -> Self {
+        self.working_layout_id = Some(id.into());
         self
     }
 

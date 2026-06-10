@@ -6,6 +6,7 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { getStoredToken, setStoredToken } from "../api/token";
+import { ExportConfigButton } from "../resources/FormControls";
 import { LocaleSwitcher } from "../components/LocaleSwitcher";
 import { PageHeader } from "../components/PageHeader";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -128,6 +129,26 @@ export function SettingsPage(): JSX.Element {
                 <Trans>Clear</Trans>
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>
+              <Trans>Configuration export</Trans>
+            </CardTitle>
+            <CardDescription>
+              <Trans>
+                Download the current stores (sources, outputs, overlays,
+                layouts, canvas) as multiview.toml. Stored UI edits take effect
+                when Multiview restarts with this file; live actions (apply
+                layout, swap, routing, salvos) act on the running engine
+                immediately.
+              </Trans>
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExportConfigButton />
           </CardContent>
         </Card>
 

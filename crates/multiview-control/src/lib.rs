@@ -61,6 +61,7 @@ pub mod salvo_store;
 pub mod state;
 pub mod tally_ingest;
 pub mod tally_state;
+pub(crate) mod typed_resources;
 pub mod versioning;
 pub mod warning_ingest;
 pub mod warning_store;

@@ -9,6 +9,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { createApiClient } from '../api/client';
 import { useLayouts, useSaveLayout } from '../api/queries';
+import { applyLayoutCommand } from '../layout/applyLayout';
 import { fromLayoutBody } from '../layout/model';
 import type { LayoutModel } from '../layout/model';
 import { LayoutEditor } from '../layout/components/LayoutEditor';
@@ -61,6 +62,42 @@ export function LayoutEditorPage(): JSX.Element {
         onSuccess: (): void => {
           toast({ title: t`Layout saved` });
           void navigate('/layouts');
+        },
+        onError: (error): void => {
+          toast({
+            title: t`Could not save layout`,
+            description: error.message,
+            variant: 'destructive',
+          });
+        },
+      },
+    );
+  };
+
+  // Save & Apply: persist first, then submit the LIVE apply-layout command
+  // (202 + operation id; outcome on the realtime stream). A failed apply
+  // leaves the layout saved — the toast says which step failed.
+  const handleSaveAndApply = (payload: LayoutSavePayload): void => {
+    const id = payload.id !== '' ? payload.id : crypto.randomUUID();
+    save.mutate(
+      { id, input: { name: payload.name, body: payload.body } },
+      {
+        onSuccess: (): void => {
+          applyLayoutCommand(id)
+            .then((accepted): void => {
+              toast({
+                title: t`Layout saved; apply accepted`,
+                description: `${t`Operation id`}: ${accepted.operation_id}`,
+              });
+              void navigate('/layouts');
+            })
+            .catch((error: unknown): void => {
+              toast({
+                title: t`Layout saved, but apply failed`,
+                description: error instanceof Error ? error.message : String(error),
+                variant: 'destructive',
+              });
+            });
         },
         onError: (error): void => {
           toast({
@@ -133,6 +170,7 @@ export function LayoutEditorPage(): JSX.Element {
         sources={sources.data ?? []}
         overlays={overlays.data ?? []}
         onSave={handleSave}
+        onSaveAndApply={handleSaveAndApply}
         isSaving={save.isPending}
       />
     </>

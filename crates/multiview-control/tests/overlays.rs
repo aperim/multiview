@@ -186,12 +186,20 @@ async fn list_returns_created_overlays_sorted() {
     let h = harness();
     send(
         &h.router,
-        post_json("/api/v1/overlays/bbb", OPERATOR_TOKEN, &overlay_body("B")),
+        post_json(
+            "/api/v1/overlays/bbb",
+            OPERATOR_TOKEN,
+            &json!({ "name": "B", "body": { "kind": "clock", "target": "canvas" } }),
+        ),
     )
     .await;
     send(
         &h.router,
-        post_json("/api/v1/overlays/aaa", OPERATOR_TOKEN, &overlay_body("A")),
+        post_json(
+            "/api/v1/overlays/aaa",
+            OPERATOR_TOKEN,
+            &json!({ "name": "A", "body": { "kind": "clock", "target": "canvas" } }),
+        ),
     )
     .await;
     let resp = send(&h.router, get("/api/v1/overlays", OPERATOR_TOKEN)).await;

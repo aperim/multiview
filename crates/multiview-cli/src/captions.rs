@@ -406,6 +406,151 @@ pub fn dvbsub_selector(kind: &multiview_config::SourceKind, selector: &CaptionSe
     )
 }
 
+/// Whether a source's selector resolves to the **in-container subtitle** path:
+/// a `Ts`/`File` source with an `Auto`, `Track`, or `TeletextPage` selector. The
+/// subtitle stream lives in the SAME container as the video (a TS DVB-sub /
+/// teletext PID, an MP4 `mov_text` track, a TS/MKV `ass`/`subrip` stream), so it
+/// is decoded on the source's own ingest thread (no second demux) and publishes
+/// its cues (bitmap or text) into the per-source store.
+///
+/// The concrete decoder is chosen from `(selector, actual stream codec)` at
+/// resolve time by [`incontainer_caption_source`] — `Auto`/`Track` map by codec
+/// (`dvbsub`→bitmap, `ass`/`subrip`/`mov_text`→text, `dvb_teletext`→teletext),
+/// while `TeletextPage` pins the page and requires a teletext stream.
+/// `EmbeddedCc`/`Off`/`Sidecar` are other paths; HLS takes the WebVTT-rendition
+/// path ([`webvtt_language`]).
+#[must_use]
+pub fn incontainer_selector_active(
+    kind: &multiview_config::SourceKind,
+    selector: &CaptionSelector,
+) -> bool {
+    use multiview_config::SourceKind;
+    if !matches!(kind, SourceKind::Ts { .. } | SourceKind::File { .. }) {
+        return false;
+    }
+    matches!(
+        selector,
+        CaptionSelector::Auto
+            | CaptionSelector::Track { .. }
+            | CaptionSelector::TeletextPage { .. }
+    )
+}
+
+/// Resolve the [`CaptionSource`] for an in-container subtitle stream from the
+/// source's `selector` and the actual subtitle stream's libav `codec_name`, or
+/// `None` when this path does not decode that combination (the tile then shows no
+/// caption rather than building a wrong/empty decoder).
+///
+/// * `Auto`/`Track` map purely by **codec**: `dvbsub`→DVB-sub bitmap,
+///   `ass`/`ssa`→ASS, `subrip`/`srt`/`text`→`SubRip`, `mov_text`/`tx3g`→MP4 timed
+///   text, `dvb_teletext`→teletext (decoder default page).
+/// * `TeletextPage { page }` pins the teletext **page** but only when the stream
+///   really is a teletext (`dvb_teletext`) stream; a `TeletextPage` selector over
+///   a non-teletext subtitle stream resolves to `None` (honest: that page is not
+///   present here).
+#[must_use]
+pub fn incontainer_caption_source(
+    selector: &CaptionSelector,
+    codec_name: &str,
+) -> Option<CaptionSource> {
+    match selector {
+        CaptionSelector::TeletextPage { page } => {
+            if matches!(codec_name, "dvb_teletext" | "teletext") {
+                Some(CaptionSource::Teletext { page: Some(*page) })
+            } else {
+                None
+            }
+        }
+        CaptionSelector::Auto | CaptionSelector::Track { .. } => match codec_name {
+            "dvbsub" | "dvb_subtitle" => Some(CaptionSource::DvbSubtitle),
+            "ass" | "ssa" => Some(CaptionSource::Ass),
+            "subrip" | "srt" | "text" => Some(CaptionSource::SubRip),
+            "mov_text" | "tx3g" => Some(CaptionSource::MovText),
+            "dvb_teletext" | "teletext" => Some(CaptionSource::Teletext { page: None }),
+            _ => None,
+        },
+        // Off / embedded-cc / sidecar are not the in-container subtitle path.
+        _ => None,
+    }
+}
+
+/// Resolve a [`CaptionSelector::EmbeddedCc`]'s `field` string to the
+/// [`CcChannel`](multiview_ffmpeg::CcChannel) the `cc_dec` embedded-CC decoder
+/// should surface, for a source whose video stream may carry A53 captions.
+///
+/// Embedded CEA-608/708 captions are side data on the **video** frames (not a
+/// separate stream — captions.md §2/§4), so this path applies to **any** source
+/// whose video the runtime decodes (TS/File/HLS/RTSP/RTMP/SRT). It returns
+/// `Some(channel)` only for an `embedded_cc` selector naming a **608 field**
+/// (`cc1`..`cc4`); a `708 service:N` field is a real but **undecodable-to-text**
+/// form for the linked `cc_dec` (it discards DTVCC service blocks), so it logs and
+/// returns [`None`] rather than wiring a silently cue-less decoder (the same honest
+/// refusal [`CaptionDecoder::open`](multiview_ffmpeg::CaptionDecoder) enforces).
+/// An unrecognised field also logs and returns [`None`]. Every other selector
+/// (`Auto`/`Off`/`TeletextPage`/`Track`/`Sidecar`) is not this path.
+///
+/// `auto` does **not** route here: embedded-CC presence is only known once A53
+/// side data actually flows, so it is selected explicitly via `embedded_cc`
+/// (captions.md §6), keeping the DVB-sub/teletext/WebVTT `auto` paths unchanged.
+#[must_use]
+pub fn embedded_cc_channel(
+    kind: &multiview_config::SourceKind,
+    selector: &CaptionSelector,
+) -> Option<multiview_ffmpeg::CcChannel> {
+    use multiview_config::SourceKind;
+    // A53 captions ride on the decoded video; only kinds whose video the runtime
+    // decodes via libav carry them (synthetic/NDI sources have no A53 stream).
+    let video_decoded = matches!(
+        kind,
+        SourceKind::Ts { .. }
+            | SourceKind::File { .. }
+            | SourceKind::Hls { .. }
+            | SourceKind::Rtsp { .. }
+            | SourceKind::Rtmp { .. }
+            | SourceKind::Srt { .. }
+    );
+    if !video_decoded {
+        return None;
+    }
+    let CaptionSelector::EmbeddedCc { field } = selector else {
+        return None;
+    };
+    parse_cc_field(field)
+}
+
+/// Parse an embedded-CC `field` string into a [`CcChannel`](multiview_ffmpeg::CcChannel).
+///
+/// Accepts `cc1`..`cc4` (case-insensitive) for the four CEA-608 fields. A
+/// `service:N` / `708:N` token names a CEA-708 service — a real form the linked
+/// `cc_dec` cannot decode to text — and is **refused** here (logged, [`None`]),
+/// mirroring the decoder's own honest refusal. Any other token logs and yields
+/// [`None`] (the tile simply shows no caption — never a panic, never a stall).
+fn parse_cc_field(field: &str) -> Option<multiview_ffmpeg::CcChannel> {
+    use multiview_ffmpeg::CcChannel;
+    match field.trim().to_ascii_lowercase().as_str() {
+        "cc1" => Some(CcChannel::Cc1),
+        "cc2" => Some(CcChannel::Cc2),
+        "cc3" => Some(CcChannel::Cc3),
+        "cc4" => Some(CcChannel::Cc4),
+        other => {
+            // A 708 service token is a known-undecodable form; anything else is
+            // unrecognised. Either way: log honestly and decline (no silent
+            // cue-less decoder), exactly like the decoder's construction guard.
+            if other.starts_with("service:") || other.starts_with("708:") || other == "708" {
+                tracing::warn!(
+                    field = %field,
+                    "embedded-CC 708 service text is not decodable by the linked cc_dec; \
+                     falling back to no embedded captions (use a 608 field cc1..cc4, teletext, \
+                     or a sidecar)"
+                );
+            } else {
+                tracing::warn!(field = %field, "unrecognised embedded-CC field; no embedded captions");
+            }
+            None
+        }
+    }
+}
+
 /// Publish each decoded **bitmap** cue into the store using its own `[start,
 /// end)` window — the DVB-sub sibling of [`publish_cues`], but with **no
 /// `CuePacer`**: these cues are decoded inside the source's already-PTS-paced
@@ -413,6 +558,17 @@ pub fn dvbsub_selector(kind: &multiview_config::SourceKind, selector: &CaptionSe
 /// its packet arrives (no separate wall-clock pacing needed). The store is the
 /// lock-free hand-off the off-hot-path baker samples per tick (#1/#10).
 pub fn publish_bitmap_cues(store: &CueStore, cues: Vec<CaptionCue>) {
+    publish_window_cues(store, cues);
+}
+
+/// Publish each decoded cue (text **or** bitmap) into the store using its own
+/// `[start, end)` window. The shared, shape-agnostic publish behind both the
+/// DVB-sub bitmap route ([`publish_bitmap_cues`]) and the embedded-CC / in-
+/// container TEXT routes: each is decoded inside the source's already-PTS-paced
+/// video ingest loop, so the cue is published at the media instant its packet/
+/// frame arrives (no separate wall-clock pacing needed). The store is the
+/// lock-free hand-off the off-hot-path baker samples per tick (#1/#10).
+pub fn publish_window_cues(store: &CueStore, cues: Vec<CaptionCue>) {
     for cue in cues {
         let (start, end) = (cue.start(), cue.end());
         store.publish(start, end, cue);
@@ -986,6 +1142,137 @@ mod tests {
         assert!(!dvbsub_selector(&file, &CaptionSelector::Off));
         // HLS is the WebVTT-rendition path, not the in-container dvbsub path.
         assert!(!dvbsub_selector(&hls, &CaptionSelector::Auto));
+    }
+
+    #[test]
+    fn incontainer_selector_active_for_ts_or_file_auto_track_or_teletext() {
+        use multiview_config::SourceKind;
+        let ts = SourceKind::Ts {
+            url: "udp://x".to_owned(),
+        };
+        let file = SourceKind::File {
+            path: "/x.ts".to_owned(),
+        };
+        let hls = SourceKind::Hls {
+            url: "https://x/m.m3u8".to_owned(),
+        };
+        assert!(incontainer_selector_active(&ts, &CaptionSelector::Auto));
+        assert!(incontainer_selector_active(
+            &file,
+            &CaptionSelector::Track {
+                id: "eng".to_owned()
+            }
+        ));
+        // Teletext IS the in-container path (it is a muxed PID, decoded in-demux).
+        assert!(incontainer_selector_active(
+            &ts,
+            &CaptionSelector::TeletextPage { page: 801 }
+        ));
+        // Off / embedded-cc / sidecar are not this path.
+        assert!(!incontainer_selector_active(&file, &CaptionSelector::Off));
+        assert!(!incontainer_selector_active(
+            &ts,
+            &CaptionSelector::EmbeddedCc {
+                field: "cc1".to_owned()
+            }
+        ));
+        // HLS takes the WebVTT-rendition path, not the in-container path.
+        assert!(!incontainer_selector_active(&hls, &CaptionSelector::Auto));
+    }
+
+    #[test]
+    fn incontainer_caption_source_maps_every_supported_codec() {
+        // Auto/Track map by codec — none of the decoder's in-container forms may be
+        // silently dropped at the wiring layer.
+        let auto = CaptionSelector::Auto;
+        assert_eq!(
+            incontainer_caption_source(&auto, "dvbsub"),
+            Some(CaptionSource::DvbSubtitle)
+        );
+        assert_eq!(
+            incontainer_caption_source(&auto, "ass"),
+            Some(CaptionSource::Ass)
+        );
+        assert_eq!(
+            incontainer_caption_source(&auto, "ssa"),
+            Some(CaptionSource::Ass)
+        );
+        assert_eq!(
+            incontainer_caption_source(&auto, "subrip"),
+            Some(CaptionSource::SubRip)
+        );
+        assert_eq!(
+            incontainer_caption_source(&auto, "mov_text"),
+            Some(CaptionSource::MovText)
+        );
+        assert_eq!(
+            incontainer_caption_source(&auto, "dvb_teletext"),
+            Some(CaptionSource::Teletext { page: None })
+        );
+        // A codec this path does not decode declines (no wrong/empty decoder).
+        assert_eq!(incontainer_caption_source(&auto, "hdmv_pgs_subtitle"), None);
+        // TeletextPage pins the page, but only over a real teletext stream.
+        let tt = CaptionSelector::TeletextPage { page: 801 };
+        assert_eq!(
+            incontainer_caption_source(&tt, "dvb_teletext"),
+            Some(CaptionSource::Teletext { page: Some(801) })
+        );
+        assert_eq!(
+            incontainer_caption_source(&tt, "dvbsub"),
+            None,
+            "a teletext_page selector over a non-teletext stream must decline"
+        );
+        // Off / embedded-cc / sidecar are not this path.
+        assert_eq!(
+            incontainer_caption_source(&CaptionSelector::Off, "ass"),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_cc_channel_maps_608_fields_and_refuses_708_and_non_video_kinds() {
+        use multiview_config::SourceKind;
+        use multiview_ffmpeg::CcChannel;
+        let ts = SourceKind::Ts {
+            url: "udp://x".to_owned(),
+        };
+        let field = |f: &str| CaptionSelector::EmbeddedCc {
+            field: f.to_owned(),
+        };
+        // Each 608 field maps (case-insensitively).
+        assert_eq!(
+            embedded_cc_channel(&ts, &field("cc1")),
+            Some(CcChannel::Cc1)
+        );
+        assert_eq!(
+            embedded_cc_channel(&ts, &field("CC2")),
+            Some(CcChannel::Cc2)
+        );
+        assert_eq!(
+            embedded_cc_channel(&ts, &field("cc3")),
+            Some(CcChannel::Cc3)
+        );
+        assert_eq!(
+            embedded_cc_channel(&ts, &field("cc4")),
+            Some(CcChannel::Cc4)
+        );
+        // A 708 service is refused honestly (the linked cc_dec has no 708 text).
+        assert_eq!(embedded_cc_channel(&ts, &field("service:1")), None);
+        assert_eq!(embedded_cc_channel(&ts, &field("708:1")), None);
+        // An unrecognised field declines.
+        assert_eq!(embedded_cc_channel(&ts, &field("nonsense")), None);
+        // Embedded CC rides the video, so it is offered for any video-decoded kind.
+        let hls = SourceKind::Hls {
+            url: "https://x/m.m3u8".to_owned(),
+        };
+        assert_eq!(
+            embedded_cc_channel(&hls, &field("cc1")),
+            Some(CcChannel::Cc1)
+        );
+        // A synthetic source has no video stream / A53 — declines.
+        assert_eq!(embedded_cc_channel(&SourceKind::Bars, &field("cc1")), None);
+        // A non-embedded selector is not this path.
+        assert_eq!(embedded_cc_channel(&ts, &CaptionSelector::Auto), None);
     }
 
     #[test]

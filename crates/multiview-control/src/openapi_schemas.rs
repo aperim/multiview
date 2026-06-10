@@ -600,3 +600,472 @@ pub struct HealthWarningDoc {
     /// Whether the condition is currently active.
     pub active: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Resource-body mirrors (ADR-W015): the `OpenAPI` contract for the documents
+// accepted by `/api/v1/sources|outputs|overlays`. The handlers validate and
+// store the real `multiview_config` types; these mirrors exist only so the
+// generated document (and the generated SPA client) describes the per-kind
+// fields instead of an opaque object. `tests/typed_resources.rs` pins the
+// shapes together so they cannot drift.
+// ---------------------------------------------------------------------------
+
+/// `OpenAPI` mirror of `multiview_config::SourceAuth` (reference-only secret).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SourceAuthDoc {
+    /// A secret reference (e.g. `op://Servers/cam/credentials`), never plaintext.
+    pub secret_ref: String,
+}
+
+/// `OpenAPI` mirror of `multiview_config::ColorOverride` (four color axes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct ColorOverrideDoc {
+    /// Primaries axis (`auto` or an explicit primaries token).
+    #[serde(default)]
+    pub primaries: Option<String>,
+    /// Transfer axis.
+    #[serde(default)]
+    pub transfer: Option<String>,
+    /// Matrix axis.
+    #[serde(default)]
+    pub matrix: Option<String>,
+    /// Range axis.
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+/// `OpenAPI` mirror of `multiview_config::CaptionSelector` (tagged by `mode`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CaptionSelectorDoc {
+    /// Auto-select the first usable caption track.
+    Auto,
+    /// Captions explicitly disabled.
+    Off,
+    /// DVB teletext, addressed by page.
+    TeletextPage {
+        /// Teletext page number (typically `100`–`899`).
+        page: u16,
+    },
+    /// A subtitle track by stream id or language tag.
+    Track {
+        /// The track identifier.
+        id: String,
+    },
+    /// Embedded CEA-608/708 captions by field/service.
+    EmbeddedCc {
+        /// The caption field/service selector (e.g. `cc1`).
+        field: String,
+    },
+    /// An external sidecar subtitle file (SRT/WebVTT).
+    Sidecar {
+        /// Filesystem path to the sidecar.
+        path: String,
+    },
+}
+
+/// `OpenAPI` mirror of `multiview_config::placement::PinVendor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PinVendorDoc {
+    /// NVIDIA.
+    Nvidia,
+    /// Intel.
+    Intel,
+    /// AMD.
+    Amd,
+    /// Apple.
+    Apple,
+}
+
+/// `OpenAPI` mirror of `multiview_config::placement::DevicePin`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct DevicePinDoc {
+    /// The vendor family.
+    pub vendor: PinVendorDoc,
+    /// The vendor's stable device handle (UUID / PCI bus id / registryID).
+    pub stable_id: String,
+}
+
+/// `OpenAPI` mirror of `multiview_config::RtspOptions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct RtspOptionsDoc {
+    /// Lower-transport selection (`tcp` / `udp`).
+    pub transport: String,
+}
+
+/// `OpenAPI` mirror of `multiview_config::ClockFaceConfig`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ClockFaceDoc {
+    /// Analog face.
+    #[default]
+    Analog,
+    /// Digital readout.
+    Digital,
+}
+
+/// `OpenAPI` mirror of `multiview_config::SourceKind` (tagged by `kind`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceKindDoc {
+    /// Built-in colour bars (`test` is a back-compat alias).
+    #[serde(alias = "test")]
+    Bars,
+    /// A solid-colour slate.
+    Solid {
+        /// Fill colour as `#RRGGBB`/`#RGB` hex.
+        color: String,
+    },
+    /// A full-frame clock.
+    Clock {
+        /// Analog (default) or digital face.
+        #[serde(default)]
+        face: ClockFaceDoc,
+        /// 12-hour vs 24-hour mode (default 24-hour).
+        #[serde(default)]
+        twelve_hour: bool,
+        /// Timezone offset from UTC in minutes (`-720..=840`).
+        #[serde(default)]
+        tz_offset_minutes: i32,
+    },
+    /// RTSP pull.
+    Rtsp {
+        /// Source URL.
+        url: String,
+        /// RTSP transport options.
+        #[serde(default)]
+        rtsp: Option<RtspOptionsDoc>,
+    },
+    /// HLS / M3U pull.
+    Hls {
+        /// Playlist URL.
+        url: String,
+    },
+    /// `YouTube` live, resolved to HLS at runtime.
+    Youtube {
+        /// Watch/live/channel URL.
+        url: String,
+    },
+    /// MPEG-TS input.
+    Ts {
+        /// Source URL.
+        url: String,
+    },
+    /// SRT input.
+    Srt {
+        /// Source URL.
+        url: String,
+    },
+    /// RTMP input.
+    Rtmp {
+        /// Source URL.
+        url: String,
+    },
+    /// NDI input, bound by source name.
+    Ndi {
+        /// NDI source name.
+        name: String,
+    },
+    /// File input.
+    File {
+        /// Filesystem path.
+        path: String,
+    },
+    /// AES67 / ST 2110-30 audio-over-IP receive (SDP-bound).
+    Aes67 {
+        /// Static SDP session description (RFC 4566/8866), as text or a URL.
+        sdp: String,
+        /// Optional SAP session id or NMOS sender id for dynamic discovery.
+        #[serde(default)]
+        session_id: Option<String>,
+        /// Optional multicast `group:port` override (`[ff3e::1]:5004`).
+        #[serde(default)]
+        multicast: Option<String>,
+        /// Optional receive jitter-buffer lead in milliseconds (link offset).
+        #[serde(default)]
+        link_offset_ms: Option<u32>,
+        /// Optional PTP domain (`0` ST 2110-30-strict, `1..=127` otherwise).
+        #[serde(default)]
+        ptp_domain: Option<u8>,
+    },
+}
+
+/// `OpenAPI` mirror of `multiview_config::WallClockUse` (ADR-0038 verb).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WallClockUseDoc {
+    /// Use the detected wall-clock (rebase when Trusted). The default.
+    #[default]
+    Use,
+    /// Discard it (reclock-to-house).
+    Discard,
+}
+
+/// `OpenAPI` mirror of `multiview_config::SourceWallClock` (ADR-0038 verb).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SourceWallClockDoc {
+    /// `use` (rebase when Trusted) or `discard` (reclock-to-house).
+    #[serde(rename = "use", default)]
+    pub use_: WallClockUseDoc,
+}
+
+/// `OpenAPI` mirror of `multiview_config::Source` — the body accepted by
+/// `POST`/`PUT /api/v1/sources/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SourceBodyDoc {
+    /// Stable input id; may be omitted (the path id is injected).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Human-friendly display name.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The kind-specific payload (`kind` + its fields sit at top level).
+    #[serde(flatten)]
+    pub kind: SourceKindDoc,
+    /// Reference-only credentials.
+    #[serde(default)]
+    pub auth: Option<SourceAuthDoc>,
+    /// Per-source color override.
+    #[serde(default)]
+    pub color_override: Option<ColorOverrideDoc>,
+    /// Caption/subtitle selector.
+    #[serde(default)]
+    pub captions: Option<CaptionSelectorDoc>,
+    /// Operator decode-stage GPU pin.
+    #[serde(default)]
+    pub gpu_pin: Option<DevicePinDoc>,
+    /// Wall-clock Use/Discard verb.
+    #[serde(default)]
+    pub wallclock: Option<SourceWallClockDoc>,
+}
+
+/// `OpenAPI` mirror of `multiview_config::audio::OutputAudioMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OutputAudioModeDoc {
+    /// Carry only the mixed program bus.
+    Program,
+    /// Carry an explicit list of selectable tracks.
+    Tracks,
+}
+
+/// `OpenAPI` mirror of `multiview_config::audio::OutputAudio`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutputAudioDoc {
+    /// `program` (mixed bus) or `tracks` (explicit selection).
+    pub mode: OutputAudioModeDoc,
+    /// The selectable-track list (used only in `tracks` mode).
+    #[serde(default)]
+    pub tracks: Vec<String>,
+}
+
+/// `OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body
+/// accepted by `POST`/`PUT /api/v1/outputs/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OutputBodyDoc {
+    /// RTSP server.
+    RtspServer {
+        /// Stable operator id; may be omitted (the path id is injected).
+        #[serde(default)]
+        id: Option<String>,
+        /// Mount point (e.g. `/multiview`).
+        mount: String,
+        /// Video codec (`h264`, `hevc`, …).
+        codec: String,
+        /// Latency profile hint.
+        #[serde(default)]
+        latency_profile: Option<String>,
+        /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// Low-latency HLS packager.
+    LlHls {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Output path.
+        path: String,
+        /// Video codec.
+        codec: String,
+        /// Target part duration (ms).
+        #[serde(default)]
+        part_target_ms: Option<u32>,
+        /// Segment duration (ms).
+        #[serde(default)]
+        segment_ms: Option<u32>,
+        /// GOP duration (ms).
+        #[serde(default)]
+        gop_ms: Option<u32>,
+        /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// HLS packager.
+    Hls {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Output path.
+        path: String,
+        /// Video codec.
+        codec: String,
+        /// Segment duration (ms).
+        #[serde(default)]
+        segment_ms: Option<u32>,
+        /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// NDI output.
+    Ndi {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// NDI source name to advertise.
+        name: String,
+        /// Frame-source GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// RTMP push.
+    Rtmp {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Destination URL.
+        url: String,
+        /// Video codec.
+        codec: String,
+        /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// SRT push.
+    Srt {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Destination URL.
+        url: String,
+        /// Video codec.
+        codec: String,
+        /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+    /// AES67 / ST 2110-30 audio-over-IP send (raw PCM multicast, no encode).
+    Aes67 {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Display name (no mount/path/url to derive one from).
+        label: String,
+        /// Multicast `group:port` to send to (`[ff3e::1]:5004`).
+        multicast: String,
+        /// PCM depth: `L24` (Class A interop default) or `L16`.
+        #[serde(default)]
+        depth: Option<String>,
+        /// Packet time in milliseconds (`1` = Class A).
+        #[serde(default)]
+        ptime_ms: Option<u32>,
+        /// Optional PTP domain (`0..=127`).
+        #[serde(default)]
+        ptp_domain: Option<u8>,
+        /// Always absent for AES67 (raw PCM, no encode stage).
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+    },
+}
+
+/// `OpenAPI` mirror of `multiview_config::Overlay` — the body accepted by
+/// `POST`/`PUT /api/v1/overlays/{id}`.
+///
+/// Overlay kinds carry a large, kind-dependent parameter set captured verbatim
+/// (lossless round-trip), so the schema documents the common envelope and
+/// leaves the per-kind extras additive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct OverlayBodyDoc {
+    /// Stable overlay id; may be omitted (the path id is injected).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Overlay kind (`clock`, `label`, `tally_border`, `image`, `subtitle`, …).
+    pub kind: String,
+    /// Attachment target (`canvas` or a cell id).
+    pub target: String,
+    /// Stacking order.
+    #[serde(default)]
+    pub z: i32,
+    /// Kind-specific parameters, captured verbatim.
+    #[serde(flatten)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/sources/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SourceResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The source document.
+    pub body: SourceBodyDoc,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/outputs/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct OutputResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The output document.
+    pub body: OutputBodyDoc,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/overlays/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct OverlayResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The overlay document.
+    pub body: OverlayBodyDoc,
+}

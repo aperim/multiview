@@ -31,7 +31,7 @@ export function ApiPage(): JSX.Element {
       />
 
       <div className="space-y-4">
-        <DocSection title={<Trans>Live API playground</Trans>}>
+        <DocSection id="playground" title={<Trans>Live API playground</Trans>}>
           <Prose>
             <Trans>
               The control plane serves an interactive OpenAPI reference at the
@@ -55,7 +55,7 @@ export function ApiPage(): JSX.Element {
           </Button>
         </DocSection>
 
-        <DocSection title={<Trans>REST conventions</Trans>}>
+        <DocSection id="rest-conventions" title={<Trans>REST conventions</Trans>}>
           <DocDefinitions>
             <DocTerm term={<Trans>Base path</Trans>}>
               <Trans>
@@ -93,7 +93,7 @@ export function ApiPage(): JSX.Element {
           </DocDefinitions>
         </DocSection>
 
-        <DocSection title={<Trans>Realtime streams</Trans>}>
+        <DocSection id="realtime-streams" title={<Trans>Realtime streams</Trans>}>
           <Prose>
             <Trans>
               The UI subscribes to engine events for tile states, operation
@@ -121,6 +121,7 @@ export function ApiPage(): JSX.Element {
         </DocSection>
 
         <DocSection
+          id="authentication"
           title={
             <span className="inline-flex items-center gap-2">
               <Trans>Authentication</Trans>

@@ -1,14 +1,16 @@
 // Docs: overview / getting started.
 import type { JSX } from "react";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Link } from "react-router-dom";
 
 import { PageHeader } from "../../components/PageHeader";
 import { Code, CodeBlock, DocList, DocSection, Prose } from "./components";
+import { DocsSearch } from "./DocsSearch";
 import { DOCS_NAV } from "./docsNav";
 
 /** The documentation landing page. */
 export function OverviewPage(): JSX.Element {
+  const { i18n } = useLingui();
   // The landing page links onward to every other section (skip its own entry).
   const onward = DOCS_NAV.filter((item) => item.path !== "/help");
   return (
@@ -23,8 +25,12 @@ export function OverviewPage(): JSX.Element {
         }
       />
 
+      <div className="mb-4 max-w-md">
+        <DocsSearch />
+      </div>
+
       <div className="space-y-4">
-        <DocSection title={<Trans>What Multiview is</Trans>}>
+        <DocSection id="what-multiview-is" title={<Trans>What Multiview is</Trans>}>
           <Prose>
             <Trans>
               Multiview is a hardware-accelerated live video multiview generator.
@@ -45,7 +51,7 @@ export function OverviewPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>Design pillars</Trans>}>
+        <DocSection id="design-pillars" title={<Trans>Design pillars</Trans>}>
           <DocList>
             <li>
               <Trans>
@@ -78,7 +84,7 @@ export function OverviewPage(): JSX.Element {
           </DocList>
         </DocSection>
 
-        <DocSection title={<Trans>Getting started</Trans>}>
+        <DocSection id="getting-started" title={<Trans>Getting started</Trans>}>
           <Prose>
             <Trans>
               The fastest way to see Multiview running is the quick-start compose
@@ -101,17 +107,19 @@ export function OverviewPage(): JSX.Element {
           </Prose>
         </DocSection>
 
-        <DocSection title={<Trans>Where to go next</Trans>}>
+        <DocSection id="where-next" title={<Trans>Where to go next</Trans>}>
           <ul className="space-y-2">
-            {onward.map(({ path, label, summary }) => (
+            {onward.map(({ path, title, summary }) => (
               <li key={path}>
                 <Link
                   to={path}
                   className="font-medium text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  {label}
+                  {i18n._(title)}
                 </Link>
-                <span className="block text-muted-foreground">{summary}</span>
+                <span className="block text-muted-foreground">
+                  {i18n._(summary)}
+                </span>
               </li>
             ))}
           </ul>
