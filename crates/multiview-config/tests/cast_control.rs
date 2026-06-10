@@ -41,8 +41,18 @@ id = "in_a"
 kind = "test"
 
 [[cells]]
+id = "cell_a"
 area = "a"
-source = "in_a"
+fit = "contain"
+[cells.source]
+input_id = "in_a"
+
+[[outputs]]
+id = "out-a"
+kind = "hls"
+path = "/srv/hls/out-a/a.m3u8"
+codec = "mpeg2video"
+segment_ms = 2000
 
 [control]
 listen = "[::]:8080"
