@@ -34,6 +34,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-R007](ADR-R007.md) — Subtitle ingest -> libass burn-in (off hot path) + format-aware discrete passthrough
 - [ADR-R008](ADR-R008.md) — Overlay rendering: serializable layer stack, glyphon/Vello+SDF, premultiplied alpha, dirty-region uploads, input-decoupled
 - [ADR-R009](ADR-R009.md) — Resilience testing: always-on output-validity probe as SLO arbiter, layered chaos, soak/fuzz, GPU-less CI
+- [ADR-R010](ADR-R010.md) — Make-before-break parallel-output migration primitive: the implementable five-phase Class-2 cutover contract (validate→spin-up→warm→swap→drain/stop) shared by CTL-6 (config migration) and GPU-5c (re-placement); preserves inv #1/#10 via two independent output clocks + non-blocking `move_sink` cutover + an off-data-plane coordinator *(Proposed)*
 
 ## Efficiency
 
