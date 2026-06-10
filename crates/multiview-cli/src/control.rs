@@ -53,6 +53,13 @@ use tokio::task::JoinHandle;
 /// off the engine hot loop, into read-mostly control-plane stores that can never
 /// back-pressure the engine (invariant #10).
 ///
+/// Every configured HLS/LL-HLS output additionally mounts its delivery surface
+/// at `/hls/{output-id}/` on this same listener ([`hls_mounts`] +
+/// [`multiview_output::hls::http::hls_router`], DEV-D1): playlists/segments/
+/// init served with the ADR-0032 §6 header contract — explicit Content-Type,
+/// Cache-Control tiers, Range/206, and Origin-reflecting CORS, so Cast
+/// receivers and browser players fetch cross-origin without a fronting proxy.
+///
 /// # Errors
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
 /// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
@@ -137,8 +144,100 @@ where
     .with_preview(preview)
     .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);
-    let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
+
+    // Mount each configured HLS/LL-HLS output's delivery surface under
+    // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
+    // output's playlist/segment/init files with the Cache-Control tiers,
+    // Range/206, and Origin-reflecting CORS — so a Cast receiver (a browser
+    // app on a Google origin) or any browser player fetches cross-origin
+    // straight off this listener. Deliberately OUTSIDE `/api/v1`, so it is
+    // unauthenticated like `/docs` (media devices cannot send Bearer tokens).
+    // Isolation-safe (inv #10): the handlers only read files the segmenter
+    // already published to disk — never an engine channel or lock.
+    let mut app = multiview_control::router(state);
+    for mount in hls_mounts(config) {
+        app = app.nest(
+            &mount.route,
+            multiview_output::hls::http::hls_router(mount.dir),
+        );
+    }
+    let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
     Ok((addr, handle))
+}
+
+/// One HLS delivery mount derived from a configured HLS/LL-HLS output: the
+/// route prefix on the control listener and the on-disk directory it serves
+/// (the configured playlist's parent — where the segmenter writes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HlsMount {
+    /// Route prefix, e.g. `/hls/program`.
+    pub route: String,
+    /// The served directory (the output playlist's parent directory).
+    pub dir: std::path::PathBuf,
+}
+
+/// Derive the `/hls/{output-id}` delivery mounts for every HLS/LL-HLS output
+/// in `config`.
+///
+/// The mount segment is the output's stable id ([`multiview_config::Output::id`])
+/// sanitised to URL-segment-safe characters (alphanumerics and `-`/`_`/`.`/`~`
+/// kept, everything else mapped to `-`; a segment that sanitises to nothing
+/// usable becomes `out`). Distinct resolved ids that collide *after*
+/// sanitisation are deduplicated with a deterministic `-2`, `-3`, … suffix in
+/// declaration order, so every configured output stays reachable.
+#[must_use]
+pub fn hls_mounts(config: &MultiviewConfig) -> Vec<HlsMount> {
+    use multiview_config::Output;
+    let mut taken = std::collections::HashSet::new();
+    let mut mounts = Vec::new();
+    for output in &config.outputs {
+        let (Output::Hls { path, .. } | Output::LlHls { path, .. }) = output else {
+            continue;
+        };
+        let dir = match std::path::Path::new(path).parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            // A bare filename (or a root path): serve the process working dir
+            // (where such a playlist would be written).
+            _ => std::path::PathBuf::from("."),
+        };
+        let mut segment = sanitize_mount_segment(&output.id());
+        if !taken.insert(segment.clone()) {
+            // Deterministic suffix dedupe; bounded by the output count.
+            let mut n: u32 = 2;
+            segment = loop {
+                let candidate = format!("{segment}-{n}");
+                if taken.insert(candidate.clone()) {
+                    break candidate;
+                }
+                n = n.saturating_add(1);
+            };
+        }
+        mounts.push(HlsMount {
+            route: format!("/hls/{segment}"),
+            dir,
+        });
+    }
+    mounts
+}
+
+/// Map an output id to a URL-segment-safe mount name (see [`hls_mounts`]).
+fn sanitize_mount_segment(id: &str) -> String {
+    let segment: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // `.`/`..`/empty are not usable URL path segments.
+    if segment.is_empty() || segment.chars().all(|c| c == '.') {
+        "out".to_owned()
+    } else {
+        segment
+    }
 }
 
 /// Project a composited program frame into the compact JSON snapshot the control

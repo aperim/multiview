@@ -87,7 +87,10 @@ async fn http_request(
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let mut req = format!("{method} {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n");
     for (name, value) in headers {
-        req.push_str(&format!("{name}: {value}\r\n"));
+        req.push_str(name);
+        req.push_str(": ");
+        req.push_str(value);
+        req.push_str("\r\n");
     }
     req.push_str("\r\n");
     stream.write_all(req.as_bytes()).await.unwrap();
@@ -110,14 +113,13 @@ fn status_code(head: &str) -> Option<&str> {
 fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim())
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
     })
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn control_listener_serves_hls_outputs_with_cors() {
+/// Stage the two HLS output directories (playlists + a segment) and build the
+/// config naming them. The `TempDir`s are returned so they outlive the run.
+fn staged_fixture() -> (tempfile::TempDir, tempfile::TempDir, MultiviewConfig) {
     let program_dir = tempfile::tempdir().unwrap();
     let aux_dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -127,8 +129,13 @@ async fn control_listener_serves_hls_outputs_with_cors() {
     .unwrap();
     std::fs::write(program_dir.path().join("seg0.ts"), SEGMENT_BYTES).unwrap();
     std::fs::write(aux_dir.path().join("low.m3u8"), "#EXTM3U\n").unwrap();
-
     let config = hls_config(program_dir.path(), aux_dir.path());
+    (program_dir, aux_dir, config)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_listener_serves_hls_outputs_with_cors() {
+    let (_program_dir, _aux_dir, config) = staged_fixture();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let (commands, _rx) = multiview_control::command_bus(8);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -173,10 +180,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         addr,
         "OPTIONS",
         "/hls/program/seg0.ts",
-        &[
-            ("Origin", ORIGIN),
-            ("Access-Control-Request-Method", "GET"),
-        ],
+        &[("Origin", ORIGIN), ("Access-Control-Request-Method", "GET")],
     )
     .await;
     assert_eq!(status_code(&head), Some("204"), "head: {head}");

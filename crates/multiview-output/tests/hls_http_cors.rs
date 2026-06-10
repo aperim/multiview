@@ -33,8 +33,8 @@ const PLAYLIST_TEXT: &str = "#EXTM3U\n#EXT-X-VERSION:7\n";
 const ORIGIN: &str = "https://receiver.example";
 
 /// Build an HLS output directory holding a playlist, a TS segment, a CMAF
-/// part/init pair, a WebVTT segment, and a non-media file that must NEVER be
-/// served.
+/// part/init pair, a `WebVTT` segment, and a non-media file that must NEVER
+/// be served.
 fn fixture_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("create temp dir");
     std::fs::write(dir.path().join("multiview.m3u8"), PLAYLIST_TEXT).unwrap();
@@ -172,7 +172,9 @@ async fn get_playlist_with_origin_reflects_origin_with_vary_and_expose() {
         );
     }
     assert_eq!(
-        headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
         Some("application/vnd.apple.mpegurl")
     );
     assert_eq!(
@@ -305,13 +307,7 @@ async fn unsatisfiable_range_yields_416_with_total_length() {
 #[tokio::test]
 async fn head_serves_metadata_with_content_length_and_no_body() {
     let dir = fixture_dir();
-    let response = send(
-        &dir,
-        Method::HEAD,
-        "/seg0.ts",
-        &[(header::ORIGIN, ORIGIN)],
-    )
-    .await;
+    let response = send(&dir, Method::HEAD, "/seg0.ts", &[(header::ORIGIN, ORIGIN)]).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
