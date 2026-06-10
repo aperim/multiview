@@ -21,19 +21,19 @@ fn epoch() -> chrono::DateTime<chrono::Utc> {
 
 #[test]
 fn entitlement_roundtrips_through_json() {
-    let ent = Entitlement {
-        tier: Tier::new("pro".to_owned()),
-        licensed_class: HardwareClass::Standard,
-        detected_class: HardwareClass::Standard,
-        gpu_limit: GpuLimit::Limited(4),
-        lease: Lease::new_full(
+    let ent = Entitlement::new(
+        Tier::new("pro".to_owned()),
+        HardwareClass::Standard,
+        HardwareClass::Standard,
+        GpuLimit::Limited(4),
+        Lease::new_full(
             "serial-9".to_owned(),
             epoch(),
             LeaseSource::Online,
             ACTIVATION_WINDOW_DAYS,
         ),
-        flags: EntitlementFlags::default(),
-    };
+        EntitlementFlags::default(),
+    );
     let json = serde_json::to_string(&ent).unwrap();
     let back: Entitlement = serde_json::from_str(&json).unwrap();
     assert_eq!(ent, back);

@@ -129,7 +129,10 @@ fn lapsed_hard_past_forty_five_days() {
     let now = granted + Duration::days(LEASE_FULL_DAYS + 46);
     let st = compute_ladder_state(&input_at(lease, now));
     assert_eq!(st.state, LadderState::LapsedHard);
-    assert!(st.watermark(), "lapsed_hard must request a watermark (data)");
+    assert!(
+        st.watermark(),
+        "lapsed_hard must request a watermark (data)"
+    );
     assert!(
         st.config_locked(),
         "lapsed_hard must request a config-lock (data)"
@@ -144,7 +147,7 @@ fn never_off_air_on_every_rung() {
     let lease = online_lease(granted);
     for extra in [0_i64, 1, 14, 15, 45, 46, 200] {
         let now = granted + Duration::days(LEASE_FULL_DAYS + extra);
-        let st = compute_ladder_state(&input_at(lease, now));
+        let st = compute_ladder_state(&input_at(lease.clone(), now));
         assert!(
             st.program_stays_on_air(),
             "state {:?} must keep program on air",

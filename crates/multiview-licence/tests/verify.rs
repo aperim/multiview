@@ -66,12 +66,12 @@ fn tampered_payload_is_rejected() {
 #[test]
 fn wrong_key_is_rejected() {
     let mut rng = OsRng;
-    let signer = SigningKey::generate(&mut rng);
+    let real_signing_key = SigningKey::generate(&mut rng);
     let other = SigningKey::generate(&mut rng);
-    // Pin the OTHER key — the signature was made by `signer`.
+    // Pin the OTHER key — the signature was made by `real_signing_key`.
     let pinned = PinnedKey::from_verifying_key(&other.verifying_key());
     let lease = sample_lease();
-    let signed = sign_with(&signer, &lease);
+    let signed = sign_with(&real_signing_key, &lease);
 
     let err = verify_signed_lease(&signed, &pinned).expect_err("wrong key must be rejected");
     assert!(matches!(err, LicenceError::BadSignature));

@@ -21,9 +21,10 @@ tracing = { workspace = true }
 # Exact lease arithmetic — never float. `chrono` here carries the workspace
 # `default-features = false` (no `clock`/`std`-time reads): this crate computes
 # the ladder over instants HANDED TO IT (the cli samples the wall clock), so the
-# pure-data model never reads a system clock itself. `MIT OR Apache-2.0`,
-# deny-clean, already in the workspace graph.
-chrono = { workspace = true }
+# pure-data model never reads a system clock itself. The `serde` feature is added
+# so the dated lease bounds (`DateTime<Utc>`) round-trip in the entitlement
+# resource. `MIT OR Apache-2.0`, deny-clean, already in the workspace graph.
+chrono = { workspace = true, features = ["serde"] }
 # Ed25519 lease/binding signature VERIFICATION against a pinned public key
 # (ADR-0050 §2.5). `MIT OR Apache-2.0`; its closure (`curve25519-dalek`,
 # `ed25519`, `signature`, `sha2`, `zeroize`, `subtle`) is `MIT`/`Apache-2.0`/
@@ -42,7 +43,7 @@ serde_json = { workspace = true }
 # (valid / tampered / wrong-key). `rand_core` enables `SigningKey::generate`;
 # the non-test library never depends on an RNG.
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "rand_core"] }
-rand_core = { version = "0.6", default-features = false }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
 [lints]
 workspace = true
