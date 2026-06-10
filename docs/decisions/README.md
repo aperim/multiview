@@ -136,6 +136,8 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-W012](ADR-W012.md) — i18n: Lingui v5 + ECMAScript Intl, client-localized errors
 - [ADR-W013](ADR-W013.md) — Serve the management plane from `multiview run`: control↔engine integration (3 isolation-safe paths, Class-1/2)
 - [ADR-W014](ADR-W014.md) — Control-plane access: bootstrap admin token from `MULTIVIEW_CONTROL_TOKEN` (else generated + logged once)
+- [ADR-W015](ADR-W015.md) — Typed resource validation (422 on invalid source/output/overlay bodies) + `GET /api/v1/config/export` TOML + honest apply semantics
+- [ADR-W016](ADR-W016.md) — In-app docs system: registry-derived MiniSearch keyword search, stable anchors, `HelpLink` deep links from the UI, operator concept library
 
 ## Dev Container
 
