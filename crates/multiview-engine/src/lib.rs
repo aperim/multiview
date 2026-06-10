@@ -111,9 +111,9 @@ pub mod sysref;
 pub mod tally;
 
 pub use alarm::{
-    black_config_from_kind, engine_zone, freeze_config_from_kind, AlarmDriver, AlarmHysteresis,
+    black_config_from_kind, engine_zone, freeze_config_from_kind, AlarmHysteresis,
     AlarmStateMachine, AlarmTransition, BoolOp, PenaltyAction, PenaltyBox, PenaltyConfig,
-    PenaltyState, Phase, ProbeFrame, ProbeRunner, RollupNode, VirtualAlarm,
+    PenaltyState, Phase, RollupNode, VirtualAlarm,
 };
 pub use clock::{ManualTimeSource, MonotonicTimeSource, OutputClock, Tick, TimeSource};
 pub use cycle::{FreezeTile, RoundRobin};

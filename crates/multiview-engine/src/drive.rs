@@ -561,34 +561,6 @@ impl CompositorDrive<Nv12Image> {
         }
     }
 
-    /// Sample the **latched** last-good NV12 frame for the named cell at `now`,
-    /// without blocking — the production seam the per-tick alarm driver
-    /// ([`AlarmDriver`](crate::alarm::AlarmDriver)) analyses through.
-    ///
-    /// Resolves the addressable `cell_id` (supplied via
-    /// [`CompositorDrive::with_cell_ids`]) to its position in `layout.cells`, then
-    /// to its bound source's store, and returns the frame
-    /// [`read_at`](multiview_framestore::TileStore::read_at) `now` selects — the
-    /// **same** frame [`compose`](CompositorDrive::compose) draws this tick. The
-    /// alarm probe therefore analyses exactly the picture on screen (including a
-    /// cell just re-pointed via [`CompositorDrive::rebind_cell`]), not a different
-    /// or future-decoded frame.
-    ///
-    /// Returns [`None`] — never a panic — when the cell id is unknown / not
-    /// addressable, the cell is unbound or its source has no registered store, or
-    /// the source has produced no frame usable at `now` (a starved/absent input).
-    /// The driver then simply does **not advance** that probe this tick (an absent
-    /// input cannot drive the alarm engine into a wrong state — inv #1 / #10). The
-    /// read is a lock-free, wait-free store read; it never awaits an input.
-    #[must_use]
-    pub fn sample_cell_luma(&self, cell_id: &str, now: MediaTime) -> Option<Arc<Nv12Image>> {
-        let &index = self.cell_index.get(cell_id)?;
-        let cell = self.layout.cells.get(index)?;
-        let source = cell.source.as_ref()?;
-        let store = self.stores.get(source)?;
-        store.read_at(now).frame().map(Arc::clone)
-    }
-
     /// The slate image a **down** cell at `index` composites.
     ///
     /// Resolves the cell's per-cell [`FailoverSlate`] policy (`cell_slates[index]`)

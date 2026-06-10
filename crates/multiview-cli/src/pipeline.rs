@@ -892,11 +892,15 @@ pub struct Pipeline {
     /// Operator-declared content-fault probes, resolved from `config.probes`
     /// (M10). Each probe `watches` a cell; this resolves that cell to its bound
     /// **source** so the per-tick [`FaultDetector`] can build that source's fault
-    /// machine from the operator's *declared* threshold / zone / dwell / severity
-    /// (via the engine [`ProbeRunner`](multiview_engine::ProbeRunner)) instead of
-    /// the hardcoded defaults. A source with no declared probe keeps the default
-    /// behaviour. Multiple probes of the same kind on one source: the first wins
-    /// (config validation already rejects duplicate probe ids).
+    /// machine from the operator's *declared* threshold / zone / dwell / severity:
+    /// the analyser config via the engine's
+    /// [`black_config_from_kind`](multiview_engine::black_config_from_kind) /
+    /// [`freeze_config_from_kind`](multiview_engine::freeze_config_from_kind)
+    /// mappers, and the X.733 lifecycle via
+    /// [`AlarmStateMachine::from_probe`](multiview_engine::AlarmStateMachine::from_probe),
+    /// instead of the hardcoded defaults. A source with no declared probe keeps the
+    /// default behaviour. Multiple probes of the same kind on one source: the first
+    /// wins (config validation already rejects duplicate probe ids).
     #[cfg(feature = "overlay")]
     declared_probes: Vec<multiview_config::probe::Probe>,
     /// An optional **analog** clock face requested by a `[[overlays]]` entry with
@@ -2992,8 +2996,9 @@ struct SourceProbeOverride {
     black: Option<multiview_config::probe::Probe>,
     /// The declared freeze probe (its `difference_threshold` + `zone` + dwell + …).
     freeze: Option<multiview_config::probe::Probe>,
-    /// The declared silence probe (its dwell + severity; the level threshold is
-    /// applied by the meter pipeline, [`SILENCE_FLOOR_DB`]).
+    /// The declared silence probe (its dwell + severity, and its `level_dbfs`,
+    /// which becomes this source's silence detection floor in place of the shared
+    /// [`SILENCE_FLOOR_DB`]).
     silence: Option<multiview_config::probe::Probe>,
 }
 
@@ -3120,11 +3125,14 @@ struct FaultDetector {
     hysteresis_freeze: multiview_engine::AlarmHysteresis,
     hysteresis_silence: multiview_engine::AlarmHysteresis,
     /// Operator-declared probe overrides, keyed by source id (M10). When a source
-    /// has a declared probe for a fault class, that class's analyser **and** X.733
-    /// lifecycle (dwell/severity/latch) come from the config probe via the engine
-    /// [`ProbeRunner`](multiview_engine::ProbeRunner) instead of the hardcoded
-    /// default — the config→analyser → alarm seam. Empty (the default) keeps the
-    /// prior behaviour byte-for-byte.
+    /// has a declared probe for a fault class, that class's analyser comes from the
+    /// config probe via the engine's
+    /// [`black_config_from_kind`](multiview_engine::black_config_from_kind) /
+    /// [`freeze_config_from_kind`](multiview_engine::freeze_config_from_kind)
+    /// mappers, and its X.733 lifecycle (dwell/severity/latch/scope) via
+    /// [`AlarmStateMachine::from_probe`](multiview_engine::AlarmStateMachine::from_probe),
+    /// instead of the hardcoded default — the config→analyser → alarm seam. Empty
+    /// (the default) keeps the prior behaviour byte-for-byte.
     source_probes: std::collections::HashMap<String, SourceProbeOverride>,
     /// Per-source config-derived **black** analyser, built once from the declared
     /// probe's `luma_threshold` + `zone`. Present only for sources with a declared
@@ -3133,6 +3141,10 @@ struct FaultDetector {
     /// Per-source config-derived **freeze** analyser (declared `difference_threshold`
     /// + `zone`). Present only for sources with a declared freeze probe.
     declared_freeze: std::collections::HashMap<String, multiview_engine::FreezeProbe>,
+    /// Per-source config-derived **silence floor** in dBFS, built once from a
+    /// declared silence probe's `level_dbfs`. Present only for sources with a
+    /// declared silence probe; others fall back to the shared [`SILENCE_FLOOR_DB`].
+    declared_silence_floor: std::collections::HashMap<String, f64>,
 }
 
 /// The number of recent sampled frames over which the instantaneous freeze
@@ -3206,6 +3218,7 @@ impl FaultDetector {
         // probe never appear here and fall back to the shared defaults.
         let mut declared_black = std::collections::HashMap::new();
         let mut declared_freeze = std::collections::HashMap::new();
+        let mut declared_silence_floor = std::collections::HashMap::new();
         for (source, ov) in &source_probes {
             if let Some(cfg) = ov
                 .black
@@ -3225,6 +3238,16 @@ impl FaultDetector {
                 // which we override to the CLI's 6 to match the default path).
                 declared_freeze.insert(source.clone(), FreezeProbe::new(cfg.with_tolerance(6)));
             }
+            // A declared silence probe carries the operator-authored level ceiling
+            // (`level_dbfs`); thread it into this source's detection floor so the
+            // instantaneous silence condition uses the operator's threshold rather
+            // than the shared default. Widen `f32 -> f64` exactly (`f64::from`, no
+            // `as` cast) to match the meter timeline scale.
+            if let Some(multiview_config::probe::ProbeKind::Silence { level_dbfs }) =
+                ov.silence.as_ref().map(|p| p.kind)
+            {
+                declared_silence_floor.insert(source.clone(), f64::from(level_dbfs));
+            }
         }
         Self {
             stores,
@@ -3240,6 +3263,7 @@ impl FaultDetector {
             source_probes,
             declared_black,
             declared_freeze,
+            declared_silence_floor,
         }
     }
 
@@ -3434,9 +3458,11 @@ impl FaultDetector {
     }
 
     /// The instantaneous silence condition for `id` at tick `index`: the source's
-    /// build-time meter reading is at/below [`SILENCE_FLOOR_DB`]. A source with no
-    /// meter timeline rides the meter floor (which is below the silence floor), so
-    /// an audio-free tile reads silent.
+    /// build-time meter reading is at/below its silence floor. The floor is the
+    /// operator-declared `level_dbfs` when this source has a declared silence probe
+    /// (M10), otherwise the shared default [`SILENCE_FLOOR_DB`]. A source with no
+    /// meter timeline rides the meter floor (which is below either silence floor),
+    /// so an audio-free tile reads silent.
     fn silence_now(&self, id: &str, index: u64) -> bool {
         let db = match self.meter_db_timelines.get(id) {
             Some(timeline) => {
@@ -3449,7 +3475,12 @@ impl FaultDetector {
             }
             None => multiview_audio::Ballistics::FLOOR_DB,
         };
-        db <= SILENCE_FLOOR_DB
+        let floor = self
+            .declared_silence_floor
+            .get(id)
+            .copied()
+            .unwrap_or(SILENCE_FLOOR_DB);
+        db <= floor
     }
 }
 
