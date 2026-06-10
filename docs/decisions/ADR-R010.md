@@ -34,29 +34,44 @@ consumers over at a frame/IDR boundary, drain and stop the old one. Building it 
 subtly-different cutovers — and any defect here is a defect in the heart of the product (inv #1 + #10).
 This ADR pins the one contract both consume.
 
-The as-built engine already provides the load-bearing pieces this contract composes, so the primitive
-is a thin coordinator, not new infrastructure:
+The as-built engine already provides **most** of the load-bearing pieces this contract composes, so
+the coordinator's lifecycle (spin-up / warm / drain / stop) is mostly assembly. **One piece does not
+yet exist and is genuinely new work this contract mandates:** the cross-`Program` sink-cutover bridge
+that lets the engine re-point a live sink from OLD's rendition to NEW's at SWAP. The as-built state:
 
-- A **`Program`** is a self-contained, independently-supervised output actor with **its own** output
-  clock, runtime, `StopSignal`, isolated `EnginePublisher`, and a **bounded drop-oldest** egress
+- *(exists)* A **`Program`** is a self-contained, independently-supervised output actor with **its own**
+  output clock, runtime, `StopSignal`, isolated `EnginePublisher`, and a **bounded drop-oldest** egress
   (`multiview-engine/src/programset.rs`). `ProgramSet::start` admits + spawns a program **without
   touching** siblings; `ProgramSet::stop` raises only that program's `StopSignal`, drains its egress,
   and joins. The supervisor **never `.await`s a program on the data plane** — it samples a wait-free
-  ticks counter.
-- **`PacketRouter::move_sink`** (`multiview-output/src/fanout.rs`, RT-12) is the runtime sink-mover: a
-  pure routing-table re-key that re-points an existing `Arc<dyn PacketSink>` (keeping its identity,
-  bounded buffer, and connection) from one rendition to another, at a frame boundary, **never blocking**
-  and **never erroring** (returns `false` on a no-op).
-- Class-1 edits already land via an **atomic double-buffered scene-graph pointer swap at a frame
-  boundary** ([ADR-R004](ADR-R004.md), `CompositorDrive::set_layout`).
+  ticks counter. SPIN-UP, WARM (counter sampling), and DRAIN/STOP all compose existing calls.
+- *(exists, in `multiview-output` only)* **`PacketRouter::move_sink`** (`multiview-output/src/fanout.rs`,
+  RT-12) is the runtime sink-mover: a pure routing-table re-key that re-points an existing
+  `Arc<dyn PacketSink>` (keeping its identity, bounded buffer, and connection) from one rendition to
+  another, at a frame boundary, **never blocking** and **never erroring** (returns `false` on a no-op).
+- *(NOT built — the new work)* **No `move_sink`/`PacketRouter` is referenced in `multiview-engine`
+  today**, and there is no engine-level crosspoint for "output ← program" cutover. `multiview-engine`'s
+  `route.rs` carries only intra-`Program` crosspoints (`RouteIntent::Video`/`Audio`/`Subtitle`); the
+  enum is `#[non_exhaustive]` *precisely* with the note that the **`output ← program`, RT-12** kind
+  "can be added without a breaking change" — i.e. it is documented as a deliberate seam but **the seam
+  is empty**. The SWAP step below therefore depends on infrastructure that the CTL-6/GPU-5c adapters
+  must **build**: an engine-side RT-12 crosspoint that drives `PacketRouter::move_sink` across two
+  `Program`s' fan-outs at a frame boundary (a cross-`Program` packet-router handle the coordinator can
+  re-key). This ADR pins the contract that bridge must satisfy; it does not pretend the bridge exists.
+- *(exists)* Class-1 edits already land via an **atomic double-buffered scene-graph pointer swap at a
+  frame boundary** ([ADR-R004](ADR-R004.md), `CompositorDrive::set_layout`).
 
 ## Decision
 
 **Define a single make-before-break migration primitive — a five-phase, supervisor-driven lifecycle —
 and make it the only execution path for every Class-2 change, whether the trigger is a control-plane
 config edit (CTL-6) or an engine-internal placement decision (GPU-5c).** It is a *coordinator over the
-existing `ProgramSet` + `PacketRouter` + scene-swap primitives*, introduces **no** new data-plane
-channel into the engine, and is driven entirely off the hot path.
+`ProgramSet` + scene-swap primitives* plus **one new piece of engine infrastructure the adapters must
+build — the RT-12 `output ← program` crosspoint** that drives `PacketRouter::move_sink` across two
+`Program`s' fan-outs (see Context: `multiview-output`'s `move_sink` exists, but it is **not yet wired
+into `multiview-engine`**). The coordinator introduces **no** new data-plane *channel* into the engine
+and is driven entirely off the hot path; the RT-12 crosspoint is a frame-boundary routing-table re-key,
+not a channel a client can fill.
 
 ### 1. The migration value object
 
@@ -90,17 +105,29 @@ synchronous response.
    inv #2), but **no consumer is attached to it yet**. OLD keeps emitting, uninterrupted. Spin-up of
    NEW failing (encoder init error, device-lost) is `ActorExit::Failed`; the coordinator tears NEW down
    and rolls back — OLD never noticed.
-3. **WARM / READY-GATE.** The coordinator waits — **off the data plane, by sampling NEW's wait-free
-   ticks counter** (`ProgramHandle::ticks_counter`) — until NEW has emitted ≥ *N* valid frames and is
-   at an IDR boundary (its next `forceIDR` tick). It never `.await`s NEW's egress. A WARM timeout
-   (`migration_warm_timeout`) elapsing → rollback. This gate is what makes the cut seamless: NEW is
-   *already producing a valid keyframe-led bitstream* before any consumer sees it.
+3. **WARM / READY-GATE.** The coordinator (a) **pre-attaches an internal keepalive sink** to NEW's
+   target rendition so that rendition is **encoding (warm)** before SWAP, then (b) waits — **off the
+   data plane, by sampling NEW's wait-free ticks counter** (`ProgramHandle::ticks_counter`) — until NEW
+   has emitted ≥ *N* valid frames and is at an IDR boundary (its next `forceIDR` tick). It never
+   `.await`s NEW's egress. A WARM timeout (`migration_warm_timeout`) elapsing → rollback. The keepalive
+   sink is a discard/no-op `PacketSink` whose sole purpose is to make NEW's rendition *active* (≥1 sink
+   ⇒ encode-once-mux-many turns its single encode on, inv #7): without it NEW's rendition would be
+   **cold** (no sinks ⇒ not encoded), and the SWAP's `move_sink` onto a cold rendition would itself
+   trigger the *first* encode at the cutover instant (the documented `PacketRouter::move_sink`
+   cold-rendition behaviour: "if `to` was cold the driver will encode it once on the next tick"). This
+   gate is what makes the cut seamless **and zero-new-encode**: NEW is *already producing a valid
+   keyframe-led bitstream into a live (keepalive) sink* before any real consumer sees it.
 4. **SWAP (break-after-make, the only critical instant).** At a single frame/IDR boundary, the
-   coordinator re-points **all** `consumers` from OLD's rendition(s) to NEW's via
+   coordinator drives the **new engine-side RT-12 `output ← program` crosspoint** (see Context — the
+   piece the adapters build) to re-point **all** `consumers` from OLD's rendition(s) to NEW's via
    `PacketRouter::move_sink` — a pure routing-table re-key. Because `move_sink` is a non-blocking,
-   non-erroring table operation and NEW is already encoding the target rendition (encode-once-mux-many,
-   inv #7), the re-point spawns **zero** new encodes and drops **zero** output frames. This is the
-   moment a consumer sees the discontinuity (new SPS/PPS + IDR; HLS gets a correctly-signalled
+   non-erroring table operation **and NEW's target rendition is already encoding** (it was made warm in
+   WARM by the keepalive sink — encode-once-mux-many, inv #7), the re-point spawns **zero** new encodes
+   and drops **zero** output frames. (Without the WARM-phase keepalive this would not hold: the *first*
+   consumer arriving on a cold rendition is what turns its encode on, so the keepalive pre-attach is the
+   load-bearing precondition for the zero-new-encode guarantee, not an optimisation.) The keepalive sink
+   is then dropped once ≥1 real consumer is attached (the rendition stays warm via the real consumer).
+   This is the moment a consumer sees the discontinuity (new SPS/PPS + IDR; HLS gets a correctly-signalled
    `EXT-X-DISCONTINUITY`); OLD is no longer fed those consumers but **is still emitting** to nothing yet.
 5. **DRAIN + STOP (break).** After SWAP, OLD has no attached consumers. The coordinator drains OLD's
    in-flight egress (bounded; the egress thread ends on channel close — the `SINK_WEDGE_GRACE` posture
@@ -133,8 +160,10 @@ synchronous response.
 - **NEW is keyframe-ready before cutover.** The WARM gate guarantees NEW emits a valid IDR-led
   bitstream *before* a consumer is moved onto it, so the consumer's first NEW packet is decodable — no
   black gap, no rebuffer beyond the format-mandated discontinuity.
-- **The cut is a non-blocking table op.** `move_sink` cannot stall; it returns immediately and never
-  errors. A frame is never dropped at the cut (the boundary is an IDR tick of NEW's own clock).
+- **The cut is a non-blocking table op.** The RT-12 crosspoint's `move_sink` cannot stall; it returns
+  immediately and never errors. A frame is never dropped at the cut (the boundary is an IDR tick of
+  NEW's own clock), and because NEW's rendition was made warm in WARM the cut spawns no encode at the
+  critical instant — the encode was already paid for one tick earlier.
 - **Admission is checked first.** Running both egresses concurrently is cost-gated in VALIDATE, so the
   migration cannot starve the running OLD program of encoder sessions / GPU headroom mid-flight.
 
@@ -144,11 +173,14 @@ synchronous response.
   **sampling wait-free counters** (`ProgramHandle::ticks_counter`, `egress_dropped`) — it **never
   `.await`s a `Program`'s egress** and the supervisor never awaits a program task on the data plane
   (the as-built `ProgramSet` contract).
-- **No new engine-inward channel.** The primitive composes existing in-process calls
-  (`ProgramSet::start`/`stop`, `PacketRouter::move_sink`) plus wait-free reads. The Class-2 trigger
-  arrives over the **existing** lock-free desired-state hand-off (ADR-W008) for CTL-6, or as a returned
-  `PlacementProposal` value for GPU-5c — in both cases the engine *pulls* the request, a slow control
-  client can never push into or stall the engine.
+- **No new engine-inward channel.** The primitive composes `ProgramSet::start`/`stop` + wait-free reads
+  with the **new RT-12 `output ← program` crosspoint** that the adapters build (which itself is just a
+  frame-boundary `PacketRouter::move_sink` table re-key across two `Program`s — an in-process call, not
+  a channel). The new infrastructure adds a *crosspoint*, **not** an inward channel a slow consumer
+  could fill, so the isolation guarantee is preserved by construction and must be re-proven by the chaos
+  gate when the bridge lands. The Class-2 trigger arrives over the **existing** lock-free desired-state
+  hand-off (ADR-W008) for CTL-6, or as a returned `PlacementProposal` value for GPU-5c — in both cases
+  the engine *pulls* the request, a slow control client can never push into or stall the engine.
 - **Outcome is broadcast, not awaited.** The terminal `Migrated`/`RolledBack` event is published on the
   drop-oldest broadcast (ADR-RT004/I001); the migration's progress is reported to the API via the
   `operation_id` on the realtime stream — the coordinator never blocks on a client consuming it.
@@ -165,6 +197,11 @@ synchronous response.
   two-GPU split island (ADR-0018 §20).
 - Both feed the *identical* five-phase coordinator. The only difference is the value object's `target`;
   the cutover, drain, rollback, and invariant guarantees are shared verbatim.
+- **The new RT-12 `output ← program` crosspoint + keepalive-sink mechanism is built once, shared by
+  both.** Whichever adapter lands first builds the engine-side bridge (the cross-`Program`
+  `PacketRouter::move_sink` handle and the WARM-phase keepalive sink — see Context and §2 phases 3–4),
+  and the second adapter reuses it. This is the one piece of genuinely new engine infrastructure this
+  ADR mandates; the rest of the coordinator is assembly over the as-built `ProgramSet` + scene-swap.
 
 ## Alternatives considered
 
@@ -198,6 +235,13 @@ synchronous response.
   paths; only true Class-2 uses this primitive.
 - **Post-SWAP is committed.** Undoing a completed migration is itself a second forward migration (a
   second discontinuity), never a silent revert — operators are shown this in the plan/dry-run.
-- **No new public crate or data-plane channel.** The primitive lives in `multiview-engine` as a
-  coordinator over `ProgramSet` + `PacketRouter`; `placement.rs` and the control `migrate` handler call
-  it. The follow-up implementation work (CTL-6, GPU-5c) wires the two adapters to this one contract.
+- **No new public crate or data-plane channel — but one new engine crosspoint to build.** The primitive
+  lives in `multiview-engine` as a coordinator over `ProgramSet` + scene-swap, and the follow-up
+  implementation work (CTL-6, GPU-5c) wires the two adapters to this one contract. That work is **not
+  purely a coordinator**: it must also build the engine-side RT-12 `output ← program` crosspoint that
+  bridges `PacketRouter::move_sink` (today defined only in `multiview-output`, and **not referenced in
+  `multiview-engine`**) across two `Program`s' fan-outs, plus the WARM-phase keepalive sink. The
+  `RouteIntent` enum in `route.rs` is already `#[non_exhaustive]` with this exact RT-12 seam noted, so
+  the addition is non-breaking — but it is new code, not an existing call the coordinator merely
+  invokes. No new *channel* into the engine is introduced; the chaos gate re-proves inv #1/#10 when the
+  bridge lands.
