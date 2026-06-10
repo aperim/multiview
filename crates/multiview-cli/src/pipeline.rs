@@ -908,6 +908,15 @@ pub struct Pipeline {
     /// clock label is drawn.
     #[cfg(feature = "overlay")]
     analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    /// ADR-W021: the live overlay working-set slot, seeded with the boot
+    /// config's overlays (generation 0). The command drain publishes each
+    /// applied overlay change through it (via
+    /// [`overlay_apply_slot`](Self::overlay_apply_slot) → the binary's drain
+    /// wiring) and the bake consumer re-derives its overlay render state from
+    /// it at the next frame — a lock-free `ArcSwap`, so neither side can pace
+    /// the other (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    overlay_apply: crate::live_overlays::OverlayApplySlot,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
@@ -1224,6 +1233,8 @@ impl Pipeline {
             declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
             analog_clock,
+            #[cfg(feature = "overlay")]
+            overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
         })
     }
 
@@ -1472,6 +1483,19 @@ impl Pipeline {
         &self,
     ) -> Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>> {
         Arc::clone(&self.subtitle_route)
+    }
+
+    /// ADR-W021: the **shared** live overlay working-set slot. The binary
+    /// threads a clone into the command drain
+    /// ([`command_drain_with_seams`](crate::control::command_drain_with_seams))
+    /// so `UpsertOverlay`/`RemoveOverlay` publish through it at the frame
+    /// boundary; the bake consumer re-derives its overlay render state from it
+    /// at the next frame. Reading/writing is a lock-free `ArcSwap` load/store,
+    /// so neither side can pace or stall the output clock (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn overlay_apply_slot(&self) -> crate::live_overlays::OverlayApplySlot {
+        Arc::clone(&self.overlay_apply)
     }
 
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
@@ -2104,6 +2128,7 @@ impl Pipeline {
             analog_clock: self.analog_clock,
             canvas_color: self.canvas_color,
             cadence: self.cadence,
+            overlay_apply: Some(Arc::clone(&self.overlay_apply)),
         }
     }
 
@@ -2143,6 +2168,11 @@ struct BakeContext {
     /// The fixed output cadence (for the per-frame media time).
     #[cfg(feature = "overlay")]
     cadence: Rational,
+    /// ADR-W021: the live overlay working-set slot the consumer re-derives
+    /// from (one wait-free load + generation compare per frame). `None` ⇒ no
+    /// live seam (the boot-derived `analog_clock` stands for the whole run).
+    #[cfg(feature = "overlay")]
+    overlay_apply: Option<crate::live_overlays::OverlayApplySlot>,
 }
 
 impl BakeContext {
@@ -2186,6 +2216,10 @@ struct StreamBaker {
     canvas_color: CanvasColor,
     cadence: Rational,
     meter: BakeContext,
+    /// The last live overlay-set generation this baker derived its render
+    /// state from (ADR-W021). `None` until the first bake, so a wired slot's
+    /// seeded set drives the very first frame (one truth: the slot).
+    overlay_generation: Option<u64>,
 }
 
 #[cfg(not(feature = "overlay"))]
@@ -2215,7 +2249,28 @@ impl StreamBaker {
             canvas_color: ctx.canvas_color,
             cadence: ctx.cadence,
             meter: ctx,
+            overlay_generation: None,
         })
+    }
+
+    /// Re-derive the overlay render state from the live working-set slot iff
+    /// its generation advanced (ADR-W021). The steady-state per-frame cost is
+    /// one wait-free `ArcSwap` load plus an integer compare; on a change the
+    /// re-derivation is O(overlays) pure math (no I/O, no rasterization), and
+    /// the frame baked next is drawn entirely from the new set — a clean
+    /// frame-boundary (Class-1) transition. Without a wired slot the
+    /// boot-derived state stands.
+    fn refresh_overlays(&mut self, canvas_w: u32, canvas_h: u32) {
+        let Some(slot) = self.meter.overlay_apply.as_ref() else {
+            return;
+        };
+        let set = slot.load();
+        if self.overlay_generation == Some(set.generation()) {
+            return;
+        }
+        self.baker
+            .set_analog_clock(analog_clock_from_config(set.overlays(), canvas_w, canvas_h));
+        self.overlay_generation = Some(set.generation());
     }
 
     /// Bake one streamed tick's overlays into its canvas, returning the overlaid
@@ -2226,6 +2281,10 @@ impl StreamBaker {
     /// Returns [`PipelineError::Engine`] if the baker/sub-pass rejects the canvas.
     fn bake(&mut self, item: &StreamItem) -> Result<Arc<Nv12Image>, PipelineError> {
         use multiview_compositor::overlay::apply_overlays_to_nv12;
+
+        // ADR-W021: pick up a live overlay-set change before drawing, so this
+        // frame is baked entirely from one set (frame-boundary apply).
+        self.refresh_overlays(item.canvas.width(), item.canvas.height());
 
         let i = usize::try_from(item.tick_index).unwrap_or(usize::MAX);
         let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);

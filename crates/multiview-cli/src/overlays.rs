@@ -335,6 +335,14 @@ impl OverlayBaker {
         self
     }
 
+    /// Set, move, or clear the analog clock face **at runtime** (ADR-W021
+    /// live overlay apply): the bake consumer calls this when the live
+    /// overlay working set's generation advances, so the next baked frame
+    /// draws the re-derived face. `None` clears the face entirely.
+    pub fn set_analog_clock(&mut self, spec: Option<AnalogClockSpec>) {
+        self.analog_clock = spec;
+    }
+
     /// The tiles this baker draws (their static placement), in declaration order.
     #[must_use]
     pub fn tiles(&self) -> &[TileSpec] {

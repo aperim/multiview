@@ -5,9 +5,13 @@
 //! ([`crate::routes`]) over the [`ResourceRepository`](crate::resource_store::ResourceRepository)
 //! trait, with `ETag`/`If-Match` optimistic concurrency on every mutation
 //! (ADR-W006), RBAC via [`Principal`], and an audit record after each successful
-//! write. The stored `body` is the opaque config-as-code document; engine-side
-//! validation against `multiview-config` happens before it is applied. Errors
-//! are RFC 9457 problem documents.
+//! write. The stored `body` is the config-as-code document, **validated against
+//! `multiview_config::Overlay` at this boundary** (ADR-W015), and every accepted
+//! mutation declares its apply semantics via `X-Multiview-Apply` (ADR-W021):
+//! when the binary injected an overlay live-apply capability, the mutation is
+//! enqueued for the engine's frame-boundary drain and the header is `live` iff
+//! the running renderer visibly draws the document. Errors are RFC 9457
+//! problem documents.
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,11 +19,79 @@ use axum::Json;
 
 use crate::audit::AuditAction;
 use crate::auth::{Action, Principal};
+use crate::command::{Command, OperationId};
 use crate::concurrency::IfMatch;
 use crate::error::ControlResult;
 use crate::resource_store::{Resource, ResourceInput, VersionedResource, OVERLAY_KIND};
 use crate::state::AppState;
-use crate::typed_resources::{validated_body, with_apply_restart, TypedCollection};
+use crate::typed_resources::{validated_body, with_apply, ApplyMode, TypedCollection};
+
+/// Parse a stored (already ADR-W015-validated) overlay body back into the
+/// canonical config type, or `None` for a legacy/foreign document that does
+/// not parse (then no live apply is attempted — restart semantics).
+fn parse_stored_overlay(body: &serde_json::Value) -> Option<multiview_config::Overlay> {
+    serde_json::from_value(body.clone()).ok()
+}
+
+/// Apply a stored overlay upsert to the **running** engine where a live
+/// overlay seam exists (ADR-W021, invariant #11), returning the apply
+/// semantics the response must declare.
+///
+/// With a capability injected, the document **always** rides the bounded bus
+/// (the engine's working-set mirror stays coherent; the drain warns for kinds
+/// it cannot render — never silently, never lying). The header is `live` only
+/// when the running renderer visibly draws the document
+/// ([`OverlayLiveCapability::renders`](crate::live_apply::OverlayLiveCapability::renders))
+/// **and** the submit was accepted; a shed submit (full/closed bus — inv #10)
+/// or a non-rendering kind degrades honestly to `restart`.
+fn live_apply_upsert(state: &AppState, overlay: Option<multiview_config::Overlay>) -> ApplyMode {
+    let Some(capability) = state.live_apply.overlays.as_ref() else {
+        return ApplyMode::Restart;
+    };
+    let Some(overlay) = overlay else {
+        return ApplyMode::Restart;
+    };
+    let renders = capability.renders(&overlay);
+    let submitted = state
+        .commands
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(overlay),
+        })
+        .is_ok();
+    if renders && submitted {
+        ApplyMode::Live
+    } else {
+        ApplyMode::Restart
+    }
+}
+
+/// Enqueue a live removal of overlay `id` for the running engine (ADR-W021),
+/// returning the apply semantics the DELETE response must declare: `live` iff
+/// the **previous** stored document was one the running renderer drew (its
+/// face disappears at the next frame boundary) and the submit was accepted.
+fn live_apply_remove(
+    state: &AppState,
+    previous: Option<&multiview_config::Overlay>,
+    id: &str,
+) -> ApplyMode {
+    let Some(capability) = state.live_apply.overlays.as_ref() else {
+        return ApplyMode::Restart;
+    };
+    let renders = previous.is_some_and(|overlay| capability.renders(overlay));
+    let submitted = state
+        .commands
+        .try_submit(Command::RemoveOverlay {
+            op: OperationId::new(),
+            id: id.to_owned(),
+        })
+        .is_ok();
+    if renders && submitted {
+        ApplyMode::Live
+    } else {
+        ApplyMode::Restart
+    }
+}
 
 /// Attach the resource's `ETag` to a successful response carrying an overlay.
 fn overlay_response(status: StatusCode, versioned: &VersionedResource) -> Response {
@@ -96,7 +168,7 @@ pub(crate) async fn get_overlay(
         params(("id" = String, Path, description = "Overlay id.")),
         request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
-            (status = 201, description = "The created overlay (ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 201, description = "The created overlay (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine's renderer draws the document (e.g. an analog-face clock on an overlay-rendering build) and it was applied at a frame boundary; `restart` otherwise — non-rendering kinds are stored losslessly and mirrored to the engine with a warning, never lied about (ADR-W021).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 422, description = "The body is not a valid overlay document (detail names the field path).", body = crate::problem::Problem),
@@ -123,10 +195,11 @@ pub(crate) async fn create_overlay(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(with_apply_restart(overlay_response(
-        StatusCode::CREATED,
-        &versioned,
-    )))
+    let mode = live_apply_upsert(&state, parse_stored_overlay(&versioned.resource.body));
+    Ok(with_apply(
+        mode,
+        overlay_response(StatusCode::CREATED, &versioned),
+    ))
 }
 
 /// `PUT /api/v1/overlays/{id}` — replace an overlay (role: write; If-Match → 412).
@@ -139,7 +212,7 @@ pub(crate) async fn create_overlay(
         params(("id" = String, Path, description = "Overlay id.")),
         request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
-            (status = 200, description = "The replaced overlay (new ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 200, description = "The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running renderer draws the new document and it was applied at a frame boundary, `restart` otherwise (ADR-W021).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 404, description = "No overlay with that id.", body = crate::problem::Problem),
@@ -173,10 +246,11 @@ pub(crate) async fn update_overlay(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(with_apply_restart(overlay_response(
-        StatusCode::OK,
-        &versioned,
-    )))
+    let mode = live_apply_upsert(&state, parse_stored_overlay(&versioned.resource.body));
+    Ok(with_apply(
+        mode,
+        overlay_response(StatusCode::OK, &versioned),
+    ))
 }
 
 /// `DELETE /api/v1/overlays/{id}` — delete an overlay (role: administer; If-Match).
@@ -188,7 +262,7 @@ pub(crate) async fn update_overlay(
         tag = "overlays",
         params(("id" = String, Path, description = "Overlay id.")),
         responses(
-            (status = 204, description = "The overlay was deleted."),
+            (status = 204, description = "The overlay was deleted. X-Multiview-Apply: `live` when the running renderer drew the document (its face disappears at the next frame boundary), `restart` otherwise (ADR-W021)."),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to administer.", body = crate::problem::Problem),
             (status = 404, description = "No overlay with that id.", body = crate::problem::Problem),
@@ -206,6 +280,7 @@ pub(crate) async fn delete_overlay(
     crate::auth::authorize_object(&principal, &id)?;
     let current = state.overlays.get(&id)?;
     if_match.require(OVERLAY_KIND, &id, current.version)?;
+    let previous = parse_stored_overlay(&current.resource.body);
     state.overlays.delete(&id)?;
     state.audit(
         &principal.key_id,
@@ -214,5 +289,6 @@ pub(crate) async fn delete_overlay(
         &id,
         None,
     );
-    Ok(with_apply_restart(StatusCode::NO_CONTENT.into_response()))
+    let mode = live_apply_remove(&state, previous.as_ref(), &id);
+    Ok(with_apply(mode, StatusCode::NO_CONTENT.into_response()))
 }

@@ -132,8 +132,15 @@ async fn upsert_overlay_publishes_the_new_set_at_the_frame_boundary() {
     );
     let mut drive = test_drive(&config);
 
-    assert_eq!(slot.load().generation(), 0, "the seeded slot is generation 0");
-    assert!(slot.load().overlays().is_empty(), "boot config has no overlays");
+    assert_eq!(
+        slot.load().generation(),
+        0,
+        "the seeded slot is generation 0"
+    );
+    assert!(
+        slot.load().overlays().is_empty(),
+        "boot config has no overlays"
+    );
 
     sender
         .try_submit(Command::UpsertOverlay {

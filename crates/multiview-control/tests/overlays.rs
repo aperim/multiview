@@ -304,7 +304,7 @@ fn analog_clock_caps() -> multiview_control::LiveApplyCaps {
     )
 }
 
-/// A harness whose AppState carries the analog-clock live capability.
+/// A harness whose `AppState` carries the analog-clock live capability.
 fn live_harness() -> support::Harness {
     support::harness_with(|state| state.with_live_apply(analog_clock_caps()))
 }
