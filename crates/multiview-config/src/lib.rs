@@ -33,6 +33,7 @@ pub mod audio;
 pub mod error;
 pub mod failover;
 pub mod grid;
+pub mod layout_doc;
 pub mod placement;
 pub mod probe;
 pub mod program;
@@ -56,6 +57,7 @@ pub use audio::{
 };
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
+pub use layout_doc::{LayoutCanvas, LayoutDocument};
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use program::{ProgramId, ProgramKind, ProgramSpec};
@@ -356,8 +358,10 @@ impl MultiviewConfig {
     }
 
     /// Resolve one schema cell into a core cell, placing it by grid area or
-    /// absolute rect.
-    fn solve_cell(
+    /// absolute rect. Shared with [`layout_doc::LayoutDocument::solve_named`]
+    /// (the stored named-layout solve, ADR-W019) so a stored body and the
+    /// working config solve cells identically.
+    pub(crate) fn solve_cell(
         cell: &Cell,
         grid_rects: Option<&[grid::AreaRect]>,
     ) -> Result<CoreCell, ConfigError> {

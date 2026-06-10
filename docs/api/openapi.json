@@ -362,8 +362,8 @@
         "tags": [
           "commands"
         ],
-        "summary": "`POST /api/v1/commands/apply-layout` — apply a layout to the running\nmultiview (role: write; per-object authz; 202).",
-        "description": "Mirrors [`cmd_swap`]: it only `try_submit`s the command via\n[`submit_accepted`] (idempotency + shed-on-full free) and never blocks the\nengine (invariant #10). The eventual outcome arrives on the realtime stream\ncorrelated by the returned operation id (ADR-W008).",
+        "summary": "`POST /api/v1/commands/apply-layout` — apply a **stored** layout to the\nrunning multiview, live, at the next frame boundary (role: write;\nper-object authz; 202) — ADR-W019, invariant #11 Class-1.",
+        "description": "The stored layout body is resolved from the layouts repository and solved\n**here, at request time** (off the engine hot path): an unknown id, a body\nthat does not parse as a `{canvas, layout, cells}` document, one that does\nnot solve (bad grid / geometry), a pinned-canvas mismatch (a Class-2\nchange — ADR-R004), or an unknown running canvas (no seeded snapshot — the\ngate fails closed) is an honest `422` **before** any `202`. On `202` the\ncommand carries the solved layout, so the engine's frame-boundary drain\nonly swaps (O(cells), no I/O — invariants #1/#10); the `202` body's\n`applied_live`/`carried_only` arrays state which per-cell property classes\ngenuinely apply on screen. Idempotency reserves **before** resolution: a\nreplayed `Idempotency-Key` returns the original operation id (kind\n`replay`, undecorated) without re-resolving, and a refused resolve\nreleases the key. The submit mirrors [`cmd_swap`] (shed-on-full) and never\nblocks the engine (invariant #10); the outcome rides the realtime stream\nas a `job.progress` event (ADR-W008).",
         "operationId": "cmd_apply_layout",
         "requestBody": {
           "content": {
@@ -377,7 +377,7 @@
         },
         "responses": {
           "202": {
-            "description": "Apply-layout accepted; outcome on the realtime stream.",
+            "description": "Apply-layout accepted: the stored layout was resolved + solved and will swap in at the next frame boundary; `applied_live`/`carried_only` state the property classes. Outcome on the realtime stream (`job.progress`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -398,6 +398,16 @@
           },
           "403": {
             "description": "Not authorized to apply a layout.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The layout id does not exist, its stored body does not parse/solve, its canvas differs from the running session's pinned canvas (Class-2), or the running canvas is unknown (no seeded snapshot — the gate fails closed).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3696,6 +3706,26 @@
           "kind"
         ],
         "properties": {
+          "applied_live": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "For `apply-layout` (ADR-W019): the per-cell property classes the live\napply genuinely applies at the next frame boundary (e.g. `geometry`,\n`bindings`, `z_order`, `opacity`, `on_loss`). Absent on other commands."
+          },
+          "carried_only": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "For `apply-layout` (ADR-W019): the property classes that are **carried**\nin the stored document (persisted, exported) but not yet rendered by the\ncompositor (e.g. `border`, `qos`, `fit`). Absent on other commands."
+          },
           "kind": {
             "type": "string",
             "description": "The command kind (e.g. `start`)."
