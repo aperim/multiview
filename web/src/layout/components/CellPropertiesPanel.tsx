@@ -125,6 +125,32 @@ export function CellPropertiesPanel({
     }
   };
 
+  // Unknown stored tokens (a future scaler/strategy) are SHOWN and preserved
+  // — never displayed as "Default" and never silently replaced (the same
+  // custom-option pattern as the failover slate above).
+  const scalerValue =
+    value.scaler === undefined || value.scaler === '' ? DEFAULT_OPTION : value.scaler;
+  const scalerOptions: readonly string[] = [
+    DEFAULT_OPTION,
+    ...SCALER_MODES,
+    ...(scalerValue !== DEFAULT_OPTION && !SCALER_MODES.some((m) => m === scalerValue)
+      ? [scalerValue]
+      : []),
+  ];
+  const storedDegradation = value.qos?.degradation;
+  const degradationValue =
+    storedDegradation === undefined || storedDegradation === ''
+      ? DEFAULT_OPTION
+      : storedDegradation;
+  const degradationOptions: readonly string[] = [
+    DEFAULT_OPTION,
+    ...DEGRADATION_MODES,
+    ...(degradationValue !== DEFAULT_OPTION &&
+    !DEGRADATION_MODES.some((m) => m === degradationValue)
+      ? [degradationValue]
+      : []),
+  ];
+
   const border = value.border ?? EMPTY_BORDER;
   const setBorder = (next: BorderModel): void => {
     onChange({ ...value, border: isEmptyBorder(next) ? undefined : next });
@@ -184,13 +210,16 @@ export function CellPropertiesPanel({
           />
           <SelectField
             label={t`Scaler`}
-            value={
-              SCALER_MODES.find((mode) => mode === value.scaler) ?? DEFAULT_OPTION
-            }
-            options={[DEFAULT_OPTION, ...SCALER_MODES]}
-            optionLabel={(option): string =>
-              option === DEFAULT_OPTION ? t`Default (auto)` : option
-            }
+            value={scalerValue}
+            options={scalerOptions}
+            optionLabel={(option): string => {
+              if (option === DEFAULT_OPTION) {
+                return t`Default (auto)`;
+              }
+              return SCALER_MODES.some((mode) => mode === option)
+                ? option
+                : t`${option} (custom — preserved)`;
+            }}
             onChange={(next): void => {
               onChange({
                 ...value,
@@ -277,14 +306,16 @@ export function CellPropertiesPanel({
           />
           <SelectField
             label={t`Strategy`}
-            value={
-              DEGRADATION_MODES.find((mode) => mode === qos.degradation) ??
-              DEFAULT_OPTION
-            }
-            options={[DEFAULT_OPTION, ...DEGRADATION_MODES]}
-            optionLabel={(option): string =>
-              option === DEFAULT_OPTION ? t`Default (balanced)` : option
-            }
+            value={degradationValue}
+            options={degradationOptions}
+            optionLabel={(option): string => {
+              if (option === DEFAULT_OPTION) {
+                return t`Default (balanced)`;
+              }
+              return DEGRADATION_MODES.some((mode) => mode === option)
+                ? option
+                : t`${option} (custom — preserved)`;
+            }}
             onChange={(next): void => {
               setQos({
                 ...qos,

@@ -9,7 +9,11 @@ import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { CellPropertiesPanel } from './CellPropertiesPanel';
-import { emptyCellProperties, serializeCellProperties } from '../cellProps';
+import {
+  emptyCellProperties,
+  parseCellProperties,
+  serializeCellProperties,
+} from '../cellProps';
 import type { CellProperties } from '../cellProps';
 import { renderWithProviders } from '../../test/render';
 
@@ -88,5 +92,40 @@ describe('CellPropertiesPanel', () => {
     expect(serialized()).toEqual({ border: { width_px: 2 } });
     await user.clear(width);
     expect(serialized()).toEqual({});
+  });
+
+  it('shows unknown scaler/degradation tokens as custom-preserved, never "Default"', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <Harness
+        initial={parseCellProperties({
+          scaler: 'sharp',
+          qos: { degradation: 'shed-everything' },
+        })}
+      />,
+    );
+    // The selectors tell the truth about the stored tokens…
+    expect(
+      screen.getByRole('combobox', { name: 'Scaler' }).textContent,
+    ).toContain('sharp');
+    expect(
+      screen.getByRole('combobox', { name: 'Strategy' }).textContent,
+    ).toContain('shed-everything');
+    // …and an unrelated edit leaves them untouched (no silent replacement).
+    await user.type(screen.getByLabelText('Opacity (0–1)'), '0.5');
+    expect(serialized()).toEqual({
+      opacity: 0.5,
+      scaler: 'sharp',
+      qos: { degradation: 'shed-everything' },
+    });
+    // Picking a known value still replaces the token explicitly.
+    const scaler = screen.getByRole('combobox', { name: 'Scaler' });
+    await user.click(scaler);
+    await user.click(screen.getByRole('option', { name: 'lanczos' }));
+    expect(serialized()).toEqual({
+      opacity: 0.5,
+      scaler: 'lanczos',
+      qos: { degradation: 'shed-everything' },
+    });
   });
 });

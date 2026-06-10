@@ -145,7 +145,7 @@ describe('validateCellProperties', () => {
   it('flags opacity outside 0..1', () => {
     const props = parseCellProperties({ opacity: 1.5 });
     expect(validateCellProperties(props, 'cells.0')).toEqual([
-      { path: 'cells.0.opacity', code: 'opacity-range' },
+      { path: 'cells.0.opacity', code: 'opacity-range', severity: 'error' },
     ]);
   });
 
@@ -164,15 +164,20 @@ describe('validateCellProperties', () => {
     const props = parseCellProperties({
       border: { width_px: -2, color: 'red' },
     });
-    const codes = validateCellProperties(props, 'c').map((issue) => issue.code);
+    const issues = validateCellProperties(props, 'c');
+    const codes = issues.map((issue) => issue.code);
     expect(codes).toContain('border-width-invalid');
     expect(codes).toContain('border-color-hex');
+    // Rust never validates Border.color, so a bad colour is advisory only;
+    // the width is a u32 in the schema, so that one stays an error.
+    expect(issues.find((i) => i.code === 'border-color-hex')?.severity).toBe('warning');
+    expect(issues.find((i) => i.code === 'border-width-invalid')?.severity).toBe('error');
   });
 
   it('flags a non-integer qos priority', () => {
     const props = parseCellProperties({ qos: { priority: 1.5 } });
     expect(validateCellProperties(props, 'cells.2')).toEqual([
-      { path: 'cells.2.qos.priority', code: 'qos-priority-int' },
+      { path: 'cells.2.qos.priority', code: 'qos-priority-int', severity: 'error' },
     ]);
   });
 });

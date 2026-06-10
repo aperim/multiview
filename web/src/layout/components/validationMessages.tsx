@@ -67,6 +67,27 @@ export function GridValidationMessage({
       return <Trans>Gaps must be whole pixel counts (0 or more).</Trans>;
     case 'area-not-rectangle':
       return <Trans>Every named area must form a contiguous rectangle.</Trans>;
+    case 'grid-overflow':
+      return (
+        <Trans>
+          The tracks overflow the canvas (fixed sizes or percentages exceed it)
+          — an area would land outside the output frame.
+        </Trans>
+      );
+    case 'areas-normalized':
+      return (
+        <Trans>
+          The stored area map was ragged and has been normalized for editing;
+          saving will persist the repaired map.
+        </Trans>
+      );
+    case 'cell-area-and-rect':
+      return (
+        <Trans>
+          This cell declares both an area and a rect — keep exactly one (the
+          engine rejects the pair).
+        </Trans>
+      );
     case 'cell-area-unknown':
       return <Trans>This cell references an area that is not in the grid.</Trans>;
     case 'area-no-cell':

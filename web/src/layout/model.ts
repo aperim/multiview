@@ -534,7 +534,14 @@ export function validateLayout(model: LayoutModel): readonly ValidationIssue[] {
     ) {
       issues.push({ path: `${base}.rotation`, code: 'rotation-range' });
     }
-    issues.push(...validateCellProperties(cell.props, base));
+    // Only error-severity property issues block here: warnings (e.g. the
+    // border colour Rust never validates) are advisory and the absolute
+    // editor gates saving on an empty issue list.
+    issues.push(
+      ...validateCellProperties(cell.props, base).filter(
+        (issue) => issue.severity === 'error',
+      ),
+    );
   });
   return issues;
 }

@@ -90,6 +90,18 @@ export interface GridCellModel {
   readonly sourceId: string | undefined;
   /** Unrendered `source` sub-fields, preserved verbatim. */
   readonly sourceExtra: Readonly<Record<string, unknown>>;
+  /**
+   * Whether the stored record carried a `source` key at all. Tracked so an
+   * absent key stays absent on save (no invented `{}`) while a present empty
+   * record is kept — both shapes round-trip exactly.
+   */
+  readonly sourcePresent: boolean;
+  /**
+   * Whether the record ALSO declares a `rect` (kept verbatim in `extra`).
+   * Rust rejects a cell with both `area` and `rect`, so this raises an
+   * error-severity issue until the operator resolves it.
+   */
+  readonly hasRect: boolean;
   /** The full Cell property set (on_loss / border / qos / appearance). */
   readonly props: CellProperties;
   /** Unrendered cell keys, preserved verbatim. */
@@ -131,6 +143,12 @@ export interface GridModel {
   readonly columnGap: number | undefined;
   /** The area map, rows × columns of area-name tokens. */
   readonly areaMatrix: readonly (readonly string[])[];
+  /**
+   * Whether the stored `areas` map was ragged (rows padded with `"."` or
+   * excess tokens dropped) and had to be normalized on load — meaning even a
+   * no-op save rewrites the stored body. Surfaced as an advisory issue.
+   */
+  readonly areasNormalized: boolean;
   /** The body's cells, in original order (editable + pass-through). */
   readonly cells: readonly GridCellEntry[];
 }
@@ -195,6 +213,13 @@ export interface ParsedTrack {
  * the Rust `Track::from_str`: trimmed, finite, non-negative; anything else is
  * `undefined`.
  */
+/**
+ * The decimal forms Rust's `f64::from_str` and JS agree on: `1`, `1.5`, `.5`,
+ * `5.`, `1e2` (± signs allowed). Notably EXCLUDES the JS-only `Number()`
+ * extras Rust rejects — hex (`0x10`), octal/binary prefixes, and `Infinity`.
+ */
+const NUMERIC_FORM = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
 export function parseTrack(value: string): ParsedTrack | undefined {
   const trimmed = value.trim();
   const tryUnit = (suffix: 'fr' | 'px' | '%'): ParsedTrack | undefined => {
@@ -202,7 +227,7 @@ export function parseTrack(value: string): ParsedTrack | undefined {
       return undefined;
     }
     const raw = trimmed.slice(0, trimmed.length - suffix.length).trim();
-    if (raw === '') {
+    if (!NUMERIC_FORM.test(raw)) {
       return undefined;
     }
     const num = Number(raw);
@@ -267,17 +292,21 @@ function matrixFromAreas(
   areas: readonly string[],
   columnCount: number,
   rowCount: number,
-): readonly (readonly string[])[] {
+): { readonly matrix: readonly (readonly string[])[]; readonly normalized: boolean } {
   const matrix: string[][] = [];
+  let normalized = areas.length !== rowCount;
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
     const tokens = (areas[rowIndex] ?? '').trim().split(/\s+/).filter((t) => t !== '');
+    if (tokens.length !== columnCount) {
+      normalized = true;
+    }
     const row: string[] = [];
     for (let colIndex = 0; colIndex < columnCount; colIndex += 1) {
       row.push(tokens[colIndex] ?? '.');
     }
     matrix.push(row);
   }
-  return matrix;
+  return { matrix, normalized };
 }
 
 function parseGridCellEntry(raw: unknown): GridCellEntry | undefined {
@@ -292,7 +321,13 @@ function parseGridCellEntry(raw: unknown): GridCellEntry | undefined {
     // verbatim so the body round-trips losslessly.
     return { kind: 'raw', record };
   }
+  const sourcePresent = 'source' in record;
   const source = asRecord(record.source);
+  if (sourcePresent && source === undefined) {
+    // A non-record `source` is out of schema; pass the whole cell through
+    // verbatim rather than model (and rewrite) what we cannot represent.
+    return { kind: 'raw', record };
+  }
   return {
     kind: 'cell',
     cell: {
@@ -302,6 +337,8 @@ function parseGridCellEntry(raw: unknown): GridCellEntry | undefined {
       fit: asFitOrUndefined(record.fit),
       sourceId: source !== undefined ? asString(source.input_id) : undefined,
       sourceExtra: source !== undefined ? extraOf(source, ['input_id']) : {},
+      sourcePresent,
+      hasRect: 'rect' in record,
       props: parseCellProperties(record),
       extra: extraOf(record, GRID_CELL_KEYS),
     },
@@ -342,6 +379,7 @@ export function fromGridLayoutBody(
     }
   }
   const { canvas, canvasExtra } = canvasFromBody(root);
+  const { matrix, normalized } = matrixFromAreas(areas, columns.length, rows.length);
   return {
     id,
     name,
@@ -354,22 +392,33 @@ export function fromGridLayoutBody(
     gap: asFiniteNumber(layout.gap),
     rowGap: asFiniteNumber(layout.row_gap),
     columnGap: asFiniteNumber(layout.column_gap),
-    areaMatrix: matrixFromAreas(areas, columns.length, rows.length),
+    areaMatrix: matrix,
+    areasNormalized: normalized,
     cells,
   };
 }
 
 function serializeGridCell(cell: GridCellModel): Record<string, unknown> {
+  // `source` is emitted only when the stored record carried the key or the
+  // editor bound something — an absent key stays absent (no invented `{}`).
+  const emitSource =
+    cell.sourcePresent ||
+    cell.sourceId !== undefined ||
+    Object.keys(cell.sourceExtra).length > 0;
   return {
     id: cell.id,
     area: cell.area,
     ...(cell.z !== undefined ? { z: cell.z } : {}),
     ...(cell.fit !== undefined ? { fit: cell.fit } : {}),
     ...serializeCellProperties(cell.props),
-    source: {
-      ...cell.sourceExtra,
-      ...(cell.sourceId !== undefined ? { input_id: cell.sourceId } : {}),
-    },
+    ...(emitSource
+      ? {
+          source: {
+            ...cell.sourceExtra,
+            ...(cell.sourceId !== undefined ? { input_id: cell.sourceId } : {}),
+          },
+        }
+      : {}),
     ...cell.extra,
   };
 }
@@ -805,6 +854,9 @@ export function ensureCell(model: GridModel, area: string): GridModel {
     fit: undefined,
     sourceId: undefined,
     sourceExtra: {},
+    // The schema requires `source` on every cell, so a fresh cell emits `{}`.
+    sourcePresent: true,
+    hasRect: false,
     props: emptyCellProperties(),
     extra: {},
   };
@@ -850,7 +902,10 @@ export type GridValidationCode =
   | 'track-format'
   | 'gap-invalid'
   | 'area-not-rectangle'
+  | 'grid-overflow'
+  | 'areas-normalized'
   | 'cell-area-unknown'
+  | 'cell-area-and-rect'
   | 'cell-id-empty'
   | 'cell-id-duplicate'
   | 'area-no-cell'
@@ -917,6 +972,23 @@ export function validateGrid(model: GridModel): readonly GridValidationIssue[] {
   for (const name of nonRectangularAreas(model.areaMatrix)) {
     issues.push(err(`areas.${name}`, 'area-not-rectangle'));
   }
+  if (model.areasNormalized) {
+    // The stored `areas` map was ragged and got repaired on load: even a
+    // no-op save rewrites the stored body, so say so where the operator looks.
+    issues.push({ path: 'layout.areas', code: 'areas-normalized', severity: 'warning' });
+  }
+  // The solver clamps nothing the core would accept: a solved rect past the
+  // canvas (oversized px tracks, % sums over 100) fails multiview-core's
+  // x+w <= 1.0 check on apply, so it must block saving here.
+  const solved = solveGridToRects(model);
+  if (solved !== undefined) {
+    const epsilon = 1e-6;
+    for (const [name, rect] of solved) {
+      if (rect.x + rect.w > 1 + epsilon || rect.y + rect.h > 1 + epsilon) {
+        issues.push(err(`areas.${name}`, 'grid-overflow'));
+      }
+    }
+  }
   const names = areaNames(model);
   const seen = new Set<string>();
   const boundAreas = new Set<string>();
@@ -932,9 +1004,18 @@ export function validateGrid(model: GridModel): readonly GridValidationIssue[] {
     if (!names.includes(cell.area)) {
       issues.push(err(`${base}.area`, 'cell-area-unknown'));
     }
+    if (cell.hasRect) {
+      // Rust rejects a cell declaring both `area` and `rect` — the operator
+      // must drop one before the document can apply.
+      issues.push(err(`${base}.rect`, 'cell-area-and-rect'));
+    }
     boundAreas.add(cell.area);
     for (const propIssue of validateCellProperties(cell.props, base)) {
-      issues.push(err(propIssue.path, propIssue.code));
+      issues.push({
+        path: propIssue.path,
+        code: propIssue.code,
+        severity: propIssue.severity,
+      });
     }
   });
   for (const name of names) {
@@ -1050,6 +1131,7 @@ export function presetBodyToGridModel(
     rowGap: undefined,
     columnGap: undefined,
     areaMatrix: expansion.areaMatrix,
+    areasNormalized: false,
     cells,
   };
   if (cells.length === 0) {
@@ -1152,7 +1234,9 @@ export function gridToLayoutModel(model: GridModel): LayoutModel | undefined {
       sourceId: entry.cell.sourceId,
       sourceExtra: entry.cell.sourceExtra,
       props: entry.cell.props,
-      extra: entry.cell.extra,
+      // A conflicting verbatim `rect` (the area+rect case) must not ride
+      // `extra` over the SOLVED managed rect in the serialized body.
+      extra: extraOf(entry.cell.extra, ['rect']),
     });
     usedIds.add(entry.cell.id);
   }

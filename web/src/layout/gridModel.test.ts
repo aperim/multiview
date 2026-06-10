@@ -35,7 +35,7 @@ import {
 } from './gridModel';
 import type { GridModel } from './gridModel';
 import { onLossOf } from './cellProps';
-import { presetCells } from './model';
+import { presetCells, toLayoutBody } from './model';
 
 /**
  * The frigate demo working-layout body: exactly what `seed_working_layout`
@@ -313,6 +313,47 @@ describe('solveGridToRects (mirrors the Rust solver)', () => {
     expect(parseTrack('-1fr')).toBeUndefined();
     expect(parseTrack('aufr')).toBeUndefined();
   });
+
+  it('parseTrack matches Rust f64::from_str on numeric forms (no hex/Infinity)', () => {
+    // Number("0x10") happily parses hex; Rust's f64::from_str rejects it.
+    expect(parseTrack('0x10px')).toBeUndefined();
+    expect(parseTrack('Infinitypx')).toBeUndefined();
+    // These forms parse identically in Rust and JS.
+    expect(parseTrack('1e2px')).toEqual({ unit: 'px', value: 100 });
+    expect(parseTrack('.5fr')).toEqual({ unit: 'fr', value: 0.5 });
+    expect(parseTrack('5.fr')).toEqual({ unit: 'fr', value: 5 });
+    expect(parseTrack('+2fr')).toEqual({ unit: 'fr', value: 2 });
+  });
+
+  it('flags grid overflow when fixed tracks exceed the canvas (core rejects on apply)', () => {
+    // A 5000px column on a 1920 canvas solves to w > 1.0; multiview-core
+    // rejects x+w > 1.0, so saving must be blocked here, not on apply.
+    const model = load({
+      canvas: { width: 1920, height: 1080, fps: '30/1' },
+      layout: {
+        kind: 'grid',
+        columns: ['5000px', '1fr'],
+        rows: ['1fr'],
+        areas: ['a b'],
+      },
+      cells: [],
+    });
+    const overflow = validateGrid(model).filter((issue) => issue.code === 'grid-overflow');
+    expect(overflow.length).toBeGreaterThan(0);
+    expect(overflow[0]?.severity).toBe('error');
+    expect(isGridSavable(model)).toBe(false);
+    // A percentage sum over 100 overflows the same way.
+    const pct = load({
+      canvas: { width: 1000, height: 1000, fps: '30/1' },
+      layout: { kind: 'grid', columns: ['80%', '80%'], rows: ['1fr'], areas: ['a b'] },
+      cells: [],
+    });
+    expect(validateGrid(pct).map((issue) => issue.code)).toContain('grid-overflow');
+    // The frigate grid does not overflow.
+    expect(validateGrid(load(frigateBody())).map((issue) => issue.code)).not.toContain(
+      'grid-overflow',
+    );
+  });
 });
 
 describe('preset expansion', () => {
@@ -581,6 +622,85 @@ describe('validation', () => {
     expect(codes).toContain('tracks-empty');
     expect(isGridSavable(model)).toBe(false);
   });
+
+  it('surfaces a visible advisory when a ragged areas map was normalized on load', () => {
+    // Row 0 has an extra token (dropped) — the body the editor would save is a
+    // rewrite of the stored one, so the operator must be told.
+    const model = load({
+      canvas: { width: 1000, height: 1000, fps: '30/1' },
+      layout: {
+        kind: 'grid',
+        columns: ['1fr', '1fr'],
+        rows: ['1fr', '1fr'],
+        areas: ['a b c', 'c d'],
+      },
+      cells: [],
+    });
+    const advisory = validateGrid(model).find((issue) => issue.code === 'areas-normalized');
+    expect(advisory?.severity).toBe('warning');
+    // A short row (padded with ".") is also a normalization.
+    const padded = load({
+      canvas: { width: 1000, height: 1000, fps: '30/1' },
+      layout: { kind: 'grid', columns: ['1fr', '1fr'], rows: ['1fr'], areas: ['a'] },
+      cells: [],
+    });
+    expect(validateGrid(padded).map((issue) => issue.code)).toContain('areas-normalized');
+    // A well-formed map never raises it.
+    expect(validateGrid(load(frigateBody())).map((issue) => issue.code)).not.toContain(
+      'areas-normalized',
+    );
+  });
+
+  it('flags a cell declaring BOTH area and rect (Rust: choose exactly one)', () => {
+    const body = frigateBody();
+    const cells = body.cells as Record<string, unknown>[];
+    const first = cells[0];
+    if (first === undefined) {
+      throw new Error('expected seeded cells');
+    }
+    first.rect = { x: 0.9, y: 0.9, w: 0.1, h: 0.1 };
+    const model = load(body);
+    const issue = validateGrid(model).find((i) => i.code === 'cell-area-and-rect');
+    expect(issue?.severity).toBe('error');
+    expect(isGridSavable(model)).toBe(false);
+    // The conflicting rect still round-trips verbatim (lossless).
+    expect(toGridLayoutBody(model)).toEqual(body);
+  });
+
+  it('treats an out-of-range border colour as a warning, not a save blocker', () => {
+    // Rust never validates Border.color: a pre-existing "red" must not make
+    // the layout unsavable; the advisory still shows.
+    const body = frigateBody();
+    const cells = body.cells as Record<string, unknown>[];
+    const first = cells[0];
+    if (first === undefined) {
+      throw new Error('expected seeded cells');
+    }
+    first.border = { width_px: 2, color: 'red' };
+    const model = load(body);
+    const issue = validateGrid(model).find((i) => i.code === 'border-color-hex');
+    expect(issue?.severity).toBe('warning');
+    expect(isGridSavable(model)).toBe(true);
+  });
+
+  it('a cell without a source key stays without one (no invented {})', () => {
+    const body = {
+      canvas: { width: 1000, height: 1000, fps: '30/1' },
+      layout: { kind: 'grid', columns: ['1fr'], rows: ['1fr'], areas: ['solo'] },
+      cells: [{ id: 'c1', area: 'solo' }],
+    };
+    const model = load(body);
+    const saved = toGridLayoutBody(model);
+    const savedCells = saved.cells as Record<string, unknown>[];
+    expect(savedCells[0]).toEqual({ id: 'c1', area: 'solo' });
+    expect(saved).toEqual(body);
+    // An explicit empty source record is presence, and is kept.
+    const withEmpty = {
+      ...body,
+      cells: [{ id: 'c1', area: 'solo', source: {} }],
+    };
+    expect(toGridLayoutBody(load(withEmpty))).toEqual(withEmpty);
+  });
 });
 
 describe('gap setters', () => {
@@ -627,5 +747,39 @@ describe('convert to free-form', () => {
       cells: [],
     });
     expect(gridToLayoutModel(model)).toBeUndefined();
+  });
+
+  it('a conflicting cell rect never overrides the solved rect on conversion', () => {
+    const body = {
+      canvas: { width: 1000, height: 1000, fps: '30/1' },
+      layout: {
+        kind: 'grid',
+        columns: ['1fr', '1fr'],
+        rows: ['1fr'],
+        areas: ['a b'],
+      },
+      cells: [
+        {
+          id: 'cell_a',
+          area: 'a',
+          rect: { x: 0.9, y: 0.9, w: 0.1, h: 0.1 },
+          source: { input_id: 'in_a' },
+        },
+      ],
+    };
+    const converted = gridToLayoutModel(load(body));
+    expect(converted).toBeDefined();
+    if (converted === undefined) {
+      return;
+    }
+    const cellA = converted.cells.find((cell) => cell.id === 'cell_a');
+    // The SOLVED placement wins, in the model…
+    expect(cellA?.rect).toEqual({ x: 0, y: 0, w: 0.5, h: 1 });
+    // …and in the serialized body (the stale rect must not ride `extra` over
+    // the managed key).
+    const absBody = toLayoutBody(converted);
+    const absCells = absBody.cells as Record<string, unknown>[];
+    const savedA = absCells.find((cell) => cell.id === 'cell_a');
+    expect(savedA?.rect).toEqual({ x: 0, y: 0, w: 0.5, h: 1 });
   });
 });

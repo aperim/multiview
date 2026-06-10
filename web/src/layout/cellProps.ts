@@ -344,6 +344,13 @@ export interface CellPropertyIssue {
   readonly path: string;
   /** The stable machine code. */
   readonly code: CellPropertyIssueCode;
+  /**
+   * Errors mirror constraints the Rust schema/engine enforces (saving such a
+   * document would fail on apply); warnings are advisory only — e.g. the
+   * border colour, which Rust never validates, must not block saving a
+   * pre-existing document.
+   */
+  readonly severity: 'error' | 'warning';
 }
 
 /** `#RGB` or `#RRGGBB` (mirrors the resource forms' hex validator). */
@@ -363,21 +370,39 @@ export function validateCellProperties(
 ): readonly CellPropertyIssue[] {
   const issues: CellPropertyIssue[] = [];
   if (props.opacity !== undefined && (props.opacity < 0 || props.opacity > 1)) {
-    issues.push({ path: `${base}.opacity`, code: 'opacity-range' });
+    issues.push({ path: `${base}.opacity`, code: 'opacity-range', severity: 'error' });
   }
   if (props.cornerRadius !== undefined && !isNonNegativeInt(props.cornerRadius)) {
-    issues.push({ path: `${base}.corner_radius`, code: 'corner-radius-invalid' });
+    issues.push({
+      path: `${base}.corner_radius`,
+      code: 'corner-radius-invalid',
+      severity: 'error',
+    });
   }
   if (props.border !== undefined) {
     if (props.border.widthPx !== undefined && !isNonNegativeInt(props.border.widthPx)) {
-      issues.push({ path: `${base}.border.width_px`, code: 'border-width-invalid' });
+      issues.push({
+        path: `${base}.border.width_px`,
+        code: 'border-width-invalid',
+        severity: 'error',
+      });
     }
     if (props.border.color !== undefined && !HEX_COLOR.test(props.border.color)) {
-      issues.push({ path: `${base}.border.color`, code: 'border-color-hex' });
+      // Advisory: Rust never validates Border.color, so a pre-existing
+      // out-of-form colour must not make the layout unsavable.
+      issues.push({
+        path: `${base}.border.color`,
+        code: 'border-color-hex',
+        severity: 'warning',
+      });
     }
   }
   if (props.qos?.priority !== undefined && !Number.isInteger(props.qos.priority)) {
-    issues.push({ path: `${base}.qos.priority`, code: 'qos-priority-int' });
+    issues.push({
+      path: `${base}.qos.priority`,
+      code: 'qos-priority-int',
+      severity: 'error',
+    });
   }
   return issues;
 }

@@ -377,6 +377,18 @@ describe('lossless extras (absolute editor)', () => {
     expect(validateLayout(bad).map((i) => i.code)).toContain('opacity-range');
   });
 
+  it('a non-hex border colour is advisory only and never blocks an absolute save', () => {
+    // Rust never validates Border.color; a pre-existing "red" must not make
+    // the layout uneditable/unsavable in the free-form editor either.
+    const m = setCellProps(
+      model([cell('a')]),
+      'a',
+      parseCellProperties({ border: { width_px: 1, color: 'red' } }),
+    );
+    expect(validateLayout(m).map((i) => i.code)).not.toContain('border-color-hex');
+    expect(isLayoutValid(m)).toBe(true);
+  });
+
   it('a new draft body still writes schema_version 1 and an empty source', () => {
     const body = toLayoutBody(model([cell('a')]));
     expect(body.schema_version).toBe(1);
