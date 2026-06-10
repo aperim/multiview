@@ -6836,3 +6836,110 @@ mod rt8b_lip_sync_driver_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod live_source_registry_tests {
+    //! ADR-W018: the startup ingest supervisor registers per-producer stop
+    //! flags — the video thread under the source id, the caption reader under
+    //! the derived `{id}/captions` key — so a live remove/edit can tear down
+    //! exactly one startup source's producers (including its caption reader).
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use multiview_config::MultiviewConfig;
+
+    use super::{ingest_plan_for, IngestSupervisor};
+    use crate::live_sources::stop_registry;
+
+    /// A minimal config carrying one never-connecting RTSP source.
+    fn rtsp_config() -> MultiviewConfig {
+        let doc = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "net1"
+kind = "rtsp"
+url = "rtsp://[::1]:1/never"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "net1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/live-source-registry.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        MultiviewConfig::load_from_toml(doc).expect("parse rtsp config")
+    }
+
+    /// m6: a STARTUP network ingest thread registers its per-source stop flag,
+    /// so a live REMOVE can stop exactly that producer via the registry (the
+    /// hub raises the flag; the supervisor's later join returns immediately).
+    #[test]
+    fn startup_network_ingest_registers_and_stops_via_the_registry() {
+        let config = rtsp_config();
+        let source = config.sources.first().expect("one source");
+        let store = Arc::new(multiview_framestore::TileStore::with_defaults("net1"));
+        let plan = ingest_plan_for(
+            source,
+            64,
+            64,
+            store,
+            multiview_compositor::pipeline::CanvasColor::default(),
+            multiview_core::time::Rational::new(25, 1),
+        )
+        .expect("rtsp ingest plan");
+
+        let registry = stop_registry();
+        let supervisor = IngestSupervisor::start(vec![plan], Vec::new(), &registry);
+        let flag = registry
+            .lock()
+            .expect("registry")
+            .get("net1")
+            .cloned()
+            .expect("the startup ingest thread registers its stop flag");
+        // A live remove raises exactly this flag (the hub does this); the
+        // ingest loop observes it between (re)connect attempts and exits, so
+        // the supervisor's shutdown join returns without the wedge-detach path.
+        flag.store(true, Ordering::Release);
+        supervisor.shutdown();
+    }
+
+    /// M1: the caption reader registers under the derived `{id}/captions` key,
+    /// so a live edit/remove of the source also stops its caption reader (the
+    /// hub raises every `{id}`-rooted flag).
+    #[test]
+    fn caption_reader_registers_a_prefixed_stop_flag() {
+        let plan = crate::captions::CaptionPlan {
+            id: "net1".to_owned(),
+            rendition_url: "http://[::1]:1/never/subs.m3u8".to_owned(),
+            store: Arc::new(crate::captions::CueStore::new()),
+            live: true,
+        };
+        let registry = stop_registry();
+        let supervisor = IngestSupervisor::start(Vec::new(), vec![plan], &registry);
+        let flag = registry
+            .lock()
+            .expect("registry")
+            .get("net1/captions")
+            .cloned()
+            .expect("the caption reader registers under {id}/captions");
+        flag.store(true, Ordering::Release);
+        supervisor.shutdown();
+    }
+}

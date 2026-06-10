@@ -426,6 +426,67 @@ mod tests {
     }
 
     #[test]
+    fn teardown_raises_the_id_and_every_prefixed_companion_flag() {
+        // A source's companion producers (e.g. its caption reader) register
+        // under `{id}/<role>` keys; tearing down `id` must raise the id's flag
+        // AND every `{id}/`-prefixed flag — but never an unrelated id that
+        // merely starts with the same characters ("src10" vs "src1").
+        let registry = stop_registry();
+        let preview = shared_stores(HashMap::new());
+        let video = Arc::new(AtomicBool::new(false));
+        let captions = Arc::new(AtomicBool::new(false));
+        let unrelated = Arc::new(AtomicBool::new(false));
+        register_stop(&registry, "src1", &video);
+        register_stop(&registry, "src1/captions", &captions);
+        register_stop(&registry, "src10", &unrelated);
+        let hub = LiveSourceHub::start(Arc::clone(&registry), preview);
+
+        assert!(matches!(
+            hub.handle().request_teardown("src1"),
+            HubSubmit::Accepted
+        ));
+        assert!(
+            wait_for(Duration::from_secs(5), || {
+                video.load(Ordering::Acquire) && captions.load(Ordering::Acquire)
+            }),
+            "teardown must raise the source flag AND its /captions companion"
+        );
+        assert!(
+            !unrelated.load(Ordering::Acquire),
+            "an unrelated id sharing a prefix must NOT be torn down"
+        );
+        assert!(
+            wait_for(Duration::from_secs(5), || {
+                registry.lock().is_ok_and(|map| {
+                    !map.contains_key("src1")
+                        && !map.contains_key("src1/captions")
+                        && map.contains_key("src10")
+                })
+            }),
+            "teardown deregisters the id + companions, keeps unrelated ids"
+        );
+        hub.shutdown();
+    }
+
+    #[test]
+    fn handle_distinguishes_a_gone_hub_from_a_full_queue() {
+        let registry = stop_registry();
+        let preview = shared_stores(HashMap::new());
+        let hub = LiveSourceHub::start(registry, preview);
+        let handle = hub.handle();
+        assert!(matches!(handle.request_teardown("x"), HubSubmit::Accepted));
+        hub.shutdown();
+        // The worker is gone: a held handle must report Gone (live apply is
+        // disabled until restart), not pretend the queue is merely full.
+        assert!(
+            wait_for(Duration::from_secs(5), || {
+                matches!(handle.request_teardown("x"), HubSubmit::Gone)
+            }),
+            "a shut-down hub must report Gone to held handles"
+        );
+    }
+
+    #[test]
     fn shutdown_tears_down_owned_producers() {
         let registry = stop_registry();
         let preview = shared_stores(HashMap::new());
