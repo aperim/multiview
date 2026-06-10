@@ -34,6 +34,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-R007](ADR-R007.md) — Subtitle ingest -> libass burn-in (off hot path) + format-aware discrete passthrough
 - [ADR-R008](ADR-R008.md) — Overlay rendering: serializable layer stack, glyphon/Vello+SDF, premultiplied alpha, dirty-region uploads, input-decoupled
 - [ADR-R009](ADR-R009.md) — Resilience testing: always-on output-validity probe as SLO arbiter, layered chaos, soak/fuzz, GPU-less CI
+- [ADR-R010](ADR-R010.md) — Make-before-break parallel-output migration primitive: the implementable five-phase Class-2 cutover contract (validate→spin-up→warm→swap→drain/stop) shared by CTL-6 (config migration) and GPU-5c (re-placement); preserves inv #1/#10 via two independent output clocks + non-blocking `move_sink` cutover + an off-data-plane coordinator *(Proposed)*
 
 ## Efficiency
 
@@ -92,6 +93,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-T009](ADR-T009.md) — Per-tile media-time ring uses O(capacity) copy-on-write publish, not an in-place O(1) ring
 - [ADR-T011](ADR-T011.md) — HLS rendition isolation: discard unrouted subtitle streams in the main demuxer; the isolated WebVTT reader is the sole WebVTT path
 - [ADR-T012](ADR-T012.md) — Reference-clock / wall-clock source-selection contract: free-run vs PTP-grandmaster (ST 2059-2 profile/domain) vs NTP-disciplined precedence, the Holdover→RefLoss failover ladder + `AlarmKind::ReferenceLoss`, and the disciplined reference as a MEDIA-CLOCK REFERENCE only — never a pacer (inv #1; gates AES67-5 + M12)
+- [ADR-T013](ADR-T013.md) — The shared RTP-audio → AudioStore program-clock rebase seam (WebRTC Opus + AES67 + future converge on one path) *(Proposed)*
 - [ADR-0020](ADR-0020.md) — Layered timing: monotonic pacing + optional reference-lock + per-input frame-sync *(Proposed)*
 - [ADR-0021](ADR-0021.md) — Input timing & frame-sync: best-effort PTS normalisation + wall-clock pacer + sample-at-tick *(Proposed)*
 
