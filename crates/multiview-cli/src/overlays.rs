@@ -1708,6 +1708,56 @@ mod tests {
     }
 
     #[test]
+    fn set_analog_clock_swaps_the_face_at_runtime() {
+        // ADR-W021: a live overlay apply re-derives the analog face on the
+        // bake consumer — the baker must accept a runtime swap (set / move /
+        // clear), not only the build-time builder.
+        let mut baker = OverlayBaker::new(quad_tiles(), epoch_clock()).unwrap();
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
+            .unwrap();
+        assert_eq!(rings_and_strokes(&list), (0, 0), "no face configured yet");
+
+        baker.set_analog_clock(Some(AnalogClockSpec::new(
+            TimeZoneOffset::UTC,
+            1160.0,
+            600.0,
+            90.0,
+        )));
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
+            .unwrap();
+        let (rings, strokes) = rings_and_strokes(&list);
+        assert_eq!(rings, 1, "the swapped-in analog face draws its bezel ring");
+        assert_eq!(strokes, 15, "12 hour ticks + 3 hands");
+
+        baker.set_analog_clock(None);
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &HashMap::new(),
+                &no_captions(),
+                &no_bitmaps(),
+            )
+            .unwrap();
+        assert_eq!(
+            rings_and_strokes(&list),
+            (0, 0),
+            "clearing the face removes the ring + strokes"
+        );
+    }
+
+    #[test]
     fn analog_clock_draws_a_ring_plus_hands_and_ticks() {
         // With an analog clock configured, the baker must emit the clock-face
         // vocabulary: a bezel ring + 12 ticks + 3 hands (the digital baseline

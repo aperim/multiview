@@ -7153,3 +7153,128 @@ segment_ms = 1000
         supervisor.shutdown();
     }
 }
+
+#[cfg(all(test, feature = "overlay"))]
+mod live_overlay_bake_tests {
+    //! ADR-W021: the bake consumer re-derives its overlay render state from the
+    //! live [`OverlayApplySlot`](crate::live_overlays::OverlayApplySlot) on a
+    //! generation change — proven at the pixel level on the baked NV12 frame.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+    use multiview_core::time::Rational;
+
+    use super::{BakeContext, StreamBaker, StreamItem};
+
+    /// The analog face region the test asserts over: a box around the face at
+    /// (200, 120) radius 40 on a 320x180 canvas — well clear of the top-left
+    /// digital-clock chrome (whose readout changes with the wall clock and
+    /// would otherwise alias the diff).
+    const FACE: (u32, u32, u32, u32) = (150, 70, 100, 100);
+
+    /// Count luma samples inside the face region that differ between frames.
+    fn face_diff(a: &Nv12Image, b: &Nv12Image) -> usize {
+        let (x0, y0, w, h) = FACE;
+        let mut differ = 0_usize;
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let pa = a.sample(x, y).expect("in bounds");
+                let pb = b.sample(x, y).expect("in bounds");
+                if pa.0 != pb.0 {
+                    differ += 1;
+                }
+            }
+        }
+        differ
+    }
+
+    /// A bake context with no tiles and no boot analog clock, wired to `slot`.
+    fn bake_context(slot: &crate::live_overlays::OverlayApplySlot) -> BakeContext {
+        BakeContext {
+            tile_specs: Vec::new(),
+            meter_db_timelines: HashMap::new(),
+            subtitles: None,
+            sidecar_target: None,
+            analog_clock: None,
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            overlay_apply: Some(Arc::clone(slot)),
+        }
+    }
+
+    /// One streamed tick over a uniform dark canvas.
+    fn item(tick_index: u64) -> StreamItem {
+        let tag = CanvasColor::default().output_tag();
+        StreamItem {
+            canvas: Arc::new(Nv12Image::solid(320, 180, 16, 128, 128, tag).expect("solid")),
+            tick_index,
+            source_states: HashMap::new(),
+            captions: HashMap::new(),
+            caption_bitmaps: HashMap::new(),
+            faults: HashMap::new(),
+        }
+    }
+
+    /// An analog wall-clock overlay document centred in the face region.
+    fn analog_clock_doc() -> multiview_config::Overlay {
+        serde_json::from_value(serde_json::json!({
+            "id": "clk", "kind": "clock", "target": "canvas",
+            "face": "analog", "x": 200, "y": 120, "radius": 40
+        }))
+        .expect("valid overlay document")
+    }
+
+    #[test]
+    fn stream_baker_rederives_the_analog_clock_from_the_live_slot() {
+        // Generation 0: an empty boot set ⇒ no analog face anywhere.
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let before = baker.bake(&item(0)).expect("bake gen 0");
+
+        // LIVE APPLY: publish a set carrying the analog clock. The next baked
+        // frame must ink the face (the bezel ring + hands) into the region.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let with_face = baker.bake(&item(1)).expect("bake gen 1");
+        let inked = face_diff(&before, &with_face);
+        assert!(
+            inked > 50,
+            "the live-applied analog face must visibly ink the region \
+             (differing luma samples: {inked})"
+        );
+
+        // LIVE REMOVE: publish the empty set again — the face disappears and
+        // the region returns to the bare-canvas pixels.
+        let _gen = crate::live_overlays::publish_set(&slot, Vec::new());
+        let removed = baker.bake(&item(2)).expect("bake gen 2");
+        assert_eq!(
+            face_diff(&before, &removed),
+            0,
+            "removing the overlay must restore the bare-canvas face region"
+        );
+    }
+
+    #[test]
+    fn unchanged_generation_does_not_rederive() {
+        // Baking twice against the SAME generation draws the same face state
+        // (the consumer re-derives only on a generation change — the per-frame
+        // cost is one wait-free load + integer compare).
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+        // Seed context had no boot analog clock, but the slot's generation-0
+        // set carries one: the FIRST bake must already honour the slot (the
+        // seeded set is the boot truth).
+        let first = baker.bake(&item(0)).expect("bake");
+        let blank = {
+            let empty = crate::live_overlays::overlay_apply_slot(Vec::new());
+            let mut bare = StreamBaker::new(bake_context(&empty)).expect("bare baker");
+            bare.bake(&item(0)).expect("bare bake")
+        };
+        assert!(
+            face_diff(&blank, &first) > 50,
+            "the seeded slot set must drive the very first bake"
+        );
+    }
+}
