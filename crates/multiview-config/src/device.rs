@@ -65,8 +65,8 @@ impl DeviceDriver {
     /// derive emits.
     ///
     /// This is the single source of truth for the driver string: the realtime
-    /// device events ([ADR-RT007](https://github.com/aperim/multiview))
-    /// construct their `driver` field **only** from this method, never from a
+    /// device events (ADR-RT007) construct their `driver` field **only** from
+    /// this method, never from a
     /// hand-typed literal, so a future renamed/added variant cannot drift the
     /// event wire form from the config wire form.
     #[must_use]

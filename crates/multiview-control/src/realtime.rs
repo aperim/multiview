@@ -541,18 +541,24 @@ impl SessionStream {
         // Two read modes:
         // * **Resume replay** (`resume_after` set): drain the bounded broadcast
         //   ring **non-blocking** via `try_recv`. The gap is finite (it cannot
-        //   exceed the ring), so once it is drained `Empty` ends the replay with
-        //   `Ok(None)` rather than awaiting — the resuming client re-snapshots
-        //   the conflated lanes and tails live deltas from a fresh subscription.
-        //   Awaiting here would wedge a caller that polls past the gap.
+        //   exceed the ring), so `Empty` means the gap is fully replayed and we
+        //   return `Ok(None)` immediately rather than awaiting — awaiting here
+        //   would wedge a caller that polls past the gap. The session pump owns
+        //   the replay→live-tail handoff (re-snapshot the conflated lanes, then
+        //   read live with a `resume_after == None` stream). That handoff is not
+        //   wired yet: no current caller sets `resume_after` — `SessionStream` is
+        //   only constructed with `None` (the connect path), so this branch runs
+        //   solely in the broadcaster resume tests until a `since_seq` cursor
+        //   lands.
         // * **Live tail** (`resume_after == None`, the connect path): `await` the
         //   next event cooperatively. A slow client lags and is skipped; the
         //   engine is never back-pressured (invariant #10).
         if self.resume_after.is_some() {
             return match self.sub.try_recv() {
                 Ok(seq_event) => Ok(self.frame_for(&seq_event)),
-                // The gap is fully replayed: nothing more buffered. End the
-                // replay (the live tail resumes on the next live `recv`).
+                // The gap is fully replayed: nothing more buffered. Return
+                // promptly so a bounded drain loop terminates; the pump then
+                // re-snapshots and reconnects for the live tail.
                 Err(TryRecvError::Empty) => Ok(None),
                 Err(TryRecvError::Lagged(_)) => {
                     self.sub = self.sub.resubscribe();
