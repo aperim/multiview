@@ -313,7 +313,7 @@ msgid "About color spaces and range"
 msgstr "About color spaces and range"
 
 #: src/layout/components/GridLayoutEditor.tsx:292
-#: src/pages/LayoutsPage.tsx:202
+#: src/pages/LayoutsPage.tsx:204
 msgid "About layouts"
 msgstr "About layouts"
 
@@ -354,7 +354,7 @@ msgstr "About the tile lifecycle"
 msgid "About tile lifecycle states"
 msgstr "About tile lifecycle states"
 
-#: src/pages/LayoutsPage.tsx:270
+#: src/pages/LayoutsPage.tsx:272
 msgid "Accessible editing path: Cells form + Inspector in the editor"
 msgstr "Accessible editing path: Cells form + Inspector in the editor"
 
@@ -496,7 +496,7 @@ msgstr "Alarms matching the current filter."
 msgid "Align"
 msgstr "Align"
 
-#: src/pages/LayoutsPage.tsx:237
+#: src/pages/LayoutsPage.tsx:239
 msgid "All configured layouts."
 msgstr "All configured layouts."
 
@@ -619,8 +619,8 @@ msgid "Apply layout to engine"
 msgstr "Apply layout to engine"
 
 #: src/pages/LayoutsPage.tsx:145
-msgid "Apply-layout accepted"
-msgstr "Apply-layout accepted"
+#~ msgid "Apply-layout accepted"
+#~ msgstr "Apply-layout accepted"
 
 #: src/layout/components/GridLayoutEditor.tsx:566
 msgid "Area cell"
@@ -818,7 +818,7 @@ msgstr "Camera 1"
 
 #: src/layout/components/GridLayoutEditor.tsx:867
 #: src/layout/components/LayoutEditor.tsx:432
-#: src/pages/LayoutsPage.tsx:308
+#: src/pages/LayoutsPage.tsx:310
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
@@ -836,11 +836,11 @@ msgstr "Cancel salvo"
 msgid "Cannot assign: area(s) {broken} would no longer be a rectangle. Areas must stay contiguous rectangles."
 msgstr "Cannot assign: area(s) {broken} would no longer be a rectangle. Areas must stay contiguous rectangles."
 
-#: src/pages/LayoutEditorPage.tsx:264
+#: src/pages/LayoutEditorPage.tsx:266
 msgid "Cannot convert this preset"
 msgstr "Cannot convert this preset"
 
-#: src/pages/LayoutEditorPage.tsx:252
+#: src/pages/LayoutEditorPage.tsx:254
 msgid "Cannot convert this preset to a grid"
 msgstr "Cannot convert this preset to a grid"
 
@@ -1075,7 +1075,7 @@ msgstr "Compose merges files left to right. The GPU overlay files swap the <0>mu
 msgid "Compose reference"
 msgstr "Compose reference"
 
-#: src/pages/LayoutEditorPage.tsx:334
+#: src/pages/LayoutEditorPage.tsx:336
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 
@@ -1153,19 +1153,19 @@ msgid "Convert to a free-form layout?"
 msgstr "Convert to a free-form layout?"
 
 #: src/layout/components/GridLayoutEditor.tsx:258
-#: src/pages/LayoutEditorPage.tsx:299
+#: src/pages/LayoutEditorPage.tsx:301
 msgid "Convert to free-form"
 msgstr "Convert to free-form"
 
-#: src/pages/LayoutEditorPage.tsx:291
+#: src/pages/LayoutEditorPage.tsx:293
 msgid "Convert to grid"
 msgstr "Convert to grid"
 
-#: src/pages/LayoutEditorPage.tsx:168
+#: src/pages/LayoutEditorPage.tsx:170
 msgid "Converted to a grid (not yet saved). Save to keep the grid form."
 msgstr "Converted to a grid (not yet saved). Save to keep the grid form."
 
-#: src/pages/LayoutEditorPage.tsx:190
+#: src/pages/LayoutEditorPage.tsx:192
 msgid "Converted to free-form (not yet saved). Save to keep the absolute placement."
 msgstr "Converted to free-form (not yet saved). Save to keep the absolute placement."
 
@@ -1181,7 +1181,7 @@ msgstr "Corner radius must be a whole number of pixels (0 or more)."
 msgid "Could not acknowledge alarm"
 msgstr "Could not acknowledge alarm"
 
-#: src/pages/LayoutsPage.tsx:151
+#: src/pages/LayoutsPage.tsx:153
 msgid "Could not apply layout"
 msgstr "Could not apply layout"
 
@@ -1193,7 +1193,7 @@ msgstr "Could not create"
 msgid "Could not delete"
 msgstr "Could not delete"
 
-#: src/pages/LayoutsPage.tsx:182
+#: src/pages/LayoutsPage.tsx:184
 msgid "Could not delete layout"
 msgstr "Could not delete layout"
 
@@ -1217,7 +1217,7 @@ msgstr "Could not load alarms:"
 msgid "Could not load for editing"
 msgstr "Could not load for editing"
 
-#: src/pages/LayoutsPage.tsx:221
+#: src/pages/LayoutsPage.tsx:223
 msgid "Could not load layouts:"
 msgstr "Could not load layouts:"
 
@@ -1266,7 +1266,7 @@ msgid "Could not save"
 msgstr "Could not save"
 
 #: src/pages/LayoutEditorPage.tsx:94
-#: src/pages/LayoutEditorPage.tsx:130
+#: src/pages/LayoutEditorPage.tsx:132
 msgid "Could not save layout"
 msgstr "Could not save layout"
 
@@ -1301,7 +1301,7 @@ msgstr "CPU utilisation trend: ours over host total"
 msgid "Create"
 msgstr "Create"
 
-#: src/pages/LayoutsPage.tsx:231
+#: src/pages/LayoutsPage.tsx:233
 msgid "Create your first layout"
 msgstr "Create your first layout"
 
@@ -1412,7 +1412,7 @@ msgid "Degradation"
 msgstr "Degradation"
 
 #: src/pages/LayoutsPage.tsx:118
-#: src/pages/LayoutsPage.tsx:311
+#: src/pages/LayoutsPage.tsx:313
 #: src/pages/SalvosPage.tsx:307
 #: src/pages/SalvosPage.tsx:436
 #: src/pages/TallyPage.tsx:392
@@ -1426,7 +1426,7 @@ msgstr "Delete"
 msgid "Delete layout"
 msgstr "Delete layout"
 
-#: src/pages/LayoutsPage.tsx:285
+#: src/pages/LayoutsPage.tsx:287
 msgid "Delete layout?"
 msgstr "Delete layout?"
 
@@ -1644,15 +1644,15 @@ msgstr "EBU R128 (−23 LUFS)"
 msgid "Edit"
 msgstr "Edit"
 
-#: src/pages/LayoutEditorPage.tsx:142
-#: src/pages/LayoutEditorPage.tsx:153
-#: src/pages/LayoutEditorPage.tsx:166
-#: src/pages/LayoutEditorPage.tsx:188
-#: src/pages/LayoutEditorPage.tsx:213
-#: src/pages/LayoutEditorPage.tsx:226
-#: src/pages/LayoutEditorPage.tsx:275
-#: src/pages/LayoutEditorPage.tsx:312
-#: src/pages/LayoutEditorPage.tsx:332
+#: src/pages/LayoutEditorPage.tsx:144
+#: src/pages/LayoutEditorPage.tsx:155
+#: src/pages/LayoutEditorPage.tsx:168
+#: src/pages/LayoutEditorPage.tsx:190
+#: src/pages/LayoutEditorPage.tsx:215
+#: src/pages/LayoutEditorPage.tsx:228
+#: src/pages/LayoutEditorPage.tsx:277
+#: src/pages/LayoutEditorPage.tsx:314
+#: src/pages/LayoutEditorPage.tsx:334
 msgid "Edit layout"
 msgstr "Edit layout"
 
@@ -2250,7 +2250,7 @@ msgstr "Internet / unmanaged links"
 msgid "IP cameras, fixed encoders"
 msgstr "IP cameras, fixed encoders"
 
-#: src/pages/LayoutEditorPage.tsx:253
+#: src/pages/LayoutEditorPage.tsx:255
 msgid "Its tiles overlap (picture-in-picture), which a grid cannot express. Convert to free-form instead."
 msgstr "Its tiles overlap (picture-in-picture), which a grid cannot express. Convert to free-form instead."
 
@@ -2344,7 +2344,11 @@ msgstr "Latency, robustness, and scale pull against each other. Buffering is wha
 msgid "Layout"
 msgstr "Layout"
 
-#: src/pages/LayoutsPage.tsx:178
+#: src/pages/LayoutsPage.tsx:147
+msgid "Layout applied live"
+msgstr "Layout applied live"
+
+#: src/pages/LayoutsPage.tsx:180
 msgid "Layout deleted"
 msgstr "Layout deleted"
 
@@ -2361,19 +2365,23 @@ msgstr "Layout or preset name (optional)"
 msgid "Layout saved"
 msgstr "Layout saved"
 
-#: src/pages/LayoutEditorPage.tsx:122
+#: src/pages/LayoutEditorPage.tsx:117
+msgid "Layout saved & applied live"
+msgstr "Layout saved & applied live"
+
+#: src/pages/LayoutEditorPage.tsx:124
 msgid "Layout saved, but apply failed"
 msgstr "Layout saved, but apply failed"
 
 #: src/pages/LayoutEditorPage.tsx:115
-msgid "Layout saved; apply accepted"
-msgstr "Layout saved; apply accepted"
+#~ msgid "Layout saved; apply accepted"
+#~ msgstr "Layout saved; apply accepted"
 
 #: src/app/navigation.tsx:37
 #: src/docs/registry.ts:201
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:25
-#: src/pages/LayoutsPage.tsx:194
+#: src/pages/LayoutsPage.tsx:196
 msgid "Layouts"
 msgstr "Layouts"
 
@@ -2473,11 +2481,11 @@ msgstr "Loading audit log…"
 msgid "Loading canvas…"
 msgstr "Loading canvas…"
 
-#: src/pages/LayoutEditorPage.tsx:144
+#: src/pages/LayoutEditorPage.tsx:146
 msgid "Loading layout…"
 msgstr "Loading layout…"
 
-#: src/pages/LayoutsPage.tsx:217
+#: src/pages/LayoutsPage.tsx:219
 msgid "Loading layouts…"
 msgstr "Loading layouts…"
 
@@ -2703,7 +2711,7 @@ msgstr "Multiview itself never trades the output cadence away: under load it deg
 #~ msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 #~ msgstr "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
 
-#: src/pages/LayoutsPage.tsx:197
+#: src/pages/LayoutsPage.tsx:199
 msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas. Apply is live on the running engine."
 msgstr "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas. Apply is live on the running engine."
 
@@ -2793,8 +2801,8 @@ msgstr "Network fit"
 msgid "New cell"
 msgstr "New cell"
 
-#: src/pages/LayoutEditorPage.tsx:332
-#: src/pages/LayoutsPage.tsx:209
+#: src/pages/LayoutEditorPage.tsx:334
+#: src/pages/LayoutsPage.tsx:211
 msgid "New layout"
 msgstr "New layout"
 
@@ -2867,7 +2875,7 @@ msgstr "No inputs are available to preview."
 msgid "No layout cells found — enter the cell id to watch."
 msgstr "No layout cells found — enter the cell id to watch."
 
-#: src/pages/LayoutsPage.tsx:226
+#: src/pages/LayoutsPage.tsx:228
 msgid "No layouts are defined yet."
 msgstr "No layouts are defined yet."
 
@@ -3042,8 +3050,8 @@ msgstr "Open the API playground"
 msgid "Open the system metrics page"
 msgstr "Open the system metrics page"
 
-#: src/pages/LayoutEditorPage.tsx:116
-#: src/pages/LayoutsPage.tsx:146
+#: src/pages/LayoutEditorPage.tsx:118
+#: src/pages/LayoutsPage.tsx:148
 #: src/pages/SalvosPage.tsx:154
 #: src/pages/TallyPage.tsx:142
 msgid "Operation id"
@@ -3798,6 +3806,11 @@ msgstr "Take"
 msgid "Take salvo"
 msgstr "Take salvo"
 
+#: src/pages/LayoutEditorPage.tsx:118
+#: src/pages/LayoutsPage.tsx:148
+msgid "Takes effect at the next frame boundary."
+msgstr "Takes effect at the next frame boundary."
+
 #: src/app/navigation.tsx:43
 #: src/docs/registry.ts:221
 #: src/docs/registry.ts:576
@@ -3846,7 +3859,7 @@ msgstr "Testing, placeholders, layout work"
 msgid "That key was not accepted. Check it and try again."
 msgstr "That key was not accepted. Check it and try again."
 
-#: src/pages/LayoutEditorPage.tsx:155
+#: src/pages/LayoutEditorPage.tsx:157
 msgid "That layout no longer exists."
 msgstr "That layout no longer exists."
 
@@ -4047,7 +4060,7 @@ msgstr "The stack publishes the management API and this web UI on <0>8080</0> (t
 msgid "The stored area map was ragged and has been normalized for editing; saving will persist the repaired map."
 msgstr "The stored area map was ragged and has been normalized for editing; saving will persist the repaired map."
 
-#: src/pages/LayoutEditorPage.tsx:265
+#: src/pages/LayoutEditorPage.tsx:267
 msgid "The stored preset body could not be expanded."
 msgstr "The stored preset body could not be expanded."
 
@@ -4158,7 +4171,7 @@ msgstr "This entry's kind has no form here; the stored document is preserved as 
 msgid "This field is required."
 msgstr "This field is required."
 
-#: src/pages/LayoutEditorPage.tsx:215
+#: src/pages/LayoutEditorPage.tsx:217
 msgid "This grid layout's body could not be parsed (its track or area lists are malformed). Fix the stored document via the API."
 msgstr "This grid layout's body could not be parsed (its track or area lists are malformed). Fix the stored document via the API."
 
@@ -4182,11 +4195,11 @@ msgstr "This is why the wall keeps running through any input failure: the output
 #~ msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 #~ msgstr "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
 
-#: src/pages/LayoutEditorPage.tsx:284
+#: src/pages/LayoutEditorPage.tsx:286
 msgid "This layout uses the factory preset \"{preset}\". To edit it, convert it to an editable form first — nothing changes until you save."
 msgstr "This layout uses the factory preset \"{preset}\". To edit it, convert it to an editable form first — nothing changes until you save."
 
-#: src/pages/LayoutEditorPage.tsx:320
+#: src/pages/LayoutEditorPage.tsx:322
 msgid "This layout's body could not be parsed into an editable form. Fix the stored document via the API."
 msgstr "This layout's body could not be parsed into an editable form. Fix the stored document via the API."
 
@@ -4198,7 +4211,7 @@ msgstr "This Multiview control plane requires an API key. Paste your admin or op
 msgid "This overlay kind has no configurable parameters in this build. Parameters authored in a config file are preserved unchanged."
 msgstr "This overlay kind has no configurable parameters in this build. Parameters authored in a config file are preserved unchanged."
 
-#: src/pages/LayoutsPage.tsx:288
+#: src/pages/LayoutsPage.tsx:290
 msgid "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
 msgstr "This permanently removes the layout. Running outputs are not affected until a new layout is applied."
 

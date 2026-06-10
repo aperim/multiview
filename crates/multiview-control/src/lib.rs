@@ -94,7 +94,9 @@ pub use audit::{
 pub use auth::{
     authorize_object, authorize_output, provision_admin_keys, Action, ApiKeyStore, Principal, Role,
 };
-pub use command::{command_bus, Command, CommandReceiver, CommandSender, OperationId, SubmitError};
+pub use command::{
+    command_bus, Command, CommandReceiver, CommandSender, OperationId, ResolvedLayout, SubmitError,
+};
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use error::{ControlError, ControlResult};
 pub use is07::{
