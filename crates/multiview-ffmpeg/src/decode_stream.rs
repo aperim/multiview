@@ -49,6 +49,17 @@ pub struct DecodedVideoFrame {
     /// detect a 33-bit MPEG-TS / 32-bit RTP wrap; `meta.pts` has already been
     /// rescaled and cannot reveal the wrap. Sampled, never used to pace.
     pub raw_pts: Option<i64>,
+    /// The embedded CEA-608/708 caption bytes (`AV_FRAME_DATA_A53_CC` side data)
+    /// this frame carried, or [`None`] for the common no-caption frame.
+    ///
+    /// A53 captions are not a separate stream: they ride as side data on the
+    /// decoded **video** frames (captions.md §2/§4). The side data does **not**
+    /// survive a libswscale pixel-format conversion, so it is extracted here off
+    /// the **raw** decoded frame, *before* [`Self::frame`] is converted to NV12 —
+    /// this is the only place the runtime can reach it. A downstream embedded-CC
+    /// [`CaptionDecoder`](crate::CaptionDecoder) feeds these bytes to `cc_dec`
+    /// anchored at [`Self::raw_pts`]. Sampled, never paced (invariants #2/#10).
+    pub a53_cc: Option<Vec<u8>>,
 }
 
 /// A video decoder that consumes caller-supplied packets and yields NV12 host
@@ -316,6 +327,11 @@ impl StreamVideoDecoder {
         // frequently absent after decoding (mpeg2/H.264 with B-frames), which
         // would map every frame to 0 and defeat downstream PTS pacing.
         let raw_pts = decoded.timestamp().or_else(|| decoded.pts());
+        // Pull the embedded CEA-608/708 A53 caption bytes off the RAW decoded
+        // frame, before NV12 conversion strips its side data (captions.md §2/§4);
+        // most frames carry none (a cheap `None`). The downstream embedded-CC
+        // decoder feeds these to `cc_dec`. Sampled, never paced.
+        let a53_cc = crate::caption_decode::extract_a53_cc(&decoded);
         let nv12 = self.ensure_nv12(decoded)?;
 
         // After `ensure_nv12` the frame is NV12 (8-bit) or P010LE (10-bit); any
@@ -338,6 +354,7 @@ impl StreamVideoDecoder {
             frame: nv12,
             meta,
             raw_pts,
+            a53_cc,
         }))
     }
 

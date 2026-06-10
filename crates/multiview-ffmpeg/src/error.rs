@@ -145,4 +145,17 @@ pub enum FfmpegError {
     /// build (name did not resolve to an `AVHWDeviceType`).
     #[error("unknown hardware device type {0:?}")]
     UnknownHwDevice(String),
+
+    /// An embedded-CC decoder was requested for a caption channel the linked
+    /// caption decoder cannot decode to text. In particular, the linked libav
+    /// `cc_dec` decodes EIA-608 (fields CC1–CC4) but discards CEA-708 service
+    /// blocks (DTVCC, `cc_type` 2/3) — so a 708 *service* selector would open a
+    /// decoder that silently emits no cues forever, masking the unsupported form
+    /// as "no captions". We refuse it up front so the caller can fall back to a
+    /// 608 field, teletext, or a sidecar (captions.md §3 row 3, ADR-R007).
+    #[error("CEA-708 service {service} is not decodable to text by the linked cc_dec (608 fields CC1–CC4 are supported); select a 608 field, teletext, or a sidecar instead")]
+    UnsupportedCaptionChannel {
+        /// The CEA-708 service number that was requested (1..=63).
+        service: u8,
+    },
 }

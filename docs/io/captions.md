@@ -90,7 +90,7 @@ surface.
 |---|------|---------|---------------|-----------|-------|
 | 1 | **DVB teletext** | broadcast TS PID | `libzvbi_teletextdec` (`dvb_teletext`) | Text | Page-addressed (commonly 801; intermittent). Selector picks the page; `auto` follows the PMT's teletext descriptor / first subtitle page. |
 | 2 | **DVB subtitle** | broadcast TS PID | `dvbsub` (`dvb_subtitle`) | **Bitmap** (RGBA + rect) | Cues are pre-rendered regions; carry a `clear` (empty) segment that ends the on-screen cue. |
-| 3 | **CEA-608 / 708** | H.264/MPEG-2 video **SEI / user-data** | `cc_dec` fed from `AV_FRAME_DATA_A53_CC` side data (or the `lavfi` `subcc` path) | Text | **Not a separate PID.** Common on HLS/TS/SDI-origin. Field/service selectable; roll-up/pop-on handled, open-ended cues bounded. |
+| 3 | **CEA-608 / 708** | H.264/MPEG-2 video **SEI / user-data** | `cc_dec` fed from `AV_FRAME_DATA_A53_CC` side data (or the `lavfi` `subcc` path) | Text | **Not a separate PID.** Common on HLS/TS/SDI-origin. 608 **field** selectable (CC1–CC4); roll-up/pop-on handled, open-ended cues bounded. **708 service text is _not_ decodable by the linked `cc_dec`** (it parses line-21 608 and discards DTVCC service blocks), so a 708-*service* selector is **refused at decoder construction** (`FfmpegError::UnsupportedCaptionChannel`) rather than yielding a silently cue-less decoder — fall back to a 608 field, teletext, or a sidecar. |
 | 4 | **HLS WebVTT rendition** | master `SUBTITLES` group | `webvtt` | Text | Must **resolve the master's SUBTITLES group**, then decode the rendition's own WebVTT segments — not the default video variant. |
 | 5 | **Sidecar SRT / WebVTT** | operator file | parsed natively (`subtitle::CueTrack`) or `subrip`/`webvtt` | Text | The existing `--subtitles` path. Pure-Rust parse already exists; kept as one form. |
 | 6 | **mov_text / tx3g · ASS/SSA** (bonus) | MP4 box / TS or file | `mov_text`; `ass` (+ libass for styled rendering) | Text (or Bitmap via libass) | Cheap to add since the decoders are linked; ASS styled rendering is behind the `libass` feature ([ADR-R007](../decisions/ADR-R007.md)). |
@@ -178,7 +178,8 @@ language = "eng"         # optional preference used by `auto`
 # id = "pid:0x812"
 
 # mode = "embedded_cc"   # CEA-608/708 from the video SEI/user-data
-# field = "cc1"          # cc1..cc4 (608) | service:1.. (708)
+# field = "cc1"          # cc1..cc4 (608, decodable to text); 708 service:N is
+#                        # refused — the linked cc_dec discards DTVCC service blocks
 
 # mode = "sidecar"
 # path = "/media/news.srt"
@@ -190,7 +191,7 @@ language = "eng"         # optional preference used by `auto`
 | `off` | No caption decoder is created; no burn-in. The cheap default for tiles that don't need captions. | — |
 | `teletext_page` | `libzvbi_teletextdec` on the teletext PID, decoding the given `page`. | 1 |
 | `track` | A discovered `CaptionTrack` id (DVB-sub PID, HLS rendition, mov_text track). | 2, 4, 6 |
-| `embedded_cc` | `cc_dec` over the video A53 side data, the given `field`/`service`. | 3 |
+| `embedded_cc` | `cc_dec` over the video A53 side data, the given 608 `field` (CC1–CC4). A 708 `service:N` is refused (the linked `cc_dec` has no 708 service text decode). | 3 |
 | `sidecar` | An external SRT/WebVTT file (existing `--subtitles`). | 5 |
 
 `auto` is intentionally conservative: it never promotes a *declared-but-silent* track over one actually

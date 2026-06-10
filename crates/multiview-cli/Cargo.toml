@@ -128,6 +128,19 @@ required-features = ["ffmpeg", "overlay"]
 name = "dvbsub_ingest"
 required-features = ["ffmpeg", "overlay"]
 
+# The embedded CEA-608 (A53 side-data) caption ingest end-to-end proof needs both
+# `ffmpeg` and `overlay`; the libav A53 fixture comes from the
+# `multiview-ffmpeg/test-fixtures` feature forwarded by `ffmpeg`.
+[[test]]
+name = "embedded_cc_ingest"
+required-features = ["ffmpeg", "overlay"]
+
+# The in-container TEXT subtitle (mov_text / ass) caption ingest end-to-end proof
+# needs both `ffmpeg` and `overlay`; its fixtures are built with the `ffmpeg` CLI.
+[[test]]
+name = "incontainer_text_ingest"
+required-features = ["ffmpeg", "overlay"]
+
 # Feature presets for the `multiview` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented

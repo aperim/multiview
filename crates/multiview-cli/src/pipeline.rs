@@ -963,14 +963,23 @@ struct IngestPlan {
     /// reopened on EOF/error (a transient HLS/RTSP drop reconnects); a finite
     /// file/VOD source plays once and then holds its last frame.
     live: bool,
-    /// An optional **in-container DVB-sub route**: the muxed subtitle stream's
-    /// index + time-base + the per-source cue store. When present, the video
+    /// An optional **in-container subtitle route**: the muxed subtitle stream's
+    /// index + time-base + the decoder kind (DVB-sub bitmap, or `ass`/`subrip`/
+    /// `mov_text` text) + the per-source cue store. When present, the video
     /// ingest loop decodes that stream's packets as a sibling of the video
-    /// packets and publishes bitmap cues into the store (#36 Phase 2). `None` ⇒
-    /// this source carries no native bitmap-caption decode. Only built under
-    /// `overlay` (the burn-in renderer consumes the cues).
+    /// packets and publishes its cues (bitmap **or** text) into the store (#36
+    /// Phase 2 + SUR-3c). `None` ⇒ this source carries no in-container subtitle
+    /// decode. Only built under `overlay` (the burn-in renderer consumes cues).
     #[cfg(feature = "overlay")]
-    dvbsub: Option<DvbSubRoute>,
+    incontainer_sub: Option<InContainerSubRoute>,
+    /// An optional **embedded CEA-608 route**: the `cc_dec` field/channel + the
+    /// per-source cue store. When present, the video ingest loop pulls the
+    /// `AV_FRAME_DATA_A53_CC` side data off each decoded video frame and feeds it
+    /// to `cc_dec`, publishing the recovered TEXT cues into the store (captions.md
+    /// §2/§4, SUR-3c). `None` ⇒ this source decodes no embedded captions. Only
+    /// built under `overlay` (the burn-in renderer consumes the cues).
+    #[cfg(feature = "overlay")]
+    embedded_cc: Option<EmbeddedCcRoute>,
     /// The canvas colour the source's frames are tagged in. Carried so an
     /// in-process synthetic generator renders into the canvas output space.
     canvas_color: CanvasColor,
@@ -989,16 +998,32 @@ struct IngestPlan {
     cuda_ordinal: Option<String>,
 }
 
-/// The in-container DVB-sub decode route stashed on an [`IngestPlan`]: which
-/// muxed subtitle stream to decode (index + its time-base) and the per-source
-/// cue store the decoded bitmap cues are published into (shared with the baker).
+/// The in-container subtitle decode route stashed on an [`IngestPlan`]: which
+/// muxed subtitle stream to decode (index + its time-base), the decoder kind
+/// (DVB-sub bitmap or `ass`/`subrip`/`mov_text` text), and the per-source cue
+/// store the decoded cues are published into (shared with the baker).
 #[cfg(feature = "overlay")]
-struct DvbSubRoute {
+struct InContainerSubRoute {
     /// The subtitle stream index within the source container.
     stream_index: usize,
     /// The subtitle stream time-base (for the caption decoder's PTS rebase).
     time_base: Rational,
-    /// The lock-free store the decoded bitmap cues are published into.
+    /// The decoder this subtitle stream needs (`DvbSubtitle` for bitmap, or
+    /// `Ass`/`SubRip`/`MovText` for in-container text).
+    source: multiview_ffmpeg::CaptionSource,
+    /// The lock-free store the decoded cues (bitmap or text) are published into.
+    store: Arc<crate::captions::CueStore>,
+}
+
+/// The embedded CEA-608 (A53 side-data) decode route stashed on an [`IngestPlan`]:
+/// the `cc_dec` channel/field and the per-source cue store the recovered TEXT cues
+/// are published into. The A53 bytes are pulled off each decoded video frame in
+/// the same ingest loop (no separate stream — captions.md §2/§4).
+#[cfg(feature = "overlay")]
+struct EmbeddedCcRoute {
+    /// The 608 field/channel the `cc_dec` decoder surfaces (CC1–CC4).
+    channel: multiview_ffmpeg::CcChannel,
+    /// The lock-free store the decoded text cues are published into.
     store: Arc<crate::captions::CueStore>,
 }
 
@@ -1245,6 +1270,20 @@ impl Pipeline {
         let id = source_id.into();
         self.caption_stores.insert(id, Arc::clone(&store));
         store
+    }
+
+    /// The native caption cue store wired for source `source_id`, if any.
+    ///
+    /// Returns the shared [`Arc`](std::sync::Arc) the source's caption reader
+    /// (HLS `WebVTT` rendition thread, in-container DVB-sub/text route, or the
+    /// embedded CEA-608 route) publishes into and the baker samples each tick.
+    /// `None` when the source declared no resolvable caption source. Exposed so a
+    /// caller (or a test) can observe the cues a source actually produced through
+    /// the whole wiring — not merely that a decoder exists.
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn caption_store_for(&self, source_id: &str) -> Option<Arc<crate::captions::CueStore>> {
+        self.caption_stores.get(source_id).map(Arc::clone)
     }
 
     /// The fixed output cadence (exact rational).
@@ -4140,11 +4179,13 @@ fn nv12_to_decoded(image: &Nv12Image) -> Result<DecodedVideoFrame, PipelineError
         color: image.color(),
     };
     // The composited canvas is not an ingested stream — there is no source-tick
-    // PTS to unwrap (the encoder re-stamps from its tick counter), so no raw PTS.
+    // PTS to unwrap (the encoder re-stamps from its tick counter), so no raw PTS,
+    // and no embedded (A53) caption side data.
     Ok(DecodedVideoFrame {
         frame,
         meta,
         raw_pts: None,
+        a53_cc: None,
     })
 }
 
@@ -4364,7 +4405,9 @@ fn ingest_plan_for(
         store,
         live,
         #[cfg(feature = "overlay")]
-        dvbsub: None,
+        incontainer_sub: None,
+        #[cfg(feature = "overlay")]
+        embedded_cc: None,
         canvas_color,
         cadence,
         // No GPU pinned yet: the load-aware admission pick (decide-once, in
@@ -4411,36 +4454,60 @@ fn wire_source_captions(
         caption_plans.push(caption_plan);
     }
 
-    // In-container DVB-sub (bitmap) path: the muxed subtitle stream is decoded on
-    // THIS source's video-ingest thread (a sibling of the video packets), so the
-    // route is stashed on the plan and its store registered for the baker. Only
-    // when the selector takes the dvbsub path, the source has not already taken
-    // the WebVTT path, and the container actually carries a dvbsub stream.
-    if let Some(selector) = source.captions.as_ref() {
-        if crate::captions::dvbsub_selector(&source.kind, selector)
-            && !caption_stores.contains_key(&source.id)
+    let Some(selector) = source.captions.as_ref() else {
+        return;
+    };
+
+    // Embedded CEA-608 (A53 side-data) path: the captions ride on the decoded
+    // video frames (no separate stream), so this needs no container probe — the
+    // video ingest loop pulls the A53 bytes off each frame and feeds `cc_dec`.
+    // Wired when the `embedded_cc` selector resolves to a decodable 608 field; a
+    // 708 service / unrecognised field declines honestly inside
+    // `embedded_cc_channel` (logged, no silent cue-less decoder). Skipped if the
+    // source already took the WebVTT path (a source has one caption store).
+    if !caption_stores.contains_key(&source.id) {
+        if let Some(channel) = crate::captions::embedded_cc_channel(&source.kind, selector) {
+            let store = Arc::new(crate::captions::CueStore::new());
+            caption_stores.insert(source.id.clone(), Arc::clone(&store));
+            plan.embedded_cc = Some(EmbeddedCcRoute { channel, store });
+            tracing::info!(source = %source.id, "native embedded CEA-608 caption route wired");
+        }
+    }
+
+    // In-container subtitle path (DVB-sub bitmap, `ass`/`subrip`/`mov_text` text,
+    // or teletext): the muxed subtitle stream is decoded on THIS source's
+    // video-ingest thread (a sibling of the video packets), so the route is
+    // stashed on the plan and its store registered for the baker. Only when the
+    // selector takes the in-container path, the source has not already taken the
+    // WebVTT/embedded-CC path, and the container actually carries a subtitle
+    // stream this path decodes (else best-effort decline).
+    if crate::captions::incontainer_selector_active(&source.kind, selector)
+        && !caption_stores.contains_key(&source.id)
+    {
+        if let Some((route, cue_store)) =
+            resolve_incontainer_sub_route(source, selector, &plan.location)
         {
-            if let Some((route, cue_store)) = resolve_dvbsub_route(source, &plan.location) {
-                caption_stores.insert(source.id.clone(), cue_store);
-                plan.dvbsub = Some(route);
-            }
+            caption_stores.insert(source.id.clone(), cue_store);
+            plan.incontainer_sub = Some(route);
         }
     }
 }
 
-/// Resolve the in-container **DVB-sub route** for a source whose selector takes
-/// the native bitmap-caption path ([`crate::captions::dvbsub_selector`]): open
-/// the source container once, find its subtitle stream and confirm it is a
-/// `dvbsub` stream, and build the cue store. Returns `(route, store)` so the
-/// caller can both stash the route on the ingest plan AND register the store for
-/// the baker to sample. Best-effort: an open failure or a container with no
-/// dvbsub stream logs and returns `None` (the tile simply shows no caption — it
-/// must never fail the pipeline build, invariants #1/#10).
+/// Resolve the in-container **subtitle route** for a source whose selector takes
+/// the native in-container path ([`crate::captions::incontainer_text_selector`]):
+/// open the source container once, find its subtitle stream, map its codec to a
+/// [`CaptionSource`](multiview_ffmpeg::CaptionSource) (DVB-sub bitmap, or
+/// `ass`/`subrip`/`mov_text` text), and build the cue store. Returns `(route,
+/// store)` so the caller can both stash the route on the ingest plan AND register
+/// the store for the baker to sample. Best-effort: an open failure, no subtitle
+/// stream, or an unsupported subtitle codec logs and returns `None` (the tile
+/// simply shows no caption — it must never fail the pipeline build, #1/#10).
 #[cfg(feature = "overlay")]
-fn resolve_dvbsub_route(
+fn resolve_incontainer_sub_route(
     source: &Source,
+    selector: &multiview_config::schema::CaptionSelector,
     location: &SourceLocation,
-) -> Option<(DvbSubRoute, Arc<crate::captions::CueStore>)> {
+) -> Option<(InContainerSubRoute, Arc<crate::captions::CueStore>)> {
     use multiview_ffmpeg::convert::MediaKind;
     use multiview_ffmpeg::Demuxer;
 
@@ -4451,7 +4518,7 @@ fn resolve_dvbsub_route(
         SourceLocation::Url(_) | SourceLocation::Synthetic(_) => return None,
         #[cfg(feature = "youtube")]
         SourceLocation::Youtube { .. } => return None,
-        // NDI ingest carries no in-container DVB-sub stream (it is a raw
+        // NDI ingest carries no in-container subtitle stream (it is a raw
         // host-memory video receive); there is no container to open here.
         #[cfg(feature = "ndi")]
         SourceLocation::Ndi { .. } => return None,
@@ -4459,32 +4526,40 @@ fn resolve_dvbsub_route(
     let demux = match Demuxer::open(path) {
         Ok(d) => d,
         Err(err) => {
-            tracing::warn!(source = %source.id, error = %err, "could not open container for dvbsub captions");
+            tracing::warn!(source = %source.id, error = %err, "could not open container for in-container captions");
             return None;
         }
     };
     let stream_index = demux.best_stream(MediaKind::Subtitle)?;
-    // Confirm it is a DVB-sub (bitmap) stream; teletext/other subtitle codecs are
-    // not this path.
     let params = demux.streams();
-    let is_dvbsub = params
-        .iter()
-        .find(|s| s.index == stream_index)
-        .is_some_and(|s| s.codec_name == "dvbsub");
-    if !is_dvbsub {
-        tracing::info!(source = %source.id, "subtitle stream is not dvbsub; no in-container bitmap captions");
+    let stream = params.iter().find(|s| s.index == stream_index)?;
+    // Choose the decoder from (selector, actual stream codec). A combination this
+    // path does not decode (e.g. a `teletext_page` selector over a non-teletext
+    // stream, or `hdmv_pgs_subtitle`) declines, so the tile shows no caption
+    // rather than building a wrong/empty decoder.
+    let Some(caption_source) =
+        crate::captions::incontainer_caption_source(selector, &stream.codec_name)
+    else {
+        tracing::info!(
+            source = %source.id,
+            codec = %stream.codec_name,
+            "in-container subtitle (selector, codec) not decoded by this path; no in-container captions"
+        );
         return None;
-    }
-    let time_base = params
-        .iter()
-        .find(|s| s.index == stream_index)
-        .map(|s| s.time_base)?;
+    };
+    let time_base = stream.time_base;
     let store = Arc::new(crate::captions::CueStore::new());
-    tracing::info!(source = %source.id, stream_index, "native in-container DVB-sub caption route resolved");
+    tracing::info!(
+        source = %source.id,
+        stream_index,
+        codec = %stream.codec_name,
+        "native in-container subtitle caption route resolved"
+    );
     Some((
-        DvbSubRoute {
+        InContainerSubRoute {
             stream_index,
             time_base,
+            source: caption_source,
             store: Arc::clone(&store),
         },
         store,
@@ -5220,13 +5295,22 @@ fn open_and_stream(
         declared_fps,
     );
 
-    // Build the in-container DVB-sub decoder once, from the SAME open container's
-    // subtitle stream parameters (#36 Phase 2). Its packets are pumped as a
-    // sibling of the video packets below — they never go through `receive_frame`.
+    // Build the in-container subtitle decoder once, from the SAME open container's
+    // subtitle stream parameters — DVB-sub bitmap or `ass`/`subrip`/`mov_text`
+    // text (#36 Phase 2 + SUR-3c). Its packets are pumped as a sibling of the
+    // video packets below — they never go through the video `receive_frame` pump.
     // A build failure logs and disables the route for this open (best-effort; the
     // video still streams). Only under `overlay`.
     #[cfg(feature = "overlay")]
-    let mut dvbsub = build_dvbsub_decoder(plan, &input);
+    let mut incontainer_sub = build_incontainer_sub_decoder(plan, &input);
+
+    // Build the embedded CEA-608 (`cc_dec`) decoder once, bound to the VIDEO
+    // stream's time-base (the A53 cc-data rides on the video frames, so its PTS is
+    // the video PTS). The recovered text cues are published as each decoded frame's
+    // A53 side data completes a caption (SUR-3c). A build failure logs and disables
+    // the route for this open (best-effort). Only under `overlay`.
+    #[cfg(feature = "overlay")]
+    let mut embedded_cc = build_embedded_cc_decoder(plan, time_base);
 
     // HLS WebVTT-rendition isolation (ADR-T011), DEFENCE-IN-DEPTH: the variant-pin
     // pre-open ([`main_demuxer_open_url`]) already stops the master's SUBTITLES
@@ -5248,6 +5332,13 @@ fn open_and_stream(
             return Ok(());
         }
         while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
+            // Embedded CEA-608: feed this frame's A53 cc-data side data (extracted
+            // off the RAW decoded frame before NV12 conversion) to `cc_dec`,
+            // anchored at the frame's raw stream PTS. Most frames carry none (a
+            // no-op); a decode error on one frame is logged and skipped — embedded
+            // captions are intermittent and must never stall ingest (#1/#2/#10).
+            #[cfg(feature = "overlay")]
+            pump_embedded_cc(plan, embedded_cc.as_mut(), &decoded);
             let image = to_tile.convert(&decoded.frame, tag)?;
             // Normalize the RAW source-tick PTS onto the unified monotonic
             // nanosecond timeline (invariant #3) before pacing/publish; a frame
@@ -5274,13 +5365,14 @@ fn open_and_stream(
                 if packet.stream() == stream_index {
                     decoder.send_packet(&packet).map_err(|e| e.to_string())?;
                 } else {
-                    // A non-video packet: route it to the in-container DVB-sub
-                    // decoder if it belongs to that subtitle stream (sibling
-                    // branch — it never goes through the video `receive_frame`
-                    // pump). A decode error on one cue is logged and skipped:
-                    // captions are intermittent and must never stall ingest.
+                    // A non-video packet: route it to the in-container subtitle
+                    // decoder (DVB-sub bitmap or text) if it belongs to that
+                    // subtitle stream (sibling branch — it never goes through the
+                    // video `receive_frame` pump). A decode error on one cue is
+                    // logged and skipped: captions are intermittent and must never
+                    // stall ingest.
                     #[cfg(feature = "overlay")]
-                    pump_dvbsub(plan, dvbsub.as_mut(), &packet);
+                    pump_incontainer_sub(plan, incontainer_sub.as_mut(), &packet);
                 }
             }
             Err(ffmpeg::Error::Eof) => {
@@ -5328,7 +5420,7 @@ fn discard_unrouted_subtitle_streams(
     input: &mut ffmpeg::format::context::Input,
 ) {
     #[cfg(feature = "overlay")]
-    let keep_subtitle = plan.dvbsub.as_ref().map(|d| d.stream_index);
+    let keep_subtitle = plan.incontainer_sub.as_ref().map(|d| d.stream_index);
     #[cfg(not(feature = "overlay"))]
     let keep_subtitle = None;
     let discarded = multiview_ffmpeg::discard_unrouted_subtitles(input, keep_subtitle);
@@ -5341,47 +5433,98 @@ fn discard_unrouted_subtitle_streams(
     }
 }
 
-/// Build the in-container DVB-sub [`CaptionDecoder`] for `plan`'s route, from the
-/// open container's subtitle stream parameters. Returns `None` when the source
-/// has no dvbsub route or the decoder cannot be built (logged, best-effort).
+/// Build the in-container subtitle [`CaptionDecoder`] for `plan`'s route (DVB-sub
+/// bitmap or `ass`/`subrip`/`mov_text` text), from the open container's subtitle
+/// stream parameters. Returns `None` when the source has no in-container route or
+/// the decoder cannot be built (logged, best-effort).
 #[cfg(feature = "overlay")]
-fn build_dvbsub_decoder(
+fn build_incontainer_sub_decoder(
     plan: &IngestPlan,
     input: &ffmpeg::format::context::Input,
 ) -> Option<multiview_ffmpeg::CaptionDecoder> {
-    let route = plan.dvbsub.as_ref()?;
+    let route = plan.incontainer_sub.as_ref()?;
     let params = input.stream(route.stream_index)?.parameters();
     match multiview_ffmpeg::CaptionDecoder::from_parameters(
-        multiview_ffmpeg::CaptionSource::DvbSubtitle,
+        route.source.clone(),
         params,
         route.time_base,
     ) {
         Ok(dec) => Some(dec),
         Err(err) => {
-            tracing::warn!(source = %plan.id, error = %err, "could not build dvbsub decoder; no bitmap captions");
+            tracing::warn!(source = %plan.id, error = %err, "could not build in-container subtitle decoder; no in-container captions");
             None
         }
     }
 }
 
-/// Decode one packet on the in-container DVB-sub route (if the packet belongs to
-/// that subtitle stream) and publish any bitmap cues into the route's store.
+/// Decode one packet on the in-container subtitle route (if the packet belongs to
+/// that subtitle stream) and publish any cues (bitmap or text) into the route's
+/// store.
 #[cfg(feature = "overlay")]
-fn pump_dvbsub(
+fn pump_incontainer_sub(
     plan: &IngestPlan,
     decoder: Option<&mut multiview_ffmpeg::CaptionDecoder>,
     packet: &ffmpeg::codec::packet::Packet,
 ) {
-    let (Some(route), Some(decoder)) = (plan.dvbsub.as_ref(), decoder) else {
+    let (Some(route), Some(decoder)) = (plan.incontainer_sub.as_ref(), decoder) else {
         return;
     };
     if packet.stream() != route.stream_index {
         return;
     }
     match decoder.decode(packet) {
-        Ok(cues) => crate::captions::publish_bitmap_cues(&route.store, cues),
+        Ok(cues) => crate::captions::publish_window_cues(&route.store, cues),
         Err(err) => {
-            tracing::debug!(source = %plan.id, error = %err, "dvbsub packet decode error");
+            tracing::debug!(source = %plan.id, error = %err, "in-container subtitle packet decode error");
+        }
+    }
+}
+
+/// Build the embedded CEA-608 (`cc_dec`) [`CaptionDecoder`] for `plan`'s route,
+/// bound to the video stream's `time_base` (the A53 cc-data shares the video
+/// PTS). Returns `None` when the source has no embedded-CC route or the decoder
+/// cannot be built (logged, best-effort).
+#[cfg(feature = "overlay")]
+fn build_embedded_cc_decoder(
+    plan: &IngestPlan,
+    video_time_base: Rational,
+) -> Option<multiview_ffmpeg::CaptionDecoder> {
+    let route = plan.embedded_cc.as_ref()?;
+    match multiview_ffmpeg::CaptionDecoder::for_embedded(
+        multiview_ffmpeg::CaptionSource::EmbeddedCc {
+            channel: route.channel,
+        },
+        video_time_base,
+    ) {
+        Ok(dec) => Some(dec),
+        Err(err) => {
+            tracing::warn!(source = %plan.id, error = %err, "could not build embedded-CC decoder; no embedded captions");
+            None
+        }
+    }
+}
+
+/// Pull the A53 cc-data side data off a decoded video `frame` and feed it to the
+/// embedded-CC `cc_dec`, anchored at the frame's raw stream PTS, publishing any
+/// recovered TEXT cues into the route's store. A frame with no A53 side data is a
+/// no-op; a decode error is logged and skipped (captions are intermittent and
+/// must never stall ingest — invariants #1/#2/#10).
+#[cfg(feature = "overlay")]
+fn pump_embedded_cc(
+    plan: &IngestPlan,
+    decoder: Option<&mut multiview_ffmpeg::CaptionDecoder>,
+    frame: &multiview_ffmpeg::decode_stream::DecodedVideoFrame,
+) {
+    let (Some(route), Some(decoder)) = (plan.embedded_cc.as_ref(), decoder) else {
+        return;
+    };
+    let Some(bytes) = frame.a53_cc.as_deref() else {
+        return;
+    };
+    match decoder.decode_bytes(bytes, frame.raw_pts) {
+        Ok(cues) => crate::captions::publish_window_cues(&route.store, cues),
+        Err(err) => {
+            tracing::debug!(source = %plan.id, error = %err, "embedded-CC A53 decode error");
         }
     }
 }
