@@ -55,6 +55,10 @@ jobs:
   # ── per (flavour, arch) build → push by digest ──────────────────────────────
   build:
     name: ffmpeg ${{ matrix.flavour }}/${{ matrix.arch }}
+    # ~10-min FFmpeg-from-source compile per leg (per the workflow header) + push
+    # by digest, on native amd64/arm64 runners. A cold cache or the arm64 native
+    # leg runs materially longer; 90min is generous headroom, still far below 6h.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -136,6 +140,10 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    # No image build — imagetools manifest create + provenance/SBOM verify +
+    # attest + keyless cosign sign. Network/registry-bound (a few min); 30min
+    # absorbs a slow registry round-trip while failing a wedge fast.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

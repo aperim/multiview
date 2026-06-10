@@ -44,6 +44,8 @@ jobs:
   changes:
     name: classify changes
     runs-on: ubuntu-latest
+    # Single checkout + paths-filter API call (~30s). Fail fast if a runner wedges.
+    timeout-minutes: 10
     outputs:
       # 'true' when at least one changed file is NOT in the prose allowlist.
       code: ${{ steps.filter.outputs.code }}
@@ -120,6 +122,9 @@ jobs:
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
+    # fmt + clippy run ~1-2min warm; a cold cargo cache pushes the full clippy
+    # build higher. 20min is ~3x worst-case while still well under the 6h default.
+    timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
@@ -135,6 +140,11 @@ jobs:
 
   test:
     name: check + test (${{ matrix.os }})
+    # The long pole of CI: macOS check+test runs ~15min warm (the slowest leg);
+    # a cold cargo cache on macOS is materially slower. 40min gives the macOS leg
+    # generous headroom while still failing a wedged runner far under 6h. ubuntu
+    # (~7min) shares the same cap with ample margin.
+    timeout-minutes: 40
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     strategy:
@@ -184,6 +194,9 @@ jobs:
   feature-clippy:
     name: feature-gated clippy (${{ matrix.crate }}, ${{ matrix.feature }})
     runs-on: ubuntu-latest
+    # Each leg clippy+tests one crate under one feature (~1min warm). A cold,
+    # per-feature-scoped cargo cache can take several minutes; 20min is safe.
+    timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     strategy:
@@ -253,6 +266,8 @@ jobs:
   asyncapi-validate:
     name: AsyncAPI 3.0 spec validation
     runs-on: ubuntu-latest
+    # Node setup + global @asyncapi/cli install + a single validate (~1min).
+    timeout-minutes: 15
     needs: changes
     # A docs/api/** spec change keeps `code == 'true'` (the spec is NOT in the
     # prose allowlist), so this validation always runs whenever a spec moves.
@@ -272,6 +287,9 @@ jobs:
   deny:
     name: cargo-deny (licenses + advisories)
     runs-on: ubuntu-latest
+    # `cargo deny check` is ~30s, but the leg also installs a toolchain and the
+    # cargo-deny binary (taiki-e/install-action) — 20min covers a cold install.
+    timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
@@ -294,6 +312,8 @@ jobs:
   inclusive-language:
     name: inclusive language
     runs-on: ubuntu-latest
+    # Checkout + a single grep-based shell script (seconds).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check-inclusive-language.sh
@@ -301,6 +321,8 @@ jobs:
   docs-sanity:
     name: docs link sanity
     runs-on: ubuntu-latest
+    # Checkout + a dependency-free markdown link-check script (seconds).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: check relative markdown links resolve
@@ -315,6 +337,9 @@ jobs:
   web:
     name: web build
     runs-on: ubuntu-latest
+    # npm install + Vite production build (~1-5min). 20min absorbs a cold npm
+    # cache and a slow registry while still failing a wedge well under 6h.
+    timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:

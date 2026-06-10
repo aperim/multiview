@@ -25,6 +25,9 @@ jobs:
   release-pr:
     name: release PR
     runs-on: ubuntu-24.04
+    # Full-history checkout + toolchain + release-plz changelog/version compute
+    # and PR open/update (~2-5min). 20min absorbs a large history or slow API.
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write
