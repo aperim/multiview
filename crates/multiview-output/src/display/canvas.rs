@@ -334,4 +334,68 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn default_canvas_exposes_no_importable_dmabuf_image() {
+        // The CPU-planes default never offers a dmabuf to import; the
+        // NV12-direct backend path therefore never fires for it.
+        let frame = solid(2, 2, 16, 128, 128);
+        assert!(DisplayCanvas::dmabuf_image(&frame).is_none());
+    }
+
+    #[test]
+    fn a_dmabuf_canvas_exposes_its_borrowed_fds_and_plane_layout() {
+        use crate::display::strategy::{DrmFormat, DRM_FORMAT_MOD_LINEAR};
+        use std::os::fd::AsFd;
+
+        // Use a real fd (stdin) just to have a valid BorrowedFd for the test.
+        let stdin = std::io::stdin();
+        struct DmabufFrame<'a> {
+            inner: Frame,
+            fd: std::os::fd::BorrowedFd<'a>,
+        }
+        impl DisplayCanvas for DmabufFrame<'_> {
+            fn width(&self) -> u32 {
+                self.inner.width()
+            }
+            fn height(&self) -> u32 {
+                self.inner.height()
+            }
+            fn y_plane(&self) -> &[u8] {
+                self.inner.y_plane()
+            }
+            fn uv_plane(&self) -> &[u8] {
+                self.inner.uv_plane()
+            }
+            fn dmabuf_image(&self) -> Option<DmabufImage<'_>> {
+                Some(DmabufImage {
+                    format: DrmFormat::NV12,
+                    modifier: Some(DRM_FORMAT_MOD_LINEAR),
+                    width: self.inner.width(),
+                    height: self.inner.height(),
+                    planes: vec![
+                        DmabufPlane {
+                            fd: self.fd,
+                            offset: 0,
+                            pitch: self.inner.width(),
+                        },
+                        DmabufPlane {
+                            fd: self.fd,
+                            offset: self.inner.width() * self.inner.height(),
+                            pitch: self.inner.width(),
+                        },
+                    ],
+                })
+            }
+        }
+        let frame = DmabufFrame {
+            inner: solid(4, 4, 16, 128, 128),
+            fd: stdin.as_fd(),
+        };
+        let image = DisplayCanvas::dmabuf_image(&frame).expect("dmabuf present");
+        assert_eq!(image.format, DrmFormat::NV12);
+        assert_eq!(image.planes.len(), 2);
+        assert_eq!(image.planes[0].offset, 0);
+        assert_eq!(image.planes[1].offset, 16);
+    }
 }
