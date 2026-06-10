@@ -31,10 +31,11 @@ fn nv(stable: &str, index: u32) -> DeviceId {
     DeviceId::new(Vendor::Nvidia, stable, index)
 }
 
-/// A probe double returning a fixed inventory.
+/// A probe double returning a fixed, already-reconciled inventory (the
+/// `_devices` set is irrelevant to a pre-built double).
 struct FixedProbe(ScanoutInventory);
 impl ScanoutProbe for FixedProbe {
-    fn enumerate(&self) -> ScanoutInventory {
+    fn enumerate(&self, _devices: &[DeviceId]) -> ScanoutInventory {
         self.0.clone()
     }
 }
@@ -66,7 +67,7 @@ fn two_gpu_inventory() -> ScanoutInventory {
 #[test]
 fn connector_resolves_to_owning_gpu() {
     let probe = FixedProbe(two_gpu_inventory());
-    let inv = probe.enumerate();
+    let inv = probe.enumerate(&[]);
     assert_eq!(
         inv.owning_device(&ConnectorId::new("DP-1")),
         Some(&amd("0000:00:01.0", 0)),

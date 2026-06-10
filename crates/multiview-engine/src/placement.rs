@@ -293,6 +293,17 @@ impl PlacementController {
         pins: Pins,
         current: DeviceId,
     ) -> Self {
+        // Precondition the scanout-affinity refusal rests on: if the pipeline
+        // declares a sink locality, the device it is *currently* placed on must be
+        // one of those connector-owning GPUs (the admission path placed it there).
+        // Were `current` outside the locality, `is_display_bound_here` would read
+        // false and the controller could migrate composite off the scanout GPU —
+        // the exact thing the affinity forbids. Validated in debug builds; an empty
+        // locality (no display sink) imposes no constraint.
+        debug_assert!(
+            demand.sink_localities().is_empty() || demand.sink_localities().contains(&current),
+            "a display-bound pipeline's current device must be in its sink locality"
+        );
         let overload = Hysteresis::new(config.overload);
         Self {
             config,

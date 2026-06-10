@@ -69,11 +69,21 @@ impl Vendor {
 /// The `index` is retained only as a deterministic, never-load-bearing
 /// tie-breaker for selection (lowest index wins an exact score tie); identity
 /// and equality are defined by `(vendor, stable_id)`.
+///
+/// `pci_bus_id` is the **non-identity** cross-probe matching key (the same role
+/// [`GpuTargetInfo::pci_bus_id`] plays for the wgpu adapter): the stable id is
+/// vendor-asymmetric (an NVML UUID on NVIDIA, the PCI slot on the DRM-sysfs
+/// path), so a second probe that only knows the PCI slot — the
+/// [`crate::scanout`] KMS probe — cannot re-derive an identity that equals this
+/// one. It instead **reuses this canonical `DeviceId`** for the same physical
+/// GPU, matching on this PCI bus id. The field is deliberately **excluded from
+/// equality and hash** so populating it never perturbs the placement key.
 #[derive(Debug, Clone)]
 pub struct DeviceId {
     vendor: Vendor,
     stable_id: String,
     index: u32,
+    pci_bus_id: Option<String>,
 }
 
 impl DeviceId {
@@ -88,7 +98,20 @@ impl DeviceId {
             vendor,
             stable_id: stable_id.into(),
             index,
+            pci_bus_id: None,
         }
+    }
+
+    /// Attach the device's PCI bus id (the non-identity cross-probe matching key).
+    ///
+    /// Set by every probe that knows it — the NVML load probe from
+    /// `PciInfo.bus_id`, the DRM-sysfs probe from `PCI_SLOT_NAME` — so the
+    /// [`crate::scanout`] KMS probe can reconcile a DRM card to this canonical
+    /// `DeviceId`. It does **not** change `(vendor, stable_id)` identity.
+    #[must_use]
+    pub fn with_pci_bus_id(mut self, pci_bus_id: impl Into<String>) -> Self {
+        self.pci_bus_id = Some(pci_bus_id.into());
+        self
     }
 
     /// The device's vendor family.
@@ -108,6 +131,54 @@ impl DeviceId {
     #[must_use]
     pub const fn index(&self) -> u32 {
         self.index
+    }
+
+    /// The raw PCI bus id this device was tagged with, if any (the non-identity
+    /// cross-probe matching key, in its source form).
+    #[must_use]
+    pub fn pci_bus_id(&self) -> Option<&str> {
+        self.pci_bus_id.as_deref()
+    }
+
+    /// The PCI bus id in canonical form ([`normalize_pci_bus_id`]) for a
+    /// cross-source compare, if this device was tagged with one.
+    ///
+    /// Maps NVML's 8-hex-digit-domain `00000000:03:00.0` and the kernel
+    /// 4-hex-digit-domain `0000:03:00.0` for the same slot onto one string, so a
+    /// scanout probe's PCI slot and this device's PCI bus id compare equal for the
+    /// same physical GPU.
+    #[must_use]
+    pub fn pci_bus_id_normalized(&self) -> Option<String> {
+        self.pci_bus_id.as_deref().map(normalize_pci_bus_id)
+    }
+}
+
+/// Normalise a PCI bus id for cross-source comparison (scanout ↔ render-node).
+///
+/// NVML reports `00000000:03:00.0` (8-hex-digit domain); the kernel sysfs
+/// `PCI_SLOT_NAME` reports `0000:03:00.0` (4-hex-digit domain). Lower-casing and
+/// reducing the domain segment to its trailing 4 hex digits (left-padding a
+/// shorter domain with `0`) maps both onto the same canonical `0000:03:00.0`
+/// form so a string compare is sound. A string with no `:` is returned
+/// lower-cased unchanged (it still compares equal to itself). This mirrors the
+/// `multiview-compositor` wgpu-adapter matcher's identical normalization.
+#[must_use]
+pub fn normalize_pci_bus_id(bus_id: &str) -> String {
+    let lower = bus_id.trim().to_ascii_lowercase();
+    match lower.split_once(':') {
+        Some((domain, rest)) => {
+            let tail: String = domain
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let padded = format!("{tail:0>4}");
+            format!("{padded}:{rest}")
+        }
+        None => lower,
     }
 }
 
@@ -990,9 +1061,17 @@ mod nvml {
                 .filter_map(|index| {
                     let device = self.nvml.device_by_index(index).ok()?;
                     // Stable identity: the NVML UUID, never the enumeration
-                    // index (ADR-0017 §2.1).
+                    // index (ADR-0017 §2.1). Also tag the PCI bus id (the
+                    // non-identity cross-probe key) so the scanout KMS probe can
+                    // reconcile a DRM card to THIS canonical DeviceId — the UUID
+                    // is unknowable from `/sys/class/drm`, the PCI slot is the
+                    // only handle both probes share.
                     let uuid = device.uuid().ok()?;
-                    Some(DeviceId::new(Vendor::Nvidia, uuid, index))
+                    let mut id = DeviceId::new(Vendor::Nvidia, uuid, index);
+                    if let Ok(info) = device.pci_info() {
+                        id = id.with_pci_bus_id(info.bus_id);
+                    }
+                    Some(id)
                 })
                 .collect()
         }
@@ -1429,9 +1508,14 @@ mod linux_sysfs {
 
         /// The stable [`DeviceId`] for this card: vendor + the PCI bus id (the
         /// placement + pin key), with the `cardN` index as the tie-breaker.
+        ///
+        /// The PCI slot is also attached as the non-identity cross-probe key so
+        /// the scanout KMS probe reconciles a DRM card to this `DeviceId` by the
+        /// same `pci_bus_id` path it uses for an NVML (UUID-keyed) device.
         #[must_use]
         pub(crate) fn device_id(&self) -> DeviceId {
             DeviceId::new(self.vendor, self.stable_id.clone(), self.index)
+                .with_pci_bus_id(self.stable_id.clone())
         }
     }
 
@@ -1995,6 +2079,8 @@ mod tests {
 
     #[test]
     fn pci_bus_id_is_carried_but_is_not_part_of_identity() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         // The PCI bus id is the cross-probe MATCHING key (scanout ↔ render-node),
         // not part of `(vendor, stable_id)` identity. Two DeviceIds with the same
         // identity but different/absent pci must stay equal + hash-equal so adding
@@ -2003,8 +2089,6 @@ mod tests {
         let bare = nv("GPU-uuid", 0);
         let with_pci = nv("GPU-uuid", 0).with_pci_bus_id("00000000:03:00.0");
         assert_eq!(bare, with_pci, "pci is NOT part of identity equality");
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         let mut h1 = DefaultHasher::new();
         let mut h2 = DefaultHasher::new();
         bare.hash(&mut h1);
