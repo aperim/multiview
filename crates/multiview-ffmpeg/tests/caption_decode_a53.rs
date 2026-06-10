@@ -244,12 +244,14 @@ fn from_parameters_also_refuses_a_708_service_selector() {
 fn supported_608_fields_still_open_and_decode_after_the_708_guard() {
     // The 708 refusal must not regress the supported 608 fields: every CC1–CC4
     // field still opens, and the primary CC1 field still decodes a known caption.
-    for channel in [CcChannel::Cc1, CcChannel::Cc2, CcChannel::Cc3, CcChannel::Cc4] {
-        CaptionDecoder::for_embedded(
-            CaptionSource::EmbeddedCc { channel },
-            ts_time_base(),
-        )
-        .unwrap_or_else(|e| panic!("608 field {channel:?} must still open: {e}"));
+    for channel in [
+        CcChannel::Cc1,
+        CcChannel::Cc2,
+        CcChannel::Cc3,
+        CcChannel::Cc4,
+    ] {
+        CaptionDecoder::for_embedded(CaptionSource::EmbeddedCc { channel }, ts_time_base())
+            .unwrap_or_else(|e| panic!("608 field {channel:?} must still open: {e}"));
     }
     let cues = decode_caption("HELLO WORLD", 90_000, 3_000);
     let (lines, _, _) = one_text(&cues.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>());

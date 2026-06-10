@@ -73,6 +73,16 @@ pub enum CcChannel {
     /// CEA-608 field 2, channel 4.
     Cc4,
     /// A CEA-708 service number (1..=63).
+    ///
+    /// **Not decodable to text by the linked `cc_dec`.** libav's caption decoder
+    /// parses the EIA-608 line-21 data in the A53 stream but discards CEA-708
+    /// service blocks (DTVCC, `cc_type` 2/3), so a decoder built for a 708 service
+    /// would emit no cues. [`CaptionDecoder`] therefore **refuses** this channel at
+    /// construction with [`FfmpegError::UnsupportedCaptionChannel`] rather than
+    /// returning a silently cue-less decoder; callers fall back to a 608 field,
+    /// teletext, or a sidecar (captions.md §3 row 3, ADR-R007). The variant is kept
+    /// because 708 services are a real, addressable caption form a future styled
+    /// 708 decoder could surface — the refusal is a property of *this* decoder.
     Service(u8),
 }
 
@@ -237,6 +247,17 @@ impl CaptionDecoder {
     /// Shared open path: apply the decoder options, open by the source's named
     /// decoder, and take the subtitle decoder.
     fn open(source: CaptionSource, ctx: Context, time_base: Rational) -> Result<Self> {
+        // Refuse a caption channel the linked decoder cannot decode to text up
+        // front, so we never hand back a decoder that silently emits no cues. The
+        // linked `cc_dec` decodes EIA-608 (fields CC1–CC4) but discards CEA-708
+        // service blocks (DTVCC); a 708 service selector is unsupported here.
+        if let CaptionSource::EmbeddedCc {
+            channel: CcChannel::Service(service),
+        } = source
+        {
+            return Err(FfmpegError::UnsupportedCaptionChannel { service });
+        }
+
         let name = source.decoder_name();
         let codec = ffmpeg::codec::decoder::find_by_name(name)
             .or_else(|| ffmpeg::codec::decoder::find(source.codec_id()))
