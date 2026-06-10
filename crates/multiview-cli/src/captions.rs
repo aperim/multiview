@@ -549,14 +549,14 @@ fn resolve_caption_plan(
     language: Option<&str>,
     fetcher: &dyn PlaylistFetcher,
 ) -> Option<CaptionPlan> {
-    let text = match fetcher.fetch(master_url) {
-        Ok(text) => text,
+    let playlist = match fetcher.fetch(master_url) {
+        Ok(playlist) => playlist,
         Err(reason) => {
             tracing::warn!(source = %id, %reason, "could not fetch HLS master for captions");
             return None;
         }
     };
-    let master = match MasterPlaylist::parse(&text) {
+    let master = match MasterPlaylist::parse(&playlist.body) {
         Ok(master) => master,
         Err(err) => {
             tracing::warn!(source = %id, error = %err, "HLS master parse failed; no captions");
@@ -565,7 +565,12 @@ fn resolve_caption_plan(
     };
     let rendition = master.pick_subtitle(language)?;
     let uri = rendition.uri.as_deref()?;
-    let rendition_url = resolve_rendition_uri(master_url, uri);
+    // Resolve the (usually relative) rendition URI against the master's EFFECTIVE
+    // (post-redirect) URL — a redirecting/CDN-fronted master (c.mjh.nz -> Akamai)
+    // serves relative children that only resolve under the final base, not the
+    // requested one (RFC 3986 §5 / RFC 8216). For a non-redirecting fetch the
+    // effective URL equals the requested URL, so this is unchanged.
+    let rendition_url = resolve_rendition_uri(&playlist.url, uri);
     tracing::info!(
         source = %id,
         language = ?rendition.language,
@@ -592,16 +597,36 @@ fn hls_url(kind: &multiview_config::SourceKind) -> Option<&str> {
     }
 }
 
+/// A fetched playlist: its body plus the **effective** URL it was actually read
+/// from — i.e. the final URL **after any HTTP redirects**.
+///
+/// Relative child URIs in an HLS playlist resolve against the playlist's effective
+/// URI, not the URL originally requested (RFC 3986 §5 / RFC 8216). A redirecting
+/// or CDN-fronted master (e.g. `c.mjh.nz/abc-news.m3u8` → a signed Akamai master
+/// with relative variant/rendition URIs) only resolves correctly when its children
+/// are joined onto this post-redirect base. When the fetch did not redirect (or the
+/// protocol exposes no final-location, e.g. `file:`), `url` equals the requested
+/// URL and resolution is unchanged.
+#[derive(Debug, Clone)]
+pub struct FetchedPlaylist {
+    /// The effective (final, post-redirect) URL the body was read from. Relative
+    /// child URIs resolve against this base.
+    pub url: String,
+    /// The playlist body text.
+    pub body: String,
+}
+
 /// Fetches a (small) playlist URL into text. Injected into the caption planner so
 /// the fetch→parse→pick seam can be exercised offline with canned bytes.
 pub trait PlaylistFetcher {
-    /// Fetch the text of `url`.
+    /// Fetch the text of `url`, returning the body together with the **effective**
+    /// (post-redirect) URL it was read from (see [`FetchedPlaylist`]).
     ///
     /// # Errors
     ///
     /// Returns `Err(reason)` describing the failure (a disallowed scheme, a
     /// network/I/O error, an oversize body, …).
-    fn fetch(&self, url: &str) -> Result<String, String>;
+    fn fetch(&self, url: &str) -> Result<FetchedPlaylist, String>;
 }
 
 /// URL schemes the caption fetch may reach — handed to libav as its
@@ -626,11 +651,20 @@ const FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct LibavFetcher;
 
 impl PlaylistFetcher for LibavFetcher {
-    fn fetch(&self, url: &str) -> Result<String, String> {
+    fn fetch(&self, url: &str) -> Result<FetchedPlaylist, String> {
         if has_scheme(url) {
+            // `fetch_url_text` follows HTTP redirects and surfaces the EFFECTIVE
+            // (final, post-redirect) URL alongside the body — relative child URIs
+            // resolve against that base, not the requested URL (the ABC/Akamai
+            // footgun where a `c.mjh.nz` master redirects to a signed Akamai master
+            // with relative variant/rendition URIs).
             fetch_with_retry(
                 || {
                     multiview_ffmpeg::fetch_url_text(url, MAX_PLAYLIST_BYTES, ALLOWED_PROTOCOLS)
+                        .map(|fetched| FetchedPlaylist {
+                            url: fetched.url,
+                            body: fetched.body,
+                        })
                         .map_err(|e| e.to_string())
                 },
                 FETCH_ATTEMPTS,
@@ -638,8 +672,14 @@ impl PlaylistFetcher for LibavFetcher {
                 FETCH_BUDGET,
             )
         } else {
-            // A bare local path (no scheme): read it from disk.
-            std::fs::read_to_string(url).map_err(|e| e.to_string())
+            // A bare local path (no scheme): read it from disk. A local file never
+            // redirects, so the effective URL is the requested path verbatim.
+            std::fs::read_to_string(url)
+                .map(|body| FetchedPlaylist {
+                    url: url.to_owned(),
+                    body,
+                })
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -648,12 +688,12 @@ impl PlaylistFetcher for LibavFetcher {
 /// return the first success or the last error. A bounded retry turns a single
 /// transient network blip from "captions silently disabled for the whole run"
 /// into a recoverable hiccup — the actual defect behind the empty caption band.
-fn fetch_with_retry(
-    mut attempt: impl FnMut() -> Result<String, String>,
+fn fetch_with_retry<T>(
+    mut attempt: impl FnMut() -> Result<T, String>,
     attempts: u32,
     backoff: std::time::Duration,
     budget: std::time::Duration,
-) -> Result<String, String> {
+) -> Result<T, String> {
     let n = attempts.max(1);
     let start = std::time::Instant::now();
     let mut last = String::from("no fetch attempt was made");
@@ -990,12 +1030,34 @@ mod tests {
         assert_eq!(webvtt_language(&file, &CaptionSelector::Auto), None);
     }
 
-    /// A [`PlaylistFetcher`] returning a fixed canned result — drives the
-    /// fetch→parse→pick→resolve seam offline, no network, no FFI.
+    /// A [`PlaylistFetcher`] returning a fixed canned body, echoing the requested
+    /// URL as the effective URL (no redirect) — drives the fetch→parse→pick→resolve
+    /// seam offline, no network, no FFI.
     struct CannedFetcher(Result<String, String>);
     impl PlaylistFetcher for CannedFetcher {
-        fn fetch(&self, _url: &str) -> Result<String, String> {
-            self.0.clone()
+        fn fetch(&self, url: &str) -> Result<FetchedPlaylist, String> {
+            self.0.clone().map(|body| FetchedPlaylist {
+                url: url.to_owned(),
+                body,
+            })
+        }
+    }
+
+    /// A [`PlaylistFetcher`] that simulates a redirecting/CDN-fronted master: the
+    /// requested URL is ignored and the canned body is reported as having been
+    /// fetched from a different **effective** URL (the post-redirect location).
+    /// Relative child URIs must resolve against this effective base, never the
+    /// requested one (the ABC/Akamai footgun).
+    struct RedirectingFetcher {
+        effective_url: String,
+        body: String,
+    }
+    impl PlaylistFetcher for RedirectingFetcher {
+        fn fetch(&self, _url: &str) -> Result<FetchedPlaylist, String> {
+            Ok(FetchedPlaylist {
+                url: self.effective_url.clone(),
+                body: self.body.clone(),
+            })
         }
     }
 
@@ -1024,6 +1086,32 @@ mod tests {
                 .ends_with("subtitles/eng/prog_index.m3u8"),
             "rendition_url = {}",
             plan.rendition_url
+        );
+    }
+
+    #[test]
+    fn a_relative_subtitle_rendition_resolves_against_the_redirected_master_base() {
+        // The ABC/Akamai footgun: the requested `c.mjh.nz` master 302-redirects to
+        // a signed Akamai master whose SUBTITLES `URI` is relative. The rendition
+        // must resolve against the EFFECTIVE (post-redirect) Akamai base, NOT the
+        // requested `c.mjh.nz` origin (which would 404).
+        let fetcher = RedirectingFetcher {
+            effective_url: "https://abc.akamaized.net/out/v1/abcd/master.m3u8?hdnea=token"
+                .to_owned(),
+            body: MASTER_WITH_SUBS.to_owned(),
+        };
+        let plan = resolve_caption_plan(
+            "abc",
+            "https://c.mjh.nz/abc-news.m3u8",
+            Some("en"),
+            &fetcher,
+        )
+        .expect("a redirected master with an English SUBTITLES rendition resolves a plan");
+        assert_eq!(
+            plan.rendition_url,
+            "https://abc.akamaized.net/out/v1/abcd/subtitles/eng/prog_index.m3u8",
+            "the relative SUBTITLES URI must resolve under the post-redirect Akamai base, \
+             not the requested c.mjh.nz origin"
         );
     }
 
@@ -1073,7 +1161,7 @@ mod tests {
     fn fetch_with_retry_gives_up_after_the_bound_with_the_last_error() {
         use std::cell::Cell;
         let calls = Cell::new(0_u32);
-        let result = fetch_with_retry(
+        let result: Result<String, String> = fetch_with_retry(
             || {
                 calls.set(calls.get() + 1);
                 Err(format!("fail {}", calls.get()))
@@ -1092,7 +1180,7 @@ mod tests {
         // A zero budget models a hung attempt that ate the whole budget: no retry
         // follows, so a dead/hung master can't stack timeouts onto the build.
         let calls = Cell::new(0_u32);
-        let result = fetch_with_retry(
+        let result: Result<String, String> = fetch_with_retry(
             || {
                 calls.set(calls.get() + 1);
                 Err("hung".to_owned())

@@ -126,7 +126,7 @@ pub use codec::{
 pub use codec::{select_audio_encoder, select_encoder};
 
 #[cfg(feature = "ffmpeg")]
-pub use avio_fetch::fetch_url_text;
+pub use avio_fetch::{fetch_url_text, FetchedText};
 
 pub use bsf_select::{
     needs_keyframe_freq_option, plan_bsf_chain, BsfFraming, BsfPlan, InputFraming,

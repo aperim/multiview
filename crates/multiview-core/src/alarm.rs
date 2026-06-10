@@ -3,8 +3,9 @@
 //! This module is the **type foundation** the broadcast monitoring/alarm engine
 //! (broadcast-multiviewer brief §4) builds on. It deliberately contains **no
 //! state machine** — per-probe threshold/dwell/hysteresis and the actual
-//! raising/clearing logic live in `multiview-engine` in a later wave. Here we pin
-//! only the shared, serialisable vocabulary every downstream crate agrees on:
+//! raising/clearing logic live in `multiview-engine`
+//! (`multiview_engine::alarm::state::AlarmStateMachine`). Here we pin only the
+//! shared, serialisable vocabulary every downstream crate agrees on:
 //!
 //! * [`PerceivedSeverity`] — the X.733 severity scale, with a **total order**
 //!   (`Cleared < Indeterminate < Warning < Minor < Major < Critical`) so a
