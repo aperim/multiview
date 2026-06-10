@@ -874,6 +874,82 @@ pub struct OutputAudioDoc {
     pub tracks: Vec<String>,
 }
 
+/// `OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by
+/// `kind`, `snake_case`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AudioChannelsDoc {
+    /// Single channel.
+    Mono,
+    /// Two channels: L, R.
+    Stereo,
+    /// Six channels: L, R, C, LFE, Ls, Rs (the BS.1770 5.1 ordering).
+    FivePointOne,
+}
+
+/// `OpenAPI` mirror of `multiview_config::audio::AudioRoute` — one per-input
+/// route in the audio-routing document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AudioRouteDoc {
+    /// The managed source id (`sources[].id`) this route takes audio from.
+    pub input_id: String,
+    /// The channel layout requested for this input.
+    pub channels: AudioChannelsDoc,
+    /// The named discrete output track (absent ⇒ program bus only). `"prog"`
+    /// is reserved for the mixed program bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_track: Option<String>,
+    /// ISO-639 language tag advertised for the discrete track (e.g. `"eng"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Human-friendly track title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Whether this input contributes to the mixed program bus.
+    #[serde(default)]
+    pub include_in_program_bus: bool,
+    /// Program-bus contribution gain in dB (`0.0` ⇒ unity; must be finite).
+    #[serde(default)]
+    pub gain_db: f32,
+    /// Whether this input is muted on the program bus (its discrete track, if
+    /// any, stays declared).
+    #[serde(default)]
+    pub mute: bool,
+}
+
+/// `OpenAPI` mirror of `multiview_config::AudioRouting` — the body accepted by
+/// `PUT /api/v1/audio-routing` (the whole-document `[audio]` block).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AudioRoutingDoc {
+    /// The working/program-bus sample rate in Hz (exact integer, > 0).
+    pub sample_rate_hz: u32,
+    /// The per-input routes.
+    #[serde(default)]
+    pub routes: Vec<AudioRouteDoc>,
+}
+
+/// The response envelope of `GET`/`PUT /api/v1/audio-routing`.
+///
+/// The GET is **404-free**: an unconfigured deployment answers
+/// `configured: false` with a `null` document and `selectable_tracks` of just
+/// the always-available program bus `"prog"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct AudioRoutingStateDoc {
+    /// Whether an audio-routing document is configured.
+    pub configured: bool,
+    /// The routing document, or `null` when unconfigured.
+    pub routing: Option<AudioRoutingDoc>,
+    /// `"prog"` + every declared discrete track, in declaration order — the
+    /// set per-output `audio.tracks` selections resolve against.
+    pub selectable_tracks: Vec<String>,
+}
+
 /// `OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body
 /// accepted by `POST`/`PUT /api/v1/outputs/{id}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

@@ -55,7 +55,12 @@ export type FormErrorCode =
   | 'number'
   | 'zone-extent'
   | 'mount-slash'
-  | 'tracks-required';
+  | 'tracks-required'
+  | 'finite-number'
+  | 'duplicate-track'
+  | 'duplicate-input'
+  | 'reserved-track'
+  | 'program-bus-muted';
 
 /** Per-field validation errors keyed by form-state field name. */
 export type FieldErrors<Field extends string> = Partial<Record<Field, FormErrorCode>>;

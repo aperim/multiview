@@ -24,6 +24,7 @@ use crate::repository::{Layout, LayoutInput, VersionedLayout, LAYOUT_KIND};
 use crate::state::AppState;
 
 pub mod alarms;
+pub mod audio;
 pub mod audit;
 pub mod config;
 pub mod health;
@@ -468,6 +469,11 @@ fn resource_router() -> Router<AppState> {
                 .post(outputs::create_output)
                 .put(outputs::update_output)
                 .delete(outputs::delete_output),
+        )
+        // The audio-routing singleton document (program-bus + discrete tracks).
+        .route(
+            "/audio-routing",
+            get(audio::get_audio_routing).put(audio::put_audio_routing),
         )
         // Overlays resource CRUD (managed overlay layers), mirroring layouts.
         .route("/overlays", get(overlays::list_overlays))

@@ -12,6 +12,7 @@ import { MonitoringPage } from "../pages/MonitoringPage";
 import { TallyPage } from "../pages/TallyPage";
 import { SalvosPage } from "../pages/SalvosPage";
 import { AlarmsPage } from "../pages/AlarmsPage";
+import { AudioPage } from "../pages/AudioPage";
 import { ProbesPage } from "../pages/ProbesPage";
 import { AuditPage } from "../pages/AuditPage";
 import { SystemPage } from "../pages/SystemPage";
@@ -46,10 +47,11 @@ export const router = createBrowserRouter([
       { path: "sources", element: <SourcesPage /> },
       { path: "outputs", element: <OutputsPage /> },
       { path: "overlays", element: <OverlaysPage /> },
+      { path: "audio", element: <AudioPage /> },
+      { path: "probes", element: <ProbesPage /> },
       { path: "monitoring", element: <MonitoringPage /> },
       { path: "tally", element: <TallyPage /> },
       { path: "salvos", element: <SalvosPage /> },
-      { path: "probes", element: <ProbesPage /> },
       { path: "alarms", element: <AlarmsPage /> },
       { path: "system", element: <SystemPage /> },
       { path: "audit", element: <AuditPage /> },

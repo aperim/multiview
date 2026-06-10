@@ -285,6 +285,142 @@ async fn export_prefers_the_seeded_working_layout_over_alphabetical_order() {
 }
 
 #[tokio::test]
+async fn export_overlays_the_stored_audio_routing_when_configured() {
+    // The audio-routing singleton (PUT /api/v1/audio-routing) is part of the
+    // composed document: when configured it overlays the `audio` key, and the
+    // whole-document validation cross-checks its routes against the declared
+    // sources (the check the PUT boundary intentionally defers).
+    let h = harness();
+    seed(&h).await; // declares source "cam1"
+
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/audio-routing",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({
+                "sample_rate_hz": 48_000,
+                "routes": [
+                    {
+                        "input_id": "cam1",
+                        "channels": { "kind": "stereo" },
+                        "target_track": "cam1-clean",
+                        "include_in_program_bus": true,
+                        "gain_db": -3.0
+                    }
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "audio routing PUT must land");
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("export with audio is a valid document");
+    let audio = parsed
+        .audio
+        .as_ref()
+        .expect("the [audio] block is exported");
+    assert_eq!(audio.sample_rate_hz, 48_000);
+    assert_eq!(audio.routes.len(), 1);
+    assert_eq!(audio.routes[0].input_id, "cam1");
+    assert_eq!(audio.routes[0].target_track.as_deref(), Some("cam1-clean"));
+}
+
+#[tokio::test]
+async fn export_rejects_audio_routes_bound_to_undeclared_sources() {
+    // PUT accepts a route naming a not-yet-declared source (internal
+    // consistency only); the EXPORT is where the whole document is validated,
+    // so the dangling reference must surface as 422 here.
+    let h = harness();
+    seed(&h).await; // declares only "cam1"
+
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/audio-routing",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({
+                "sample_rate_hz": 48_000,
+                "routes": [
+                    {
+                        "input_id": "ghost-cam",
+                        "channels": { "kind": "stereo" },
+                        "include_in_program_bus": true
+                    }
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let problem = support::body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/validation");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ghost-cam"),
+        "the violation names the dangling source, got: {}",
+        problem["detail"]
+    );
+}
+
+#[tokio::test]
+async fn export_preserves_the_base_documents_audio_when_the_store_is_unconfigured() {
+    // An authored [audio] block in the loaded config must survive an export
+    // round-trip untouched when no operator edit replaced it.
+    let base = json!({
+        "schema_version": 1,
+        "canvas": {
+            "width": 1280, "height": 720, "fps": "25/1",
+            "pixel_format": "nv12", "background": "#000000",
+            "color": { "profile": "sdr-bt709-limited" }
+        },
+        "layout": { "kind": "absolute" },
+        "cells": [],
+        "sources": [ { "id": "cam1", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam1" } ],
+        "outputs": [],
+        "audio": {
+            "sample_rate_hz": 96_000,
+            "routes": [
+                { "input_id": "cam1", "channels": { "kind": "stereo" },
+                  "include_in_program_bus": true }
+            ]
+        }
+    });
+    let h = support::harness_with(|state| state.with_base_document(base.clone()));
+    seed(&h).await;
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(core::str::from_utf8(&body).unwrap()).unwrap();
+    let audio = parsed
+        .audio
+        .as_ref()
+        .expect("the authored [audio] survives");
+    assert_eq!(
+        audio.sample_rate_hz, 96_000,
+        "the base document's audio block is untouched"
+    );
+}
+
+#[tokio::test]
 async fn export_carries_a_download_disposition() {
     let h = harness();
     seed(&h).await;

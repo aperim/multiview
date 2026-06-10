@@ -38,6 +38,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/audio-routing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/audio-routing` — the singleton document (role: read).
+         * @description **404-free**: an unconfigured deployment answers `200` with
+         *     `configured: false`, `routing: null`, and `selectable_tracks: ["prog"]`
+         *     (the program bus is always selectable). The response `ETag` is the document
+         *     version a later `PUT` must present as `If-Match`.
+         */
+        get: operations["get_audio_routing"];
+        /**
+         * `PUT /api/v1/audio-routing` — replace the singleton document (role: write;
+         *     `If-Match` required → `428`/`412`).
+         */
+        put: operations["put_audio_routing"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit": {
         parameters: {
             query?: never;
@@ -867,6 +894,81 @@ export interface components {
         ApplyLayoutRequest: {
             /** @description The layout id to make active on the running multiview. */
             layout: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by
+         *     `kind`, `snake_case`).
+         */
+        AudioChannelsDoc: {
+            /** @enum {string} */
+            kind: "mono";
+        } | {
+            /** @enum {string} */
+            kind: "stereo";
+        } | {
+            /** @enum {string} */
+            kind: "five_point_one";
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::audio::AudioRoute` — one per-input
+         *     route in the audio-routing document.
+         */
+        AudioRouteDoc: {
+            /** @description The channel layout requested for this input. */
+            channels: components["schemas"]["AudioChannelsDoc"];
+            /**
+             * Format: float
+             * @description Program-bus contribution gain in dB (`0.0` ⇒ unity; must be finite).
+             */
+            gain_db?: number;
+            /** @description Whether this input contributes to the mixed program bus. */
+            include_in_program_bus?: boolean;
+            /** @description The managed source id (`sources[].id`) this route takes audio from. */
+            input_id: string;
+            /** @description ISO-639 language tag advertised for the discrete track (e.g. `"eng"`). */
+            language?: string | null;
+            /**
+             * @description Whether this input is muted on the program bus (its discrete track, if
+             *     any, stays declared).
+             */
+            mute?: boolean;
+            /**
+             * @description The named discrete output track (absent ⇒ program bus only). `"prog"`
+             *     is reserved for the mixed program bus.
+             */
+            target_track?: string | null;
+            /** @description Human-friendly track title. */
+            title?: string | null;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::AudioRouting` — the body accepted by
+         *     `PUT /api/v1/audio-routing` (the whole-document `[audio]` block).
+         */
+        AudioRoutingDoc: {
+            /** @description The per-input routes. */
+            routes?: components["schemas"]["AudioRouteDoc"][];
+            /**
+             * Format: int32
+             * @description The working/program-bus sample rate in Hz (exact integer, > 0).
+             */
+            sample_rate_hz: number;
+        };
+        /**
+         * @description The response envelope of `GET`/`PUT /api/v1/audio-routing`.
+         *
+         *     The GET is **404-free**: an unconfigured deployment answers
+         *     `configured: false` with a `null` document and `selectable_tracks` of just
+         *     the always-available program bus `"prog"`.
+         */
+        AudioRoutingStateDoc: {
+            /** @description Whether an audio-routing document is configured. */
+            configured: boolean;
+            routing?: null | components["schemas"]["AudioRoutingDoc"];
+            /**
+             * @description `"prog"` + every declared discrete track, in declaration order — the
+             *     set per-output `audio.tracks` selections resolve against.
+             */
+            selectable_tracks: string[];
         };
         /**
          * @description The kind of mutation an audit entry records.
@@ -2338,6 +2440,113 @@ export interface operations {
                 };
             };
             /** @description If-Match precondition required. */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_audio_routing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The audio-routing document (404-free: `configured: false` + a null document when none is set; ETag in the response header). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioRoutingStateDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_audio_routing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AudioRoutingDoc"];
+            };
+        };
+        responses: {
+            /** @description The replaced document (new ETag in the response header; X-Multiview-Apply: restart — it takes effect via config export + restart). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioRoutingStateDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description If-Match precondition failed. */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not a valid audio-routing document (detail names the field path or the violated routing invariant; references to undeclared sources are checked at config export, not here). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No If-Match precondition was sent. */
             428: {
                 headers: {
                     [name: string]: unknown;

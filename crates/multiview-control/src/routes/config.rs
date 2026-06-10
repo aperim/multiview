@@ -299,5 +299,22 @@ fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value>
         "probes".to_owned(),
         serde_json::Value::Array(collect(&state.probes)?),
     );
+    // The audio-routing singleton overlays the `audio` key when an operator
+    // (or the seeded config) configured it; otherwise the base document's
+    // authored block — if any — is left untouched. The whole-document
+    // validation below this composition is where routes are cross-checked
+    // against the declared sources (the check `PUT /api/v1/audio-routing`
+    // intentionally defers).
+    let (audio, _) = state.audio_routing.snapshot();
+    if let Some(routing) = audio {
+        doc.insert(
+            "audio".to_owned(),
+            serde_json::to_value(&routing).map_err(|e| {
+                crate::error::ControlError::Repository(format!(
+                    "serializing the audio-routing document: {e}"
+                ))
+            })?,
+        );
+    }
     Ok(document)
 }
