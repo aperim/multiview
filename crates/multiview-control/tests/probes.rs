@@ -547,6 +547,9 @@ fn openapi_probe_mirror_rejects_what_the_config_type_rejects() {
         // A loudness target with the wrong field for its standard.
         json!({ "id": "p", "cell": "c", "kind": "loudness",
                 "target": { "kind": "r128", "target_lkfs": -24.0, "max_true_peak_dbtp": -1.0 } }),
+        // The symmetric crossed case: an A85 target with R128's field name.
+        json!({ "id": "p", "cell": "c", "kind": "loudness",
+                "target": { "kind": "a85", "target_lufs": -23.0, "max_true_peak_dbtp": -2.0 } }),
     ];
     for doc in &bad_probes {
         assert!(

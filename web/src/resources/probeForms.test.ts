@@ -336,7 +336,7 @@ describe('PROBE_SEVERITIES', () => {
 });
 
 describe('cellIdsFromLayouts', () => {
-  it('collects the cell ids from layout bodies, working layout first, deduplicated', () => {
+  it('collects cell ids from canvas-bearing layouts only (drafts would poison export)', () => {
     const layouts = [
       // No canvas: a preset/draft — its cells still count, after canvas layouts.
       { body: { cells: [{ id: 'draft-cell' }] } },
@@ -348,7 +348,7 @@ describe('cellIdsFromLayouts', () => {
         },
       },
     ];
-    expect(cellIdsFromLayouts(layouts)).toEqual(['cell-a', 'cell-b', 'draft-cell']);
+    expect(cellIdsFromLayouts(layouts)).toEqual(['cell-a', 'cell-b']);
   });
 
   it('tolerates malformed bodies', () => {

@@ -1615,11 +1615,14 @@ export function validateProbeForm(
   if ((form.kind === 'black' || form.kind === 'freeze') && form.zoneEnabled) {
     validateZone(form, errors);
   }
-  const up = intRangeError(form.dwellUpMs, 0, Number.MAX_SAFE_INTEGER);
+  // Dwell fields are u32 on the wire — bound client-side so an overlarge
+  // value fails locally instead of bouncing as a server-side 422.
+  const U32_MAX = 4294967295;
+  const up = intRangeError(form.dwellUpMs, 0, U32_MAX);
   if (up !== undefined) {
     errors.dwellUpMs = up;
   }
-  const down = intRangeError(form.dwellDownMs, 0, Number.MAX_SAFE_INTEGER);
+  const down = intRangeError(form.dwellDownMs, 0, U32_MAX);
   if (down !== undefined) {
     errors.dwellDownMs = down;
   }
@@ -1635,26 +1638,22 @@ export function validateProbeForm(
 export function cellIdsFromLayouts(
   layouts: readonly { readonly body: unknown }[],
 ): readonly string[] {
-  const fromWorking: string[] = [];
-  const fromDrafts: string[] = [];
+  // Only canvas-bearing layout documents feed the picker: the export composes
+  // from the working layout, so a probe bound to a draft-only cell would fail
+  // every `GET /config/export` with an unknown-cell 422. Draft cells are typed
+  // manually (the field accepts free text) — deliberate, not discoverable.
+  const out: string[] = [];
   for (const layout of layouts) {
     const body = asRecord(layout.body);
-    if (body === undefined) {
+    if (body?.canvas === undefined) {
       continue;
     }
     const cells = Array.isArray(body.cells) ? body.cells : [];
-    const bucket = body.canvas === undefined ? fromDrafts : fromWorking;
     for (const cell of cells) {
       const id = asString(asRecord(cell)?.id);
-      if (id !== undefined && id !== '') {
-        bucket.push(id);
+      if (id !== undefined && id !== '' && !out.includes(id)) {
+        out.push(id);
       }
-    }
-  }
-  const out: string[] = [];
-  for (const id of [...fromWorking, ...fromDrafts]) {
-    if (!out.includes(id)) {
-      out.push(id);
     }
   }
   return out;

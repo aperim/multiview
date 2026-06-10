@@ -319,3 +319,35 @@ async fn the_export_segment_is_reserved_in_the_versioning_namespace() {
     .await;
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn export_rejects_a_probe_watching_an_unknown_cell() {
+    // A probe may be stored against any non-empty cell id (per-item checks
+    // cannot see the layout), but the composed export enforces the reference:
+    // a probe watching a cell the working layout does not declare is a named
+    // 422 for every export caller.
+    let h = harness();
+    seed(&h).await;
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/probes/ghost",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "Ghost watcher",
+                "body": { "cell": "no-such-cell", "kind": "black", "luma_threshold": 16 }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "stored per-item");
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let problem = support::body_json(resp).await;
+    let detail = problem["detail"].as_str().unwrap_or("");
+    assert!(
+        detail.contains("no-such-cell") || detail.contains("ghost"),
+        "the violation names the probe/cell, got: {detail}"
+    );
+}
