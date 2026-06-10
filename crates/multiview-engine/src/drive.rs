@@ -328,6 +328,29 @@ impl<T> CompositorDrive<T> {
         self.stores.insert(source_id.into(), store);
     }
 
+    /// The registered frame store for `source_id`, if any.
+    ///
+    /// Used by the live-apply drain (ADR-W018) to **reuse** an existing store on
+    /// an edit-by-id upsert, so the bound tile holds last-good through a
+    /// producer swap instead of flashing the slate.
+    #[must_use]
+    pub fn store(&self, source_id: &str) -> Option<&Arc<TileStore<T>>> {
+        self.stores.get(source_id)
+    }
+
+    /// Unregister a source's frame store (live remove, ADR-W018), returning
+    /// whether a store was registered under that id.
+    ///
+    /// Cells still bound to the id composite their **failover slate** from the
+    /// next [`CompositorDrive::compose`] tick (a missing store is the honest
+    /// `NoSignal` path in `sample_cell`), and a subsequent
+    /// [`CompositorDrive::rebind_cell`] to the id is a held error — never a
+    /// panic, never a stall (invariants #1/#2). O(1) map removal at the frame
+    /// boundary; the producer teardown happens off the clock thread.
+    pub fn remove_store(&mut self, source_id: &str) -> bool {
+        self.stores.remove(source_id).is_some()
+    }
+
     /// Re-point the cell named `cell_id` to sample source `source_id`, **LIVE** —
     /// the O(1) crosspoint re-point (RT-6 / ADR-0034, instant VIDEO→cell switch).
     ///

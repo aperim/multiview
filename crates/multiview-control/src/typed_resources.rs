@@ -18,16 +18,41 @@ use serde_json::Value;
 use crate::error::ControlError;
 
 /// The response header declaring how a stored mutation takes effect
-/// (ADR-W015 §4). `restart` until live resource apply lands; the value then
-/// flips per-class without a path change.
+/// (ADR-W015 §4, ADR-W018). `live` when the change was handed to the running
+/// engine (the engine applies it at a frame boundary); `restart` when the
+/// stored document only takes effect via config export + restart.
 pub(crate) const APPLY_HEADER: HeaderName = HeaderName::from_static("x-multiview-apply");
 
-/// Mark a mutation response as taking effect via config export + restart.
-pub(crate) fn with_apply_restart(mut response: Response) -> Response {
+/// How a stored mutation reaches the running engine (ADR-W018, inv #11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyMode {
+    /// The mutation was enqueued for the running engine's frame-boundary drain.
+    Live,
+    /// The stored document takes effect via config export + restart.
+    Restart,
+}
+
+impl ApplyMode {
+    /// The wire value carried by [`APPLY_HEADER`].
+    const fn header_value(self) -> HeaderValue {
+        match self {
+            Self::Live => HeaderValue::from_static("live"),
+            Self::Restart => HeaderValue::from_static("restart"),
+        }
+    }
+}
+
+/// Stamp a mutation response with its apply semantics (ADR-W018).
+pub(crate) fn with_apply(mode: ApplyMode, mut response: Response) -> Response {
     response
         .headers_mut()
-        .insert(APPLY_HEADER, HeaderValue::from_static("restart"));
+        .insert(APPLY_HEADER, mode.header_value());
     response
+}
+
+/// Mark a mutation response as taking effect via config export + restart.
+pub(crate) fn with_apply_restart(response: Response) -> Response {
+    with_apply(ApplyMode::Restart, response)
 }
 
 /// The collections this module validates, naming the target config type.

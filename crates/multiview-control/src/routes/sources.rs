@@ -17,11 +17,95 @@ use axum::Json;
 
 use crate::audit::AuditAction;
 use crate::auth::{Action, Principal};
+use crate::command::{Command, OperationId};
 use crate::concurrency::IfMatch;
 use crate::error::ControlResult;
 use crate::resource_store::{Resource, ResourceInput, VersionedResource, SOURCE_KIND};
 use crate::state::AppState;
-use crate::typed_resources::{validated_body, with_apply_restart, TypedCollection};
+use crate::typed_resources::{validated_body, with_apply, ApplyMode, TypedCollection};
+
+/// Parse a stored (already ADR-W015-validated) source body back into the
+/// canonical config type, or `None` for a legacy/foreign document that does
+/// not parse (then no live apply is attempted — restart semantics).
+fn parse_stored_source(body: &serde_json::Value) -> Option<multiview_config::Source> {
+    serde_json::from_value(body.clone()).ok()
+}
+
+/// Apply a stored source mutation to the **running** engine where the engine
+/// can take it live (ADR-W018, invariant #11), returning the apply semantics
+/// the response must declare.
+///
+/// * A **synthetic** kind (`bars`/`solid`/`clock`) is enqueued as
+///   [`Command::UpsertSource`]; the engine drain registers it at a frame
+///   boundary → `live`.
+/// * A kind change **off** synthetic (`previous` synthetic, new kind not)
+///   enqueues [`Command::RemoveSource`] — the running generator stops (a stale
+///   picture pretending to be the new URL would be dishonest) — but the new
+///   document itself still applies on `restart`.
+/// * Network/decoded kinds, a full/closed bus (no engine draining), or an
+///   unparseable stored doc → `restart`, honestly.
+///
+/// Submission is `try_submit` (bounded, non-blocking, ADR-W008): control can
+/// never block on the engine (invariant #10); a shed submit degrades the
+/// header to `restart` (the stored doc remains the durable truth).
+fn live_apply_upsert(
+    state: &AppState,
+    source: Option<multiview_config::Source>,
+    previous: Option<&multiview_config::Source>,
+) -> ApplyMode {
+    let Some(source) = source else {
+        return ApplyMode::Restart;
+    };
+    if source.kind.is_synthetic() {
+        let submitted = state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: OperationId::new(),
+                source: Box::new(source),
+            })
+            .is_ok();
+        return if submitted {
+            ApplyMode::Live
+        } else {
+            ApplyMode::Restart
+        };
+    }
+    if previous.is_some_and(|prev| prev.kind.is_synthetic()) {
+        // Synthetic -> decoded kind change: stop the running generator now;
+        // the stored decoded source applies on restart. A shed submit is
+        // surfaced (never silent): the stale generator keeps rendering until
+        // restart, and the operator should know why.
+        if let Err(err) = state.commands.try_submit(Command::RemoveSource {
+            op: OperationId::new(),
+            id: source.id.clone(),
+        }) {
+            tracing::warn!(
+                source = %source.id,
+                error = %err,
+                "kind-change RemoveSource shed: the running generator keeps \
+                 rendering the old synthetic picture until restart"
+            );
+        }
+    }
+    ApplyMode::Restart
+}
+
+/// Enqueue a live removal of `id` for the running engine, returning the apply
+/// semantics the DELETE response must declare (`live` iff enqueued).
+fn live_apply_remove(state: &AppState, id: &str) -> ApplyMode {
+    let submitted = state
+        .commands
+        .try_submit(Command::RemoveSource {
+            op: OperationId::new(),
+            id: id.to_owned(),
+        })
+        .is_ok();
+    if submitted {
+        ApplyMode::Live
+    } else {
+        ApplyMode::Restart
+    }
+}
 
 /// Attach the resource's `ETag` to a successful response carrying a source.
 fn source_response(status: StatusCode, versioned: &VersionedResource) -> Response {
@@ -98,7 +182,7 @@ pub(crate) async fn get_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
-            (status = 201, description = "The created source (ETag in the response header; X-Multiview-Apply declares how it takes effect).", body = crate::resource_store::Resource),
+            (status = 201, description = "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds (bars/solid/clock) applied to the running engine at a frame boundary, `restart` otherwise (ADR-W018).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 422, description = "The body is not a valid source document (detail names the field path).", body = crate::problem::Problem),
@@ -125,10 +209,11 @@ pub(crate) async fn create_source(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(with_apply_restart(source_response(
-        StatusCode::CREATED,
-        &versioned,
-    )))
+    let mode = live_apply_upsert(&state, parse_stored_source(&versioned.resource.body), None);
+    Ok(with_apply(
+        mode,
+        source_response(StatusCode::CREATED, &versioned),
+    ))
 }
 
 /// `PUT /api/v1/sources/{id}` — replace a source (role: write; If-Match → 412).
@@ -141,7 +226,7 @@ pub(crate) async fn create_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
-            (status = 200, description = "The replaced source (new ETag in the response header).", body = crate::resource_store::Resource),
+            (status = 200, description = "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds applied to the running engine, `restart` otherwise (ADR-W018).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 404, description = "No source with that id.", body = crate::problem::Problem),
@@ -168,6 +253,7 @@ pub(crate) async fn update_source(
         name: input.name,
         body: validated_body(TypedCollection::Sources, &id, &input.body)?,
     };
+    let previous = parse_stored_source(&current.resource.body);
     let versioned = state.sources.update(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -176,10 +262,15 @@ pub(crate) async fn update_source(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    Ok(with_apply_restart(source_response(
-        StatusCode::OK,
-        &versioned,
-    )))
+    let mode = live_apply_upsert(
+        &state,
+        parse_stored_source(&versioned.resource.body),
+        previous.as_ref(),
+    );
+    Ok(with_apply(
+        mode,
+        source_response(StatusCode::OK, &versioned),
+    ))
 }
 
 /// `DELETE /api/v1/sources/{id}` — delete a source (role: administer; If-Match).
@@ -191,7 +282,7 @@ pub(crate) async fn update_source(
         tag = "sources",
         params(("id" = String, Path, description = "Source id.")),
         responses(
-            (status = 204, description = "The source was deleted."),
+            (status = 204, description = "The source was deleted. X-Multiview-Apply: `live` when the running engine unregisters it at a frame boundary (bound tiles ride their failover slate), `restart` when no engine is draining (ADR-W018)."),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to administer.", body = crate::problem::Problem),
             (status = 404, description = "No source with that id.", body = crate::problem::Problem),
@@ -217,5 +308,6 @@ pub(crate) async fn delete_source(
         &id,
         None,
     );
-    Ok(with_apply_restart(StatusCode::NO_CONTENT.into_response()))
+    let mode = live_apply_remove(&state, &id);
+    Ok(with_apply(mode, StatusCode::NO_CONTENT.into_response()))
 }

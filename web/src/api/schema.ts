@@ -4749,7 +4749,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The replaced source (new ETag in the response header). */
+            /** @description The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds applied to the running engine, `restart` otherwise (ADR-W018). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4821,7 +4821,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The created source (ETag in the response header; X-Multiview-Apply declares how it takes effect). */
+            /** @description The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds (bars/solid/clock) applied to the running engine at a frame boundary, `restart` otherwise (ADR-W018). */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -4871,7 +4871,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The source was deleted. */
+            /** @description The source was deleted. X-Multiview-Apply: `live` when the running engine unregisters it at a frame boundary (bound tiles ride their failover slate), `restart` when no engine is draining (ADR-W018). */
             204: {
                 headers: {
                     [name: string]: unknown;

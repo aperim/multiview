@@ -114,12 +114,19 @@ services:
     # Serve the HLS output volume over HTTP. Open http://[::1]:8888/multiview.m3u8
     # in VLC/ffplay. (The default LGPL image encodes mpeg2video — use VLC; for
     # browser/H.264 playback use the `-gpl` image, see the README.)
+    #
+    # hls-nginx.conf is the REFERENCE fronting config (ADR-0032 §6, DEV-D1): the
+    # Cache-Control tiers + Origin-reflecting CORS + `.m4s` MIME type any static
+    # front (nginx/traefik/CDN) must apply. Multiview also serves the same
+    # contract itself at http://[::1]:8080/hls/{output-id}/ on the control
+    # listener — this sidecar is the static-fronting pattern, not the only path.
     image: nginx:1-alpine
     restart: unless-stopped
     depends_on:
       - multiview
     volumes:
       - multiview-hls:/usr/share/nginx/html:ro
+      - ./hls-nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       # IPv6-first `[::]:` host-IP form (publishes on the host IPv6 wildcard).
       - "[::]:8888:80"
