@@ -44,6 +44,7 @@ export type SourceKind =
   | 'clock'
   | 'rtsp'
   | 'hls'
+  | 'youtube'
   | 'ts'
   | 'srt'
   | 'rtmp'
@@ -64,6 +65,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'clock',
   'rtsp',
   'hls',
+  'youtube',
   'ts',
   'srt',
   'rtmp',
@@ -79,6 +81,18 @@ export interface SourceView {
   readonly name: string;
   /** Transport kind. */
   readonly kind: SourceKind;
+  /**
+   * The kind tag exactly as authored in the stored body (e.g. `aes67` for a
+   * kind this UI has no form for). Display this, never the folded `kind`, so
+   * an unknown-kind document is shown as it is.
+   */
+  readonly rawKind: string;
+  /**
+   * Whether this UI can edit the record (its kind has a typed form). An
+   * unknown kind renders + deletes normally but Edit is refused — editing
+   * through a fold would silently rewrite the authored document.
+   */
+  readonly editable: boolean;
   /**
    * The configured locator for display — the kind's key field: `url` for the
    * network kinds, the source `name` for NDI, the `path` for file. Absent for
@@ -109,6 +123,10 @@ export interface OutputView {
   readonly name: string;
   /** Output transport kind. */
   readonly kind: OutputKind;
+  /** The kind tag exactly as authored in the stored body (wire form). */
+  readonly rawKind: string;
+  /** Whether this UI can edit the record (see {@link SourceView.editable}). */
+  readonly editable: boolean;
   /**
    * The kind's key field for display: the RTSP `mount`, the HLS/LL-HLS `path`,
    * the RTMP/SRT `url`, or the NDI source `name`.
@@ -138,6 +156,10 @@ export interface OverlayView {
   readonly name: string;
   /** Overlay kind. */
   readonly kind: OverlayKind;
+  /** The kind tag exactly as authored in the stored body. */
+  readonly rawKind: string;
+  /** Whether this UI can edit the record (see {@link SourceView.editable}). */
+  readonly editable: boolean;
   /** Attachment target (`canvas` or a cell id). */
   readonly target: string;
   /** Stacking order over the program. */

@@ -37,6 +37,7 @@
     "clsx": "^2.1.1",
     "konva": "^9.3.22",
     "lucide-react": "^0.460.0",
+    "minisearch": "^7.2.0",
     "openapi-fetch": "^0.17.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

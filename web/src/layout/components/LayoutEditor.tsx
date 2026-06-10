@@ -8,19 +8,27 @@
 //
 // The canvas and the form are two views of the SAME state, so the editor is
 // fully usable without the canvas (WCAG 2.2 AA, accessibility.md).
-import { lazy, Suspense, useMemo } from 'react';
+import { lazy, Suspense, useMemo, useState } from 'react';
 import type { JSX } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
-import { Plus } from 'lucide-react';
+import { Grid2x2, Plus, Send } from 'lucide-react';
 
 import { useLayoutEditor } from '../useLayoutEditor';
-import { toLayoutBody } from '../model';
-import type { LayoutModel } from '../model';
+import { LAYOUT_PRESETS, toLayoutBody } from '../model';
+import type { LayoutModel, LayoutPreset } from '../model';
 import type { OverlayView, SourceView } from '../../resources/types';
 import { CellsForm } from './CellsForm';
 import { SourcePalette } from './SourcePalette';
 import { ValidationMessage } from './validationMessages';
 import { Button } from '../../components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import {
@@ -56,6 +64,12 @@ export interface LayoutEditorProps {
   readonly overlays: readonly OverlayView[];
   /** Called with the serialized payload when the operator saves a valid layout. */
   readonly onSave: (payload: LayoutSavePayload) => void;
+  /**
+   * Called for "Save & Apply": persist the layout, then apply it to the
+   * running engine (a LIVE action, unlike stored-resource edits). Omitted ⇒
+   * the button is not offered (e.g. while the apply route is unavailable).
+   */
+  readonly onSaveAndApply?: (payload: LayoutSavePayload) => void;
   /** Whether a save is in flight (disables the save button). */
   readonly isSaving?: boolean;
 }
@@ -66,11 +80,41 @@ export function LayoutEditor({
   sources,
   overlays,
   onSave,
+  onSaveAndApply,
   isSaving = false,
 }: LayoutEditorProps): JSX.Element {
   const { t } = useLingui();
   const editor = useLayoutEditor(initial);
   const nameId = 'layout-name';
+  const [pendingPreset, setPendingPreset] = useState<LayoutPreset | null>(null);
+
+  const presetLabel = (preset: LayoutPreset): string => {
+    switch (preset) {
+      case '2x2':
+        return t`2×2`;
+      case '3x3':
+        return t`3×3`;
+      case '1+5':
+        return t`1+5`;
+      case 'pip':
+        return t`PIP`;
+    }
+  };
+
+  const seedPreset = (preset: LayoutPreset): void => {
+    // Seeding replaces the composed cells; confirm before discarding work.
+    if (editor.model.cells.length > 0) {
+      setPendingPreset(preset);
+      return;
+    }
+    editor.applyPreset(preset);
+  };
+
+  const savePayload = (): LayoutSavePayload => ({
+    id: editor.model.id,
+    name: editor.model.name,
+    body: toLayoutBody(editor.model),
+  });
 
   const addSourceCell = (source: SourceView): void => {
     editor.add(source.name, { sourceId: source.id });
@@ -139,16 +183,118 @@ export function LayoutEditor({
             type="button"
             disabled={!canSave}
             onClick={(): void => {
-              onSave({
-                id: editor.model.id,
-                name: editor.model.name,
-                body: toLayoutBody(editor.model),
-              });
+              onSave(savePayload());
             }}
           >
             {isSaving ? <Trans>Saving…</Trans> : <Trans>Save layout</Trans>}
           </Button>
+          {onSaveAndApply !== undefined ? (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!canSave}
+              onClick={(): void => {
+                onSaveAndApply(savePayload());
+              }}
+            >
+              <Send aria-hidden="true" />
+              <Trans>Save &amp; apply to engine</Trans>
+            </Button>
+          ) : null}
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-6">
+        <fieldset className="flex flex-wrap items-end gap-3">
+          <legend className="mb-1 text-sm font-medium">
+            <Trans>Canvas</Trans>
+          </legend>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="layout-canvas-width" className="text-xs">
+              <Trans>Width (px)</Trans>
+            </Label>
+            <Input
+              id="layout-canvas-width"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              className="w-24"
+              value={editor.model.canvas.width}
+              aria-invalid={issues.some((issue) => issue.path === 'canvas')}
+              onChange={(event): void => {
+                const parsed = Number.parseInt(event.target.value, 10);
+                editor.setCanvas({
+                  ...editor.model.canvas,
+                  width: Number.isFinite(parsed) ? parsed : 0,
+                });
+              }}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="layout-canvas-height" className="text-xs">
+              <Trans>Height (px)</Trans>
+            </Label>
+            <Input
+              id="layout-canvas-height"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              className="w-24"
+              value={editor.model.canvas.height}
+              aria-invalid={issues.some((issue) => issue.path === 'canvas')}
+              onChange={(event): void => {
+                const parsed = Number.parseInt(event.target.value, 10);
+                editor.setCanvas({
+                  ...editor.model.canvas,
+                  height: Number.isFinite(parsed) ? parsed : 0,
+                });
+              }}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="layout-canvas-fps" className="text-xs">
+              <Trans>Frame rate (rational)</Trans>
+            </Label>
+            <Input
+              id="layout-canvas-fps"
+              className="w-32"
+              value={editor.model.canvas.fps}
+              placeholder="30/1"
+              aria-invalid={issues.some((issue) => issue.path === 'canvas.fps')}
+              aria-describedby="layout-canvas-fps-hint"
+              onChange={(event): void => {
+                editor.setCanvas({
+                  ...editor.model.canvas,
+                  fps: event.target.value,
+                });
+              }}
+            />
+            <p id="layout-canvas-fps-hint" className="text-xs text-muted-foreground">
+              <Trans>Exact "num/den", e.g. 30/1 or 30000/1001 — never a float.</Trans>
+            </p>
+          </div>
+        </fieldset>
+
+        <fieldset className="flex flex-wrap items-end gap-2">
+          <legend className="mb-1 text-sm font-medium">
+            <Trans>Seed from a preset</Trans>
+          </legend>
+          {LAYOUT_PRESETS.map((preset) => (
+            <Button
+              key={preset}
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label={`${t`Seed cells from preset`}: ${presetLabel(preset)}`}
+              onClick={(): void => {
+                seedPreset(preset);
+              }}
+            >
+              <Grid2x2 aria-hidden="true" />
+              {presetLabel(preset)}
+            </Button>
+          ))}
+        </fieldset>
       </div>
 
       {issues.length > 0 ? (
@@ -254,6 +400,49 @@ export function LayoutEditor({
             .join(', ')}
         </span>
       </p>
+
+      <Dialog
+        open={pendingPreset !== null}
+        onOpenChange={(open): void => {
+          if (!open) {
+            setPendingPreset(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              <Trans>Replace the current cells?</Trans>
+            </DialogTitle>
+            <DialogDescription>
+              <Trans>
+                Seeding from a preset replaces every cell in this draft. Nothing
+                is saved until you save the layout.
+              </Trans>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={(): void => {
+                setPendingPreset(null);
+              }}
+            >
+              <Trans>Cancel</Trans>
+            </Button>
+            <Button
+              onClick={(): void => {
+                if (pendingPreset !== null) {
+                  editor.applyPreset(pendingPreset);
+                }
+                setPendingPreset(null);
+              }}
+            >
+              <Trans>Replace cells</Trans>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

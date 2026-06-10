@@ -130,8 +130,23 @@ pub fn harness() -> Harness {
     harness_with_capacity(4)
 }
 
+/// Build a harness whose [`AppState`] is customized before the router is
+/// built (e.g. `with_base_document`, `with_working_layout_id`).
+pub fn harness_with(customize: impl FnOnce(AppState) -> AppState) -> Harness {
+    harness_customized(4, customize)
+}
+
 /// Build a harness with a specific command-bus capacity.
 pub fn harness_with_capacity(capacity: usize) -> Harness {
+    harness_customized(capacity, |state| state)
+}
+
+/// Build a harness with a specific command-bus capacity and a state customizer
+/// applied before the router is constructed.
+pub fn harness_customized(
+    capacity: usize,
+    customize: impl FnOnce(AppState) -> AppState,
+) -> Harness {
     let engine = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let (tx, rx) = command_bus(capacity);
     let alarms: Arc<dyn AlarmRepository> = Arc::new(InMemoryAlarmStore::new());
@@ -151,6 +166,7 @@ pub fn harness_with_capacity(capacity: usize) -> Harness {
     .with_tally_mirror(Arc::clone(&tally))
     .with_nmos(Arc::clone(&nmos))
     .with_ack_clock(Arc::new(|| MediaTime::from_nanos(ACK_NANOS)));
+    let state = customize(state);
     Harness {
         router: multiview_control::router(state),
         engine,
