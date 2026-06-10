@@ -17,6 +17,10 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# `ReaderStream` for streaming HLS segment bodies straight off disk (no whole-
+# segment RAM buffering on the unauthenticated delivery surface). MIT-licensed,
+# already in the workspace graph transitively (tokio-stream / tokio-tungstenite).
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 # Runtime `dlopen`/`dlsym` for the off-by-default `ndi` path (resolving the
 # proprietary NDI runtime via `NDIlib_v6_load` at RUN time — never linked at
 # build time; ADR-0008). Dual ISC-licensed (LGPL-clean) and already transitively

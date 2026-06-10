@@ -24,6 +24,10 @@ tracing = { workspace = true }
 # `fs` + `io-util` serve the HLS delivery surface (`hls::http`): async file
 # metadata/reads (with seek for Range requests) off the engine hot path.
 tokio = { workspace = true, features = ["fs", "io-util"] }
+# `ReaderStream` streams a (bounded) segment span straight off disk into the
+# response body — never buffering a whole multi-MB segment into RAM on the
+# unauthenticated HLS delivery surface (`hls::http`).
+tokio-util = { workspace = true }
 
 # The HLS delivery origin (`hls::http`, ADR-0032 §6): an axum router serving
 # playlists/segments/init with the documented header contract (Content-Type per

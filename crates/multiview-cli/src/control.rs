@@ -1622,4 +1622,122 @@ input_id = "in_b"
             .expect("serve task panicked")
             .expect("serve returned an I/O error");
     }
+
+    /// Build a config carrying one HLS output per `(id, path)` pair (the rest of
+    /// the canvas/layout/source/cell scaffolding is fixed and valid).
+    fn config_with_hls_outputs(outputs: &[(&str, &str)]) -> MultiviewConfig {
+        use std::fmt::Write as _;
+        let mut doc = String::from(
+            r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "rtsp"
+url = "rtsp://x/a"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+"##,
+        );
+        for (id, path) in outputs {
+            // Escape backslashes/quotes are unnecessary for these test ids/paths.
+            let _ = write!(
+                doc,
+                "[[outputs]]\nkind = \"hls\"\nid = \"{id}\"\npath = \"{path}\"\ncodec = \"h264\"\n"
+            );
+        }
+        MultiviewConfig::load_from_toml(&doc).expect("parse HLS-outputs config")
+    }
+
+    /// Two outputs whose **distinct** ids sanitise to the SAME URL segment get
+    /// **distinct** mounts: the first keeps the base segment, the second is
+    /// deduped with a deterministic `-2` suffix, so every output stays reachable.
+    #[test]
+    fn colliding_sanitised_mounts_are_deduplicated() {
+        // `aux/out` → `aux-out` and `aux out` → `aux-out` collide post-sanitise.
+        let config = config_with_hls_outputs(&[
+            ("aux/out", "/tmp/a/multiview.m3u8"),
+            ("aux out", "/tmp/b/multiview.m3u8"),
+        ]);
+        let mounts = hls_mounts(&config);
+        assert_eq!(mounts.len(), 2, "both outputs must mount");
+        assert_eq!(mounts[0].route, "/hls/aux-out");
+        assert_eq!(
+            mounts[1].route, "/hls/aux-out-2",
+            "the colliding second id must dedupe with a -2 suffix, got {:?}",
+            mounts[1].route
+        );
+        assert_ne!(
+            mounts[0].route, mounts[1].route,
+            "deduped mounts must be distinct"
+        );
+    }
+
+    /// A THIRD collision continues the deterministic suffix sequence (`-2`, `-3`).
+    #[test]
+    fn three_way_collision_deduplicates_2_then_3() {
+        // `a/b`, `a b`, and `a!b` all sanitise to the same `a-b` segment.
+        let config = config_with_hls_outputs(&[
+            ("a/b", "/tmp/a/multiview.m3u8"),
+            ("a b", "/tmp/b/multiview.m3u8"),
+            ("a!b", "/tmp/c/multiview.m3u8"),
+        ]);
+        let routes: Vec<String> = hls_mounts(&config).into_iter().map(|m| m.route).collect();
+        assert_eq!(
+            routes,
+            vec![
+                "/hls/a-b".to_owned(),
+                "/hls/a-b-2".to_owned(),
+                "/hls/a-b-3".to_owned(),
+            ]
+        );
+    }
+
+    /// An id of `..`, the empty string, or all-dots (`...`) is not a usable URL
+    /// path segment and maps to the `out` fallback.
+    #[test]
+    fn unusable_ids_fall_back_to_out() {
+        for id in ["..", "", "..."] {
+            assert_eq!(
+                sanitize_mount_segment(id),
+                "out",
+                "id {id:?} must map to the `out` fallback"
+            );
+        }
+    }
+
+    /// The `out` fallback ALSO participates in dedupe: two outputs whose ids
+    /// both collapse to `out` get `/hls/out` and `/hls/out-2`.
+    #[test]
+    fn colliding_out_fallbacks_are_deduplicated() {
+        let config = config_with_hls_outputs(&[
+            ("..", "/tmp/a/multiview.m3u8"),
+            ("...", "/tmp/b/multiview.m3u8"),
+        ]);
+        let routes: Vec<String> = hls_mounts(&config).into_iter().map(|m| m.route).collect();
+        assert_eq!(routes, vec!["/hls/out".to_owned(), "/hls/out-2".to_owned()]);
+    }
+
+    /// A normal alphanumeric id (with the kept `-`/`_`/`.`/`~` set) passes
+    /// through unchanged — sanitisation never mangles already-safe segments.
+    #[test]
+    fn already_safe_ids_pass_through_unchanged() {
+        for id in ["program", "low-latency_1.0~alt", "ABC123"] {
+            assert_eq!(sanitize_mount_segment(id), id);
+        }
+    }
 }

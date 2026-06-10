@@ -36,6 +36,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use tokio_util::io::ReaderStream;
 
 /// `Access-Control-Allow-Methods` for the HLS delivery surface (read-only).
 const ALLOW_METHODS: HeaderValue = HeaderValue::from_static("GET, HEAD, OPTIONS");
@@ -153,11 +154,18 @@ pub fn byte_range(header: &str, len: u64) -> ByteRange {
 /// config knob, when that serving-config slice lands, narrows the reflected
 /// set inside this same layer.)
 pub fn hls_router(root: impl Into<PathBuf>) -> Router {
-    let root: Arc<PathBuf> = Arc::new(root.into());
+    let root = root.into();
+    // Canonicalise the served root **once** at build time (a one-shot startup
+    // cost, off any hot path) so per-request symlink confinement compares
+    // against the real root. If the directory does not exist yet (the segmenter
+    // creates it lazily), fall back to the lexical root — every served file
+    // still 404s until the directory exists, and confinement re-canonicalises
+    // per request once it does.
+    let canonical_root = std::fs::canonicalize(&root).unwrap_or(root);
     with_hls_cors(
         Router::new()
             .route("/{*path}", get(serve_media))
-            .with_state(root),
+            .with_state(Arc::new(canonical_root)),
     )
 }
 
@@ -177,6 +185,17 @@ pub fn hls_router(root: impl Into<PathBuf>) -> Router {
 ///   CORS headers;
 /// - **every** response carries `Vary: Origin`, so a shared cache never serves
 ///   a header-less variant to a cross-origin caller.
+///
+/// # Why not `tower-http`'s `CorsLayer`
+/// This is a small, purpose-built middleware rather than `tower_http::cors::
+/// CorsLayer`, and the deviation from ADR-0032 §6's "wire `tower-http`
+/// `CorsLayer`" wording is **deliberate and contract-identical**: (1) `CorsLayer`
+/// answers preflight `OPTIONS` with `200 OK`, but this surface returns `204 No
+/// Content` (the §6 contract this router and its tests pin); (2) `tower-http` is
+/// not a dependency of this crate, and pulling it in for one reflected-Origin
+/// rule is not worth the build/licence surface. The contract above (reflect the
+/// Origin, `Vary: Origin`, the allow/expose sets, `204` preflight) is exactly
+/// what the ADR specifies — only the implementation differs.
 pub fn with_hls_cors(router: Router) -> Router {
     router.layer(middleware::from_fn(hls_cors))
 }
@@ -257,9 +276,15 @@ fn classify(extension: &str) -> Option<(HeaderValue, CacheTier)> {
     }
 }
 
-/// Resolve the request path against the output root, rejecting anything that
-/// is not a plain relative file path (no `..`, no leading `/`, no `.`): a
-/// traversal can never escape the segment directory.
+/// Lexically resolve the request path against the output root, rejecting
+/// anything that is not a plain relative file path (no `..`, no leading `/`,
+/// no `.`).
+///
+/// This is a **cheap pre-check only**: it stops the obvious `..`/absolute
+/// traversals before any filesystem work, but it cannot stop a symlink
+/// **inside** the tree pointing out of it (its components are all `Normal`).
+/// The symlink confinement is enforced separately by [`confine_to_root`],
+/// which canonicalises the resolved target against the canonical root.
 fn resolve_media_path(root: &Path, relative: &str) -> Option<PathBuf> {
     let relative = Path::new(relative);
     let mut any = false;
@@ -270,6 +295,38 @@ fn resolve_media_path(root: &Path, relative: &str) -> Option<PathBuf> {
         any = true;
     }
     any.then(|| root.join(relative))
+}
+
+/// Confine a lexically-resolved `target` to the served `root` by canonicalising
+/// both and requiring the real target to live under the real root — so a
+/// symlink **inside** the tree pointing outside it is rejected (the lexical
+/// pre-check in [`resolve_media_path`] cannot catch that; its components are all
+/// `Normal`).
+///
+/// Canonicalisation requires the path to exist, so a *missing* file (the
+/// common 404) is handled by canonicalising the target's **parent** and
+/// re-appending the final component: a request for a file that does not exist
+/// yet still resolves its real directory and 404s as a missing file (never a
+/// `500`), while a request whose parent escapes the root is rejected.
+///
+/// Returns the canonical, confined absolute path on success, or `None` when the
+/// target (or its parent) cannot be confined to the canonical root — the caller
+/// maps `None` to `404`.
+async fn confine_to_root(canonical_root: &Path, target: &Path) -> Option<PathBuf> {
+    // Fast path: the target itself exists (a real file or a symlink to one
+    // inside the tree) — canonicalise it directly.
+    if let Ok(canonical) = tokio::fs::canonicalize(target).await {
+        return canonical.starts_with(canonical_root).then_some(canonical);
+    }
+    // The target does not exist (the common 404): canonicalise its parent and
+    // re-append the final component, so a missing file still resolves its real
+    // directory and confines correctly instead of erroring.
+    let parent = target.parent()?;
+    let file_name = target.file_name()?;
+    let canonical_parent = tokio::fs::canonicalize(parent).await.ok()?;
+    canonical_parent
+        .starts_with(canonical_root)
+        .then(|| canonical_parent.join(file_name))
 }
 
 /// Serve one playlist/segment/init file (`GET`/`HEAD`) with the §6 contract.
@@ -283,11 +340,21 @@ async fn serve_media(
     method: Method,
     request_headers: HeaderMap,
 ) -> Response {
-    let Some(file) = resolve_media_path(&root, &relative) else {
+    let Some(lexical) = resolve_media_path(&root, &relative) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some((content_type, tier)) = file.extension().and_then(|e| e.to_str()).and_then(classify)
+    let Some((content_type, tier)) = lexical
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(classify)
     else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Symlink confinement: canonicalise the lexically-resolved target against
+    // the canonical root, so a symlink **inside** the tree pointing outside it
+    // is rejected (the lexical check above cannot catch that). A missing file
+    // still 404s (handled inside `confine_to_root`), never 500s.
+    let Some(file) = confine_to_root(&root, &lexical).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let len = match tokio::fs::metadata(&file).await {
@@ -321,18 +388,23 @@ async fn serve_media(
     };
 
     let body = if method == Method::HEAD {
-        // Metadata only — never read a segment to answer HEAD.
+        // Metadata only — never open or read a segment to answer HEAD.
         Body::empty()
     } else {
-        match read_span(&file, body_start, body_len).await {
-            Ok(bytes) => Body::from(bytes),
+        // Open + seek to the span start, then **stream** the (bounded) span
+        // straight off disk: never buffer a whole multi-MB segment into RAM.
+        // The open/seek happens before the response is built, so a raced-away
+        // file (404) or an I/O fault (500) still maps to the right status; once
+        // streaming begins the `Content-Length` framing is already fixed.
+        match open_span(&file, body_start).await {
+            Ok(handle) => span_body(handle, body_len),
             // The file raced away (e.g. the segmenter's deferred-unlink prune)
-            // between metadata and read: honest 404, never a panic.
+            // between metadata and open: honest 404, never a panic.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return StatusCode::NOT_FOUND.into_response();
             }
             Err(e) => {
-                tracing::warn!(file = %file.display(), error = %e, "HLS delivery read failed");
+                tracing::warn!(file = %file.display(), error = %e, "HLS delivery open failed");
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         }
@@ -354,20 +426,27 @@ async fn serve_media(
     response
 }
 
-/// Read exactly `count` bytes of `file` starting at `start`.
-async fn read_span(file: &Path, start: u64, count: u64) -> std::io::Result<Vec<u8>> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let count = usize::try_from(count).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "range span exceeds the address space",
-        )
-    })?;
+/// Open `file` and seek to byte `start`, returning the positioned handle.
+///
+/// The handle is then streamed by [`span_body`] — the whole segment is never
+/// materialised in RAM (an unauthenticated GET of a multi-MB segment must not
+/// amplify into a multi-MB allocation, and streaming improves LL-HLS TTFB).
+async fn open_span(file: &Path, start: u64) -> std::io::Result<tokio::fs::File> {
+    use tokio::io::AsyncSeekExt;
     let mut handle = tokio::fs::File::open(file).await?;
     if start > 0 {
         handle.seek(SeekFrom::Start(start)).await?;
     }
-    let mut buffer = vec![0_u8; count];
-    handle.read_exact(&mut buffer).await?;
-    Ok(buffer)
+    Ok(handle)
+}
+
+/// Stream exactly `count` bytes from the positioned `handle` into a response
+/// [`Body`], holding only a bounded chunk in memory at a time.
+///
+/// `.take(count)` bounds the stream to the span length, so the body matches the
+/// explicit `Content-Length` even though the underlying file may be longer (the
+/// `206` Range path) — framing is unchanged from the previous buffered path.
+fn span_body(handle: tokio::fs::File, count: u64) -> Body {
+    use tokio::io::AsyncReadExt;
+    Body::from_stream(ReaderStream::new(handle.take(count)))
 }

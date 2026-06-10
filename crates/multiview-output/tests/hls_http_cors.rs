@@ -54,13 +54,36 @@ async fn send(
     path: &str,
     headers: &[(header::HeaderName, &str)],
 ) -> Response<axum::body::Body> {
-    let router = hls_router(dir.path());
+    send_dir(&DirHandle(dir.path().to_path_buf()), method, path, headers).await
+}
+
+/// A served-directory handle for tests that need an explicit root (symlink /
+/// large-file fixtures) rather than a [`tempfile::TempDir`].
+struct DirHandle(std::path::PathBuf);
+
+/// Drive one request against an explicit served root.
+async fn send_dir(
+    dir: &DirHandle,
+    method: Method,
+    path: &str,
+    headers: &[(header::HeaderName, &str)],
+) -> Response<axum::body::Body> {
+    let router = hls_router(dir.0.clone());
     let mut request = Request::builder().method(method).uri(path);
     for (name, value) in headers {
         request = request.header(name, *value);
     }
     let request = request.body(Body::empty()).expect("build request");
     router.oneshot(request).await.expect("infallible service")
+}
+
+/// A response header's value as an owned `String`, if present and UTF-8.
+fn header_str(response: &Response<axum::body::Body>, name: header::HeaderName) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(ToOwned::to_owned)
 }
 
 /// Collect a response body to bytes.
@@ -337,6 +360,111 @@ async fn non_media_files_and_traversal_are_never_served() {
     // Traversal out of the root is rejected (encoded dot-dot segments).
     let response = send(&dir, Method::GET, "/%2e%2e/%2e%2e/etc/passwd", &[]).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// A symlink **inside** the served root that points OUTSIDE it must never be
+/// followed: the lexical pre-check passes (the request path has only Normal
+/// components), but canonicalisation resolves the link's real target outside
+/// the canonical root and the handler must 404 — no secret bytes leak.
+///
+/// Mirrors the reviewer's repro: a sibling `secret/` directory holding a
+/// `.ts` "segment" with a sentinel body, plus (a) a directory symlink and
+/// (b) a media-extension file symlink inside the served root, each pointing
+/// into that sibling secret. Both must 404 with no secret content served.
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_escaping_the_served_root_is_never_followed() {
+    use std::os::unix::fs::symlink;
+
+    const SECRET: &[u8] = b"TOP-SECRET-NOT-DELIVERY-SURFACE";
+
+    // A parent tree with two siblings: `served/` (the HLS root) and `secret/`
+    // (outside the root) holding a media-extension file we must never serve.
+    let parent = tempfile::tempdir().expect("create temp dir");
+    let served = parent.path().join("served");
+    let secret = parent.path().join("secret");
+    std::fs::create_dir(&served).unwrap();
+    std::fs::create_dir(&secret).unwrap();
+    std::fs::write(served.join("ok.ts"), SEGMENT_BYTES).unwrap();
+    std::fs::write(secret.join("leak.ts"), SECRET).unwrap();
+
+    // (a) A directory symlink inside the root pointing at the sibling secret dir.
+    symlink(&secret, served.join("escape")).unwrap();
+    // (b) A file symlink (media extension) inside the root pointing at the secret.
+    symlink(secret.join("leak.ts"), served.join("link.ts")).unwrap();
+
+    let dir_handle = DirHandle(served);
+
+    // Sanity: a real file inside the root still serves.
+    let response = send_dir(&dir_handle, Method::GET, "/ok.ts", &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_bytes(response).await, SEGMENT_BYTES);
+
+    // The directory-symlink traversal must 404 and never leak secret bytes.
+    let response = send_dir(&dir_handle, Method::GET, "/escape/leak.ts", &[]).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a dir symlink escaping the served root must not be followed"
+    );
+    let body = body_bytes(response).await;
+    assert_ne!(body, SECRET, "no secret bytes may be served");
+
+    // The file-symlink escape must 404 and never leak secret bytes.
+    let response = send_dir(&dir_handle, Method::GET, "/link.ts", &[]).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a file symlink escaping the served root must not be followed"
+    );
+    let body = body_bytes(response).await;
+    assert_ne!(body, SECRET, "no secret bytes may be served");
+}
+
+/// A large segment (well past any sane single read buffer) is served correctly
+/// in full and by Range — the streaming body must reproduce the file
+/// byte-for-byte. This is the behavioural guard that the streaming rewrite
+/// (no whole-file `vec![0; len]` buffering) keeps bodies identical.
+#[tokio::test]
+async fn large_segment_streams_full_and_range_byte_for_byte() {
+    // 5 MiB of deterministic, non-repeating-per-byte content so a truncated or
+    // mis-seeked stream is detectable.
+    let len: usize = 5 * 1024 * 1024;
+    let mut bytes = vec![0_u8; len];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::try_from(i % 251).unwrap();
+    }
+    let dir = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(dir.path().join("big.ts"), &bytes).unwrap();
+    let dir_handle = DirHandle(dir.path().to_path_buf());
+    // Keep the TempDir alive for the duration of the requests.
+    let _keep = dir;
+
+    // Full GET reproduces the whole file.
+    let response = send_dir(&dir_handle, Method::GET, "/big.ts", &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header_str(&response, header::CONTENT_LENGTH),
+        Some(len.to_string())
+    );
+    assert_eq!(body_bytes(response).await, bytes);
+
+    // A Range across an internal span streams exactly that span.
+    let start = 1_000_000_usize;
+    let end = 4_000_000_usize;
+    let response = send_dir(
+        &dir_handle,
+        Method::GET,
+        "/big.ts",
+        &[(header::RANGE, &format!("bytes={start}-{end}"))],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        header_str(&response, header::CONTENT_RANGE),
+        Some(format!("bytes {start}-{end}/{len}"))
+    );
+    assert_eq!(body_bytes(response).await, bytes[start..=end].to_vec());
 }
 
 proptest! {
