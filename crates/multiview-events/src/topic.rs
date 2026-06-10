@@ -113,8 +113,10 @@ impl Topic {
     /// mixed-cadence topic (ADR-RT007), whose lossless lifecycle events must
     /// stay in the replay ring while its conflated `device.status` /
     /// `timing.status` lanes are excluded **per event type** via
-    /// [`crate::event::Event::is_conflated`]. The full ring-exclusion rule is
-    /// `topic.is_high_rate() || event.is_conflated()`.
+    /// [`crate::event::Event::is_conflated`]. The full ring-exclusion rule the
+    /// session pump must apply once the Devices producers land (DEV-A3) is
+    /// `topic.is_high_rate() || event.is_conflated()`; no producer emits
+    /// Devices events yet.
     #[must_use]
     pub const fn is_high_rate(self) -> bool {
         matches!(self, Self::AudioMeters | Self::System)

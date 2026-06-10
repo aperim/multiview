@@ -665,17 +665,21 @@ pub struct DeviceSyncSummary {
 /// The conflated, latest-wins per-device runtime snapshot — the `data` body of
 /// the `device.status` event (topic [`crate::topic::Topic::Devices`], envelope
 /// `id` = device id), matching the status JSON shape in managed-devices.md
-/// §2.1.
+/// §2.1 with one additive field: [`device_id`](DeviceStatus::device_id), so
+/// snapshot rows are self-describing (the envelope `id` carries the same
+/// value).
 ///
 /// **Conflation policy (ADR-RT007 / ADR-RT004, invariant #10):** this is
-/// telemetry whose latest value supersedes all prior values — produced by a
-/// control-plane driver poller (~1 Hz per device) into a `tokio::watch`
-/// (latest-wins), conflated per connection by the session pump, and **excluded
-/// from the lossless replay ring** ([`Event::is_conflated`]): a re-snapshot
-/// heals it, so conflation is *correct*, not lossy. Staleness is surfaced via
-/// [`last_seen_ts`](DeviceStatus::last_seen_ts), never papered over. The
-/// engine never produces, forwards, or awaits this event. The conflating
-/// broadcaster lives in `multiview-control`; this crate carries the type.
+/// telemetry whose latest value supersedes all prior values. The contract its
+/// producer must honour (the driver pollers + conflating broadcaster land in
+/// `multiview-control` with DEV-A3/A4 — no producer emits this event yet): a
+/// control-plane poller (~1 Hz per device) publishes into a `tokio::watch`
+/// (latest-wins), the session pump conflates per connection, and the frame is
+/// **excluded from the lossless replay ring** ([`Event::is_conflated`]): a
+/// re-snapshot heals it, so conflation is *correct*, not lossy. Staleness is
+/// surfaced via [`last_seen_ts`](DeviceStatus::last_seen_ts), never papered
+/// over. The engine never produces, forwards, or awaits this event; this
+/// crate carries the type and the policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceStatus {
     /// The registry device id this snapshot describes.
@@ -1181,7 +1185,7 @@ impl Event {
     /// Whether this event is a **conflated latest-wins** telemetry sample —
     /// the per-event-type half of the replay-ring exclusion rule.
     ///
-    /// A frame is excluded from the lossless replay ring (ADR-RT003) when
+    /// The ring-exclusion rule the session pump must apply (ADR-RT003) is
     /// `topic.is_high_rate() || event.is_conflated()`. ADR-RT007 extends the
     /// per-topic rule ([`crate::topic::Topic::is_high_rate`]) to per-event-type
     /// granularity for the one mixed-cadence `devices` topic: `device.status`
@@ -1190,7 +1194,9 @@ impl Event {
     /// map that stays valid when stale), while the device lifecycle events on
     /// the same topic stay lossless in the ring. The existing conflated lanes
     /// (`audio.meter`, `system.metrics`) answer `true` here too, so this
-    /// predicate is the single per-event source of truth for conflation.
+    /// predicate is the single per-event source of truth for conflation. No
+    /// production consumer consults it yet: the pump's Devices handling lands
+    /// with the producers in DEV-A3.
     #[must_use]
     pub const fn is_conflated(&self) -> bool {
         matches!(
