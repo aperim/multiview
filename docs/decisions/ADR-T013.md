@@ -1,4 +1,4 @@
-# ADR-T012 — The shared RTP-audio → AudioStore program-clock rebase seam
+# ADR-T013 — The shared RTP-audio → AudioStore program-clock rebase seam
 
 **Status:** Proposed (2026-06-10)
 **Area:** streaming/timing (T) — audio ingest timing
