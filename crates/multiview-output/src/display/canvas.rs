@@ -6,13 +6,19 @@
 //! workspace-canonical pixel format, invariant #5). The CLI adapts its canvas
 //! type onto this trait.
 //!
-//! [`nv12_to_xrgb`] is the **v1 CPU scanout conversion** (DEV-B1): BT.709
+//! [`nv12_to_xrgb`] is the **CPU scanout conversion** (DEV-B1): BT.709
 //! limited-range YCbCr → full-range RGB in 8.8 fixed-point integer math (no
 //! floats anywhere), written straight into a stride-aware XRGB8888 scanout
 //! mapping, centred with black borders when the canvas and mode geometry
-//! differ. DEV-B3 replaces this with the per-hardware zero-copy/GPU paths
-//! (NV12 direct scanout on Intel/vc4; one wgpu pass elsewhere); the math here
-//! is the portable, hardware-free baseline and is golden-tested in CI.
+//! differ. DEV-B3 adds the per-hardware *faster* paths the
+//! [`super::strategy`] selector chooses when their preconditions hold (NV12
+//! direct scanout on Intel/vc4 via a dmabuf canvas; the wgpu pass elsewhere
+//! when wired) — but this CPU conversion **remains the guaranteed default and
+//! fallback**: it needs only a CPU NV12 canvas + an XRGB plane, takes the
+//! frame whenever the canvas is CPU-resident or a faster path is unavailable,
+//! and is golden-tested in CI. The [`DisplayCanvas::delivery`] /
+//! [`DisplayCanvas::dmabuf_image`] accessors are how a dmabuf-backed canvas
+//! opts into those faster paths.
 
 use std::os::fd::BorrowedFd;
 
