@@ -49,10 +49,13 @@ fn discovery_schemas_are_registered() {
     let doc = ApiDoc::openapi();
     let json = serde_json::to_value(&doc).unwrap();
     let schemas = &json["components"]["schemas"];
+    // The discovery types live in this crate and derive `ToSchema` directly, so
+    // they register under their real names (the `...Doc` shadow convention is for
+    // types in other crates that cannot derive `ToSchema` locally).
     for schema in [
-        "DiscoveredServiceDoc",
-        "DiscoveredEndpointDoc",
-        "DiscoveryDriverKindDoc",
+        "DiscoveredService",
+        "DiscoveredEndpoint",
+        "DiscoveryDriverKind",
         "ScanAccepted",
     ] {
         assert!(

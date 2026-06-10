@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use multiview_control::devices::discovery::{
-    infer_driver_kind, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind, DiscoveryInventory,
-    RawDiscoveredService, StaticBrowser, CAST_SERVICE_TYPE, NDI_SERVICE_TYPE,
+    infer_driver_kind, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
+    DiscoveryInventory, RawDiscoveredService, StaticBrowser, CAST_SERVICE_TYPE, NDI_SERVICE_TYPE,
 };
 use multiview_events::{AddressFamily, Event};
 use serde_json::json;
@@ -32,29 +32,29 @@ use support::{body_json, get, harness_with, post_json, send, OPERATOR_TOKEN, VIE
 /// A raw zowietek/NDI service the injected browser will yield: both an IPv6
 /// (AAAA) and an IPv4 (legacy) address, plus a TXT record.
 fn raw_ndi() -> RawDiscoveredService {
-    RawDiscoveredService {
-        service_type: NDI_SERVICE_TYPE.to_owned(),
-        instance_name: "ZowieBox-Foyer".to_owned(),
-        host: "zowiebox-foyer.local.".to_owned(),
-        port: 5961,
-        addresses: vec![
+    RawDiscoveredService::new(
+        NDI_SERVICE_TYPE,
+        "ZowieBox-Foyer",
+        "zowiebox-foyer.local.",
+        5961,
+        vec![
             "192.0.2.42".parse::<IpAddr>().unwrap(),
             "fd00:db8::42".parse::<IpAddr>().unwrap(),
         ],
-        txt: vec![("model".to_owned(), "ZowieBox".to_owned())],
-    }
+        vec![("model".to_owned(), "ZowieBox".to_owned())],
+    )
 }
 
 /// A raw Cast service that advertises a non-8009 port (Cast groups do).
 fn raw_cast() -> RawDiscoveredService {
-    RawDiscoveredService {
-        service_type: CAST_SERVICE_TYPE.to_owned(),
-        instance_name: "Foyer-Display".to_owned(),
-        host: "chromecast-foyer.local.".to_owned(),
-        port: 42001,
-        addresses: vec!["fd00:db8::99".parse::<IpAddr>().unwrap()],
-        txt: vec![("fn".to_owned(), "Foyer Display".to_owned())],
-    }
+    RawDiscoveredService::new(
+        CAST_SERVICE_TYPE,
+        "Foyer-Display",
+        "chromecast-foyer.local.",
+        42001,
+        vec!["fd00:db8::99".parse::<IpAddr>().unwrap()],
+        vec![("fn".to_owned(), "Foyer Display".to_owned())],
+    )
 }
 
 // ---- Pure model: driver-kind inference ----
@@ -128,7 +128,11 @@ fn inventory_dedups_by_key_latest_wins() {
 fn inventory_expires_stale_rows_on_snapshot() {
     let inv = DiscoveryInventory::new(8);
     // A row that already expired (deadline in the past) is purged on read.
-    inv.upsert(DiscoveredService::from_raw(&raw_ndi(), None, already_expired()));
+    inv.upsert(DiscoveredService::from_raw(
+        &raw_ndi(),
+        None,
+        already_expired(),
+    ));
     assert!(inv.snapshot().is_empty());
 }
 
@@ -200,7 +204,7 @@ async fn scan_returns_202_and_populates_untrusted_inventory() {
     for _ in 0..50 {
         let resp = send(&h.router, get("/api/v1/discovery/devices", OPERATOR_TOKEN)).await;
         let body = body_json(resp).await;
-        found = body.as_array().map(Vec::len).unwrap_or(0);
+        found = body.as_array().map_or(0, Vec::len);
         if found >= 2 {
             break;
         }
@@ -257,7 +261,7 @@ async fn scan_never_auto_creates_a_device() {
     // Wait for the discovery inventory to fill.
     for _ in 0..50 {
         let resp = send(&h.router, get("/api/v1/discovery/devices", OPERATOR_TOKEN)).await;
-        if body_json(resp).await.as_array().map(Vec::len).unwrap_or(0) >= 2 {
+        if body_json(resp).await.as_array().map_or(0, Vec::len) >= 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -324,10 +328,7 @@ async fn confirm_adopt_is_the_separate_devices_post_referencing_a_discovered_add
 
     // Now — and only now — the device exists in the registry.
     let resp = send(&h.router, get("/api/v1/devices", OPERATOR_TOKEN)).await;
-    assert_eq!(
-        body_json(resp).await.as_array().expect("an array").len(),
-        1
-    );
+    assert_eq!(body_json(resp).await.as_array().expect("an array").len(), 1);
 }
 
 /// A TTL deadline far in the future (rows stay live for the test).

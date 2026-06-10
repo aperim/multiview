@@ -147,6 +147,27 @@ where
     .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);
 
+    // Install the real mDNS browser when the `discovery` feature is built, so
+    // `POST /api/v1/discovery/devices/scan` browses the LAN for Cast / NDI /
+    // (configured) zowietek-control services. Discovery is untrusted inventory
+    // requiring explicit confirm-adopt (ADR-0041) and the browse runs on a
+    // bounded control-plane task — it can never back-pressure the engine
+    // (invariant #10). Without the feature the default `NullBrowser` finds
+    // nothing, so the endpoints answer with an empty inventory rather than
+    // failing.
+    #[cfg(feature = "discovery")]
+    let state = match multiview_control::devices::discovery::MdnsBrowser::new() {
+        Ok(browser) => state.with_discovery_browser(Arc::new(browser)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "mDNS discovery daemon failed to start; device discovery is disabled \
+                 for this run (scans return an empty inventory)"
+            );
+            state
+        }
+    };
+
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
     // output's playlist/segment/init files with the Cache-Control tiers,

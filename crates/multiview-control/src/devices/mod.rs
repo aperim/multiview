@@ -22,18 +22,26 @@
 //! can back-pressure the engine — the same proof shape as the alarms and tally
 //! producers.
 //!
-//! In this slice there is **no real device I/O** — the driver actors are
-//! DEV-A4/A5. The state machine, the status registry, and the broadcaster are
-//! real and complete; the projection endpoints return the honestly-declared
-//! candidate shape (empty until a driver enumerates), never fabricated live
-//! telemetry.
+//! The state machine, the status registry, and the broadcaster are real and
+//! complete. mDNS/DNS-SD **discovery** ([`discovery`]) is real and complete too
+//! (DEV-A5): a bounded, TTL-expiring, **untrusted** inventory of services found
+//! on the LAN, requiring explicit confirm-adopt (ADR-0041) — discovery never
+//! creates a device. The remaining device driver actors (live HTTP probe /
+//! mode-switch round-trips) are DEV-A4; the projection endpoints return the
+//! honestly-declared candidate shape (empty until a driver enumerates), never
+//! fabricated live telemetry.
 
 pub mod broadcaster;
+pub mod discovery;
 pub mod projection;
 pub mod registry;
 pub mod state_machine;
 
 pub use broadcaster::DeviceBroadcaster;
+pub use discovery::{
+    DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
+    DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,
+};
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;
 pub use state_machine::{DeviceLifecycle, LifecycleEvent};

@@ -124,6 +124,32 @@ impl DeviceBroadcaster {
         }))
     }
 
+    /// Publish `device.discovered` (lossless lifecycle): one **untrusted**
+    /// discovery-inventory row found by an mDNS scan (DEV-A5 / ADR-0041).
+    ///
+    /// This is **not** an adoption: it does not touch the status registry and
+    /// carries no registry id — a discovered service is a hint requiring explicit
+    /// confirm-adopt (`POST /devices/{id}`). The `driver` string is the discovered
+    /// driver-kind wire token (e.g. `ndi-source`); `address` is the IPv6-first
+    /// management address and `family` labels IPv4 as legacy (ADR-0042).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn discovered(
+        &self,
+        driver: &str,
+        address: &str,
+        family: multiview_events::AddressFamily,
+        name: Option<String>,
+    ) -> u64 {
+        self.engine.publish_event(Event::DeviceDiscovered(
+            multiview_events::DeviceDiscovered {
+                driver: driver.to_owned(),
+                address: address.to_owned(),
+                family,
+                name,
+            },
+        ))
+    }
+
     /// Publish `device.error` (lossless lifecycle).
     #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn error(&self, device_id: &str, message: &str) -> u64 {

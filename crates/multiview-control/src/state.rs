@@ -19,6 +19,7 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
+use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser};
 use crate::devices::DeviceStatusRegistry;
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
@@ -323,6 +324,20 @@ pub struct AppState {
     /// plane-only, latest-wins — it can never back-pressure the engine
     /// (invariant #10).
     pub device_status: Arc<DeviceStatusRegistry>,
+    /// The **untrusted** mDNS-discovery inventory (DEV-A5 / ADR-M008 §6 /
+    /// ADR-0041): a bounded, TTL-expiring, dedup-keyed list of services found on
+    /// the LAN. It is runtime state, never persisted/exported, and it is **never**
+    /// the device registry — its rows are hints requiring explicit confirm-adopt
+    /// (`POST /devices/{id}`). Bounded drop-oldest, control-plane-only — it can
+    /// never back-pressure the engine (invariant #10).
+    pub discovery: Arc<DiscoveryInventory>,
+    /// The mDNS browse seam (DEV-A5): the only socket-touching part of discovery.
+    /// The default ([`NullBrowser`]) finds nothing (the pure default build has no
+    /// mDNS socket); the binary swaps in the real `mdns-sd`-backed browser behind
+    /// the `discovery` feature, and tests inject a `StaticBrowser`. A scan runs
+    /// this on a bounded control-plane task and publishes `device.discovered`
+    /// (drop-oldest) — it never awaits a client (invariant #10).
+    pub discovery_browser: Arc<dyn DiscoveryBrowser>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -445,6 +460,8 @@ impl AppState {
             devices: Arc::new(InMemoryDeviceStore::new()),
             sync_groups: Arc::new(InMemorySyncGroupStore::new()),
             device_status: Arc::new(DeviceStatusRegistry::new()),
+            discovery: Arc::new(DiscoveryInventory::default()),
+            discovery_browser: Arc::new(NullBrowser),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -629,6 +646,23 @@ impl AppState {
     #[must_use]
     pub fn with_device_status(mut self, device_status: Arc<DeviceStatusRegistry>) -> Self {
         self.device_status = device_status;
+        self
+    }
+
+    /// Replace the mDNS browse seam (DEV-A5). The binary installs the real
+    /// `mdns-sd`-backed browser (behind the `discovery` feature); tests inject a
+    /// `StaticBrowser`. The browser is the only socket-touching part of
+    /// discovery; the scan task runs it off the engine path (invariant #10).
+    #[must_use]
+    pub fn with_discovery_browser(mut self, browser: Arc<dyn DiscoveryBrowser>) -> Self {
+        self.discovery_browser = browser;
+        self
+    }
+
+    /// Replace the untrusted discovery inventory (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_discovery_inventory(mut self, discovery: Arc<DiscoveryInventory>) -> Self {
+        self.discovery = discovery;
         self
     }
 

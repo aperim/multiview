@@ -153,6 +153,13 @@ cuda = ["multiview-hal/cuda"]
 # build can serve the full management UI: `run --features web,overlay`.
 web = ["multiview-control/embed-web"]
 
+# mDNS/DNS-SD managed-device discovery (DEV-A5 / ADR-M008 §6 / ADR-0041): install
+# the real `mdns-sd`-backed browser so `POST /api/v1/discovery/devices/scan`
+# browses the LAN for Cast / NDI / (configured) zowietek-control services. The
+# untrusted-inventory model + endpoints are always compiled; this feature only
+# adds the multicast socket. Pure Rust, LGPL-clean, GPU-free.
+discovery = ["multiview-control/discovery"]
+
 # Overlay rasterization: bakes the configured overlays (clock/labels, dB
 # meters, safe-area graticules, tally borders, burned-in SRT/VTT subtitles) into
 # the composited program before encode, via multiview-compositor's pure-Rust
@@ -350,6 +357,8 @@ full = [
     "multiview-control/embed-web",
     "multiview-control/openapi",
     "multiview-preview/webrtc",
+    # mDNS managed-device discovery (DEV-A5): pure-Rust, LGPL-clean, GPU-free.
+    "multiview-control/discovery",
 ]
 
 [lints]
