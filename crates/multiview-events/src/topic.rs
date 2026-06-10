@@ -63,6 +63,11 @@ pub enum Topic {
     /// WHEP preview signaling (offer/answer/ICE/closed).
     #[serde(rename = "preview")]
     Preview,
+    /// Managed-device registry + telemetry (ADR-RT007): the conflated
+    /// `device.status` / `timing.status` lanes plus the lossless low-rate
+    /// device lifecycle events, scoped finer with the `ids` filter.
+    #[serde(rename = "devices")]
+    Devices,
 }
 
 impl Topic {
@@ -86,6 +91,7 @@ impl Topic {
             Self::Logs => "logs",
             Self::Jobs => "jobs",
             Self::Preview => "preview",
+            Self::Devices => "devices",
         }
     }
 
@@ -102,6 +108,13 @@ impl Topic {
     /// High-rate lanes are latest-only and re-snapshotable, so they must not be
     /// kept in the bounded replay ring; the engine never blocks on a slow client
     /// (inv #10) — a lagging UI simply skips samples, it never polls them.
+    ///
+    /// [`Topic::Devices`] is deliberately **not** in this set: it is the one
+    /// mixed-cadence topic (ADR-RT007), whose lossless lifecycle events must
+    /// stay in the replay ring while its conflated `device.status` /
+    /// `timing.status` lanes are excluded **per event type** via
+    /// [`crate::event::Event::is_conflated`]. The full ring-exclusion rule is
+    /// `topic.is_high_rate() || event.is_conflated()`.
     #[must_use]
     pub const fn is_high_rate(self) -> bool {
         matches!(self, Self::AudioMeters | Self::System)

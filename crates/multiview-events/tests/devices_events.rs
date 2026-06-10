@@ -201,38 +201,38 @@ fn device_state_wire_strings_are_screaming_snake() {
 #[test]
 fn device_enum_wire_strings_roundtrip() {
     // Every small wire enum on the Devices surface, exhaustively.
-    fn check<T>(value: T, wire: &str)
+    fn check<T>(value: &T, wire: &str)
     where
         T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
     {
-        let v = serde_json::to_value(&value).unwrap();
+        let v = serde_json::to_value(value).unwrap();
         assert_eq!(v, json!(wire), "wire string mismatch for {wire}");
         let back: T = serde_json::from_value(v).unwrap();
-        assert_eq!(back, value, "{wire} must round-trip");
+        assert_eq!(&back, value, "{wire} must round-trip");
     }
-    check(SyncCapability::FrameAccurate, "frame-accurate");
-    check(SyncCapability::OffsetOnly, "offset-only");
-    check(SyncCapability::None, "none");
-    check(AchievedSync::FrameAccurate, "frame-accurate");
-    check(AchievedSync::BoundedSkew, "bounded-skew");
-    check(AchievedSync::None, "none");
-    check(DeviceStreamRole::Encode, "encode");
-    check(DeviceStreamRole::Decode, "decode");
-    check(ModePhase::Started, "started");
-    check(ModePhase::Finished, "finished");
-    check(ModePhase::Failed, "failed");
-    check(ImpactClass::ControlPlane, "cp");
-    check(ImpactClass::Class1, "c1");
-    check(ImpactClass::Class2, "c2");
-    check(ImpactClass::Device, "dev");
-    check(AddressFamily::Ipv6, "ipv6");
-    check(AddressFamily::Ipv4Legacy, "ipv4-legacy");
-    check(ClockSource::Ptp, "ptp");
-    check(ClockSource::System, "system");
-    check(ClockQuality::Locked, "locked");
-    check(ClockQuality::Holdover, "holdover");
-    check(ClockQuality::Acquiring, "acquiring");
-    check(ClockQuality::Freerun, "freerun");
+    check(&SyncCapability::FrameAccurate, "frame-accurate");
+    check(&SyncCapability::OffsetOnly, "offset-only");
+    check(&SyncCapability::None, "none");
+    check(&AchievedSync::FrameAccurate, "frame-accurate");
+    check(&AchievedSync::BoundedSkew, "bounded-skew");
+    check(&AchievedSync::None, "none");
+    check(&DeviceStreamRole::Encode, "encode");
+    check(&DeviceStreamRole::Decode, "decode");
+    check(&ModePhase::Started, "started");
+    check(&ModePhase::Finished, "finished");
+    check(&ModePhase::Failed, "failed");
+    check(&ImpactClass::ControlPlane, "cp");
+    check(&ImpactClass::Class1, "c1");
+    check(&ImpactClass::Class2, "c2");
+    check(&ImpactClass::Device, "dev");
+    check(&AddressFamily::Ipv6, "ipv6");
+    check(&AddressFamily::Ipv4Legacy, "ipv4-legacy");
+    check(&ClockSource::Ptp, "ptp");
+    check(&ClockSource::System, "system");
+    check(&ClockQuality::Locked, "locked");
+    check(&ClockQuality::Holdover, "holdover");
+    check(&ClockQuality::Acquiring, "acquiring");
+    check(&ClockQuality::Freerun, "freerun");
 }
 
 #[test]

@@ -540,6 +540,18 @@ fn tiles_from_engine_snapshot(snapshot: &EngineStateSnapshot) -> Option<Vec<Tile
 pub fn event_scope_id(event: &Event) -> Option<String> {
     match event {
         Event::TileState(tile) => tile.input.clone(),
+        // Devices-domain events scope by device id so the `ids` filter narrows
+        // the coarse `devices` topic to a detail view (ADR-RT007).
+        Event::DeviceStatus(status) => Some(status.device_id.clone()),
+        Event::DeviceAdopted(adopted) => Some(adopted.device_id.clone()),
+        Event::DeviceRemoved(removed) => Some(removed.device_id.clone()),
+        Event::DeviceMode(mode) => Some(mode.device_id.clone()),
+        Event::DeviceError(error) => Some(error.device_id.clone()),
+        Event::DeviceSync(sync) => Some(sync.device_id.clone()),
+        // `timing.status` scopes by the program/output stream the epoch maps.
+        Event::TimingStatus(timing) => Some(timing.stream_id.clone()),
+        // A discovery row has no registry id yet (untrusted inventory): it is
+        // correlated to its scan operation via `corr`, never a fabricated id.
         _ => None,
     }
 }
@@ -575,6 +587,18 @@ pub fn topic_for_event(event: &Event) -> Topic {
         | Event::SalvoArmed(_)
         | Event::SalvoTaken(_)
         | Event::SalvoCancelled(_) => Topic::Tally,
+        // Every Devices-domain event rides the one coarse `devices` lane
+        // (ADR-RT007): the conflated `device.status`/`timing.status` telemetry
+        // AND the lossless lifecycle events — fine scoping is the `ids`
+        // filter, never more topics.
+        Event::DeviceStatus(_)
+        | Event::DeviceAdopted(_)
+        | Event::DeviceRemoved(_)
+        | Event::DeviceMode(_)
+        | Event::DeviceError(_)
+        | Event::DeviceSync(_)
+        | Event::DeviceDiscovered(_)
+        | Event::TimingStatus(_) => Topic::Devices,
         _ => Topic::Control,
     }
 }
@@ -885,9 +909,9 @@ mod topic_routing_tests {
         use multiview_core::time::Rational;
         use multiview_core::wallclock::WallClockRef;
         use multiview_events::{
-            AddressFamily, ClockQuality, ClockSource, DeviceAdopted, DeviceDiscovered,
-            DeviceError, DeviceMode, DeviceRemoved, DeviceState, DeviceStatus, DeviceSync,
-            ImpactClass, ModePhase, SyncChange, TimingStatus,
+            AddressFamily, ClockQuality, ClockSource, DeviceAdopted, DeviceDiscovered, DeviceError,
+            DeviceMode, DeviceRemoved, DeviceState, DeviceStatus, DeviceSync, ImpactClass,
+            ModePhase, SyncChange, TimingStatus,
         };
 
         let events: Vec<Event> = vec![
@@ -951,8 +975,8 @@ mod topic_routing_tests {
         use multiview_core::time::Rational;
         use multiview_core::wallclock::WallClockRef;
         use multiview_events::{
-            AddressFamily, ClockQuality, ClockSource, DeviceDiscovered, DeviceRemoved,
-            DeviceState, DeviceStatus, TimingStatus,
+            AddressFamily, ClockQuality, ClockSource, DeviceDiscovered, DeviceRemoved, DeviceState,
+            DeviceStatus, TimingStatus,
         };
 
         use super::event_scope_id;

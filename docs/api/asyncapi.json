@@ -96,6 +96,72 @@
         "summary": "Per-input/track peak/RMS/clip meter sample (numeric only, never audio data).",
         "title": "High-rate audio meter sample"
       },
+      "DeviceAdopted": {
+        "contentType": "application/json",
+        "name": "DeviceAdopted",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceAdopted"
+        },
+        "summary": "A device was adopted (device.adopted on topic `devices`; lossless lifecycle lane).",
+        "title": "Device adopted into the registry"
+      },
+      "DeviceDiscovered": {
+        "contentType": "application/json",
+        "description": "Discovery results are an UNTRUSTED inventory requiring explicit confirm-adopt — never auto-ingested. IPv6-first: IPv4 results are explicitly labelled `ipv4-legacy`.",
+        "name": "DeviceDiscovered",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceDiscovered"
+        },
+        "summary": "A discovery row streamed while a scan operation runs (device.discovered on topic `devices`, correlated via `corr`).",
+        "title": "Untrusted discovery-inventory row"
+      },
+      "DeviceError": {
+        "contentType": "application/json",
+        "name": "DeviceError",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceError"
+        },
+        "summary": "A device error was reported (device.error on topic `devices`; lossless lifecycle lane).",
+        "title": "Driver-reported device error"
+      },
+      "DeviceMode": {
+        "contentType": "application/json",
+        "description": "Carries the impact declared BEFORE apply per the instant-apply doctrine: vendor-decoder mode convergence is `dev`-class (the device pipeline restarts; Multiview program output is unaffected).",
+        "name": "DeviceMode",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceMode"
+        },
+        "summary": "Mode convergence started/finished/failed with its declared impact (device.mode on topic `devices`).",
+        "title": "Device mode convergence"
+      },
+      "DeviceRemoved": {
+        "contentType": "application/json",
+        "name": "DeviceRemoved",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceRemoved"
+        },
+        "summary": "A device was removed (device.removed on topic `devices`; lossless lifecycle lane).",
+        "title": "Device removed from the registry"
+      },
+      "DeviceStatus": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `devices` with envelope `id` = device id. CONFLATED latest-wins telemetry (vendor-polled at ~1 s cadence): the latest value supersedes all prior values, and the event is excluded from the lossless replay ring — a re-snapshot heals it (ADR-RT007 extends ADR-RT003's ring-exclusion rule to per-event-type granularity on this mixed-cadence topic). Staleness is surfaced via `last_seen_ts`, never papered over.",
+        "name": "DeviceStatus",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceStatus"
+        },
+        "summary": "Latest-wins device status: state/mode/capabilities/streams/sync/temperature (device.status on topic `devices`).",
+        "title": "Conflated per-device runtime snapshot"
+      },
+      "DeviceSync": {
+        "contentType": "application/json",
+        "name": "DeviceSync",
+        "payload": {
+          "$ref": "#/components/schemas/DeviceSync"
+        },
+        "summary": "Sync-group membership / achieved-tier change or drift-threshold crossing (device.sync on topic `devices`).",
+        "title": "Device sync participation change"
+      },
       "Envelope": {
         "contentType": "application/json",
         "description": "Every message in both directions uses this envelope. The `t` field is the discriminator selecting the `data` schema. The `seq` field is a per-connection monotonic cursor; gaps indicate dropped frames and trigger resume/resync. The `ts` field carries engine-monotonic nanoseconds (same clock family as output PTS). `v` is the envelope schema major; clients MUST reject unknown majors.",
@@ -144,6 +210,30 @@
                 },
                 {
                   "$ref": "#/components/schemas/SalvoEvent"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceStatus"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceAdopted"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceRemoved"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceMode"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceError"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceSync"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceDiscovered"
+                },
+                {
+                  "$ref": "#/components/schemas/TimingStatus"
                 },
                 {
                   "$ref": "#/components/schemas/Hello"
@@ -206,7 +296,8 @@
                 "config",
                 "logs",
                 "jobs",
-                "preview"
+                "preview",
+                "devices"
               ],
               "type": "string"
             },
@@ -348,9 +439,28 @@
         },
         "summary": "Full current per-tile lifecycle state a fresh client rebuilds its tile cache from.",
         "title": "Connect-time tiles baseline ($snapshot on topic tiles)"
+      },
+      "TimingStatus": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `devices` with envelope `id` = program or sync-group id (ADR-M010). CONFLATED latest-wins and excluded from the lossless replay ring: the epoch is an exact affine map that stays valid when stale, so a receiver that misses updates keeps the last epoch and free-runs — it degrades, never stalls. The achieved tier is the MEASURED tier, never an aspirational one.",
+        "name": "TimingStatus",
+        "payload": {
+          "$ref": "#/components/schemas/TimingStatus"
+        },
+        "summary": "The per-program WallClockRef epoch, link offset, clock source/quality, and per-sync-group achieved skew (timing.status on topic `devices`).",
+        "title": "Outbound presentation epoch + sync telemetry"
       }
     },
     "schemas": {
+      "AchievedSync": {
+        "description": "The MEASURED sync tier actually achieved (never aspirational): frame-accurate (our nodes), bounded-skew (vendor decoders, ±100–500 ms drift), or none (never part of a synchronized canvas).",
+        "enum": [
+          "frame-accurate",
+          "bounded-skew",
+          "none"
+        ],
+        "type": "string"
+      },
       "AlarmTransition": {
         "description": "Data body of `alarm.raised`, `alarm.updated`, `alarm.cleared`, `alarm.acked`. Carries the current AlarmRecord value after the transition (X.733-aligned).",
         "properties": {
@@ -450,6 +560,309 @@
           "clip",
           "overflow",
           "sampled_hz"
+        ],
+        "type": "object"
+      },
+      "DeviceAdopted": {
+        "description": "Data body of `device.adopted`: a device was adopted into the registry.",
+        "properties": {
+          "device_id": {
+            "description": "The registry device id.",
+            "type": "string"
+          },
+          "driver": {
+            "description": "The compiled-in driver managing it (e.g. `zowietek`).",
+            "type": "string"
+          },
+          "name": {
+            "description": "The operator-facing display name, if set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "driver"
+        ],
+        "type": "object"
+      },
+      "DeviceCapabilities": {
+        "description": "Fixed probed capability flags — a driver maps its device into exactly this shape.",
+        "properties": {
+          "audio": {
+            "description": "The device handles audio.",
+            "type": "boolean"
+          },
+          "decode": {
+            "description": "The device can decode (receive a Multiview output).",
+            "type": "boolean"
+          },
+          "display": {
+            "description": "The device drives a physical display.",
+            "type": "boolean"
+          },
+          "encode": {
+            "description": "The device can encode (offers streams Multiview ingests as Sources).",
+            "type": "boolean"
+          },
+          "firmware_update": {
+            "description": "The device supports managed firmware update.",
+            "type": "boolean"
+          },
+          "reboot": {
+            "description": "The device can be rebooted via the management channel.",
+            "type": "boolean"
+          },
+          "sync": {
+            "$ref": "#/components/schemas/SyncCapability"
+          }
+        },
+        "required": [
+          "encode",
+          "decode",
+          "display",
+          "sync",
+          "audio",
+          "reboot",
+          "firmware_update"
+        ],
+        "type": "object"
+      },
+      "DeviceDiscovered": {
+        "description": "Data body of `device.discovered`: one untrusted discovery-inventory row streamed while a scan runs (correlated via the envelope `corr`). Requires explicit confirm-adopt; never auto-ingested.",
+        "properties": {
+          "address": {
+            "description": "The management endpoint (URL/host; IPv6 literals bracketed).",
+            "type": "string"
+          },
+          "driver": {
+            "description": "The candidate driver that recognised the device.",
+            "type": "string"
+          },
+          "family": {
+            "description": "Address family — IPv6-first; IPv4 results are labelled legacy.",
+            "enum": [
+              "ipv6",
+              "ipv4-legacy"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "The advertised device name, if any.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "driver",
+          "address",
+          "family"
+        ],
+        "type": "object"
+      },
+      "DeviceError": {
+        "description": "Data body of `device.error`: a driver-reported device error.",
+        "properties": {
+          "code": {
+            "description": "Short machine-readable code where the driver has one (vendor codes pass through verbatim).",
+            "type": "string"
+          },
+          "device_id": {
+            "description": "The registry device id the error concerns.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable description of the error.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "message"
+        ],
+        "type": "object"
+      },
+      "DeviceMode": {
+        "description": "Data body of `device.mode`: a mode convergence started/finished/failed, carrying the impact declared BEFORE apply (instant-apply doctrine).",
+        "properties": {
+          "detail": {
+            "description": "The human-readable declared-impact statement, if the driver provides one.",
+            "type": "string"
+          },
+          "device_id": {
+            "description": "The registry device id converging.",
+            "type": "string"
+          },
+          "impact": {
+            "$ref": "#/components/schemas/ImpactClass"
+          },
+          "mode": {
+            "description": "The target mode being converged to (driver vocabulary).",
+            "type": "string"
+          },
+          "phase": {
+            "description": "Which convergence phase this event reports.",
+            "enum": [
+              "started",
+              "finished",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "mode",
+          "phase",
+          "impact"
+        ],
+        "type": "object"
+      },
+      "DeviceRemoved": {
+        "description": "Data body of `device.removed`: a device was removed from the registry.",
+        "properties": {
+          "device_id": {
+            "description": "The registry device id that was removed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id"
+        ],
+        "type": "object"
+      },
+      "DeviceState": {
+        "description": "Managed-device lifecycle state (managed-devices.md §2.2), uppercase on the wire.",
+        "enum": [
+          "DISCOVERED",
+          "ADOPTING",
+          "ONLINE",
+          "DEGRADED",
+          "AUTH_FAILED",
+          "UNREACHABLE"
+        ],
+        "type": "string"
+      },
+      "DeviceStatus": {
+        "description": "Data body of `device.status` (managed-devices.md §2.1): the conflated latest-wins per-device runtime snapshot, envelope `id` = device id. Excluded from the lossless replay ring (a re-snapshot heals it); staleness is surfaced via `last_seen_ts`.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/DeviceCapabilities"
+          },
+          "device_id": {
+            "description": "The registry device id this snapshot describes.",
+            "type": "string"
+          },
+          "last_seen_ts": {
+            "description": "When the device last answered (engine monotonic nanoseconds).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "mode": {
+            "description": "The device's current converged mode (driver vocabulary), once known.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeviceState"
+          },
+          "streams": {
+            "description": "Device-reported active streams (omitted when none / unknown).",
+            "items": {
+              "$ref": "#/components/schemas/DeviceStreamStatus"
+            },
+            "type": "array"
+          },
+          "sync": {
+            "$ref": "#/components/schemas/DeviceSyncSummary"
+          },
+          "temperature_c": {
+            "description": "Device-reported temperature (°C), where exposed.",
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "device_id",
+          "state"
+        ],
+        "type": "object"
+      },
+      "DeviceStreamStatus": {
+        "description": "One device-reported active stream. Optional fields are absent where the vendor does not report that figure.",
+        "properties": {
+          "bitrate_bps": {
+            "description": "Device-reported stream bitrate (bits/sec), if reported.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "fps": {
+            "description": "Device-reported stream rate (fps), if reported.",
+            "format": "float",
+            "type": "number"
+          },
+          "healthy": {
+            "description": "Whether the device reports this stream as healthy.",
+            "type": "boolean"
+          },
+          "output_ref": {
+            "description": "The Multiview output this decode stream is bound to, if any.",
+            "type": "string"
+          },
+          "role": {
+            "description": "Whether the device is encoding or decoding this stream.",
+            "enum": [
+              "encode",
+              "decode"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "healthy"
+        ],
+        "type": "object"
+      },
+      "DeviceSync": {
+        "description": "Data body of `device.sync`: sync-group membership / achieved-tier / drift change.",
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/SyncChange"
+          },
+          "device_id": {
+            "description": "The member device id.",
+            "type": "string"
+          },
+          "group": {
+            "description": "The sync group concerned.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "group",
+          "change"
+        ],
+        "type": "object"
+      },
+      "DeviceSyncSummary": {
+        "description": "A device's sync-group membership summary inside a device.status snapshot.",
+        "properties": {
+          "achieved": {
+            "$ref": "#/components/schemas/AchievedSync"
+          },
+          "group": {
+            "description": "The sync group this device belongs to.",
+            "type": "string"
+          },
+          "offset_ms": {
+            "description": "Per-member presentation offset trim (ms, AES67 link-offset semantics).",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "group",
+          "offset_ms",
+          "achieved"
         ],
         "type": "object"
       },
@@ -641,6 +1054,16 @@
           "replay_ring"
         ],
         "type": "object"
+      },
+      "ImpactClass": {
+        "description": "Declared impact class of a management change: cp (control-plane only), c1 (hot/seamless at a frame boundary), c2 (controlled reset via make-before-break), dev (the DEVICE pipeline restarts; Multiview program output is unaffected).",
+        "enum": [
+          "cp",
+          "c1",
+          "c2",
+          "dev"
+        ],
+        "type": "string"
       },
       "InputConnection": {
         "description": "Data body of the `input.connection` event.",
@@ -963,6 +1386,122 @@
         ],
         "type": "object"
       },
+      "SyncCapability": {
+        "description": "How well a device can participate in synchronized presentation (fixed probed tri-state).",
+        "enum": [
+          "frame-accurate",
+          "offset-only",
+          "none"
+        ],
+        "type": "string"
+      },
+      "SyncChange": {
+        "description": "What changed about a device's sync participation (tagged by `kind`, never untagged).",
+        "discriminator": "kind",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "joined",
+                "type": "string"
+              },
+              "offset_ms": {
+                "description": "The per-member offset trim (ms).",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "offset_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "left",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "achieved": {
+                "$ref": "#/components/schemas/AchievedSync"
+              },
+              "kind": {
+                "const": "tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "achieved"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "exceeded": {
+                "description": "true = crossed above the target; false = recovered back inside it.",
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "drift",
+                "type": "string"
+              },
+              "measured_skew_ms": {
+                "description": "The measured skew for this member (ms).",
+                "format": "float",
+                "type": "number"
+              },
+              "target_skew_ms": {
+                "description": "The group's configured skew target (ms).",
+                "format": "uint32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "measured_skew_ms",
+              "target_skew_ms",
+              "exceeded"
+            ],
+            "type": "object"
+          }
+        ],
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "SyncGroupSkew": {
+        "description": "One sync group's MEASURED skew/tier (achieved tier = weakest member, never over-claimed).",
+        "properties": {
+          "achieved": {
+            "$ref": "#/components/schemas/AchievedSync"
+          },
+          "group": {
+            "description": "The sync group measured.",
+            "type": "string"
+          },
+          "measured_skew_ms": {
+            "description": "The worst measured member skew (ms), where a measurement exists.",
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "group",
+          "achieved"
+        ],
+        "type": "object"
+      },
       "SystemMetrics": {
         "description": "Data body of the `system.metrics` event: a high-rate whole-system sample (cpu / gpu / encoder-decoder). Numeric only; conflated at ~1-2 Hz (high-rate lane).",
         "properties": {
@@ -1136,6 +1675,56 @@
         ],
         "type": "object"
       },
+      "TimingStatus": {
+        "description": "Data body of `timing.status` (ADR-M010): the outbound presentation epoch plus per-sync-group achieved skew, envelope `id` = program or sync-group id. Latest-wins and ring-excluded: the affine epoch stays valid when stale, so receivers free-run on a missed update — they never stall.",
+        "properties": {
+          "clock_quality": {
+            "description": "The discipline quality of that clock (the engine servo's lock-state lifecycle).",
+            "enum": [
+              "locked",
+              "holdover",
+              "acquiring",
+              "freerun"
+            ],
+            "type": "string"
+          },
+          "clock_source": {
+            "description": "What disciplines the wall estimate (ST 2059-2 PTP servo or chrony-disciplined system time). The clock labels the timeline; it never paces the tick loop.",
+            "enum": [
+              "ptp",
+              "system"
+            ],
+            "type": "string"
+          },
+          "epoch": {
+            "$ref": "#/components/schemas/WallClockRef"
+          },
+          "groups": {
+            "description": "Per-sync-group measured skew/tier (omitted when no groups exist).",
+            "items": {
+              "$ref": "#/components/schemas/SyncGroupSkew"
+            },
+            "type": "array"
+          },
+          "link_offset_ns": {
+            "description": "Fixed receiver-side presentation delay (ns, AES67 link-offset semantics): uniformity is the goal, not smallness.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "stream_id": {
+            "description": "The program/output stream this epoch maps.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream_id",
+          "epoch",
+          "link_offset_ns",
+          "clock_source",
+          "clock_quality"
+        ],
+        "type": "object"
+      },
       "Unsubscribe": {
         "description": "Data body of `$unsubscribe` (client→server): stop receiving topics.",
         "properties": {
@@ -1149,6 +1738,47 @@
         },
         "required": [
           "topics"
+        ],
+        "type": "object"
+      },
+      "WallClockRef": {
+        "description": "The exact affine media↔wall map (multiview_core::wallclock::WallClockRef, ADR-0038): wall(pts) = wall_at_anchor_ns + rescale(pts − media_at_anchor). Integer/rational arithmetic only — never float.",
+        "properties": {
+          "media_at_anchor": {
+            "description": "Media PTS of the anchor sample, in units of `rate`.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "rate": {
+            "description": "The media rate (ticks per second) as an exact rational.",
+            "properties": {
+              "den": {
+                "description": "Denominator.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "num": {
+                "description": "Numerator.",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "num",
+              "den"
+            ],
+            "type": "object"
+          },
+          "wall_at_anchor_ns": {
+            "description": "Wall-clock instant (ns past the Unix epoch) at the anchor sample.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "wall_at_anchor_ns",
+          "media_at_anchor",
+          "rate"
         ],
         "type": "object"
       },
@@ -1175,7 +1805,7 @@
       "name": "The Multiview Authors",
       "url": "https://github.com/aperim/multiview"
     },
-    "description": "WebSocket and SSE realtime event stream for the Multiview engine. Every message uses a single versioned envelope (ADR-RT002). Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, layout, config, logs, jobs, preview, system, capabilities. The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
+    "description": "WebSocket and SSE realtime event stream for the Multiview engine. Every message uses a single versioned envelope (ADR-RT002). Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, layout, config, logs, jobs, preview, system, capabilities, devices. The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
     "externalDocs": {
       "description": "Realtime API reference",
       "url": "https://github.com/aperim/multiview/blob/main/docs/api/realtime.md"

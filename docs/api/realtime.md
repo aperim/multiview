@@ -143,6 +143,10 @@ fine-grained scoping is the `ids` filter, **not** more topics. High-rate volume 
 | `log.line` | `logs` | tracing tail | rate-limited / drop-oldest + marker |
 | `job.accepted` / `.progress` / `.result` / `.failed` | `jobs` | long REST command lifecycle (`corr`) | low / lossless |
 | `preview.offer` / `.answer` / `.ice` / `.closed` | `preview` | WHEP signaling | best-effort, **never dropped by meter policy** |
+| `device.status` | `devices` | conflated latest-wins per-device snapshot (state/mode/streams/temperature) | ~1 Hz / conflate, **ring-excluded per event type** (ADR-RT007) |
+| `device.adopted` / `.removed` / `.mode` / `.error` / `.sync` | `devices` | adoption/removal, mode convergence (declared impact), driver errors, sync changes | low / lossless |
+| `device.discovered` | `devices` | untrusted discovery rows streamed during a scan (`corr` = scan op) | low / lossless |
+| `timing.status` | `devices` | outbound presentation epoch (`WallClockRef`) + per-group achieved skew (ADR-M010) | low / conflate, **ring-excluded per event type** |
 
 The `tile.state` machine (LIVE → STALE → RECONNECTING → NO_SIGNAL) is the same one described in
 [`../architecture/resilience.md`](../architecture/resilience.md) — invariant #2 in conventions §5.

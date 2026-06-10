@@ -13,7 +13,9 @@
 use multiview_core::alarm::AlarmRecord;
 use multiview_core::stream::StreamInventory;
 use multiview_core::tally::TallyState;
+use multiview_core::time::MediaTime;
 use multiview_core::traits::SourceState;
+use multiview_core::wallclock::WallClockRef;
 use serde::{Deserialize, Serialize};
 
 use crate::subscription::{
@@ -534,6 +536,445 @@ impl SalvoEvent {
     }
 }
 
+// ---- Devices realtime surface (ADR-RT007, managed-devices.md §2.1/§7) ----
+
+/// A managed device's lifecycle state (managed-devices.md §2.2), uppercase on
+/// the wire exactly as the status JSON documents it. `#[non_exhaustive]` so a
+/// future state does not break the wire enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
+pub enum DeviceState {
+    /// Present only in the untrusted discovery inventory; not yet adopted.
+    Discovered,
+    /// Registry record created; the first probe is in flight.
+    Adopting,
+    /// Reachable and healthy.
+    Online,
+    /// Reachable, but the device reports a fault (decode stalled,
+    /// over-temperature) while the management channel still answers.
+    Degraded,
+    /// Credentials rejected; the breaker opens immediately (no retry storm).
+    AuthFailed,
+    /// Supervised reconnect in progress (backoff + jitter + circuit breaker).
+    Unreachable,
+}
+
+/// How well a device can participate in synchronized presentation — a fixed
+/// probed tri-state (managed-devices.md §2.3), kebab-case on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SyncCapability {
+    /// The device presents by frame choice against the published epoch
+    /// (display nodes): the same frame index everywhere.
+    FrameAccurate,
+    /// The device accepts only a fixed presentation offset trim (vendor
+    /// decoders): drift stays bounded, never frame-locked.
+    OffsetOnly,
+    /// No sync mechanism at all (e.g. Cast-class endpoints).
+    None,
+}
+
+/// The fixed probed capability flags of a managed device (managed-devices.md
+/// §2.3): a driver maps its device into exactly this shape — never a vendor's
+/// full feature tree.
+// The documented wire contract IS a fixed set of independent probed boolean
+// flags (`{"encode":false,"decode":true,…}`, managed-devices.md §2.1/§2.3);
+// a state-machine or bitflags refactor would change the JSON shape, so the
+// bools are the root design here, not an accident.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCapabilities {
+    /// The device can encode (offer streams Multiview ingests as Sources).
+    pub encode: bool,
+    /// The device can decode (receive a Multiview output).
+    pub decode: bool,
+    /// The device drives a physical display.
+    pub display: bool,
+    /// How well the device can participate in synchronized presentation.
+    pub sync: SyncCapability,
+    /// The device handles audio.
+    pub audio: bool,
+    /// The device can be rebooted via the management channel.
+    pub reboot: bool,
+    /// The device supports managed firmware update.
+    pub firmware_update: bool,
+}
+
+/// The direction of a device-reported active stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DeviceStreamRole {
+    /// The device encodes; Multiview ingests it as a Source.
+    Encode,
+    /// The device decodes a Multiview output.
+    Decode,
+}
+
+/// One device-reported active stream in a [`DeviceStatus`] summary
+/// (managed-devices.md §2.1). Optional fields are absent where the vendor does
+/// not report that figure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceStreamStatus {
+    /// Whether the device is encoding or decoding this stream.
+    pub role: DeviceStreamRole,
+    /// The Multiview output this decode stream is bound to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    /// Device-reported stream bitrate (bits/sec), if reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_bps: Option<u64>,
+    /// Device-reported stream rate (fps), if reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f32>,
+    /// Whether the device reports this stream as healthy.
+    pub healthy: bool,
+}
+
+/// The **measured** sync tier a device or group actually achieves (ADR-M010's
+/// published tier table, collapsed to its honest wire vocabulary): never an
+/// aspirational claim. Kebab-case on the wire (managed-devices.md §2.1 uses
+/// `"bounded-skew"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum AchievedSync {
+    /// The same frame index everywhere (tiers S/A/B: our nodes on PTP/chrony).
+    FrameAccurate,
+    /// Drift-bounded only (tier C: vendor decoders, ±100–500 ms).
+    BoundedSkew,
+    /// No measurable sync (tier D: never part of a synchronized canvas).
+    None,
+}
+
+/// A device's sync-group membership summary inside a [`DeviceStatus`]
+/// (managed-devices.md §2.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSyncSummary {
+    /// The sync group this device belongs to.
+    pub group: String,
+    /// The per-member presentation offset trim (milliseconds, AES67
+    /// link-offset semantics applied to video).
+    pub offset_ms: i64,
+    /// The tier this member actually achieves (weakest-member inputs).
+    pub achieved: AchievedSync,
+}
+
+/// The conflated, latest-wins per-device runtime snapshot — the `data` body of
+/// the `device.status` event (topic [`crate::topic::Topic::Devices`], envelope
+/// `id` = device id), matching the status JSON shape in managed-devices.md
+/// §2.1.
+///
+/// **Conflation policy (ADR-RT007 / ADR-RT004, invariant #10):** this is
+/// telemetry whose latest value supersedes all prior values — produced by a
+/// control-plane driver poller (~1 Hz per device) into a `tokio::watch`
+/// (latest-wins), conflated per connection by the session pump, and **excluded
+/// from the lossless replay ring** ([`Event::is_conflated`]): a re-snapshot
+/// heals it, so conflation is *correct*, not lossy. Staleness is surfaced via
+/// [`last_seen_ts`](DeviceStatus::last_seen_ts), never papered over. The
+/// engine never produces, forwards, or awaits this event. The conflating
+/// broadcaster lives in `multiview-control`; this crate carries the type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceStatus {
+    /// The registry device id this snapshot describes.
+    pub device_id: String,
+    /// The device's lifecycle state.
+    pub state: DeviceState,
+    /// The device's current converged mode (driver vocabulary, e.g.
+    /// `decoder`), once known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The probed capability flags; absent until the first successful probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<DeviceCapabilities>,
+    /// Device-reported active streams (empty when none / unknown).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<DeviceStreamStatus>,
+    /// Sync-group membership summary, if the device is in a group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<DeviceSyncSummary>,
+    /// Device-reported temperature (°C), where the vendor exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_c: Option<f32>,
+    /// When the device last answered (engine monotonic nanoseconds — the same
+    /// clock family as the envelope `ts`, so staleness math is direct). Absent
+    /// until the device has answered at least once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_ts: Option<MediaTime>,
+}
+
+impl DeviceStatus {
+    /// A minimal pre-probe status row for `device_id` in `state`: every
+    /// optional field absent, no streams.
+    #[must_use]
+    pub fn new(device_id: impl Into<String>, state: DeviceState) -> Self {
+        Self {
+            device_id: device_id.into(),
+            state,
+            mode: None,
+            capabilities: None,
+            streams: Vec::new(),
+            sync: None,
+            temperature_c: None,
+            last_seen_ts: None,
+        }
+    }
+}
+
+/// A device was adopted into the registry — the `data` body of
+/// `device.adopted` (lossless low-rate lifecycle lane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceAdopted {
+    /// The registry device id.
+    pub device_id: String,
+    /// The compiled-in driver managing it (e.g. `zowietek`).
+    pub driver: String,
+    /// The operator-facing display name, if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// A device was removed from the registry — the `data` body of
+/// `device.removed` (lossless low-rate lifecycle lane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRemoved {
+    /// The registry device id that was removed.
+    pub device_id: String,
+}
+
+impl DeviceRemoved {
+    /// Build a removal event body for `device_id`.
+    #[must_use]
+    pub fn new(device_id: impl Into<String>) -> Self {
+        Self {
+            device_id: device_id.into(),
+        }
+    }
+}
+
+/// The phase of a device mode convergence reported by `device.mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ModePhase {
+    /// Convergence began (the declared impact is now in effect).
+    Started,
+    /// The device converged to the requested mode.
+    Finished,
+    /// Convergence failed; the driver re-converges per its supervision policy.
+    Failed,
+}
+
+/// The declared impact class of a management change (the instant-apply
+/// doctrine's legend, managed-devices.md §10). `#[non_exhaustive]` so further
+/// classes can be added without a breaking wire change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ImpactClass {
+    /// Control-plane only: no media path is touched.
+    #[serde(rename = "cp")]
+    ControlPlane,
+    /// Class-1: hot/seamless at a frame boundary (invariant #11).
+    #[serde(rename = "c1")]
+    Class1,
+    /// Class-2: controlled reset via make-before-break migration.
+    #[serde(rename = "c2")]
+    Class2,
+    /// Device-side reset: the DEVICE pipeline restarts; Multiview program
+    /// output is unaffected.
+    #[serde(rename = "dev")]
+    Device,
+}
+
+/// A device mode convergence started/finished/failed — the `data` body of
+/// `device.mode` (lossless low-rate lifecycle lane), carrying the impact
+/// declared **before** apply per the instant-apply doctrine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceMode {
+    /// The registry device id converging.
+    pub device_id: String,
+    /// The target mode being converged to (driver vocabulary).
+    pub mode: String,
+    /// Which convergence phase this event reports.
+    pub phase: ModePhase,
+    /// The declared impact class (DEV for vendor decoders: close-before-open,
+    /// the device pipeline restarts).
+    pub impact: ImpactClass,
+    /// The human-readable declared-impact statement shown to the operator
+    /// pre-apply, if the driver provides one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// A driver-reported device error — the `data` body of `device.error`
+/// (lossless low-rate lifecycle lane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceError {
+    /// The registry device id the error concerns.
+    pub device_id: String,
+    /// A short machine-readable code where the driver has one (vendor status
+    /// codes pass through verbatim).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// A human-readable description of the error.
+    pub message: String,
+}
+
+/// What changed about a device's sync participation, carried by
+/// [`DeviceSync`]. Serialised **tagged** (`#[serde(tag = "kind")]`) per repo
+/// conventions; never `untagged`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SyncChange {
+    /// The device joined the group with this presentation offset trim.
+    Joined {
+        /// The per-member offset trim (milliseconds).
+        offset_ms: i64,
+    },
+    /// The device left the group.
+    Left,
+    /// The member's achieved tier changed (weakest-member recomputation
+    /// inputs).
+    Tier {
+        /// The tier this member now actually achieves.
+        achieved: AchievedSync,
+    },
+    /// A drift-alarm threshold crossing: the measured skew moved past (or back
+    /// inside) the group's target.
+    Drift {
+        /// The measured skew for this member (milliseconds).
+        measured_skew_ms: f32,
+        /// The group's configured skew target (milliseconds).
+        target_skew_ms: u32,
+        /// `true` when the measurement crossed above the target (alarm raised
+        /// after dwell); `false` when it recovered back inside it.
+        exceeded: bool,
+    },
+}
+
+/// A device's sync-group membership / achieved-tier / drift state changed —
+/// the `data` body of `device.sync` (lossless low-rate lifecycle lane).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceSync {
+    /// The member device id.
+    pub device_id: String,
+    /// The sync group concerned.
+    pub group: String,
+    /// What changed.
+    pub change: SyncChange,
+}
+
+/// The address family of a discovery result. IPv6-first (ADR-0042): IPv4
+/// results are explicitly labelled **legacy** on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AddressFamily {
+    /// An IPv6 endpoint (the lead/default family).
+    #[serde(rename = "ipv6")]
+    Ipv6,
+    /// A legacy IPv4-only endpoint (deprecation-path interop).
+    #[serde(rename = "ipv4-legacy")]
+    Ipv4Legacy,
+}
+
+/// One untrusted discovery-inventory row streamed while a
+/// `POST /discovery/devices/scan` operation runs — the `data` body of
+/// `device.discovered`, correlated to the scan via the envelope `corr`
+/// (ADR-RT007). Discovery rows are an **untrusted inventory** requiring
+/// explicit confirm-adopt (ADR-0041 doctrine); they carry no registry id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceDiscovered {
+    /// The candidate driver that recognised the device (e.g. `zowietek`).
+    pub driver: String,
+    /// The management endpoint (URL/host; IPv6 literals bracketed).
+    pub address: String,
+    /// The address family — IPv4 results are labelled legacy.
+    pub family: AddressFamily,
+    /// The advertised device name, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// What disciplines the wall-clock estimate behind a [`TimingStatus`] epoch
+/// (ADR-M010): PTP servo or chrony-disciplined system time. The clock
+/// **never** paces the tick loop (invariant #1) — it labels the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ClockSource {
+    /// ST 2059-2 PTP servo (PHC-disciplined).
+    Ptp,
+    /// chrony/NTP-disciplined system time.
+    System,
+}
+
+/// The discipline quality of the clock behind a [`TimingStatus`] epoch —
+/// mirrors the engine servo's lock-state lifecycle (see
+/// `multiview_core::wallclock`: `Locked`/`Holdover`/`Acquiring`/`Freerun`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ClockQuality {
+    /// The servo is locked to its reference.
+    Locked,
+    /// The reference was lost recently; coasting on the last discipline.
+    Holdover,
+    /// Acquiring lock; the estimate is not yet trustworthy.
+    Acquiring,
+    /// Undisciplined free-run.
+    Freerun,
+}
+
+/// One sync group's **measured** skew/tier as carried by [`TimingStatus`]
+/// (achieved tier = weakest member, never over-claimed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncGroupSkew {
+    /// The sync group measured.
+    pub group: String,
+    /// The tier the group actually achieves (weakest member).
+    pub achieved: AchievedSync,
+    /// The worst measured member skew (milliseconds), where a measurement
+    /// exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_skew_ms: Option<f32>,
+}
+
+/// The F3 sync-telemetry payload — the `data` body of `timing.status` (topic
+/// [`crate::topic::Topic::Devices`], envelope `id` = program or sync-group
+/// id): the outbound presentation epoch
+/// `{stream_id, WallClockRef, link_offset, clock_source, clock_quality}`
+/// published per ADR-M010, plus per-sync-group achieved-skew measurements.
+///
+/// **Conflation policy (ADR-RT007):** latest-wins and **excluded from the
+/// lossless replay ring** ([`Event::is_conflated`]) — the epoch is an exact
+/// affine map that remains valid when stale, so a node that misses updates
+/// keeps the last epoch and free-runs (it degrades, never stalls). Produced by
+/// a control-plane task from the engine's watch-published estimate; the engine
+/// never awaits a reader (invariant #10). The achieved tier is the *measured*
+/// tier, never an aspirational one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimingStatus {
+    /// The program/output stream this epoch maps.
+    pub stream_id: String,
+    /// The exact affine media↔wall map anchoring the output tick counter to
+    /// disciplined wall-clock nanoseconds.
+    pub epoch: WallClockRef,
+    /// The fixed receiver-side presentation delay (nanoseconds, AES67
+    /// link-offset semantics applied to video): uniformity across nodes is
+    /// the goal, not smallness.
+    pub link_offset_ns: i64,
+    /// What disciplines the wall estimate.
+    pub clock_source: ClockSource,
+    /// The discipline quality of that clock.
+    pub clock_quality: ClockQuality,
+    /// Per-sync-group measured skew/tier (omitted when no groups exist).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SyncGroupSkew>,
+}
+
 /// The discriminated payload of every frame: control frames and data events.
 ///
 /// Internally tagged on `t` with the body under `data` (ADR-RT002). The
@@ -654,6 +1095,40 @@ pub enum Event {
     /// A previously-armed salvo was cancelled before being taken (topic `tally`).
     #[serde(rename = "salvo.cancelled")]
     SalvoCancelled(SalvoEvent),
+
+    // ---- Devices realtime surface (topic `devices`, ADR-RT007) ----
+    /// Conflated latest-wins per-device runtime snapshot (envelope `id` =
+    /// device id). Excluded from the lossless replay ring per event type
+    /// ([`Event::is_conflated`]); a re-snapshot heals it.
+    #[serde(rename = "device.status")]
+    DeviceStatus(DeviceStatus),
+    /// A device was adopted into the registry (lossless lifecycle lane).
+    #[serde(rename = "device.adopted")]
+    DeviceAdopted(DeviceAdopted),
+    /// A device was removed from the registry (lossless lifecycle lane).
+    #[serde(rename = "device.removed")]
+    DeviceRemoved(DeviceRemoved),
+    /// A device mode convergence started/finished/failed, with its declared
+    /// impact (lossless lifecycle lane).
+    #[serde(rename = "device.mode")]
+    DeviceMode(DeviceMode),
+    /// A driver-reported device error (lossless lifecycle lane).
+    #[serde(rename = "device.error")]
+    DeviceError(DeviceError),
+    /// A device's sync-group membership / achieved tier / drift state changed
+    /// (lossless lifecycle lane).
+    #[serde(rename = "device.sync")]
+    DeviceSync(DeviceSync),
+    /// An untrusted discovery row streamed while a scan operation runs,
+    /// correlated via the envelope `corr` (lossless lifecycle lane).
+    #[serde(rename = "device.discovered")]
+    DeviceDiscovered(DeviceDiscovered),
+    /// F3 sync telemetry: the outbound presentation epoch + per-group achieved
+    /// skew (envelope `id` = program or sync-group id). Latest-wins and
+    /// ring-excluded like `device.status` — the affine epoch stays valid when
+    /// stale, so receivers free-run on a missed update, never stall.
+    #[serde(rename = "timing.status")]
+    TimingStatus(TimingStatus),
 }
 
 impl Event {
@@ -692,7 +1167,39 @@ impl Event {
             Self::SalvoArmed(_) => "salvo.armed",
             Self::SalvoTaken(_) => "salvo.taken",
             Self::SalvoCancelled(_) => "salvo.cancelled",
+            Self::DeviceStatus(_) => "device.status",
+            Self::DeviceAdopted(_) => "device.adopted",
+            Self::DeviceRemoved(_) => "device.removed",
+            Self::DeviceMode(_) => "device.mode",
+            Self::DeviceError(_) => "device.error",
+            Self::DeviceSync(_) => "device.sync",
+            Self::DeviceDiscovered(_) => "device.discovered",
+            Self::TimingStatus(_) => "timing.status",
         }
+    }
+
+    /// Whether this event is a **conflated latest-wins** telemetry sample —
+    /// the per-event-type half of the replay-ring exclusion rule.
+    ///
+    /// A frame is excluded from the lossless replay ring (ADR-RT003) when
+    /// `topic.is_high_rate() || event.is_conflated()`. ADR-RT007 extends the
+    /// per-topic rule ([`crate::topic::Topic::is_high_rate`]) to per-event-type
+    /// granularity for the one mixed-cadence `devices` topic: `device.status`
+    /// and `timing.status` are latest-wins (a re-snapshot heals them — the
+    /// status is a snapshot by definition, and the timing epoch is an affine
+    /// map that stays valid when stale), while the device lifecycle events on
+    /// the same topic stay lossless in the ring. The existing conflated lanes
+    /// (`audio.meter`, `system.metrics`) answer `true` here too, so this
+    /// predicate is the single per-event source of truth for conflation.
+    #[must_use]
+    pub const fn is_conflated(&self) -> bool {
+        matches!(
+            self,
+            Self::AudioMeter(_)
+                | Self::SystemMetrics(_)
+                | Self::DeviceStatus(_)
+                | Self::TimingStatus(_)
+        )
     }
 
     /// Whether this is a control frame (carried on [`crate::topic::Topic::Control`]).
