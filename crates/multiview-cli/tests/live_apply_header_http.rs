@@ -55,7 +55,8 @@ segment_ms = 1000
 /// POST an rtsp source over a raw HTTP/1.0 connection and return the full
 /// response text (status line + headers + body).
 async fn post_rtsp_source(addr: std::net::SocketAddr, token: &str) -> String {
-    let body = r#"{"name":"Cam","body":{"id":"cam1","kind":"rtsp","url":"rtsp://[2001:db8::1]/cam1"}}"#;
+    let body =
+        r#"{"name":"Cam","body":{"id":"cam1","kind":"rtsp","url":"rtsp://[2001:db8::1]/cam1"}}"#;
     let req = format!(
         "POST /api/v1/sources/cam1 HTTP/1.0\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()

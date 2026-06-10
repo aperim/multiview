@@ -55,6 +55,12 @@ use tokio::task::JoinHandle;
 /// off the engine hot loop, into read-mostly control-plane stores that can never
 /// back-pressure the engine (invariant #10).
 ///
+/// `live_sources` is the run-path **live-apply capability** (ADR-W018): the
+/// caller declares which source kinds the running engine can apply live —
+/// network/file kinds only when a real ingest spawner is wired into the run's
+/// live-source hub — so the `X-Multiview-Apply` header answers from runtime
+/// truth, never from wishful classification.
+///
 /// Every configured HLS/LL-HLS output additionally mounts its delivery surface
 /// at `/hls/{output-id}/` on this same listener ([`hls_mounts`] +
 /// [`multiview_output::hls::http::hls_router`], DEV-D1): playlists/segments/
@@ -72,6 +78,7 @@ pub async fn bind_and_serve<F>(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    live_sources: multiview_control::LiveSourceCapability,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)>
 where
@@ -145,7 +152,12 @@ where
     )
     .with_preview(preview)
     .with_warning_store(warnings)
-    .with_auth_disabled(auth_disabled);
+    .with_auth_disabled(auth_disabled)
+    // The run-path live-apply capability (ADR-W018): which source kinds the
+    // RUNNING engine can take live. The binary derives it from the seams it
+    // actually wired (network kinds iff the hub has an ingest spawner), so
+    // the X-Multiview-Apply header never over-claims.
+    .with_live_sources(live_sources);
 
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
@@ -1113,11 +1125,18 @@ impl CommandDrain {
     /// non-blocking channel (invariants #1 + #10; a full queue is shed with a
     /// warning and the tile rides the slate — re-applying retries).
     ///
-    /// Kinds: this slice ships **synthetic** sources (`bars`/`solid`/`clock`,
-    /// ADR-0027) live; a decoded kind is a surfaced held action (the stored
-    /// document applies on restart — exactly what the route's
-    /// `X-Multiview-Apply: restart` told the client). The route only enqueues
-    /// `UpsertSource` for synthetic kinds, so the held arm is defence in depth.
+    /// Kinds: **synthetic** sources (`bars`/`solid`/`clock`, ADR-0027) spawn
+    /// the in-process generator; **network/file** kinds
+    /// (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`, ADR-W018 level 2) ride the same
+    /// request path to the hub's ingest spawner — when the run wired one (the
+    /// full-pipeline path), the SAME supervised `ingest_loop` the startup path
+    /// builds is spawned; without one the hub holds the spawn (warned) and the
+    /// tile rides the slate, exactly the restart semantics the route's
+    /// capability-driven header declared. Any other kind (`ndi`/`youtube`/
+    /// `aes67`) is a surfaced held action (the stored document applies on
+    /// restart). The route's capability signal keeps `UpsertSource` off the
+    /// bus for kinds the run cannot apply, so the held arms are defence in
+    /// depth.
     fn upsert_source(
         &mut self,
         source: &multiview_config::Source,
@@ -1131,14 +1150,15 @@ impl CommandDrain {
             );
             return;
         };
-        let Some(kind) = crate::synth::SyntheticKind::from_source_kind(&source.kind) else {
+        let synthetic = crate::synth::SyntheticKind::from_source_kind(&source.kind);
+        if synthetic.is_none() && !source.kind.is_network_media() {
             tracing::warn!(
                 source = %source.id,
-                "upsert_source held: this kind is not live-appliable yet \
-                 (network live-add is the next ADR-W018 slice); it applies on restart"
+                "upsert_source held: this kind is not live-appliable \
+                 (ndi/youtube/aes67 apply on restart)"
             );
             return;
-        };
+        }
         let id = source.id.clone();
         // Reuse the registered store on an edit-by-id so the tile holds
         // last-good while the hub swaps the producer behind it.
@@ -1154,20 +1174,28 @@ impl CommandDrain {
         );
         // Heavy half off-thread FIRST: the hub tears down any previous
         // producer under this id (and its `{id}/` companions) before spawning
-        // the SAME generator_loop the startup path runs, and RCUs the preview
-        // map. Requesting this BEFORE the binding mutations below gives the
-        // hub a head start on stopping a replaced producer, shrinking the
-        // bounded window in which old and new frames can interleave in the
-        // reused store on an edit (ADR-W018 §5).
-        match seam.request_spawn_synth(crate::live_sources::SynthSpawn {
-            id: id.clone(),
-            kind,
-            store: Arc::clone(&store),
-            width: self.config.canvas.width,
-            height: self.config.canvas.height,
-            canvas: multiview_compositor::pipeline::CanvasColor::default(),
-            cadence: self.config.canvas.fps.rational(),
-        }) {
+        // the replacement — the SAME generator_loop (synthetic) or the SAME
+        // supervised ingest_loop (network/file) the startup path runs — and
+        // RCUs the preview map. Requesting this BEFORE the binding mutations
+        // below gives the hub a head start on stopping a replaced producer,
+        // shrinking the bounded window in which old and new frames can
+        // interleave in the reused store on an edit (ADR-W018 §5).
+        let submitted = match synthetic {
+            Some(kind) => seam.request_spawn_synth(crate::live_sources::SynthSpawn {
+                id: id.clone(),
+                kind,
+                store: Arc::clone(&store),
+                width: self.config.canvas.width,
+                height: self.config.canvas.height,
+                canvas: multiview_compositor::pipeline::CanvasColor::default(),
+                cadence: self.config.canvas.fps.rational(),
+            }),
+            None => seam.request_spawn_source(crate::live_sources::SourceSpawn {
+                source: source.clone(),
+                store: Arc::clone(&store),
+            }),
+        };
+        match submitted {
             crate::live_sources::HubSubmit::Accepted => {}
             crate::live_sources::HubSubmit::Full => {
                 tracing::warn!(
@@ -2159,6 +2187,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            multiview_control::LiveSourceCapability::synthetic_only(),
             async move {
                 let _ = shutdown_rx.await;
             },

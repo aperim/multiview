@@ -13,7 +13,7 @@
 //! * a live-added FILE source (a deterministic local fixture — the same libav
 //!   open/decode/scale/publish path every network kind rides) reaches **LIVE**,
 //!   observed via the engine's own `tile.state` events;
-//! * a live REMOVE returns the bound cell to **NO_SIGNAL** (slate);
+//! * a live REMOVE returns the bound cell to **`NO_SIGNAL`** (slate);
 //! * rapid add/remove churn of the decoded source never falters the output
 //!   clock (invariants #1 + #10).
 #![cfg(feature = "ffmpeg")]
@@ -128,9 +128,22 @@ fn wait_state(
     }
 }
 
+/// A `file`-kind `UpsertSource` command for `id` playing `clip_path`.
+fn upsert_file(id: &str, clip_path: &str) -> Command {
+    Command::UpsertSource {
+        op: OperationId::new(),
+        source: Box::new(
+            serde_json::from_value(
+                serde_json::json!({ "id": id, "kind": "file", "path": clip_path }),
+            )
+            .expect("valid file source"),
+        ),
+    }
+}
+
 /// REALTIME PROOF (ADR-W018 level 2): on a real libav pipeline run, a
 /// live-added file source's tile reaches LIVE via the uniform hub-spawned
-/// `ingest_loop`, a live remove returns it to NO_SIGNAL, and rapid add/remove
+/// `ingest_loop`, a live remove returns it to `NO_SIGNAL`, and rapid add/remove
 /// churn of the decoded source never falters the output clock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_added_file_source_goes_live_then_remove_slates_never_faltering() {
@@ -166,18 +179,10 @@ async fn live_added_file_source_goes_live_then_remove_slates_never_faltering() {
     let clip_path = clip.display().to_string();
     let driver_stop = stop.clone();
     let driver = tokio::spawn(async move {
-        let upsert = |id: &str| Command::UpsertSource {
-            op: OperationId::new(),
-            source: Box::new(
-                serde_json::from_value(
-                    serde_json::json!({ "id": id, "kind": "file", "path": clip_path }),
-                )
-                .expect("valid file source"),
-            ),
-        };
-
         // Live-add the file source and bind the cell to it.
-        commands.try_submit(upsert("live_clip")).expect("submit upsert");
+        commands
+            .try_submit(upsert_file("live_clip", &clip_path))
+            .expect("submit upsert");
         commands
             .try_submit(Command::SwapSource {
                 op: OperationId::new(),
@@ -216,7 +221,7 @@ async fn live_added_file_source_goes_live_then_remove_slates_never_faltering() {
         // clock — the level-2 extension of the churn soak.
         for n in 0..3_u32 {
             let id = format!("churn{n}");
-            let _ = commands.try_submit(upsert(&id));
+            let _ = commands.try_submit(upsert_file(&id, &clip_path));
             let _ = commands.try_submit(Command::RemoveSource {
                 op: OperationId::new(),
                 id,

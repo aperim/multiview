@@ -176,6 +176,21 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     })
 }
 
+/// The engine-side seams a run path hands the control plane: the program
+/// preview slot, the per-source stores, the shared stop registry, and the
+/// optional decoded-ingest spawner (ADR-W018 level 2 — the full-pipeline path
+/// only).
+struct EngineSeams {
+    /// The wait-free program-preview slot the run loop fills.
+    program_slot: multiview_cli::preview::ProgramSlot,
+    /// The startup per-source frame stores (the preview thumbnails' source).
+    stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
+    /// The shared per-source producer stop registry (live remove/edit teardown).
+    registry: multiview_cli::live_sources::StopRegistry,
+    /// The decoded-ingest spawner (`Some` ⇔ network kinds live-apply).
+    ingest: Option<Arc<dyn multiview_cli::live_sources::IngestSpawner>>,
+}
+
 /// Bring up the management control plane for a run (one wiring for BOTH run
 /// paths — ADR-W013/ADR-W018): the live-source hub over the run's per-source
 /// stop registry + the shared (live-updatable) preview store map, the preview
@@ -186,25 +201,46 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
 /// returns). The hub shares `registry`, so a live remove can tear down a
 /// startup producer (generator or ingest thread) too.
+///
+/// `seams.ingest` is the run's decoded-ingest spawner (ADR-W018 level 2): the
+/// full-pipeline path passes `Pipeline::live_ingest_spawner` so network/file
+/// sources spawn the same supervised `ingest_loop` live; the software path
+/// passes `None`. The capability declared to the control plane is **derived
+/// from it** — the `X-Multiview-Apply` header claims `live` for network kinds
+/// exactly when a real spawner backs the claim.
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
-    program_slot: multiview_cli::preview::ProgramSlot,
-    stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
-    registry: multiview_cli::live_sources::StopRegistry,
+    seams: EngineSeams,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<(
     tokio::task::JoinHandle<std::io::Result<()>>,
     multiview_control::CommandReceiver,
     multiview_cli::live_sources::LiveSourceHub,
 )> {
+    let EngineSeams {
+        program_slot,
+        stores,
+        registry,
+        ingest,
+    } = seams;
     let (commands, command_rx) = command_bus(64);
+    // The honesty keystone (ADR-W018): network kinds are declared live-appliable
+    // exactly when the hub below carries a real ingest spawner.
+    let live_capability = if ingest.is_some() {
+        multiview_control::LiveSourceCapability::synthetic_and_network()
+    } else {
+        multiview_control::LiveSourceCapability::synthetic_only()
+    };
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
     // the SHARED, live-updatable preview store map, off the clock thread.
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
-    let hub =
-        multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
+    let hub = multiview_cli::live_sources::LiveSourceHub::start_with_ingest(
+        registry,
+        Arc::clone(&shared_stores),
+        ingest,
+    );
     // The live-preview provider reads the program slot the run loop fills + the
     // shared per-input store map — read-only for control (invariant #10).
     let provider: multiview_control::SharedPreview = Arc::new(
@@ -216,6 +252,7 @@ async fn serve_control_plane(
         Arc::clone(publisher),
         commands,
         provider,
+        live_capability,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -252,9 +289,15 @@ async fn run_pipeline_until_ctrl_c(
                 &cfg.listen,
                 config,
                 &publisher,
-                Arc::clone(&preview_slot),
-                pipeline.preview_stores(),
-                pipeline.stop_registry(),
+                EngineSeams {
+                    program_slot: Arc::clone(&preview_slot),
+                    stores: pipeline.preview_stores(),
+                    registry: pipeline.stop_registry(),
+                    // The real decoded-ingest spawner (ADR-W018 level 2):
+                    // network/file sources live-apply through the SAME
+                    // supervised ingest_loop the startup path builds.
+                    ingest: Some(pipeline.live_ingest_spawner()),
+                },
                 shutdown_rx,
             )
             .await?;
@@ -508,9 +551,15 @@ async fn run_software_until_ctrl_c(
                 &cfg.listen,
                 config,
                 &publisher,
-                engine.program_preview(),
-                engine.preview_stores(),
-                engine.stop_registry(),
+                EngineSeams {
+                    program_slot: engine.program_preview(),
+                    stores: engine.preview_stores(),
+                    registry: engine.stop_registry(),
+                    // The software engine has no decoder: no ingest spawner, so
+                    // the capability (and the apply header) honestly stays
+                    // synthetic-only.
+                    ingest: None,
+                },
                 shutdown_rx,
             )
             .await?;

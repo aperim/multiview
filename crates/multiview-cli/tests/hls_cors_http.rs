@@ -147,6 +147,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         publisher,
         commands,
         multiview_control::no_preview(),
+        multiview_control::LiveSourceCapability::synthetic_and_network(),
         async move {
             let _ = shutdown_rx.await;
         },

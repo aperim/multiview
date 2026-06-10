@@ -662,7 +662,10 @@ async fn ndi_youtube_and_aes67_stay_restart_even_when_network_kinds_are_live() {
         state.with_live_sources(multiview_control::LiveSourceCapability::synthetic_and_network())
     });
     for (id, body) in [
-        ("ndi1", json!({ "id": "ndi1", "kind": "ndi", "name": "STUDIO (CAM 1)" })),
+        (
+            "ndi1",
+            json!({ "id": "ndi1", "kind": "ndi", "name": "STUDIO (CAM 1)" }),
+        ),
         (
             "yt1",
             json!({ "id": "yt1", "kind": "youtube", "url": "https://www.youtube.com/watch?v=x" }),
