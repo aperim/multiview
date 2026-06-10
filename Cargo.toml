@@ -62,6 +62,7 @@ multiview-output = { path = "crates/multiview-output" }
 multiview-engine = { path = "crates/multiview-engine" }
 multiview-config = { path = "crates/multiview-config" }
 multiview-events = { path = "crates/multiview-events" }
+multiview-licence = { path = "crates/multiview-licence" }
 multiview-control = { path = "crates/multiview-control" }
 multiview-preview = { path = "crates/multiview-preview" }
 multiview-telemetry = { path = "crates/multiview-telemetry" }
