@@ -544,6 +544,18 @@ fn tiles_from_engine_snapshot(snapshot: &EngineStateSnapshot) -> Option<Vec<Tile
 pub fn event_scope_id(event: &Event) -> Option<String> {
     match event {
         Event::TileState(tile) => tile.input.clone(),
+        // Devices-domain events scope by device id so the `ids` filter narrows
+        // the coarse `devices` topic to a detail view (ADR-RT007).
+        Event::DeviceStatus(status) => Some(status.device_id.clone()),
+        Event::DeviceAdopted(adopted) => Some(adopted.device_id.clone()),
+        Event::DeviceRemoved(removed) => Some(removed.device_id.clone()),
+        Event::DeviceMode(mode) => Some(mode.device_id.clone()),
+        Event::DeviceError(error) => Some(error.device_id.clone()),
+        Event::DeviceSync(sync) => Some(sync.device_id.clone()),
+        // `timing.status` scopes by the program/output stream the epoch maps.
+        Event::TimingStatus(timing) => Some(timing.stream_id.clone()),
+        // A discovery row has no registry id yet (untrusted inventory): it is
+        // correlated to its scan operation via `corr`, never a fabricated id.
         _ => None,
     }
 }
@@ -579,6 +591,18 @@ pub fn topic_for_event(event: &Event) -> Topic {
         | Event::SalvoArmed(_)
         | Event::SalvoTaken(_)
         | Event::SalvoCancelled(_) => Topic::Tally,
+        // Every Devices-domain event rides the one coarse `devices` lane
+        // (ADR-RT007): the conflated `device.status`/`timing.status` telemetry
+        // AND the lossless lifecycle events — fine scoping is the `ids`
+        // filter, never more topics.
+        Event::DeviceStatus(_)
+        | Event::DeviceAdopted(_)
+        | Event::DeviceRemoved(_)
+        | Event::DeviceMode(_)
+        | Event::DeviceError(_)
+        | Event::DeviceSync(_)
+        | Event::DeviceDiscovered(_)
+        | Event::TimingStatus(_) => Topic::Devices,
         _ => Topic::Control,
     }
 }
@@ -879,5 +903,112 @@ mod topic_routing_tests {
         assert_eq!(topic_for_event(&event), Topic::System);
         // And `system` is a high-rate conflated lane (pushed, never polled).
         assert!(Topic::System.is_high_rate());
+    }
+
+    /// Every Devices-domain event (ADR-RT007) MUST route to the one coarse
+    /// `devices` lane — never the `$control` catch-all — so the SPA Devices
+    /// page subscribes once and switches exhaustively on `t`.
+    #[test]
+    fn device_events_route_to_the_devices_topic() {
+        use multiview_core::time::Rational;
+        use multiview_core::wallclock::WallClockRef;
+        use multiview_events::{
+            AddressFamily, ClockQuality, ClockSource, DeviceAdopted, DeviceDiscovered, DeviceError,
+            DeviceMode, DeviceRemoved, DeviceState, DeviceStatus, DeviceSync, ImpactClass,
+            ModePhase, SyncChange, TimingStatus,
+        };
+
+        let events: Vec<Event> = vec![
+            Event::DeviceStatus(DeviceStatus::new("dev-a", DeviceState::Online)),
+            Event::DeviceAdopted(DeviceAdopted {
+                device_id: "dev-a".to_owned(),
+                driver: "zowietek".to_owned(),
+                name: None,
+            }),
+            Event::DeviceRemoved(DeviceRemoved::new("dev-a")),
+            Event::DeviceMode(DeviceMode {
+                device_id: "dev-a".to_owned(),
+                mode: "decoder".to_owned(),
+                phase: ModePhase::Finished,
+                impact: ImpactClass::Device,
+                detail: None,
+            }),
+            Event::DeviceError(DeviceError {
+                device_id: "dev-a".to_owned(),
+                code: None,
+                message: "probe failed".to_owned(),
+            }),
+            Event::DeviceSync(DeviceSync {
+                device_id: "dev-a".to_owned(),
+                group: "lobby-wall".to_owned(),
+                change: SyncChange::Left,
+            }),
+            Event::DeviceDiscovered(DeviceDiscovered {
+                driver: "zowietek".to_owned(),
+                address: "http://[fd00:db8::42]".to_owned(),
+                family: AddressFamily::Ipv6,
+                name: None,
+            }),
+            Event::TimingStatus(TimingStatus {
+                stream_id: "prog-main".to_owned(),
+                epoch: WallClockRef::new(0, 0, Rational::new(90_000, 1)),
+                link_offset_ns: 0,
+                clock_source: ClockSource::System,
+                clock_quality: ClockQuality::Locked,
+                groups: vec![],
+            }),
+        ];
+        for event in events {
+            assert_eq!(
+                topic_for_event(&event),
+                Topic::Devices,
+                "{} must ride the coarse devices topic",
+                event.type_tag()
+            );
+        }
+        // The mixed-cadence topic stays out of the per-topic high-rate set:
+        // ring exclusion is per-event (`Event::is_conflated`), per ADR-RT007.
+        assert!(!Topic::Devices.is_high_rate());
+    }
+
+    /// Device events scope their envelope `id` by device id (status/lifecycle)
+    /// or stream id (`timing.status`), so the existing `ids` filter narrows the
+    /// coarse topic to a detail view (ADR-RT007).
+    #[test]
+    fn device_events_scope_their_envelope_id() {
+        use multiview_core::time::Rational;
+        use multiview_core::wallclock::WallClockRef;
+        use multiview_events::{
+            AddressFamily, ClockQuality, ClockSource, DeviceDiscovered, DeviceRemoved, DeviceState,
+            DeviceStatus, TimingStatus,
+        };
+
+        use super::event_scope_id;
+
+        let status = Event::DeviceStatus(DeviceStatus::new("dev-a", DeviceState::Online));
+        assert_eq!(event_scope_id(&status).as_deref(), Some("dev-a"));
+
+        let removed = Event::DeviceRemoved(DeviceRemoved::new("dev-a"));
+        assert_eq!(event_scope_id(&removed).as_deref(), Some("dev-a"));
+
+        let timing = Event::TimingStatus(TimingStatus {
+            stream_id: "prog-main".to_owned(),
+            epoch: WallClockRef::new(0, 0, Rational::new(90_000, 1)),
+            link_offset_ns: 0,
+            clock_source: ClockSource::Ptp,
+            clock_quality: ClockQuality::Acquiring,
+            groups: vec![],
+        });
+        assert_eq!(event_scope_id(&timing).as_deref(), Some("prog-main"));
+
+        // A discovery row has no registry id yet — it is scoped by `corr`
+        // (the scan operation), never by a fabricated id.
+        let discovered = Event::DeviceDiscovered(DeviceDiscovered {
+            driver: "zowietek".to_owned(),
+            address: "http://[fd00:db8::42]".to_owned(),
+            family: AddressFamily::Ipv6,
+            name: None,
+        });
+        assert_eq!(event_scope_id(&discovered), None);
     }
 }
