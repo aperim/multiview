@@ -60,10 +60,12 @@
 #![warn(missing_docs)]
 
 pub mod announce;
+pub mod driver;
 pub mod error;
 pub mod peer;
 pub mod relay;
 pub mod role;
+pub mod state;
 pub mod transport;
 
 #[cfg(feature = "mdns")]
@@ -81,6 +83,8 @@ pub use peer::{Peer, PeerKey, PeerObservation, PeerTable};
 pub use relay::{RelayConfig, RelayQueue, RelayedBinding};
 #[doc(inline)]
 pub use role::{determine_role, Connectivity, MeshRole, RoleInputs};
+#[doc(inline)]
+pub use state::{DiscoveryMode, MeshState, MeshStatus};
 #[doc(inline)]
 pub use transport::MeshTransport;
 

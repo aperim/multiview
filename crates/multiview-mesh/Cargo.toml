@@ -21,8 +21,18 @@ multiview-core = { workspace = true }
 multiview-licence = { workspace = true }
 multiview-events = { workspace = true }
 serde = { workspace = true }
+# Compact JSON wire form for the mDNS TXT-record announce payload (robust across
+# the mdns-sd property encoding) — pure Rust, `MIT OR Apache-2.0`, already in the
+# workspace graph + deny-clean.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# The lease-bound instants the entitlement summary advertises (`DateTime<Utc>`).
+# Carries the workspace `default-features = false` (no `clock`/`std`-time reads —
+# the cli samples the wall clock and hands instants in, so this leaf crate reads
+# no system clock itself). `serde` for the dated summary fields. `MIT OR
+# Apache-2.0`, deny-clean, already in the workspace graph.
+chrono = { workspace = true, features = ["serde"] }
 # Ed25519 signature VERIFICATION of the originator-signed announce summary
 # (data-minimisation: the announcer signs its OWN summary so a peer can detect a
 # spoofed/tampered announcement). `MIT OR Apache-2.0`; its closure
@@ -53,7 +63,6 @@ default = []
 mdns = ["dep:mdns-sd", "dep:tokio"]
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # Test-only deterministic keypair generation for the Ed25519 announce-signature
 # tests (valid / tampered / wrong-key). `rand_core` enables `SigningKey::generate`;
 # the non-test library never depends on an RNG (data minimisation).

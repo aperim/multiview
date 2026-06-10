@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use multiview_mesh::announce::{AnnouncePayload, EntitlementSummary, SaltedDigest, ANNOUNCE_PROTOCOL_VERSION};
 use multiview_mesh::ClaimState;
 use multiview_licence::EnforcementLevel;
