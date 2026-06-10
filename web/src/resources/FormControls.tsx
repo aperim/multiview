@@ -61,6 +61,25 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
       return <Trans>A mount point must start with /, e.g. /multiview.</Trans>;
     case 'tracks-required':
       return <Trans>List at least one track name (comma-separated).</Trans>;
+    case 'finite-number':
+      return <Trans>Enter a number (decibels may be negative, e.g. -3).</Trans>;
+    case 'duplicate-track':
+      return <Trans>Another route already claims this track name.</Trans>;
+    case 'duplicate-input':
+      return <Trans>Another route already uses this input.</Trans>;
+    case 'reserved-track':
+      return (
+        <Trans>
+          “prog” is reserved for the program mix — choose another track name.
+        </Trans>
+      );
+    case 'program-bus-muted':
+      return (
+        <Trans>
+          Every input on the program mix is muted. Unmute at least one, or take
+          them all off the mix.
+        </Trans>
+      );
   }
 }
 
@@ -77,6 +96,7 @@ export function FormField({
   type,
   hint,
   trailing,
+  labelHidden,
 }: {
   readonly id: string;
   readonly label: string;
@@ -92,6 +112,11 @@ export function FormField({
   readonly hint?: ReactNode;
   /** Optional trailing affordance next to the label (e.g. a HelpLink). */
   readonly trailing?: ReactNode;
+  /**
+   * Visually hide the label (it stays the accessible name) — for dense table
+   * cells where the column header already shows the text.
+   */
+  readonly labelHidden?: boolean;
 }): JSX.Element {
   const errorId = `${id}-error`;
   const hintId = `${id}-hint`;
@@ -101,7 +126,11 @@ export function FormField({
       .join(' ') || undefined;
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1.5">
+      <div
+        className={
+          labelHidden === true ? 'sr-only' : 'flex items-center gap-1.5'
+        }
+      >
         <Label htmlFor={id}>{label}</Label>
         {trailing}
       </div>
@@ -140,6 +169,9 @@ export function SelectField<Option extends string>({
   onChange,
   optionLabel,
   trailing,
+  labelHidden,
+  placeholder,
+  error,
 }: {
   readonly label: string;
   readonly value: Option;
@@ -149,11 +181,22 @@ export function SelectField<Option extends string>({
   readonly optionLabel?: (option: Option) => ReactNode;
   /** Optional trailing affordance next to the label (e.g. a HelpLink). */
   readonly trailing?: ReactNode;
+  /** Visually hide the label (it stays the accessible name). */
+  readonly labelHidden?: boolean;
+  /** Placeholder shown while no option is selected (empty `value`). */
+  readonly placeholder?: string;
+  /** The active validation code for this field, if any. */
+  readonly error?: FormErrorCode | undefined;
 }): JSX.Element {
   const labelId = useId();
+  const errorId = useId();
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1.5">
+      <div
+        className={
+          labelHidden === true ? 'sr-only' : 'flex items-center gap-1.5'
+        }
+      >
         <Label id={labelId}>{label}</Label>
         {trailing}
       </div>
@@ -166,8 +209,12 @@ export function SelectField<Option extends string>({
           }
         }}
       >
-        <SelectTrigger aria-labelledby={labelId}>
-          <SelectValue />
+        <SelectTrigger
+          aria-labelledby={labelId}
+          aria-invalid={error !== undefined}
+          {...(error !== undefined ? { 'aria-describedby': errorId } : {})}
+        >
+          <SelectValue {...(placeholder !== undefined ? { placeholder } : {})} />
         </SelectTrigger>
         <SelectContent>
           {options.map((option) => (
@@ -177,6 +224,11 @@ export function SelectField<Option extends string>({
           ))}
         </SelectContent>
       </Select>
+      {error !== undefined ? (
+        <p id={errorId} className="text-sm text-destructive">
+          <FieldErrorMessage code={error} />
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -187,11 +239,14 @@ export function CheckboxField({
   label,
   checked,
   onChange,
+  labelHidden,
 }: {
   readonly id: string;
   readonly label: string;
   readonly checked: boolean;
   readonly onChange: (next: boolean) => void;
+  /** Visually hide the label (it stays the accessible name). */
+  readonly labelHidden?: boolean;
 }): JSX.Element {
   return (
     <div className="flex items-center gap-2">
@@ -204,7 +259,9 @@ export function CheckboxField({
           onChange(event.target.checked);
         }}
       />
-      <Label htmlFor={id}>{label}</Label>
+      <Label htmlFor={id} className={labelHidden === true ? 'sr-only' : undefined}>
+        {label}
+      </Label>
     </div>
   );
 }
