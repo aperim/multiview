@@ -15,11 +15,28 @@
 // and `[[cells]]` carrying a normalized `rect` (`0..1` per axis), a stacking `z`,
 // a `fit` mode, and a `source` binding (`input_id`).
 //
-// The editor only authors the ABSOLUTE-placement subset (free-form rects); a
-// loaded grid/preset document is surfaced read-only by `fromLayoutBody` returning
-// `undefined`, so we never silently corrupt a grid layout we cannot fully edit.
+// This editor authors the ABSOLUTE-placement subset (free-form rects); a
+// loaded grid/preset document makes `fromLayoutBody` return `undefined`, and
+// the page routes those bodies to the grid editor (`./gridModel.ts`) instead.
 // `body` is `unknown` in the generated schema, so reading it is done with
 // defensive type guards — never an unchecked `as` cast.
+//
+// LOSSLESSNESS: fields the editor does not render (unknown root/canvas/layout/
+// cell/source keys, plus the full Cell property set parsed in `./cellProps`)
+// are preserved verbatim and re-emitted on save, mirroring the resource forms'
+// extra-preservation discipline.
+import {
+  CELL_PROPERTY_KEYS,
+  emptyCellProperties,
+  extraOf,
+  isRecord,
+  asFiniteNumber,
+  asString,
+  parseCellProperties,
+  serializeCellProperties,
+  validateCellProperties,
+} from './cellProps';
+import type { CellProperties, CellPropertyIssueCode } from './cellProps';
 
 /** The five fit modes the compositor supports (config `fit`, snake_case). */
 export type FitMode = 'fill' | 'contain' | 'cover' | 'none' | 'scale_down';
@@ -70,6 +87,12 @@ export interface CellModel {
   readonly fit: FitMode;
   /** The bound source/input id, or `undefined` when the cell is unbound. */
   readonly sourceId: string | undefined;
+  /** Unrendered `source` sub-fields (inline specs…), preserved verbatim. */
+  readonly sourceExtra: Readonly<Record<string, unknown>>;
+  /** The full Cell property set (on_loss / border / qos / appearance). */
+  readonly props: CellProperties;
+  /** Unrendered cell keys, preserved verbatim. */
+  readonly extra: Readonly<Record<string, unknown>>;
 }
 
 /** The full editor view-model: a canvas plus its absolutely-placed cells. */
@@ -80,6 +103,12 @@ export interface LayoutModel {
   readonly name: string;
   /** The output canvas. */
   readonly canvas: CanvasModel;
+  /** Unrendered root body keys (incl. an authored schema_version), verbatim. */
+  readonly rootExtra: Readonly<Record<string, unknown>>;
+  /** Unrendered canvas keys (pixel_format, background, color…), verbatim. */
+  readonly canvasExtra: Readonly<Record<string, unknown>>;
+  /** Unrendered layout-record keys (beyond `kind`), verbatim. */
+  readonly layoutExtra: Readonly<Record<string, unknown>>;
   /** The cells, in authoring order (NOT necessarily z-order). */
   readonly cells: readonly CellModel[];
 }
@@ -233,6 +262,15 @@ export function setCellLabel(
   return replaceCell(model, id, (cell) => ({ ...cell, label }));
 }
 
+/** Replace a cell's full property set (on_loss / border / qos / appearance). */
+export function setCellProps(
+  model: LayoutModel,
+  id: string,
+  props: CellProperties,
+): LayoutModel {
+  return replaceCell(model, id, (cell) => ({ ...cell, props }));
+}
+
 /** Set a cell's explicit `z` stacking order. */
 export function setCellZ(
   model: LayoutModel,
@@ -269,6 +307,9 @@ export function addCell(
     rotation: cell.rotation ?? 0,
     fit: cell.fit ?? 'contain',
     sourceId: cell.sourceId,
+    sourceExtra: cell.sourceExtra ?? {},
+    props: cell.props ?? emptyCellProperties(),
+    extra: cell.extra ?? {},
   };
   return { ...model, cells: [...model.cells, next] };
 }
@@ -339,7 +380,18 @@ export const LAYOUT_PRESETS: readonly LayoutPreset[] = ['2x2', '3x3', '1+5', 'pi
 
 /** Build a cell with the preset defaults (contain fit, no rotation/binding). */
 function presetCell(id: string, rect: NormalizedRect, z: number): CellModel {
-  return { id, label: id, rect, z, rotation: 0, fit: 'contain', sourceId: undefined };
+  return {
+    id,
+    label: id,
+    rect,
+    z,
+    rotation: 0,
+    fit: 'contain',
+    sourceId: undefined,
+    sourceExtra: {},
+    props: emptyCellProperties(),
+    extra: {},
+  };
 }
 
 /** A uniform rows×cols grid of cells covering the whole canvas. */
@@ -414,9 +466,40 @@ export type ValidationCode =
   | 'rect-bounds'
   | 'rect-extent'
   | 'rotation-range'
-  | 'no-cells';
+  | 'no-cells'
+  | CellPropertyIssueCode;
 
 const FPS_PATTERN = /^\s*\d+\s*\/\s*[1-9]\d*\s*$/;
+
+/** A canvas-only validation finding (the narrowed code set both editors share). */
+export interface CanvasValidationIssue {
+  /** Dotted path of the offending field. */
+  readonly path: string;
+  /** Either of the two canvas codes. */
+  readonly code: 'canvas-dim' | 'fps-format';
+}
+
+/**
+ * Validate just the canvas (geometry + exact-rational cadence). Shared with
+ * the grid model so both editors enforce identical canvas rules.
+ */
+export function validateCanvas(
+  canvas: CanvasModel,
+): readonly CanvasValidationIssue[] {
+  const issues: CanvasValidationIssue[] = [];
+  if (
+    !Number.isInteger(canvas.width) ||
+    canvas.width < 1 ||
+    !Number.isInteger(canvas.height) ||
+    canvas.height < 1
+  ) {
+    issues.push({ path: 'canvas', code: 'canvas-dim' });
+  }
+  if (!FPS_PATTERN.test(canvas.fps)) {
+    issues.push({ path: 'canvas.fps', code: 'fps-format' });
+  }
+  return issues;
+}
 
 /**
  * Validate a whole layout, returning every issue found (an empty array means
@@ -429,17 +512,7 @@ export function validateLayout(model: LayoutModel): readonly ValidationIssue[] {
   if (model.name.trim() === '') {
     issues.push({ path: 'name', code: 'name-empty' });
   }
-  if (
-    !Number.isInteger(model.canvas.width) ||
-    model.canvas.width < 1 ||
-    !Number.isInteger(model.canvas.height) ||
-    model.canvas.height < 1
-  ) {
-    issues.push({ path: 'canvas', code: 'canvas-dim' });
-  }
-  if (!FPS_PATTERN.test(model.canvas.fps)) {
-    issues.push({ path: 'canvas.fps', code: 'fps-format' });
-  }
+  issues.push(...validateCanvas(model.canvas));
   if (model.cells.length === 0) {
     issues.push({ path: 'cells', code: 'no-cells' });
   }
@@ -461,6 +534,7 @@ export function validateLayout(model: LayoutModel): readonly ValidationIssue[] {
     ) {
       issues.push({ path: `${base}.rotation`, code: 'rotation-range' });
     }
+    issues.push(...validateCellProperties(cell.props, base));
   });
   return issues;
 }
@@ -491,22 +565,9 @@ export function isLayoutValid(model: LayoutModel): boolean {
 
 // --- Mapping to/from the opaque config `body` ------------------------------
 
-/** Type guard: a non-null, non-array object (a plain record). */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /** Narrow an unknown value to a plain record without an unsafe assertion. */
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
-}
-
-function asFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
 }
 
 function asFit(value: unknown): FitMode {
@@ -528,11 +589,73 @@ function rectFrom(value: unknown): NormalizedRect | undefined {
   return clampRect({ x, y, w, h });
 }
 
+/** The cell keys the absolute editor manages; the rest is preserved extra. */
+const ABSOLUTE_CELL_KEYS: readonly string[] = [
+  'id',
+  'label',
+  'rect',
+  'z',
+  'rotation',
+  'fit',
+  'source',
+  ...CELL_PROPERTY_KEYS,
+];
+
+/** The root body keys composed by the editors (the rest rides `rootExtra`). */
+const ROOT_KEYS: readonly string[] = ['canvas', 'layout', 'cells'];
+
+/** The canvas keys both editors render (the rest rides `canvasExtra`). */
+const CANVAS_KEYS: readonly string[] = ['width', 'height', 'fps'];
+
+/**
+ * Parse one persisted cell record into a {@link CellModel} — used by the
+ * absolute editor's body mapping and by grid→free-form conversion. Returns
+ * `undefined` when the record lacks an id or a parsable absolute `rect`.
+ */
+export function cellModelFromRecord(
+  record: Readonly<Record<string, unknown>>,
+  fallbackZ: number,
+): CellModel | undefined {
+  const cellId = asString(record.id);
+  const rect = rectFrom(record.rect);
+  if (cellId === undefined || rect === undefined) {
+    return undefined;
+  }
+  const source = asRecord(record.source);
+  return {
+    id: cellId,
+    label: asString(record.label) ?? cellId,
+    rect,
+    z: asFiniteNumber(record.z) ?? fallbackZ,
+    rotation: normalizeRotation(asFiniteNumber(record.rotation) ?? 0),
+    fit: asFit(record.fit),
+    sourceId: source !== undefined ? asString(source.input_id) : undefined,
+    sourceExtra: source !== undefined ? extraOf(source, ['input_id']) : {},
+    props: parseCellProperties(record),
+    extra: extraOf(record, ABSOLUTE_CELL_KEYS),
+  };
+}
+
+/** Parse a body's canvas record into the shared canvas model + its extras. */
+export function canvasFromBody(root: Readonly<Record<string, unknown>>): {
+  readonly canvas: CanvasModel;
+  readonly canvasExtra: Readonly<Record<string, unknown>>;
+} {
+  const record = asRecord(root.canvas) ?? {};
+  return {
+    canvas: {
+      width: asFiniteNumber(record.width) ?? 1920,
+      height: asFiniteNumber(record.height) ?? 1080,
+      fps: asString(record.fps) ?? '30/1',
+    },
+    canvasExtra: extraOf(record, CANVAS_KEYS),
+  };
+}
+
 /**
  * Build a view-model from a persisted layout `{ id, name, body }`. Returns
- * `undefined` when `body` is not an absolute-placement document this editor can
- * round-trip (e.g. a grid/preset layout) — the caller surfaces that as a
- * read-only state rather than risk corrupting a layout it cannot fully edit.
+ * `undefined` when `body` is not an absolute-placement document this editor
+ * can round-trip — the page routes grid/preset bodies to the grid editor.
  */
 export function fromLayoutBody(
   id: string,
@@ -548,12 +671,7 @@ export function fromLayoutBody(
   if (layout !== undefined && asString(layout.kind) !== 'absolute') {
     return undefined;
   }
-  const canvasRecord = asRecord(root.canvas) ?? {};
-  const canvas: CanvasModel = {
-    width: asFiniteNumber(canvasRecord.width) ?? 1920,
-    height: asFiniteNumber(canvasRecord.height) ?? 1080,
-    fps: asString(canvasRecord.fps) ?? '30/1',
-  };
+  const { canvas, canvasExtra } = canvasFromBody(root);
   const rawCells = Array.isArray(root.cells) ? root.cells : [];
   const cells: CellModel[] = [];
   for (const raw of rawCells) {
@@ -561,36 +679,38 @@ export function fromLayoutBody(
     if (record === undefined) {
       continue;
     }
-    const cellId = asString(record.id);
-    const rect = rectFrom(record.rect);
     // A cell without an id or an absolute rect is outside the editable subset.
-    if (cellId === undefined || rect === undefined) {
+    const cell = cellModelFromRecord(record, cells.length);
+    if (cell === undefined) {
       return undefined;
     }
-    const source = asRecord(record.source);
-    const sourceId = source !== undefined ? asString(source.input_id) : undefined;
-    cells.push({
-      id: cellId,
-      label: asString(record.label) ?? cellId,
-      rect,
-      z: asFiniteNumber(record.z) ?? cells.length,
-      rotation: normalizeRotation(asFiniteNumber(record.rotation) ?? 0),
-      fit: asFit(record.fit),
-      sourceId,
-    });
+    cells.push(cell);
   }
-  return { id, name, canvas, cells };
+  return {
+    id,
+    name,
+    canvas,
+    rootExtra: extraOf(root, ROOT_KEYS),
+    canvasExtra,
+    layoutExtra: layout !== undefined ? extraOf(layout, ['kind']) : {},
+    cells,
+  };
 }
 
 /**
  * Serialize a view-model back to the opaque config `body` (canonical JSON). The
  * shape matches `multiview-config`'s document so the engine validates it on apply.
  * `z` is renumbered from the authoring order so list order and stacking agree.
+ * Preserved extras (root/canvas/layout/cell/source + unrendered cell
+ * properties) are re-emitted verbatim; an authored `schema_version` riding
+ * `rootExtra` overrides the default `1` via spread order.
  */
 export function toLayoutBody(model: LayoutModel): Record<string, unknown> {
   const cells = renumberZ(model.cells).map((cell) => {
-    const source: Record<string, unknown> =
-      cell.sourceId !== undefined ? { input_id: cell.sourceId } : {};
+    const source: Record<string, unknown> = {
+      ...cell.sourceExtra,
+      ...(cell.sourceId !== undefined ? { input_id: cell.sourceId } : {}),
+    };
     return {
       id: cell.id,
       label: cell.label,
@@ -603,17 +723,21 @@ export function toLayoutBody(model: LayoutModel): Record<string, unknown> {
       z: cell.z,
       rotation: cell.rotation,
       fit: cell.fit,
+      ...serializeCellProperties(cell.props),
       source,
+      ...cell.extra,
     };
   });
   return {
     schema_version: 1,
+    ...model.rootExtra,
     canvas: {
       width: model.canvas.width,
       height: model.canvas.height,
       fps: model.canvas.fps,
+      ...model.canvasExtra,
     },
-    layout: { kind: 'absolute' },
+    layout: { kind: 'absolute', ...model.layoutExtra },
     cells,
   };
 }
@@ -624,6 +748,9 @@ export function emptyLayout(name = ''): LayoutModel {
     id: '',
     name,
     canvas: { width: 1920, height: 1080, fps: '30/1' },
+    rootExtra: {},
+    canvasExtra: {},
+    layoutExtra: {},
     cells: [],
   };
 }

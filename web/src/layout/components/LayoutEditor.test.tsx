@@ -81,8 +81,12 @@ describe('LayoutEditor', () => {
     const cellsRegion = (): HTMLElement => screen.getByRole('region', { name: 'Cells' });
     expect(within(cellsRegion()).queryByRole('group')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Add cell' }));
-    // A new cell fieldset now exists, and the no-cells issue is cleared.
-    expect(within(cellsRegion()).getAllByRole('group')).toHaveLength(1);
+    // A new cell fieldset now exists, and the no-cells issue is cleared. The
+    // row nests further groups (Border fieldset + the property disclosures),
+    // so count the cell rows by their accessible (legend) name.
+    expect(
+      within(cellsRegion()).getAllByRole('group', { name: /New cell/ }),
+    ).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Save layout' })).toBeEnabled();
   });
 });

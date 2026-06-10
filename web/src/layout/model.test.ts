@@ -27,6 +27,8 @@ import {
   validateLayout,
 } from './model';
 import type { CellModel, LayoutModel } from './model';
+import { setCellProps } from './model';
+import { emptyCellProperties, onLossOf, parseCellProperties } from './cellProps';
 
 function cell(id: string, over: Partial<CellModel> = {}): CellModel {
   return {
@@ -37,6 +39,9 @@ function cell(id: string, over: Partial<CellModel> = {}): CellModel {
     rotation: 0,
     fit: 'contain',
     sourceId: undefined,
+    sourceExtra: {},
+    props: emptyCellProperties(),
+    extra: {},
     ...over,
   };
 }
@@ -46,6 +51,9 @@ function model(cells: CellModel[]): LayoutModel {
     id: 'lay-1',
     name: 'Studio',
     canvas: { width: 1920, height: 1080, fps: '30/1' },
+    rootExtra: {},
+    canvasExtra: {},
+    layoutExtra: {},
     cells,
   };
 }
@@ -165,6 +173,9 @@ describe('validation', () => {
       id: '',
       name: '   ',
       canvas: { width: 1920, height: 1080, fps: '29.97' },
+      rootExtra: {},
+      canvasExtra: {},
+      layoutExtra: {},
       cells: [],
     };
     const codes = validateLayout(bad).map((i) => i.code);
@@ -304,5 +315,72 @@ describe('setCanvas', () => {
   it('a float fps string still fails validation (invariant #3: exact rationals)', () => {
     const m = setCanvas(model([cell('a')]), { width: 1920, height: 1080, fps: '29.97' });
     expect(validateLayout(m).map((i) => i.code)).toContain('fps-format');
+  });
+});
+
+describe('lossless extras (absolute editor)', () => {
+  it('preserves root / canvas / layout / cell / source extras through a no-op edit', () => {
+    const body = {
+      schema_version: 2,
+      operator_note: 'keep me',
+      canvas: {
+        width: 1920,
+        height: 1080,
+        fps: '25/1',
+        pixel_format: 'nv12',
+        background: '#101014',
+        color: { profile: 'sdr-bt709-limited' },
+      },
+      layout: { kind: 'absolute', future_layout_knob: 1 },
+      cells: [
+        {
+          id: 'a',
+          label: 'a',
+          rect: { x: 0, y: 0, w: 0.5, h: 0.5 },
+          z: 0,
+          rotation: 0,
+          fit: 'contain',
+          opacity: 0.8,
+          border: { width_px: 2, color: '#0f0f0f' },
+          qos: { priority: 3, degradation: 'balanced' },
+          on_loss: { slate: 'no_signal' },
+          annotation: 'hand-authored',
+          source: { input_id: 'cam-1', fallback: 'freeze' },
+        },
+      ],
+    };
+    const restored = fromLayoutBody('lay', 'Studio', body);
+    expect(restored).toBeDefined();
+    if (restored === undefined) {
+      return;
+    }
+    expect(restored.cells[0]?.props.opacity).toBe(0.8);
+    expect(restored.cells[0]?.props.onLoss?.slate).toBe('no_signal');
+    expect(toLayoutBody(restored)).toEqual(body);
+  });
+
+  it('setCellProps writes the snake_case property fields into the body', () => {
+    const base = model([cell('a')]);
+    const next = setCellProps(base, 'a', {
+      ...parseCellProperties({ opacity: 0.5, qos: { priority: 9 } }),
+      onLoss: onLossOf('black'),
+    });
+    const body = toLayoutBody(next);
+    const cells = body.cells as Record<string, unknown>[];
+    expect(cells[0]?.opacity).toBe(0.5);
+    expect(cells[0]?.qos).toEqual({ priority: 9 });
+    expect(cells[0]?.on_loss).toEqual({ slate: 'black' });
+  });
+
+  it('cell property issues surface through validateLayout', () => {
+    const bad = setCellProps(model([cell('a')]), 'a', parseCellProperties({ opacity: 2 }));
+    expect(validateLayout(bad).map((i) => i.code)).toContain('opacity-range');
+  });
+
+  it('a new draft body still writes schema_version 1 and an empty source', () => {
+    const body = toLayoutBody(model([cell('a')]));
+    expect(body.schema_version).toBe(1);
+    const cells = body.cells as Record<string, unknown>[];
+    expect(cells[0]?.source).toEqual({});
   });
 });
