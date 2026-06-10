@@ -10,6 +10,12 @@
 //!   RLB filter, mean-square integration, channel weighting, absolute/relative
 //!   gating, and momentary / short-term / integrated loudness + loudness range
 //!   (LRA), plus an oversampled true-peak (dBTP) estimate.
+//! - [`loudnorm`] — live EBU R128 loudness **normalisation** of the program bus
+//!   (AUD-6): a smoothed makeup gain toward a target LUFS (−23 broadcast / −16
+//!   web) driven off [`loudness`]'s short-term measurement, with a true-peak
+//!   limiter (−1.5 dBTP ceiling) so normalisation never clips, a −70 LUFS gate so
+//!   a lost input's silence is not amplified, and discrete tracks left unaltered
+//!   (ADR-R005/R006).
 //! - [`ballistics`] — selectable meter ballistics: PPM Type I/IIa/IIb (IEC
 //!   60268-10), VU, sample-peak (IEC TR 60268-18) and true-peak (ITU-R BS.1770),
 //!   each with the standardised integration/decay constants.
@@ -58,6 +64,7 @@ pub mod error;
 pub mod filter;
 pub mod format;
 pub mod loudness;
+pub mod loudnorm;
 pub mod meterdata;
 pub mod mixer;
 pub mod probe;
@@ -74,6 +81,7 @@ pub use decode::{meter_file, AudioFileDecoder, DecodedBlock};
 pub use error::{AudioError, Result};
 pub use format::{AudioBlock, AudioFormat, ChannelLayout};
 pub use loudness::LoudnessMeter;
+pub use loudnorm::{LoudnessTarget, LoudnormProcessor, DEFAULT_TRUE_PEAK_CEILING_DBTP};
 pub use meterdata::{Conflator, MeterSample, StereoMeterSample, DISPLAY_HZ};
 pub use mixer::{GainRamp, Mixer, RoutePoint};
 pub use probe::{AudioProbeBank, AudioProbeConfig, ProbeSeverityProfile};

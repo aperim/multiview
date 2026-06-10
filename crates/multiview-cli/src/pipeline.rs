@@ -602,7 +602,7 @@ mod admission_target_tests {
     use multiview_core::time::Rational;
     use multiview_hal::{DeviceId, DeviceLoad, GpuTargetInfo, LoadSource, NullLoadPoller, Vendor};
 
-    /// A fake two-GPU [`LoadSource`] modelling the contended frigate box: a
+    /// A fake two-GPU [`LoadSource`] modelling a contended dual-GPU host: a
     /// 95%-VRAM RTX 4060 at ordinal 0 (over the 0.85 headroom ceiling, so the
     /// scorer rejects it) and an idle Quadro P2000 at ordinal 1. Each device
     /// resolves a DISTINCT [`GpuTargetInfo`] (distinct PCI bus id + ordinal), so a
@@ -889,6 +889,20 @@ pub struct Pipeline {
     /// source id — the text drawn bottom-left of each tile.
     #[cfg(feature = "overlay")]
     tile_labels: std::collections::HashMap<String, String>,
+    /// Operator-declared content-fault probes, resolved from `config.probes`
+    /// (M10). Each probe `watches` a cell; this resolves that cell to its bound
+    /// **source** so the per-tick [`FaultDetector`] can build that source's fault
+    /// machine from the operator's *declared* threshold / zone / dwell / severity:
+    /// the analyser config via the engine's
+    /// [`black_config_from_kind`](multiview_engine::black_config_from_kind) /
+    /// [`freeze_config_from_kind`](multiview_engine::freeze_config_from_kind)
+    /// mappers, and the X.733 lifecycle via
+    /// [`AlarmStateMachine::from_probe`](multiview_engine::AlarmStateMachine::from_probe),
+    /// instead of the hardcoded defaults. A source with no declared probe keeps the
+    /// default behaviour. Multiple probes of the same kind on one source: the first
+    /// wins (config validation already rejects duplicate probe ids).
+    #[cfg(feature = "overlay")]
+    declared_probes: Vec<multiview_config::probe::Probe>,
     /// An optional **analog** clock face requested by a `[[overlays]]` entry with
     /// `kind = "clock"` + `face = "analog"`. `None` ⇒ only the default digital
     /// clock label is drawn.
@@ -1188,6 +1202,8 @@ impl Pipeline {
             meter_db_timelines,
             #[cfg(feature = "overlay")]
             tile_labels,
+            #[cfg(feature = "overlay")]
+            declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
             analog_clock,
         })
@@ -1680,6 +1696,13 @@ impl Pipeline {
             .audio
             .as_ref()
             .map(|cfg| program_audio_bus(cfg, self.cadence));
+        // The program-bus loudness normaliser (AUD-6): pair one with the audio bus
+        // so the mixed program is normalised toward the target LUFS with a
+        // true-peak ceiling BEFORE encode, while discrete tracks stay unaltered
+        // (ADR-R005/R006). Built from the same audio config (so its format matches
+        // the bus); `None` when audio is off. Default target: the -16 LUFS
+        // streaming/web level (this output is a live streaming multiview).
+        let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
@@ -1688,7 +1711,14 @@ impl Pipeline {
         // overlay baker from it, plus the single `ProgramEncoder`; the bake +
         // encode math moved off the hot loop, never onto it.
         let bake_ctx = self.bake_context();
-        let (egress, hot_tx) = StreamEgress::spawn(bake_ctx, runners, policy, encoder, audio_bus);
+        let (egress, hot_tx) = StreamEgress::spawn(
+            bake_ctx,
+            runners,
+            policy,
+            encoder,
+            audio_bus,
+            audio_loudnorm,
+        );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
         // flows through ONE `MultiviewProgram` that owns this program's clock +
@@ -1739,11 +1769,20 @@ impl Pipeline {
         #[cfg(feature = "overlay")]
         self.subtitle_route
             .store(Some(Arc::new(subtitle_router.handle())));
+        // Resolve each operator-declared probe's watched CELL to its bound SOURCE
+        // via the solved layout, so the per-tick fault detector can build that
+        // source's fault machine from the declared threshold/zone/dwell/severity
+        // (M10 — the config→analyser → X.733 driver). A probe whose cell is unbound
+        // is skipped (no source to sample). This runs once at run start, off the
+        // hot loop.
+        #[cfg(feature = "overlay")]
+        let source_probes = resolve_source_probes(&self.layout, &self.declared_probes);
         #[cfg(feature = "overlay")]
         let mut fault_detector = FaultDetector::new(
             self.stores.clone(),
             self.meter_db_timelines.clone(),
             self.cadence,
+            source_probes,
         );
         // RT-3 read-only stream-inventory discovery (off the hot loop, inv #10):
         // the per-input inventories were probed ONCE at build time. Emit one
@@ -2387,6 +2426,7 @@ impl StreamEgress {
         policy: SendPolicy,
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
+        audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -2443,6 +2483,7 @@ impl StreamEgress {
                     sink_txs,
                     encoder,
                     audio_bus,
+                    audio_loudnorm,
                     &consumer_in_flight,
                 )
             })
@@ -2562,6 +2603,27 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
+///
+/// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
+/// (discrete tracks stay unaltered — the ADR-R005/R006 authenticity guarantee).
+/// The format mirrors [`program_audio_bus`] (so the normaliser's meter matches the
+/// bus it processes). The default target is the `-16` LUFS streaming/web level
+/// with the default `-1.5` dBTP true-peak ceiling (resilience-and-av §4.1). Returns
+/// `None` only if the audio format is unusable (zero rate/channels — already
+/// validated upstream), in which case the bus is emitted un-normalised rather than
+/// failing the run.
+fn program_loudnorm(
+    cfg: &multiview_output::AudioEncodeConfig,
+) -> Option<multiview_audio::LoudnormProcessor> {
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    let format = multiview_audio::AudioFormat::new(cfg.sample_rate, layout);
+    multiview_audio::LoudnormProcessor::new(format, multiview_audio::LoudnessTarget::Streaming).ok()
+}
+
 /// Drive the program-audio bus to the output **tick index** of one surviving
 /// [`StreamItem`] and return that frame's audio block (RT-8b, the lip-sync fix).
 ///
@@ -2611,6 +2673,7 @@ fn consumer_main(
     sink_txs: Vec<SyncSender<EncodedPacket>>,
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
+    mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -2645,6 +2708,17 @@ fn consumer_main(
         // this entirely — the run is video-only as before.
         if let Some(bus) = audio_bus.as_mut() {
             let block = drive_audio_for_item(bus, item.tick_index);
+            // EBU R128 loudness normalisation of the PROGRAM bus (AUD-6), still off
+            // the engine hot loop (this bake-consumer thread): a smoothed makeup
+            // gain toward the target LUFS with a true-peak limiter clamping to the
+            // -1.5 dBTP ceiling so normalisation never clips. The block shape is
+            // preserved exactly, so the AAC encode sees the same frame count it
+            // would have. `None` (no normaliser) emits the mixed bus unaltered.
+            // Discrete tracks never pass through here (program-bus-only — ADR-R006).
+            let block = match audio_loudnorm.as_mut() {
+                Some(norm) => norm.process(block),
+                None => block,
+            };
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {
@@ -2906,6 +2980,76 @@ fn sample_caption_bitmaps(
     out
 }
 
+/// An operator-declared probe override for one source, resolved from
+/// `config.probes` (M10): the config [`Probe`](multiview_config::probe::Probe) the
+/// engine builds a config-derived analyser + X.733 lifecycle from, per fault
+/// class. A `None` entry means "no declared probe for this class — use the
+/// hardcoded default".
+///
+/// The first declared probe of each kind for a source wins (duplicate probe ids
+/// are already rejected by config validation; two probes of the same kind on one
+/// source is an unusual config and deterministically resolves to the first).
+#[cfg(feature = "overlay")]
+#[derive(Default, Clone)]
+struct SourceProbeOverride {
+    /// The declared black probe (its `luma_threshold` + `zone` + dwell + severity).
+    black: Option<multiview_config::probe::Probe>,
+    /// The declared freeze probe (its `difference_threshold` + `zone` + dwell + …).
+    freeze: Option<multiview_config::probe::Probe>,
+    /// The declared silence probe (its dwell + severity, and its `level_dbfs`,
+    /// which becomes this source's silence detection floor in place of the shared
+    /// [`SILENCE_FLOOR_DB`]).
+    silence: Option<multiview_config::probe::Probe>,
+}
+
+/// Resolve `config.probes` into per-**source** overrides by mapping each probe's
+/// watched **cell** to its bound source via the solved `layout` (M10).
+///
+/// A probe whose cell is unbound (no `source`) or absent from the layout is
+/// skipped — there is no picture/audio to analyse. Runs once at run start, off the
+/// hot loop.
+#[cfg(feature = "overlay")]
+fn resolve_source_probes(
+    layout: &Layout,
+    probes: &[multiview_config::probe::Probe],
+) -> std::collections::HashMap<String, SourceProbeOverride> {
+    use multiview_config::probe::ProbeKind;
+    let mut out: std::collections::HashMap<String, SourceProbeOverride> =
+        std::collections::HashMap::new();
+    for probe in probes {
+        // The config carries cell ids only on the raw cells, not the solved
+        // `Layout`; the layout cell binds a `source`, and a probe's `cell` field
+        // names a config cell id. The desugared run binds cell id == source id for
+        // the common single-source-per-cell case, so resolve by matching the
+        // probe's cell against a layout cell whose bound source equals it, falling
+        // back to treating the probe's `cell` as the source id directly when no
+        // distinct cell id is carried. Either way an unbound name is skipped.
+        let source = layout
+            .cells
+            .iter()
+            .filter_map(|c| c.source.clone())
+            .find(|s| s == &probe.cell)
+            .unwrap_or_else(|| probe.cell.clone());
+        let entry = out.entry(source).or_default();
+        match probe.kind {
+            ProbeKind::Black { .. } if entry.black.is_none() => {
+                entry.black = Some(probe.clone());
+            }
+            ProbeKind::Freeze { .. } if entry.freeze.is_none() => {
+                entry.freeze = Some(probe.clone());
+            }
+            ProbeKind::Silence { .. } if entry.silence.is_none() => {
+                entry.silence = Some(probe.clone());
+            }
+            // A loudness probe (or a duplicate of an already-captured kind, or a
+            // future kind) does not override one of the three content-fault badge
+            // classes; the loudness alarm rides the meter path elsewhere.
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The dBFS floor at/below which the per-input meter is treated as **silent**
 /// for the audio-loss fault. Just above the meter's true floor so a genuinely
 /// quiet-but-present programme does not trip it; sustained past the silence
@@ -2980,6 +3124,27 @@ struct FaultDetector {
     hysteresis_black: multiview_engine::AlarmHysteresis,
     hysteresis_freeze: multiview_engine::AlarmHysteresis,
     hysteresis_silence: multiview_engine::AlarmHysteresis,
+    /// Operator-declared probe overrides, keyed by source id (M10). When a source
+    /// has a declared probe for a fault class, that class's analyser comes from the
+    /// config probe via the engine's
+    /// [`black_config_from_kind`](multiview_engine::black_config_from_kind) /
+    /// [`freeze_config_from_kind`](multiview_engine::freeze_config_from_kind)
+    /// mappers, and its X.733 lifecycle (dwell/severity/latch/scope) via
+    /// [`AlarmStateMachine::from_probe`](multiview_engine::AlarmStateMachine::from_probe),
+    /// instead of the hardcoded default — the config→analyser → alarm seam. Empty
+    /// (the default) keeps the prior behaviour byte-for-byte.
+    source_probes: std::collections::HashMap<String, SourceProbeOverride>,
+    /// Per-source config-derived **black** analyser, built once from the declared
+    /// probe's `luma_threshold` + `zone`. Present only for sources with a declared
+    /// black probe; others fall back to the shared default [`Self::black`].
+    declared_black: std::collections::HashMap<String, multiview_engine::BlackProbe>,
+    /// Per-source config-derived **freeze** analyser (declared `difference_threshold`
+    /// + `zone`). Present only for sources with a declared freeze probe.
+    declared_freeze: std::collections::HashMap<String, multiview_engine::FreezeProbe>,
+    /// Per-source config-derived **silence floor** in dBFS, built once from a
+    /// declared silence probe's `level_dbfs`. Present only for sources with a
+    /// declared silence probe; others fall back to the shared [`SILENCE_FLOOR_DB`].
+    declared_silence_floor: std::collections::HashMap<String, f64>,
 }
 
 /// The number of recent sampled frames over which the instantaneous freeze
@@ -3015,9 +3180,11 @@ impl FaultDetector {
         stores: HashMapStores,
         meter_db_timelines: std::collections::HashMap<String, Vec<f64>>,
         _cadence: Rational,
+        source_probes: std::collections::HashMap<String, SourceProbeOverride>,
     ) -> Self {
         use multiview_engine::{
-            AlarmHysteresis, BlackConfig, BlackProbe, FreezeConfig, FreezeProbe,
+            black_config_from_kind, freeze_config_from_kind, AlarmHysteresis, BlackConfig,
+            BlackProbe, FreezeConfig, FreezeProbe,
         };
         // Dwell windows on the media timeline. Black/silence raise after ~0.5 s of
         // the condition and clear after ~0.3 s of its absence; freeze needs a
@@ -3043,6 +3210,45 @@ impl FaultDetector {
                                  // The two residual per-GOP spikes the frozen source still shows are absorbed
                                  // by the debounce window below, not by a looser threshold.
         let freeze_cfg = FreezeConfig::default().with_tolerance(6);
+        // Build the per-source config-derived analysers ONCE from any declared
+        // black/freeze probe (its operator-authored threshold + zone). A declared
+        // freeze probe is honoured verbatim — the CLI's codec-noise tolerance/
+        // debounce defaults still apply to it via the shared sample path, but its
+        // change threshold + zone are the operator's. Sources without a declared
+        // probe never appear here and fall back to the shared defaults.
+        let mut declared_black = std::collections::HashMap::new();
+        let mut declared_freeze = std::collections::HashMap::new();
+        let mut declared_silence_floor = std::collections::HashMap::new();
+        for (source, ov) in &source_probes {
+            if let Some(cfg) = ov
+                .black
+                .as_ref()
+                .and_then(|p| black_config_from_kind(&p.kind))
+            {
+                declared_black.insert(source.clone(), BlackProbe::new(cfg));
+            }
+            if let Some(cfg) = ov
+                .freeze
+                .as_ref()
+                .and_then(|p| freeze_config_from_kind(&p.kind))
+            {
+                // Preserve the CLI's wider per-sample tolerance for real encoded
+                // sources; only the operator-authored change threshold + zone come
+                // from config (the engine `from_kind` keeps the default tolerance,
+                // which we override to the CLI's 6 to match the default path).
+                declared_freeze.insert(source.clone(), FreezeProbe::new(cfg.with_tolerance(6)));
+            }
+            // A declared silence probe carries the operator-authored level ceiling
+            // (`level_dbfs`); thread it into this source's detection floor so the
+            // instantaneous silence condition uses the operator's threshold rather
+            // than the shared default. Widen `f32 -> f64` exactly (`f64::from`, no
+            // `as` cast) to match the meter timeline scale.
+            if let Some(multiview_config::probe::ProbeKind::Silence { level_dbfs }) =
+                ov.silence.as_ref().map(|p| p.kind)
+            {
+                declared_silence_floor.insert(source.clone(), f64::from(level_dbfs));
+            }
+        }
         Self {
             stores,
             meter_db_timelines,
@@ -3054,16 +3260,28 @@ impl FaultDetector {
             hysteresis_black: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
             hysteresis_freeze: AlarmHysteresis::new(dwell(2, 1), down), // 2 s up
             hysteresis_silence: AlarmHysteresis::new(dwell(1, 2), down), // 0.5 s up
+            source_probes,
+            declared_black,
+            declared_freeze,
+            declared_silence_floor,
         }
     }
 
     /// Get-or-create the dwell machines for `id` (one per fault class).
+    ///
+    /// When the source has an operator-declared probe for a fault class (M10), that
+    /// class's machine is built from the config probe via
+    /// [`AlarmStateMachine::from_probe`](multiview_engine::AlarmStateMachine::from_probe)
+    /// — honouring the declared dwell, severity, latch and scope. Classes with no
+    /// declared probe use the hardcoded default machine, so an undeclared source is
+    /// byte-for-byte the prior behaviour.
     fn machines_for(&mut self, id: &str) -> &mut SourceFaultMachines {
         use multiview_core::alarm::{AlarmId, AlarmKind, AlarmScope, PerceivedSeverity};
         use multiview_engine::{AlarmHysteresis, AlarmStateMachine};
         let hb = self.hysteresis_black;
         let hf = self.hysteresis_freeze;
         let hs = self.hysteresis_silence;
+        let ov = self.source_probes.get(id).cloned().unwrap_or_default();
         self.machines.entry(id.to_owned()).or_insert_with(|| {
             let mk = |kind: AlarmKind, sev: PerceivedSeverity, hyst: AlarmHysteresis| {
                 AlarmStateMachine::new(
@@ -3074,10 +3292,31 @@ impl FaultDetector {
                     hyst,
                 )
             };
+            // A declared probe's full X.733 lifecycle (id/scope/severity/dwell/
+            // latch) via `from_probe`; otherwise the hardcoded default machine.
+            let from_or_default = |probe: &Option<multiview_config::probe::Probe>,
+                                   kind: AlarmKind,
+                                   sev: PerceivedSeverity,
+                                   hyst: AlarmHysteresis| {
+                match probe {
+                    Some(p) => AlarmStateMachine::from_probe(p),
+                    None => mk(kind, sev, hyst),
+                }
+            };
             SourceFaultMachines {
-                black: mk(AlarmKind::Black, PerceivedSeverity::Major, hb),
-                freeze: mk(AlarmKind::Freeze, PerceivedSeverity::Major, hf),
-                silence: mk(AlarmKind::Silence, PerceivedSeverity::Minor, hs),
+                black: from_or_default(&ov.black, AlarmKind::Black, PerceivedSeverity::Major, hb),
+                freeze: from_or_default(
+                    &ov.freeze,
+                    AlarmKind::Freeze,
+                    PerceivedSeverity::Major,
+                    hf,
+                ),
+                silence: from_or_default(
+                    &ov.silence,
+                    AlarmKind::Silence,
+                    PerceivedSeverity::Minor,
+                    hs,
+                ),
             }
         })
     }
@@ -3169,12 +3408,17 @@ impl FaultDetector {
                 return (false, false);
             }
         };
-        let black = self.black.detect(&current).condition_present;
+        // Prefer this source's config-derived analyser (the operator-declared
+        // threshold + zone, M10); fall back to the shared default when no probe was
+        // declared for it.
+        let black_probe = self.declared_black.get(id).unwrap_or(&self.black);
+        let freeze_probe = self.declared_freeze.get(id).unwrap_or(&self.freeze);
+        let black = black_probe.detect(&current).condition_present;
         // Freeze needs the previous sampled frame; if none yet (first frame or a
         // gap), it is not frozen this tick (fail-safe toward "live").
         let frozen = match self.previous.get(id) {
             Some(prev) => match LumaView::packed(prev.y_plane(), prev.width(), prev.height()) {
-                Ok(prev_view) => self.freeze.detect(&current, &prev_view).condition_present,
+                Ok(prev_view) => freeze_probe.detect(&current, &prev_view).condition_present,
                 Err(_) => false,
             },
             None => false,
@@ -3214,9 +3458,11 @@ impl FaultDetector {
     }
 
     /// The instantaneous silence condition for `id` at tick `index`: the source's
-    /// build-time meter reading is at/below [`SILENCE_FLOOR_DB`]. A source with no
-    /// meter timeline rides the meter floor (which is below the silence floor), so
-    /// an audio-free tile reads silent.
+    /// build-time meter reading is at/below its silence floor. The floor is the
+    /// operator-declared `level_dbfs` when this source has a declared silence probe
+    /// (M10), otherwise the shared default [`SILENCE_FLOOR_DB`]. A source with no
+    /// meter timeline rides the meter floor (which is below either silence floor),
+    /// so an audio-free tile reads silent.
     fn silence_now(&self, id: &str, index: u64) -> bool {
         let db = match self.meter_db_timelines.get(id) {
             Some(timeline) => {
@@ -3229,7 +3475,12 @@ impl FaultDetector {
             }
             None => multiview_audio::Ballistics::FLOOR_DB,
         };
-        db <= SILENCE_FLOOR_DB
+        let floor = self
+            .declared_silence_floor
+            .get(id)
+            .copied()
+            .unwrap_or(SILENCE_FLOOR_DB);
+        db <= floor
     }
 }
 
@@ -4328,12 +4579,12 @@ const INGEST_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// source id so different sources de-correlate (no thundering herd) while the
 /// sequence stays reproducible — which is what keeps [`reconnect_backoff`]
 /// testable with no real randomness. A SplitMix64-style step; not cryptographic.
-struct JitterRng(u64);
+pub(crate) struct JitterRng(u64);
 
 impl JitterRng {
     /// Seed from a stable hash of the source id (each source gets its own jitter
     /// phase). The seed is forced odd so the step never degenerates to a constant.
-    fn seeded(id: &str) -> Self {
+    pub(crate) fn seeded(id: &str) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut hasher);
@@ -4341,7 +4592,7 @@ impl JitterRng {
     }
 
     /// Advance the state and return the next jitter unit in `[0.0, 1.0]`.
-    fn next_unit(&mut self) -> f64 {
+    pub(crate) fn next_unit(&mut self) -> f64 {
         // SplitMix64 step (deterministic, well-distributed across the id space).
         self.0 = self
             .0
@@ -4360,7 +4611,7 @@ impl JitterRng {
 /// reconnect loop) and de-correlated across sources/attempts (no thundering herd).
 /// `jitter_fraction` comes from [`JitterRng::next_unit`]; a non-finite or
 /// out-of-range value is clamped into `[0, 1]`.
-fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
+pub(crate) fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
     let shift = attempt.min(INGEST_RECONNECT_MAX_ATTEMPT);
     // `shift <= 6`, so the shift is always `Some`; `unwrap_or` is just belt-and-
     // braces against a future constant change.
@@ -4383,7 +4634,7 @@ fn reconnect_backoff(attempt: u32, jitter_fraction: f64) -> Duration {
 /// [`INGEST_RECONNECT_HEALTHY`] resets the escalation to 0 (it was healthy and
 /// merely blipped); anything shorter is a fast failure that escalates the index by
 /// one, capped at [`INGEST_RECONNECT_MAX_ATTEMPT`].
-fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
+pub(crate) fn next_reconnect_attempt(prev: u32, ran_for: Duration) -> u32 {
     if ran_for >= INGEST_RECONNECT_HEALTHY {
         0
     } else {
@@ -4416,7 +4667,48 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
         // `rw_timeout` is expressed in microseconds; libav copies the strings.
         opts.set("rw_timeout", &INGEST_RW_TIMEOUT.as_micros().to_string());
     }
+    // HLS open-time hardening (ADR-T011): a master playlist with a
+    // `TYPE=SUBTITLES` WebVTT rendition is the ABC-News-AU footgun — libav can
+    // fold the rendition into the one shared context, so a corrupt/404/expired
+    // `.vtt` aborts the open or fails the whole read. Defence-in-depth ahead of
+    // the in-loop `discard_unrouted_subtitles` (the primary guard):
+    //   * `strict=normal` — FFmpeg's HLS demuxer (`hls.c` `new_rendition`) drops a
+    //     SUBTITLES rendition pre-probe when `strict_std_compliance > experimental`,
+    //     so a normal/strict open never even adds the WebVTT stream to the context.
+    //     We never widen `allowed_extensions` to admit `.vtt` here — the isolated
+    //     reader is the sole WebVTT path.
+    //   * `seg_max_retry` — a transient SEGMENT fetch failure retries instead of
+    //     failing the open.
+    //   * `protocol_whitelist` — a sane set so an HTTPS master + AES (`crypto`)
+    //     segments open, without admitting `file`/`concat`-style surprises beyond
+    //     the standard HLS surface.
+    if is_hls_location(location) {
+        opts.set("strict", "normal");
+        opts.set("seg_max_retry", "8");
+        opts.set("protocol_whitelist", "file,http,https,tcp,tls,crypto,data");
+    }
     opts
+}
+
+/// Whether `location` opens an HLS master playlist (a `.m3u8` URL, or a resolved
+/// `YouTube` master — which libav opens as HLS too). Detected on the URL string so
+/// the HLS open-time hardening in [`ingest_open_options`] applies (ADR-T011).
+fn is_hls_location(location: &SourceLocation) -> bool {
+    let url = match location {
+        SourceLocation::Url(u) => u.as_str(),
+        // A resolved YouTube watch URL is opened as a `*.googlevideo.com` HLS
+        // master; treat it as HLS for the open-time hardening.
+        #[cfg(feature = "youtube")]
+        SourceLocation::Youtube { .. } => return true,
+        // A local `.m3u8` file is also an HLS playlist.
+        SourceLocation::Path(p) => p.to_str().unwrap_or(""),
+        #[cfg(feature = "ndi")]
+        SourceLocation::Ndi { .. } => return false,
+        SourceLocation::Synthetic(_) => return false,
+    };
+    // An `.m3u8` (with or without a query string) is an HLS playlist.
+    let base = url.split(['?', '#']).next().unwrap_or(url);
+    base.to_ascii_lowercase().ends_with(".m3u8")
 }
 
 /// The per-source streaming-ingest loop, run on a dedicated thread (BUG-2 fix).
@@ -4770,18 +5062,7 @@ fn open_and_stream(
         }
     };
 
-    let (stream_index, params, time_base, declared_fps) = {
-        let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .ok_or_else(|| "input has no video stream".to_owned())?;
-        (
-            stream.index(),
-            stream.parameters(),
-            multiview_ffmpeg::from_ff_rational(stream.time_base()),
-            multiview_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
-        )
-    };
+    let (stream_index, params, time_base, declared_fps) = best_video_stream_params(&input)?;
 
     // Prefer NVDEC hardware decode (`*_cuvid`) so 4K H.264/HEVC decode runs on
     // the GPU ASIC instead of the CPU (efficiency). The selection is gated by the
@@ -4838,6 +5119,11 @@ fn open_and_stream(
     // video still streams). Only under `overlay`.
     #[cfg(feature = "overlay")]
     let mut dvbsub = build_dvbsub_decoder(plan, &input);
+
+    // HLS WebVTT-rendition isolation (ADR-T011): discard unrouted subtitle streams
+    // before the first read (see the fn doc for the footgun + the routed-keep).
+    discard_unrouted_subtitle_streams(plan, &mut input);
+
     // The wall-clock pacer: maps the first frame's PTS to "now" and releases
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
     let mut pacer = PtsWallClock::new();
@@ -4893,6 +5179,55 @@ fn open_and_stream(
     }
 }
 
+/// Resolve the best video stream's `(index, codec parameters, time-base,
+/// declared fps)` from an opened `input`, or `Err` if the container has no video
+/// stream. The codec [`Parameters`] and rationals are owned snapshots that borrow
+/// nothing from `input`, so the demuxer can keep being read after this returns.
+fn best_video_stream_params(
+    input: &ffmpeg::format::context::Input,
+) -> Result<(usize, ffmpeg::codec::Parameters, Rational, Rational), String> {
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .ok_or_else(|| "input has no video stream".to_owned())?;
+    Ok((
+        stream.index(),
+        stream.parameters(),
+        multiview_ffmpeg::from_ff_rational(stream.time_base()),
+        multiview_ffmpeg::from_ff_rational(stream.avg_frame_rate()),
+    ))
+}
+
+/// Mark every UNROUTED subtitle stream in `input` `AVDISCARD_ALL` so libav stops
+/// fetching it (HLS WebVTT-rendition isolation, ADR-T011).
+///
+/// If the open surfaced a `TYPE=SUBTITLES` `WebVTT` rendition into this shared
+/// context (the ABC-News-AU footgun), a corrupt/404 `.vtt` would otherwise make
+/// `av_read_frame` return that rendition's error for the WHOLE context, killing
+/// the video tile. The main demuxer needs nothing from a `WebVTT` rendition — the
+/// isolated `caption_loop` reader is the sole `WebVTT` path — so discarding it
+/// loses no stream. A routed in-container DVB-sub stream (the MPEG-TS DVB-sub
+/// route) is KEPT; audio renditions are never touched (the guard keys strictly on
+/// `medium() == Subtitle`). Must be called before the first `packet.read()`:
+/// libav's HLS `recheck_discard_flags` fires one-shot on the first packet.
+fn discard_unrouted_subtitle_streams(
+    plan: &IngestPlan,
+    input: &mut ffmpeg::format::context::Input,
+) {
+    #[cfg(feature = "overlay")]
+    let keep_subtitle = plan.dvbsub.as_ref().map(|d| d.stream_index);
+    #[cfg(not(feature = "overlay"))]
+    let keep_subtitle = None;
+    let discarded = multiview_ffmpeg::discard_unrouted_subtitles(input, keep_subtitle);
+    if discarded > 0 {
+        tracing::info!(
+            source = %plan.id,
+            discarded,
+            "discarded unrouted subtitle stream(s) in the main demuxer (HLS rendition isolation)"
+        );
+    }
+}
+
 /// Build the in-container DVB-sub [`CaptionDecoder`] for `plan`'s route, from the
 /// open container's subtitle stream parameters. Returns `None` when the source
 /// has no dvbsub route or the decoder cannot be built (logged, best-effort).
@@ -4940,7 +5275,7 @@ fn pump_dvbsub(
 
 /// Sleep up to `total`, waking early (in <= 50 ms slices) if `stop` is raised,
 /// so ingest teardown stays prompt without a condvar.
-fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
+pub(crate) fn sleep_interruptible(total: Duration, stop: &AtomicBool) {
     let slice = Duration::from_millis(50);
     let mut remaining = total;
     while remaining > Duration::ZERO {
@@ -5290,11 +5625,123 @@ mod fault_detector_tests {
         s
     }
 
+    /// A per-source override map naming `id`'s declared probes (M10).
+    fn source_probes_for(
+        id: &str,
+        probes: &[multiview_config::probe::Probe],
+    ) -> std::collections::HashMap<String, SourceProbeOverride> {
+        let layout = Layout {
+            name: "t".to_owned(),
+            canvas: multiview_core::layout::Canvas {
+                width: 64,
+                height: 64,
+                fps_num: 25,
+                fps_den: 1,
+            },
+            cells: vec![Cell {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                fit: multiview_core::layout::FitMode::Contain,
+                source: Some(id.to_owned()),
+                ..Cell::default()
+            }],
+        };
+        resolve_source_probes(&layout, probes)
+    }
+
+    #[test]
+    fn declared_black_probe_threshold_and_dwell_drive_the_fault() {
+        use multiview_config::probe::{DetectionZone, Dwell, Probe, ProbeKind};
+        use multiview_core::alarm::PerceivedSeverity;
+        let id = "blk";
+        let (stores, store) = store_for(id);
+        // The operator declares a black probe with a HIGH luma ceiling (100) and a
+        // short 80 ms dwell-up (2 ticks at 25 fps). A Y=80 field is "black" under
+        // this declared threshold but NOT under the hardcoded default (16), and it
+        // must raise within ~2 ticks — far sooner than the default 0.5 s (12 ticks).
+        let probe = Probe::new(
+            "blk-probe",
+            id,
+            ProbeKind::black(100, DetectionZone::default()),
+            Dwell::new(80, 80),
+            PerceivedSeverity::Critical,
+            false,
+        );
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            source_probes_for(id, &[probe]),
+        );
+        let states = live_states(id);
+
+        // Tick 0: present, dwell not yet served. Tick 1 (40 ms) still pending.
+        store.publish(solid(80), pts_of(0));
+        let t0 = det.sample(pts_of(0), 0, &states);
+        assert_eq!(
+            t0.get(id).copied().unwrap_or(TileFault::None),
+            TileFault::None,
+            "Y=80 under the declared threshold 100 is black, but the 80 ms dwell has not elapsed"
+        );
+        store.publish(solid(80), pts_of(1));
+        let t1 = det.sample(pts_of(1), 1, &states);
+        assert_eq!(
+            t1.get(id).copied().unwrap_or(TileFault::None),
+            TileFault::None,
+            "still within the declared dwell-up at 40 ms"
+        );
+        // Tick 2 (80 ms): the declared dwell-up elapses → BLACK raises. The default
+        // threshold (16) would NEVER call Y=80 black, so this proves the config
+        // threshold is what drove the detection.
+        store.publish(solid(80), pts_of(2));
+        let t2 = det.sample(pts_of(2), 2, &states);
+        assert_eq!(
+            t2.get(id).copied(),
+            Some(TileFault::Black),
+            "the declared black probe (threshold 100, 80 ms dwell) raises on Y=80 at 80 ms"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_source_keeps_the_default_black_threshold() {
+        // Regression guard for the seam: a Y=80 field with NO declared probe is NOT
+        // black under the hardcoded default threshold (16) — the override path must
+        // not change undeclared sources. (A silence fault may fire from the absent
+        // meter timeline — orthogonal default behaviour — so we assert specifically
+        // that BLACK never raises, which is what the threshold drives.)
+        let id = "blk";
+        let (stores, store) = store_for(id);
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            std::collections::HashMap::new(),
+        );
+        let states = live_states(id);
+        for i in 0..40 {
+            store.publish(solid(80), pts_of(i));
+            let last = det.sample(pts_of(i), i, &states);
+            assert_ne!(
+                last.get(id).copied(),
+                Some(TileFault::Black),
+                "Y=80 is above the default black threshold (16) → no BLACK fault for an undeclared source"
+            );
+        }
+    }
+
     #[test]
     fn sustained_all_black_frames_raise_a_black_fault() {
         let id = "blk";
         let (stores, store) = store_for(id);
-        let mut det = FaultDetector::new(stores, std::collections::HashMap::new(), cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Drive 40 ticks (1.6 s > the 0.5 s black dwell) publishing an all-black
@@ -5315,7 +5762,12 @@ mod fault_detector_tests {
     fn sustained_identical_frames_raise_a_frozen_fault() {
         let id = "frz";
         let (stores, store) = store_for(id);
-        let mut det = FaultDetector::new(stores, std::collections::HashMap::new(), cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            std::collections::HashMap::new(),
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Publish the SAME bright, non-black content every tick (Y=200 solid):
@@ -5340,7 +5792,12 @@ mod fault_detector_tests {
         // A meter timeline pinned below the silence floor for every tick.
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-80.0_f64; 80]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Publish a MOVING, bright picture so neither black nor freeze fires —
@@ -5364,7 +5821,12 @@ mod fault_detector_tests {
         // A loud meter timeline (well above the silence floor) for every tick.
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-6.0_f64; 80]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Publish a MOVING, bright picture (changes every tick) and a loud meter:
@@ -5393,7 +5855,12 @@ mod fault_detector_tests {
         // Loud meter so silence never fires — freeze must be the only fault.
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-6.0_f64; 120]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         // Drive 90 ticks (3.6 s > the 2 s freeze dwell), crossing >=3 simulated
@@ -5420,7 +5887,12 @@ mod fault_detector_tests {
         let (stores, store) = store_for(id);
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-80.0_f64; 120]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         let mut last = std::collections::HashMap::new();
@@ -5443,7 +5915,12 @@ mod fault_detector_tests {
         let (stores, store) = store_for(id);
         let mut timelines = std::collections::HashMap::new();
         timelines.insert(id.to_owned(), vec![-80.0_f64; 80]);
-        let mut det = FaultDetector::new(stores, timelines, cadence());
+        let mut det = FaultDetector::new(
+            stores,
+            timelines,
+            cadence(),
+            std::collections::HashMap::new(),
+        );
         let states = live_states(id);
 
         let mut last = std::collections::HashMap::new();
@@ -5595,8 +6072,8 @@ mod reconnect_tests {
     use std::time::Duration;
 
     use super::{
-        ingest_open_options, next_reconnect_attempt, reconnect_backoff, JitterRng, SourceLocation,
-        INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
+        ingest_open_options, is_hls_location, next_reconnect_attempt, reconnect_backoff, JitterRng,
+        SourceLocation, INGEST_RECONNECT_BASE, INGEST_RECONNECT_CAP, INGEST_RECONNECT_HEALTHY,
         INGEST_RECONNECT_MAX_ATTEMPT, INGEST_RW_TIMEOUT,
     };
 
@@ -5711,6 +6188,39 @@ mod reconnect_tests {
         let path = SourceLocation::Path(std::path::PathBuf::from("/tmp/clip.mp4"));
         let opts = ingest_open_options(&path);
         assert_eq!(opts.get("rw_timeout"), None);
+    }
+
+    #[test]
+    fn open_options_harden_hls_masters_against_the_webvtt_rendition_footgun() {
+        // An HLS master (.m3u8 URL) gets the open-time hardening (ADR-T011): a
+        // normal/strict compliance so libav drops the SUBTITLES rendition
+        // pre-probe, a bounded segment retry, and a sane protocol allowlist — and
+        // it MUST NOT widen `allowed_extensions` to admit `.vtt`.
+        let hls = SourceLocation::Url("https://h.test/live/master.m3u8".to_owned());
+        assert!(is_hls_location(&hls), "an .m3u8 URL is an HLS master");
+        let opts = ingest_open_options(&hls);
+        assert_eq!(opts.get("strict"), Some("normal"));
+        assert_eq!(opts.get("seg_max_retry"), Some("8"));
+        assert_eq!(
+            opts.get("protocol_whitelist"),
+            Some("file,http,https,tcp,tls,crypto,data")
+        );
+        assert_eq!(
+            opts.get("allowed_extensions"),
+            None,
+            "the main demuxer must NEVER widen allowed_extensions to admit .vtt"
+        );
+
+        // A query string after the .m3u8 still classifies as HLS.
+        let hls_q = SourceLocation::Url("https://h.test/m.m3u8?token=abc".to_owned());
+        assert!(is_hls_location(&hls_q));
+
+        // A non-HLS network source gets `rw_timeout` but NONE of the HLS knobs.
+        let rtsp = SourceLocation::Url("rtsp://example.invalid/stream".to_owned());
+        assert!(!is_hls_location(&rtsp));
+        let opts = ingest_open_options(&rtsp);
+        assert_eq!(opts.get("strict"), None);
+        assert_eq!(opts.get("seg_max_retry"), None);
     }
 }
 

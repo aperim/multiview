@@ -1,16 +1,16 @@
 # AES67 / SMPTE ST 2110-30 audio I/O — delivery design brief
 
-**Status:** design (2026-06-07). Builds on and does **not** duplicate
-[dante-audio](dante-audio.md). Drives [ADR-0033](../decisions/ADR-0033.md);
+**Status:** design (2026-06-07). Builds on and does **not** duplicate the predecessor
+research. Drives [ADR-0033](../decisions/ADR-0033.md);
 consistent with [ADR-T010](../decisions/ADR-T010.md).
 **Question:** what is the implementation-ready architecture for **AES67 /
 SMPTE ST 2110-30 linear-PCM audio over IP — send *and* receive** — so Multiview
 interoperates with broadcast audio-over-IP plants, open-interop-first, pure-Rust,
 LGPL-clean, no SDK?
 
-> **Scope split.** [dante-audio](dante-audio.md) decided *why* AES67/ST 2110-30 is
+> **Scope split.** [ADR-T010](../decisions/ADR-T010.md) decided *why* AES67/ST 2110-30 is
 > the interop path (it is Audinate's own licence-free bridge to Dante; native Dante
-> is closed and stays out per [ADR-T010](../decisions/ADR-T010.md)). **This brief
+> is closed and is NOT supported). **This brief
 > does not re-argue that** — it adds the send/receive architecture, the clocking
 > reconciliation, the discovery tiers, the resilience model, and the
 > crate/feature/config surface, all grounded in the as-built code. Native Dante is
@@ -95,7 +95,7 @@ idea is dropped; it is a MUST violation conformance analyzers flag.)
 **mandatory *receiver* baseline** of ST 2110-30 and therefore the **interop-maximizing
 *sender* target** (any conformant receiver decodes it) — senders are not *obligated* to
 Class A, they choose it. It is also the Dante-AES67 interop clamp
-([ADR-T010](../decisions/ADR-T010.md), [dante-audio §2](dante-audio.md)) and covers the
+([ADR-T010](../decisions/ADR-T010.md)) and covers the
 stereo/5.1 layouts `multiview-audio` already models. ptime 250 µs/125 µs (Class B/C) is
 **additive config**, not first cut. ST 2110-30 also defines extended levels AX/BX/CX for
 AES3/2110-31 mixing — **out of scope** for the PCM-only first cut.
@@ -239,7 +239,7 @@ ramp; stateful waveform/interpolation PLC is v2.
 **ST 2022-7: receive IN scope, send OUT (v2).** The essence-agnostic `HitlessReconstructor`
 + `DualPathPacketSource` merge by RTP seq for any essence; AES67-RX reuses them behind
 config. The audio depacketizer runs **downstream** of the merge. Plain Dante AES67 is
-single-path ([dante-audio §2](dante-audio.md)), so 2022-7 only engages with true dual-flow
+single-path ([ADR-T010](../decisions/ADR-T010.md)), so 2022-7 only engages with true dual-flow
 ST 2110-30 senders. **Guard:** the reconstructor keys on seq with no SSRC check — two
 mis-wired unrelated senders on path A/B could seq-collide and silently mis-merge. Before
 engaging dual-path RX, validate the two flows **share SSRC** and satisfy the ST 2110-30
@@ -264,14 +264,14 @@ Receiver joins **both**; sender announces on the operator-selected group (defaul
 (AES67-2018 tightens RFC 2974's 300 s `max()`-based interval down to ~30 s), the
 10×-period/1 h purge, and `T`-bit deletion packets. Dante Controller does **not** route
 AES67 — SAP/SDP is the only Dante discovery path (legacy Dante needs DDM to proxy
-SDP→SAP). **Entirely unbuilt.** Document in [dante-audio](dante-audio.md) that
-`224.2.127.254` is the registered group while `239.255.255.255` is what shipping AES67/Dante
-gear uses.
+SDP→SAP). **Entirely unbuilt.** Document (see [ADR-0041](../decisions/ADR-0041.md) /
+[sap-discovery](sap-discovery.md)) that `224.2.127.254` is the registered group while
+`239.255.255.255` is what shipping AES67/Dante gear uses.
 
 **Tier 2 (NMOS IS-04/IS-05)** — **already substantially built and tested** (served Node
 API, staged/active + scheduled-TAI activation). Note: [ADR-T010](../decisions/ADR-T010.md)
-and [dante-audio](dante-audio.md) were written framing discovery purely as SAP/SDP (they
-never mention NMOS) — this brief adds the NMOS tier. Remaining live work (DNS-SD over the
+was written framing discovery purely as SAP/SDP (it
+never mentions NMOS) — this brief adds the NMOS tier. Remaining live work (DNS-SD over the
 wire, multicast bind on IS-05 activation, the **audio** SDP `transport_file`) overlaps the
 SAP/SDP work, so sequence **NMOS-finish *after* AES67 SDP/SAP**. **Do not block
 plug-and-play on NMOS** — Dante interop depends on SAP/SDP, not NMOS.
@@ -332,13 +332,13 @@ discovery endpoint lists SAP + NMOS sessions. Binding a receiver group to a tile
 - **PTP** via linuxptp `ptp4l`/`phc2sys` as a software grandmaster (media-profile sync intervals + DSCP/EF) + forced GM drop for the reference-loss test.
 - **Drift soak** (resampler): inject a deliberate ppm offset, 72 h soak per [ADR-T006](../decisions/ADR-T006.md), assert zero gaps + zero audible drop/dup.
 - **Chaos gate (inv #10):** wedge the send socket; output clock keeps ticking, drops counted.
-- **Honesty caveat ([dante-audio §5](dante-audio.md)):** Dante Virtual Soundcard is **not** AES67-capable — it cannot be the interop target; real Dante-over-AES67 needs AES67-capable hardware + SAP.
+- **Honesty caveat ([ADR-T010](../decisions/ADR-T010.md)):** Dante Virtual Soundcard is **not** AES67-capable — it cannot be the interop target; real Dante-over-AES67 needs AES67-capable hardware + SAP.
 
 ---
 
 ## 9. Citations
 
-- AES67 / clocking / RTP timestamp / mediaclk offset — see [dante-audio](dante-audio.md) citation set (Audinate, AES67, RAVENNA/AIMS).
+- AES67 / clocking / RTP timestamp / mediaclk offset (Audinate, AES67, RAVENNA/AIMS): AES67 summary <https://en.wikipedia.org/wiki/AES67>; Audinate AES67 config / creating AES67–ST 2110-30 flows <https://dev.audinate.com/GA/dante-controller/userguide/webhelp/content/aes67_config.htm>; Audinate clock synchronization (PTPv1/v2, leader election) <https://dev.audinate.com/GA/dante-controller/userguide/webhelp/content/clock_synchronization.htm>; DDM AES67 vs SMPTE domains <https://dev.audinate.com/GA/ddm/userguide/1.1/webhelp/content/appendix/aes67_and_smpte_domains.htm>; DVS not AES67-capable <https://www.mdw.ac.at/aesr-lab/docs/A-System/Networked-audio/Dante-AES67-interoperability/>.
 - RFC 3190 (L16/L24 over RTP), RFC 3550 (RTP), RFC 3551 §4.1/§4.3 (audio RTP clock independent of channel count; timestamp = first-sample instant) + §4.5.11 (L16 sample format), RFC 2974 (SAP), RFC 4566/8866 (SDP), RFC 7273 (`ts-refclk`/`mediaclk`).
 - SMPTE ST 2110-30 (Class A/B/C, AX/BX/CX), ST 2110-10 §7.5 (1970 TAI epoch media clock), SMPTE ST 2059-1/-2 (PTP profile), IEEE 1588-2008.
 - SAP group de-facto `239.255.255.255` — Biamp Tesira, Shure, Sonifex, Q-SYS AES67 docs.

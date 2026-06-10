@@ -11,8 +11,7 @@ Deep, verification-hardened design records that back the Multiview implementatio
 - [Streaming Robustness Runbook](streaming-gotchas.md) — Streaming/Timing
 - [Timing Architecture](timing-architecture.md) — Streaming/Timing (pacing + reference-lock + frame-sync + wall-clock + timecode)
 - [Input Timing & Frame-Sync](input-timing-and-sync.md) — Streaming/Timing (best-effort PTS normalisation + wall-clock pacer + sample-at-tick)
-- [AES67 / ST 2110-30 audio I/O delivery](aes67-delivery.md) — IO/Transport (open-interop-first AES67 send+receive: L16/L24 PCM/RTP, PTP media-clock reference (never a pacer, inv #1) + boundary resampler, SDP+SAP discovery (NMOS optional), bounded fail-honest receive; receive ~80% reuses the existing st2110/v30 depacketizer; drives ADR-0033)
-- [Dante audio in/out](dante-audio.md) — Streaming/Timing (AES67/ST 2110-30 open interop vs licence-gated native Dante; drives ADR-T010)
+- [AES67 / ST 2110-30 audio I/O delivery](aes67-delivery.md) — IO/Transport (open-interop-first AES67 send+receive — **the open Dante interop path**, native Dante is NOT supported; L16/L24 PCM/RTP, PTP media-clock reference (never a pacer, inv #1) + boundary resampler, SDP+SAP discovery (NMOS optional), bounded fail-honest receive; receive ~80% reuses the existing st2110/v30 depacketizer; drives [ADR-T010](../decisions/ADR-T010.md) + ADR-0033)
 - [NDI + NDI|HX integration](ndi-integration.md) — IO/Transport (own-the-FFI-binding over the NewTek/Vizrt C SDK: NV12-native send, transparent HX decode, Advanced-SDK HX send; + open libndi+SpeedHQ receive path)
 - [Preview Subsystem](preview-subsystem.md) — Preview
 - [Realtime / Eventing API](realtime-api.md) — Realtime API

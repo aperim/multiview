@@ -6,7 +6,7 @@
       "description": "Server-Sent Events fallback for proxies or environments that strip the WebSocket Upgrade header. Server-to-client only: identical envelope shape, no client subscription control frames or WHEP signaling.",
       "messages": {
         "EnvelopeMessage": {
-          "$ref": "#/messages/Envelope"
+          "$ref": "#/components/messages/Envelope"
         }
       },
       "servers": [
@@ -54,7 +54,7 @@
       "description": "Bidirectional WebSocket channel. The server sends event envelopes; the client sends subscription control frames ($subscribe, $unsubscribe, $set_rate, $resume, $pong). Negotiated subprotocol: `multiview.v1` (or `multiview.bin.v1` for compact binary meter frames).",
       "messages": {
         "EnvelopeMessage": {
-          "$ref": "#/messages/Envelope"
+          "$ref": "#/components/messages/Envelope"
         }
       },
       "servers": [
@@ -66,6 +66,277 @@
     }
   },
   "components": {
+    "messages": {
+      "AlarmTransition": {
+        "contentType": "application/json",
+        "name": "AlarmTransition",
+        "payload": {
+          "$ref": "#/components/schemas/AlarmTransition"
+        },
+        "summary": "An alarm was raised, updated, cleared, or acknowledged (topic `alarms`).",
+        "title": "Monitoring alarm lifecycle event"
+      },
+      "Alert": {
+        "contentType": "application/json",
+        "description": "The `key` field is a stable dedupe identifier for the condition; multiple `alert.raised` frames with the same key coalesce rather than stacking.",
+        "name": "Alert",
+        "payload": {
+          "$ref": "#/components/schemas/Alert"
+        },
+        "summary": "An alert was raised (alert.raised) or cleared (alert.cleared) on topic `alerts`.",
+        "title": "Operator alert raised or cleared"
+      },
+      "AudioMeter": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `audio.meters`. This is the sole high-rate conflated topic; frames are conflated/sampled at 10–30 Hz on the wire. A slow consumer can only lose its own meter frames — the engine never back-pressures. The binary fast-path (subprotocol `multiview.bin.v1`) carries the same fields in compact form; this schema describes the decoded (JSON) shape.",
+        "name": "AudioMeter",
+        "payload": {
+          "$ref": "#/components/schemas/AudioMeter"
+        },
+        "summary": "Per-input/track peak/RMS/clip meter sample (numeric only, never audio data).",
+        "title": "High-rate audio meter sample"
+      },
+      "Envelope": {
+        "contentType": "application/json",
+        "description": "Every message in both directions uses this envelope. The `t` field is the discriminator selecting the `data` schema. The `seq` field is a per-connection monotonic cursor; gaps indicate dropped frames and trigger resume/resync. The `ts` field carries engine-monotonic nanoseconds (same clock family as output PTS). `v` is the envelope schema major; clients MUST reject unknown majors.",
+        "name": "Envelope",
+        "payload": {
+          "properties": {
+            "corr": {
+              "description": "Optional correlation id echoing a REST command / job.",
+              "type": "string"
+            },
+            "data": {
+              "description": "Typed payload selected by `t`. Schema depends on the event type.",
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/TileState"
+                },
+                {
+                  "$ref": "#/components/schemas/AudioMeter"
+                },
+                {
+                  "$ref": "#/components/schemas/OutputStatus"
+                },
+                {
+                  "$ref": "#/components/schemas/Alert"
+                },
+                {
+                  "$ref": "#/components/schemas/HealthWarning"
+                },
+                {
+                  "$ref": "#/components/schemas/InputConnection"
+                },
+                {
+                  "$ref": "#/components/schemas/InputStreams"
+                },
+                {
+                  "$ref": "#/components/schemas/JobProgress"
+                },
+                {
+                  "$ref": "#/components/schemas/AlarmTransition"
+                },
+                {
+                  "$ref": "#/components/schemas/TallyEvent"
+                },
+                {
+                  "$ref": "#/components/schemas/SalvoEvent"
+                },
+                {
+                  "$ref": "#/components/schemas/Hello"
+                },
+                {
+                  "$ref": "#/components/schemas/Subscribe"
+                },
+                {
+                  "$ref": "#/components/schemas/Subscribed"
+                },
+                {
+                  "$ref": "#/components/schemas/Unsubscribe"
+                },
+                {
+                  "$ref": "#/components/schemas/SetRate"
+                },
+                {
+                  "$ref": "#/components/schemas/Resume"
+                },
+                {
+                  "$ref": "#/components/schemas/Resync"
+                },
+                {
+                  "$ref": "#/components/schemas/Lag"
+                },
+                {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              ],
+              "type": "object"
+            },
+            "id": {
+              "description": "Optional resource scope (tile/input/output/job id).",
+              "type": "string"
+            },
+            "seq": {
+              "description": "Per-connection monotonic resume cursor. A gap means frames were dropped.",
+              "format": "uint64",
+              "type": "integer"
+            },
+            "t": {
+              "description": "Dotted event type; the discriminator selecting the `data` schema.",
+              "type": "string"
+            },
+            "topic": {
+              "description": "Subscription routing key. Control frames use `$control`.",
+              "enum": [
+                "$control",
+                "system",
+                "capabilities",
+                "inputs",
+                "tiles",
+                "outputs",
+                "audio.meters",
+                "audio.loudness",
+                "alerts",
+                "alarms",
+                "tally",
+                "layout",
+                "config",
+                "logs",
+                "jobs",
+                "preview"
+              ],
+              "type": "string"
+            },
+            "ts": {
+              "description": "Engine monotonic nanoseconds (same clock family as output PTS).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "v": {
+              "const": 1,
+              "description": "Envelope schema major. A receiver MUST reject an unknown major.",
+              "format": "uint16",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "t",
+            "topic",
+            "seq",
+            "ts",
+            "data"
+          ],
+          "type": "object"
+        },
+        "summary": "The single wire frame used for all realtime messages (ADR-RT002).",
+        "title": "Versioned realtime envelope"
+      },
+      "HealthWarning": {
+        "contentType": "application/json",
+        "description": "A richer sibling of `Alert` carrying a stable `code`, the affected `subsystem`, and a concrete `remediation`. The `code` is the dedupe key: frames with the same code coalesce rather than stacking. Capability-mismatch codes (e.g. `gpu-present-no-vulkan-adapter`) are latched build-time facts — raised once, cleared on reconfigure/restart.",
+        "name": "HealthWarning",
+        "payload": {
+          "$ref": "#/components/schemas/HealthWarning"
+        },
+        "summary": "A health warning was raised (health.warning.raised) or cleared (health.warning.cleared) on topic `alerts`.",
+        "title": "Actionable health warning raised or cleared"
+      },
+      "Hello": {
+        "contentType": "application/json",
+        "name": "Hello",
+        "payload": {
+          "$ref": "#/components/schemas/Hello"
+        },
+        "summary": "First server frame after auth; advertises connection parameters.",
+        "title": "$hello control frame"
+      },
+      "InputConnection": {
+        "contentType": "application/json",
+        "name": "InputConnection",
+        "payload": {
+          "$ref": "#/components/schemas/InputConnection"
+        },
+        "summary": "An input source transitioned connection state (input.connection on topic `inputs`).",
+        "title": "Input source connection state change"
+      },
+      "InputStreams": {
+        "contentType": "application/json",
+        "description": "Read-only discovery: every elementary stream (video / audio tracks / subtitles / SCTE-35 / KLV / timecode) the input offers, each with a stable kind-scoped id. Emitted on first appearance and as a delta on re-probe / PMT-version bump.",
+        "name": "InputStreams",
+        "payload": {
+          "$ref": "#/components/schemas/InputStreams"
+        },
+        "summary": "An input's stream inventory appeared or changed on re-probe (input.streams on topic `inputs`).",
+        "title": "Input elementary-stream inventory"
+      },
+      "JobProgress": {
+        "contentType": "application/json",
+        "name": "JobProgress",
+        "payload": {
+          "$ref": "#/components/schemas/JobProgress"
+        },
+        "summary": "Progress of a REST command job correlated by `corr` (topic `jobs`).",
+        "title": "Long-running job progress"
+      },
+      "OutputStatus": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `outputs`. Make-before-break migration emits `migrating` during the parallel-output window.",
+        "name": "OutputStatus",
+        "payload": {
+          "$ref": "#/components/schemas/OutputStatus"
+        },
+        "summary": "An output sink changed run state (starting/running/migrating/error).",
+        "title": "Output sink status update"
+      },
+      "SalvoEvent": {
+        "contentType": "application/json",
+        "name": "SalvoEvent",
+        "payload": {
+          "$ref": "#/components/schemas/SalvoEvent"
+        },
+        "summary": "A salvo was armed, taken, or cancelled (topic `tally`).",
+        "title": "Salvo arm/take lifecycle"
+      },
+      "Subscribe": {
+        "contentType": "application/json",
+        "name": "Subscribe",
+        "payload": {
+          "$ref": "#/components/schemas/Subscribe"
+        },
+        "summary": "Client requests subscription to one or more topics.",
+        "title": "$subscribe control frame (client to server)"
+      },
+      "SystemMetrics": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `system`. A high-rate conflated lane like `audio.meters`: samples are latest-only at ~1-2 Hz on the wire and excluded from the lossless replay ring. PUSHED, never polled — a slow UI loses only its own samples and the engine never back-pressures (inv #10). Live values only; historic windows (the data decisions are made from) are a separate cold REST query.",
+        "name": "SystemMetrics",
+        "payload": {
+          "$ref": "#/components/schemas/SystemMetrics"
+        },
+        "summary": "CPU / GPU / encoder-decoder utilisation sample (numeric only).",
+        "title": "High-rate whole-system metrics sample"
+      },
+      "TallyEvent": {
+        "contentType": "application/json",
+        "name": "TallyEvent",
+        "payload": {
+          "$ref": "#/components/schemas/TallyEvent"
+        },
+        "summary": "Resolved tally state for one tile/element changed (topic `tally`).",
+        "title": "Tally lamp/UMD state change"
+      },
+      "TileState": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `tiles` whenever a tile's state machine transitions. Invariant #2: Live → Stale → Reconnecting → NoSignal. The compositor holds the last-good frame while STALE/RECONNECTING; renders a placeholder on NO_SIGNAL.",
+        "name": "TileState",
+        "payload": {
+          "$ref": "#/components/schemas/TileState"
+        },
+        "summary": "A tile transitioned between lifecycle states (LIVE/STALE/RECONNECTING/NO_SIGNAL).",
+        "title": "Tile state machine transition"
+      }
+    },
     "schemas": {
       "AlarmTransition": {
         "description": "Data body of `alarm.raised`, `alarm.updated`, `alarm.cleared`, `alarm.acked`. Carries the current AlarmRecord value after the transition (X.733-aligned).",
@@ -741,9 +1012,7 @@
       },
       "TallyTarget": {
         "description": "What a tally state applies to (tagged by `kind`).",
-        "discriminator": {
-          "propertyName": "kind"
-        },
+        "discriminator": "kind",
         "oneOf": [
           {
             "properties": {
@@ -853,7 +1122,7 @@
     "description": "WebSocket and SSE realtime event stream for the Multiview engine. Every message uses a single versioned envelope (ADR-RT002). Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, layout, config, logs, jobs, preview, system, capabilities. The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
     "externalDocs": {
       "description": "Realtime API reference",
-      "url": "docs/api/realtime.md"
+      "url": "https://github.com/aperim/multiview/blob/main/docs/api/realtime.md"
     },
     "license": {
       "name": "Multiview Source-Available Non-Commercial License",
@@ -861,277 +1130,6 @@
     },
     "title": "Multiview Realtime API",
     "version": "1.0.0"
-  },
-  "messages": {
-    "AlarmTransition": {
-      "contentType": "application/json",
-      "name": "AlarmTransition",
-      "payload": {
-        "$ref": "#/components/schemas/AlarmTransition"
-      },
-      "summary": "An alarm was raised, updated, cleared, or acknowledged (topic `alarms`).",
-      "title": "Monitoring alarm lifecycle event"
-    },
-    "Alert": {
-      "contentType": "application/json",
-      "description": "The `key` field is a stable dedupe identifier for the condition; multiple `alert.raised` frames with the same key coalesce rather than stacking.",
-      "name": "Alert",
-      "payload": {
-        "$ref": "#/components/schemas/Alert"
-      },
-      "summary": "An alert was raised (alert.raised) or cleared (alert.cleared) on topic `alerts`.",
-      "title": "Operator alert raised or cleared"
-    },
-    "AudioMeter": {
-      "contentType": "application/json",
-      "description": "Emitted on topic `audio.meters`. This is the sole high-rate conflated topic; frames are conflated/sampled at 10–30 Hz on the wire. A slow consumer can only lose its own meter frames — the engine never back-pressures. The binary fast-path (subprotocol `multiview.bin.v1`) carries the same fields in compact form; this schema describes the decoded (JSON) shape.",
-      "name": "AudioMeter",
-      "payload": {
-        "$ref": "#/components/schemas/AudioMeter"
-      },
-      "summary": "Per-input/track peak/RMS/clip meter sample (numeric only, never audio data).",
-      "title": "High-rate audio meter sample"
-    },
-    "Envelope": {
-      "contentType": "application/json",
-      "description": "Every message in both directions uses this envelope. The `t` field is the discriminator selecting the `data` schema. The `seq` field is a per-connection monotonic cursor; gaps indicate dropped frames and trigger resume/resync. The `ts` field carries engine-monotonic nanoseconds (same clock family as output PTS). `v` is the envelope schema major; clients MUST reject unknown majors.",
-      "name": "Envelope",
-      "payload": {
-        "properties": {
-          "corr": {
-            "description": "Optional correlation id echoing a REST command / job.",
-            "type": "string"
-          },
-          "data": {
-            "description": "Typed payload selected by `t`. Schema depends on the event type.",
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/TileState"
-              },
-              {
-                "$ref": "#/components/schemas/AudioMeter"
-              },
-              {
-                "$ref": "#/components/schemas/OutputStatus"
-              },
-              {
-                "$ref": "#/components/schemas/Alert"
-              },
-              {
-                "$ref": "#/components/schemas/HealthWarning"
-              },
-              {
-                "$ref": "#/components/schemas/InputConnection"
-              },
-              {
-                "$ref": "#/components/schemas/InputStreams"
-              },
-              {
-                "$ref": "#/components/schemas/JobProgress"
-              },
-              {
-                "$ref": "#/components/schemas/AlarmTransition"
-              },
-              {
-                "$ref": "#/components/schemas/TallyEvent"
-              },
-              {
-                "$ref": "#/components/schemas/SalvoEvent"
-              },
-              {
-                "$ref": "#/components/schemas/Hello"
-              },
-              {
-                "$ref": "#/components/schemas/Subscribe"
-              },
-              {
-                "$ref": "#/components/schemas/Subscribed"
-              },
-              {
-                "$ref": "#/components/schemas/Unsubscribe"
-              },
-              {
-                "$ref": "#/components/schemas/SetRate"
-              },
-              {
-                "$ref": "#/components/schemas/Resume"
-              },
-              {
-                "$ref": "#/components/schemas/Resync"
-              },
-              {
-                "$ref": "#/components/schemas/Lag"
-              },
-              {
-                "$ref": "#/components/schemas/ProtocolError"
-              }
-            ],
-            "type": "object"
-          },
-          "id": {
-            "description": "Optional resource scope (tile/input/output/job id).",
-            "type": "string"
-          },
-          "seq": {
-            "description": "Per-connection monotonic resume cursor. A gap means frames were dropped.",
-            "format": "uint64",
-            "type": "integer"
-          },
-          "t": {
-            "description": "Dotted event type; the discriminator selecting the `data` schema.",
-            "type": "string"
-          },
-          "topic": {
-            "description": "Subscription routing key. Control frames use `$control`.",
-            "enum": [
-              "$control",
-              "system",
-              "capabilities",
-              "inputs",
-              "tiles",
-              "outputs",
-              "audio.meters",
-              "audio.loudness",
-              "alerts",
-              "alarms",
-              "tally",
-              "layout",
-              "config",
-              "logs",
-              "jobs",
-              "preview"
-            ],
-            "type": "string"
-          },
-          "ts": {
-            "description": "Engine monotonic nanoseconds (same clock family as output PTS).",
-            "format": "int64",
-            "type": "integer"
-          },
-          "v": {
-            "const": 1,
-            "description": "Envelope schema major. A receiver MUST reject an unknown major.",
-            "format": "uint16",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "v",
-          "t",
-          "topic",
-          "seq",
-          "ts",
-          "data"
-        ],
-        "type": "object"
-      },
-      "summary": "The single wire frame used for all realtime messages (ADR-RT002).",
-      "title": "Versioned realtime envelope"
-    },
-    "HealthWarning": {
-      "contentType": "application/json",
-      "description": "A richer sibling of `Alert` carrying a stable `code`, the affected `subsystem`, and a concrete `remediation`. The `code` is the dedupe key: frames with the same code coalesce rather than stacking. Capability-mismatch codes (e.g. `gpu-present-no-vulkan-adapter`) are latched build-time facts — raised once, cleared on reconfigure/restart.",
-      "name": "HealthWarning",
-      "payload": {
-        "$ref": "#/components/schemas/HealthWarning"
-      },
-      "summary": "A health warning was raised (health.warning.raised) or cleared (health.warning.cleared) on topic `alerts`.",
-      "title": "Actionable health warning raised or cleared"
-    },
-    "Hello": {
-      "contentType": "application/json",
-      "name": "Hello",
-      "payload": {
-        "$ref": "#/components/schemas/Hello"
-      },
-      "summary": "First server frame after auth; advertises connection parameters.",
-      "title": "$hello control frame"
-    },
-    "InputConnection": {
-      "contentType": "application/json",
-      "name": "InputConnection",
-      "payload": {
-        "$ref": "#/components/schemas/InputConnection"
-      },
-      "summary": "An input source transitioned connection state (input.connection on topic `inputs`).",
-      "title": "Input source connection state change"
-    },
-    "InputStreams": {
-      "contentType": "application/json",
-      "description": "Read-only discovery: every elementary stream (video / audio tracks / subtitles / SCTE-35 / KLV / timecode) the input offers, each with a stable kind-scoped id. Emitted on first appearance and as a delta on re-probe / PMT-version bump.",
-      "name": "InputStreams",
-      "payload": {
-        "$ref": "#/components/schemas/InputStreams"
-      },
-      "summary": "An input's stream inventory appeared or changed on re-probe (input.streams on topic `inputs`).",
-      "title": "Input elementary-stream inventory"
-    },
-    "JobProgress": {
-      "contentType": "application/json",
-      "name": "JobProgress",
-      "payload": {
-        "$ref": "#/components/schemas/JobProgress"
-      },
-      "summary": "Progress of a REST command job correlated by `corr` (topic `jobs`).",
-      "title": "Long-running job progress"
-    },
-    "OutputStatus": {
-      "contentType": "application/json",
-      "description": "Emitted on topic `outputs`. Make-before-break migration emits `migrating` during the parallel-output window.",
-      "name": "OutputStatus",
-      "payload": {
-        "$ref": "#/components/schemas/OutputStatus"
-      },
-      "summary": "An output sink changed run state (starting/running/migrating/error).",
-      "title": "Output sink status update"
-    },
-    "SalvoEvent": {
-      "contentType": "application/json",
-      "name": "SalvoEvent",
-      "payload": {
-        "$ref": "#/components/schemas/SalvoEvent"
-      },
-      "summary": "A salvo was armed, taken, or cancelled (topic `tally`).",
-      "title": "Salvo arm/take lifecycle"
-    },
-    "Subscribe": {
-      "contentType": "application/json",
-      "name": "Subscribe",
-      "payload": {
-        "$ref": "#/components/schemas/Subscribe"
-      },
-      "summary": "Client requests subscription to one or more topics.",
-      "title": "$subscribe control frame (client to server)"
-    },
-    "SystemMetrics": {
-      "contentType": "application/json",
-      "description": "Emitted on topic `system`. A high-rate conflated lane like `audio.meters`: samples are latest-only at ~1-2 Hz on the wire and excluded from the lossless replay ring. PUSHED, never polled — a slow UI loses only its own samples and the engine never back-pressures (inv #10). Live values only; historic windows (the data decisions are made from) are a separate cold REST query.",
-      "name": "SystemMetrics",
-      "payload": {
-        "$ref": "#/components/schemas/SystemMetrics"
-      },
-      "summary": "CPU / GPU / encoder-decoder utilisation sample (numeric only).",
-      "title": "High-rate whole-system metrics sample"
-    },
-    "TallyEvent": {
-      "contentType": "application/json",
-      "name": "TallyEvent",
-      "payload": {
-        "$ref": "#/components/schemas/TallyEvent"
-      },
-      "summary": "Resolved tally state for one tile/element changed (topic `tally`).",
-      "title": "Tally lamp/UMD state change"
-    },
-    "TileState": {
-      "contentType": "application/json",
-      "description": "Emitted on topic `tiles` whenever a tile's state machine transitions. Invariant #2: Live → Stale → Reconnecting → NoSignal. The compositor holds the last-good frame while STALE/RECONNECTING; renders a placeholder on NO_SIGNAL.",
-      "name": "TileState",
-      "payload": {
-        "$ref": "#/components/schemas/TileState"
-      },
-      "summary": "A tile transitioned between lifecycle states (LIVE/STALE/RECONNECTING/NO_SIGNAL).",
-      "title": "Tile state machine transition"
-    }
   },
   "operations": {
     "subscribe-sse": {
@@ -1142,7 +1140,7 @@
       "description": "Receive all event types on the SSE fallback channel.",
       "messages": [
         {
-          "$ref": "#/messages/Envelope"
+          "$ref": "#/channels/sse/messages/EnvelopeMessage"
         }
       ],
       "title": "Receive realtime events (SSE)"
@@ -1155,7 +1153,7 @@
       "description": "Receive all event types on the WebSocket channel after subscribing to the desired topics via $subscribe control frames.",
       "messages": [
         {
-          "$ref": "#/messages/Envelope"
+          "$ref": "#/channels/ws/messages/EnvelopeMessage"
         }
       ],
       "title": "Receive realtime events (WebSocket)"

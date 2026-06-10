@@ -51,7 +51,8 @@ use multiview_core::stream::StreamKind as CoreStreamKind;
 
 use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
 pub use audio::{
-    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioMode, PROGRAM_TRACK,
+    AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
+    TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
@@ -514,7 +515,14 @@ impl MultiviewConfig {
 
         for output in &self.outputs {
             if let Some(selection) = output.audio() {
-                selection.validate(&output.label(), &selectable)?;
+                // Cross-check the selection against the transport's verified
+                // capability matrix (ADR-R005 §4.2): reference consistency plus
+                // the discrete-track count the transport can actually deliver.
+                selection.validate_against_capability(
+                    &output.label(),
+                    &selectable,
+                    output.audio_capability(),
+                )?;
             }
         }
 
@@ -869,7 +877,10 @@ impl Source {
             | SourceKind::Srt { .. }
             | SourceKind::Rtmp { .. }
             | SourceKind::Ndi { .. }
-            | SourceKind::File { .. } => {}
+            | SourceKind::File { .. }
+            // AES67's binding (SDP / multicast group / PTP domain) is a runtime
+            // ingest concern, like the network URL kinds — accepted as authored.
+            | SourceKind::Aes67 { .. } => {}
         }
         Ok(())
     }
@@ -891,7 +902,9 @@ impl Output {
             | Output::Hls { codec, .. }
             | Output::Rtmp { codec, .. }
             | Output::Srt { codec, .. } => Some(codec),
-            Output::Ndi { .. } => None,
+            // NDI carries a channel-map, AES67 sends raw PCM — neither has a
+            // (video) codec to validate.
+            Output::Ndi { .. } | Output::Aes67 { .. } => None,
         };
         if let Some(codec) = codec {
             if codec.is_empty() {
