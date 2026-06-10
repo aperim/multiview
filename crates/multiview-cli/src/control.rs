@@ -1254,6 +1254,46 @@ input_id = "in_b"
         assert!(snap.get("inputs").is_none());
     }
 
+    #[test]
+    fn fold_tile_states_adds_sorted_lifecycle_tiles() {
+        let mut states = std::collections::HashMap::new();
+        states.insert("zeta".to_owned(), multiview_core::traits::SourceState::NoSignal);
+        states.insert("alpha".to_owned(), multiview_core::traits::SourceState::Live);
+        states.insert(
+            "mid".to_owned(),
+            multiview_core::traits::SourceState::Reconnecting,
+        );
+
+        let mut snap = state_snapshot(7, 233_333_333, 1920, 1080);
+        fold_tile_states(&mut snap, &states);
+
+        // Sorted by id (HashMap order is non-deterministic; the wire must not
+        // be), with the SAME LifecycleState wire strings the events use.
+        let tiles = snap["tiles"].as_array().expect("tiles array");
+        assert_eq!(
+            tiles,
+            &vec![
+                serde_json::json!({"id": "alpha", "state": "LIVE"}),
+                serde_json::json!({"id": "mid", "state": "RECONNECTING"}),
+                serde_json::json!({"id": "zeta", "state": "NO_SIGNAL"}),
+            ]
+        );
+        // The base fields are untouched by the fold.
+        assert_eq!(snap["v"], 1);
+        assert_eq!(snap["tick"], 7);
+    }
+
+    #[test]
+    fn fold_tile_states_empty_map_yields_an_empty_tiles_array() {
+        // A run with no sources still publishes `tiles: []` so a connected
+        // client rebuilds to an EMPTY tile cache (not a stale one).
+        let states: std::collections::HashMap<String, multiview_core::traits::SourceState> =
+            std::collections::HashMap::new();
+        let mut snap = state_snapshot(3, 9, 64, 64);
+        fold_tile_states(&mut snap, &states);
+        assert_eq!(snap["tiles"], serde_json::json!([]));
+    }
+
     /// A tiny representative inventory (one video + one audio) for the fold-in /
     /// event-projection tests.
     fn fixture_inventory(input_id: &str) -> multiview_core::stream::StreamInventory {
