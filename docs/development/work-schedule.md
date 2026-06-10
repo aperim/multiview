@@ -205,9 +205,9 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 
 - [x] **SUR-1** `M` — IS-05 scheduled activation (absolute + relative)  ·  _deps: —_
 - [x] **SUR-2** `L` — IS-07 MQTT broker transport  ·  _deps: SUR-1_  · _codec+topics+bounded drop-oldest queue (always-built) + live `rumqttc` client behind `is07-mqtt`; round-trip exercised against an in-process `rumqttd` broker_
-- [~] **SUR-3** `XL` — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT  ·  _deps: —_  · _`734e693`: native TEXT-caption decode to `CaptionCue::Text` proven via real LGPL libav decoders (SubRip/SRT, WebVTT-in-container w/ markup-strip, MOV_TEXT/tx3g) + ns rebase + empty/invalid-UTF-8 fail-safe; `decode_bytes_for_window`. CEA-608/708 (cc_dec + A53_CC side-data) + ASS + cli reader-wiring = **SUR-3b**_
+- [x] **SUR-3** `XL` — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT  ·  _deps: —_  · _`734e693`: native TEXT-caption decode to `CaptionCue::Text` proven via real LGPL libav decoders (SubRip/SRT, WebVTT-in-container w/ markup-strip, MOV_TEXT/tx3g) + ns rebase + empty/invalid-UTF-8 fail-safe; `decode_bytes_for_window`. CEA-608/708 (cc_dec + A53_CC side-data) + ASS + cli reader-wiring completed via SUR-3b + SUR-3c (both [x]): all caption source forms—CEA-608/708, ASS, MOV_TEXT, SubRip, Teletext, DVB-sub, WebVTT—now decode and wire into the per-tile CueStore._
   - [x] **SUR-3b** `L` — Caption decode remainder: CEA-608/708 (`cc_dec` over `AV_FRAME_DATA_A53_CC` side-data) + ASS, in multiview-ffmpeg  ·  _deps: SUR-3_  · _`b49bbc8`: `extract_a53_cc` (safe `frame.side_data(A53CC)`, before NV12 — swscale drops side-data) + `decode_video_frame` with `cc_dec real_time=1` (REAL bug found: cc_dec buffers to flush otherwise) → `CaptionCue::Text`; A53 fixture generator + tests (608 CC1; 708-service untested). cli caption-reader/PMT/HLS-SUBTITLES wiring = **SUR-3c** (cli, CORE)_
-  - [ ] **SUR-3c** `M` — cli caption-reader wiring for the broadened decoders: route in-container A53/text/ASS caption packets (PMT-walk discovery, HLS SUBTITLES-group resolve) through `decode_video_frame`/`decode_bytes_for_window` into the per-tile `CueStore`  ·  _deps: SUR-3b_
+  - [x] **SUR-3c** `M` — cli caption-reader wiring for the broadened decoders: route in-container A53/text/ASS caption packets (PMT-walk discovery, HLS SUBTITLES-group resolve) through `decode_video_frame`/`decode_bytes_for_window` into the per-tile `CueStore`  ·  _deps: SUR-3b_  · _`94c6aef` (PR #44): `DecodedVideoFrame.a53_cc` (A53 bytes off the raw frame before NV12 conversion, before swscale); `embedded_cc_channel()`/`incontainer_caption_source()` route the declared selector to the correct decoder (dvbsub→bitmap, ass/ssa→ASS, subrip/srt→SubRip, mov_text/tx3g→MovText, dvb_teletext→Teletext); `InContainerSubRoute` (generalised from `DvbSubRoute`) + `EmbeddedCcRoute` wired in `open_and_stream` + `wire_source_captions`; `publish_window_cues` handles text and bitmap paths. TDD: `embedded_cc_ingest` real-pipeline test over the A53 fixture recovers "HELLO WORLD" CEA-608 cue into the `CueStore`. Best-effort+isolated (inv #1/#2/#10). Completes the SUR-3b→end-to-end caption path._
 - [x] **SUR-4** `M` — OpenAPI: annotate the layout/resource write ops so they enter the spec  ·  _deps: —_
 - [x] **SUR-5** `M` — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes  ·  _deps: SUR-4_  · _generated openapi-fetch client; create/update/delete wired; tsc+eslint+build+76 tests green_
 - [~] **SUR-6** `XL` — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope)  ·  _deps: SUR-4_  · _`bd1bd68`: AsyncAPI 3.0 generator + `xtask gen-asyncapi` + generated TS types (additive, idempotent, tested); envelope SWAP + serve `/asyncapi.json` + CI AsyncAPI-CLI validation are **SUR-6b** below_
@@ -231,8 +231,14 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **GPU-5c** `L` — Wire `PlacementController` (GPU-5b) into the engine runtime: a `LoadPoller` poll thread publishing the `arc_swap` `Vec<DeviceLoad>` snapshot, execute `Migrate`/`Split` proposals through the make-before-break supervisor + scene-swap, call `PlacementCounters::record_*`, resolve config `DevicePin`→`multiview_hal::DeviceId`. Touches the protected output core.  ·  _deps: GPU-5b_
 - [x] **ENG-4c** `S` — i915 PMU `perf_event_open` GPU-busy path behind a tiny FFI-shim leaf crate (deny+SAFETY, like `multiview-ntpsys`), feeding the same `DeviceLoad` enc/dec fields on Intel where fdinfo is unavailable  ·  _deps: ENG-4b_  · _`4a45c46`: NEW `multiview-i915pmu` FFI crate — 3 `// SAFETY:` `unsafe` syscalls (`perf_event_open`/`read`/`close`) + a hand-rolled correct `PERF_ATTR_SIZE_VER1` (72-byte) `perf_event_attr`; hal `i915-pmu` feature folds busy-ns→frac into `DeviceLoad`. Pure diff tested; live `perf_event_open` gated. Poller call = ENG-4 infra_
 - [x] **GPU-1b** `L` — Wire the `ProgramEncoder` into the cli bake consumer (encode-once-mux-many)  ·  _deps: GPU-1_  · _`a1af76c`: consumer owns one `ProgramEncoder`; `RunnableOutput`/`build_outputs`/`run_one_output`→`PacketMuxSink`; `StreamingPacketSource`; test seam evolved frame→packet (no assertion weakened); per-sink encoders retired; aspirational comments fixed. Completes GPU-1 / inv #7_
-- [x] **HLS-WEBVTT-ISO** `M` — Isolate WebVTT subtitle renditions from the main HLS video demuxer (ADR-T011)  ·  _deps: —_  · _shipped #33 (test `f14afcb` → green `6f5c136`, ADR-T011): an HLS master carrying an `EXT-X-MEDIA:TYPE=SUBTITLES` WebVTT rendition (e.g. ABC News AU) could black out the whole tile — libav folds the rendition into the one shared `AVFormatContext`, so a corrupt/404/expired `.vtt` aborts the open or makes `av_read_frame` return that rendition's error for the entire context. Multiview already ingests HLS WebVTT via a separate isolated reader (`captions.rs::read_captions`, own context). Fix (4 parts): (b, primary) `multiview-ffmpeg` safe `discard_unrouted_subtitles(input, keep)` marks every `medium==Subtitle` stream `AVDISCARD_ALL` (one raw field write in the crate's `unsafe=deny` island — ffmpeg-next 8.1 `StreamMut` has no `set_discard`) except a routed `keep`, wired into `open_and_stream` before the first read (audio renditions never touched); (a) `ingest_open_options` HLS-master open-time hardening (strict=normal so libav drops the rendition pre-probe, seg_max_retry, sane protocol allowlist); (c) main-source recovery unchanged (supervised reconnect); (d) `caption_loop` becomes a supervised reconnect loop mirroring `ingest_loop` (live HLS rendition backs off + retries on EOF/error; finite VOD plays once). `crates/multiview-cli/tests/hls_webvtt_isolation.rs` green; inv #1/#2/#10. (Discovered during the #33 session — was not separately enumerated.)_
+- [x] **HLS-WEBVTT-ISO** `M` — Isolate WebVTT subtitle renditions from the main HLS video demuxer (ADR-T011)  ·  _deps: —_  · _shipped #33 (test `f14afcb` → green `6f5c136`, ADR-T011): an HLS master carrying an `EXT-X-MEDIA:TYPE=SUBTITLES` WebVTT rendition (e.g. ABC News AU) could black out the whole tile — libav folds the rendition into the one shared `AVFormatContext`, so a corrupt/404/expired `.vtt` aborts the open or makes `av_read_frame` return that rendition's error for the entire context. Multiview already ingests HLS WebVTT via a separate isolated reader (`captions.rs::read_captions`, own context). Fix (4 parts): (b, primary) `multiview-ffmpeg` safe `discard_unrouted_subtitles(input, keep)` marks every `medium==Subtitle` stream `AVDISCARD_ALL` (one raw field write in the crate's `unsafe=deny` island — ffmpeg-next 8.1 `StreamMut` has no `set_discard`) except a routed `keep`, wired into `open_and_stream` before the first read (audio renditions never touched); (a) `ingest_open_options` HLS-master open-time hardening (strict=normal so libav drops the rendition pre-probe, seg_max_retry, sane protocol allowlist); (c) main-source recovery unchanged (supervised reconnect); (d) `caption_loop` becomes a supervised reconnect loop mirroring `ingest_loop` (live HLS rendition backs off + retries on EOF/error; finite VOD plays once). `crates/multiview-cli/tests/hls_webvtt_isolation.rs` green; inv #1/#2/#10. (Discovered during the #33 session — was not separately enumerated.) **FFmpeg-8.x follow-up fix shipped PR #47** (`3c96a48`+`7055a92`, hardware-validated on 8.1.1): FFmpeg 8.x removed the `strict` rendition gate that the original fix relied on, so the fix needed a second layer — pin the MAIN demuxer to a VIDEO variant playlist (no SUBTITLES rendition) via `resolve_hls_variant_url` (decode-at-display-resolution selection, inv #6/ADR-E001); a second commit resolved relative child URIs against the post-redirect (Akamai CDN) effective base URL (`FetchedText.url` via `av_opt_get location`) so CDN-redirected masters work correctly. ADR-T011 corrected to reflect both layers._
 - [x] **SOAK-IPTV** `M` — `cargo xtask soak-iptv` quirk-tagged iptv-org test-source selector  ·  _deps: —_  · _shipped #33 (test red `b903318` → green `31b339b`): `xtask::iptv` builds an adversarial set of REAL test sources from iptv-org so the ingest path systematically hits resilience edge cases (the pinned ABC News WebVTT class, geo-blocked, part-time, header-gated/non-TLS origins, resolution extremes). Pipeline: fetch streams.json + channels.json → JOIN → quirk-classify → deterministic seed-stratified quirk-aware over-sample (in-crate SplitMix64, no RNG dep) → liveness probe (keeps first K live, deliberately retains a few dead/geo for the LIVE→STALE→RECONNECTING→NO_SIGNAL state machine) → filter nsfw + blocklist → emit a quirk-tagged manifest to the gitignored `.multiview-build/` (always incl. the pinned `https://c.mjh.nz/abc-news.m3u8`). All network behind `SourceCatalog`/`Prober` async traits; offline tests inject `FixtureCatalog`/`FixtureProber` (RFC-2606 example.* domains, no sockets); the real HTTP `HttpCatalog`/`HttpProber` (`ureq` 3.x, rustls) compile ONLY under the off-by-default `net` feature so the default build + `cargo deny` stay light/LGPL-clean. 12 integration + 2 unit tests green; real stream URLs are NEVER committed (resolved live per run). The automated "run each source + assert the state machine" soak is the documented box-gated follow-up. (Discovered during the #33 session — was not separately enumerated.)_
+
+#### Discovered items (post-session, shipped in PRs #40–#49 — 2026-06-10)
+- [x] **M10-ALARM** `M` — X.733 alarm state machine + config-probe → analyser → per-tick driver  ·  _deps: —_  · _shipped PR #45 (test red `da30e09` → green `6317b4a` + reconcile `af81988`): `multiview-engine` gains a per-tick `AlarmStateMachine` implementing the ITU-T X.733 severity lifecycle (CLEARED/INDETERMINATE/WARNING/MINOR/MAJOR/CRITICAL transitions, hysteresis) wired into `EngineRuntime::run_*_with_control` so an alarm fires on every output tick without touching the hot path; `multiview-config` gains a `FaultAnalyser` seam (`fault_probes`) that categorises config items into `ProbeResult`s; `config_probe_feeds_alarm_state_machine` + `alarm_reconcile` tests green. The engine fault analyser (config → analyser → alarm driver) is fully end-to-end: config-level faults surface as X.733 alarms in the event stream without blocking the output clock (inv #1/#10). Alarm emission is off-hot-path (non-blocking `EnginePublisher::publish_event`)._
+- [x] **DEPLOY-CAPTIONS** `S` — Ship the native caption path (`overlay` feature) in the hardware deploy presets (nvidia/apple/linux-vaapi)  ·  _deps: —_  · _shipped PR #49 (test red `fde2d00` → green `1117507`): the three hardware Cargo feature presets (`nvidia`, `apple`, `linux-vaapi`) omitted the `overlay` feature despite caption/overlay being a first-class capability; the fix adds `multiview-cli/overlay` to each preset so `multiview run --features nvidia` (and the others) actually compiles the caption ingest and burn-in path. CI guard: `tests/deploy_presets.rs::deploy_presets_carry_captions` asserts each preset's feature list contains `overlay`. No change to the caption logic itself._
+- [x] **WEBUI-DOCS-OVERHAUL** `L` — Professional kind-specific management UI + searchable in-app docs (ADR-W015/ADR-W016)  ·  _deps: CTL-3, SUR-4_  · _shipped PR #48 (commits `29d0a37` + `ba756b9` + `bbc9c73` + `bd3ffef`): (ADR-W015) kind-specific sources/outputs/overlays management forms (RTSP/HLS/NDI/SRT/RTMP source forms, file/HLS/RTSP/NDI/SRT/RTMP output forms, text/image/clock overlay forms), live status display, apply-layout trigger, preset selector, config export — all wired to the OpenAPI-generated client; output id namespace preserved on edit; overlay kind-scoped params; unknown-kind edit refused. (ADR-W016) searchable in-app documentation rendered from Markdown, linked from the nav. Adversarial-review fixes (`bbc9c73`+`ba756b9`): B1 (export base overlay) + M1 (output id namespace) + M2 (semantic validation) + M3 (precondition order) + several minor tightening. ADR-W015 + ADR-W016 added to `docs/decisions/`. SPA build + tsc + eslint green._
+- [x] **ADR-BATCH-40-43** `S` — Four new docs-only ADRs pinning load-bearing contracts (PRs #40–#43)  ·  _deps: —_  · _shipped in four separate PRs: **ADR-R010** (PR #41, `05b814d`+`34d201b`) — make-before-break parallel-output migration primitive; corrected to clarify RT-12 bridge is NEW work, keepalive sink makes SWAP zero-new-encode. **ADR-T012** (PR #42, `5c46a28`) — reference-clock/wallclock source-selection contract. **ADR-T013** (PR #43, `ed8fec3`, renumbered from T012 after conflict) — shared RTP-audio → AudioStore rebase seam. **ADR-I005** (PR #40, `a436c36`+`2087f49`) — packet carrier (RT-12); corrected to reflect both `EncodedPacket` carriers live + fix RT-13→RT-12. All four docs-only; no code change._
 
 
 ---
@@ -303,7 +309,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Keep tone generation pure/deterministic so it runs identically on CI without hardware. 1 kHz at 48k is exactly 48 samples/cycle → phase bookkeeping is clean; still carry phase as f64 for non-integer-divisor freqs.
 - **Read first:** synth.rs header (synthetic source = peer of decode thread); ADR-0027 (synthetic sources, referenced in synth.rs:1); resilience-and-av §4.1.
 
-### `[ ]` AUD-6 — EBU R128 loudness normalisation on the program bus · effort: L · deps: AUD-3
+### `[x]` AUD-6 — EBU R128 loudness normalisation on the program bus · effort: L · deps: AUD-3
 - **Goal:** Normalise *only* the program bus toward a target LUFS (−23 broadcast / −16 web) with a true-peak ceiling, reusing the existing `LoudnessMeter` math, while leaving discrete tracks unaltered (authenticity guarantee, ADR-R005/R006).
 - **Touches:** new `crates/multiview-audio/src/loudnorm.rs` (a normaliser built on `loudness.rs` measurement, loudness.rs:97); applied in the pipeline mix step (AUD-3, pipeline.rs `state_of`) between `mix_program` and the encoder.
 - **Approach:**
@@ -374,7 +380,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Pulls the GStreamer/GLib C stack + a GLib main loop — **must** stay behind the `rtsp` feature so the default build is unaffected (ADR-0006 consequence; lean-static-binary tension). CI needs GStreamer base+good plugins (`rtph264pay`, `h264parse`) installed — gate the live test on their presence. LGPL-clean: gst-rtsp-server is LGPL-2.1 and dynamic-linked (clean); the H.264 *encode* stays in our LGPL/gpl-codecs-gated encoder, GStreamer only *payloads*. Guardrails: the FFI surface is GStreamer's safe Rust bindings — keep `unsafe_code = forbid` in this crate, no `unwrap`/`as`/indexing in non-test.
 - **Read first:** ADR-0006; core-engine §9.2 (the exact `appsrc`/`rtph264pay`/`set_shared` recipe); `multiview-output/CLAUDE.md` (#7/#10 contract); streaming-gotchas §4.
 
-### `[ ]` OUT-3 — NDI dynamic-load backend (`NDIlib_v6_load`) + feature/license scaffolding · effort: L · deps: none
+### `[x]` OUT-3 — NDI dynamic-load backend (`NDIlib_v6_load`) + feature/license scaffolding · effort: L · deps: none
 - **Goal:** Stand up the ADR-0008 runtime-loaded NDI backend — feature-gated, never-vendored, dynamically loaded via `NDIlib_v6_load()` with mandatory attribution and a runtime license-acceptance gate — so the default open-source build carries zero proprietary code/obligations and NDI stays inert until an operator accepts.
 - **Touches:** `crates/multiview-output/Cargo.toml` (the `ndi` feature is currently an empty stub at line 72 — wire it to `grafton-ndi` + `libloading`); new `crates/multiview-output/src/ndi/` module; `crates/multiview-config/src/schema.rs:550` (`Output::Ndi { name }`) plus a `[system.ndi] accept_license` setting (ADR-0008 runtime gate — add to the system schema); attribution surfaced in `NOTICE`/`README` (read-only here — propose).
 - **Approach:**
@@ -416,7 +422,7 @@ Key architectural fact established by the scaffold: every ingest path must produ
 
 ---
 
-### `[ ]` IN-1 — ST 2110 receive: frame assembler over the depacketizers · effort: M · deps: none
+### `[x]` IN-1 — ST 2110 receive: frame assembler over the depacketizers · effort: M · deps: none
 - **Goal:** Add a pure, testable per-frame assembler that turns the stream of `V20Payload` SRD segments + RTP marker bits into a single `ProducedFrame`, so the `st2110` transport has something to feed the `IngestPump` (the current `RtpReceiver` yields raw packets with no reassembly).
 - **Touches:** `crates/multiview-input/src/st2110/` — new `assembler` submodule alongside `v20.rs`/`v30.rs`/`v40.rs`; consumes `RtpHeader.marker`/`.timestamp` (`rtp.rs:73/81`) and `SrdSegment` (`v20.rs:77`). Pure, always-compiled (mirrors how depacketizers are always compiled per `Cargo.toml` `st2110` feature comment).
 - **Approach:**
@@ -428,7 +434,7 @@ Key architectural fact established by the scaffold: every ingest path must produ
 - **Risks/notes:** pure logic, runs in the default LGPL-clean build (no feature gate, no NIC). Watch `as_conversions` ban on the 90 kHz→ns rebase — push the float-free math into `multiview_core::time::Rational`.
 - **Read first:** docs/research/streaming-gotchas.md §0 (PTS pipeline) + §7 (RTP reorder/jitter); ADR-T003.
 
-### `[ ]` IN-2 — ST 2110 receive: wire `RtpReceiver`/`DualPathReceiver` into a `FrameProducer` + PTP timing · effort: L · deps: IN-1
+### `[x]` IN-2 — ST 2110 receive: wire `RtpReceiver`/`DualPathReceiver` into a `FrameProducer` + PTP timing · effort: L · deps: IN-1
 - **Goal:** Make the compile-only `st2110::transport` an actual ingest `Source` by driving the sockets → assembler → `IngestPump`, with receive timing anchored to a PTP/ST 2059 reference (or wall-clock fallback) per the timing model.
 - **Touches:** `crates/multiview-input/src/st2110/transport.rs` (current `RtpReceiver::recv_rtp` @~95, `DualPathReceiver::recv_merged` @~140); a new `St2110Producer` implementing `source::FrameProducer`; `crates/multiview-input/Cargo.toml` `st2110` feature (already `["tokio/net"]`).
 - **Approach:**
@@ -452,7 +458,7 @@ Key architectural fact established by the scaffold: every ingest path must produ
 - **Risks/notes:** proprietary SDK — must never leak into the default build or `--all-features` deny job (ci.yml:69 runs default-only by design; verify `ndi` is excluded from any `full` preset). No real NDI network in CI → receive path is gated/ignored. `grafton-ndi` is `unsafe`/FFI — but it's an external crate; `multiview-input` stays `unsafe_code = forbid` (the FFI lives in grafton-ndi, not our code). License acceptance is load-bearing and audited.
 - **Read first:** ADR-0008 (full); docs/io/ndi.md §2 (two code paths) + §3 (frame formats); ADR-0004 (copy boundary); ADR-M007 (CapabilityReport).
 
-### `[ ]` IN-4 — YouTube live: pure resolver core over `yt-dlp -J` · effort: M · deps: none
+### `[x]` IN-4 — YouTube live: pure resolver core over `yt-dlp -J` · effort: M · deps: none
 - **Goal:** Add a `youtube` module that spawns `yt-dlp`, parses its JSON info-dict, classifies `live_status`, and extracts the HLS `manifest_url` + `expire` deadline — pure and fixture-testable (ADR-0015 phase P0).
 - **Touches:** new `crates/multiview-input/src/youtube/` module (ADR-0015: "no new crate"); `multiview-input/Cargo.toml` new off-by-default `youtube` feature (per docs: `youtube` requires `ffmpeg`; add `serde_json` already in workspace Cargo.toml:15); `crates/multiview-config/src/schema.rs` (new `SourceKind::Youtube { url }` — the enum is `#[non_exhaustive]` @209 so additive).
 - **Approach:**
@@ -474,7 +480,7 @@ Key architectural fact established by the scaffold: every ingest path must produ
 - **Risks/notes:** real network + a current `yt-dlp` (ideally a JS runtime like Deno for n-sig) needed — gate the live test, keep CI on fixtures. Extraction breakage is *expected and handled*, not a hard failure.
 - **Read first:** ADR-0015 consequences ("re-resolution is load-bearing"); ADR-T004 (HLS pacing) + docs/io/inputs.md §3 (input pacer); ADR-R003/R004.
 
-### `[ ]` IN-6 — WebRTC ingest: ICE/DTLS/SRTP transport behind an application-layer media engine · effort: XL · deps: IN-1 (shares the RTP→assembler→FrameProducer bridge)
+### `[~]` IN-6 — WebRTC ingest: ICE/DTLS/SRTP transport behind an application-layer media engine · effort: XL · deps: IN-1 (shares the RTP→assembler→FrameProducer bridge)
 - **Goal:** Turn the compile-only `webrtc::transport::WebRtcSession` shell into a real receive session, driving the pure SDP negotiation (`negotiate_answer`, mod.rs:266) through ICE/DTLS/SRTP into RTP → the IN-1 assembler → `IngestPump`.
 - **Touches:** `crates/multiview-input/src/webrtc/transport.rs` (current shell holds only `NegotiatedSession`); `webrtc/Cargo.toml` feature (currently `"webrtc" = []`); a `WebRtcProducer: source::FrameProducer`. Per the module doc, the concrete media-engine binding "is supplied by the application layer" — so define the trait/seam here, keep the native WebRTC crate out of `multiview-input` to preserve the pure/LGPL-clean default.
 - **Approach:**
@@ -485,7 +491,7 @@ Key architectural fact established by the scaffold: every ingest path must produ
 - **Risks/notes:** no ICE peer/TURN/real network in CI → engine path is gated/ignored; the sans-IO engine choice must be license-vetted (LGPL-clean default) and kept at the application layer, not pulled into `multiview-input` (which stays `unsafe_code = forbid`, no native WebRTC lib). Highest-effort item; consider phasing (negotiation seam + adapter first, full engine second).
 - **Read first:** the `webrtc::transport` module doc (compile-only rationale) + `webrtc/mod.rs` `negotiate_answer`; docs/research/streaming-gotchas.md §7 (RTCP SR lip-sync, jitter); ADR-0009.
 
-### `[ ]` IN-7 — CI strategy: feature-gated compile + integration gating for the wired transports · effort: S · deps: IN-2, IN-3, IN-6
+### `[x]` IN-7 — CI strategy: feature-gated compile + integration gating for the wired transports · effort: S · deps: IN-2, IN-3, IN-6
 - **Goal:** Ensure the four new gated paths are clippy/check-verified without requiring NICs/peers/SDKs in CI, closing the gap that today's clippy job (ci.yml:32) runs **default features only** and never lints `st2110`/`webrtc`/`ndi`/`youtube`.
 - **Touches:** `.github/workflows/ci.yml` (the `fmt + clippy` job @21 and `check + test` job @34).
 - **Approach:**
@@ -598,7 +604,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` PRV-1 — Native ICE/DTLS/SRTP transport behind a `WhepTransport` seam (str0m, in-process default)  · effort: XL · deps: none
+### `[~]` PRV-1 — Native ICE/DTLS/SRTP transport behind a `WhepTransport` seam (str0m, in-process default)  · effort: XL · deps: none
 - **Goal:** Turn the WHEP SDP scaffold into a working sub-250ms focus media path by adding a transport seam and a native (str0m) implementation, so `negotiate()` produces an answer that actually carries SRTP video — without coupling preview to the engine.
 - **Touches:** `crates/multiview-preview/src/whep.rs` (extend `WhepSession`, `whep.rs:91`), new `crates/multiview-preview/src/whep/transport.rs`; `crates/multiview-preview/Cargo.toml` (new optional `str0m` dep gated under a *new* `webrtc-native` feature, kept separate from the existing pure `webrtc` feature so the negotiation-only build stays dep-free per `lib.rs:38`); `Cargo.toml` workspace `[workspace.dependencies]`; `deny.toml` (license/advisory entries for str0m + ring/openssl chain).
 - **Approach:**
@@ -610,7 +616,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 - **Risks/notes:** Prefer str0m to keep the default build LGPL-clean and C-free; webrtc-rs pulls a heavier stack. Gate strictly behind `webrtc-native` (off by default) so `cargo deny`/the pure build stay green (`lib.rs:43` `forbid(unsafe_code)` must hold — str0m is safe Rust). UDP/STUN/TURN availability in CI is unreliable → loopback-only, env-gated. No `unwrap`/`as`/indexing in non-test (RRTP seq/timestamp arithmetic must use checked/`wrapping_*`).
 - **Read first:** preview-subsystem.md §4 (transport table) + §8 "Sidecar reuse"; ADR-P002; ADR-0006.
 
-### `[ ]` PRV-2 — Wire WHEP focus routes into `multiview-control` (POST/DELETE per scope) with token-gated Focus + transport seam  · effort: L · deps: PRV-1
+### `[x]` PRV-2 — Wire WHEP focus routes into `multiview-control` (POST/DELETE per scope) with token-gated Focus + transport seam  · effort: L · deps: PRV-1
 - **Goal:** Expose the WHEP focus endpoints the brief §5 specifies so the SPA can actually open a focus session, enforcing `AccessScope::Focus` and the focus cap at the HTTP edge.
 - **Touches:** `crates/multiview-control/src/routes/preview.rs` (add handlers alongside `program_jpeg`, `routes/preview.rs:35`), `crates/multiview-control/src/routes/mod.rs` (route registration), `crates/multiview-control/src/preview.rs` (extend `PreviewProvider` seam, `preview.rs:21`, with a `whep_negotiate`/`whep_close` capability OR a sibling `WhepProvider` trait so control stays codec-free), `crates/multiview-control/src/state.rs` (hold the new provider in `AppState`).
 - **Approach:**
@@ -621,7 +627,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 - **Risks/notes:** Auth/SSRF: cue/whep schemes must stay allowlisted (ADR-P004) — not in scope here but the route must reject non-allowlisted ids. Keep control free of native deps (the seam is a trait object). RFC 9457 problem+json for all error bodies. No `unwrap` in handlers.
 - **Read first:** preview-subsystem.md §5 (API tables) + §2; ADR-P002; control CLAUDE.md API conventions.
 
-### `[ ]` PRV-3 — Concurrent-focus session caps + isolation enforcement (the `FocusGate`)  · effort: M · deps: PRV-2
+### `[x]` PRV-3 — Concurrent-focus session caps + isolation enforcement (the `FocusGate`)  · effort: M · deps: PRV-2
 - **Goal:** Bound worst-case preview load deterministically — hard caps on concurrent WHEP focus sessions (per-operator and server-wide) with "open second focus demotes the first," and admit focus encode sessions only from leftover budget after program reserves first.
 - **Touches:** new `crates/multiview-preview/src/focus.rs` (a `FocusGate` admission gate); `crates/multiview-preview/src/lib.rs` (re-export, `lib.rs:57`); integrate with `crates/multiview-hal/src/cost.rs` (`CostBudget`, `cost.rs:24`) and `crates/multiview-hal/src/degradation.rs` for shed-first; `crates/multiview-preview/src/token.rs` (the `AccessScope::Focus` cap is "only enforceable when Focus is granted explicitly," `token.rs:106` — the gate is where that promise is kept).
 - **Approach:**
@@ -632,7 +638,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 - **Risks/notes:** Base Apple silicon = 1 encode engine (brief §4) → cap WHEP to 1 and prefer JPEG; make caps config-driven, never hard-coded (probe via HAL). No `unwrap`/indexing; saturating arithmetic on counters.
 - **Read first:** preview-subsystem.md §3 ("CAP CONCURRENCY") + §8 ("Shared budgets"); ADR-P003; ADR-P002.
 
-### `[ ]` PRV-4 — Make preview the topmost (cheapest-to-shed) degradation rung  · effort: M · deps: PRV-3
+### `[x]` PRV-4 — Make preview the topmost (cheapest-to-shed) degradation rung  · effort: M · deps: PRV-3
 - **Goal:** Honor the non-negotiable ADR-P001 guarantee that preview is shed *before any program lever moves*, by extending the HAL ladder so preview suspension precedes rung 0.
 - **Touches:** `crates/multiview-hal/src/degradation.rs` (`DegradationAction` enum `:27`, `LADDER` `:49`, `rung` `:62`, `affects_program` `:81`); `crates/multiview-preview/src/focus.rs` (a `suspend()`/`resume()` driven by the ladder); the binary glue that observes `Hysteresis` (`degradation.rs:202`).
 - **Approach:**
@@ -642,7 +648,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 - **Risks/notes:** This changes a load-bearing enum in the protected-core HAL — coordinate with the engine/HAL work-stream; the change is additive (prepending rungs) but `MAX_LEVEL` shifts, so any persisted level mapping must be migrated. No behavior change to existing rungs' relative order.
 - **Read first:** preview-subsystem.md §3 + §8 ("First on the degradation ladder"); ADR-P001; multiview-engine CLAUDE.md inv #9/#10.
 
-### `[ ]` PRV-5 — Sub-second WebRTC OUTPUT (program) focus: program-canvas tap → preview encode → WHEP  · effort: L · deps: PRV-1, PRV-2, PRV-3
+### `[~]` PRV-5 — Sub-second WebRTC OUTPUT (program) focus: program-canvas tap → preview encode → WHEP  · effort: L · deps: PRV-1, PRV-2, PRV-3
 - **Goal:** Deliver sub-second program (and per-output) focus over WebRTC — the "OUTPUT/PROGRAM focus" rows of brief §4 — built on the same transport, gate, and tap seams as input focus, with mandatory real-vs-approx labeling for outputs.
 - **Touches:** `crates/multiview-preview/src/tap.rs` (a program-canvas `TapKey` of `TapScope::Program` and per-output `TapScope::Output`, `token.rs:35`); `crates/multiview-output/src/fanout.rs` (register a *separate* preview `PacketSink` on the existing `PacketRouter::register`, `fanout.rs:133`, depth-1-3 drop-oldest per ADR-P001 — never the encoder readback ring); the preview encode source in `whep/transport.rs` (PRV-1); a `preview/source` descriptor (`routes/preview.rs`) reporting `REAL ENCODED OUTPUT (tap:<proto>)` vs `PRE-ENCODE CANVAS APPROX` per ADR-P005.
 - **Approach:**
@@ -666,7 +672,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 ## ENG — Engine timing & resilience
 
 
-### `[ ]` ENG-1 — Bounded teardown join for a wedged sink (task #50) · effort: M · deps: none
+### `[x]` ENG-1 — Bounded teardown join for a wedged sink (task #50) · effort: M · deps: none
 - **Goal:** Make `drive_streaming` always return on stop even when an output sink thread is wedged in a blocking muxer/network write, so no infinite hang on teardown — without touching inv #1 (the engine already emits all N ticks past a wedged sink).
 - **Touches:** `crates/multiview-cli/src/pipeline.rs` — `StreamEgress::join` (`pipeline.rs:1629`), the teardown sequence at `pipeline.rs:1088` (`egress.join()`), and the existing precedent `IngestSupervisor::join_all` (`pipeline.rs:2269`) + `INGEST_JOIN_GRACE` (`pipeline.rs:3128`). New test alongside `crates/multiview-cli/tests/streaming_encode.rs`.
 - **Approach:**
@@ -711,7 +717,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` ENG-3 — NTP/PTP lock auto-detect for the wall-clock badge (task #37) · effort: M · deps: ENG-5 (shares the syscall binding)
+### `[x]` ENG-3 — NTP/PTP lock auto-detect for the wall-clock badge (task #37) · effort: M · deps: ENG-5 (shares the syscall binding)
 - **Goal:** Replace the *assumed* `RefStatus::Locked` on the on-screen clock badge with a *measured* kernel lock-state (Linux `adjtimex`, macOS `ntp_adjtime`), so the overlay clock honestly shows Locked / Holdover / Freerun (`RefStatus` already has all three — `crates/multiview-overlay/src/clock.rs:281`).
 - **Touches:** `crates/multiview-cli/src/wallclock.rs` — `SystemWallClock::reference()` (`wallclock.rs:118`) currently returns the static `status` field; `RefStatus` enum (`multiview-overlay/src/clock.rs:281`, `.is_locked()` at :322 covers Locked|Holdover). The binding cannot live in `multiview-cli` (`#![forbid(unsafe_code)]`, `wallclock.rs:33`).
 - **Approach:**
@@ -727,7 +733,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` ENG-4 — Linux i915/amdgpu GPU load probe · effort: L · deps: none
+### `[x]` ENG-4 — Linux i915/amdgpu GPU load probe · effort: L · deps: none
 - **Goal:** Implement the real `SysfsLoadProbe` (currently returns `LoadSample::Unavailable { reason: "Linux sysfs/i915 PMU load probe not yet implemented" }`, `load.rs:630`) so the scheduler gets live AMD/Intel `DeviceLoad` snapshots — sampled off the hot path at 1-4 Hz, never pacing (ADR-0017).
 - **Touches:** `crates/multiview-hal/src/load.rs` — `linux_sysfs` module (`load.rs:600-633`), gated behind `vaapi`/`qsv`; mirrors the `NvmlLoadProbe` reference impl (`load.rs:491+`). Telemetry gauges in `multiview-telemetry` (ADR-0017 §Consequences: register only known metrics).
 - **Approach:**
@@ -744,7 +750,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` ENG-5 — PTP / ST 2059 PHC NIC binding (`ptp` feature) · effort: L · deps: none (blocks ENG-3's syscall shim)
+### `[x]` ENG-5 — PTP / ST 2059 PHC NIC binding (`ptp` feature) · effort: L · deps: none (blocks ENG-3's syscall shim)
 - **Goal:** Bind the disciplined-reference servo (`PtpServo`, fully tested, `ptp.rs`) to a real PTP Hardware Clock: read the host PHC and feed `(offset, delay)` samples into the servo, behind the off-by-default `ptp` feature — sampled, **never pacing** the output clock.
 - **Touches:** `crates/multiview-engine/src/ptp.rs` — the `phc` module (`ptp.rs:263-306`), currently compile-only wrapping `DisciplinedReference`. Feature `"ptp" = []` (`engine/Cargo.toml:44`). Engine forbids unsafe (`lib.rs:87`), so the raw `clock_gettime(dynamic_clock_from_fd)`/`clock_adjtime` calls need a binding boundary.
 - **Approach:**
@@ -760,7 +766,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` ENG-6 — HA cluster peer transport (`cluster` feature) · effort: L · deps: none
+### `[x]` ENG-6 — HA cluster peer transport (`cluster` feature) · effort: L · deps: none
 - **Goal:** Implement a real `ClusterTransport` (peer heartbeat sockets + replication snapshot/delta wire I/O) behind the off-by-default `cluster` feature, driving the already-tested `HaRunner`/`HaStateMachine`/`ReplicaApplier` — best-effort, drop-oldest, never back-pressuring the active engine.
 - **Touches:** `crates/multiview-engine/src/ha/transport.rs` — the `ClusterTransport` trait (`transport.rs:35`) and `HaRunner` (`transport.rs:90`) are done and pure; only a concrete socket impl is missing. `repl.rs` `EngineSnapshot`/`ReplicationDelta` are already serde-tagged (`repl.rs:117`). Feature `"cluster" = []` (`engine/Cargo.toml:52`).
 - **Approach:**
@@ -787,7 +793,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 ## GPU — Compositor, efficiency & hardware
 
 
-### `[ ]` GPU-1 — Hoist the single encoder into the bake consumer; fan packets to mux-only sinks · effort: L · deps: none
+### `[x]` GPU-1 — Hoist the single encoder into the bake consumer; fan packets to mux-only sinks · effort: L · deps: none
 - **Goal:** Make inv #7 actually hold across outputs: a file + HLS run at one rendition must encode the canvas once, not twice, by moving the lone `VideoEncoder` into `consumer_main` and fanning `EncodedPacket`s to `PacketMuxSink`s.
 - **Touches:** `crates/multiview-cli/src/pipeline.rs` — `consumer_main` (1682), `StreamEgress::spawn` (1568), `SinkRunner` type (1448), `run_one_output` (1729), `RunnableOutput` enum (~328), `StreamingFrameSource` (~1735). Uses the existing `multiview_output::PacketMuxSink`/`PacketSource` (`sink.rs:720`) and `multiview_ffmpeg::{EncodedPacket, StreamCodecParameters, VideoEncoder}`. The `EncodeConfig` already lives on the `Pipeline` (`pipeline.rs:565`).
 - **Approach:**
@@ -816,7 +822,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` GPU-3 — GPU `describe_*` metadata trait methods: wire or remove · effort: S · deps: none
+### `[x]` GPU-3 — GPU `describe_*` metadata trait methods: wire or remove · effort: S · deps: none
 - **Goal:** Resolve the dead `NotImplemented` `describe_output` on `GpuCompositor` (and the analogous `Decoder::describe_next`/`Encoder::describe_input` defaults) — either return real `FrameMeta` or remove the override so the scaffold is honest.
 - **Touches:** `crates/multiview-compositor/src/gpu/compositor.rs:525` (`GpuCompositor::describe_output`), `crates/multiview-core/src/traits.rs:98-149` (the three trait defaults + `FrameMeta`). No real decoder/encoder currently implements the core `Decoder`/`Encoder` traits (the ffmpeg crate has its own concrete types), so those two are default-only.
 - **Approach:**
@@ -829,7 +835,7 @@ Key facts that shape the plan: WHEP today is **pure SDP/codec negotiation only**
 
 ---
 
-### `[ ]` GPU-4 — Overlay IMAGE-primitive GPU texture upload (the wgpu shader branch) · effort: L · deps: GPU-3
+### `[~]` GPU-4 — Overlay IMAGE-primitive GPU texture upload (the wgpu shader branch) · effort: L · deps: GPU-3
 - **Goal:** Make the `KIND_IMAGE` branch in `overlay.wgsl` a real premultiplied-RGBA blit (DVB-sub / bitmap caption burn-in on GPU) instead of the transparent no-op, matching the CPU reference `blend_image` within SSIM/PSNR thresholds.
 - **Touches:** `crates/multiview-compositor/src/gpu/shaders/overlay.wgsl:142` (the `KIND_IMAGE` no-op), `crates/multiview-compositor/src/overlay/gpu_subpass.rs` — `OverlayPrimGpu::pack` Image arm (181), `bind_group_layout` (350), `OverlaySubpass` (271); the CPU reference `blend_image` (`overlay/subpass.rs:701`) is the ground truth. Likely needs the GPU compositor to actually **dispatch** the overlay subpass (currently `gpu/compositor.rs` only runs composite+encode) and a new image-atlas/texture-array binding.
 - **Approach:**
@@ -891,7 +897,7 @@ Cross-cutting reality check found during exploration (load-bearing for sequencin
 
 ---
 
-### `[ ]` SUR-1 — IS-05 scheduled activation (absolute + relative) · effort: M · deps: none
+### `[x]` SUR-1 — IS-05 scheduled activation (absolute + relative) · effort: M · deps: none
 - **Goal:** Promote a staged IS-05 connection at a scheduled TAI time so a facility controller can pre-load a 2110 receiver swap, completing the activation modes already modelled but deferred.
 - **Touches:** `crates/multiview-control/src/nmos/is05.rs` (`ActivationMode` is05.rs:29, `Activation.requested_time` is05.rs:47, `ConnectionState::activate_if_immediate` is05.rs:138); `crates/multiview-control/src/nmos/mod.rs` (`NmosRegistry::stage_connection` mod.rs:156, `RegistryInner` mod.rs:71).
 - **Approach:**
@@ -905,7 +911,7 @@ Cross-cutting reality check found during exploration (load-bearing for sequencin
 
 ---
 
-### `[ ]` SUR-2 — IS-07 MQTT broker transport · effort: L · deps: none (parallel with SUR-1)
+### `[x]` SUR-2 — IS-07 MQTT broker transport · effort: L · deps: none (parallel with SUR-1)
 - **Goal:** Carry IS-07 event/tally messages over an MQTT broker so Multiview interoperates with MQTT-native NMOS facilities, completing the transport whose message model + topic seam already exist.
 - **Touches:** `crates/multiview-control/src/is07.rs` (`mod mqtt` is07.rs:300, `topic_for_source`/`topic_for_message` is07.rs:317/324, `Is07Message` is07.rs:118); `crates/multiview-control/Cargo.toml` (`"is07-mqtt" = []` Cargo.toml:106); `deny.toml` (opt-in native dep allowance, deny.toml:28).
 - **Approach:**
@@ -918,7 +924,7 @@ Cross-cutting reality check found during exploration (load-bearing for sequencin
 
 ---
 
-### `[ ]` SUR-3 — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT · effort: XL · deps: none (Rust, independent of web/NMOS)
+### `[x]` SUR-3 — Caption ingest Phase 2/3: broaden native decode beyond HLS WebVTT · effort: XL · deps: none (Rust, independent of web/NMOS)
 - **Goal:** Decode CEA-608/708 (embedded), DVB-teletext, and the HLS native-master rendition in-pipeline per ADR-0019 so captions arrive from the source stream itself, not only from a sidecar/HLS-WebVTT path — degrading to "no cue" and never pacing output.
 - **Touches:** `crates/multiview-ffmpeg/` (caption decoder FFI behind `ffmpeg` feature — captions.md §7 table); `crates/multiview-input/` (PMT-walk discovery, A53 sniff, HLS `SUBTITLES`-group resolve, per-tile cue store — captions.md §7; `unsafe = forbid`); `crates/multiview-overlay::subtitle` (`Cue { start, end, lines }` extended with optional `region`, captions.md §1) + `caption_probe` (captions.md §7); `multiview-cli/src/pipeline.rs` (the one `av_read_frame` loop — captions.md §4).
 - **Approach:** First **audit what is already real vs missing** (the task explicitly asks this):
@@ -933,7 +939,7 @@ Cross-cutting reality check found during exploration (load-bearing for sequencin
 
 ---
 
-### `[ ]` SUR-4 — OpenAPI: annotate the layout/resource write ops so they enter the spec · effort: M · deps: none
+### `[x]` SUR-4 — OpenAPI: annotate the layout/resource write ops so they enter the spec · effort: M · deps: none
 - **Goal:** Add the `POST`/`PUT`/`DELETE`/`GET-by-id` layout (and sources/outputs/overlays) operations to the generated OpenAPI spec so the web client can call them fully-typed, eliminating the hand-written wrapper's reason to exist.
 - **Touches:** `crates/multiview-control/src/routes/mod.rs` (`get_layout` mod.rs:96, `create_layout` mod.rs:108, `update_layout` mod.rs:129, `delete_layout` mod.rs:154 — all currently un-annotated); `crates/multiview-control/src/routes/sources.rs` (`get/create/update/delete_source` sources.rs:62–117); `crates/multiview-control/src/openapi.rs` (`paths(...)` openapi.rs:26, `rest_routes` table openapi.rs:127); `docs/api/openapi.json` (regenerated artifact).
 - **Approach:**
@@ -946,7 +952,7 @@ Cross-cutting reality check found during exploration (load-bearing for sequencin
 
 ---
 
-### `[ ]` SUR-5 — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes · effort: M · deps: SUR-4
+### `[x]` SUR-5 — Web: replace the hand-written layouts wrapper with the generated client + wire deferred routes · effort: M · deps: SUR-4
 - **Goal:** Delete `writeLayout`/`deleteLayout` and call the generated `openapi-fetch` client directly, so layout CRUD is compile-checked against the spec, and route the remaining `PlaceholderPage` screens to real surfaces.
 - **Touches:** `web/src/api/layouts.ts` (whole file — the `TODO(api-schema)` at layouts.ts:15–17 is the trigger), `web/src/api/schema.ts` (regenerated), `web/src/api/client.ts`; `web/src/app/router.tsx` (route table router.tsx:30); `web/src/pages/PlaceholderPage.tsx` consumers (any route still pointing at it); `web/package.json` (`generate:api` script package.json:9).
 - **Approach:**
@@ -959,7 +965,7 @@ Cross-cutting reality check found during exploration (load-bearing for sequencin
 
 ---
 
-### `[ ]` SUR-6 — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope) · effort: XL · deps: none for the schemars derives; the web swap deps SUR-6a
+### `[~]` SUR-6 — AsyncAPI generation + generated realtime envelope types (replace the hand-modelled envelope) · effort: XL · deps: none for the schemars derives; the web swap deps SUR-6a
 - **Goal:** Implement ADR-RT006: derive AsyncAPI 3.0 from the shared `multiview-events` types, serve `/asyncapi.json`, generate TS models, and replace the hand-modelled `web/src/realtime/envelope.ts` (its `TODO(api-schema)` envelope.ts:3) with codegen — closing the realtime drift gap.
 - **Touches:** `crates/multiview-events/` (`envelope.rs:56`, `event.rs`, `subscription.rs`, `topic.rs`, `seq.rs` — add `schemars`/`utoipa` derives; `Cargo.toml` has neither today); `crates/multiview-control/src/openapi.rs` / a new `asyncapi.rs` + route (no `/asyncapi.json` exists yet); `xtask/src/main.rs` (new `gen-asyncapi` task beside `gen-openapi` xtask/src/main.rs:29 — the help text at main.rs:26 already advertises it as "coming soon"); `web/src/realtime/envelope.ts` (+ `connection.ts`, `useEngineEvents.ts`); `web/package.json` (new `generate:events` script).
 - **Approach:**
