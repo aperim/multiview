@@ -1059,6 +1059,7 @@ input_id = "in_b"
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
                 layout: working_name.clone(),
+                document: None,
             })
             .expect("submit apply-layout");
         drain(&mut drive);
@@ -1081,6 +1082,7 @@ input_id = "in_b"
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
                 layout: "no_such_layout".to_owned(),
+                document: None,
             })
             .expect("submit apply-layout");
         // Must not panic.
@@ -1096,6 +1098,207 @@ input_id = "in_b"
             sub.try_recv().is_err(),
             "an unknown layout must not emit a success event"
         );
+    }
+
+    /// Build a stored absolute-layout [`multiview_control::ResolvedLayout`]
+    /// named `wall-x` — one full-canvas cell `stored_cell` bound to `source`
+    /// with an `on_loss = black` slate — solved exactly as the apply-layout
+    /// route solves it (ADR-W017). `canvas` matches `TWO_CELL_DOC` (64x64@25)
+    /// unless overridden.
+    fn stored_full_canvas(
+        source: &str,
+        canvas: serde_json::Value,
+    ) -> multiview_control::ResolvedLayout {
+        let body = serde_json::json!({
+            "canvas": canvas,
+            "layout": { "kind": "absolute" },
+            "cells": [{
+                "id": "stored_cell",
+                "rect": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+                "z": 0,
+                "on_loss": { "slate": "black" },
+                "source": { "input_id": source }
+            }]
+        });
+        let document =
+            multiview_config::LayoutDocument::from_body(&body).expect("stored body parses");
+        let solved = document.solve_named("wall-x").expect("stored body solves");
+        multiview_control::ResolvedLayout::new(solved, document)
+    }
+
+    /// The matching canvas for `TWO_CELL_DOC` (64x64 @ 25/1).
+    fn matching_canvas() -> serde_json::Value {
+        serde_json::json!({ "width": 64, "height": 64, "fps": "25/1" })
+    }
+
+    /// ADR-W017: an `ApplyLayout` carrying a stored, route-solved document swaps
+    /// the ACTIVE layout at the frame boundary — geometry, bindings, per-cell
+    /// slates, and the re-point address space (cell ids) all follow the stored
+    /// document, regardless of any config-layout name.
+    #[test]
+    fn apply_layout_with_stored_document_swaps_geometry_bindings_and_ids() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+        let mut sub = publisher.subscribe();
+
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(stored_full_canvas("in_b", matching_canvas()))),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        // The stored layout is ACTIVE: its name, geometry, and binding.
+        assert_eq!(
+            drive.layout().name,
+            "wall-x",
+            "the stored layout must become the active layout"
+        );
+        assert_eq!(drive.layout().cells.len(), 1);
+        let cell = drive.layout().cells.first().expect("one cell");
+        assert_eq!(cell.source.as_deref(), Some("in_b"));
+        assert!(
+            (cell.w - 1.0).abs() < f32::EPSILON && (cell.h - 1.0).abs() < f32::EPSILON,
+            "the stored cell spans the full canvas"
+        );
+
+        // The re-point address space follows the stored document: the NEW cell
+        // id is addressable (an O(1) SwapSource onto it lands).
+        sender
+            .try_submit(Command::SwapSource {
+                op: OperationId::new(),
+                tile: "stored_cell".to_owned(),
+                source: "in_a".to_owned(),
+            })
+            .expect("submit swap");
+        let _ = drain.apply(&mut drive);
+        assert_eq!(
+            drive.effective_cell_source("stored_cell"),
+            Some("in_a".to_owned()),
+            "the stored layout's cell ids must be live re-point addresses"
+        );
+
+        // The apply is observable on the realtime stream (drop-oldest, inv #10):
+        // a job.progress outcome naming the stored layout id.
+        let mut saw_apply = false;
+        while let Ok(seq) = sub.try_recv() {
+            if let Event::JobProgress(progress) = seq.event.as_ref() {
+                if progress.phase == "apply_layout" {
+                    assert_eq!(progress.pct, 100);
+                    assert!(
+                        progress.message.as_deref().unwrap_or_default().contains("wall-x"),
+                        "the outcome names the stored layout id"
+                    );
+                    saw_apply = true;
+                }
+            }
+        }
+        assert!(
+            saw_apply,
+            "a successful stored-layout apply emits a job.progress outcome"
+        );
+    }
+
+    /// ADR-W017: the next composited frame PROVES the apply — pixels that were
+    /// the left cell's no-signal slate become the stored layout's full-canvas
+    /// source on the very next tick.
+    #[test]
+    fn apply_layout_changes_the_next_composited_frame() {
+        use multiview_core::time::MediaTime;
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+
+        // A real drive whose `in_b` store holds a BRIGHT frame (luma 200); `in_a`
+        // stays empty so cell_a (the left half) composes the dark slate.
+        let cfg = test_config();
+        let drive_cfg = test_config();
+        let mut drive = test_drive(&drive_cfg);
+        let bright = Nv12Image::solid(
+            cfg.canvas.width,
+            cfg.canvas.height,
+            200,
+            128,
+            128,
+            multiview_compositor::pipeline::CanvasColor::default().output_tag(),
+        )
+        .expect("bright frame");
+        // Reach the in_b store through a fresh drive build is not possible here;
+        // publish via a store registered on the drive instead.
+        let store = Arc::new(multiview_framestore::TileStore::<Nv12Image>::with_defaults("in_b"));
+        store.publish(bright, MediaTime::from_nanos(0));
+        drive.insert_store("in_b", Arc::clone(&store));
+
+        let tick = |index: u64| multiview_engine::Tick {
+            index,
+            pts: MediaTime::from_nanos(0),
+        };
+        // Left-half center pixel: cell_a samples the empty `in_a` → slate (dark).
+        let before = drive.compose(tick(0)).expect("compose before");
+        let (y_before, _, _) = before.canvas.sample(16, 32).expect("sample before");
+        assert!(
+            y_before < 64,
+            "before the apply the left half is the dark slate (got luma {y_before})"
+        );
+
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(stored_full_canvas("in_b", matching_canvas()))),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        // The very next composited frame draws the stored layout: the same
+        // pixel is now the bright full-canvas `in_b` source.
+        let after = drive.compose(tick(1)).expect("compose after");
+        let (y_after, _, _) = after.canvas.sample(16, 32).expect("sample after");
+        assert!(
+            y_after > 150,
+            "after the apply the next frame draws the stored full-canvas source \
+             (got luma {y_after}, was {y_before})"
+        );
+    }
+
+    /// ADR-R004 / ADR-W017 guard: the output canvas (geometry + cadence) is
+    /// PINNED for the session — a stored document authored for a different
+    /// canvas is held (warned), never adopted, and the output keeps composing
+    /// on the pinned canvas. (The route refuses this with 422; the drain is the
+    /// authoritative backstop.)
+    #[test]
+    fn apply_layout_with_mismatched_canvas_is_held() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+        let before = drive.layout().name.clone();
+
+        // Same document shape, WRONG canvas (128x128@30 vs the running 64x64@25).
+        let mismatched =
+            stored_full_canvas("in_b", serde_json::json!({ "width": 128, "height": 128, "fps": "30/1" }));
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(mismatched)),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        assert_eq!(
+            drive.layout().name,
+            before,
+            "a pinned-canvas mismatch must be held, never adopted (Class-2)"
+        );
+        assert_eq!(drive.layout().canvas.width, 64, "the pinned canvas survives");
     }
 
     #[test]

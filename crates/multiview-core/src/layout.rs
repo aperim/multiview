@@ -118,7 +118,7 @@ const fn default_opacity() -> f32 {
 /// constructed without them (or deserialized from a document predating them)
 /// behaves exactly as before. Use `..Cell::default()` in struct literals to opt
 /// out of the new fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     /// Left edge (fraction of canvas width).
     pub x: f32,
@@ -240,7 +240,7 @@ impl Canvas {
 }
 
 /// A complete named layout/template.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     /// Template name.
     pub name: String,

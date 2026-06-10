@@ -242,11 +242,28 @@ async fn apply_layout_202_carries_the_solved_document_and_apply_classes() {
         assert!(carried.contains(&class), "carried_only includes {class:?}");
     }
 
-    // Exactly one command reached the engine. (The solved-document payload the
-    // command carries is asserted once the wire shape lands — see the
-    // `command_carries_resolved_document` test added with it.)
+    // The drained command carries the layout SOLVED at the route (ADR-W017):
+    // the frame-boundary drain only swaps — no repository read, no re-solve.
     let drained = h.commands.try_drain();
     assert_eq!(drained.len(), 1);
+    match &drained[0] {
+        multiview_control::Command::ApplyLayout {
+            layout, document, ..
+        } => {
+            assert_eq!(layout, "wall-a");
+            let resolved = document
+                .as_deref()
+                .expect("the command carries the resolved stored layout");
+            assert_eq!(resolved.solved.name, "wall-a");
+            assert_eq!(resolved.solved.cells.len(), 1);
+            assert_eq!(
+                resolved.solved.cells[0].source.as_deref(),
+                Some("in_a"),
+                "the solved cells carry their source bindings"
+            );
+        }
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    }
 }
 
 #[tokio::test]

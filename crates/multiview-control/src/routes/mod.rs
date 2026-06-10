@@ -388,6 +388,7 @@ pub(crate) async fn cmd_apply_layout(
     let response = submit_accepted(&state, &idem, |op| Command::ApplyLayout {
         op,
         layout: req.layout,
+        document: None,
     })?;
     // Audit the accepted command (the engine reports its outcome separately on
     // the realtime stream; what we audit here is the operator's request).
