@@ -19,8 +19,12 @@
 //!   control-API mDNS service type is **undocumented / unverified** (the public
 //!   doc mentions an mDNS section but gives no service-type string). We do **not**
 //!   fabricate one: a zowietek-control browse type is recognised **only** when the
-//!   operator configures it (best-effort, clearly labelled unverified). Until
-//!   then, such a service is reported `unknown`, never mis-claimed as zowietek.
+//!   operator configures it via the `[discovery]` config section
+//!   (`multiview_config::DiscoveryConfig::zowietek_service_type`; best-effort,
+//!   clearly labelled unverified). Until then, such a service is reported
+//!   `unknown`, never mis-claimed as zowietek. The same section's
+//!   `extra_service_types` adds further browse types (extra scope, never extra
+//!   trust — they classify by the same honest inference).
 //!
 //! ## Trust + isolation (ADR-0041, invariant #10)
 //!
@@ -32,16 +36,29 @@
 //! can back-pressure the engine — the same proof shape as the other
 //! control-plane producers. The real multicast socket lives behind the
 //! off-by-default `discovery` feature ([`MdnsBrowser`]); the model, the
-//! driver-kind inference, and the injected [`DiscoveryBrowser`] seam are always
-//! compiled and tested socket-free.
+//! driver-kind inference, the interleaved drain ([`drain_interleaved`]), and
+//! the injected [`DiscoveryBrowser`] seam are always compiled and tested
+//! socket-free.
+//!
+//! ## Hostile-responder bounds
+//!
+//! mDNS answers are unauthenticated LAN input. Everything a responder controls
+//! is bounded before it is retained: one scan collects at most
+//! [`MAX_SCAN_EVENTS`] services (fair-shared across the browsed types), and
+//! every advertised string/list is truncated/capped by
+//! [`DiscoveredService::from_raw`] ([`MAX_FIELD_LEN`], [`MAX_TXT_VALUE_LEN`],
+//! [`MAX_TXT_RECORDS`], [`MAX_ENDPOINTS`]). Scans themselves are single-flight
+//! ([`ScanGate`]) — bounded *and* rate-limited (ADR-M008).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use multiview_events::AddressFamily;
 use serde::{Deserialize, Serialize};
+
+use crate::command::OperationId;
 
 /// The DNS-SD service type for Cast targets (Chromecast / Cast groups).
 pub const CAST_SERVICE_TYPE: &str = "_googlecast._tcp.local.";
@@ -60,6 +77,27 @@ pub const DEFAULT_ENTRY_TTL: Duration = Duration::from_secs(120);
 /// The default cap on the number of retained discovered services (bounded,
 /// drop-oldest — invariant #10).
 pub const DEFAULT_INVENTORY_CAPACITY: usize = 256;
+
+/// Hostile-responder bound: the cap on raw services one scan may collect
+/// across all browsed types — 4× the default inventory capacity, far beyond
+/// any sane LAN's mDNS population, so a flood of forged responses bounds the
+/// scan's transient memory instead of growing it (invariant #10).
+pub const MAX_SCAN_EVENTS: usize = DEFAULT_INVENTORY_CAPACITY * 4;
+
+/// Hostile-responder bound: bytes retained of any advertised name / host /
+/// service-type / TXT key (a legitimate DNS name is at most 253 bytes).
+pub const MAX_FIELD_LEN: usize = 256;
+
+/// Hostile-responder bound: bytes retained of one advertised TXT value.
+pub const MAX_TXT_VALUE_LEN: usize = 512;
+
+/// Hostile-responder bound: TXT records retained per discovered service.
+pub const MAX_TXT_RECORDS: usize = 64;
+
+/// Hostile-responder bound: resolved endpoints retained per discovered
+/// service. Endpoints are ordered AAAA-first **before** the cap, so a flood of
+/// forged IPv4 answers can never evict the IPv6 lead (ADR-0042).
+pub const MAX_ENDPOINTS: usize = 16;
 
 /// The inferred driver family of a discovered service, from its service type
 /// (and the operator-configured zowietek-control type, if any).
@@ -275,32 +313,43 @@ impl DiscoveredService {
     /// type, if any (see [`infer_driver_kind`]). Endpoints are ordered
     /// **AAAA-first** with IPv4 labelled legacy; the primary address is the
     /// leading (IPv6, where present) endpoint.
+    ///
+    /// Every responder-controlled value is bounded here (mDNS answers are
+    /// unauthenticated LAN input): strings are truncated to [`MAX_FIELD_LEN`] /
+    /// [`MAX_TXT_VALUE_LEN`] bytes (on a char boundary), TXT records are capped
+    /// at [`MAX_TXT_RECORDS`], and endpoints at [`MAX_ENDPOINTS`] — applied
+    /// after AAAA-first ordering so the IPv6 lead survives the cap.
     #[must_use]
     pub fn from_raw(
         raw: &RawDiscoveredService,
         configured_zowietek: Option<&str>,
         expires_at: Instant,
     ) -> Self {
-        let driver_kind = infer_driver_kind(&raw.service_type, configured_zowietek);
-        let endpoints = order_endpoints(&raw.addresses, raw.port);
+        let service_type = truncate_field(&raw.service_type, MAX_FIELD_LEN);
+        let name = truncate_field(&raw.instance_name, MAX_FIELD_LEN);
+        let host = truncate_field(&raw.host, MAX_FIELD_LEN);
+        let driver_kind = infer_driver_kind(&service_type, configured_zowietek);
+        let mut endpoints = order_endpoints(&raw.addresses, raw.port);
+        endpoints.truncate(MAX_ENDPOINTS);
         let primary_address = endpoints
             .first()
-            .map_or_else(|| raw.host.clone(), |ep| ep.address.clone());
+            .map_or_else(|| host.clone(), |ep| ep.address.clone());
         let mut txt: Vec<TxtRecord> = raw
             .txt
             .iter()
+            .take(MAX_TXT_RECORDS)
             .map(|(k, v)| TxtRecord {
-                key: k.clone(),
-                value: v.clone(),
+                key: truncate_field(k, MAX_FIELD_LEN),
+                value: truncate_field(v, MAX_TXT_VALUE_LEN),
             })
             .collect();
         txt.sort();
         Self {
-            key: dedup_key(driver_kind, &raw.instance_name, &raw.service_type),
+            key: dedup_key(driver_kind, &name, &service_type),
             driver_kind,
-            service_type: raw.service_type.clone(),
-            name: raw.instance_name.clone(),
-            host: raw.host.clone(),
+            service_type,
+            name,
+            host,
             port: raw.port,
             endpoints,
             primary_address,
@@ -354,6 +403,20 @@ pub fn order_endpoints(addrs: &[IpAddr], port: u16) -> Vec<DiscoveredEndpoint> {
 /// when its driver kind, instance name, and service type match.
 fn dedup_key(kind: DiscoveryDriverKind, instance: &str, service_type: &str) -> String {
     format!("{}|{}|{}", kind.as_str(), instance, service_type)
+}
+
+/// Truncate a responder-controlled string to at most `max` **bytes** on a char
+/// boundary (a hostile responder must never grow retained memory or split a
+/// UTF-8 sequence). Values within the bound are kept verbatim.
+fn truncate_field(value: &str, max: usize) -> String {
+    if value.len() <= max {
+        return value.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.get(..end).unwrap_or_default().to_owned()
 }
 
 /// System time as Unix nanoseconds (informational `last_seen` stamp; not used
@@ -533,27 +596,224 @@ pub fn default_service_types(configured_zowietek: Option<&str>) -> Vec<String> {
     types
 }
 
+/// The full set of service types one scan browses: the
+/// [`default_service_types`] (Cast + NDI + the configured zowietek-control
+/// type) plus the operator-configured `extra` types, deduplicated with the
+/// `.local.`-tolerant comparison so no type is ever browsed twice (re-browsing
+/// a type would overwrite its live `mdns-sd` listener).
+#[must_use]
+pub fn scan_service_types(configured_zowietek: Option<&str>, extra: &[String]) -> Vec<String> {
+    let mut types = default_service_types(configured_zowietek);
+    for ty in extra {
+        if !types.iter().any(|t| service_types_match(t, ty)) {
+            types.push(ty.clone());
+        }
+    }
+    types
+}
+
+/// One browse-event receiver the interleaved scan drain polls — the seam that
+/// makes [`drain_interleaved`] CI-testable without sockets. The `discovery`
+/// feature implements it over an `mdns-sd` browse channel; tests implement it
+/// over plain tokio channels.
+pub trait DrainReceiver {
+    /// The event type the receiver yields.
+    type Event;
+
+    /// Await the next event, resolving to [`None`] once the channel is closed.
+    /// Must be **cancel-safe** (the drain drops an in-flight `recv` future at
+    /// the deadline; a delivered event must not be lost by that drop) — both
+    /// `flume` and `tokio::sync::mpsc` receivers are.
+    fn recv(&mut self) -> impl std::future::Future<Output = Option<Self::Event>> + Send;
+
+    /// Take one already-queued event without waiting (the final post-deadline
+    /// sweep).
+    fn try_recv(&mut self) -> Option<Self::Event>;
+}
+
+/// Drain `receivers` **concurrently** until `budget` elapses, collecting at
+/// most `max_events` events in total.
+///
+/// Each receiver is drained by its own task, so no receiver can starve
+/// another: a chatty browse channel (`_googlecast._tcp` plus `mdns-sd`'s
+/// periodic `SearchStarted` keepalives) is consumed continuously while the
+/// quieter channels' events are collected the moment they arrive. Continuous
+/// consumption is also the daemon-side liveness proof — `mdns-sd` delivers
+/// into a bounded channel with a **blocking** send from its single daemon
+/// thread, so an undrained receiver would stall every other browse; here every
+/// receiver is always being awaited.
+///
+/// The global `max_events` cap (hostile-responder bound) is split fairly: each
+/// receiver may contribute at most `max_events / receivers.len()` events, so a
+/// flood of forged answers on one type cannot spend another type's share. At
+/// the deadline each task takes a final **non-blocking sweep** of its queue so
+/// events that arrived within the budget are never dropped on the floor.
+pub async fn drain_interleaved<R>(
+    receivers: Vec<R>,
+    budget: Duration,
+    max_events: usize,
+) -> Vec<R::Event>
+where
+    R: DrainReceiver + Send + 'static,
+    R::Event: Send + 'static,
+{
+    if receivers.is_empty() || max_events == 0 {
+        return Vec::new();
+    }
+    let deadline = tokio::time::Instant::now() + budget;
+    // Each receiver's fair share of the global cap (at least 1 so a scan of
+    // many types still collects something); the per-task caps sum to at most
+    // `max_events` except in the degenerate more-receivers-than-cap case,
+    // which the final truncate bounds exactly.
+    let share = (max_events / receivers.len()).max(1);
+    let mut tasks = tokio::task::JoinSet::new();
+    for mut rx in receivers {
+        tasks.spawn(async move {
+            let mut out: Vec<R::Event> = Vec::new();
+            while out.len() < share {
+                tokio::select! {
+                    event = rx.recv() => match event {
+                        Some(event) => out.push(event),
+                        // Closed: nothing more can arrive on this receiver.
+                        None => return out,
+                    },
+                    () = tokio::time::sleep_until(deadline) => break,
+                }
+            }
+            // Deadline (or share cap) reached: sweep whatever is already
+            // queued without waiting, so in-budget events are never dropped.
+            while out.len() < share {
+                match rx.try_recv() {
+                    Some(event) => out.push(event),
+                    None => break,
+                }
+            }
+            out
+        });
+    }
+    let mut all = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        // A task can only fail by panicking, which only a test receiver can do
+        // (the library receivers never panic); a panicked drain simply
+        // contributes no events.
+        if let Ok(events) = joined {
+            all.extend(events);
+        }
+    }
+    all.truncate(max_events);
+    all
+}
+
+/// Single-flight admission for the discovery scan: **one in-flight browse**.
+///
+/// `mdns-sd` keeps one listener per service type — a second concurrent browse
+/// of the same type overwrites the first scan's listener, and either scan's
+/// `stop_browse` removes the other's live querier and flushes its cache, so
+/// concurrent scans destructively corrupt each other. The gate admits one
+/// running scan; a concurrent request **attaches** to it (it is answered with
+/// the running scan's operation id) instead of starting a second browse. This
+/// is also the scan rate limit (ADR-M008 "bounded and rate-limited"): at most
+/// one LAN browse runs at any time.
+#[derive(Debug, Default)]
+pub struct ScanGate {
+    /// The operation id of the running scan, if any.
+    running: Mutex<Option<OperationId>>,
+}
+
+/// The outcome of asking the [`ScanGate`] to admit a scan.
+#[derive(Debug)]
+pub enum ScanAdmission {
+    /// No scan was running: this request owns the slot. The held
+    /// [`ScanGuard`] clears the slot when the scan task ends (it is dropped
+    /// with the task, so even an unwound or cancelled scan can never wedge
+    /// discovery).
+    Started(ScanGuard),
+    /// A scan is already running: answer with **its** operation id and do not
+    /// browse again.
+    Attached(OperationId),
+}
+
+impl ScanGate {
+    /// A fresh gate with no scan running.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Admit a scan: claim the slot for `op`, or attach to the running scan.
+    #[must_use]
+    pub fn begin(self: &Arc<Self>, op: OperationId) -> ScanAdmission {
+        let mut slot = self.lock();
+        if let Some(running) = slot.as_ref() {
+            return ScanAdmission::Attached(running.clone());
+        }
+        *slot = Some(op.clone());
+        ScanAdmission::Started(ScanGuard {
+            gate: Arc::clone(self),
+            op,
+        })
+    }
+
+    /// Clear the slot **iff** it still holds `op` (idempotent; a newer scan's
+    /// claim is never erased by a stale guard).
+    fn finish(&self, op: &OperationId) {
+        let mut slot = self.lock();
+        if slot.as_ref() == Some(op) {
+            *slot = None;
+        }
+    }
+
+    /// Lock the slot, recovering from a poisoned lock (a panic elsewhere must
+    /// not wedge discovery).
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<OperationId>> {
+        match self.running.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// Clears the [`ScanGate`] slot when dropped (the scan task holds it for the
+/// duration of the browse).
+#[derive(Debug)]
+pub struct ScanGuard {
+    gate: Arc<ScanGate>,
+    op: OperationId,
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        self.gate.finish(&self.op);
+    }
+}
+
 #[cfg(feature = "discovery")]
 pub use mdns::MdnsBrowser;
 
 /// The real `mdns-sd`-backed multicast browser, compiled only behind the
 /// off-by-default `discovery` feature. This is the **only** socket-touching code
-/// in the discovery subsystem — everything above is pure and tested socket-free.
+/// in the discovery subsystem — everything above (including the interleaved
+/// drain it runs) is pure and tested socket-free.
 #[cfg(feature = "discovery")]
 mod mdns {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use mdns_sd::{ServiceDaemon, ServiceEvent};
 
-    use super::{DiscoveryBrowser, RawDiscoveredService};
+    use super::{
+        drain_interleaved, DiscoveryBrowser, DrainReceiver, RawDiscoveredService, MAX_SCAN_EVENTS,
+    };
 
     /// A multicast mDNS/DNS-SD browser over [`mdns_sd::ServiceDaemon`].
     ///
     /// `mdns-sd` runs its own runtime-agnostic background thread and delivers
-    /// resolved services over a channel; we drain that channel until the time
-    /// `budget` elapses, then stop the browse. The daemon socket is owned by the
-    /// daemon thread, never the engine — so this cannot back-pressure the engine
-    /// (invariant #10).
+    /// browse events over one bounded channel per service type, with a
+    /// **blocking** send from its single daemon thread. The browse drains all
+    /// of those channels **concurrently** ([`drain_interleaved`]) until the
+    /// time budget elapses, so no service type can starve another and the
+    /// daemon is never left blocked on an undrained channel. The daemon socket
+    /// is owned by the daemon thread, never the engine — so this cannot
+    /// back-pressure the engine (invariant #10).
     pub struct MdnsBrowser {
         daemon: ServiceDaemon,
     }
@@ -580,37 +840,83 @@ mod mdns {
         }
     }
 
+    /// One browse channel adapted to the interleaved drain: yields only
+    /// resolved services, consuming (and discarding) the browse-lifecycle
+    /// noise (`SearchStarted` etc.) so the keepalives keep the channel drained
+    /// without counting against the scan's event cap.
+    struct ResolvedReceiver(mdns_sd::Receiver<ServiceEvent>);
+
+    impl DrainReceiver for ResolvedReceiver {
+        type Event = RawDiscoveredService;
+
+        async fn recv(&mut self) -> Option<RawDiscoveredService> {
+            loop {
+                match self.0.recv_async().await {
+                    Ok(ServiceEvent::ServiceResolved(info)) => {
+                        return Some(raw_from_resolved(&info));
+                    }
+                    // Browse-lifecycle noise: keep the channel drained.
+                    Ok(_) => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+
+        fn try_recv(&mut self) -> Option<RawDiscoveredService> {
+            loop {
+                match self.0.try_recv() {
+                    Ok(ServiceEvent::ServiceResolved(info)) => {
+                        return Some(raw_from_resolved(&info));
+                    }
+                    Ok(_) => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+    }
+
     impl DiscoveryBrowser for MdnsBrowser {
         fn browse(&self, service_types: &[String], budget: Duration) -> Vec<RawDiscoveredService> {
-            let deadline = Instant::now() + budget;
             let mut receivers = Vec::new();
             for ty in service_types {
-                if let Ok(rx) = self.daemon.browse(ty) {
-                    receivers.push((ty.clone(), rx));
+                match self.daemon.browse(ty) {
+                    Ok(rx) => receivers.push(ResolvedReceiver(rx)),
+                    Err(e) => tracing::warn!(
+                        service_type = %ty,
+                        error = %e,
+                        "mDNS browse failed to start for service type; it is \
+                         skipped for this scan"
+                    ),
                 }
             }
-            let mut out = Vec::new();
-            // Drain each browse channel until the shared budget elapses.
-            for (_, rx) in &receivers {
-                loop {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    match rx.recv_timeout(remaining) {
-                        Ok(ServiceEvent::ServiceResolved(info)) => {
-                            out.push(raw_from_resolved(&info));
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
-                    }
-                }
-            }
+            let out = run_drain(receivers, budget);
             for ty in service_types {
                 let _ = self.daemon.stop_browse(ty);
             }
             out
         }
+    }
+
+    /// Run the interleaved drain to completion on a **scan-local**
+    /// current-thread runtime. `browse` is a blocking call by contract (the
+    /// scan task wraps it in `spawn_blocking`), so blocking this thread on a
+    /// private mini-runtime is safe, keeps the drain's timers/tasks off any
+    /// shared runtime, and works even when no ambient runtime exists.
+    fn run_drain(receivers: Vec<ResolvedReceiver>, budget: Duration) -> Vec<RawDiscoveredService> {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not build the scan drain runtime; this scan finds nothing"
+                );
+                return Vec::new();
+            }
+        };
+        runtime.block_on(drain_interleaved(receivers, budget, MAX_SCAN_EVENTS))
     }
 
     /// Convert a resolved `mdns-sd` service into our raw model.

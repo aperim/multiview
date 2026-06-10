@@ -408,8 +408,15 @@ export interface paths {
          * @description The browse runs on a bounded control-plane task: it asks the injected browser
          *     for services within a time budget, classifies each into the **untrusted
          *     inventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`
-         *     event per service. It never creates a device (ADR-0041). A retried
-         *     `Idempotency-Key` returns the original operation id.
+         *     event per service, correlated to this operation id via the envelope `corr`
+         *     (ADR-RT007). It never creates a device (ADR-0041).
+         *
+         *     Scans are **single-flight** (one in-flight browse — concurrent `mdns-sd`
+         *     browses corrupt each other's listeners/queriers, and one browse at a time is
+         *     the ADR-M008 rate limit): a request that arrives while a scan runs
+         *     **attaches** to it and is answered with the *running* scan's operation id.
+         *     A retried `Idempotency-Key` returns the original operation id without
+         *     re-executing the browse (the canonical replay semantics).
          */
         post: operations["scan_devices"];
         delete?: never;
@@ -2437,8 +2444,10 @@ export interface components {
              */
             note: string;
             /**
-             * @description The operation id for this scan (the `device.discovered` rows it produces
-             *     stream on the realtime `devices` topic while it runs).
+             * @description The operation id of the scan that actually runs — freshly started,
+             *     attached-to (single-flight), or replayed (`Idempotency-Key`). The
+             *     `device.discovered` rows it produces stream on the realtime `devices`
+             *     topic while it runs, each echoing this id as the envelope `corr`.
              */
             operation_id: string;
             /**
@@ -4077,7 +4086,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Scan accepted; discovered rows stream as device.discovered events and land in the untrusted inventory. */
+            /** @description Scan accepted (or attached to the single-flight running scan, or replayed by Idempotency-Key — the operation id names the scan that actually runs); discovered rows stream as device.discovered events correlated via corr and land in the untrusted inventory. */
             202: {
                 headers: {
                     [name: string]: unknown;

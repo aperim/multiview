@@ -1370,11 +1370,11 @@
           "discovery"
         ],
         "summary": "`POST /api/v1/discovery/devices/scan` — kick a time-bounded mDNS browse\n(role: write; `202` + operation id).",
-        "description": "The browse runs on a bounded control-plane task: it asks the injected browser\nfor services within a time budget, classifies each into the **untrusted\ninventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`\nevent per service. It never creates a device (ADR-0041). A retried\n`Idempotency-Key` returns the original operation id.",
+        "description": "The browse runs on a bounded control-plane task: it asks the injected browser\nfor services within a time budget, classifies each into the **untrusted\ninventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`\nevent per service, correlated to this operation id via the envelope `corr`\n(ADR-RT007). It never creates a device (ADR-0041).\n\nScans are **single-flight** (one in-flight browse — concurrent `mdns-sd`\nbrowses corrupt each other's listeners/queriers, and one browse at a time is\nthe ADR-M008 rate limit): a request that arrives while a scan runs\n**attaches** to it and is answered with the *running* scan's operation id.\nA retried `Idempotency-Key` returns the original operation id without\nre-executing the browse (the canonical replay semantics).",
         "operationId": "scan_devices",
         "responses": {
           "202": {
-            "description": "Scan accepted; discovered rows stream as device.discovered events and land in the untrusted inventory.",
+            "description": "Scan accepted (or attached to the single-flight running scan, or replayed by Idempotency-Key — the operation id names the scan that actually runs); discovered rows stream as device.discovered events correlated via corr and land in the untrusted inventory.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7851,7 +7851,7 @@
           },
           "operation_id": {
             "type": "string",
-            "description": "The operation id for this scan (the `device.discovered` rows it produces\nstream on the realtime `devices` topic while it runs)."
+            "description": "The operation id of the scan that actually runs — freshly started,\nattached-to (single-flight), or replayed (`Idempotency-Key`). The\n`device.discovered` rows it produces stream on the realtime `devices`\ntopic while it runs, each echoing this id as the envelope `corr`."
           },
           "service_types": {
             "type": "array",

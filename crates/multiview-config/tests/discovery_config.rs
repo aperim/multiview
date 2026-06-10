@@ -59,7 +59,10 @@ fn discovery_section_parses_validates_and_roundtrips() {
     let cfg = MultiviewConfig::load_from_toml(&toml).expect("the [discovery] section parses");
     cfg.validate().expect("a well-formed [discovery] validates");
 
-    let discovery = cfg.discovery.as_ref().expect("the discovery section is kept");
+    let discovery = cfg
+        .discovery
+        .as_ref()
+        .expect("the discovery section is kept");
     assert_eq!(
         discovery.zowietek_service_type.as_deref(),
         Some("_zowietek-ctl._tcp.local.")
@@ -89,7 +92,9 @@ fn absent_discovery_section_is_none_and_valid() {
 fn discovery_rejects_an_empty_zowietek_service_type() {
     let toml = format!("{BASE}\n[discovery]\nzowietek_service_type = \"\"\n");
     let cfg = MultiviewConfig::load_from_toml(&toml).expect("parses");
-    let err = cfg.validate().expect_err("an empty service type must be rejected");
+    let err = cfg
+        .validate()
+        .expect_err("an empty service type must be rejected");
     assert!(
         err.to_string().contains("discovery"),
         "the error names the discovery section: {err}"

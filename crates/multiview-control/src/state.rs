@@ -19,7 +19,7 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
-use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser};
+use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
 use crate::devices::DeviceStatusRegistry;
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
@@ -338,6 +338,17 @@ pub struct AppState {
     /// this on a bounded control-plane task and publishes `device.discovered`
     /// (drop-oldest) — it never awaits a client (invariant #10).
     pub discovery_browser: Arc<dyn DiscoveryBrowser>,
+    /// Single-flight admission for the discovery scan: **one in-flight mDNS
+    /// browse** (concurrent `mdns-sd` browses of the same type overwrite each
+    /// other's listeners, and either scan's `stop_browse` removes the other's
+    /// live querier). A concurrent scan request attaches to the running scan's
+    /// operation id. Also the scan rate limit (ADR-M008).
+    pub discovery_scan_gate: Arc<ScanGate>,
+    /// The `[discovery]` browse configuration (managed-devices brief §6): the
+    /// operator-configured zowietek-control service type (the vendor's type is
+    /// unverified — never fabricated) and any extra DNS-SD types to browse.
+    /// Defaults to the empty section (built-in Cast + NDI types only).
+    pub discovery_config: Arc<multiview_config::DiscoveryConfig>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -462,6 +473,8 @@ impl AppState {
             device_status: Arc::new(DeviceStatusRegistry::new()),
             discovery: Arc::new(DiscoveryInventory::default()),
             discovery_browser: Arc::new(NullBrowser),
+            discovery_scan_gate: Arc::new(ScanGate::new()),
+            discovery_config: Arc::new(multiview_config::DiscoveryConfig::default()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -663,6 +676,16 @@ impl AppState {
     #[must_use]
     pub fn with_discovery_inventory(mut self, discovery: Arc<DiscoveryInventory>) -> Self {
         self.discovery = discovery;
+        self
+    }
+
+    /// Set the `[discovery]` browse configuration from the loaded config: the
+    /// operator-configured zowietek-control service type and any extra DNS-SD
+    /// types to browse. The binary threads `MultiviewConfig::discovery` here;
+    /// the default is the empty section (built-in Cast + NDI types only).
+    #[must_use]
+    pub fn with_discovery_config(mut self, config: multiview_config::DiscoveryConfig) -> Self {
+        self.discovery_config = Arc::new(config);
         self
     }
 

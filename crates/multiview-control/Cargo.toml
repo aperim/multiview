@@ -98,7 +98,11 @@ rumqttc = { version = "0.25.1", default-features = false, optional = true }
 # allowlist (MIT / Apache-2.0 / BSD-3-Clause); it is pure Rust with no native C
 # deps and ships its own runtime-agnostic background thread, so the feature
 # stays LGPL-clean and out of the CI-green default build. The `async` feature
-# gives the browse `Receiver` a `recv_async()` we poll from a bounded tokio task.
+# gives the browse `Receiver` a `recv_async()` the scan's interleaved drain
+# (`drain_interleaved`, one task per browsed type on a scan-local runtime)
+# awaits concurrently across every browse channel, so no service type can
+# starve another and the daemon's bounded blocking send never wedges on an
+# undrained channel.
 mdns-sd = { version = "0.20.0", default-features = false, features = [
     "async",
 ], optional = true }

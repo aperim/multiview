@@ -43,9 +43,7 @@ use multiview_control::devices::discovery::{
 };
 use multiview_control::devices::DeviceBroadcaster;
 use multiview_control::realtime::{CorrKey, CorrRegistry};
-use multiview_control::{
-    DeviceStatusRegistry, EngineStateSnapshot, OperationId, SessionStream,
-};
+use multiview_control::{DeviceStatusRegistry, EngineStateSnapshot, OperationId, SessionStream};
 use multiview_engine::EnginePublisher;
 use multiview_events::{AddressFamily, Event};
 use serde_json::json;
@@ -84,8 +82,7 @@ fn post_scan(token: &str, idempotency_key: Option<&str>) -> Request<Body> {
 async fn scan_op(router: &axum::Router, key: Option<&str>) -> String {
     let resp = send(router, post_scan(OPERATOR_TOKEN, key)).await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    body_json(resp)
-        .await["operation_id"]
+    body_json(resp).await["operation_id"]
         .as_str()
         .expect("an operation id")
         .to_owned()
@@ -251,7 +248,10 @@ fn from_raw_truncates_hostile_oversized_fields() {
         svc.service_type.len() <= MAX_FIELD_LEN,
         "service type is truncated"
     );
-    assert!(svc.txt.len() <= MAX_TXT_RECORDS, "TXT record count is capped");
+    assert!(
+        svc.txt.len() <= MAX_TXT_RECORDS,
+        "TXT record count is capped"
+    );
     for record in &svc.txt {
         assert!(record.key.len() <= MAX_FIELD_LEN, "TXT key is truncated");
         assert!(
@@ -343,7 +343,10 @@ async fn concurrent_scans_single_flight_attach_to_the_running_scan() {
     // A concurrent POST attaches to the RUNNING scan instead of spawning a
     // second browse (mdns-sd listeners/queriers are mutually destructive).
     let op2 = scan_op(&h.router, None).await;
-    assert_eq!(op2, op1, "a concurrent scan attaches to the running scan's op");
+    assert_eq!(
+        op2, op1,
+        "a concurrent scan attaches to the running scan's op"
+    );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
@@ -368,7 +371,11 @@ async fn concurrent_scans_single_flight_attach_to_the_running_scan() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "the new scan browses again");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the new scan browses again"
+    );
 }
 
 #[tokio::test]
@@ -434,10 +441,8 @@ async fn corr_window_does_not_stamp_pre_window_events() {
     let engine: Arc<EnginePublisher<EngineStateSnapshot, Event>> =
         Arc::new(EnginePublisher::new(64));
     let registry = Arc::new(CorrRegistry::new(8));
-    let broadcaster = DeviceBroadcaster::new(
-        Arc::clone(&engine),
-        Arc::new(DeviceStatusRegistry::new()),
-    );
+    let broadcaster =
+        DeviceBroadcaster::new(Arc::clone(&engine), Arc::new(DeviceStatusRegistry::new()));
     let mut session = SessionStream::new(engine.subscribe(), "sess-window", None)
         .with_corr_registry(Arc::clone(&registry));
 
@@ -537,7 +542,12 @@ fn scan_service_types_include_configured_and_extra_types_deduplicated() {
     // browsed twice.
     let ndi_count = types
         .iter()
-        .filter(|t| t.trim_end_matches('.').trim_end_matches(".local").trim_end_matches('.') == "_ndi._tcp")
+        .filter(|t| {
+            t.trim_end_matches('.')
+                .trim_end_matches(".local")
+                .trim_end_matches('.')
+                == "_ndi._tcp"
+        })
         .count();
     assert_eq!(ndi_count, 1, "no duplicated browse types: {types:?}");
 }

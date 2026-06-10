@@ -145,7 +145,11 @@ where
     )
     .with_preview(preview)
     .with_warning_store(warnings)
-    .with_auth_disabled(auth_disabled);
+    .with_auth_disabled(auth_disabled)
+    // The `[discovery]` browse configuration: the operator-configured
+    // zowietek-control service type (the vendor's type is unverified — only a
+    // configured string is ever recognised) plus any extra DNS-SD types.
+    .with_discovery_config(config.discovery.clone().unwrap_or_default());
 
     // Install the real mDNS browser when the `discovery` feature is built, so
     // `POST /api/v1/discovery/devices/scan` browses the LAN for Cast / NDI /
