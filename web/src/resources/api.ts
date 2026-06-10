@@ -239,10 +239,12 @@ export function sourceLocatorKey(kind: SourceKind): 'url' | 'name' | 'path' | un
       return 'name';
     case 'file':
       return 'path';
-    // Synthetic kinds (ADR-0027) carry no locator; `test` is the legacy alias.
+    // Synthetic kinds (ADR-0027 / ADR-0047) carry no locator; `test` is the
+    // legacy alias.
     case 'bars':
     case 'solid':
     case 'clock':
+    case 'timer':
     case 'test':
       return undefined;
     default:

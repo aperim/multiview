@@ -61,7 +61,10 @@ export type FormErrorCode =
   | 'duplicate-input'
   | 'reserved-track'
   | 'program-bus-muted'
-  | 'rational-fps';
+  | 'rational-fps'
+  | 'timezone'
+  | 'time-of-day'
+  | 'date-time';
 
 /** Per-field validation errors keyed by form-state field name. */
 export type FieldErrors<Field extends string> = Partial<Record<Field, FormErrorCode>>;
@@ -131,6 +134,93 @@ function urlErrorCode(
   return undefined;
 }
 
+/**
+ * The IANA timezone ids offered to the timezone pickers as `<datalist>`
+ * suggestions, sorted. `UTC` always leads (the universal, DST-free default, an
+ * alias `Intl.supportedValuesOf` omits but `chrono-tz` accepts — ADR-0047), then
+ * the host-discovered zones via `Intl.supportedValuesOf('timeZone')` (Node 18+ /
+ * modern browsers). Empty when the runtime exposes no tz database; the field
+ * still works as free text validated by {@link isKnownTimezone} + the server.
+ */
+export const IANA_TIMEZONES: readonly string[] = ((): readonly string[] => {
+  // `Intl.supportedValuesOf` is ES2022; older runtimes (or a polyfilled jsdom)
+  // may not expose it, so probe before calling and degrade to free text.
+  if (typeof Intl.supportedValuesOf !== 'function') {
+    return [];
+  }
+  try {
+    const zones = Intl.supportedValuesOf('timeZone')
+      .filter((zone) => zone !== 'UTC')
+      .sort((a, b) => a.localeCompare(b));
+    return ['UTC', ...zones];
+  } catch {
+    return [];
+  }
+})();
+
+/**
+ * Whether `id` is a timezone this runtime recognizes. Probes the platform tz
+ * database via `Intl.DateTimeFormat` (which canonicalizes — it accepts both
+ * `UTC` and every IANA id, throwing `RangeError` for an unknown zone), matching
+ * the set `chrono-tz` resolves server-side. This is a best-effort early catch:
+ * the server remains the authority (an unknown zone is a typed
+ * `ConfigError`/422, surfaced inline — ADR-0047 §5.2).
+ */
+export function isKnownTimezone(id: string): boolean {
+  const trimmed = id.trim();
+  if (trimmed === '') {
+    return false;
+  }
+  try {
+    // Throws RangeError for an invalid `timeZone` option; canonicalizes valid
+    // ids (including the `UTC` alias the supported-values list omits).
+    new Intl.DateTimeFormat(undefined, { timeZone: trimmed });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `HH:MM:SS` (24-hour) time-of-day, the shape the timer `at` field carries. */
+const TIME_OF_DAY_RE = /^([01]\d|2[0-3]):[0-5]\d:[0-5]\d$/;
+
+/** Whether `value` is a valid `HH:MM:SS` 24-hour time-of-day (timer.rs `parse_hms`). */
+export function isValidTimeOfDay(value: string): boolean {
+  return TIME_OF_DAY_RE.test(value.trim());
+}
+
+/**
+ * Whether `value` is a valid `YYYY-MM-DDTHH:MM:SS` local date+time — the shape
+ * `TimerTarget::DateTime` parses (timer.rs `parse_naive_datetime`). The calendar
+ * is checked (month length / leap years) by reconstructing the date, so an
+ * impossible day (e.g. `2026-02-30`) is rejected, never silently accepted.
+ */
+export function isValidLocalDateTime(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ]([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$/.exec(value.trim());
+  if (m === null) {
+    return false;
+  }
+  const [year, month, day, hour, minute, second] = [
+    Number(m[1]),
+    Number(m[2]),
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6]),
+  ];
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+  // Reconstruct in UTC and confirm the calendar fields survive — rejects
+  // overflow days like 2026-02-30 / 2026-04-31 that the regex alone allows.
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
 /** Type guard: a non-null, non-array object (a plain record). */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -192,10 +282,56 @@ function extraOf(
 export type SourceFormKind = Exclude<SourceKind, 'test'>;
 
 /** The clock-face styles (schema `ClockFaceConfig`, snake_case). */
-export type ClockFace = 'analog' | 'digital';
+export type ClockFace = 'analog' | 'digital' | 'dual';
 
-/** Both clock faces, for building selectors. */
-export const CLOCK_FACES: readonly ClockFace[] = ['analog', 'digital'];
+/**
+ * All clock faces, for building selectors. `dual` (ADR-0047) is an analogue
+ * face with a digital readout beneath it.
+ */
+export const CLOCK_FACES: readonly ClockFace[] = ['analog', 'digital', 'dual'];
+
+/**
+ * The clock faces a `[[overlays]]` clock overlay supports — `analog`/`digital`
+ * only (the overlay run path renders a single face; `dual` is a source-only
+ * placement). Kept distinct from {@link CLOCK_FACES} so the source picker can
+ * offer `dual` without leaking it into the overlay form.
+ */
+export const OVERLAY_CLOCK_FACES: readonly ClockFace[] = ['analog', 'digital'];
+
+/** The timer target kinds (schema `TimerTarget`, tagged on `target`). */
+export type TimerTargetType = 'time_of_day' | 'date_time';
+
+/** Both timer target kinds, for building selectors. */
+export const TIMER_TARGET_TYPES: readonly TimerTargetType[] = ['time_of_day', 'date_time'];
+
+/** Timer count direction (schema `TimerDirection`, snake_case). */
+export type TimerDirection = 'down' | 'up';
+
+/** Both timer directions, for building selectors. */
+export const TIMER_DIRECTIONS: readonly TimerDirection[] = ['down', 'up'];
+
+/** At/after-target behaviour (schema `TimerOnTarget`, snake_case). */
+export type TimerOnTarget = 'hold' | 'continue' | 'zero_then_up' | 'recur';
+
+/** All at-target behaviours, for building selectors. */
+export const TIMER_ON_TARGETS: readonly TimerOnTarget[] = [
+  'hold',
+  'continue',
+  'zero_then_up',
+  'recur',
+];
+
+/** Timer display format (schema `TimerFormat`, snake_case). */
+export type TimerFormat = 'd_hh_mm_ss' | 'hh_mm_ss' | 'mm_ss' | 'hh_mm_ss_ff' | 'auto';
+
+/** All timer formats, for building selectors. */
+export const TIMER_FORMATS: readonly TimerFormat[] = [
+  'd_hh_mm_ss',
+  'hh_mm_ss',
+  'mm_ss',
+  'hh_mm_ss_ff',
+  'auto',
+];
 
 /** RTSP lower-transport options (schema `RtspOptions.transport`); '' = default. */
 export type RtspTransport = '' | 'tcp' | 'udp';
@@ -237,12 +373,44 @@ export interface SourceFormState {
   readonly path: string;
   /** Fill colour (`solid`). */
   readonly color: string;
-  /** Clock face (`clock`). */
+  /** Clock face (`clock`): analog / digital / dual. */
   readonly clockFace: ClockFace;
   /** 12-hour mode (`clock`). */
   readonly clockTwelveHour: boolean;
-  /** Timezone offset in minutes (`clock`). */
+  /** IANA timezone id (`clock`, '' = use the fixed offset). Wins over offset. */
+  readonly clockTimezone: string;
+  /** Timezone offset in minutes (`clock`; ignored when `clockTimezone` is set). */
   readonly clockTzMinutes: string;
+  /** Location/title label drawn on the face (`clock`, '' = none). */
+  readonly clockLabel: string;
+  /** Draw a `UTC±HH:MM` offset badge (`clock`). */
+  readonly clockShowOffset: boolean;
+  /** Draw the disciplined-reference (PTP/NTP/SYS) badge (`clock`). */
+  readonly clockShowReference: boolean;
+  /** Draw hour numerals on the analogue / dual face (`clock`). */
+  readonly clockNumerals: boolean;
+  /** Timer target kind (`timer`): time-of-day vs date+time. */
+  readonly timerTargetType: TimerTargetType;
+  /** Target `at` string (`timer`): `HH:MM:SS` (time-of-day) or `YYYY-MM-DDTHH:MM:SS`. */
+  readonly timerAt: string;
+  /** IANA timezone id (`timer`, '' = use the fixed offset). Wins over offset. */
+  readonly timerTimezone: string;
+  /** Timezone offset in minutes (`timer`; ignored when `timerTimezone` is set). */
+  readonly timerTzMinutes: string;
+  /** Re-arm to the next day each day (`timer`, time-of-day target only). */
+  readonly timerRecurDaily: boolean;
+  /** Count direction (`timer`): down to / up from the target. */
+  readonly timerDirection: TimerDirection;
+  /** At/after-target behaviour (`timer`). */
+  readonly timerOnTarget: TimerOnTarget;
+  /** Display format (`timer`). */
+  readonly timerFormat: TimerFormat;
+  /** Operator label drawn with the count (`timer`, '' = none). */
+  readonly timerLabel: string;
+  /** Overrun prefix override (`timer`, '' = the default `+`). */
+  readonly timerOverrunPrefix: string;
+  /** Draw the overrun a11y badge (`OVER`/`ELAPSED`) past the target (`timer`). */
+  readonly timerOverrunBadge: boolean;
   /** RTSP lower transport ('' = engine default, omitted from the body). */
   readonly rtspTransport: RtspTransport;
   /** Caption selector mode ('none' = no `captions` block). */
@@ -282,6 +450,10 @@ export type SourceField =
   | 'path'
   | 'color'
   | 'clockTzMinutes'
+  | 'clockTimezone'
+  | 'timerAt'
+  | 'timerTimezone'
+  | 'timerTzMinutes'
   | 'captionsPage'
   | 'captionsTrack'
   | 'captionsField'
@@ -303,7 +475,23 @@ export function emptySourceForm(): SourceFormState {
     color: SOLID_DEFAULT_COLOR,
     clockFace: 'analog',
     clockTwelveHour: false,
+    clockTimezone: '',
     clockTzMinutes: '0',
+    clockLabel: '',
+    clockShowOffset: false,
+    clockShowReference: false,
+    clockNumerals: false,
+    timerTargetType: 'time_of_day',
+    timerAt: '',
+    timerTimezone: '',
+    timerTzMinutes: '0',
+    timerRecurDaily: false,
+    timerDirection: 'down',
+    timerOnTarget: 'hold',
+    timerFormat: 'd_hh_mm_ss',
+    timerLabel: '',
+    timerOverrunPrefix: '',
+    timerOverrunBadge: true,
     rtspTransport: '',
     captionsMode: 'none',
     captionsPage: '',
@@ -335,7 +523,22 @@ const SOURCE_MANAGED_KEYS: readonly string[] = [
   'color',
   'face',
   'twelve_hour',
+  'timezone',
   'tz_offset_minutes',
+  'label',
+  'show_offset',
+  'show_reference',
+  'numerals',
+  // Timer keys: the `target` discriminator + the flattened `TimerTarget`
+  // payload (`at` / `recur_daily`) and the timer's own fields.
+  'target',
+  'at',
+  'recur_daily',
+  'direction',
+  'on_target',
+  'format',
+  'overrun_prefix',
+  'overrun_badge',
   'rtsp',
   'auth',
   'color_override',
@@ -373,6 +576,30 @@ export function withSourceKind(form: SourceFormState, kind: SourceFormKind): Sou
   };
 }
 
+/**
+ * Switch a timer form's target kind. Moving to a `date_time` target drops the
+ * time-of-day-only state (`recur_daily`, and the `recur` at-target policy that
+ * the schema only honours for a recurring time-of-day target — ADR-0047) so the
+ * body can never carry an inert/invalid combination. The `at` string resets
+ * because the two target shapes are different (`HH:MM:SS` vs a full date+time).
+ */
+export function withTimerTargetType(
+  form: SourceFormState,
+  targetType: TimerTargetType,
+): SourceFormState {
+  if (targetType === form.timerTargetType) {
+    return form;
+  }
+  return {
+    ...form,
+    timerTargetType: targetType,
+    timerAt: '',
+    timerRecurDaily: targetType === 'time_of_day' ? form.timerRecurDaily : false,
+    timerOnTarget:
+      targetType === 'date_time' && form.timerOnTarget === 'recur' ? 'hold' : form.timerOnTarget,
+  };
+}
+
 /** Build the exact config `Source` body from a valid form. */
 export function sourceFormToBody(form: SourceFormState): Record<string, unknown> {
   const body: Record<string, unknown> = { ...form.extra };
@@ -388,11 +615,54 @@ export function sourceFormToBody(form: SourceFormState): Record<string, unknown>
     case 'solid':
       body.color = form.color.trim();
       break;
-    case 'clock':
+    case 'clock': {
       body.face = form.clockFace;
       body.twelve_hour = form.clockTwelveHour;
-      body.tz_offset_minutes = parseIntStrict(form.clockTzMinutes) ?? 0;
+      const tz = form.clockTimezone.trim();
+      if (tz !== '') {
+        // An IANA zone wins over the fixed offset (DST-correct, ADR-0047 §5.2);
+        // the offset is then omitted so the body reflects the chosen mode.
+        body.timezone = tz;
+      } else {
+        body.tz_offset_minutes = parseIntStrict(form.clockTzMinutes) ?? 0;
+      }
+      const label = form.clockLabel.trim();
+      if (label !== '') {
+        body.label = label;
+      }
+      body.show_offset = form.clockShowOffset;
+      body.show_reference = form.clockShowReference;
+      body.numerals = form.clockNumerals;
       break;
+    }
+    case 'timer': {
+      body.target = form.timerTargetType;
+      body.at = form.timerAt.trim();
+      const tz = form.timerTimezone.trim();
+      if (tz !== '') {
+        body.timezone = tz;
+      } else {
+        body.tz_offset_minutes = parseIntStrict(form.timerTzMinutes) ?? 0;
+      }
+      // `recur_daily` is a time-of-day-only field (the schema ignores it on a
+      // date_time target); write it only there so the body stays kind-exact.
+      if (form.timerTargetType === 'time_of_day') {
+        body.recur_daily = form.timerRecurDaily;
+      }
+      body.direction = form.timerDirection;
+      body.on_target = form.timerOnTarget;
+      body.format = form.timerFormat;
+      const label = form.timerLabel.trim();
+      if (label !== '') {
+        body.label = label;
+      }
+      const prefix = form.timerOverrunPrefix;
+      if (prefix.trim() !== '') {
+        body.overrun_prefix = prefix;
+      }
+      body.overrun_badge = form.timerOverrunBadge;
+      break;
+    }
     case 'rtsp':
       body.url = form.url.trim();
       if (form.rtspTransport !== '') {
@@ -471,6 +741,7 @@ export function parseSourceFormKind(tag: string | undefined): SourceFormKind | u
       'bars',
       'solid',
       'clock',
+      'timer',
       'rtsp',
       'hls',
       'youtube',
@@ -524,7 +795,27 @@ export function sourceFormFromRecord(record: ResourceRecord): SourceFormState | 
     color: asString(body.color) ?? SOLID_DEFAULT_COLOR,
     clockFace: CLOCK_FACES.find((face) => face === asString(body.face)) ?? 'analog',
     clockTwelveHour: body.twelve_hour === true,
+    clockTimezone: kind === 'clock' ? (asString(body.timezone) ?? '') : '',
     clockTzMinutes: numberToField(asFiniteNumber(body.tz_offset_minutes)) || '0',
+    clockLabel: kind === 'clock' ? (asString(body.label) ?? '') : '',
+    clockShowOffset: kind === 'clock' && body.show_offset === true,
+    clockShowReference: kind === 'clock' && body.show_reference === true,
+    clockNumerals: kind === 'clock' && body.numerals === true,
+    timerTargetType:
+      TIMER_TARGET_TYPES.find((tt) => tt === asString(body.target)) ?? 'time_of_day',
+    timerAt: kind === 'timer' ? (asString(body.at) ?? '') : '',
+    timerTimezone: kind === 'timer' ? (asString(body.timezone) ?? '') : '',
+    timerTzMinutes:
+      kind === 'timer' ? numberToField(asFiniteNumber(body.tz_offset_minutes)) || '0' : '0',
+    timerRecurDaily: kind === 'timer' && body.recur_daily === true,
+    timerDirection: TIMER_DIRECTIONS.find((d) => d === asString(body.direction)) ?? 'down',
+    timerOnTarget: TIMER_ON_TARGETS.find((o) => o === asString(body.on_target)) ?? 'hold',
+    timerFormat: TIMER_FORMATS.find((f) => f === asString(body.format)) ?? 'd_hh_mm_ss',
+    timerLabel: kind === 'timer' ? (asString(body.label) ?? '') : '',
+    timerOverrunPrefix: kind === 'timer' ? (asString(body.overrun_prefix) ?? '') : '',
+    // `overrun_badge` defaults to true on the schema (`default_true`); an absent
+    // field means "draw it", so only an explicit `false` turns it off.
+    timerOverrunBadge: kind === 'timer' ? body.overrun_badge !== false : true,
     rtspTransport: transport === 'tcp' || transport === 'udp' ? transport : '',
     captionsMode,
     captionsPage: numberToField(asFiniteNumber(captions?.page)),
@@ -612,9 +903,39 @@ export function validateSourceForm(
       }
       break;
     case 'clock': {
-      const tz = parseIntStrict(form.clockTzMinutes);
-      if (tz === undefined || tz < CLOCK_TZ_MIN_MINUTES || tz > CLOCK_TZ_MAX_MINUTES) {
-        errors.clockTzMinutes = 'int-range';
+      if (form.clockTimezone.trim() !== '') {
+        // IANA mode: the zone id is validated; the fixed offset is ignored.
+        if (!isKnownTimezone(form.clockTimezone)) {
+          errors.clockTimezone = 'timezone';
+        }
+      } else {
+        const tz = parseIntStrict(form.clockTzMinutes);
+        if (tz === undefined || tz < CLOCK_TZ_MIN_MINUTES || tz > CLOCK_TZ_MAX_MINUTES) {
+          errors.clockTzMinutes = 'int-range';
+        }
+      }
+      break;
+    }
+    case 'timer': {
+      const at = form.timerAt.trim();
+      if (at === '') {
+        errors.timerAt = 'required';
+      } else if (form.timerTargetType === 'time_of_day') {
+        if (!isValidTimeOfDay(at)) {
+          errors.timerAt = 'time-of-day';
+        }
+      } else if (!isValidLocalDateTime(at)) {
+        errors.timerAt = 'date-time';
+      }
+      if (form.timerTimezone.trim() !== '') {
+        if (!isKnownTimezone(form.timerTimezone)) {
+          errors.timerTimezone = 'timezone';
+        }
+      } else {
+        const tz = parseIntStrict(form.timerTzMinutes);
+        if (tz === undefined || tz < CLOCK_TZ_MIN_MINUTES || tz > CLOCK_TZ_MAX_MINUTES) {
+          errors.timerTzMinutes = 'int-range';
+        }
       }
       break;
     }

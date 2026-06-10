@@ -18,12 +18,18 @@ import {
   CAPTION_MODES,
   CLOCK_FACES,
   emptySourceForm,
+  IANA_TIMEZONES,
   PIN_VENDORS,
   sourceFormFromRecord,
   sourceFormToBody,
   sourceKindHasUrl,
+  TIMER_DIRECTIONS,
+  TIMER_FORMATS,
+  TIMER_ON_TARGETS,
+  TIMER_TARGET_TYPES,
   validateSourceForm,
   withSourceKind,
+  withTimerTargetType,
 } from '../resources/forms';
 import type {
   CaptionsMode,
@@ -34,6 +40,10 @@ import type {
   SourceField,
   SourceFormKind,
   SourceFormState,
+  TimerDirection,
+  TimerFormat,
+  TimerOnTarget,
+  TimerTargetType,
   WallClockChoice,
 } from '../resources/forms';
 import { CrudPage, KindCell, NameCell, RowActions } from '../resources/CrudPage';
@@ -193,42 +203,329 @@ function SourceKindFields({
         />
       );
     case 'clock':
-      return (
-        <>
-          <SelectField<ClockFace>
-            label={t`Face`}
-            value={form.clockFace}
-            options={CLOCK_FACES}
-            onChange={(next): void => {
-              setForm({ ...form, clockFace: next });
-            }}
-          />
-          <CheckboxField
-            id="source-clock-12h"
-            label={t`12-hour clock`}
-            checked={form.clockTwelveHour}
-            onChange={(next): void => {
-              setForm({ ...form, clockTwelveHour: next });
-            }}
-          />
-          <FormField
-            id="source-clock-tz"
-            label={t`Timezone offset (minutes from UTC)`}
-            type="number"
-            value={form.clockTzMinutes}
-            placeholder="0"
-            error={errors.clockTzMinutes}
-            hint={<Trans>Whole minutes between −720 and 840 (e.g. 600 = UTC+10).</Trans>}
-            onChange={(next): void => {
-              setForm({ ...form, clockTzMinutes: next });
-            }}
-          />
-        </>
-      );
+      return <ClockKindFields form={form} setForm={setForm} errors={errors} />;
+    case 'timer':
+      return <TimerKindFields form={form} setForm={setForm} errors={errors} />;
     default:
       // `bars` carries only its kind tag.
       return null;
   }
+}
+
+/** Translate a clock face value to its localized option label. */
+function clockFaceLabel(face: ClockFace): JSX.Element {
+  switch (face) {
+    case 'analog':
+      return <Trans>Analog (hands on a dial)</Trans>;
+    case 'digital':
+      return <Trans>Digital (HH:MM:SS readout)</Trans>;
+    case 'dual':
+      return <Trans>Dual (analogue face + digital readout)</Trans>;
+  }
+}
+
+/** The clock-source fields (ADR-0047: face/timezone/label + metadata toggles). */
+function ClockKindFields({
+  form,
+  setForm,
+  errors,
+}: {
+  readonly form: SourceFormState;
+  readonly setForm: (next: SourceFormState) => void;
+  readonly errors: FieldErrors<SourceField>;
+}): JSX.Element {
+  const { t } = useLingui();
+  const usingZone = form.clockTimezone.trim() !== '';
+  return (
+    <>
+      <SelectField<ClockFace>
+        label={t`Face`}
+        value={form.clockFace}
+        options={CLOCK_FACES}
+        optionLabel={clockFaceLabel}
+        onChange={(next): void => {
+          setForm({ ...form, clockFace: next });
+        }}
+      />
+      <CheckboxField
+        id="source-clock-12h"
+        label={t`12-hour clock`}
+        checked={form.clockTwelveHour}
+        onChange={(next): void => {
+          setForm({ ...form, clockTwelveHour: next });
+        }}
+      />
+      <FormField
+        id="source-clock-tz-name"
+        label={t`Timezone (IANA id)`}
+        value={form.clockTimezone}
+        placeholder="Australia/Sydney"
+        datalist={IANA_TIMEZONES}
+        error={errors.clockTimezone}
+        hint={
+          <Trans>
+            DST-correct, preferred over a fixed offset (e.g. Australia/Sydney,
+            UTC). Leave blank to use a fixed offset instead.
+          </Trans>
+        }
+        onChange={(next): void => {
+          setForm({ ...form, clockTimezone: next });
+        }}
+      />
+      {usingZone ? null : (
+        <FormField
+          id="source-clock-tz"
+          label={t`Timezone offset (minutes from UTC)`}
+          type="number"
+          value={form.clockTzMinutes}
+          placeholder="0"
+          error={errors.clockTzMinutes}
+          hint={<Trans>Whole minutes between −720 and 840 (e.g. 600 = UTC+10).</Trans>}
+          onChange={(next): void => {
+            setForm({ ...form, clockTzMinutes: next });
+          }}
+        />
+      )}
+      <FormField
+        id="source-clock-label"
+        label={t`Label (optional)`}
+        value={form.clockLabel}
+        placeholder={t`e.g. Sydney`}
+        hint={<Trans>A location/title drawn on the face. Leave blank for none.</Trans>}
+        onChange={(next): void => {
+          setForm({ ...form, clockLabel: next });
+        }}
+      />
+      <CheckboxField
+        id="source-clock-show-offset"
+        label={t`Show the UTC offset badge`}
+        checked={form.clockShowOffset}
+        onChange={(next): void => {
+          setForm({ ...form, clockShowOffset: next });
+        }}
+      />
+      <CheckboxField
+        id="source-clock-show-reference"
+        label={t`Show the reference-lock badge (PTP/NTP/SYS)`}
+        checked={form.clockShowReference}
+        onChange={(next): void => {
+          setForm({ ...form, clockShowReference: next });
+        }}
+      />
+      <CheckboxField
+        id="source-clock-numerals"
+        label={t`Draw hour numerals (analogue / dual face)`}
+        checked={form.clockNumerals}
+        onChange={(next): void => {
+          setForm({ ...form, clockNumerals: next });
+        }}
+      />
+    </>
+  );
+}
+
+/** Translate a timer target type to its localized option label. */
+function timerTargetTypeLabel(type: TimerTargetType): JSX.Element {
+  return type === 'time_of_day' ? (
+    <Trans>Time of day (recurring)</Trans>
+  ) : (
+    <Trans>Specific date &amp; time</Trans>
+  );
+}
+
+/** Translate a timer direction to its localized option label. */
+function timerDirectionLabel(direction: TimerDirection): JSX.Element {
+  return direction === 'down' ? (
+    <Trans>Count down to the target</Trans>
+  ) : (
+    <Trans>Count up from the target</Trans>
+  );
+}
+
+/** Translate a timer at-target behaviour to its localized option label. */
+function timerOnTargetLabel(onTarget: TimerOnTarget): JSX.Element {
+  switch (onTarget) {
+    case 'hold':
+      return <Trans>Hold at 00:00:00</Trans>;
+    case 'continue':
+      return <Trans>Continue past the target</Trans>;
+    case 'zero_then_up':
+      return <Trans>Reach zero, then count the overrun up</Trans>;
+    case 'recur':
+      return <Trans>Re-arm to the next occurrence (recurring daily)</Trans>;
+  }
+}
+
+/** Translate a timer format to its localized option label. */
+function timerFormatLabel(format: TimerFormat): JSX.Element {
+  switch (format) {
+    case 'd_hh_mm_ss':
+      return <Trans>D:HH:MM:SS (drop day when zero)</Trans>;
+    case 'hh_mm_ss':
+      return <Trans>HH:MM:SS</Trans>;
+    case 'mm_ss':
+      return <Trans>MM:SS</Trans>;
+    case 'hh_mm_ss_ff':
+      return <Trans>HH:MM:SS:FF (with frames)</Trans>;
+    case 'auto':
+      return <Trans>Auto (drop leading zero units)</Trans>;
+  }
+}
+
+/** The timer-source fields (ADR-0047: target/direction/on_target/format + overrun). */
+function TimerKindFields({
+  form,
+  setForm,
+  errors,
+}: {
+  readonly form: SourceFormState;
+  readonly setForm: (next: SourceFormState) => void;
+  readonly errors: FieldErrors<SourceField>;
+}): JSX.Element {
+  const { t } = useLingui();
+  const isTimeOfDay = form.timerTargetType === 'time_of_day';
+  const usingZone = form.timerTimezone.trim() !== '';
+  // `recur` is only meaningful for a recurring time-of-day target (ADR-0047);
+  // hide it for a date+time target so the body never carries an inert policy.
+  const onTargetOptions = isTimeOfDay
+    ? TIMER_ON_TARGETS
+    : TIMER_ON_TARGETS.filter((o) => o !== 'recur');
+  return (
+    <>
+      <SelectField<TimerTargetType>
+        label={t`Target`}
+        value={form.timerTargetType}
+        options={TIMER_TARGET_TYPES}
+        optionLabel={timerTargetTypeLabel}
+        onChange={(next): void => {
+          setForm(withTimerTargetType(form, next));
+        }}
+      />
+      {isTimeOfDay ? (
+        <FormField
+          id="source-timer-at-tod"
+          label={t`Target time of day`}
+          value={form.timerAt}
+          required
+          placeholder="14:30:00"
+          error={errors.timerAt}
+          hint={<Trans>24-hour HH:MM:SS in the timezone below.</Trans>}
+          onChange={(next): void => {
+            setForm({ ...form, timerAt: next });
+          }}
+        />
+      ) : (
+        <FormField
+          id="source-timer-at-dt"
+          label={t`Target date &amp; time`}
+          value={form.timerAt}
+          required
+          placeholder="2026-07-01T09:00:00"
+          error={errors.timerAt}
+          hint={<Trans>Local YYYY-MM-DDTHH:MM:SS, resolved in the timezone below.</Trans>}
+          onChange={(next): void => {
+            setForm({ ...form, timerAt: next });
+          }}
+        />
+      )}
+      <FormField
+        id="source-timer-tz-name"
+        label={t`Timezone (IANA id)`}
+        value={form.timerTimezone}
+        placeholder="Australia/Sydney"
+        datalist={IANA_TIMEZONES}
+        error={errors.timerTimezone}
+        hint={
+          <Trans>
+            DST-correct, preferred over a fixed offset. Leave blank to use a
+            fixed offset instead.
+          </Trans>
+        }
+        onChange={(next): void => {
+          setForm({ ...form, timerTimezone: next });
+        }}
+      />
+      {usingZone ? null : (
+        <FormField
+          id="source-timer-tz"
+          label={t`Timezone offset (minutes from UTC)`}
+          type="number"
+          value={form.timerTzMinutes}
+          placeholder="0"
+          error={errors.timerTzMinutes}
+          hint={<Trans>Whole minutes between −720 and 840 (e.g. 600 = UTC+10).</Trans>}
+          onChange={(next): void => {
+            setForm({ ...form, timerTzMinutes: next });
+          }}
+        />
+      )}
+      {isTimeOfDay ? (
+        <CheckboxField
+          id="source-timer-recur-daily"
+          label={t`Recur daily (re-arm each day)`}
+          checked={form.timerRecurDaily}
+          onChange={(next): void => {
+            setForm({ ...form, timerRecurDaily: next });
+          }}
+        />
+      ) : null}
+      <SelectField<TimerDirection>
+        label={t`Direction`}
+        value={form.timerDirection}
+        options={TIMER_DIRECTIONS}
+        optionLabel={timerDirectionLabel}
+        onChange={(next): void => {
+          setForm({ ...form, timerDirection: next });
+        }}
+      />
+      <SelectField<TimerOnTarget>
+        label={t`At the target`}
+        value={form.timerOnTarget}
+        options={onTargetOptions}
+        optionLabel={timerOnTargetLabel}
+        onChange={(next): void => {
+          setForm({ ...form, timerOnTarget: next });
+        }}
+      />
+      <SelectField<TimerFormat>
+        label={t`Display format`}
+        value={form.timerFormat}
+        options={TIMER_FORMATS}
+        optionLabel={timerFormatLabel}
+        onChange={(next): void => {
+          setForm({ ...form, timerFormat: next });
+        }}
+      />
+      <FormField
+        id="source-timer-label"
+        label={t`Label (optional)`}
+        value={form.timerLabel}
+        placeholder={t`e.g. ON AIR IN`}
+        hint={<Trans>Drawn with the count. Leave blank for none.</Trans>}
+        onChange={(next): void => {
+          setForm({ ...form, timerLabel: next });
+        }}
+      />
+      <FormField
+        id="source-timer-overrun-prefix"
+        label={t`Overrun prefix (optional)`}
+        value={form.timerOverrunPrefix}
+        placeholder="+"
+        hint={<Trans>Shown past the target. Blank uses the default “+”.</Trans>}
+        onChange={(next): void => {
+          setForm({ ...form, timerOverrunPrefix: next });
+        }}
+      />
+      <CheckboxField
+        id="source-timer-overrun-badge"
+        label={t`Show the overrun badge (OVER / ELAPSED)`}
+        checked={form.timerOverrunBadge}
+        onChange={(next): void => {
+          setForm({ ...form, timerOverrunBadge: next });
+        }}
+      />
+    </>
+  );
 }
 
 /** The collapsible Advanced block (captions / colour / pin / wallclock / auth). */
@@ -528,16 +825,17 @@ export function SourcesPage(): JSX.Element {
           helpLabel={t`How configuration applies`}
           message={
             <Trans>
-              Synthetic sources (bars, solid colour, clock) apply to the running
-              engine immediately when saved, and deleting any source removes it
-              from the running engine immediately. Network and file sources are
-              stored and go live via config export + restart. Each save response
-              declares which applied (X-Multiview-Apply: live or restart).
+              Synthetic sources (bars, solid colour, clock, timer) apply to the
+              running engine immediately when saved, and deleting any source
+              removes it from the running engine immediately. Network and file
+              sources are stored and go live via config export + restart. Each
+              save response declares which applied (X-Multiview-Apply: live or
+              restart).
             </Trans>
           }
         />
       }
-      savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart.`}
+      savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock, timer) apply to the running engine immediately; other kinds go live via config export + restart.`}
       deletedDescription={t`Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed.`}
       list={sources.data ?? []}
       isPending={sources.isPending}
