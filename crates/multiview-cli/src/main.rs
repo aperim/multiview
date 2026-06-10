@@ -339,6 +339,19 @@ async fn run_pipeline_until_ctrl_c(
         None,
     );
 
+    // CONSPECT engine-seam S5 (ADR-0052 §3): the consent-independent local-metrics
+    // retention feed for the real libav pipeline. A read-only subscriber to the
+    // SAME outbound broadcast mirrors live utilisation / per-input reconnect /
+    // incident events into the bounded, drop-oldest on-box [`RetentionStore`] for
+    // the §7.2 support bundle — independent of telemetry consent, never able to
+    // back-pressure the engine (read-only + lagged-skip, invariant #10). The feed
+    // task self-terminates when the engine's publish handles drop at shutdown.
+    let retention_store = Arc::new(multiview_telemetry::retention::RetentionStore::new());
+    let retention_task = tokio::spawn(multiview_cli::metrics_retention::run_metrics_retention(
+        publisher.subscribe(),
+        Arc::clone(&retention_store),
+    ));
+
     // SA-0 (ADR-0035): at build time, off the output-clock thread (the clock is
     // not yet constructed → inv #1), cross-check the wgpu compositor adapter
     // against discovered hardware. If a real GPU is present but compositing
@@ -370,9 +383,11 @@ async fn run_pipeline_until_ctrl_c(
             .await?;
 
     // The pipeline loop returned; stop the metrics poller (it also self-stops on
-    // the StopSignal within one sample period) and tear down the live-source hub
-    // (it stops + joins every runtime producer).
+    // the StopSignal within one sample period), the retention feed, and tear down
+    // the live-source hub (it stops + joins every runtime producer).
     metrics_task.abort();
+    retention_task.abort();
+    log_retention_summary(&retention_store);
     if let Some(hub) = live_hub {
         hub.shutdown();
     }
@@ -592,6 +607,20 @@ async fn run_software_until_ctrl_c(
         None,
     );
 
+    // CONSPECT engine-seam S5 (ADR-0052 §3): the consent-independent local-metrics
+    // retention feed. A read-only subscriber to the SAME outbound broadcast mirrors
+    // live utilisation / per-input reconnect / incident events into the bounded,
+    // drop-oldest on-box [`RetentionStore`] for the §7.2 support bundle. It is
+    // independent of telemetry consent and can never back-pressure the engine
+    // (read-only + lagged-skip, invariant #10). Held in the run scope so the store
+    // lives for the whole run; the feed task self-terminates when the engine's
+    // publish handles drop at shutdown.
+    let retention_store = Arc::new(multiview_telemetry::retention::RetentionStore::new());
+    let retention_task = tokio::spawn(multiview_cli::metrics_retention::run_metrics_retention(
+        publisher.subscribe(),
+        Arc::clone(&retention_store),
+    ));
+
     let report = engine
         .run_until_stopped_with_control(&stop, publisher.as_ref(), drain)
         .await
@@ -601,6 +630,8 @@ async fn run_software_until_ctrl_c(
     // StopSignal within one sample period), tear down the live-source hub (it
     // stops + joins every runtime producer), and bring the control server down.
     metrics_task.abort();
+    retention_task.abort();
+    log_retention_summary(&retention_store);
     if let Some(hub) = live_hub {
         hub.shutdown();
     }
@@ -652,4 +683,25 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
         tracing::warn!(advisory = %warning, "config advisory");
     }
     Ok(config)
+}
+
+/// Log a one-line summary of what the consent-independent local-metrics retention
+/// store (CONSPECT S5) accumulated over the run, across the full 7-day window.
+///
+/// This both surfaces the on-box diagnostics tally to the operator and confirms
+/// the feed recorded from the live event stream. The store stays in scope until
+/// here so it lived for the whole run; the §7.2 support-bundle endpoint that
+/// *reads* it is a separate CONSPECT item (not part of this change).
+fn log_retention_summary(store: &multiview_telemetry::retention::RetentionStore) {
+    use multiview_telemetry::retention::RetentionWindow::LastWeek;
+    let now = multiview_cli::metrics_retention::now_unix_seconds();
+    let reconnects = store.reconnect_window(now, LastWeek).len();
+    let incidents = store.incident_window(now, LastWeek).len();
+    let util_minutes = store.utilisation_window(now, LastWeek).len();
+    tracing::info!(
+        reconnects,
+        incidents,
+        util_minutes,
+        "consent-independent local metrics retained (7-day window) at shutdown"
+    );
 }

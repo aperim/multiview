@@ -96,6 +96,22 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
           50 — never a decimal.
         </Trans>
       );
+    case 'timezone':
+      return (
+        <Trans>
+          Enter a valid IANA timezone id, e.g. Australia/Sydney or UTC. Leave
+          blank to use a fixed UTC offset instead.
+        </Trans>
+      );
+    case 'time-of-day':
+      return <Trans>Enter a 24-hour time of day as HH:MM:SS, e.g. 14:30:00.</Trans>;
+    case 'date-time':
+      return (
+        <Trans>
+          Enter a local date and time as YYYY-MM-DDTHH:MM:SS, e.g.
+          2026-07-01T09:00:00.
+        </Trans>
+      );
   }
 }
 
@@ -113,6 +129,7 @@ export function FormField({
   hint,
   trailing,
   labelHidden,
+  datalist,
 }: {
   readonly id: string;
   readonly label: string;
@@ -133,9 +150,18 @@ export function FormField({
    * cells where the column header already shows the text.
    */
   readonly labelHidden?: boolean;
+  /**
+   * Optional suggestion list rendered as a native `<datalist>` — keeps the
+   * field free-text (the value is server-validated) while offering a native,
+   * keyboard-accessible autocomplete (e.g. IANA timezone ids). Omitted ⇒ no
+   * datalist, identical to before.
+   */
+  readonly datalist?: readonly string[];
 }): JSX.Element {
   const errorId = `${id}-error`;
   const hintId = `${id}-hint`;
+  const listId = `${id}-list`;
+  const hasList = datalist !== undefined && datalist.length > 0;
   const describedBy =
     [error !== undefined ? errorId : undefined, hint !== undefined ? hintId : undefined]
       .filter((part) => part !== undefined)
@@ -159,10 +185,18 @@ export function FormField({
         aria-invalid={error !== undefined}
         {...(describedBy !== undefined ? { 'aria-describedby': describedBy } : {})}
         {...(placeholder !== undefined ? { placeholder } : {})}
+        {...(hasList ? { list: listId } : {})}
         onChange={(event): void => {
           onChange(event.target.value);
         }}
       />
+      {hasList ? (
+        <datalist id={listId}>
+          {datalist.map((option) => (
+            <option key={option} value={option} />
+          ))}
+        </datalist>
+      ) : null}
       {hint !== undefined ? (
         <p id={hintId} className="text-xs text-muted-foreground">
           {hint}

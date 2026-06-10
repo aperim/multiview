@@ -33,6 +33,11 @@
 //!   ([`placement::PlacementCounters`]) for the GPU work-placement loop
 //!   (ADR-0018 — "every adaptation logged"), labelled by a bounded
 //!   `outcome`/`reason` vocabulary.
+//! * [`retention`] — the **consent-independent local metrics retention store**
+//!   ([`retention::RetentionStore`], CONSPECT engine-seam S5; ADR-0052 §3): a
+//!   rolling, bounded, minute-bucketed ≥7-day record of the §7.2 support
+//!   categories (utilisation percentiles, shed-load, per-input reconnects,
+//!   incident markers), retained **regardless of telemetry consent**.
 //! * [`tracing_init`] — [`tracing_init::SubscriberBuilder`] for an
 //!   `EnvFilter`-based subscriber.
 //! * [`syslog`] — a **pure** RFC 5424 message formatter (always compiled); the
@@ -51,6 +56,7 @@ pub mod gpu;
 pub mod health;
 pub mod metrics;
 pub mod placement;
+pub mod retention;
 #[cfg(feature = "snmp")]
 pub mod snmp;
 pub mod syslog;
@@ -65,5 +71,10 @@ pub use metrics::{
     SeriesDescriptor,
 };
 pub use placement::{PlacementCounters, SuppressReason};
+pub use retention::{
+    IncidentKind, IncidentMarker, ReconnectEvent, RetentionStore, RetentionWindow, ShedEvent,
+    ShedReason, UtilisationBucket, UtilisationSample, UtilisationSummary, BUCKET_SECONDS,
+    MAX_EVENTS_PER_BUCKET, RETENTION_BUCKETS,
+};
 pub use syslog::{Facility, SdElement, Severity, SyslogMessage};
 pub use tracing_init::{Output, SubscriberBuilder};

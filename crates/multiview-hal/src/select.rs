@@ -165,6 +165,12 @@ pub enum RejectReason {
     },
     /// No candidate GPUs were supplied at all.
     NoCandidates,
+    /// The pipeline feeds a GPU-resident display sink whose scanout locality
+    /// (the connector-owning GPUs, ADR-0044 §3) is not among the viable
+    /// candidates — so composite cannot be placed where the framebuffer must
+    /// live. Surfaced rather than silently placed off the scanout GPU (which
+    /// would force the per-frame GPU→host→GPU copy ADR-0018 forbids).
+    SinkLocalityUnsatisfied,
 }
 
 /// A chosen placement: the winning device plus its computed load score.
@@ -200,6 +206,11 @@ pub struct PipelineDemand {
     format: PixelFormat,
     predicted_pool_bytes: u64,
     opens_encode_session: bool,
+    /// The scanout-locality constraint (ADR-0044 §3): when non-empty, the
+    /// pipeline feeds a GPU-resident display sink and its composite **must** be
+    /// placed on one of these connector-owning GPUs. Empty = no display sink, no
+    /// constraint (every existing call path).
+    sink_localities: Vec<DeviceId>,
 }
 
 impl PipelineDemand {
@@ -226,7 +237,40 @@ impl PipelineDemand {
             format,
             predicted_pool_bytes,
             opens_encode_session,
+            sink_localities: Vec::new(),
         }
+    }
+
+    /// Constrain this demand to a **scanout locality**: the set of
+    /// connector-owning GPUs a local display sink ([ADR-0044](../../../docs/decisions/ADR-0044.md)
+    /// §3) requires the composite to be co-located with.
+    ///
+    /// A display [`crate::scanout::ScanoutInventory::locality_for`] produces this
+    /// set from the sink's connectors. With it set, [`select_device`] rejects
+    /// every candidate not in the set ([`RejectReason::SinkLocalityUnsatisfied`])
+    /// — composite cannot be placed off the GPU the scanout framebuffer must live
+    /// on. An empty locality (the default) imposes no constraint. On a single-GPU
+    /// display host the set is `{that GPU}`, so the constraint is trivially
+    /// satisfied yet still modelled.
+    #[must_use]
+    pub fn with_sink_locality(mut self, localities: Vec<DeviceId>) -> Self {
+        self.sink_localities = localities;
+        self
+    }
+
+    /// The scanout-locality constraint, if this pipeline feeds a display sink
+    /// (empty otherwise).
+    #[must_use]
+    pub fn sink_localities(&self) -> &[DeviceId] {
+        &self.sink_localities
+    }
+
+    /// Whether `device` satisfies this demand's scanout-locality constraint: an
+    /// empty constraint admits every device; a non-empty one admits only its
+    /// members (the connector-owning GPUs).
+    #[must_use]
+    pub fn satisfies_sink_locality(&self, device: &DeviceId) -> bool {
+        self.sink_localities.is_empty() || self.sink_localities.contains(device)
     }
 
     /// The plan this demand presents to a candidate GPU's [`Planner`].
@@ -398,11 +442,13 @@ impl Default for PlacementPolicy {
 ///
 /// Returns a [`RejectReason`] (the `Err` arm of [`SelectOutcome`]) — never a
 /// panic — when no single GPU can host the whole pipeline: [`RejectReason::NoCandidates`]
-/// (none supplied), [`RejectReason::PinUnsatisfiable`] (an operator pin names a
-/// non-viable device), [`RejectReason::NoCandidateFitsWholePipeline`] (every
-/// candidate failed a hard gate), or [`RejectReason::AllOverHeadroomCeiling`]
-/// (gate-passing candidates all exceed the headroom ceiling). Each hands off to
-/// the caller's no-fit ladder (degrade-to-fit, then the deliberate split).
+/// (none supplied), [`RejectReason::SinkLocalityUnsatisfied`] (the pipeline
+/// feeds a display sink but no candidate owns its connector — ADR-0044 §3),
+/// [`RejectReason::PinUnsatisfiable`] (an operator pin names a non-viable
+/// device), [`RejectReason::NoCandidateFitsWholePipeline`] (every candidate
+/// failed a hard gate), or [`RejectReason::AllOverHeadroomCeiling`] (gate-passing
+/// candidates all exceed the headroom ceiling). Each hands off to the caller's
+/// no-fit ladder (degrade-to-fit, then the deliberate split).
 pub fn select_device(
     candidates: &[GpuCandidate],
     demand: &PipelineDemand,
@@ -416,10 +462,27 @@ pub fn select_device(
         return Err(RejectReason::NoCandidates);
     }
 
-    // Stage 2 (computed first so a pin can be checked against it): the set of
-    // GPUs that pass every hard gate as a whole-island host.
-    let viable: Vec<&GpuCandidate> = candidates
+    // Stage 0 — scanout affinity (ADR-0044 §3, a HARD gate, checked first). A
+    // display-bound pipeline's composite must live on a connector-owning GPU; a
+    // candidate outside the locality set is not a legal host *at any load*.
+    // Filtering here (before the load/cost gates) lets the locality cause be
+    // surfaced distinctly: if no candidate owns the display, that is the reason,
+    // not a generic no-fit.
+    let local: Vec<&GpuCandidate> = candidates
         .iter()
+        .filter(|candidate| demand.satisfies_sink_locality(&candidate.device_id))
+        .collect();
+    if local.is_empty() {
+        // There were candidates, but none owns the display the sink targets.
+        return Err(RejectReason::SinkLocalityUnsatisfied);
+    }
+
+    // Stage 2 (computed first so a pin can be checked against it): the set of
+    // GPUs that pass every hard gate as a whole-island host. Only the
+    // locality-satisfying candidates are considered.
+    let viable: Vec<&GpuCandidate> = local
+        .iter()
+        .copied()
         .filter(|candidate| {
             passes_hard_gates(
                 candidate,
@@ -1256,5 +1319,165 @@ mod tests {
         )
         .expect("the seen GPU is scored");
         assert_eq!(outcome.device, nv("GPU-seen", 1));
+    }
+
+    // ----- DEV-B2: sink-locality constraint (ADR-0044 §3 / display-out.md §3) -----
+
+    #[test]
+    fn sink_locality_pins_composite_to_the_display_gpu() {
+        // GPU-display owns the connector; GPU-idle is idler but owns no connector.
+        // A display sink declares locality on GPU-display, so the composite MUST
+        // land there even though GPU-idle would otherwise win on load.
+        let candidates = vec![candidate("GPU-display", 0), candidate("GPU-idle", 1)];
+        let loads = vec![
+            // GPU-display is busier (60%)...
+            load_vram(
+                "GPU-display",
+                0,
+                7_200_000_000,
+                12_000_000_000,
+                Some(0.5),
+                Some(0.5),
+            ),
+            // ...GPU-idle is idle (10%) but cannot scan out the display.
+            load_vram(
+                "GPU-idle",
+                1,
+                1_200_000_000,
+                12_000_000_000,
+                Some(0.1),
+                Some(0.1),
+            ),
+        ];
+        let demand = demand_1080p(1_000_000).with_sink_locality(vec![nv("GPU-display", 0)]);
+        let outcome = select_device(
+            &candidates,
+            &demand,
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        )
+        .expect("the display GPU hosts the locked composite");
+        assert_eq!(
+            outcome.device,
+            nv("GPU-display", 0),
+            "sink locality pins composite to the connector-owning GPU"
+        );
+    }
+
+    #[test]
+    fn sink_locality_rejects_when_the_display_gpu_is_not_a_candidate() {
+        // The locality names a GPU that is not in the candidate set at all (it was
+        // gated out / never offered). select_device must REJECT with the dedicated
+        // SinkLocalityUnsatisfied reason — never silently place composite on a GPU
+        // that owns no connector (which would force the GPU->host->GPU copy).
+        let candidates = vec![candidate("GPU-render-only", 0)];
+        let loads = vec![load_vram(
+            "GPU-render-only",
+            0,
+            1_000_000_000,
+            12_000_000_000,
+            Some(0.1),
+            Some(0.1),
+        )];
+        let demand = demand_1080p(1_000_000).with_sink_locality(vec![nv("GPU-has-the-display", 9)]);
+        let outcome = select_device(
+            &candidates,
+            &demand,
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        );
+        assert_eq!(outcome, Err(RejectReason::SinkLocalityUnsatisfied));
+    }
+
+    #[test]
+    fn empty_sink_locality_imposes_no_constraint() {
+        // The default (no display sink) carries an empty locality set, which must
+        // impose NO constraint: the idlest GPU wins exactly as before.
+        let candidates = vec![candidate("GPU-a", 0), candidate("GPU-b", 1)];
+        let loads = vec![
+            load_vram(
+                "GPU-a",
+                0,
+                9_000_000_000,
+                12_000_000_000,
+                Some(0.8),
+                Some(0.2),
+            ),
+            load_vram(
+                "GPU-b",
+                1,
+                1_200_000_000,
+                12_000_000_000,
+                Some(0.1),
+                Some(0.1),
+            ),
+        ];
+        // demand_1080p carries an empty locality by default.
+        let outcome = select_device(
+            &candidates,
+            &demand_1080p(1_000_000),
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        )
+        .expect("no locality -> least-loaded wins");
+        assert_eq!(outcome.device, nv("GPU-b", 1));
+    }
+
+    #[test]
+    fn sink_locality_with_multiple_owners_admits_either() {
+        // Two connectors on two GPUs -> locality = {GPU-x, GPU-y}. Composite may
+        // legally live on EITHER (a same-GPU scanout); the idler of the two wins,
+        // and a third render-only GPU is rejected by the locality gate.
+        let candidates = vec![
+            candidate("GPU-x", 0),
+            candidate("GPU-y", 1),
+            candidate("GPU-render", 2),
+        ];
+        let loads = vec![
+            load_vram(
+                "GPU-x",
+                0,
+                8_000_000_000,
+                12_000_000_000,
+                Some(0.6),
+                Some(0.6),
+            ),
+            // GPU-y is the idler of the two display GPUs.
+            load_vram(
+                "GPU-y",
+                1,
+                1_500_000_000,
+                12_000_000_000,
+                Some(0.1),
+                Some(0.1),
+            ),
+            // GPU-render is the idlest overall but owns no connector -> gated out.
+            load_vram(
+                "GPU-render",
+                2,
+                300_000_000,
+                12_000_000_000,
+                Some(0.0),
+                Some(0.0),
+            ),
+        ];
+        let demand =
+            demand_1080p(1_000_000).with_sink_locality(vec![nv("GPU-x", 0), nv("GPU-y", 1)]);
+        let outcome = select_device(
+            &candidates,
+            &demand,
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        )
+        .expect("either display GPU is admissible");
+        assert_eq!(
+            outcome.device,
+            nv("GPU-y", 1),
+            "the idler display-owning GPU wins; the render-only GPU is gated out"
+        );
     }
 }

@@ -16,7 +16,7 @@ import type { SaveResourceVars } from '../resources/queries';
 import type { OverlayKind, OverlayView } from '../resources/types';
 import { OVERLAY_KINDS } from '../resources/types';
 import {
-  CLOCK_FACES,
+  OVERLAY_CLOCK_FACES,
   emptyOverlayForm,
   overlayFormFromRecord,
   overlayFormToBody,
@@ -51,7 +51,7 @@ function OverlayKindFields({
           <SelectField<ClockFace>
             label={t`Face`}
             value={form.clockFace}
-            options={CLOCK_FACES}
+            options={OVERLAY_CLOCK_FACES}
             onChange={(next): void => {
               setForm({ ...form, clockFace: next });
             }}

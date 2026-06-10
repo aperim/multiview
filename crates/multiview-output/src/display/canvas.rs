@@ -6,15 +6,60 @@
 //! workspace-canonical pixel format, invariant #5). The CLI adapts its canvas
 //! type onto this trait.
 //!
-//! [`nv12_to_xrgb`] is the **v1 CPU scanout conversion** (DEV-B1): BT.709
+//! [`nv12_to_xrgb`] is the **CPU scanout conversion** (DEV-B1): BT.709
 //! limited-range YCbCr → full-range RGB in 8.8 fixed-point integer math (no
 //! floats anywhere), written straight into a stride-aware XRGB8888 scanout
 //! mapping, centred with black borders when the canvas and mode geometry
-//! differ. DEV-B3 replaces this with the per-hardware zero-copy/GPU paths
-//! (NV12 direct scanout on Intel/vc4; one wgpu pass elsewhere); the math here
-//! is the portable, hardware-free baseline and is golden-tested in CI.
+//! differ. DEV-B3 adds the per-hardware *faster* paths the
+//! [`super::strategy`] selector chooses when their preconditions hold (NV12
+//! direct scanout on Intel/vc4 via a dmabuf canvas; the wgpu pass elsewhere
+//! when wired) — but this CPU conversion **remains the guaranteed default and
+//! fallback**: it needs only a CPU NV12 canvas + an XRGB plane, takes the
+//! frame whenever the canvas is CPU-resident or a faster path is unavailable,
+//! and is golden-tested in CI. The [`DisplayCanvas::delivery`] /
+//! [`DisplayCanvas::dmabuf_image`] accessors are how a dmabuf-backed canvas
+//! opts into those faster paths.
+
+use std::os::fd::BorrowedFd;
 
 use thiserror::Error;
+
+use super::strategy::{CanvasDelivery, DrmFormat};
+
+/// One plane of an importable dmabuf-backed canvas: the borrowed prime fd plus
+/// where that plane starts and how wide its rows are. Borrowed for the
+/// duration of one scan-out submission — the canvas owns the fd, the backend
+/// imports it (`prime_fd_to_buffer`) and adds a framebuffer over it.
+#[derive(Debug, Clone, Copy)]
+pub struct DmabufPlane<'a> {
+    /// The prime (dmabuf) file descriptor backing this plane (planes may share
+    /// one fd at different offsets, as NV12 typically does).
+    pub fd: BorrowedFd<'a>,
+    /// Byte offset of this plane within the dmabuf.
+    pub offset: u32,
+    /// Row pitch (stride) in bytes.
+    pub pitch: u32,
+}
+
+/// A dmabuf-backed canvas image ready for **NV12-direct** scanout: the format,
+/// modifier, geometry, and per-plane fds/layout the backend needs to
+/// `ADDFB2`-import it and flip it with **0 copies, 0 render passes**
+/// (display-out.md §2). Only meaningful when the format is plane-scannable
+/// (NV12/P010) and the modifier matches the plane (the
+/// [`super::strategy::select_buffer_strategy`] gate).
+#[derive(Debug, Clone)]
+pub struct DmabufImage<'a> {
+    /// The dmabuf pixel format (NV12/P010 for direct scanout).
+    pub format: DrmFormat,
+    /// The dmabuf modifier (`None` == linear); SAND128 for vc4 decoder buffers.
+    pub modifier: Option<u64>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// The planes (1–4), in fourcc plane order (NV12 = [Y, UV]).
+    pub planes: Vec<DmabufPlane<'a>>,
+}
 
 /// An NV12 frame the display sink can scan out: tightly-packed planes
 /// (`y.len() == width*height`, `uv.len() == width*height/2`), even
@@ -28,6 +73,34 @@ pub trait DisplayCanvas {
     fn y_plane(&self) -> &[u8];
     /// The interleaved Cb/Cr plane, `width * height / 2` bytes, no padding.
     fn uv_plane(&self) -> &[u8];
+
+    /// How this canvas is delivered — CPU-resident planes (the default,
+    /// DEV-B1) or an importable dmabuf. The buffer-strategy selector
+    /// ([`super::strategy::select_buffer_strategy`]) reads this to decide
+    /// NV12-direct / wgpu-pass scanout vs the portable CPU conversion: a
+    /// CPU-planes canvas always takes the CPU convert (there is no dmabuf to
+    /// import or flip).
+    ///
+    /// The default is [`CanvasDelivery::CpuPlanes`]; a canvas backed by a
+    /// decoder/compositor dmabuf overrides it. The `y_plane`/`uv_plane`
+    /// accessors must remain valid regardless (they are the universal CPU
+    /// fallback path even for a dmabuf-backed canvas).
+    fn delivery(&self) -> CanvasDelivery {
+        CanvasDelivery::CpuPlanes
+    }
+
+    /// The borrowed dmabuf fds + plane layout for **NV12-direct** scanout, or
+    /// [`None`] for a CPU-planes canvas. Consistent with [`Self::delivery`]: a
+    /// canvas that reports [`CanvasDelivery::Dmabuf`] returns `Some` here, and
+    /// the NV12-direct backend path (`ADDFB2`-import + flip) uses it. The fds
+    /// are borrowed for the call only — the backend imports a GEM handle from
+    /// them synchronously and never retains the borrow.
+    ///
+    /// The default is [`None`] (the CPU-planes path); only a dmabuf-backed
+    /// canvas overrides it.
+    fn dmabuf_image(&self) -> Option<DmabufImage<'_>> {
+        None
+    }
 }
 
 /// A structurally invalid conversion request (geometry/plane mismatch).
@@ -266,5 +339,117 @@ mod tests {
         let mut dst = vec![0u8; 4];
         let err = nv12_to_xrgb(&solid(2, 2, 16, 128, 128), &mut dst, 2, 2, 8);
         assert!(matches!(err, Err(CanvasError::Destination(_))));
+    }
+
+    #[test]
+    fn default_canvas_delivery_is_cpu_planes() {
+        // A canvas that does not override `delivery` is CPU-resident planes —
+        // the DEV-B1 path. The strategy selector reads this to refuse
+        // direct/GPU scanout for a CPU-only canvas (no dmabuf to import).
+        use crate::display::strategy::CanvasDelivery;
+        let frame = solid(2, 2, 16, 128, 128);
+        assert_eq!(DisplayCanvas::delivery(&frame), CanvasDelivery::CpuPlanes);
+    }
+
+    #[test]
+    fn a_canvas_can_advertise_an_importable_nv12_dmabuf() {
+        use crate::display::strategy::{CanvasDelivery, DrmFormat, DRM_FORMAT_MOD_LINEAR};
+
+        // A canvas wrapping an imported NV12 dmabuf overrides `delivery`; the
+        // selector then becomes eligible for NV12-direct / wgpu-pass scanout.
+        struct DmabufFrame(Frame);
+        impl DisplayCanvas for DmabufFrame {
+            fn width(&self) -> u32 {
+                self.0.width()
+            }
+            fn height(&self) -> u32 {
+                self.0.height()
+            }
+            fn y_plane(&self) -> &[u8] {
+                self.0.y_plane()
+            }
+            fn uv_plane(&self) -> &[u8] {
+                self.0.uv_plane()
+            }
+            fn delivery(&self) -> CanvasDelivery {
+                CanvasDelivery::Dmabuf {
+                    format: DrmFormat::NV12,
+                    modifier: Some(DRM_FORMAT_MOD_LINEAR),
+                }
+            }
+        }
+        let frame = DmabufFrame(solid(2, 2, 16, 128, 128));
+        assert_eq!(
+            frame.delivery(),
+            CanvasDelivery::Dmabuf {
+                format: DrmFormat::NV12,
+                modifier: Some(DRM_FORMAT_MOD_LINEAR),
+            }
+        );
+    }
+
+    #[test]
+    fn default_canvas_exposes_no_importable_dmabuf_image() {
+        // The CPU-planes default never offers a dmabuf to import; the
+        // NV12-direct backend path therefore never fires for it.
+        let frame = solid(2, 2, 16, 128, 128);
+        assert!(DisplayCanvas::dmabuf_image(&frame).is_none());
+    }
+
+    #[test]
+    fn a_dmabuf_canvas_exposes_its_borrowed_fds_and_plane_layout() {
+        use crate::display::strategy::{DrmFormat, DRM_FORMAT_MOD_LINEAR};
+        use std::os::fd::AsFd;
+
+        struct DmabufFrame<'a> {
+            inner: Frame,
+            fd: std::os::fd::BorrowedFd<'a>,
+        }
+        impl DisplayCanvas for DmabufFrame<'_> {
+            fn width(&self) -> u32 {
+                self.inner.width()
+            }
+            fn height(&self) -> u32 {
+                self.inner.height()
+            }
+            fn y_plane(&self) -> &[u8] {
+                self.inner.y_plane()
+            }
+            fn uv_plane(&self) -> &[u8] {
+                self.inner.uv_plane()
+            }
+            fn dmabuf_image(&self) -> Option<DmabufImage<'_>> {
+                Some(DmabufImage {
+                    format: DrmFormat::NV12,
+                    modifier: Some(DRM_FORMAT_MOD_LINEAR),
+                    width: self.inner.width(),
+                    height: self.inner.height(),
+                    planes: vec![
+                        DmabufPlane {
+                            fd: self.fd,
+                            offset: 0,
+                            pitch: self.inner.width(),
+                        },
+                        DmabufPlane {
+                            fd: self.fd,
+                            offset: self.inner.width() * self.inner.height(),
+                            pitch: self.inner.width(),
+                        },
+                    ],
+                })
+            }
+        }
+
+        // Use a real fd (stdin) just to have a valid BorrowedFd for the test.
+        let stdin = std::io::stdin();
+        let frame = DmabufFrame {
+            inner: solid(4, 4, 16, 128, 128),
+            fd: stdin.as_fd(),
+        };
+        let image = DisplayCanvas::dmabuf_image(&frame).expect("dmabuf present");
+        assert_eq!(image.format, DrmFormat::NV12);
+        assert_eq!(image.planes.len(), 2);
+        assert_eq!(image.planes[0].offset, 0);
+        assert_eq!(image.planes[1].offset, 16);
     }
 }
