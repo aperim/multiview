@@ -59,17 +59,31 @@ impl DeviceDriver {
             Self::Displaynode => false,
         }
     }
-}
 
-impl fmt::Display for DeviceDriver {
-    /// Write the driver's config token (`zowietek` / `displaynode` / `cast`).
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let token = match self {
+    /// The driver's serde **wire token** (`"zowietek"` / `"displaynode"` /
+    /// `"cast"`) — the exact string the `#[serde(rename_all = "snake_case")]`
+    /// derive emits.
+    ///
+    /// This is the single source of truth for the driver string: the realtime
+    /// device events ([ADR-RT007](https://github.com/aperim/multiview))
+    /// construct their `driver` field **only** from this method, never from a
+    /// hand-typed literal, so a future renamed/added variant cannot drift the
+    /// event wire form from the config wire form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Zowietek => "zowietek",
             Self::Displaynode => "displaynode",
             Self::Cast => "cast",
-        };
-        f.write_str(token)
+        }
+    }
+}
+
+impl fmt::Display for DeviceDriver {
+    /// Write the driver's config token (`zowietek` / `displaynode` / `cast`) —
+    /// the same string as [`DeviceDriver::as_str`].
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

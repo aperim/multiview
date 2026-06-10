@@ -19,12 +19,13 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
+use crate::devices::DeviceStatusRegistry;
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
 use crate::resource_store::{
-    InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore, InMemorySourceStore,
-    ResourceInput, ResourceRepository,
+    InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore,
+    InMemorySourceStore, InMemorySyncGroupStore, ResourceInput, ResourceRepository,
 };
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
@@ -262,6 +263,19 @@ pub struct AppState {
     /// The probes store (versioned CRUD over config-as-code per-cell
     /// fail-state detectors: black / freeze / silence / loudness).
     pub probes: Arc<dyn ResourceRepository>,
+    /// The devices store (versioned CRUD over the config-as-code managed-device
+    /// registry, ADR-M008). The body is a `multiview_config::Device`.
+    pub devices: Arc<dyn ResourceRepository>,
+    /// The sync-groups store (versioned CRUD over config-as-code
+    /// presentation-sync groups, ADR-M008/M010). The body is a
+    /// `multiview_config::SyncGroup`.
+    pub sync_groups: Arc<dyn ResourceRepository>,
+    /// The latest-wins device **status** registry (runtime state, never
+    /// persisted/exported): the conflated `device.status` lane's backing store
+    /// and `GET /devices/{id}/status`'s cold-snapshot source. Bounded, control-
+    /// plane-only, latest-wins — it can never back-pressure the engine
+    /// (invariant #10).
+    pub device_status: Arc<DeviceStatusRegistry>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -381,6 +395,9 @@ impl AppState {
             outputs: Arc::new(InMemoryOutputStore::new()),
             overlays: Arc::new(InMemoryOverlayStore::new()),
             probes: Arc::new(InMemoryProbeStore::new()),
+            devices: Arc::new(InMemoryDeviceStore::new()),
+            sync_groups: Arc::new(InMemorySyncGroupStore::new()),
+            device_status: Arc::new(DeviceStatusRegistry::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -543,6 +560,28 @@ impl AppState {
     #[must_use]
     pub fn with_probes_store(mut self, probes: Arc<dyn ResourceRepository>) -> Self {
         self.probes = probes;
+        self
+    }
+
+    /// Replace the devices store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_devices_store(mut self, devices: Arc<dyn ResourceRepository>) -> Self {
+        self.devices = devices;
+        self
+    }
+
+    /// Replace the sync-groups store (e.g. to share one store with a test).
+    #[must_use]
+    pub fn with_sync_groups_store(mut self, sync_groups: Arc<dyn ResourceRepository>) -> Self {
+        self.sync_groups = sync_groups;
+        self
+    }
+
+    /// Replace the device status registry (e.g. to share one with a driver
+    /// poller / broadcaster).
+    #[must_use]
+    pub fn with_device_status(mut self, device_status: Arc<DeviceStatusRegistry>) -> Self {
+        self.device_status = device_status;
         self
     }
 

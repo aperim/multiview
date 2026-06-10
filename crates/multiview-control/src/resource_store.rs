@@ -39,6 +39,12 @@ pub const OVERLAY_KIND: &str = "overlay";
 /// The resource collection name used in problem documents and not-found errors
 /// for the `probes` resource.
 pub const PROBE_KIND: &str = "probe";
+/// The resource collection name used in problem documents and not-found errors
+/// for the `devices` resource (managed-device registry, ADR-M008).
+pub const DEVICE_KIND: &str = "device";
+/// The resource collection name used in problem documents and not-found errors
+/// for the `sync-groups` resource (presentation-sync groups, ADR-M008/M010).
+pub const SYNC_GROUP_KIND: &str = "sync-group";
 
 /// A marker selecting which resource collection a store serves, supplying the
 /// stable kind name used in errors and audit records.
@@ -73,6 +79,20 @@ impl ResourceKind for OverlayKind {
 pub struct ProbeKind;
 impl ResourceKind for ProbeKind {
     const KIND: &'static str = PROBE_KIND;
+}
+
+/// The `devices` resource marker (managed-device registry, ADR-M008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceKind;
+impl ResourceKind for DeviceKind {
+    const KIND: &'static str = DEVICE_KIND;
+}
+
+/// The `sync-groups` resource marker (presentation-sync groups, ADR-M008/M010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncGroupKind;
+impl ResourceKind for SyncGroupKind {
+    const KIND: &'static str = SYNC_GROUP_KIND;
 }
 
 /// A persisted management resource: a stable `id`, a display `name`, and the
@@ -181,6 +201,10 @@ pub type InMemoryOutputStore = InMemoryResourceStore<OutputKind>;
 pub type InMemoryOverlayStore = InMemoryResourceStore<OverlayKind>;
 /// An in-memory `probes` store.
 pub type InMemoryProbeStore = InMemoryResourceStore<ProbeKind>;
+/// An in-memory `devices` store (the managed-device registry, ADR-M008).
+pub type InMemoryDeviceStore = InMemoryResourceStore<DeviceKind>;
+/// An in-memory `sync-groups` store (presentation-sync groups, ADR-M008/M010).
+pub type InMemorySyncGroupStore = InMemoryResourceStore<SyncGroupKind>;
 
 impl<K: ResourceKind> Default for InMemoryResourceStore<K> {
     fn default() -> Self {
@@ -288,8 +312,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore, InMemorySourceStore,
-        ResourceInput, ResourceRepository, OUTPUT_KIND, OVERLAY_KIND, PROBE_KIND, SOURCE_KIND,
+        InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore,
+        InMemorySourceStore, InMemorySyncGroupStore, ResourceInput, ResourceRepository, DEVICE_KIND,
+        OUTPUT_KIND, OVERLAY_KIND, PROBE_KIND, SOURCE_KIND, SYNC_GROUP_KIND,
     };
     use crate::concurrency::Version;
     use crate::error::ControlError;
@@ -365,5 +390,7 @@ mod tests {
         assert_eq!(InMemoryOutputStore::new().kind(), OUTPUT_KIND);
         assert_eq!(InMemoryOverlayStore::new().kind(), OVERLAY_KIND);
         assert_eq!(InMemoryProbeStore::new().kind(), PROBE_KIND);
+        assert_eq!(InMemoryDeviceStore::new().kind(), DEVICE_KIND);
+        assert_eq!(InMemorySyncGroupStore::new().kind(), SYNC_GROUP_KIND);
     }
 }
