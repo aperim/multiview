@@ -115,6 +115,7 @@ fn clock_source_defaults_to_analog_utc_and_round_trips() {
             face,
             twelve_hour,
             tz_offset_minutes,
+            ..
         } => {
             assert_eq!(*face, ClockFaceConfig::Analog, "clock defaults to analog");
             assert!(!*twelve_hour, "12-hour defaults off");
@@ -136,6 +137,7 @@ fn digital_clock_with_tz_round_trips() {
             face,
             twelve_hour,
             tz_offset_minutes,
+            ..
         } => {
             assert_eq!(*face, ClockFaceConfig::Digital);
             assert!(*twelve_hour);
@@ -260,7 +262,12 @@ fn clock_rejects_an_unknown_iana_timezone() {
 
 #[test]
 fn clock_with_valid_iana_timezone_validates() {
-    for tz in ["UTC", "Australia/Sydney", "America/New_York", "Europe/London"] {
+    for tz in [
+        "UTC",
+        "Australia/Sydney",
+        "America/New_York",
+        "Europe/London",
+    ] {
         let doc = config_with_source(&format!("kind = \"clock\"\ntimezone = \"{tz}\""));
         let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
         cfg.validate()

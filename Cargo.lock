@@ -2757,8 +2757,8 @@ dependencies = [
 name = "multiview-config"
 version = "0.1.0"
 dependencies = [
- "chrono-tz",
  "multiview-core",
+ "multiview-overlay",
  "proptest",
  "serde",
  "serde_json",

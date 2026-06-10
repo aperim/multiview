@@ -219,7 +219,11 @@ fn resolve_offset_is_dst_correct_for_sydney() {
     let syd = parse_tz("Australia/Sydney").expect("Australia/Sydney is a known IANA zone");
     // Austral summer (DST on): +11:00 = 660 minutes.
     let jan = resolve_offset(syd, WallTime::from_unix_seconds(JAN_2026_UTC));
-    assert_eq!(jan.minutes(), 11 * 60, "Sydney in January is UTC+11:00 (DST)");
+    assert_eq!(
+        jan.minutes(),
+        11 * 60,
+        "Sydney in January is UTC+11:00 (DST)"
+    );
     // Austral winter (DST off): +10:00 = 600 minutes.
     let jul = resolve_offset(syd, WallTime::from_unix_seconds(JUL_2026_UTC));
     assert_eq!(
@@ -296,9 +300,18 @@ fn clock_face_mode_is_three_state_and_round_trips() {
 #[test]
 fn offset_badge_text_renders_signed_hh_mm() {
     // The "UTC±HH:MM" badge text the `show_offset` flag draws.
-    assert_eq!(TimeZoneOffset::from_minutes(11 * 60).utc_badge(), "UTC+11:00");
-    assert_eq!(TimeZoneOffset::from_minutes(10 * 60).utc_badge(), "UTC+10:00");
-    assert_eq!(TimeZoneOffset::from_minutes(-4 * 60).utc_badge(), "UTC-04:00");
+    assert_eq!(
+        TimeZoneOffset::from_minutes(11 * 60).utc_badge(),
+        "UTC+11:00"
+    );
+    assert_eq!(
+        TimeZoneOffset::from_minutes(10 * 60).utc_badge(),
+        "UTC+10:00"
+    );
+    assert_eq!(
+        TimeZoneOffset::from_minutes(-4 * 60).utc_badge(),
+        "UTC-04:00"
+    );
     assert_eq!(TimeZoneOffset::from_minutes(-330).utc_badge(), "UTC-05:30");
     assert_eq!(TimeZoneOffset::UTC.utc_badge(), "UTC+00:00");
 }

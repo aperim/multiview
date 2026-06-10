@@ -710,6 +710,8 @@ pub enum ClockFaceDoc {
     Analog,
     /// Digital readout.
     Digital,
+    /// Dual: an analogue face with a digital readout beneath it.
+    Dual,
 }
 
 /// `OpenAPI` mirror of `multiview_config::SourceKind` (tagged by `kind`).
@@ -727,15 +729,32 @@ pub enum SourceKindDoc {
     },
     /// A full-frame clock.
     Clock {
-        /// Analog (default) or digital face.
+        /// Analog (default), digital, or dual face.
         #[serde(default)]
         face: ClockFaceDoc,
         /// 12-hour vs 24-hour mode (default 24-hour).
         #[serde(default)]
         twelve_hour: bool,
-        /// Timezone offset from UTC in minutes (`-720..=840`).
+        /// IANA timezone id (e.g. `Australia/Sydney`), preferred over
+        /// `tz_offset_minutes` and DST-resolved per displayed instant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+        /// Fixed timezone offset from UTC in minutes (`-720..=840`); ignored when
+        /// `timezone` is set.
         #[serde(default)]
         tz_offset_minutes: i32,
+        /// Operator location/label drawn on the face.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Draw a `UTC±HH:MM` offset badge for the displayed instant.
+        #[serde(default)]
+        show_offset: bool,
+        /// Draw the disciplined-reference (PTP/NTP/SYS) badge. Display only.
+        #[serde(default)]
+        show_reference: bool,
+        /// Draw hour numerals on the analogue / dual face.
+        #[serde(default)]
+        numerals: bool,
     },
     /// RTSP pull.
     Rtsp {

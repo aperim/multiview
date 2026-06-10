@@ -274,8 +274,8 @@ impl SoftwareEngine {
             // overlay-off build falls through to the primed placeholder card
             // instead (an honest static fallback rather than a blank tile).
             let synthetic = SyntheticKind::from_source_kind(&source.kind);
-            let drive_with_generator =
-                cfg!(feature = "overlay") && synthetic.is_some_and(SyntheticKind::animated);
+            let drive_with_generator = cfg!(feature = "overlay")
+                && synthetic.as_ref().is_some_and(SyntheticKind::animated);
             if let Some(kind) = synthetic.filter(|_| drive_with_generator) {
                 // Recorded for a generator; NOT primed (no double-publish): the
                 // generator owns this tile's stream of frames.
@@ -390,7 +390,7 @@ impl SoftwareEngine {
         for source in &self.animated {
             let stop = Arc::clone(&stop);
             let store = Arc::clone(&source.store);
-            let kind = source.kind;
+            let kind = source.kind.clone();
             let (width, height) = (source.width, source.height);
             let canvas = self.canvas_color;
             let cadence = self.cadence;
