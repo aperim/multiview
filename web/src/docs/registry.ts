@@ -151,7 +151,7 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
       {
         id: "outputs",
         title: msg`Outputs`,
-        keywords: ["hls", "ll-hls", "rtsp", "rtmp", "srt", "ndi", "codec", "sink"],
+        keywords: ["hls", "ll-hls", "rtsp", "rtmp", "srt", "ndi", "display", "connector", "codec", "sink"],
       },
       {
         id: "validation",

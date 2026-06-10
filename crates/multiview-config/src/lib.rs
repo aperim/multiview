@@ -70,8 +70,9 @@ pub use routing::{
 };
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
-    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride, Fps,
-    Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth, SourceKind,
+    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride,
+    DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth,
+    SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
@@ -1031,9 +1032,9 @@ impl Output {
             | Output::Hls { codec, .. }
             | Output::Rtmp { codec, .. }
             | Output::Srt { codec, .. } => Some(codec),
-            // NDI carries a channel-map, AES67 sends raw PCM — neither has a
-            // (video) codec to validate.
-            Output::Ndi { .. } | Output::Aes67 { .. } => None,
+            // NDI carries a channel-map, AES67 sends raw PCM, and a display
+            // head scans out raw frames — none has a (video) codec to validate.
+            Output::Ndi { .. } | Output::Aes67 { .. } | Output::Display { .. } => None,
         };
         if let Some(codec) = codec {
             if codec.is_empty() {
@@ -1054,6 +1055,61 @@ impl Output {
             pin.validate()
                 .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
         }
+        if let Output::Display {
+            connector,
+            mode,
+            forced_mode,
+            ..
+        } = self
+        {
+            validate_display_output(connector, mode.as_ref(), forced_mode.as_ref())?;
+        }
         Ok(())
     }
+}
+
+/// Validate an [`Output::Display`]'s connector + mode block (ADR-0044):
+/// non-empty connector, `mode`/`forced_mode` mutual exclusion (an explicit
+/// EDID override and an EDID-less forced timing are contradictory requests),
+/// and a structurally sound [`DisplayModeSpec`] wherever one is given.
+fn validate_display_output(
+    connector: &str,
+    mode: Option<&DisplayModeSpec>,
+    forced_mode: Option<&DisplayModeSpec>,
+) -> Result<(), ConfigError> {
+    if connector.trim().is_empty() {
+        return Err(ConfigError::Validation(
+            "output display: connector must not be empty (use \"auto\" for the first \
+             connected connector)"
+                .to_owned(),
+        ));
+    }
+    if mode.is_some() && forced_mode.is_some() {
+        return Err(ConfigError::Validation(format!(
+            "output \"display {connector}\": `mode` and `forced_mode` are mutually \
+             exclusive (`mode` overrides among EDID modes; `forced_mode` is the \
+             CVT-RB timing for an EDID-less head)"
+        )));
+    }
+    for (field, spec) in [("mode", mode), ("forced_mode", forced_mode)] {
+        let Some(spec) = spec else { continue };
+        if spec.width == 0 {
+            return Err(ConfigError::Validation(format!(
+                "output \"display {connector}\": {field}.width must be positive"
+            )));
+        }
+        if spec.height == 0 {
+            return Err(ConfigError::Validation(format!(
+                "output \"display {connector}\": {field}.height must be positive"
+            )));
+        }
+        let refresh = spec.refresh.rational();
+        if !refresh.is_valid() || refresh.num <= 0 || refresh.den <= 0 {
+            return Err(ConfigError::Validation(format!(
+                "output \"display {connector}\": {field}.refresh must be a positive \
+                 exact rational (e.g. \"60000/1001\"), got {refresh:?}"
+            )));
+        }
+    }
+    Ok(())
 }
