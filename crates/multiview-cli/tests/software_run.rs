@@ -478,6 +478,7 @@ async fn control_command_flood_never_falters_the_output_clock() {
                 let _ = tx.try_submit(Command::ApplyLayout {
                     op: OperationId::new(),
                     layout: "schema_v1".to_owned(),
+                    document: None,
                 });
             }
         })
@@ -507,6 +508,100 @@ async fn control_command_flood_never_falters_the_output_clock() {
     assert!(
         !report.faltered,
         "a flooded command bus must never falter the output clock (invariants #1 + #10)"
+    );
+}
+
+#[tokio::test]
+async fn stored_layout_apply_storm_swaps_live_and_never_falters() {
+    // ADR-W019 + invariant #1/#10 soak: a STORM of stored-layout applies (each
+    // carrying a route-solved document) is drained at frame boundaries through a
+    // real bounded run — the stored layout actually becomes the active layout
+    // (geometry + bindings swap live), and the output clock still emits exactly
+    // N frames for N ticks, never faltered.
+    use multiview_cli::control::CommandDrain;
+    use multiview_compositor::pipeline::Nv12Image;
+    use multiview_control::{command_bus, Command, EngineStateSnapshot, OperationId};
+    use multiview_engine::{CompositorDrive, EnginePublisher};
+    use multiview_events::Event;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    const TICKS: u64 = 120;
+
+    let cfg = small_config();
+    let mut engine = SoftwareEngine::build(&cfg).expect("build software engine");
+
+    // The stored document, solved exactly as the apply-layout route solves it:
+    // ONE full-canvas cell bound to in_b on the running canvas (320x240@30000/1001).
+    let stored = || {
+        let body = serde_json::json!({
+            "canvas": { "width": 320, "height": 240, "fps": "30000/1001" },
+            "layout": { "kind": "absolute" },
+            "cells": [{
+                "id": "stored_cell",
+                "rect": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+                "z": 0,
+                "source": { "input_id": "in_b" }
+            }]
+        });
+        let document =
+            multiview_config::LayoutDocument::from_body(&body).expect("stored body parses");
+        let solved = document.solve_named("wall-x").expect("stored body solves");
+        multiview_control::ResolvedLayout::new(solved, document)
+    };
+
+    let (tx, rx) = command_bus(64);
+    // Background flooder: keep the bus saturated with stored-layout applies for
+    // the whole run (each drained at a frame boundary; a full bus just sheds).
+    let stop_flood = Arc::new(AtomicBool::new(false));
+    let flooder = {
+        let stop_flood = Arc::clone(&stop_flood);
+        std::thread::spawn(move || {
+            while !stop_flood.load(Ordering::Relaxed) {
+                let _ = tx.try_submit(Command::ApplyLayout {
+                    op: OperationId::new(),
+                    layout: "wall-x".to_owned(),
+                    document: Some(Box::new(stored())),
+                });
+            }
+        })
+    };
+
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(8));
+    let mut drain = CommandDrain::new(rx, cfg.clone(), Arc::clone(&publisher));
+    // Record the ACTIVE layout each tick so the swap is provable post-run.
+    let active_layout = Arc::new(Mutex::new(String::new()));
+    let hook = {
+        let active_layout = Arc::clone(&active_layout);
+        move |drive: &mut CompositorDrive<Nv12Image>| {
+            let _ = drain.apply(drive);
+            if let Ok(mut name) = active_layout.lock() {
+                drive.layout().name.clone_into(&mut name);
+            }
+        }
+    };
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = engine
+        .run_for_with_control(Arc::clone(&time), CooperativePacer, TICKS, hook)
+        .await
+        .expect("software run under a stored-layout apply storm succeeds");
+
+    stop_flood.store(true, Ordering::Relaxed);
+    let _ = flooder.join();
+
+    assert_eq!(
+        report.frames, TICKS,
+        "a stored-layout apply storm must still produce exactly N frames for N ticks"
+    );
+    assert!(
+        !report.faltered,
+        "a stored-layout apply storm must never falter the output clock (inv #1 + #10)"
+    );
+    assert_eq!(
+        active_layout.lock().expect("name").as_str(),
+        "wall-x",
+        "the stored layout must actually be the ACTIVE layout (the apply is real)"
     );
 }
 

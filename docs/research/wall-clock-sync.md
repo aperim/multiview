@@ -303,6 +303,40 @@ PTP-lost rides the built ladder: Locked → Holdover (coast, flagged) → Freeru
 falls to the NTP-disciplined system clock; the output label follows the badge state, and `D` reverts
 toward 0 as sources drop out of tight sync.
 
+### Outbound presentation epoch — the consumer-side projection (ADR-M010)
+
+The three carriers above write the synced instant *into the media*. The managed-devices/display-node
+design ([ADR-M010](../decisions/ADR-M010.md), [display-out](display-out.md)) additionally publishes
+the same anchor as a machine-readable **presentation epoch**, so downstream presenters (our display
+nodes first) can choose frames against a common wall timeline. This extends §3's outbound story; the
+inbound DETECT/trust machinery (§1) and the servo rules above are unchanged.
+
+- **One outbound `WallClockRef` per program** — the same exact-affine type
+  (`multiview-core/src/wallclock.rs`, `i128` intermediates via `rescale`, never float) used on the
+  inbound **Use** path, here anchoring **output tick ↔ disciplined wall ns**. The wall estimate comes
+  from the existing reference machinery (the `ptp.rs` servo, or the NTP/chrony-disciplined system
+  clock via `sysref.rs`) and **disciplines an estimate only — it never paces the tick loop** (inv #1,
+  exactly the Tight-tier rule above).
+- **Distribution:** (a) `{stream_id, WallClockRef, link_offset, clock_source/quality}` on the control
+  WS (versioned in `multiview-events`, conflated latest-wins — inv #10 already holds on that channel);
+  (b) **RTCP SR** NTP↔RTP on the RTSP output and (c) **`EXT-X-PROGRAM-DATE-TIME`** on HLS, both
+  stamped from the *same* epoch (carriers 3 and 1 above — one anchor, every surface agrees);
+  (d) optionally **RFC 7273** `a=ts-refclk`/`a=mediaclk` in the RTSP SDP — a cheap standards-aligned
+  advertisement; standard receivers must still opt in, so it is not load-bearing for our own nodes.
+- **Link-offset semantics (AES67's rule applied to video):** a fixed per-deployment receiver delay
+  added to `wall_at(pts)` (default ≈ 2× max network jitter + decode time, e.g. 100–300 ms).
+  **Uniformity across receivers is what matters, not smallness.** A receiver presents the frame whose
+  `wall_at(pts) + link_offset` is closest to its next vblank — repeat if early, drop if late: pure
+  pull-side frame *choice*, never feedback into the engine. A consumer that loses the WS keeps its
+  last epoch and free-runs, drift-bounded — graceful degradation, the output never falters.
+- **Epoch vs label:** the epoch publishes the program's tick↔wall *map*; the R4 label (`T = now − D`)
+  is the *value* the carriers write. One anchor, two projections — and an epoch re-anchor follows the
+  same Class-2 discontinuity rules as a `D` change (step the label, `EXT-X-DISCONTINUITY`, jam the
+  SEI/SR).
+- **Tier honesty carries through:** epoch-disciplined display nodes achieve frame accuracy (the
+  PTP/chrony tiers in [display-out](display-out.md)); vendor decoders remain bounded-drift and Cast
+  seconds-class — the epoch cannot improve a device that exposes no presentation-timing control.
+
 ---
 
 ## 4. Efficiency — encoded-vs-decoded budget
@@ -402,6 +436,7 @@ AsyncAPI regen via the `envelope.ts` `TileStateDeltaData` extension precedent, t
 - Invariants: CLAUDE.md §2 / [conventions](../architecture/conventions.md) §5 (#1, #2, #3, #5, #7, #10, #11).
 - [ADR-T003](../decisions/ADR-T003.md) unified timing; [ADR-T001] output-clock; [ADR-T009] framestore COW.
 - [ADR-0032](../decisions/ADR-0032.md) HLS serving + `utc0@tick0` PDT anchor.
+- [ADR-M010](../decisions/ADR-M010.md) outbound presentation epoch + link offset + sync groups; [display-out](display-out.md) node presentation discipline.
 - [ADR-0020] the WHEN/WHAT timing-layer split + slew-not-step; [timing-architecture](timing-architecture.md) §6/§7.
 - [streaming-gotchas](streaming-gotchas.md) §3/§4 (latency tiers, RTCP-SR alignment of separate RTP sessions).
 - [core-engine](core-engine.md) §9.1/§9.2.

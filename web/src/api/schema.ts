@@ -95,12 +95,20 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * `POST /api/v1/commands/apply-layout` — apply a layout to the running
-         *     multiview (role: write; per-object authz; 202).
-         * @description Mirrors [`cmd_swap`]: it only `try_submit`s the command via
-         *     [`submit_accepted`] (idempotency + shed-on-full free) and never blocks the
-         *     engine (invariant #10). The eventual outcome arrives on the realtime stream
-         *     correlated by the returned operation id (ADR-W008).
+         * `POST /api/v1/commands/apply-layout` — apply a **stored** layout to the
+         *     running multiview, live, at the next frame boundary (role: write;
+         *     per-object authz; 202) — ADR-W019, invariant #11 Class-1.
+         * @description The stored layout body is resolved from the layouts repository and solved
+         *     **here, at request time** (off the engine hot path): an unknown id, a body
+         *     that does not parse as a `{canvas, layout, cells}` document, one that does
+         *     not solve (bad grid / geometry), or a pinned-canvas mismatch (a Class-2
+         *     change — ADR-R004) is an honest `422` **before** any `202`. On `202` the
+         *     command carries the solved layout, so the engine's frame-boundary drain
+         *     only swaps (O(cells), no I/O — invariants #1/#10); the `202` body's
+         *     `applied_live`/`carried_only` arrays state which per-cell property classes
+         *     genuinely apply on screen. The submit itself mirrors [`cmd_swap`]
+         *     (idempotency + shed-on-full) and never blocks the engine (invariant #10);
+         *     the outcome rides the realtime stream as a `job.progress` event (ADR-W008).
          */
         post: operations["cmd_apply_layout"];
         delete?: never;
@@ -784,6 +792,18 @@ export interface components {
     schemas: {
         /** @description A `202 Accepted` body returned for an asynchronously-applied command. */
         AcceptedBody: {
+            /**
+             * @description For `apply-layout` (ADR-W019): the per-cell property classes the live
+             *     apply genuinely applies at the next frame boundary (e.g. `geometry`,
+             *     `bindings`, `z_order`, `opacity`, `on_loss`). Absent on other commands.
+             */
+            applied_live?: string[] | null;
+            /**
+             * @description For `apply-layout` (ADR-W019): the property classes that are **carried**
+             *     in the stored document (persisted, exported) but not yet rendered by the
+             *     compositor (e.g. `border`, `qos`, `fit`). Absent on other commands.
+             */
+            carried_only?: string[] | null;
             /** @description The command kind (e.g. `start`). */
             kind: string;
             /**
@@ -2611,7 +2631,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Apply-layout accepted; outcome on the realtime stream. */
+            /** @description Apply-layout accepted: the stored layout was resolved + solved and will swap in at the next frame boundary; `applied_live`/`carried_only` state the property classes. Outcome on the realtime stream (`job.progress`). */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -2631,6 +2651,15 @@ export interface operations {
             };
             /** @description Not authorized to apply a layout. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The layout id does not exist, its stored body does not parse/solve, or its canvas differs from the running session's pinned canvas (Class-2). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

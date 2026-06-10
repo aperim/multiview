@@ -1,6 +1,7 @@
 # Architecture Decision Records
 
-These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Multiview engine. 100 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -22,6 +23,8 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-0016](ADR-0016.md) — Efficient overlay rendering: GPU glyph-atlas text + libass subtitles + cached/dirty-region compositing *(Proposed)*
 - [ADR-0019](ADR-0019.md) — Native multi-form caption ingest: unified cue model decoded in-demux into a per-tile sampled cue store *(Proposed)*
 - [ADR-0024](ADR-0024.md) — Native caption master-fetch over libav avio (no `curl`, no HTTP dep) + bounded retry; fetcher seam for offline tests *(Accepted)*
+- [ADR-0044](ADR-0044.md) — Local display output via DRM/KMS: the off-by-default `display-kms` raw-frame sink (drm-rs + gbm), mailbox flip policy, scanout affinity *(Proposed)*
+- [ADR-0045](ADR-0045.md) — Display-node mode: `multiview node` subcommand, enrollment/pairing, node presentation discipline, display-locked clock option *(Proposed)*
 
 ## Resilience & A/V
 
@@ -91,6 +94,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-T007](ADR-T007.md) — Codec edge-case & decode/encode policy: one bad input never stalls the multiview
 - [ADR-T008](ADR-T008.md) — A/V sync & per-input jitter-buffer model
 - [ADR-T009](ADR-T009.md) — Per-tile media-time ring uses O(capacity) copy-on-write publish, not an in-place O(1) ring
+- [ADR-T010](ADR-T010.md) — Dante audio via AES67 / ST 2110-30 (open); native Dante is licence-gated *(Accepted)*
 - [ADR-T011](ADR-T011.md) — HLS rendition isolation: pin the main demuxer to a video variant playlist (FFmpeg-8.x-robust); the isolated WebVTT reader is the sole WebVTT path
 - [ADR-T012](ADR-T012.md) — Reference-clock / wall-clock source-selection contract: free-run vs PTP-grandmaster (ST 2059-2 profile/domain) vs NTP-disciplined precedence, the Holdover→RefLoss failover ladder + `AlarmKind::ReferenceLoss`, and the disciplined reference as a MEDIA-CLOCK REFERENCE only — never a pacer (inv #1; gates AES67-5 + M12)
 - [ADR-T013](ADR-T013.md) — The shared RTP-audio → AudioStore program-clock rebase seam (WebRTC Opus + AES67 + future converge on one path) *(Proposed)*
@@ -113,6 +117,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-RT004](ADR-RT004.md) — Structural backpressure isolation with per-topic conflation and meter sampling
 - [ADR-RT005](ADR-RT005.md) — WS auth via short-lived one-time ticket (default), with subprotocol-token and same-origin-cookie alternatives
 - [ADR-RT006](ADR-RT006.md) — Document the event API with AsyncAPI 3.0 from shared types, served beside Scalar, with codegen'd typed clients
+- [ADR-RT007](ADR-RT007.md) — Devices realtime topic and event types *(Proposed)*
 
 ## Management
 
@@ -123,6 +128,10 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-M005](ADR-M005.md) — Live-apply vs needs-reset semantics: Class-1/reset-lite/Class-2 + listener-restart, surfaced via dry-run plan
 - [ADR-M006](ADR-M006.md) — Config-as-code import/export with versioning, rollback, and reference-only secrets
 - [ADR-M007](ADR-M007.md) — CapabilityReport as the single machine-readable gate for UI and validator
+- [ADR-M008](ADR-M008.md) — Managed-device registry and compiled-in driver model *(Proposed)*
+- [ADR-M009](ADR-M009.md) — Device stream binding: source-candidate / output-target / display-head projections *(Proposed)*
+- [ADR-M010](ADR-M010.md) — Multi-output timing & sync: outbound WallClockRef epoch, link offset, sync groups, published tiers *(Proposed)*
+- [ADR-M011](ADR-M011.md) — Google Cast output driver: protocol stance, sessions, legacy-IPv4 interop *(Proposed)*
 
 ## Web/API Stack
 
@@ -143,6 +152,8 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 99 ADRs 
 - [ADR-W015](ADR-W015.md) — Typed resource validation (422 on invalid source/output/overlay bodies) + `GET /api/v1/config/export` TOML + honest apply semantics
 - [ADR-W016](ADR-W016.md) — In-app docs system: registry-derived MiniSearch keyword search, stable anchors, `HelpLink` deep links from the UI, operator concept library
 - [ADR-W018](ADR-W018.md) — Live source apply: `UpsertSource`/`RemoveSource` on the command bus, frame-boundary registration + off-thread producer hub, per-response `X-Multiview-Apply` live/restart per kind, placement pinned to the running island
+- [ADR-W019](ADR-W019.md) — Live apply of stored layouts: resolve+solve at the route (422 before 202), command carries the solved artifact, frame-boundary swap (Class-1; pinned-canvas mismatches refused)
+- [ADR-W017](ADR-W017.md) — Action route style: bare verb path segments (codify shipped practice) *(Proposed)*
 
 ## Dev Container
 
