@@ -114,6 +114,46 @@ async fn export_renders_the_stores_as_valid_toml() {
 }
 
 #[tokio::test]
+async fn export_carries_a_created_probe() {
+    let h = harness();
+    seed(&h).await;
+
+    // A probe watching the seeded cell "a" (document-level validation resolves
+    // the cell reference, so the export only composes when it exists).
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/probes/black-a",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "Black on a",
+                "body": {
+                    "cell": "a",
+                    "kind": "black",
+                    "luma_threshold": 16,
+                    "dwell": { "up_ms": 2000, "down_ms": 1000 },
+                    "severity": "Major"
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "probe seed must land");
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("export is a valid MultiviewConfig document");
+    assert_eq!(parsed.probes.len(), 1, "the created probe is exported");
+    assert_eq!(parsed.probes[0].id, "black-a");
+    assert_eq!(parsed.probes[0].cell, "a");
+}
+
+#[tokio::test]
 async fn export_requires_authentication() {
     let h = harness();
     let req = axum::http::Request::builder()

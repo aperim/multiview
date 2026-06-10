@@ -447,6 +447,36 @@ mod tests {
     }
 
     #[test]
+    fn freeze_difference_threshold_is_bounded_to_per_mille() {
+        // The doc contract: `difference_threshold` is a per-mille of full-scale
+        // luma, `0..=1000`. The u16 type admits up to 65535, so validation must
+        // reject anything above 1000 — the boundary itself is valid.
+        let at_limit = Probe::new(
+            "p-limit",
+            "c",
+            ProbeKind::freeze(1000, DetectionZone::default()),
+            Dwell::default(),
+            PerceivedSeverity::Warning,
+            false,
+        );
+        at_limit.validate().unwrap();
+
+        let over_limit = Probe::new(
+            "p-over",
+            "c",
+            ProbeKind::freeze(1001, DetectionZone::default()),
+            Dwell::default(),
+            PerceivedSeverity::Warning,
+            false,
+        );
+        let err = over_limit.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("difference_threshold"),
+            "the error names the offending field, got: {err}"
+        );
+    }
+
+    #[test]
     fn constructed_probe_round_trips_through_toml() {
         let probe = Probe::new(
             "p",
