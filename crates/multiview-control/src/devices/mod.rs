@@ -42,4 +42,10 @@ pub use driver_registry::DeviceDriverRegistry;
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;
 pub use state_machine::{DeviceLifecycle, LifecycleEvent};
+pub use zowietek::poller::{PollerConfig, PollerControl, PollerHandle, PollerStep, ZowietekPoller};
+#[cfg(feature = "zowietek")]
+pub use zowietek::runtime::ReqwestPollerFactory;
+pub use zowietek::runtime::{
+    DevicePollerFactory, DevicePollerRegistry, NoPollerFactory, PollerWiring,
+};
 pub use zowietek::{ModeConvergence, WorkMode, ZowietekDriver};

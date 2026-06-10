@@ -37,6 +37,8 @@
 //! driver does; a hung device can at worst stall its own driver task.
 
 pub mod client;
+pub mod poller;
+pub mod runtime;
 
 use std::sync::Arc;
 
@@ -45,7 +47,7 @@ use multiview_events::DeviceState;
 use serde_json::Value;
 
 use self::client::{
-    RpcVerb, ZowietekClient, ZowietekClientError, ZowietekSession, ZowietekTransport,
+    BitrateBps, RpcVerb, ZowietekClient, ZowietekClientError, ZowietekSession, ZowietekTransport,
 };
 use super::broadcaster::{mode_impact_detail, DeviceBroadcaster};
 use super::driver_registry::DeviceDriverRegistry;
@@ -188,6 +190,15 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
         &self.device_id
     }
 
+    /// The last probed [`WorkMode`], if any (cached at adopt/reconnect). The
+    /// poller consults this to decide which facets to enumerate: an encoder-mode
+    /// box has no decode table, so the output-target read is skipped rather than
+    /// issued and rejected (`00004`).
+    #[must_use]
+    pub fn workmode(&self) -> Option<WorkMode> {
+        self.workmode.lock().ok().and_then(|g| *g)
+    }
+
     /// Probe and adopt the device: login → probe workmode → drive the lifecycle
     /// to ONLINE and publish `device.adopted` + a conflated `device.status`.
     ///
@@ -273,6 +284,38 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
                 Err(err)
             }
         }
+    }
+
+    /// Poll the device's status groups once and **return** whether all streams
+    /// are healthy — without itself publishing a lifecycle state.
+    ///
+    /// This is the seam the [`poller`](crate::devices::zowietek::poller) actor
+    /// uses: the poller maps the result into a [`LifecycleEvent`](crate::devices::LifecycleEvent)
+    /// (`Recover` / `DeviceFault`), drives the DEV-A3 state machine, and
+    /// publishes the **lifecycle's** output state via
+    /// [`publish_state`](ZowietekDriver::publish_state) — so the published
+    /// `device.status` is always the transition table's output, never an ad-hoc
+    /// target. (The standalone [`poll_once`](ZowietekDriver::poll_once) publishes
+    /// directly; it predates the poller and is retained for direct use.)
+    ///
+    /// # Errors
+    ///
+    /// [`ZowietekClientError`] if the management channel fails mid-poll (the
+    /// poller rides the device to `UNREACHABLE` from the error).
+    pub async fn poll_status(&self) -> Result<bool, ZowietekClientError> {
+        let session = self.session_clone()?;
+        let data = self
+            .client
+            .get_info(&session, "streamplay", "streamplay", Value::Null)
+            .await?;
+        Ok(streams_healthy(&data))
+    }
+
+    /// Publish an explicit lifecycle `state` as the conflated `device.status`
+    /// (latest-wins) — the path the poller uses to publish the **state machine's
+    /// output** after driving a [`LifecycleEvent`](crate::devices::LifecycleEvent).
+    pub fn publish_state(&self, state: DeviceState) {
+        self.broadcaster.status(&self.device_id, state);
     }
 
     // ---- Facet (a): source candidates -------------------------------------
@@ -436,6 +479,13 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
     }
 
     /// Probe the device's workmode from its `venc` response shape.
+    ///
+    /// Also reads the encoder bitrate (when the response carries one) and
+    /// validates it through [`BitrateBps`], so a kbps-shaped value the vendor
+    /// doc's unit ambiguity could leak is caught at runtime (logged), not
+    /// silently trusted. The bitrate is advisory telemetry — it never changes the
+    /// returned workmode — so an absent or implausible field degrades to a debug
+    /// log, never a probe failure.
     async fn probe_workmode(
         &self,
         session: &ZowietekSession,
@@ -444,6 +494,7 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
             .client
             .get_info(session, "venc", "venc", serde_json::json!({ "ch": 0 }))
             .await?;
+        self.note_probed_bitrate(&data);
         // The probe reports a `workmode` token; default to encoder (the box's
         // power-on default) when the field is absent.
         let token = data
@@ -451,6 +502,31 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
             .and_then(Value::as_str)
             .unwrap_or("encoder");
         Ok(WorkMode::parse(token).unwrap_or(WorkMode::Encoder))
+    }
+
+    /// Read and magnitude-validate the encoder bitrate from a `venc` probe
+    /// response through [`BitrateBps`] (the bps-vs-kbps guard). Best-effort
+    /// telemetry: an absent field is silent; an implausible (kbps-shaped) field
+    /// is logged for hardware-verification follow-up, never trusted as a bps
+    /// value, and never fails the probe.
+    fn note_probed_bitrate(&self, data: &Value) {
+        let Some(field) = data.get("bitrate").and_then(Value::as_u64) else {
+            return;
+        };
+        match BitrateBps::from_field(field) {
+            Ok(bitrate) => tracing::debug!(
+                device = %self.device_id,
+                bitrate_bps = bitrate.get(),
+                "zowietek probe: encoder bitrate (validated bps)"
+            ),
+            Err(err) => tracing::warn!(
+                device = %self.device_id,
+                field,
+                error = %err,
+                "zowietek probe: reported bitrate is implausibly small for bps \
+                 (kbps-shaped?); not trusted — verify on hardware"
+            ),
+        }
     }
 
     /// Publish the lifecycle state implied by a client error (`AUTH_FAILED` for

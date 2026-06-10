@@ -10,7 +10,13 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // Test prose names the lifecycle states in plain caps (ADOPTING/ONLINE/…)
+    // for readability; not API items needing backticks.
+    clippy::doc_markdown,
+    // The harness returns a 4-tuple of shared handles — a test helper, not a
+    // public type worth a named alias.
+    clippy::type_complexity
 )]
 
 use std::sync::Arc;
@@ -199,7 +205,10 @@ async fn auth_failed_opens_the_breaker_no_reconnect_storm() {
         "bad credentials open the breaker (AUTH_FAILED)"
     );
     let after_adopt = transport.request_count("system");
-    assert_eq!(after_adopt, 1, "exactly one login attempt was made on adopt");
+    assert_eq!(
+        after_adopt, 1,
+        "exactly one login attempt was made on adopt"
+    );
 
     // The breaker is OPEN: reconnect attempts must NOT re-login (no storm).
     for _ in 0..5 {
@@ -274,7 +283,10 @@ async fn set_mode_command_dispatches_convergence() {
             saw_mode = true;
         }
     }
-    assert!(saw_mode, "set-mode dispatched a device.mode convergence event");
+    assert!(
+        saw_mode,
+        "set-mode dispatched a device.mode convergence event"
+    );
 }
 
 /// The spawned actor task drives the full lifecycle end-to-end over its control
@@ -322,7 +334,10 @@ async fn spawned_actor_runs_and_stops_on_handle_drop() {
         }
     })
     .await;
-    assert!(online.is_ok(), "the spawned actor adopts the device to ONLINE");
+    assert!(
+        online.is_ok(),
+        "the spawned actor adopts the device to ONLINE"
+    );
     assert!(
         !drivers.source_candidates("dev-a").is_empty(),
         "the spawned actor populated the driver registry the projection route reads"

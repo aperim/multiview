@@ -216,7 +216,15 @@ pub enum TransportResponse {
 /// [`ScriptedTransport`] test mock. `post` performs **one** HTTP POST and
 /// returns the raw outcome; all retry/serialization/status logic lives in
 /// [`ZowietekClient`], above this trait, so it is fully socket-free testable.
-#[allow(async_fn_in_trait)]
+///
+/// `post` is written as an explicit `-> impl Future<…> + Send` (RPITIT) rather
+/// than a plain `async fn`: the supervised **poller actor** is spawned on the
+/// multi-thread Tokio runtime ([`tokio::spawn`], which requires `Send`), and it
+/// holds the client's request future across `.await` points. A bare `async fn`
+/// in a public trait gives **no** `Send` bound on the returned future, so the
+/// spawned task would fail to compile; the `+ Send` bound here is the real fix
+/// (not an `#[allow(async_fn_in_trait)]` papering over a genuine `Send`
+/// problem). It also means the trait carries no auto-trait surprise for callers.
 pub trait ZowietekTransport: Send + Sync {
     /// Issue one `POST /<module>?option=<verb>&login_check_flag=1` with `body`
     /// as the JSON request body.
@@ -227,12 +235,12 @@ pub trait ZowietekTransport: Send + Sync {
     /// classify (a connection refused before any bytes, a malformed URL). A
     /// reboot-style socket drop is **not** an error — it is
     /// [`TransportResponse::Dropped`], so the caller can treat it as expected.
-    async fn post(
+    fn post(
         &self,
         module: &str,
         verb: RpcVerb,
         body: &Value,
-    ) -> Result<TransportResponse, TransportError>;
+    ) -> impl std::future::Future<Output = Result<TransportResponse, TransportError>> + Send;
 }
 
 /// A transport-level failure the client could not classify into a protocol

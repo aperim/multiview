@@ -489,7 +489,9 @@ async fn viewer_cannot_create_a_device() {
 async fn projection_routes_serve_real_facets_a_live_driver_enumerated() {
     use multiview_control::devices::zowietek::client::{ScriptedReply, ScriptedTransport};
     use multiview_control::devices::zowietek::ZowietekDriver;
-    use multiview_control::devices::{DeviceBroadcaster, DeviceDriverRegistry, DeviceStatusRegistry};
+    use multiview_control::devices::{
+        DeviceBroadcaster, DeviceDriverRegistry, DeviceStatusRegistry,
+    };
 
     // Share ONE driver registry between the router (via AppState) and a live
     // driver, exactly as the spawned poller shares the AppState registry.
@@ -548,7 +550,10 @@ async fn projection_routes_serve_real_facets_a_live_driver_enumerated() {
         "admin",
         "admin",
     );
-    driver.probe_and_adopt().await.expect("driver adopts device");
+    driver
+        .probe_and_adopt()
+        .await
+        .expect("driver adopts device");
     driver
         .enumerate_source_candidates("[fd00:db8::42]")
         .expect("source facet enumerates");

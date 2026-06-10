@@ -145,7 +145,20 @@ where
     )
     .with_preview(preview)
     .with_warning_store(warnings)
+    .with_device_pollers(device_poller_registry())
     .with_auth_disabled(auth_disabled);
+
+    // Boot-seed: spawn a supervised driver poller for every config-declared
+    // managed device (DEV-A4, ADR-M009). With the `zowietek` feature on, a
+    // `zowietek` device logs in → probes → enumerates its three facets → polls
+    // status → drives the lifecycle, so the projection routes return real data
+    // and `set-mode` dispatches convergence — all on its own control-plane task
+    // (invariant #10). Without the feature this is a no-op (the default no-op
+    // factory spawns nothing). Off the engine hot loop.
+    let spawned = state.seed_device_pollers(&config.devices);
+    if spawned > 0 {
+        tracing::info!(spawned, "DEV-A4: spawned supervised device poller(s)");
+    }
 
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
@@ -165,6 +178,58 @@ where
     }
     let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
     Ok((addr, handle))
+}
+
+/// Build the runtime device-poller registry for the control plane (DEV-A4).
+///
+/// With the `devices-net` feature on (which forwards `multiview-control/zowietek`),
+/// the registry carries the reqwest-backed
+/// [`ReqwestPollerFactory`](multiview_control::devices::ReqwestPollerFactory) so
+/// boot-seed/adopt spawn a **live** supervised poller per `zowietek` device,
+/// resolving each device's credentials from its `auth.secret_ref` via
+/// [`resolve_device_credentials`]. Without the feature it is the default no-op
+/// registry (no live transport → no poller spawned; the projection routes stay
+/// honestly empty), so the default build pulls no socket.
+#[cfg(feature = "devices-net")]
+fn device_poller_registry() -> Arc<multiview_control::devices::DevicePollerRegistry> {
+    use multiview_control::devices::{DevicePollerRegistry, ReqwestPollerFactory};
+    // A 5s per-request timeout: generous for a LAN appliance, bounded so a hung
+    // device times out into the supervised-reconnect path rather than wedging
+    // the poller task.
+    let factory = ReqwestPollerFactory::new(
+        std::time::Duration::from_secs(5),
+        resolve_device_credentials,
+    );
+    Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)))
+}
+
+/// The default no-op poller registry (no `zowietek` feature): no live device
+/// transport, so no poller is spawned and the projection routes stay honestly
+/// empty — exactly the pre-DEV-A4 behaviour.
+#[cfg(not(feature = "devices-net"))]
+fn device_poller_registry() -> Arc<multiview_control::devices::DevicePollerRegistry> {
+    Arc::new(multiview_control::devices::DevicePollerRegistry::new())
+}
+
+/// Resolve a managed device's `(username, password)` from its
+/// `auth.secret_ref` (DEV-A4). The secret reference is read from the secret
+/// store the deployment configures (1Password `op://…`, an environment
+/// variable, etc.) — credentials never live in the config model.
+///
+/// This build resolves a `secret_ref` of the form `env:VAR_USER:VAR_PASS` from
+/// the environment (no extra dependency, works in every deployment); an
+/// `op://…` ref or any other scheme returns `None` (the device is then not
+/// polled — it cannot be logged into — and rides ADOPTING until a resolvable
+/// credential is configured). A device with no `auth` block returns `None`.
+#[cfg(feature = "devices-net")]
+fn resolve_device_credentials(device: &multiview_config::Device) -> Option<(String, String)> {
+    let secret_ref = device.auth.as_ref().map(|a| a.secret_ref.as_str())?;
+    // `env:USER_VAR:PASS_VAR` — read the username/password from two env vars.
+    let rest = secret_ref.strip_prefix("env:")?;
+    let (user_var, pass_var) = rest.split_once(':')?;
+    let username = std::env::var(user_var).ok()?;
+    let password = std::env::var(pass_var).ok()?;
+    Some((username, password))
 }
 
 /// One HLS delivery mount derived from a configured HLS/LL-HLS output: the
