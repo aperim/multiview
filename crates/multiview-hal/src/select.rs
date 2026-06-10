@@ -1257,4 +1257,164 @@ mod tests {
         .expect("the seen GPU is scored");
         assert_eq!(outcome.device, nv("GPU-seen", 1));
     }
+
+    // ----- DEV-B2: sink-locality constraint (ADR-0044 §3 / display-out.md §3) -----
+
+    #[test]
+    fn sink_locality_pins_composite_to_the_display_gpu() {
+        // GPU-display owns the connector; GPU-idle is idler but owns no connector.
+        // A display sink declares locality on GPU-display, so the composite MUST
+        // land there even though GPU-idle would otherwise win on load.
+        let candidates = vec![candidate("GPU-display", 0), candidate("GPU-idle", 1)];
+        let loads = vec![
+            // GPU-display is busier (60%)...
+            load_vram(
+                "GPU-display",
+                0,
+                7_200_000_000,
+                12_000_000_000,
+                Some(0.5),
+                Some(0.5),
+            ),
+            // ...GPU-idle is idle (10%) but cannot scan out the display.
+            load_vram(
+                "GPU-idle",
+                1,
+                1_200_000_000,
+                12_000_000_000,
+                Some(0.1),
+                Some(0.1),
+            ),
+        ];
+        let demand = demand_1080p(1_000_000).with_sink_locality(vec![nv("GPU-display", 0)]);
+        let outcome = select_device(
+            &candidates,
+            &demand,
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        )
+        .expect("the display GPU hosts the locked composite");
+        assert_eq!(
+            outcome.device,
+            nv("GPU-display", 0),
+            "sink locality pins composite to the connector-owning GPU"
+        );
+    }
+
+    #[test]
+    fn sink_locality_rejects_when_the_display_gpu_is_not_a_candidate() {
+        // The locality names a GPU that is not in the candidate set at all (it was
+        // gated out / never offered). select_device must REJECT with the dedicated
+        // SinkLocalityUnsatisfied reason — never silently place composite on a GPU
+        // that owns no connector (which would force the GPU->host->GPU copy).
+        let candidates = vec![candidate("GPU-render-only", 0)];
+        let loads = vec![load_vram(
+            "GPU-render-only",
+            0,
+            1_000_000_000,
+            12_000_000_000,
+            Some(0.1),
+            Some(0.1),
+        )];
+        let demand = demand_1080p(1_000_000).with_sink_locality(vec![nv("GPU-has-the-display", 9)]);
+        let outcome = select_device(
+            &candidates,
+            &demand,
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        );
+        assert_eq!(outcome, Err(RejectReason::SinkLocalityUnsatisfied));
+    }
+
+    #[test]
+    fn empty_sink_locality_imposes_no_constraint() {
+        // The default (no display sink) carries an empty locality set, which must
+        // impose NO constraint: the idlest GPU wins exactly as before.
+        let candidates = vec![candidate("GPU-a", 0), candidate("GPU-b", 1)];
+        let loads = vec![
+            load_vram(
+                "GPU-a",
+                0,
+                9_000_000_000,
+                12_000_000_000,
+                Some(0.8),
+                Some(0.2),
+            ),
+            load_vram(
+                "GPU-b",
+                1,
+                1_200_000_000,
+                12_000_000_000,
+                Some(0.1),
+                Some(0.1),
+            ),
+        ];
+        // demand_1080p carries an empty locality by default.
+        let outcome = select_device(
+            &candidates,
+            &demand_1080p(1_000_000),
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        )
+        .expect("no locality -> least-loaded wins");
+        assert_eq!(outcome.device, nv("GPU-b", 1));
+    }
+
+    #[test]
+    fn sink_locality_with_multiple_owners_admits_either() {
+        // Two connectors on two GPUs -> locality = {GPU-x, GPU-y}. Composite may
+        // legally live on EITHER (a same-GPU scanout); the idler of the two wins,
+        // and a third render-only GPU is rejected by the locality gate.
+        let candidates = vec![
+            candidate("GPU-x", 0),
+            candidate("GPU-y", 1),
+            candidate("GPU-render", 2),
+        ];
+        let loads = vec![
+            load_vram(
+                "GPU-x",
+                0,
+                8_000_000_000,
+                12_000_000_000,
+                Some(0.6),
+                Some(0.6),
+            ),
+            // GPU-y is the idler of the two display GPUs.
+            load_vram(
+                "GPU-y",
+                1,
+                1_500_000_000,
+                12_000_000_000,
+                Some(0.1),
+                Some(0.1),
+            ),
+            // GPU-render is the idlest overall but owns no connector -> gated out.
+            load_vram(
+                "GPU-render",
+                2,
+                300_000_000,
+                12_000_000_000,
+                Some(0.0),
+                Some(0.0),
+            ),
+        ];
+        let demand =
+            demand_1080p(1_000_000).with_sink_locality(vec![nv("GPU-x", 0), nv("GPU-y", 1)]);
+        let outcome = select_device(
+            &candidates,
+            &demand,
+            &loads,
+            &Pins::none(),
+            PlacementPolicy::default(),
+        )
+        .expect("either display GPU is admissible");
+        assert_eq!(
+            outcome.device,
+            nv("GPU-y", 1),
+            "the idler display-owning GPU wins; the render-only GPU is gated out"
+        );
+    }
 }
