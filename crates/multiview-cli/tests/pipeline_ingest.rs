@@ -484,7 +484,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
     let preview_slot = program_slot();
     let provider: SharedPreview = Arc::new(CliPreviewProvider::new(
         Arc::clone(&preview_slot),
-        pipeline.preview_stores(),
+        multiview_cli::live_sources::shared_stores(pipeline.preview_stores()),
     ));
     let (commands, _command_rx) = command_bus(8);
     let stop = StopSignal::new();

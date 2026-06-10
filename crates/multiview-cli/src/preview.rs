@@ -4,13 +4,13 @@
 //! (invariant #10):
 //! * the **program** — a wait-free latest-frame slot ([`ProgramSlot`]) the engine
 //!   loop publishes a throttled clone of the composited canvas into; and
-//! * each **input** — the lock-free per-source [`TileStore`], read at the current
+//! * each **input** — the lock-free per-source
+//!   [`TileStore`](multiview_framestore::TileStore), read at the current
 //!   wall-clock instant.
 //!
 //! NV12→JPEG encoding (via [`multiview_preview::Nv12JpegEncoder`]) runs on the
 //! request task, never on the output-clock loop. No path here blocks the engine.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -18,8 +18,9 @@ use multiview_compositor::pipeline::Nv12Image;
 use multiview_control::PreviewProvider;
 use multiview_core::time::MediaTime;
 use multiview_engine::{MonotonicTimeSource, TimeSource};
-use multiview_framestore::TileStore;
 use multiview_preview::{JpegEncoder, Nv12JpegEncoder};
+
+use crate::live_sources::SharedStores;
 
 /// The wait-free slot the engine loop publishes the latest composited program
 /// frame into (throttled to the preview rate). Cloned into both the engine
@@ -36,15 +37,19 @@ pub fn program_slot() -> ProgramSlot {
 /// frames to JPEG on demand.
 pub struct CliPreviewProvider {
     program: ProgramSlot,
-    stores: HashMap<String, Arc<TileStore<Nv12Image>>>,
+    /// The **live-updatable** per-input store map (ADR-W018): the run seeds it
+    /// with the startup sources and the live-source hub RCUs additions/removals
+    /// in, so live-added inputs are previewable. Reads are wait-free snapshots.
+    stores: SharedStores,
     encoder: Nv12JpegEncoder,
     clock: MonotonicTimeSource,
 }
 
 impl CliPreviewProvider {
-    /// Build a provider reading the program `slot` and the per-input `stores`.
+    /// Build a provider reading the program `slot` and the shared per-input
+    /// `stores` map (see [`crate::live_sources::shared_stores`]).
     #[must_use]
-    pub fn new(program: ProgramSlot, stores: HashMap<String, Arc<TileStore<Nv12Image>>>) -> Self {
+    pub fn new(program: ProgramSlot, stores: SharedStores) -> Self {
         Self {
             program,
             stores,
@@ -74,7 +79,8 @@ impl PreviewProvider for CliPreviewProvider {
     }
 
     fn input_jpeg(&self, id: &str, quality: u8) -> Option<Vec<u8>> {
-        let store = self.stores.get(id)?;
+        let stores = self.stores.load();
+        let store = stores.get(id)?;
         let now = MediaTime::from_nanos(self.clock.now_nanos());
         let read = store.read_at(now);
         let frame = read.frame()?;
@@ -82,7 +88,7 @@ impl PreviewProvider for CliPreviewProvider {
     }
 
     fn input_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.stores.keys().cloned().collect();
+        let mut ids: Vec<String> = self.stores.load().keys().cloned().collect();
         ids.sort();
         ids
     }
@@ -101,7 +107,10 @@ mod tests {
     #[test]
     fn program_jpeg_encodes_the_published_frame_and_none_when_empty() {
         let slot = program_slot();
-        let provider = CliPreviewProvider::new(Arc::clone(&slot), HashMap::new());
+        let provider = CliPreviewProvider::new(
+            Arc::clone(&slot),
+            crate::live_sources::shared_stores(std::collections::HashMap::new()),
+        );
         // Empty slot -> no still.
         assert!(provider.program_jpeg(70).is_none());
 
@@ -117,14 +126,17 @@ mod tests {
 
     #[test]
     fn input_ids_are_sorted_and_unknown_input_is_none() {
-        let mut stores = HashMap::new();
+        let mut stores = std::collections::HashMap::new();
         for id in ["zeta", "alpha"] {
             stores.insert(
                 id.to_owned(),
-                Arc::new(TileStore::<Nv12Image>::with_defaults(id)),
+                Arc::new(multiview_framestore::TileStore::<Nv12Image>::with_defaults(
+                    id,
+                )),
             );
         }
-        let provider = CliPreviewProvider::new(program_slot(), stores);
+        let provider =
+            CliPreviewProvider::new(program_slot(), crate::live_sources::shared_stores(stores));
         assert_eq!(
             provider.input_ids(),
             vec!["alpha".to_owned(), "zeta".to_owned()]

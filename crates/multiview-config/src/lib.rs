@@ -30,19 +30,22 @@
 #![warn(missing_docs)]
 
 pub mod audio;
+pub mod device;
 pub mod error;
 pub mod failover;
 pub mod grid;
+pub mod layout_doc;
 pub mod placement;
 pub mod probe;
 pub mod program;
 pub mod routing;
 pub mod salvo;
 pub mod schema;
+pub mod sync_group;
 pub mod tally;
 pub mod wall;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use multiview_core::layout::{
     Canvas as CoreCanvas, Cell as CoreCell, FitMode, Layout as CoreLayout,
@@ -54,8 +57,10 @@ pub use audio::{
     AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
     TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
+pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
+pub use layout_doc::{LayoutCanvas, LayoutDocument};
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use program::{ProgramId, ProgramKind, ProgramSpec};
@@ -69,6 +74,7 @@ pub use schema::{
     DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth,
     SourceKind,
 };
+pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
@@ -132,6 +138,17 @@ pub struct MultiviewConfig {
     /// Multi-head video walls.
     #[serde(default)]
     pub walls: Vec<WallConfig>,
+    /// Managed devices (ADR-M008): operator-adopted hardware — encoder/decoder
+    /// appliances, display nodes, cast targets — as declarative **desired
+    /// state**. Runtime status (online state, firmware, temperature, achieved
+    /// skew) has no representation here and is never exported.
+    #[serde(default)]
+    pub devices: Vec<Device>,
+    /// Presentation-sync groups over managed devices (ADR-M008 / ADR-M010):
+    /// achieved tier = weakest member, per-member `offset_ms` trim, drift
+    /// alarm beyond `target_skew_ms`.
+    #[serde(default)]
+    pub sync_groups: Vec<SyncGroup>,
     /// The management control-plane listener. When present, `multiview run`
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,7 +264,13 @@ impl MultiviewConfig {
     /// - every probe/tally-profile/salvo references a declared cell (and every
     ///   salvo source-recall references a declared source), and each is
     ///   internally consistent;
-    /// - every declared video wall passes the core wall invariants.
+    /// - every declared video wall passes the core wall invariants;
+    /// - device ids are unique, each device satisfies its driver's
+    ///   requirements (ADR-M008), and every display assignment resolves to a
+    ///   declared output / wall head;
+    /// - sync-group ids are unique, every member references a declared
+    ///   device, no device belongs to two groups, and skew/offset bounds are
+    ///   sane.
     ///
     /// # Errors
     ///
@@ -269,6 +292,8 @@ impl MultiviewConfig {
         self.validate_tally_profiles()?;
         self.validate_salvos()?;
         self.validate_walls()?;
+        self.validate_devices()?;
+        self.validate_sync_groups()?;
         self.validate_control()?;
         self.validate_placement()?;
         self.validate_routing()?;
@@ -290,6 +315,108 @@ impl MultiviewConfig {
     fn validate_sources(&self) -> Result<(), ConfigError> {
         for source in &self.sources {
             source.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Validate managed devices (ADR-M008): each is internally consistent
+    /// ([`Device::validate`]), ids are unique, and every display assignment
+    /// resolves — an `{ output = … }` ref to a declared output's stable id,
+    /// a `{ wall_head = … }` ref to a head of a declared video wall.
+    fn validate_devices(&self) -> Result<(), ConfigError> {
+        let output_ids = self.output_ids();
+        let outputs: HashSet<&str> = output_ids.iter().map(String::as_str).collect();
+        let wall_heads: HashSet<&str> = self
+            .walls
+            .iter()
+            .flat_map(|wall| wall.heads.iter().map(|head| head.id.as_str()))
+            .collect();
+
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.devices.len());
+        for device in &self.devices {
+            device.validate()?;
+            if !seen.insert(device.id.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate device id {:?}",
+                    device.id
+                )));
+            }
+            if let Some(display) = &device.display {
+                match &display.assign {
+                    // The payload (must be `true`) is checked by `Device::validate`.
+                    DisplayAssign::Program(_) => {}
+                    DisplayAssign::Output(output) => {
+                        if !outputs.contains(output.as_str()) {
+                            return Err(ConfigError::Validation(format!(
+                                "device {:?} display assignment references unknown output \
+                                 {output:?}",
+                                device.id
+                            )));
+                        }
+                    }
+                    DisplayAssign::WallHead(head) => {
+                        if !wall_heads.contains(head.as_str()) {
+                            return Err(ConfigError::Validation(format!(
+                                "device {:?} display assignment references unknown wall head \
+                                 {head:?}",
+                                device.id
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate sync groups (ADR-M008 / ADR-M010): each is internally
+    /// consistent ([`SyncGroup::validate`]), ids are unique, every member
+    /// references a declared device, and a device belongs to **at most one**
+    /// group (two groups disagreeing about one device's presentation trim is
+    /// unsatisfiable).
+    fn validate_sync_groups(&self) -> Result<(), ConfigError> {
+        let devices: HashMap<&str, &DeviceDriver> = self
+            .devices
+            .iter()
+            .map(|d| (d.id.as_str(), &d.driver))
+            .collect();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.sync_groups.len());
+        // Which group already claimed each member device.
+        let mut membership: HashMap<&str, &str> = HashMap::new();
+        for group in &self.sync_groups {
+            group.validate()?;
+            if !seen.insert(group.id.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate sync group id {:?}",
+                    group.id
+                )));
+            }
+            for member in &group.members {
+                match devices.get(member.device.as_str()) {
+                    None => {
+                        return Err(ConfigError::Validation(format!(
+                            "sync group {:?} references unknown device {:?}",
+                            group.id, member.device
+                        )));
+                    }
+                    Some(DeviceDriver::Cast) => {
+                        return Err(ConfigError::Validation(format!(
+                            "sync group {:?} includes cast device {:?}: cast outputs are Tier D \
+                             (seconds of receiver buffering, no sync surface) and are never sync \
+                             participants (ADR-M011)",
+                            group.id, member.device
+                        )));
+                    }
+                    Some(_) => {}
+                }
+                if let Some(previous) = membership.insert(member.device.as_str(), &group.id) {
+                    return Err(ConfigError::Validation(format!(
+                        "device {:?} is a member of sync groups {previous:?} and {:?} (a \
+                         device may belong to at most one sync group)",
+                        member.device, group.id
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -357,8 +484,10 @@ impl MultiviewConfig {
     }
 
     /// Resolve one schema cell into a core cell, placing it by grid area or
-    /// absolute rect.
-    fn solve_cell(
+    /// absolute rect. Shared with [`layout_doc::LayoutDocument::solve_named`]
+    /// (the stored named-layout solve, ADR-W019) so a stored body and the
+    /// working config solve cells identically.
+    pub(crate) fn solve_cell(
         cell: &Cell,
         grid_rects: Option<&[grid::AreaRect]>,
     ) -> Result<CoreCell, ConfigError> {

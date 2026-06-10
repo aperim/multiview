@@ -318,6 +318,20 @@ pub enum SourceKind {
     },
 }
 
+impl SourceKind {
+    /// Whether this kind is produced **in-process** (`bars`/`solid`/`clock`,
+    /// ADR-0027) rather than decoded from external media.
+    ///
+    /// This is the live-apply classification point (ADR-W018): synthetic kinds
+    /// can be added/edited on the running engine (`X-Multiview-Apply: live`),
+    /// while decoded kinds currently apply on restart. The CLI's synthetic
+    /// renderer (`SyntheticKind::from_source_kind`) accepts exactly this set.
+    #[must_use]
+    pub const fn is_synthetic(&self) -> bool {
+        matches!(self, Self::Bars | Self::Solid { .. } | Self::Clock { .. })
+    }
+}
+
 /// A managed input: a stable `id`, a display name, the kind-specific payload,
 /// and optional auth/color overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

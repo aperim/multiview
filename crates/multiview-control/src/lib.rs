@@ -94,7 +94,9 @@ pub use audit::{
 pub use auth::{
     authorize_object, authorize_output, provision_admin_keys, Action, ApiKeyStore, Principal, Role,
 };
-pub use command::{command_bus, Command, CommandReceiver, CommandSender, OperationId, SubmitError};
+pub use command::{
+    command_bus, Command, CommandReceiver, CommandSender, OperationId, ResolvedLayout, SubmitError,
+};
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use error::{ControlError, ControlResult};
 pub use is07::{
@@ -202,7 +204,32 @@ pub async fn serve<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router(state).into_make_service())
+    serve_router(listener, router(state), shutdown).await
+}
+
+/// Serve an already-built [`axum::Router`] on an already-bound
+/// [`tokio::net::TcpListener`], shutting down gracefully when `shutdown`
+/// resolves.
+///
+/// The composition seam behind [`serve`]: a caller that needs extra routes
+/// alongside the control plane — e.g. `multiview run` nesting each configured
+/// HLS output's delivery router under `/hls/{output-id}` (DEV-D1) — builds the
+/// app from [`router`] plus its mounts and serves it here, so there is exactly
+/// one accept-loop/graceful-shutdown implementation. The same isolation
+/// contract as [`serve`] applies: anything mounted must be best-effort and
+/// physically incapable of back-pressuring the engine (invariant #10).
+///
+/// # Errors
+/// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
+pub async fn serve_router<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown)
         .await
 }

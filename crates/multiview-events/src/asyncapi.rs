@@ -84,7 +84,7 @@ fn build_info() -> Value {
             "WebSocket and SSE realtime event stream for the Multiview engine. ",
             "Every message uses a single versioned envelope (ADR-RT002). ",
             "Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, ",
-            "layout, config, logs, jobs, preview, system, capabilities. ",
+            "layout, config, logs, jobs, preview, system, capabilities, devices. ",
             "The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription ",
             "control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
         ),
@@ -241,6 +241,8 @@ fn build_messages() -> Value {
     map.extend(build_messages_envelope());
     // Data event messages.
     map.extend(build_messages_data_events());
+    // Devices realtime surface messages (ADR-RT007).
+    map.extend(build_messages_device_events());
     // Control frame messages.
     map.extend(build_messages_control_frames());
     Value::Object(map)
@@ -424,6 +426,96 @@ fn input_streams_message() -> Value {
     })
 }
 
+/// Build the Devices realtime-surface message definitions (ADR-RT007): the
+/// conflated `device.status` / `timing.status` telemetry lanes plus the
+/// lossless low-rate device lifecycle events, all on topic `devices`.
+fn build_messages_device_events() -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("DeviceStatus".to_owned(), json!({
+        "name": "DeviceStatus",
+        "title": "Conflated per-device runtime snapshot",
+        "summary": "Latest-wins device status: state/mode/capabilities/streams/sync/temperature (device.status on topic `devices`).",
+        "description": concat!(
+            "Emitted on topic `devices` with envelope `id` = device id. CONFLATED ",
+            "latest-wins telemetry (vendor-polled at ~1 s cadence): the latest value ",
+            "supersedes all prior values, and the event is excluded from the lossless ",
+            "replay ring — a re-snapshot heals it (ADR-RT007 extends ADR-RT003's ",
+            "ring-exclusion rule to per-event-type granularity on this mixed-cadence ",
+            "topic). Staleness is surfaced via `last_seen_ts`, never papered over.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceStatus" }
+    }));
+    map.insert("DeviceAdopted".to_owned(), json!({
+        "name": "DeviceAdopted",
+        "title": "Device adopted into the registry",
+        "summary": "A device was adopted (device.adopted on topic `devices`; lossless lifecycle lane).",
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceAdopted" }
+    }));
+    map.insert("DeviceRemoved".to_owned(), json!({
+        "name": "DeviceRemoved",
+        "title": "Device removed from the registry",
+        "summary": "A device was removed (device.removed on topic `devices`; lossless lifecycle lane).",
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceRemoved" }
+    }));
+    map.insert("DeviceMode".to_owned(), json!({
+        "name": "DeviceMode",
+        "title": "Device mode convergence",
+        "summary": "Mode convergence started/finished/failed with its declared impact (device.mode on topic `devices`).",
+        "description": concat!(
+            "Carries the impact declared BEFORE apply per the instant-apply doctrine: ",
+            "vendor-decoder mode convergence is `dev`-class (the device pipeline ",
+            "restarts; Multiview program output is unaffected).",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceMode" }
+    }));
+    map.insert("DeviceError".to_owned(), json!({
+        "name": "DeviceError",
+        "title": "Driver-reported device error",
+        "summary": "A device error was reported (device.error on topic `devices`; lossless lifecycle lane).",
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceError" }
+    }));
+    map.insert("DeviceSync".to_owned(), json!({
+        "name": "DeviceSync",
+        "title": "Device sync participation change",
+        "summary": "Sync-group membership / achieved-tier change or drift-threshold crossing (device.sync on topic `devices`).",
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceSync" }
+    }));
+    map.insert("DeviceDiscovered".to_owned(), json!({
+        "name": "DeviceDiscovered",
+        "title": "Untrusted discovery-inventory row",
+        "summary": "A discovery row streamed while a scan operation runs (device.discovered on topic `devices`, correlated via `corr`).",
+        "description": concat!(
+            "Discovery results are an UNTRUSTED inventory requiring explicit ",
+            "confirm-adopt — never auto-ingested. IPv6-first: IPv4 results are ",
+            "explicitly labelled `ipv4-legacy`.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/DeviceDiscovered" }
+    }));
+    map.insert("TimingStatus".to_owned(), json!({
+        "name": "TimingStatus",
+        "title": "Outbound presentation epoch + sync telemetry",
+        "summary": "The per-program WallClockRef epoch, link offset, clock source/quality, and per-sync-group achieved skew (timing.status on topic `devices`).",
+        "description": concat!(
+            "Emitted on topic `devices` with envelope `id` = program or sync-group id ",
+            "(ADR-M010). CONFLATED latest-wins and excluded from the lossless replay ",
+            "ring: the epoch is an exact affine map that stays valid when stale, so a ",
+            "receiver that misses updates keeps the last epoch and free-runs — it ",
+            "degrades, never stalls. The achieved tier is the MEASURED tier, never an ",
+            "aspirational one.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/TimingStatus" }
+    }));
+    map
+}
+
 /// Build control-frame message definitions ($hello, $subscribe, …).
 fn build_messages_control_frames() -> serde_json::Map<String, Value> {
     let mut map = serde_json::Map::new();
@@ -475,7 +567,7 @@ fn envelope_schema() -> Value {
                 "enum": [
                     "$control", "system", "capabilities", "inputs", "tiles", "outputs",
                     "audio.meters", "audio.loudness", "alerts", "alarms", "tally",
-                    "layout", "config", "logs", "jobs", "preview"
+                    "layout", "config", "logs", "jobs", "preview", "devices"
                 ]
             },
             "id": {
@@ -523,6 +615,14 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/AlarmTransition" },
         { "$ref": "#/components/schemas/TallyEvent" },
         { "$ref": "#/components/schemas/SalvoEvent" },
+        { "$ref": "#/components/schemas/DeviceStatus" },
+        { "$ref": "#/components/schemas/DeviceAdopted" },
+        { "$ref": "#/components/schemas/DeviceRemoved" },
+        { "$ref": "#/components/schemas/DeviceMode" },
+        { "$ref": "#/components/schemas/DeviceError" },
+        { "$ref": "#/components/schemas/DeviceSync" },
+        { "$ref": "#/components/schemas/DeviceDiscovered" },
+        { "$ref": "#/components/schemas/TimingStatus" },
         { "$ref": "#/components/schemas/Hello" },
         { "$ref": "#/components/schemas/Subscribe" },
         { "$ref": "#/components/schemas/Subscribed" },
@@ -541,6 +641,27 @@ fn event_payload_one_of() -> Value {
 /// and [`crate::subscription`]. The canonical source of truth is the Rust type
 /// definitions (any drift here must be corrected in favour of the Rust code).
 fn build_schemas() -> Value {
+    // Assembled in three sections (core data events, the Devices surface,
+    // control frames) because a single `json!` literal of this size exceeds
+    // the macro recursion limit. Section order is stable, so the generated
+    // document stays deterministic.
+    let mut map = serde_json::Map::new();
+    for section in [
+        core_event_schemas(),
+        device_event_schemas(),
+        control_frame_schemas(),
+    ] {
+        // Each section builder returns a `json!` object literal, so the
+        // object arm always matches; nothing is skipped.
+        if let Value::Object(entries) = section {
+            map.extend(entries);
+        }
+    }
+    Value::Object(map)
+}
+
+/// The core data-event payload schemas (tiles, audio, outputs, alerts, …).
+fn core_event_schemas() -> Value {
     json!({
         "LifecycleState": lifecycle_state_schema(),
         "TileState": tile_state_schema(),
@@ -563,7 +684,37 @@ fn build_schemas() -> Value {
         "AlarmTransition": alarm_transition_schema(),
         "TallyTarget": tally_target_schema(),
         "TallyEvent": tally_event_schema(),
-        "SalvoEvent": salvo_event_schema(),
+        "SalvoEvent": salvo_event_schema()
+    })
+}
+
+/// The Devices realtime-surface payload schemas (ADR-RT007).
+fn device_event_schemas() -> Value {
+    json!({
+        "DeviceState": device_state_schema(),
+        "SyncCapability": sync_capability_schema(),
+        "DeviceCapabilities": device_capabilities_schema(),
+        "DeviceStreamStatus": device_stream_status_schema(),
+        "AchievedSync": achieved_sync_schema(),
+        "DeviceSyncSummary": device_sync_summary_schema(),
+        "DeviceStatus": device_status_schema(),
+        "DeviceAdopted": device_adopted_schema(),
+        "DeviceRemoved": device_removed_schema(),
+        "ImpactClass": impact_class_schema(),
+        "DeviceMode": device_mode_schema(),
+        "DeviceError": device_error_schema(),
+        "SyncChange": sync_change_schema(),
+        "DeviceSync": device_sync_schema(),
+        "DeviceDiscovered": device_discovered_schema(),
+        "WallClockRef": wall_clock_ref_schema(),
+        "SyncGroupSkew": sync_group_skew_schema(),
+        "TimingStatus": timing_status_schema()
+    })
+}
+
+/// The `$control`-frame payload schemas ($hello, $subscribe, …).
+fn control_frame_schemas() -> Value {
+    json!({
         "Hello": hello_schema(),
         "Subscribe": subscribe_schema(),
         "Subscribed": subscribed_schema(),
@@ -1052,6 +1203,337 @@ fn salvo_event_schema() -> Value {
             "head": {
                 "type": "string",
                 "description": "Output head this recall applies to, if scoped."
+            }
+        }
+    })
+}
+
+// --- Devices realtime-surface schemas (ADR-RT007) ---
+// Mirror the serde wire shapes of the Devices types in `crate::event`; the
+// Rust definitions are the canonical source of truth.
+
+fn device_state_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Managed-device lifecycle state (managed-devices.md §2.2), uppercase on the wire.",
+        "enum": ["DISCOVERED", "ADOPTING", "ONLINE", "DEGRADED", "AUTH_FAILED", "UNREACHABLE"]
+    })
+}
+
+fn sync_capability_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "How well a device can participate in synchronized presentation (fixed probed tri-state).",
+        "enum": ["frame-accurate", "offset-only", "none"]
+    })
+}
+
+fn device_capabilities_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Fixed probed capability flags — a driver maps its device into exactly this shape.",
+        "required": ["encode", "decode", "display", "sync", "audio", "reboot", "firmware_update"],
+        "properties": {
+            "encode": { "type": "boolean", "description": "The device can encode (offers streams Multiview ingests as Sources)." },
+            "decode": { "type": "boolean", "description": "The device can decode (receive a Multiview output)." },
+            "display": { "type": "boolean", "description": "The device drives a physical display." },
+            "sync": { "$ref": "#/components/schemas/SyncCapability" },
+            "audio": { "type": "boolean", "description": "The device handles audio." },
+            "reboot": { "type": "boolean", "description": "The device can be rebooted via the management channel." },
+            "firmware_update": { "type": "boolean", "description": "The device supports managed firmware update." }
+        }
+    })
+}
+
+fn device_stream_status_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "One device-reported active stream. Optional fields are absent where the vendor does not report that figure.",
+        "required": ["role", "healthy"],
+        "properties": {
+            "role": {
+                "type": "string",
+                "enum": ["encode", "decode"],
+                "description": "Whether the device is encoding or decoding this stream."
+            },
+            "output_ref": { "type": "string", "description": "The Multiview output this decode stream is bound to, if any." },
+            "bitrate_bps": { "type": "integer", "format": "uint64", "description": "Device-reported stream bitrate (bits/sec), if reported." },
+            "fps": { "type": "number", "format": "float", "description": "Device-reported stream rate (fps), if reported." },
+            "healthy": { "type": "boolean", "description": "Whether the device reports this stream as healthy." }
+        }
+    })
+}
+
+fn achieved_sync_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": concat!(
+            "The MEASURED sync tier actually achieved (never aspirational): ",
+            "frame-accurate (our nodes), bounded-skew (vendor decoders, ±100–500 ms ",
+            "drift), or none (never part of a synchronized canvas).",
+        ),
+        "enum": ["frame-accurate", "bounded-skew", "none"]
+    })
+}
+
+fn device_sync_summary_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "A device's sync-group membership summary inside a device.status snapshot.",
+        "required": ["group", "offset_ms", "achieved"],
+        "properties": {
+            "group": { "type": "string", "description": "The sync group this device belongs to." },
+            "offset_ms": { "type": "integer", "format": "int64", "description": "Per-member presentation offset trim (ms, AES67 link-offset semantics)." },
+            "achieved": { "$ref": "#/components/schemas/AchievedSync" }
+        }
+    })
+}
+
+fn device_status_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `device.status` (managed-devices.md §2.1): the conflated ",
+            "latest-wins per-device runtime snapshot, envelope `id` = device id. ",
+            "Excluded from the lossless replay ring (a re-snapshot heals it); ",
+            "staleness is surfaced via `last_seen_ts`.",
+        ),
+        "required": ["device_id", "state"],
+        "properties": {
+            "device_id": { "type": "string", "description": "The registry device id this snapshot describes." },
+            "state": { "$ref": "#/components/schemas/DeviceState" },
+            "mode": { "type": "string", "description": "The device's current converged mode (driver vocabulary), once known." },
+            "capabilities": { "$ref": "#/components/schemas/DeviceCapabilities" },
+            "streams": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/DeviceStreamStatus" },
+                "description": "Device-reported active streams (omitted when none / unknown)."
+            },
+            "sync": { "$ref": "#/components/schemas/DeviceSyncSummary" },
+            "temperature_c": { "type": "number", "format": "float", "description": "Device-reported temperature (°C), where exposed." },
+            "last_seen_ts": { "type": "integer", "format": "int64", "description": "When the device last answered (engine monotonic nanoseconds)." }
+        }
+    })
+}
+
+fn device_adopted_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Data body of `device.adopted`: a device was adopted into the registry.",
+        "required": ["device_id", "driver"],
+        "properties": {
+            "device_id": { "type": "string", "description": "The registry device id." },
+            "driver": { "type": "string", "description": "The compiled-in driver managing it (e.g. `zowietek`)." },
+            "name": { "type": "string", "description": "The operator-facing display name, if set." }
+        }
+    })
+}
+
+fn device_removed_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Data body of `device.removed`: a device was removed from the registry.",
+        "required": ["device_id"],
+        "properties": {
+            "device_id": { "type": "string", "description": "The registry device id that was removed." }
+        }
+    })
+}
+
+fn impact_class_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": concat!(
+            "Declared impact class of a management change: cp (control-plane only), ",
+            "c1 (hot/seamless at a frame boundary), c2 (controlled reset via ",
+            "make-before-break), dev (the DEVICE pipeline restarts; Multiview ",
+            "program output is unaffected).",
+        ),
+        "enum": ["cp", "c1", "c2", "dev"]
+    })
+}
+
+fn device_mode_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `device.mode`: a mode convergence started/finished/failed, ",
+            "carrying the impact declared BEFORE apply (instant-apply doctrine).",
+        ),
+        "required": ["device_id", "mode", "phase", "impact"],
+        "properties": {
+            "device_id": { "type": "string", "description": "The registry device id converging." },
+            "mode": { "type": "string", "description": "The target mode being converged to (driver vocabulary)." },
+            "phase": {
+                "type": "string",
+                "enum": ["started", "finished", "failed"],
+                "description": "Which convergence phase this event reports."
+            },
+            "impact": { "$ref": "#/components/schemas/ImpactClass" },
+            "detail": { "type": "string", "description": "The human-readable declared-impact statement, if the driver provides one." }
+        }
+    })
+}
+
+fn device_error_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Data body of `device.error`: a driver-reported device error.",
+        "required": ["device_id", "message"],
+        "properties": {
+            "device_id": { "type": "string", "description": "The registry device id the error concerns." },
+            "code": { "type": "string", "description": "Short machine-readable code where the driver has one (vendor codes pass through verbatim)." },
+            "message": { "type": "string", "description": "Human-readable description of the error." }
+        }
+    })
+}
+
+fn sync_change_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "What changed about a device's sync participation (tagged by `kind`, never untagged).",
+        "required": ["kind"],
+        // AsyncAPI 3.0 Schema Object: `discriminator` is the property NAME.
+        "discriminator": "kind",
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["kind", "offset_ms"],
+                "properties": {
+                    "kind": { "type": "string", "const": "joined" },
+                    "offset_ms": { "type": "integer", "format": "int64", "description": "The per-member offset trim (ms)." }
+                }
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "type": "string", "const": "left" }
+                }
+            },
+            {
+                "type": "object",
+                "required": ["kind", "achieved"],
+                "properties": {
+                    "kind": { "type": "string", "const": "tier" },
+                    "achieved": { "$ref": "#/components/schemas/AchievedSync" }
+                }
+            },
+            {
+                "type": "object",
+                "required": ["kind", "measured_skew_ms", "target_skew_ms", "exceeded"],
+                "properties": {
+                    "kind": { "type": "string", "const": "drift" },
+                    "measured_skew_ms": { "type": "number", "format": "float", "description": "The measured skew for this member (ms)." },
+                    "target_skew_ms": { "type": "integer", "format": "uint32", "description": "The group's configured skew target (ms)." },
+                    "exceeded": { "type": "boolean", "description": "true = crossed above the target; false = recovered back inside it." }
+                }
+            }
+        ]
+    })
+}
+
+fn device_sync_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Data body of `device.sync`: sync-group membership / achieved-tier / drift change.",
+        "required": ["device_id", "group", "change"],
+        "properties": {
+            "device_id": { "type": "string", "description": "The member device id." },
+            "group": { "type": "string", "description": "The sync group concerned." },
+            "change": { "$ref": "#/components/schemas/SyncChange" }
+        }
+    })
+}
+
+fn device_discovered_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `device.discovered`: one untrusted discovery-inventory row ",
+            "streamed while a scan runs (correlated via the envelope `corr`). ",
+            "Requires explicit confirm-adopt; never auto-ingested.",
+        ),
+        "required": ["driver", "address", "family"],
+        "properties": {
+            "driver": { "type": "string", "description": "The candidate driver that recognised the device." },
+            "address": { "type": "string", "description": "The management endpoint (URL/host; IPv6 literals bracketed)." },
+            "family": {
+                "type": "string",
+                "enum": ["ipv6", "ipv4-legacy"],
+                "description": "Address family — IPv6-first; IPv4 results are labelled legacy."
+            },
+            "name": { "type": "string", "description": "The advertised device name, if any." }
+        }
+    })
+}
+
+fn wall_clock_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "The exact affine media↔wall map (multiview_core::wallclock::WallClockRef, ",
+            "ADR-0038): wall(pts) = wall_at_anchor_ns + rescale(pts − media_at_anchor). ",
+            "Integer/rational arithmetic only — never float.",
+        ),
+        "required": ["wall_at_anchor_ns", "media_at_anchor", "rate"],
+        "properties": {
+            "wall_at_anchor_ns": { "type": "integer", "format": "int64", "description": "Wall-clock instant (ns past the Unix epoch) at the anchor sample." },
+            "media_at_anchor": { "type": "integer", "format": "int64", "description": "Media PTS of the anchor sample, in units of `rate`." },
+            "rate": {
+                "type": "object",
+                "description": "The media rate (ticks per second) as an exact rational.",
+                "required": ["num", "den"],
+                "properties": {
+                    "num": { "type": "integer", "format": "int64", "description": "Numerator." },
+                    "den": { "type": "integer", "format": "int64", "description": "Denominator." }
+                }
+            }
+        }
+    })
+}
+
+fn sync_group_skew_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "One sync group's MEASURED skew/tier (achieved tier = weakest member, never over-claimed).",
+        "required": ["group", "achieved"],
+        "properties": {
+            "group": { "type": "string", "description": "The sync group measured." },
+            "achieved": { "$ref": "#/components/schemas/AchievedSync" },
+            "measured_skew_ms": { "type": "number", "format": "float", "description": "The worst measured member skew (ms), where a measurement exists." }
+        }
+    })
+}
+
+fn timing_status_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `timing.status` (ADR-M010): the outbound presentation epoch ",
+            "plus per-sync-group achieved skew, envelope `id` = program or sync-group ",
+            "id. Latest-wins and ring-excluded: the affine epoch stays valid when ",
+            "stale, so receivers free-run on a missed update — they never stall.",
+        ),
+        "required": ["stream_id", "epoch", "link_offset_ns", "clock_source", "clock_quality"],
+        "properties": {
+            "stream_id": { "type": "string", "description": "The program/output stream this epoch maps." },
+            "epoch": { "$ref": "#/components/schemas/WallClockRef" },
+            "link_offset_ns": { "type": "integer", "format": "int64", "description": "Fixed receiver-side presentation delay (ns, AES67 link-offset semantics): uniformity is the goal, not smallness." },
+            "clock_source": {
+                "type": "string",
+                "enum": ["ptp", "system"],
+                "description": "What disciplines the wall estimate (ST 2059-2 PTP servo or chrony-disciplined system time). The clock labels the timeline; it never paces the tick loop."
+            },
+            "clock_quality": {
+                "type": "string",
+                "enum": ["locked", "holdover", "acquiring", "freerun"],
+                "description": "The discipline quality of that clock (the engine servo's lock-state lifecycle)."
+            },
+            "groups": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/SyncGroupSkew" },
+                "description": "Per-sync-group measured skew/tier (omitted when no groups exist)."
             }
         }
     })

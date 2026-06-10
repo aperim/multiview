@@ -71,6 +71,39 @@ impl fmt::Display for OperationId {
     }
 }
 
+/// A stored named layout **resolved + solved at the route** (off the engine
+/// hot path), carried by [`Command::ApplyLayout`] (ADR-W019).
+///
+/// The HTTP handler reads the body from the layouts repository at request
+/// time, parses it as a typed [`multiview_config::LayoutDocument`], and solves
+/// it to a validated [`multiview_core::layout::Layout`] named after the stored
+/// id — failing with `422` **before** any `202` when the id is unknown or the
+/// body does not parse/solve. The engine's frame-boundary drain therefore does
+/// **no I/O and no solving**: applying is one `set_layout` pointer swap plus
+/// O(cells) id/slate rebinds (invariants #1/#10).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ResolvedLayout {
+    /// The solved core layout (canvas + normalized cells + source bindings),
+    /// named after the stored layout id.
+    pub solved: multiview_core::layout::Layout,
+    /// The typed stored-layout document (placement strategy + schema cells),
+    /// mirrored into the engine's working config on apply so export/salvo/
+    /// fallback surfaces stay coherent with the active layout.
+    pub document: multiview_config::LayoutDocument,
+}
+
+impl ResolvedLayout {
+    /// Bundle a solved layout with its source document.
+    #[must_use]
+    pub const fn new(
+        solved: multiview_core::layout::Layout,
+        document: multiview_config::LayoutDocument,
+    ) -> Self {
+        Self { solved, document }
+    }
+}
+
 /// A control-plane command destined for the engine.
 ///
 /// These are the management mutations that must be applied on the data plane
@@ -150,12 +183,20 @@ pub enum Command {
         /// The source elementary stream feeding the layer.
         source: StreamRef,
     },
-    /// Apply a new layout to the running multiview.
+    /// Apply a new layout to the running multiview at the next frame boundary
+    /// (invariant #11 Class-1; ADR-R004 atomic scene-graph swap).
     ApplyLayout {
         /// Correlation id for the async outcome.
         op: OperationId,
         /// The layout id to make active.
         layout: String,
+        /// The stored layout, resolved + solved **at the route** (ADR-W019), so
+        /// the frame-boundary drain never reads the repository or re-solves on
+        /// the render thread. [`None`] is the back-compat form: the engine then
+        /// falls back to re-solving its working config iff `layout` matches the
+        /// solved working layout's name. Boxed to keep the command small on the
+        /// bounded bus.
+        document: Option<Box<ResolvedLayout>>,
     },
     /// Arm (stage) a salvo so it is ready for an atomic take. Arming never
     /// changes program output; it only stages the recall (broadcast-multiviewer
@@ -187,6 +228,30 @@ pub enum Command {
         /// The output head this recall targets, if scoped to one head.
         head: Option<String>,
     },
+    /// Create **or replace** a managed source on the **running** engine
+    /// (ADR-W018 live apply, invariant #11). Carries the full, already-validated
+    /// (ADR-W015) config document; the engine drain registers the source's frame
+    /// store + route key at a frame boundary and hands the heavy producer
+    /// spawn/teardown to an off-thread hub. An upsert under an existing id is a
+    /// live **edit**: the registered `TileStore` is reused so the bound tile
+    /// holds last-good through the producer swap.
+    UpsertSource {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The validated source document to apply (boxed: the source document
+        /// is much larger than the other command variants).
+        source: Box<multiview_config::Source>,
+    },
+    /// Remove a managed source from the **running** engine (ADR-W018): the
+    /// frame store unregisters at a frame boundary (bound cells composite their
+    /// `on_loss` slate from the next tick) and the producer is torn down off the
+    /// clock thread (bounded).
+    RemoveSource {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The source id to remove.
+        id: String,
+    },
     /// Force (or clear) a manual tally override on a tile/element, taking
     /// precedence over the arbitrated bus state until released. A `color` of
     /// [`None`] clears the override and returns the element to arbitration.
@@ -215,6 +280,8 @@ impl Command {
             | Self::ArmSalvo { op, .. }
             | Self::TakeSalvo { op, .. }
             | Self::CancelSalvo { op, .. }
+            | Self::UpsertSource { op, .. }
+            | Self::RemoveSource { op, .. }
             | Self::SetTallyOverride { op, .. } => op,
         }
     }
@@ -233,6 +300,8 @@ impl Command {
             Self::ArmSalvo { .. } => "arm_salvo",
             Self::TakeSalvo { .. } => "take_salvo",
             Self::CancelSalvo { .. } => "cancel_salvo",
+            Self::UpsertSource { .. } => "upsert_source",
+            Self::RemoveSource { .. } => "remove_source",
             Self::SetTallyOverride { .. } => "set_tally_override",
         }
     }

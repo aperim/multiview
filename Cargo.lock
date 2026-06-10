@@ -2992,6 +2992,7 @@ dependencies = [
 name = "multiview-output"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.9",
  "drm",
  "drm-ffi",
  "ffmpeg-next",
@@ -3000,6 +3001,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-rtsp-server",
+ "http-body-util",
  "multiview-core",
  "multiview-ffmpeg",
  "multiview-framestore",
@@ -3010,6 +3012,8 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
+ "tower",
  "tracing",
 ]
 

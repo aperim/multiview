@@ -18,13 +18,15 @@ use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_control::{
     provision_admin_keys, run_warning_ingest, AppState, Command, CommandReceiver, CommandSender,
-    EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, SharedPreview,
+    EngineStateSnapshot, InMemoryRepository, InMemoryWarningStore, ResolvedLayout, SharedPreview,
     WarningRepository,
 };
 use multiview_engine::{
     CompositorDrive, EnginePublisher, RouteApplier, RouteIntent, RouteResolution,
 };
-use multiview_events::{Event, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent};
+use multiview_events::{
+    Event, JobProgress, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase, TallyEvent,
+};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -52,6 +54,13 @@ use tokio::task::JoinHandle;
 /// non-empty under a live run instead of starting blank. Seeding is one-shot,
 /// off the engine hot loop, into read-mostly control-plane stores that can never
 /// back-pressure the engine (invariant #10).
+///
+/// Every configured HLS/LL-HLS output additionally mounts its delivery surface
+/// at `/hls/{output-id}/` on this same listener ([`hls_mounts`] +
+/// [`multiview_output::hls::http::hls_router`], DEV-D1): playlists/segments/
+/// init served with the ADR-0032 §6 header contract — explicit Content-Type,
+/// Cache-Control tiers, Range/206, and Origin-reflecting CORS, so Cast
+/// receivers and browser players fetch cross-origin without a fronting proxy.
 ///
 /// # Errors
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
@@ -137,8 +146,100 @@ where
     .with_preview(preview)
     .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);
-    let handle = tokio::spawn(multiview_control::serve(listener, state, shutdown));
+
+    // Mount each configured HLS/LL-HLS output's delivery surface under
+    // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
+    // output's playlist/segment/init files with the Cache-Control tiers,
+    // Range/206, and Origin-reflecting CORS — so a Cast receiver (a browser
+    // app on a Google origin) or any browser player fetches cross-origin
+    // straight off this listener. Deliberately OUTSIDE `/api/v1`, so it is
+    // unauthenticated like `/docs` (media devices cannot send Bearer tokens).
+    // Isolation-safe (inv #10): the handlers only read files the segmenter
+    // already published to disk — never an engine channel or lock.
+    let mut app = multiview_control::router(state);
+    for mount in hls_mounts(config) {
+        app = app.nest(
+            &mount.route,
+            multiview_output::hls::http::hls_router(mount.dir),
+        );
+    }
+    let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
     Ok((addr, handle))
+}
+
+/// One HLS delivery mount derived from a configured HLS/LL-HLS output: the
+/// route prefix on the control listener and the on-disk directory it serves
+/// (the configured playlist's parent — where the segmenter writes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HlsMount {
+    /// Route prefix, e.g. `/hls/program`.
+    pub route: String,
+    /// The served directory (the output playlist's parent directory).
+    pub dir: std::path::PathBuf,
+}
+
+/// Derive the `/hls/{output-id}` delivery mounts for every HLS/LL-HLS output
+/// in `config`.
+///
+/// The mount segment is the output's stable id ([`multiview_config::Output::id`])
+/// sanitised to URL-segment-safe characters (alphanumerics and `-`/`_`/`.`/`~`
+/// kept, everything else mapped to `-`; a segment that sanitises to nothing
+/// usable becomes `out`). Distinct resolved ids that collide *after*
+/// sanitisation are deduplicated with a deterministic `-2`, `-3`, … suffix in
+/// declaration order, so every configured output stays reachable.
+#[must_use]
+pub fn hls_mounts(config: &MultiviewConfig) -> Vec<HlsMount> {
+    use multiview_config::Output;
+    let mut taken = std::collections::HashSet::new();
+    let mut mounts = Vec::new();
+    for output in &config.outputs {
+        let (Output::Hls { path, .. } | Output::LlHls { path, .. }) = output else {
+            continue;
+        };
+        let dir = match std::path::Path::new(path).parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            // A bare filename (or a root path): serve the process working dir
+            // (where such a playlist would be written).
+            _ => std::path::PathBuf::from("."),
+        };
+        let mut segment = sanitize_mount_segment(&output.id());
+        if !taken.insert(segment.clone()) {
+            // Deterministic suffix dedupe; bounded by the output count.
+            let mut n: u32 = 2;
+            segment = loop {
+                let candidate = format!("{segment}-{n}");
+                if taken.insert(candidate.clone()) {
+                    break candidate;
+                }
+                n = n.saturating_add(1);
+            };
+        }
+        mounts.push(HlsMount {
+            route: format!("/hls/{segment}"),
+            dir,
+        });
+    }
+    mounts
+}
+
+/// Map an output id to a URL-segment-safe mount name (see [`hls_mounts`]).
+fn sanitize_mount_segment(id: &str) -> String {
+    let segment: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // `.`/`..`/empty are not usable URL path segments.
+    if segment.is_empty() || segment.chars().all(|c| c == '.') {
+        "out".to_owned()
+    } else {
+        segment
+    }
 }
 
 /// Project a composited program frame into the compact JSON snapshot the control
@@ -383,10 +484,18 @@ fn resolve_and_apply(config: &MultiviewConfig, drive: &mut CompositorDrive<Nv12I
 ///   there is no per-source `AudioStore` to re-point onto, the run-side audio
 ///   ingest is RT-5/RT-8b, unbuilt). It is therefore a **surfaced** held action
 ///   (`tracing::warn!` naming the missing crosspoint), never a silent drop.
-/// * [`Command::ApplyLayout`] re-solves + re-applies the working layout iff
-///   `layout` matches the solved working layout's name (geometry CAN change, so it
-///   keeps the re-solve path); any other id is a failure (there is no named-layout
-///   library yet) — logged via `tracing::warn!`, never a panic.
+/// * [`Command::ApplyLayout`] **with a route-resolved document** (ADR-W019)
+///   swaps the STORED layout in at the frame boundary — geometry, bindings,
+///   cell ids, and per-cell `on_loss` slates — in O(cells) with no I/O and no
+///   re-solve (the route already solved + validated it), mirrors it into the
+///   working config, and emits a `job.progress` outcome. A pinned-canvas
+///   mismatch (Class-2, ADR-R004 — compared by VALUE via `Canvas::same_signal`,
+///   so an equivalent non-reduced cadence applies) or a compositor rejection is
+///   held — warned AND surfaced as a `job.progress` `apply_layout_held` outcome
+///   — never adopted. **Without a document** (back-compat) it re-solves +
+///   re-applies the working layout iff `layout` matches the solved working
+///   layout's name; any other id is a failure — logged via `tracing::warn!`,
+///   never a panic.
 /// * [`Command::ArmSalvo`] stages a named salvo and emits [`Event::SalvoArmed`];
 ///   [`Command::TakeSalvo`] enqueues the named-or-armed salvo's source recalls as
 ///   coalesced re-points (one capped pass, O(1) each) and emits
@@ -406,6 +515,26 @@ pub fn command_drain(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
     let mut drain = CommandDrain::new(commands, config, publisher);
+    move |drive: &mut CompositorDrive<Nv12Image>| {
+        let _applied = drain.apply(drive);
+    }
+}
+
+/// Build the per-tick control hook **with the live-source seam** (ADR-W018)
+/// threaded in, so `UpsertSource`/`RemoveSource` apply to the running engine:
+/// the drain registers/unregisters the source's frame store + route key at the
+/// frame boundary (cheap binding mutations) and hands every heavy step
+/// (producer spawn/teardown, preview registry) to the
+/// [`LiveSourceHub`](crate::live_sources::LiveSourceHub) behind `live` over a
+/// bounded, non-blocking channel (invariants #1 + #10). The binary wires this
+/// on the software-engine run path.
+pub fn command_drain_with_live_sources(
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    live: crate::live_sources::LiveSourceHandle,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    let mut drain = CommandDrain::new(commands, config, publisher).with_live_sources(live);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
     }
@@ -436,9 +565,11 @@ pub fn command_drain_with_seams(
     config: MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
+    live: crate::live_sources::LiveSourceHandle,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
-    let mut drain =
-        CommandDrain::new(commands, config, publisher).with_subtitle_route(subtitle_route);
+    let mut drain = CommandDrain::new(commands, config, publisher)
+        .with_subtitle_route(subtitle_route)
+        .with_live_sources(live);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
     }
@@ -499,6 +630,13 @@ pub struct CommandDrain {
     /// logged held action.
     #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
     subtitle_route: Option<Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>>,
+    /// The live-source producer seam (ADR-W018), when wired
+    /// ([`command_drain_with_live_sources`] / [`command_drain_with_seams`]): the
+    /// bounded, non-blocking handle to the off-thread
+    /// [`LiveSourceHub`](crate::live_sources::LiveSourceHub) that owns producer
+    /// spawn/teardown + the preview registry. `None` ⇒ `UpsertSource`/
+    /// `RemoveSource` are surfaced held actions (never a silent drop).
+    live_sources: Option<crate::live_sources::LiveSourceHandle>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
     cell_ids_set: bool,
     /// Test-only spy counting how many times this drain calls `solve_layout`.
@@ -524,10 +662,20 @@ impl CommandDrain {
             resolution: RouteResolution::default(),
             #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
             subtitle_route: None,
+            live_sources: None,
             cell_ids_set: false,
             #[cfg(test)]
             resolve_spy: None,
         }
+    }
+
+    /// Thread in the live-source producer seam (ADR-W018) so
+    /// `UpsertSource`/`RemoveSource` reach the running engine. See
+    /// [`command_drain_with_live_sources`].
+    #[must_use]
+    fn with_live_sources(mut self, live: crate::live_sources::LiveSourceHandle) -> Self {
+        self.live_sources = Some(live);
+        self
     }
 
     /// Thread in the live run-side subtitle re-point seam (RT-10b) so a
@@ -562,7 +710,9 @@ impl CommandDrain {
     pub fn apply(&mut self, drive: &mut CompositorDrive<Nv12Image>) -> usize {
         // First tick: hand the drive the cell ids (in config-cell order, which is
         // exactly `solve_layout`'s core-cell order) so `rebind_cell` can address
-        // cells by id. One-shot, off the hot composite.
+        // cells by id, and the per-cell `on_loss` failover-slate policy (ADR-0027
+        // / ADR-0030) so a down tile composites the slate its config declares.
+        // One-shot, off the hot composite.
         if !self.cell_ids_set {
             let ids: Vec<Option<String>> = self
                 .config
@@ -571,6 +721,7 @@ impl CommandDrain {
                 .map(|c| Some(c.id.clone()))
                 .collect();
             drive.set_cell_ids(ids);
+            drive.set_cell_slates(self.config.cells.iter().map(|c| c.on_loss).collect());
             self.cell_ids_set = true;
         }
 
@@ -629,6 +780,104 @@ impl CommandDrain {
             cell: cell.to_owned(),
             source: source.clone(),
         });
+    }
+
+    /// Apply a STORED layout that was resolved + solved **at the route**
+    /// (ADR-W019): swap the active layout at this frame boundary, re-establish
+    /// the O(1) re-point address space (cell ids) and per-cell failover slates
+    /// from the stored document, and mirror the document into the working
+    /// config so export / salvo recalls / the back-compat `ApplyLayout`
+    /// fallback address the **active** layout.
+    ///
+    /// O(cells), no I/O, no `solve_layout`, no `.await` — the render thread
+    /// only swaps (invariants #1/#10). Held (warned, surfaced as a
+    /// `job.progress` `apply_layout_held` outcome, never adopted, never a
+    /// panic) when:
+    /// * the stored canvas (geometry/cadence) differs from the running
+    ///   session's pinned canvas — a Class-2 change (ADR-R004). The route
+    ///   refuses this with `422`; this is the authoritative backstop;
+    /// * the compositor rejects the layout (`set_layout` re-validates and
+    ///   retains the last-good layout on error).
+    ///
+    /// A cell bound to a source with **no registered store** (no running
+    /// ingest) stays bound and composites its per-cell `on_loss` slate until
+    /// the source appears — the output never stalls and never panics
+    /// (consistent with how an unbound/down tile already composes).
+    ///
+    /// On success the apply is observable: a `job.progress` outcome event
+    /// (phase `apply_layout`, drop-oldest — inv #10) plus a `tracing::info!`;
+    /// the proof is the next composited frame.
+    fn apply_stored_layout(
+        &mut self,
+        id: &str,
+        resolved: ResolvedLayout,
+        drive: &mut CompositorDrive<Nv12Image>,
+    ) {
+        let current = &drive.layout().canvas;
+        let stored = &resolved.solved.canvas;
+        // Same SIGNAL, by value: geometry equal and cadence cross-multiplied
+        // (`Canvas::same_signal`), so a non-reduced 50/2 against a running 25/1
+        // is never a false Class-2 hold (ADR-W019 MINOR-3).
+        if !current.same_signal(stored) {
+            tracing::warn!(
+                layout = %id,
+                running = ?current,
+                stored = ?stored,
+                "apply_layout held: the stored layout's canvas differs from the running \
+                 session's pinned canvas (Class-2, ADR-R004); not applied live"
+            );
+            self.publish_apply_held(
+                id,
+                "the stored canvas differs from the running session's pinned canvas (Class-2)",
+            );
+            return;
+        }
+        let cells = resolved.solved.cells.len();
+        match drive.set_layout(Arc::new(resolved.solved)) {
+            Ok(()) => {
+                drive.set_cell_ids(resolved.document.cell_ids());
+                drive.set_cell_slates(resolved.document.cell_slates());
+                // Mirror the document into the working config so the other
+                // management surfaces follow the ACTIVE layout, not the boot one.
+                self.config.layout = resolved.document.layout;
+                self.config.cells = resolved.document.cells;
+                tracing::info!(
+                    layout = %id,
+                    cells,
+                    "apply_layout: stored layout applied live at the frame boundary"
+                );
+                self.publisher
+                    .publish_event(Event::JobProgress(JobProgress {
+                        phase: "apply_layout".to_owned(),
+                        pct: 100,
+                        message: Some(format!("layout {id} applied live at the frame boundary")),
+                    }));
+            }
+            Err(e) => {
+                // Unreachable for a route-solved document (the route validated the
+                // same pure invariants), but held honestly rather than panicking.
+                tracing::warn!(
+                    layout = %id,
+                    error = %e,
+                    "apply_layout: compositor rejected the stored layout; last-good retained"
+                );
+                self.publish_apply_held(id, &format!("the compositor rejected the layout: {e}"));
+            }
+        }
+    }
+
+    /// Make a HELD stored-layout apply observable on the realtime stream
+    /// (ADR-W019 MINOR-2): the 202 promised a swap, so a drain-side hold (the
+    /// pinned-canvas backstop or a compositor rejection) emits a `job.progress`
+    /// outcome with the held phase and the reason — drop-oldest, never awaits a
+    /// client (inv #10) — alongside the `tracing::warn!`.
+    fn publish_apply_held(&self, id: &str, reason: &str) {
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_layout_held".to_owned(),
+                pct: 0,
+                message: Some(format!("layout {id} not applied: {reason}")),
+            }));
     }
 
     /// Re-solve the working config and hot-swap it onto `drive` (the geometry-
@@ -698,23 +947,30 @@ impl CommandDrain {
             } => {
                 self.route_subtitle(layer, source);
             }
-            Command::ApplyLayout { layout, .. } => {
-                // There is no named-layout library in the software engine: the
-                // working config carries a single solved layout named
-                // `schema_v{N}`. Applying that name (the only valid id) re-solves +
-                // re-applies the working layout; any other id is a failure (no
-                // panic). A layout change CAN alter geometry, so this keeps the
-                // re-solve path (counted by the test spy).
-                // FOLLOW-UP (CTL-4/CTL-2): resolve `layout` against a real layout
-                // library once one exists.
-                let working = self.config.solve_layout().ok().map(|l| l.name);
-                if working.as_deref() == Some(layout.as_str()) {
-                    let _ = self.resolve_and_apply(drive);
+            Command::ApplyLayout {
+                layout, document, ..
+            } => {
+                if let Some(resolved) = document {
+                    // ADR-W019: a STORED layout, resolved + solved at the route
+                    // (off this render thread). The frame-boundary work is the
+                    // swap: O(cells), no I/O, no re-solve.
+                    self.apply_stored_layout(&layout, *resolved, drive);
                 } else {
-                    tracing::warn!(
-                        layout = %layout,
-                        "apply_layout: unknown layout id (no named-layout library yet); ignored"
-                    );
+                    // Back-compat (no document): the working config carries a
+                    // single solved layout named `schema_v{N}`. Applying that
+                    // name re-solves + re-applies the working layout; any other
+                    // id is a failure (no panic). A layout change CAN alter
+                    // geometry, so this keeps the re-solve path (counted by the
+                    // test spy).
+                    let working = self.config.solve_layout().ok().map(|l| l.name);
+                    if working.as_deref() == Some(layout.as_str()) {
+                        let _ = self.resolve_and_apply(drive);
+                    } else {
+                        tracing::warn!(
+                            layout = %layout,
+                            "apply_layout: unknown layout id (no stored document on the command); ignored"
+                        );
+                    }
                 }
             }
             Command::ArmSalvo { salvo, head, .. } => {
@@ -748,6 +1004,12 @@ impl CommandDrain {
                         SalvoPhase::Cancelled,
                         head,
                     )));
+            }
+            Command::UpsertSource { ref source, .. } => {
+                self.upsert_source(source, drive);
+            }
+            Command::RemoveSource { ref id, .. } => {
+                self.remove_source(id, drive);
             }
             Command::SetTallyOverride { target, color, .. } => {
                 // No tally arbiter is wired into the software engine yet, so this
@@ -835,6 +1097,150 @@ impl CommandDrain {
             SalvoPhase::Taken,
             head,
         )));
+    }
+
+    /// Apply an `UpsertSource` (ADR-W018 live add/edit) at the frame boundary.
+    ///
+    /// Only the **cheap binding mutations** happen here on the output-clock
+    /// loop: create *or reuse* the source's `TileStore` (reuse on an edit — the
+    /// bound tile holds last-good through the producer swap, never a slate
+    /// flash), register it with the drive (`insert_store`), register the route
+    /// key so a follow-up `RouteVideo`/`SwapSource` resolves, and mirror the
+    /// source into the working config (so `ApplyLayout` re-solves and export
+    /// stay coherent). The **heavy** half — spawning the producer thread and
+    /// the preview-registry RCU — is handed to the off-thread
+    /// [`LiveSourceHub`](crate::live_sources::LiveSourceHub) over a bounded,
+    /// non-blocking channel (invariants #1 + #10; a full queue is shed with a
+    /// warning and the tile rides the slate — re-applying retries).
+    ///
+    /// Kinds: this slice ships **synthetic** sources (`bars`/`solid`/`clock`,
+    /// ADR-0027) live; a decoded kind is a surfaced held action (the stored
+    /// document applies on restart — exactly what the route's
+    /// `X-Multiview-Apply: restart` told the client). The route only enqueues
+    /// `UpsertSource` for synthetic kinds, so the held arm is defence in depth.
+    fn upsert_source(
+        &mut self,
+        source: &multiview_config::Source,
+        drive: &mut CompositorDrive<Nv12Image>,
+    ) {
+        let Some(seam) = self.live_sources.clone() else {
+            tracing::warn!(
+                source = %source.id,
+                "upsert_source held: no live-source hub wired on this run path \
+                 (the stored document applies on restart)"
+            );
+            return;
+        };
+        let Some(kind) = crate::synth::SyntheticKind::from_source_kind(&source.kind) else {
+            tracing::warn!(
+                source = %source.id,
+                "upsert_source held: this kind is not live-appliable yet \
+                 (network live-add is the next ADR-W018 slice); it applies on restart"
+            );
+            return;
+        };
+        let id = source.id.clone();
+        // Reuse the registered store on an edit-by-id so the tile holds
+        // last-good while the hub swaps the producer behind it.
+        let store = drive.store(&id).map_or_else(
+            || {
+                Arc::new(multiview_framestore::TileStore::new(
+                    id.clone(),
+                    multiview_framestore::TileThresholds::default(),
+                    multiview_framestore::NoSignalPolicy::HoldForever,
+                ))
+            },
+            Arc::clone,
+        );
+        // Heavy half off-thread FIRST: the hub tears down any previous
+        // producer under this id (and its `{id}/` companions) before spawning
+        // the SAME generator_loop the startup path runs, and RCUs the preview
+        // map. Requesting this BEFORE the binding mutations below gives the
+        // hub a head start on stopping a replaced producer, shrinking the
+        // bounded window in which old and new frames can interleave in the
+        // reused store on an edit (ADR-W018 §5).
+        match seam.request_spawn_synth(crate::live_sources::SynthSpawn {
+            id: id.clone(),
+            kind,
+            store: Arc::clone(&store),
+            width: self.config.canvas.width,
+            height: self.config.canvas.height,
+            canvas: multiview_compositor::pipeline::CanvasColor::default(),
+            cadence: self.config.canvas.fps.rational(),
+        }) {
+            crate::live_sources::HubSubmit::Accepted => {}
+            crate::live_sources::HubSubmit::Full => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub queue full; producer spawn shed — the tile \
+                     rides the slate (re-apply the source to retry)"
+                );
+            }
+            crate::live_sources::HubSubmit::Gone => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub gone — live producer apply is disabled until \
+                     restart; the tile rides the slate"
+                );
+            }
+        }
+        drive.insert_store(id.clone(), store);
+        // Register the route key so a follow-up RouteVideo/SwapSource resolves:
+        // in the run, the CompositorDrive store key IS the source id.
+        let stream = multiview_config::routing::StreamRef::best(
+            id.clone(),
+            multiview_core::stream::StreamKind::Video,
+        );
+        self.resolution.set_video_store_key(&stream, id.clone());
+        // Mirror into the working config (replace-or-append) so ApplyLayout's
+        // re-solve treats the live source as declared.
+        match self.config.sources.iter_mut().find(|s| s.id == id) {
+            Some(slot) => *slot = source.clone(),
+            None => self.config.sources.push(source.clone()),
+        }
+    }
+
+    /// Apply a `RemoveSource` (ADR-W018 live remove) at the frame boundary:
+    /// unregister the frame store (cells bound to the id composite their
+    /// `on_loss` failover slate from the next tick — the honest `NoSignal` path),
+    /// mirror the removal out of the working config, and hand the producer
+    /// teardown (stop-flag raise + bounded join) and the preview-registry RCU
+    /// to the off-thread hub. Removing an unknown id is a logged no-op.
+    fn remove_source(&mut self, id: &str, drive: &mut CompositorDrive<Nv12Image>) {
+        let Some(seam) = self.live_sources.clone() else {
+            tracing::warn!(
+                source = %id,
+                "remove_source held: no live-source hub wired on this run path \
+                 (the stored removal applies on restart)"
+            );
+            return;
+        };
+        // Teardown-request FIRST (the hub starts raising the producer's stop
+        // flags while the drain finishes the binding mutations — the same
+        // window-shrinking order as upsert), then unregister the store.
+        match seam.request_teardown(id) {
+            crate::live_sources::HubSubmit::Accepted => {}
+            crate::live_sources::HubSubmit::Full => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub queue full; producer teardown shed — the store \
+                     is unregistered (slate) but the producer stops only at run teardown"
+                );
+            }
+            crate::live_sources::HubSubmit::Gone => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub gone — live apply disabled until restart; the \
+                     store is unregistered (slate) but the producer stops only at \
+                     run teardown"
+                );
+            }
+        }
+        let removed = drive.remove_store(id);
+        if !removed {
+            tracing::info!(source = %id, "remove_source: no registered store under that id");
+        }
+        self.config.sources.retain(|s| s.id != id);
     }
 
     /// Apply a `RouteSubtitle` by driving the run's live subtitle re-point seam
@@ -1059,6 +1465,7 @@ input_id = "in_b"
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
                 layout: working_name.clone(),
+                document: None,
             })
             .expect("submit apply-layout");
         drain(&mut drive);
@@ -1081,6 +1488,7 @@ input_id = "in_b"
             .try_submit(Command::ApplyLayout {
                 op: OperationId::new(),
                 layout: "no_such_layout".to_owned(),
+                document: None,
             })
             .expect("submit apply-layout");
         // Must not panic.
@@ -1095,6 +1503,274 @@ input_id = "in_b"
         assert!(
             sub.try_recv().is_err(),
             "an unknown layout must not emit a success event"
+        );
+    }
+
+    /// Build a stored absolute-layout [`multiview_control::ResolvedLayout`]
+    /// named `wall-x` — one full-canvas cell `stored_cell` bound to `source`
+    /// with an `on_loss = black` slate — solved exactly as the apply-layout
+    /// route solves it (ADR-W019). `canvas` matches `TWO_CELL_DOC` (64x64@25)
+    /// unless overridden.
+    fn stored_full_canvas(
+        source: &str,
+        canvas: &serde_json::Value,
+    ) -> multiview_control::ResolvedLayout {
+        let body = serde_json::json!({
+            "canvas": canvas,
+            "layout": { "kind": "absolute" },
+            "cells": [{
+                "id": "stored_cell",
+                "rect": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+                "z": 0,
+                "on_loss": { "slate": "black" },
+                "source": { "input_id": source }
+            }]
+        });
+        let document =
+            multiview_config::LayoutDocument::from_body(&body).expect("stored body parses");
+        let solved = document.solve_named("wall-x").expect("stored body solves");
+        multiview_control::ResolvedLayout::new(solved, document)
+    }
+
+    /// The matching canvas for `TWO_CELL_DOC` (64x64 @ 25/1).
+    fn matching_canvas() -> serde_json::Value {
+        serde_json::json!({ "width": 64, "height": 64, "fps": "25/1" })
+    }
+
+    /// ADR-W019: an `ApplyLayout` carrying a stored, route-solved document swaps
+    /// the ACTIVE layout at the frame boundary — geometry, bindings, per-cell
+    /// slates, and the re-point address space (cell ids) all follow the stored
+    /// document, regardless of any config-layout name.
+    #[test]
+    fn apply_layout_with_stored_document_swaps_geometry_bindings_and_ids() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+        let mut sub = publisher.subscribe();
+
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(stored_full_canvas("in_b", &matching_canvas()))),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        // The stored layout is ACTIVE: its name, geometry, and binding.
+        assert_eq!(
+            drive.layout().name,
+            "wall-x",
+            "the stored layout must become the active layout"
+        );
+        assert_eq!(drive.layout().cells.len(), 1);
+        let cell = drive.layout().cells.first().expect("one cell");
+        assert_eq!(cell.source.as_deref(), Some("in_b"));
+        assert!(
+            (cell.w - 1.0).abs() < f32::EPSILON && (cell.h - 1.0).abs() < f32::EPSILON,
+            "the stored cell spans the full canvas"
+        );
+
+        // The re-point address space follows the stored document: the NEW cell
+        // id is addressable (an O(1) SwapSource onto it lands).
+        sender
+            .try_submit(Command::SwapSource {
+                op: OperationId::new(),
+                tile: "stored_cell".to_owned(),
+                source: "in_a".to_owned(),
+            })
+            .expect("submit swap");
+        let _ = drain.apply(&mut drive);
+        assert_eq!(
+            drive.effective_cell_source("stored_cell"),
+            Some("in_a".to_owned()),
+            "the stored layout's cell ids must be live re-point addresses"
+        );
+
+        // The apply is observable on the realtime stream (drop-oldest, inv #10):
+        // a job.progress outcome naming the stored layout id.
+        let mut saw_apply = false;
+        while let Ok(seq) = sub.try_recv() {
+            if let Event::JobProgress(progress) = seq.event.as_ref() {
+                if progress.phase == "apply_layout" {
+                    assert_eq!(progress.pct, 100);
+                    assert!(
+                        progress
+                            .message
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains("wall-x"),
+                        "the outcome names the stored layout id"
+                    );
+                    saw_apply = true;
+                }
+            }
+        }
+        assert!(
+            saw_apply,
+            "a successful stored-layout apply emits a job.progress outcome"
+        );
+    }
+
+    /// ADR-W019: the next composited frame PROVES the apply — pixels that were
+    /// the left cell's no-signal slate become the stored layout's full-canvas
+    /// source on the very next tick.
+    #[test]
+    fn apply_layout_changes_the_next_composited_frame() {
+        use multiview_core::time::MediaTime;
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+
+        // A real drive whose `in_b` store holds a BRIGHT frame (luma 200); `in_a`
+        // stays empty so cell_a (the left half) composes the dark slate.
+        let cfg = test_config();
+        let drive_cfg = test_config();
+        let mut drive = test_drive(&drive_cfg);
+        let bright = Nv12Image::solid(
+            cfg.canvas.width,
+            cfg.canvas.height,
+            200,
+            128,
+            128,
+            multiview_compositor::pipeline::CanvasColor::default().output_tag(),
+        )
+        .expect("bright frame");
+        // Reach the in_b store through a fresh drive build is not possible here;
+        // publish via a store registered on the drive instead.
+        let store = Arc::new(multiview_framestore::TileStore::<Nv12Image>::with_defaults(
+            "in_b",
+        ));
+        store.publish(bright, MediaTime::from_nanos(0));
+        drive.insert_store("in_b", Arc::clone(&store));
+
+        let tick = |index: u64| multiview_engine::Tick {
+            index,
+            pts: MediaTime::from_nanos(0),
+        };
+        // Left-half center pixel: cell_a samples the empty `in_a` → slate (dark).
+        let before = drive.compose(tick(0)).expect("compose before");
+        let (y_before, _, _) = before.canvas.sample(16, 32).expect("sample before");
+        assert!(
+            y_before < 64,
+            "before the apply the left half is the dark slate (got luma {y_before})"
+        );
+
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(stored_full_canvas("in_b", &matching_canvas()))),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        // The very next composited frame draws the stored layout: the same
+        // pixel is now the bright full-canvas `in_b` source.
+        let after = drive.compose(tick(1)).expect("compose after");
+        let (y_after, _, _) = after.canvas.sample(16, 32).expect("sample after");
+        assert!(
+            y_after > 150,
+            "after the apply the next frame draws the stored full-canvas source \
+             (got luma {y_after}, was {y_before})"
+        );
+    }
+
+    /// ADR-R004 / ADR-W019 guard: the output canvas (geometry + cadence) is
+    /// PINNED for the session — a stored document authored for a different
+    /// canvas is held (warned), never adopted, and the output keeps composing
+    /// on the pinned canvas. (The route refuses this with 422; the drain is the
+    /// authoritative backstop.)
+    #[test]
+    fn apply_layout_with_mismatched_canvas_is_held() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+        let before = drive.layout().name.clone();
+        let mut sub = publisher.subscribe();
+
+        // Same document shape, WRONG canvas (128x128@30 vs the running 64x64@25).
+        let mismatched = stored_full_canvas(
+            "in_b",
+            &serde_json::json!({ "width": 128, "height": 128, "fps": "30/1" }),
+        );
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(mismatched)),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        assert_eq!(
+            drive.layout().name,
+            before,
+            "a pinned-canvas mismatch must be held, never adopted (Class-2)"
+        );
+        assert_eq!(
+            drive.layout().canvas.width,
+            64,
+            "the pinned canvas survives"
+        );
+
+        // MINOR-2 (ADR-W019 review): the broken promise must be OBSERVABLE on
+        // the realtime stream, not only a tracing line — a `job.progress`
+        // outcome with the held phase, pct < 100, naming the reason.
+        let mut saw_held = false;
+        while let Ok(seq) = sub.try_recv() {
+            if let Event::JobProgress(progress) = seq.event.as_ref() {
+                if progress.phase == "apply_layout_held" {
+                    assert!(progress.pct < 100, "a held apply is not 100% complete");
+                    let message = progress.message.as_deref().unwrap_or_default();
+                    assert!(
+                        message.contains("wall-x") && message.contains("canvas"),
+                        "the held outcome names the layout and the reason, got {message:?}"
+                    );
+                    saw_held = true;
+                }
+            }
+        }
+        assert!(
+            saw_held,
+            "a held stored-layout apply emits an apply_layout_held outcome (inv #10 drop-oldest)"
+        );
+    }
+
+    /// MINOR-3 (ADR-W019 review): the drain's pinned-canvas backstop compares
+    /// cadence by VALUE — a stored `50/2` against the running `25/1` is the
+    /// same signal and must apply, never a false Class-2 hold.
+    #[test]
+    fn apply_layout_with_equivalent_cadence_applies() {
+        let config = test_config();
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+        let (sender, command_rx) = command_bus(8);
+        let mut drain = CommandDrain::new(command_rx, config, Arc::clone(&publisher));
+        let mut drive = test_drive(&test_config());
+
+        // Identical geometry, equivalent non-reduced cadence (50/2 == 25/1).
+        let equivalent = stored_full_canvas(
+            "in_b",
+            &serde_json::json!({ "width": 64, "height": 64, "fps": "50/2" }),
+        );
+        sender
+            .try_submit(Command::ApplyLayout {
+                op: OperationId::new(),
+                layout: "wall-x".to_owned(),
+                document: Some(Box::new(equivalent)),
+            })
+            .expect("submit apply-layout");
+        let _ = drain.apply(&mut drive);
+
+        assert_eq!(
+            drive.layout().name,
+            "wall-x",
+            "an equivalent (non-reduced) cadence is the SAME pinned signal and must apply"
         );
     }
 
@@ -1522,5 +2198,123 @@ input_id = "in_b"
         joined
             .expect("serve task panicked")
             .expect("serve returned an I/O error");
+    }
+
+    /// Build a config carrying one HLS output per `(id, path)` pair (the rest of
+    /// the canvas/layout/source/cell scaffolding is fixed and valid).
+    fn config_with_hls_outputs(outputs: &[(&str, &str)]) -> MultiviewConfig {
+        use std::fmt::Write as _;
+        let mut doc = String::from(
+            r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "rtsp"
+url = "rtsp://x/a"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+"##,
+        );
+        for (id, path) in outputs {
+            // Escape backslashes/quotes are unnecessary for these test ids/paths.
+            let _ = write!(
+                doc,
+                "[[outputs]]\nkind = \"hls\"\nid = \"{id}\"\npath = \"{path}\"\ncodec = \"h264\"\n"
+            );
+        }
+        MultiviewConfig::load_from_toml(&doc).expect("parse HLS-outputs config")
+    }
+
+    /// Two outputs whose **distinct** ids sanitise to the SAME URL segment get
+    /// **distinct** mounts: the first keeps the base segment, the second is
+    /// deduped with a deterministic `-2` suffix, so every output stays reachable.
+    #[test]
+    fn colliding_sanitised_mounts_are_deduplicated() {
+        // `aux/out` → `aux-out` and `aux out` → `aux-out` collide post-sanitise.
+        let config = config_with_hls_outputs(&[
+            ("aux/out", "/tmp/a/multiview.m3u8"),
+            ("aux out", "/tmp/b/multiview.m3u8"),
+        ]);
+        let mounts = hls_mounts(&config);
+        assert_eq!(mounts.len(), 2, "both outputs must mount");
+        assert_eq!(mounts[0].route, "/hls/aux-out");
+        assert_eq!(
+            mounts[1].route, "/hls/aux-out-2",
+            "the colliding second id must dedupe with a -2 suffix, got {:?}",
+            mounts[1].route
+        );
+        assert_ne!(
+            mounts[0].route, mounts[1].route,
+            "deduped mounts must be distinct"
+        );
+    }
+
+    /// A THIRD collision continues the deterministic suffix sequence (`-2`, `-3`).
+    #[test]
+    fn three_way_collision_deduplicates_2_then_3() {
+        // `a/b`, `a b`, and `a!b` all sanitise to the same `a-b` segment.
+        let config = config_with_hls_outputs(&[
+            ("a/b", "/tmp/a/multiview.m3u8"),
+            ("a b", "/tmp/b/multiview.m3u8"),
+            ("a!b", "/tmp/c/multiview.m3u8"),
+        ]);
+        let routes: Vec<String> = hls_mounts(&config).into_iter().map(|m| m.route).collect();
+        assert_eq!(
+            routes,
+            vec![
+                "/hls/a-b".to_owned(),
+                "/hls/a-b-2".to_owned(),
+                "/hls/a-b-3".to_owned(),
+            ]
+        );
+    }
+
+    /// An id of `..`, the empty string, or all-dots (`...`) is not a usable URL
+    /// path segment and maps to the `out` fallback.
+    #[test]
+    fn unusable_ids_fall_back_to_out() {
+        for id in ["..", "", "..."] {
+            assert_eq!(
+                sanitize_mount_segment(id),
+                "out",
+                "id {id:?} must map to the `out` fallback"
+            );
+        }
+    }
+
+    /// The `out` fallback ALSO participates in dedupe: two outputs whose ids
+    /// both collapse to `out` get `/hls/out` and `/hls/out-2`.
+    #[test]
+    fn colliding_out_fallbacks_are_deduplicated() {
+        let config = config_with_hls_outputs(&[
+            ("..", "/tmp/a/multiview.m3u8"),
+            ("...", "/tmp/b/multiview.m3u8"),
+        ]);
+        let routes: Vec<String> = hls_mounts(&config).into_iter().map(|m| m.route).collect();
+        assert_eq!(routes, vec!["/hls/out".to_owned(), "/hls/out-2".to_owned()]);
+    }
+
+    /// A normal alphanumeric id (with the kept `-`/`_`/`.`/`~` set) passes
+    /// through unchanged — sanitisation never mangles already-safe segments.
+    #[test]
+    fn already_safe_ids_pass_through_unchanged() {
+        for id in ["program", "low-latency_1.0~alt", "ABC123"] {
+            assert_eq!(sanitize_mount_segment(id), id);
+        }
     }
 }

@@ -46,6 +46,7 @@ pub mod control;
 /// never be silently skipped. Always compiled, so the default build tests the
 /// rejection path and a `display-kms` build tests the acceptance path.
 pub mod outputs;
+pub mod live_sources;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
