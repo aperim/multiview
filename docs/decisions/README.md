@@ -1,7 +1,6 @@
 # Architecture Decision Records
 
-These ADRs capture the load-bearing decisions for the Multiview engine. 100 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
-These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
+These ADRs capture the load-bearing decisions for the Multiview engine. 150 ADRs total. Most are **Proposed** — derived from the design briefs in [../research](../research/). The [Implementation Build-out](#implementation-build-out) series (`ADR-I*`) records decisions **Accepted** during the foundation build-out (the as-built state, which may deliberately and temporarily diverge from a Proposed ADR or from [conventions](../architecture/conventions.md) with a tracked follow-up).
 
 ## Core Engine
 
@@ -25,6 +24,8 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs
 - [ADR-0024](ADR-0024.md) — Native caption master-fetch over libav avio (no `curl`, no HTTP dep) + bounded retry; fetcher seam for offline tests *(Accepted)*
 - [ADR-0044](ADR-0044.md) — Local display output via DRM/KMS: the off-by-default `display-kms` raw-frame sink (drm-rs + gbm), mailbox flip policy, scanout affinity *(Proposed)*
 - [ADR-0045](ADR-0045.md) — Display-node mode: `multiview node` subcommand, enrollment/pairing, node presentation discipline, display-locked clock option *(Proposed)*
+- [ADR-0048](ADR-0048.md) — WebRTC transport endpoint: new leaf crate `multiview-webrtc` (feature `native`, str0m =0.16.2 pinned) owning ALL native WebRTC transport (relocated from `multiview-preview`'s `webrtc-native`) — ONE dual-stack `[::]` UDP socket (default 8189) muxing every session (WHIP ingest · WHEP preview · WHEP output viewers · WHIP push) by ICE-ufrag/learned-addr, full-ICE (never ice-lite) with IPv6-first host candidates + `webrtc.advertised_addresses`, per-run self-signed DTLS cert, one bounded driver task the engine never awaits (inv #10), session GC + `max_sessions` *(Proposed)*
+- [ADR-0049](ADR-0049.md) — WebRTC program outputs: `Output::Webrtc` (WHEP serve of the REAL H.264 program rendition to ≤`max_viewers` — fanout `PacketSink` route()+1, encode-once inv #7, B-frames-off validated at config time, SPS/PPS prepend at IDR, rate-limited force-IDR seam) + `Output::WhipPush` (RFC 9725 client publish: Bearer, 307-redirect-follow, supervised reconnect like RTMP/SRT push) + ONE program Opus rendition embedded for all WebRTC consumers; engine-protected real outputs, never shed by the preview ladder, bounded per-viewer drop-oldest rings *(Proposed)*
 
 ## Resilience & A/V
 
@@ -99,6 +100,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs
 - [ADR-T011](ADR-T011.md) — HLS rendition isolation: pin the main demuxer to a video variant playlist (FFmpeg-8.x-robust); the isolated WebVTT reader is the sole WebVTT path
 - [ADR-T012](ADR-T012.md) — Reference-clock / wall-clock source-selection contract: free-run vs PTP-grandmaster (ST 2059-2 profile/domain) vs NTP-disciplined precedence, the Holdover→RefLoss failover ladder + `AlarmKind::ReferenceLoss`, and the disciplined reference as a MEDIA-CLOCK REFERENCE only — never a pacer (inv #1; gates AES67-5 + M12)
 - [ADR-T013](ADR-T013.md) — The shared RTP-audio → AudioStore program-clock rebase seam (WebRTC Opus + AES67 + future converge on one path) *(Proposed)*
+- [ADR-T014](ADR-T014.md) — WHIP ingest (RFC 9725): `SourceKind::Webrtc` published at `POST /api/v1/whip/{source_id}` (per-source Bearer token, single-publisher 409, PATCH→405 vanilla ICE, RFC 9457 errors) over a native-free `WhipProvider` seam; RTP-mode session → `MediaEngine` → keyframe-gated H.264 depacketizer → packet-fed decoder → `TileStore` (`WrapBits::Rtp32`, decode-at-display-res inv #6) + Opus de-embed → `AudioStore` → program-bus routing; event-driven PLI — session start/loss, ≥2 s rate-limited (documented OBS publish profile); unpublished = NO_SIGNAL, tile rides the normal state machine; add/remove/edit classified like the other network sources *(Proposed)*
 - [ADR-0020](ADR-0020.md) — Layered timing: monotonic pacing + optional reference-lock + per-input frame-sync *(Proposed)*
 - [ADR-0021](ADR-0021.md) — Input timing & frame-sync: best-effort PTS normalisation + wall-clock pacer + sample-at-tick *(Proposed)*
 
@@ -109,6 +111,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs
 - [ADR-P003](ADR-P003.md) — On-demand activation + auto-stop lifecycle (cost ~zero when idle)
 - [ADR-P004](ADR-P004.md) — Off-air cue mechanism = the pre-warm worker (one machinery for look + take)
 - [ADR-P005](ADR-P005.md) — Output preview = tap the REAL encoded bitstream; label real-vs-approx always
+- [ADR-P006](ADR-P006.md) — WHEP preview completion: native transport relocated to `multiview-webrtc` (preview keeps the pure `webrtc` seam); answers are str0m's own complete SDP (the pure scaffold's placeholders go `c=IN IP6 ::`); real preview-encoder ladder (hardware H.264 / always-available VP8 / Opus — zerolatency, B-frames off); audio joins the `SampleFeed` seam (`SampleKind`, per-kind RTP clock); program/input/output scopes with `RealEncodedOutput` vs `PreEncodeCanvasApprox` fidelity labels (ADR-P005); `GET /api/v1/preview/capabilities`; FocusGate suspend/resume degradation glue *(Proposed)*
 
 ## Realtime API
 
@@ -155,6 +158,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 141 ADRs
 - [ADR-W018](ADR-W018.md) — Live source apply: `UpsertSource`/`RemoveSource` on the command bus, frame-boundary registration + off-thread producer hub, per-response `X-Multiview-Apply` live/restart per kind, placement pinned to the running island
 - [ADR-W019](ADR-W019.md) — Live apply of stored layouts: resolve+solve at the route (422 before 202), command carries the solved artifact, frame-boundary swap (Class-1; pinned-canvas mismatches refused)
 - [ADR-W017](ADR-W017.md) — Action route style: bare verb path segments (codify shipped practice) *(Proposed)*
+- [ADR-W020](ADR-W020.md) — SPA WebRTC preview & management: `<WhepPlayer>` (injected `RTCPeerConnection` factory, recvonly, `muted`+`playsinline`, keepalive DELETE teardown) + capabilities-probed WHEP→JPEG fallback ladder with an honest fallback badge; forms for the `webrtc` source (derived WHIP URL + token copy) and `webrtc`/`whip_push` output kinds; in-app docs/glossary/i18n; the JPEG snapshot endpoints enter OpenAPI so the fallback path is typed *(Proposed)*
 
 ## Dev Container
 
