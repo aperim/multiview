@@ -132,6 +132,22 @@ impl ToneGenerator {
         self.format
     }
 
+    /// Seek the generator's phase to the sine value at **absolute frame index**
+    /// `frame`, so the next [`next_block`](Self::next_block) emits the tone as it
+    /// would have been at that frame.
+    ///
+    /// Because the sine is a pure function of the absolute frame index (the phase
+    /// is `2π · freq · frame / rate`, periodic in `frame` with period `rate`),
+    /// seeking is exact and is the right way to *skip forward* over a span that
+    /// will never be read — e.g. when a downstream reader's cursor has jumped
+    /// ahead (a `DropOnOverload` catch-up) — instead of generating every
+    /// intervening sample. The phase stays on the same continuous sine, so the
+    /// tone is still phase-correct (and click-free) at the seam.
+    pub fn seek_to_frame(&mut self, frame: u64) {
+        let rate = u64::from(self.format.sample_rate().max(1));
+        self.phase_frame = frame % rate;
+    }
+
     /// Generate the next `frames` frames of the tone as an [`AudioBlock`],
     /// advancing the internal phase so the *next* call continues the same sine
     /// without a seam.
@@ -265,8 +281,7 @@ mod tests {
 
         // And the last sample of block N is the sample just before, also on-curve.
         let last = f64::from(*first.interleaved().get((n0 - 1) * 2).expect("last sample"));
-        let theta_last = std::f64::consts::TAU
-            * (f64::from(REFERENCE_TONE_HZ) * count_f64(n0 - 1))
+        let theta_last = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * count_f64(n0 - 1))
             / f64::from(AudioFormat::CANONICAL_RATE);
         assert!(
             (last - amp * theta_last.sin()).abs() < 1.0e-4,
@@ -289,7 +304,8 @@ mod tests {
             for &c in &chunks {
                 let block = gen.next_block(c).expect("block");
                 // Check the first sample of this block against the analytic value.
-                let theta = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * frame_f64(absolute))
+                let theta = std::f64::consts::TAU
+                    * (f64::from(REFERENCE_TONE_HZ) * frame_f64(absolute))
                     / f64::from(AudioFormat::CANONICAL_RATE);
                 let predicted = amp * theta.sin();
                 let actual = f64::from(*block.interleaved().first().expect("sample"));
@@ -321,6 +337,28 @@ mod tests {
         assert!(
             (momentary - (-18.0)).abs() < 0.5,
             "momentary loudness {momentary} LUFS must be the expected line-up level (±0.5 LU)"
+        );
+    }
+
+    #[test]
+    fn seek_to_frame_resumes_on_the_analytic_sine() {
+        // Seeking forward must produce the tone as it would be at that absolute
+        // frame (a pure function of the index), so skipping a never-read span stays
+        // phase-correct rather than restarting at phase 0.
+        let fmt = stereo();
+        let amp = line_up_tone_amplitude();
+        let mut gen = ToneGenerator::line_up(fmt);
+        let target: u64 = 123_457; // arbitrary, not a multiple of the 48-sample period
+        gen.seek_to_frame(target);
+        let block = gen.next_block(1).expect("block");
+        let theta = std::f64::consts::TAU * (f64::from(REFERENCE_TONE_HZ) * frame_f64(target))
+            / f64::from(AudioFormat::CANONICAL_RATE);
+        let predicted = amp * theta.sin();
+        let actual = f64::from(*block.interleaved().first().expect("sample"));
+        assert!(
+            (actual - predicted).abs() < 1.0e-4,
+            "after seek_to_frame({target}) the tone must equal the analytic sine: \
+             predicted {predicted}, got {actual}"
         );
     }
 }

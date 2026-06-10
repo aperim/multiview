@@ -278,7 +278,9 @@ fn output_audio_dominant_hz(path: &Path) -> f64 {
     let out = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(path)
-        .args(["-map", "a:0", "-f", "f32le", "-ac", "1", "-ar", "48000", "pipe:1"])
+        .args([
+            "-map", "a:0", "-f", "f32le", "-ac", "1", "-ar", "48000", "pipe:1",
+        ])
         .output()
         .expect("spawn ffmpeg to decode output audio (mono)");
     assert!(out.status.success(), "ffmpeg failed to decode mono audio");
@@ -287,7 +289,10 @@ fn output_audio_dominant_hz(path: &Path) -> f64 {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    assert!(samples.len() > RATE, "too few samples for a frequency estimate");
+    assert!(
+        samples.len() > RATE,
+        "too few samples for a frequency estimate"
+    );
     // Skip the encoder's leading priming/ramp by ignoring the first 0.25 s, then
     // count sign changes through zero on the remaining steady tone. A small
     // dead-band rejects denormal jitter around zero.
