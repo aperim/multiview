@@ -1293,3 +1293,144 @@ pub struct ProbeResourceInputDoc {
     /// The probe document.
     pub body: ProbeBodyDoc,
 }
+
+/// `OpenAPI` mirror of [`multiview_config::DeviceDriver`] (ADR-M008): the
+/// compiled-in device-driver families, `snake_case` on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DeviceDriverDoc {
+    /// ZowieBox-class network encoder/decoder appliances (requires `address`).
+    Zowietek,
+    /// Our own display nodes (enrolled keypair identity; `address` optional).
+    Displaynode,
+    /// Cast media targets (requires `address`).
+    Cast,
+}
+
+/// `OpenAPI` mirror of the `[devices.auth]` block: a write-only secret reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct DeviceAuthDoc {
+    /// A secret-store reference (e.g. `op://Site/foyer-decoder/credentials`);
+    /// never plaintext.
+    pub secret_ref: String,
+}
+
+/// `OpenAPI` mirror of the `[devices.reconnect]` block: supervised-reconnect
+/// backoff bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct ReconnectPolicyDoc {
+    /// First-retry delay in milliseconds (`>= 1`).
+    pub initial_ms: u32,
+    /// Backoff ceiling in milliseconds (`initial_ms..=3_600_000`).
+    pub max_ms: u32,
+}
+
+/// `OpenAPI` mirror of [`multiview_config::Device`] (ADR-M008): the config-as-code
+/// managed-device document.
+///
+/// Serde-equivalent to the config type field-for-field; the runtime status is a
+/// separate read-only projection ([`DeviceStatusDoc`]), never carried here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct DeviceBodyDoc {
+    /// Stable device id; may be omitted (the path id is injected).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Human-friendly display name.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The compiled-in driver family managing this device.
+    pub driver: DeviceDriverDoc,
+    /// Management address, IPv6-first (e.g. `http://[fd00:db8::42]`). Required
+    /// for `zowietek`/`cast`; optional for `displaynode`.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// The desired converged work mode (driver vocabulary, e.g. `decoder`).
+    #[serde(default)]
+    pub desired_mode: Option<String>,
+    /// The lowercase X.733 severity raised when the device stays offline
+    /// (`warning`/`minor`/`major`/`critical`); absent disables the alarm.
+    #[serde(default)]
+    pub alarm_on_offline: Option<String>,
+    /// Write-only credentials (the export emits the ref string only).
+    #[serde(default)]
+    pub auth: Option<DeviceAuthDoc>,
+    /// Supervised-reconnect backoff bounds; absent uses the driver defaults.
+    #[serde(default)]
+    pub reconnect: Option<ReconnectPolicyDoc>,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/devices/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct DeviceResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The device document.
+    pub body: DeviceBodyDoc,
+}
+
+/// `OpenAPI` mirror of one sync-group member (`{ device, offset_ms }`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SyncMemberDoc {
+    /// The member device id (must resolve to a declared device).
+    pub device: String,
+    /// The per-member presentation offset trim in milliseconds (defaults to 0).
+    #[serde(default)]
+    pub offset_ms: i64,
+}
+
+/// `OpenAPI` mirror of [`multiview_config::SyncGroup`] (ADR-M008/M010): the
+/// config-as-code presentation-sync-group document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SyncGroupBodyDoc {
+    /// Stable sync-group id; may be omitted (the path id is injected).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// How the group claims its achieved tier (`auto` = weakest member).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The drift-alarm threshold in milliseconds (`1..=10_000`).
+    pub target_skew_ms: u32,
+    /// The member devices (at least one; `cast` devices are never members).
+    pub members: Vec<SyncMemberDoc>,
+}
+
+/// The request envelope for `POST`/`PUT /api/v1/sync-groups/{id}` (`name` + body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SyncGroupResourceInputDoc {
+    /// Human-friendly name.
+    pub name: String,
+    /// The sync-group document.
+    pub body: SyncGroupBodyDoc,
+}
+
+/// `OpenAPI` mirror of [`multiview_events::DeviceStatus`] (ADR-M008 §2.1): the
+/// read-only latest-wins runtime status `GET /devices/{id}/status` returns.
+///
+/// Serde-equivalent to the event type; runtime telemetry only — never persisted
+/// or exported (config-as-code carries the durable desired state).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct DeviceStatusDoc {
+    /// The registry device id this snapshot describes.
+    pub device_id: String,
+    /// The device's lifecycle state, uppercase on the wire (e.g. `ADOPTING`,
+    /// `ONLINE`, `DEGRADED`, `AUTH_FAILED`, `UNREACHABLE`).
+    pub state: String,
+    /// The device's current converged mode (driver vocabulary), once known.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Device-reported temperature (°C), where the vendor exposes it.
+    #[serde(default)]
+    pub temperature_c: Option<f32>,
+    /// Engine monotonic nanoseconds the device last answered, once it has.
+    #[serde(default)]
+    pub last_seen_ts: Option<i64>,
+}

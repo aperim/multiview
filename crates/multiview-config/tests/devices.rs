@@ -961,3 +961,24 @@ fn indeterminate_offline_alarm_severity_is_rejected() {
         "states the rule: {err}"
     );
 }
+
+#[test]
+fn driver_as_str_matches_serde_wire_form_and_display() {
+    // The event `driver` strings (DEV-A3 / ADR-RT007) are constructed ONLY from
+    // this wire form, never hand-typed — so `as_str()`, the serde rename, and
+    // `Display` must agree for every variant.
+    for (driver, wire) in [
+        (DeviceDriver::Zowietek, "zowietek"),
+        (DeviceDriver::Displaynode, "displaynode"),
+        (DeviceDriver::Cast, "cast"),
+    ] {
+        assert_eq!(driver.as_str(), wire, "as_str() is the wire token");
+        assert_eq!(driver.to_string(), wire, "Display matches as_str()");
+        let serialised = serde_json::to_value(driver).unwrap();
+        assert_eq!(
+            serialised,
+            serde_json::Value::String(wire.to_owned()),
+            "serde wire form matches as_str()"
+        );
+    }
+}
