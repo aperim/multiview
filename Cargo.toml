@@ -35,6 +35,16 @@ gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-rtsp-server = "0.23"
 glib = "0.20"
+# Date/time + IANA timezone database for the clock synthetic source (ADR-0047):
+# resolve an IANA zone id (e.g. `Australia/Sydney`) to a DST-correct concrete UTC
+# offset for the displayed instant. Both `MIT OR Apache-2.0` (deny-clean), pure
+# Rust, no native deps; `chrono-tz` bundles the public-domain IANA tz database at
+# build time (no runtime network). `chrono` carries no `default-features` (no
+# `clock`/`std`-time reads — the clock model samples the host wall clock itself in
+# `multiview-cli`); `chrono-tz` keeps its bundled-db default. Lands in the default
+# build (no `ffmpeg`, no `gpl-codecs`).
+chrono = { version = "0.4.45", default-features = false }
+chrono-tz = { version = "0.10.4", default-features = false }
 # Internal crates
 multiview-core = { path = "crates/multiview-core" }
 multiview-hal = { path = "crates/multiview-hal" }

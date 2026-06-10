@@ -10,8 +10,18 @@
 )]
 
 use multiview_overlay::clock::{
-    AnalogHands, ClockFace, ClockModel, RefSource, RefStatus, TimeRef, TimeZoneOffset, WallTime,
+    parse_tz, resolve_offset, AnalogHands, ClockFace, ClockFaceMode, ClockModel, RefSource,
+    RefStatus, TimeRef, TimeZoneOffset, WallTime,
 };
+
+/// 2026-01-15 00:00:00 UTC as whole Unix seconds — austral summer (Sydney DST on).
+const JAN_2026_UTC: i64 = 1_768_435_200;
+/// 2026-07-15 00:00:00 UTC as whole Unix seconds — austral winter (Sydney DST off).
+const JUL_2026_UTC: i64 = 1_784_073_600;
+/// 2026-03-08 06:30:00 UTC — just BEFORE the US spring-forward (NY is EST, −05:00).
+const NY_BEFORE_SPRING_UTC: i64 = 1_772_951_400;
+/// 2026-03-08 07:30:00 UTC — just AFTER the US spring-forward (NY is EDT, −04:00).
+const NY_AFTER_SPRING_UTC: i64 = 1_772_955_000;
 
 /// Assert two f32 angles (degrees) are equal within tolerance.
 fn assert_deg(actual: f32, expected: f32) {
@@ -190,4 +200,105 @@ fn for_dial_24h_advances_the_hour_hand_half_as_fast() {
     let eighteen = WallTime::from_unix_seconds(18 * 3600).with_offset(TimeZoneOffset::UTC);
     assert_deg(AnalogHands::for_dial(six, false).hour_deg, 90.0);
     assert_deg(AnalogHands::for_dial(eighteen, false).hour_deg, 270.0);
+}
+
+#[test]
+fn parse_tz_accepts_iana_and_rejects_garbage() {
+    assert!(parse_tz("Australia/Sydney").is_some());
+    assert!(parse_tz("America/New_York").is_some());
+    assert!(parse_tz("UTC").is_some());
+    // Unknown / malformed ids resolve to None (the config layer turns this into a
+    // typed error; the resolver never panics).
+    assert!(parse_tz("Mars/Olympus_Mons").is_none());
+    assert!(parse_tz("").is_none());
+    assert!(parse_tz("australia/sydney").is_none()); // case-sensitive IANA ids
+}
+
+#[test]
+fn resolve_offset_is_dst_correct_for_sydney() {
+    let syd = parse_tz("Australia/Sydney").expect("Australia/Sydney is a known IANA zone");
+    // Austral summer (DST on): +11:00 = 660 minutes.
+    let jan = resolve_offset(syd, WallTime::from_unix_seconds(JAN_2026_UTC));
+    assert_eq!(jan.minutes(), 11 * 60, "Sydney in January is UTC+11:00 (DST)");
+    // Austral winter (DST off): +10:00 = 600 minutes.
+    let jul = resolve_offset(syd, WallTime::from_unix_seconds(JUL_2026_UTC));
+    assert_eq!(
+        jul.minutes(),
+        10 * 60,
+        "Sydney in July is UTC+10:00 (standard)"
+    );
+    // The displayed wall-clock time reflects the resolved offset: 2026-01-15
+    // 00:00 UTC is 11:00 local in Sydney (DST), but 2026-07-15 00:00 UTC is 10:00.
+    assert_eq!(
+        ClockFace::digital_24h().format(WallTime::from_unix_seconds(JAN_2026_UTC).with_offset(jan)),
+        "11:00:00"
+    );
+    assert_eq!(
+        ClockFace::digital_24h().format(WallTime::from_unix_seconds(JUL_2026_UTC).with_offset(jul)),
+        "10:00:00"
+    );
+}
+
+#[test]
+fn resolve_offset_tracks_the_us_spring_forward_boundary() {
+    let ny = parse_tz("America/New_York").expect("America/New_York is a known IANA zone");
+    // 30 minutes before the spring-forward instant New York is EST (−05:00).
+    let before = resolve_offset(ny, WallTime::from_unix_seconds(NY_BEFORE_SPRING_UTC));
+    assert_eq!(
+        before.minutes(),
+        -5 * 60,
+        "New York is UTC−05:00 (EST) before spring-forward"
+    );
+    // 30 minutes after, it is EDT (−04:00) — the clock follows the DST jump.
+    let after = resolve_offset(ny, WallTime::from_unix_seconds(NY_AFTER_SPRING_UTC));
+    assert_eq!(
+        after.minutes(),
+        -4 * 60,
+        "New York is UTC−04:00 (EDT) after spring-forward"
+    );
+}
+
+#[test]
+fn resolve_offset_utc_is_zero_year_round() {
+    let utc = parse_tz("UTC").expect("UTC is a known IANA zone");
+    assert_eq!(
+        resolve_offset(utc, WallTime::from_unix_seconds(JAN_2026_UTC)).minutes(),
+        0
+    );
+    assert_eq!(
+        resolve_offset(utc, WallTime::from_unix_seconds(JUL_2026_UTC)).minutes(),
+        0
+    );
+}
+
+#[test]
+fn clock_face_mode_is_three_state_and_round_trips() {
+    // The face is now a 3-state mode: analog / digital / dual.
+    let modes = [
+        ClockFaceMode::Analog,
+        ClockFaceMode::Digital,
+        ClockFaceMode::Dual,
+    ];
+    for m in modes {
+        let json = serde_json::to_string(&m).unwrap();
+        let back: ClockFaceMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
+    }
+    // Dual draws both faces.
+    assert!(ClockFaceMode::Dual.has_analog());
+    assert!(ClockFaceMode::Dual.has_digital());
+    assert!(ClockFaceMode::Analog.has_analog());
+    assert!(!ClockFaceMode::Analog.has_digital());
+    assert!(ClockFaceMode::Digital.has_digital());
+    assert!(!ClockFaceMode::Digital.has_analog());
+}
+
+#[test]
+fn offset_badge_text_renders_signed_hh_mm() {
+    // The "UTC±HH:MM" badge text the `show_offset` flag draws.
+    assert_eq!(TimeZoneOffset::from_minutes(11 * 60).utc_badge(), "UTC+11:00");
+    assert_eq!(TimeZoneOffset::from_minutes(10 * 60).utc_badge(), "UTC+10:00");
+    assert_eq!(TimeZoneOffset::from_minutes(-4 * 60).utc_badge(), "UTC-04:00");
+    assert_eq!(TimeZoneOffset::from_minutes(-330).utc_badge(), "UTC-05:30");
+    assert_eq!(TimeZoneOffset::UTC.utc_badge(), "UTC+00:00");
 }

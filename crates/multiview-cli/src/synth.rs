@@ -415,7 +415,23 @@ segment_ms = 1000
         );
         assert!(matches!(
             kind_of("kind = \"clock\""),
-            SyntheticKind::Clock { analog: true, .. }
+            SyntheticKind::Clock {
+                mode: ClockFaceMode::Analog,
+                ..
+            }
+        ));
+        // The dual face resolves to the 3-state mode and carries the IANA zone +
+        // metadata; the fixed-offset fallback is used only when no zone is set.
+        assert!(matches!(
+            kind_of(
+                "kind = \"clock\"\nface = \"dual\"\ntimezone = \"Australia/Sydney\"\nlabel = \"Sydney\"\nshow_offset = true"
+            ),
+            SyntheticKind::Clock {
+                mode: ClockFaceMode::Dual,
+                tz: Some(_),
+                show_offset: true,
+                ..
+            }
         ));
         // A decoded kind is not synthetic.
         let doc = "schema_version=1\n[canvas]\nwidth=64\nheight=64\nfps=\"25/1\"\npixel_format=\"nv12\"\nbackground=\"#101014\"\n[canvas.color]\nprofile=\"sdr-bt709-limited\"\n[layout]\nkind=\"grid\"\ncolumns=[\"1fr\"]\nrows=[\"1fr\"]\nareas=[\"a\"]\n[[sources]]\nid=\"s\"\nkind=\"rtsp\"\nurl=\"rtsp://x/y\"\n[[cells]]\nid=\"c\"\narea=\"a\"\n[cells.source]\ninput_id=\"s\"\n[[outputs]]\nkind=\"hls\"\npath=\"/tmp/x.m3u8\"\ncodec=\"mpeg2video\"\nsegment_ms=1000\n";
@@ -459,17 +475,28 @@ segment_ms = 1000
         assert_eq!(img.sample(63, 63).expect("br"), tl);
     }
 
+    /// A bare clock descriptor (fixed offset, no metadata) at `mode`/`twelve_hour`.
+    #[cfg(any(test, feature = "overlay"))]
+    fn clock_kind(mode: ClockFaceMode, twelve_hour: bool, tz_offset_minutes: i32) -> SyntheticKind {
+        SyntheticKind::Clock {
+            mode,
+            twelve_hour,
+            tz: None,
+            tz_offset_minutes,
+            label: None,
+            show_offset: false,
+            show_reference: false,
+            numerals: false,
+        }
+    }
+
     #[cfg(feature = "overlay")]
     #[test]
     fn analog_clock_renders_and_animates() {
         let c = canvas();
         // 03:00:00 UTC and 09:00:00 UTC must differ (the hands moved).
         let three = render(
-            SyntheticKind::Clock {
-                analog: true,
-                twelve_hour: false,
-                tz_offset_minutes: 0,
-            },
+            clock_kind(ClockFaceMode::Analog, false, 0),
             240,
             240,
             c,
@@ -477,11 +504,7 @@ segment_ms = 1000
         )
         .expect("clock 3:00");
         let nine = render(
-            SyntheticKind::Clock {
-                analog: true,
-                twelve_hour: false,
-                tz_offset_minutes: 0,
-            },
+            clock_kind(ClockFaceMode::Analog, false, 0),
             240,
             240,
             c,
@@ -512,11 +535,7 @@ segment_ms = 1000
         // dials must render a visibly different face.
         let render_dial = |twelve_hour| {
             render(
-                SyntheticKind::Clock {
-                    analog: true,
-                    twelve_hour,
-                    tz_offset_minutes: 0,
-                },
+                clock_kind(ClockFaceMode::Analog, twelve_hour, 0),
                 240,
                 240,
                 c,
@@ -536,11 +555,7 @@ segment_ms = 1000
     fn digital_clock_renders_onto_the_slate() {
         let c = canvas();
         let img = render(
-            SyntheticKind::Clock {
-                analog: false,
-                twelve_hour: false,
-                tz_offset_minutes: 0,
-            },
+            clock_kind(ClockFaceMode::Digital, false, 0),
             320,
             120,
             c,
@@ -552,6 +567,194 @@ segment_ms = 1000
             img.y_plane(),
             bg.y_plane(),
             "the digital readout drew glyphs onto the slate"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn dual_clock_differs_from_analog_and_digital_at_the_same_instant() {
+        let c = canvas();
+        // A fixed instant (12:34:56 UTC); inject it directly so the test never
+        // reads the system clock (deterministic — the clock abstraction is the
+        // injected `WallTime`).
+        let at = WallTime::from_unix_seconds(12 * 3600 + 34 * 60 + 56);
+        let dim = (320, 320);
+        let dual = render(
+            clock_kind(ClockFaceMode::Dual, false, 0),
+            dim.0,
+            dim.1,
+            c,
+            at,
+        )
+        .expect("dual clock");
+        let analog = render(
+            clock_kind(ClockFaceMode::Analog, false, 0),
+            dim.0,
+            dim.1,
+            c,
+            at,
+        )
+        .expect("analog clock");
+        let digital = render(
+            clock_kind(ClockFaceMode::Digital, false, 0),
+            dim.0,
+            dim.1,
+            c,
+            at,
+        )
+        .expect("digital clock");
+        let bg = Nv12Image::solid_rgb(dim.0, dim.1, 8, 8, 12, c).expect("bg");
+        // Dual drew something, and it is neither the pure analog face nor the pure
+        // digital readout (it placed BOTH — the face up top, the readout below).
+        assert_ne!(dual.y_plane(), bg.y_plane(), "dual drew onto the slate");
+        assert_ne!(
+            dual.y_plane(),
+            analog.y_plane(),
+            "dual is not just the analog face (it added the digital readout)"
+        );
+        assert_ne!(
+            dual.y_plane(),
+            digital.y_plane(),
+            "dual is not just the digital readout (it added the analog face)"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn dual_clock_animates_second_by_second() {
+        let c = canvas();
+        let base = 12 * 3600 + 34 * 60;
+        let a = render(
+            clock_kind(ClockFaceMode::Dual, false, 0),
+            320,
+            320,
+            c,
+            WallTime::from_unix_seconds(base + 4),
+        )
+        .expect("dual :04");
+        let b = render(
+            clock_kind(ClockFaceMode::Dual, false, 0),
+            320,
+            320,
+            c,
+            WallTime::from_unix_seconds(base + 5),
+        )
+        .expect("dual :05");
+        assert_ne!(
+            a.y_plane(),
+            b.y_plane(),
+            "the dual clock advances with the displayed second"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn labeled_clock_differs_from_unlabeled() {
+        let c = canvas();
+        let at = WallTime::from_unix_seconds(9 * 3600);
+        let labeled = render(
+            SyntheticKind::Clock {
+                mode: ClockFaceMode::Dual,
+                twelve_hour: false,
+                tz: None,
+                tz_offset_minutes: 0,
+                label: Some("Sydney".to_owned()),
+                show_offset: false,
+                show_reference: false,
+                numerals: false,
+            },
+            320,
+            320,
+            c,
+            at,
+        )
+        .expect("labeled");
+        let plain = render(
+            clock_kind(ClockFaceMode::Dual, false, 0),
+            320,
+            320,
+            c,
+            at,
+        )
+        .expect("plain");
+        assert_ne!(
+            labeled.y_plane(),
+            plain.y_plane(),
+            "the label line drew glyphs that the plain clock did not"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn show_offset_badge_differs_across_a_dst_boundary_for_one_zone() {
+        // Same Sydney clock, two instants either side of the austral DST change:
+        // the resolved offset (UTC+11:00 vs UTC+10:00) changes the badge text, so
+        // the rendered strip must differ. Inject both instants (deterministic).
+        let c = canvas();
+        let syd = multiview_overlay::clock::parse_tz("Australia/Sydney").expect("zone");
+        let make = |unix: i64| {
+            render(
+                SyntheticKind::Clock {
+                    mode: ClockFaceMode::Dual,
+                    twelve_hour: false,
+                    tz: Some(syd),
+                    tz_offset_minutes: 0,
+                    label: None,
+                    show_offset: true,
+                    show_reference: false,
+                    numerals: false,
+                },
+                320,
+                320,
+                c,
+                WallTime::from_unix_seconds(unix),
+            )
+            .expect("sydney clock")
+        };
+        // 2026-01-15 00:00 UTC (DST, +11) vs 2026-07-15 00:00 UTC (standard, +10).
+        let jan = make(1_768_435_200);
+        let jul = make(1_784_073_600);
+        assert_ne!(
+            jan.y_plane(),
+            jul.y_plane(),
+            "the UTC-offset badge follows DST (UTC+11:00 in Jan vs UTC+10:00 in Jul)"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn numerals_add_glyphs_to_the_analog_face() {
+        let c = canvas();
+        let at = WallTime::from_unix_seconds(10 * 3600 + 8 * 60);
+        let with = render(
+            SyntheticKind::Clock {
+                mode: ClockFaceMode::Analog,
+                twelve_hour: true,
+                tz: None,
+                tz_offset_minutes: 0,
+                label: None,
+                show_offset: false,
+                show_reference: false,
+                numerals: true,
+            },
+            320,
+            320,
+            c,
+            at,
+        )
+        .expect("with numerals");
+        let without = render(
+            clock_kind(ClockFaceMode::Analog, true, 0),
+            320,
+            320,
+            c,
+            at,
+        )
+        .expect("no numerals");
+        assert_ne!(
+            with.y_plane(),
+            without.y_plane(),
+            "hour numerals drew glyphs at the tick positions"
         );
     }
 }

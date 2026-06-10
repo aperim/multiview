@@ -17,6 +17,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = "0.8.19"
+# IANA timezone validation for the clock synthetic source (ADR-0047): a
+# `timezone` id is rejected at config load if it is not a known IANA zone. Pure
+# Rust, `MIT OR Apache-2.0` (deny-clean), bundles the public-domain tz database
+# at build time. `default-features = false` keeps the binary-size knobs on.
+chrono-tz = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.5.0"
