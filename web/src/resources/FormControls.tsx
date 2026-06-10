@@ -57,6 +57,15 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
       return <Trans>Enter a whole number within the allowed range.</Trans>;
     case 'positive-int':
       return <Trans>Enter a whole number greater than zero.</Trans>;
+    case 'number':
+      return <Trans>Enter a number (decimals allowed, e.g. -23.5).</Trans>;
+    case 'zone-extent':
+      return (
+        <Trans>
+          The zone must fit inside the frame: x, y at least 0, width and
+          height above 0, and x+width / y+height at most 1.
+        </Trans>
+      );
     case 'mount-slash':
       return <Trans>A mount point must start with /, e.g. /multiview.</Trans>;
     case 'tracks-required':
@@ -140,6 +149,7 @@ export function SelectField<Option extends string>({
   onChange,
   optionLabel,
   trailing,
+  testId,
 }: {
   readonly label: string;
   readonly value: Option;
@@ -149,6 +159,12 @@ export function SelectField<Option extends string>({
   readonly optionLabel?: (option: Option) => ReactNode;
   /** Optional trailing affordance next to the label (e.g. a HelpLink). */
   readonly trailing?: ReactNode;
+  /**
+   * Optional stable test id on the trigger. e2e tests against the production
+   * bundle cannot match freshly-added localized labels (the compiled catalog
+   * lags until the i18n lane runs `lingui extract`), so they hook this instead.
+   */
+  readonly testId?: string;
 }): JSX.Element {
   const labelId = useId();
   return (
@@ -166,7 +182,10 @@ export function SelectField<Option extends string>({
           }
         }}
       >
-        <SelectTrigger aria-labelledby={labelId}>
+        <SelectTrigger
+          aria-labelledby={labelId}
+          {...(testId !== undefined ? { 'data-testid': testId } : {})}
+        >
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

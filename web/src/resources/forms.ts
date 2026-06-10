@@ -20,7 +20,7 @@
 // Validation returns machine codes per field; the pages translate codes into
 // localized messages (Lingui stays in the components).
 
-import type { OutputKind, OverlayKind, ResourceRecord, SourceKind } from './types';
+import type { OutputKind, OverlayKind, ProbeKind, ResourceRecord, SourceKind } from './types';
 
 // --- shared helpers ----------------------------------------------------------
 
@@ -52,6 +52,8 @@ export type FormErrorCode =
   | 'int'
   | 'int-range'
   | 'positive-int'
+  | 'number'
+  | 'zone-extent'
   | 'mount-slash'
   | 'tracks-required';
 
@@ -66,6 +68,19 @@ function parseIntStrict(value: string): number | undefined {
   }
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/** A plain decimal number string (optionally signed; no exponent forms). */
+const NUMBER_RE = /^-?\d+(\.\d+)?$/;
+
+/** Parse a strict finite decimal string, or `undefined` when not a number. */
+function parseNumberStrict(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!NUMBER_RE.test(trimmed)) {
+    return undefined;
+  }
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /**
@@ -1224,4 +1239,423 @@ export function validateOverlayForm(
     }
   }
   return errors;
+}
+
+// --- Probes ---------------------------------------------------------------------
+
+/**
+ * The X.733 perceived-severity wire values (core `PerceivedSeverity`,
+ * PascalCase variant names), in ascending order of urgency.
+ */
+export type ProbeSeverity =
+  | 'Cleared'
+  | 'Indeterminate'
+  | 'Warning'
+  | 'Minor'
+  | 'Major'
+  | 'Critical';
+
+/** All severities in ascending urgency, for building selectors. */
+export const PROBE_SEVERITIES: readonly ProbeSeverity[] = [
+  'Cleared',
+  'Indeterminate',
+  'Warning',
+  'Minor',
+  'Major',
+  'Critical',
+];
+
+/** The loudness compliance standards (config `LoudnessTarget` kind tags). */
+export type LoudnessStandard = 'r128' | 'a85';
+
+/** Both loudness standards, for building selectors. */
+export const LOUDNESS_STANDARDS: readonly LoudnessStandard[] = ['r128', 'a85'];
+
+/** The standard's default integrated-loudness target (LUFS/LKFS, as a field). */
+function loudnessTargetDefault(standard: LoudnessStandard): string {
+  return standard === 'a85' ? '-24' : '-23';
+}
+
+/** The standard's default max true-peak ceiling (dBTP, as a field). */
+function loudnessTruePeakDefault(standard: LoudnessStandard): string {
+  return standard === 'a85' ? '-2' : '-1';
+}
+
+/** The editable state behind the probe form (numbers kept as input strings). */
+export interface ProbeFormState {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: ProbeKind;
+  /** The cell id this probe watches. */
+  readonly cell: string;
+  /** Luma ceiling, 8-bit `0..=255` (`black`). */
+  readonly lumaThreshold: string;
+  /** Inter-frame difference floor, per-mille `0..=1000` (`freeze`). */
+  readonly differenceThreshold: string;
+  /** Whether a `zone` block is written (`black`/`freeze`; off = full frame). */
+  readonly zoneEnabled: boolean;
+  /** Zone left edge, fraction of tile width (`0..=1`). */
+  readonly zoneX: string;
+  /** Zone top edge, fraction of tile height (`0..=1`). */
+  readonly zoneY: string;
+  /** Zone width, fraction of tile width (`0..=1`). */
+  readonly zoneW: string;
+  /** Zone height, fraction of tile height (`0..=1`). */
+  readonly zoneH: string;
+  /** Level ceiling in dBFS at or below which audio is silent (`silence`). */
+  readonly levelDbfs: string;
+  /** Loudness compliance standard (`loudness`). */
+  readonly loudnessStandard: LoudnessStandard;
+  /** Integrated-loudness target in LUFS/LKFS (`loudness`). */
+  readonly loudnessTarget: string;
+  /** Max permitted true-peak in dBTP (`loudness`). */
+  readonly loudnessTruePeak: string;
+  /** Milliseconds the condition must persist before the alarm raises. */
+  readonly dwellUpMs: string;
+  /** Milliseconds the condition must clear before the alarm clears. */
+  readonly dwellDownMs: string;
+  /** The X.733 severity asserted when the probe fires. */
+  readonly severity: ProbeSeverity;
+  /** Whether the alarm latches (held until explicitly reset). */
+  readonly latched: boolean;
+  /** Unmanaged body fields preserved verbatim across an edit. */
+  readonly extra: Readonly<Record<string, unknown>>;
+}
+
+/** The probe-form fields that can carry a validation error. */
+export type ProbeField =
+  | 'id'
+  | 'name'
+  | 'cell'
+  | 'lumaThreshold'
+  | 'differenceThreshold'
+  | 'zoneX'
+  | 'zoneY'
+  | 'zoneW'
+  | 'zoneH'
+  | 'levelDbfs'
+  | 'loudnessTarget'
+  | 'loudnessTruePeak'
+  | 'dwellUpMs'
+  | 'dwellDownMs';
+
+/** A fresh, empty probe form (schema-aligned defaults). */
+export function emptyProbeForm(): ProbeFormState {
+  return {
+    id: '',
+    name: '',
+    kind: 'black',
+    cell: '',
+    lumaThreshold: '16',
+    differenceThreshold: '5',
+    zoneEnabled: false,
+    zoneX: '0',
+    zoneY: '0',
+    zoneW: '1',
+    zoneH: '1',
+    levelDbfs: '-60',
+    loudnessStandard: 'r128',
+    loudnessTarget: loudnessTargetDefault('r128'),
+    loudnessTruePeak: loudnessTruePeakDefault('r128'),
+    dwellUpMs: '1000',
+    dwellDownMs: '1000',
+    severity: 'Warning',
+    latched: false,
+    extra: {},
+  };
+}
+
+/** The body keys the probe form manages (everything else is preserved). */
+const PROBE_MANAGED_KEYS: readonly string[] = [
+  'id',
+  'cell',
+  'kind',
+  'luma_threshold',
+  'difference_threshold',
+  'zone',
+  'level_dbfs',
+  'target',
+  'dwell',
+  'severity',
+  'latched',
+];
+
+/**
+ * Switch a probe form to a new kind. The shared identity/policy fields (cell,
+ * dwell, severity, latched) are kept; kind-scoped parameters reset to their
+ * defaults so a stale payload can never leak into the body.
+ */
+export function withProbeKind(form: ProbeFormState, kind: ProbeKind): ProbeFormState {
+  if (kind === form.kind) {
+    return form;
+  }
+  const empty = emptyProbeForm();
+  return {
+    ...form,
+    kind,
+    lumaThreshold: empty.lumaThreshold,
+    differenceThreshold: empty.differenceThreshold,
+    zoneEnabled: empty.zoneEnabled,
+    zoneX: empty.zoneX,
+    zoneY: empty.zoneY,
+    zoneW: empty.zoneW,
+    zoneH: empty.zoneH,
+    levelDbfs: empty.levelDbfs,
+    loudnessStandard: empty.loudnessStandard,
+    loudnessTarget: empty.loudnessTarget,
+    loudnessTruePeak: empty.loudnessTruePeak,
+  };
+}
+
+/**
+ * Switch the loudness standard, resetting the target/true-peak fields to the
+ * new standard's defaults (R128 −23 LUFS / −1 dBTP; A/85 −24 LKFS / −2 dBTP).
+ */
+export function withProbeLoudnessStandard(
+  form: ProbeFormState,
+  standard: LoudnessStandard,
+): ProbeFormState {
+  if (standard === form.loudnessStandard) {
+    return form;
+  }
+  return {
+    ...form,
+    loudnessStandard: standard,
+    loudnessTarget: loudnessTargetDefault(standard),
+    loudnessTruePeak: loudnessTruePeakDefault(standard),
+  };
+}
+
+/** Build the exact config `Probe` body from a valid form. */
+export function probeFormToBody(form: ProbeFormState): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...form.extra };
+  body.id = form.id.trim();
+  body.cell = form.cell.trim();
+  body.kind = form.kind;
+  switch (form.kind) {
+    case 'black':
+      body.luma_threshold = parseIntStrict(form.lumaThreshold) ?? 0;
+      break;
+    case 'freeze':
+      body.difference_threshold = parseIntStrict(form.differenceThreshold) ?? 0;
+      break;
+    case 'silence':
+      body.level_dbfs = parseNumberStrict(form.levelDbfs) ?? 0;
+      break;
+    case 'loudness': {
+      const target = parseNumberStrict(form.loudnessTarget) ?? 0;
+      const peak = parseNumberStrict(form.loudnessTruePeak) ?? 0;
+      body.target =
+        form.loudnessStandard === 'a85'
+          ? { kind: 'a85', target_lkfs: target, max_true_peak_dbtp: peak }
+          : { kind: 'r128', target_lufs: target, max_true_peak_dbtp: peak };
+      break;
+    }
+  }
+  if ((form.kind === 'black' || form.kind === 'freeze') && form.zoneEnabled) {
+    body.zone = {
+      x: parseNumberStrict(form.zoneX) ?? 0,
+      y: parseNumberStrict(form.zoneY) ?? 0,
+      w: parseNumberStrict(form.zoneW) ?? 1,
+      h: parseNumberStrict(form.zoneH) ?? 1,
+    };
+  }
+  // Dwell, severity, and latching are policy the operator always authors here;
+  // the explicit values match the schema defaults on a fresh form.
+  body.dwell = {
+    up_ms: parseIntStrict(form.dwellUpMs) ?? 1000,
+    down_ms: parseIntStrict(form.dwellDownMs) ?? 1000,
+  };
+  body.severity = form.severity;
+  body.latched = form.latched;
+  return body;
+}
+
+/**
+ * Parse a stored probe kind tag, or `undefined` for a kind this UI cannot
+ * edit — an explicit refusal, never a fold.
+ */
+export function parseProbeFormKind(tag: string | undefined): ProbeKind | undefined {
+  return (['black', 'freeze', 'silence', 'loudness'] as const).find((k) => k === tag);
+}
+
+/**
+ * Project a stored record back onto the editable probe form, or `undefined`
+ * when the body's kind is not one this UI can edit (the page disables Edit;
+ * the document is preserved as authored).
+ */
+export function probeFormFromRecord(record: ResourceRecord): ProbeFormState | undefined {
+  const body = record.body;
+  const empty = emptyProbeForm();
+  const kind = parseProbeFormKind(asString(body.kind));
+  if (kind === undefined) {
+    return undefined;
+  }
+  const zone = asRecord(body.zone);
+  const dwell = asRecord(body.dwell);
+  const target = asRecord(body.target);
+  const standard: LoudnessStandard = asString(target?.kind) === 'a85' ? 'a85' : 'r128';
+  const targetValue =
+    standard === 'a85' ? asFiniteNumber(target?.target_lkfs) : asFiniteNumber(target?.target_lufs);
+  return {
+    ...empty,
+    id: record.id,
+    name: record.name,
+    kind,
+    cell: asString(body.cell) ?? '',
+    lumaThreshold: numberToField(asFiniteNumber(body.luma_threshold)) || empty.lumaThreshold,
+    differenceThreshold:
+      numberToField(asFiniteNumber(body.difference_threshold)) || empty.differenceThreshold,
+    zoneEnabled: zone !== undefined,
+    zoneX: zone === undefined ? empty.zoneX : numberToField(asFiniteNumber(zone.x)) || '0',
+    zoneY: zone === undefined ? empty.zoneY : numberToField(asFiniteNumber(zone.y)) || '0',
+    zoneW: zone === undefined ? empty.zoneW : numberToField(asFiniteNumber(zone.w)) || '1',
+    zoneH: zone === undefined ? empty.zoneH : numberToField(asFiniteNumber(zone.h)) || '1',
+    levelDbfs: numberToField(asFiniteNumber(body.level_dbfs)) || empty.levelDbfs,
+    loudnessStandard: standard,
+    loudnessTarget: numberToField(targetValue) || loudnessTargetDefault(standard),
+    loudnessTruePeak:
+      numberToField(asFiniteNumber(target?.max_true_peak_dbtp)) ||
+      loudnessTruePeakDefault(standard),
+    dwellUpMs: numberToField(asFiniteNumber(dwell?.up_ms)) || empty.dwellUpMs,
+    dwellDownMs: numberToField(asFiniteNumber(dwell?.down_ms)) || empty.dwellDownMs,
+    severity: PROBE_SEVERITIES.find((s) => s === asString(body.severity)) ?? 'Cleared',
+    latched: body.latched === true,
+    extra: extraOf(body, PROBE_MANAGED_KEYS),
+  };
+}
+
+/** Validate a bounded-integer field (`min..=max`), returning a code or none. */
+function intRangeError(value: string, min: number, max: number): FormErrorCode | undefined {
+  const parsed = parseIntStrict(value);
+  return parsed === undefined || parsed < min || parsed > max ? 'int-range' : undefined;
+}
+
+/** Validate the detection-zone geometry into per-field error codes. */
+function validateZone(form: ProbeFormState, errors: FieldErrors<ProbeField>): void {
+  const x = parseNumberStrict(form.zoneX);
+  const y = parseNumberStrict(form.zoneY);
+  const w = parseNumberStrict(form.zoneW);
+  const h = parseNumberStrict(form.zoneH);
+  if (x === undefined) {
+    errors.zoneX = 'number';
+  }
+  if (y === undefined) {
+    errors.zoneY = 'number';
+  }
+  if (w === undefined) {
+    errors.zoneW = 'number';
+  }
+  if (h === undefined) {
+    errors.zoneH = 'number';
+  }
+  if (x === undefined || y === undefined || w === undefined || h === undefined) {
+    return;
+  }
+  // Mirrors DetectionZone::validate: positive extent, origin within the unit
+  // square, and no overhang past 1.0 on either axis.
+  if (x < 0) {
+    errors.zoneX = 'zone-extent';
+  }
+  if (y < 0) {
+    errors.zoneY = 'zone-extent';
+  }
+  if (w <= 0 || x + w > 1) {
+    errors.zoneW = 'zone-extent';
+  }
+  if (h <= 0 || y + h > 1) {
+    errors.zoneH = 'zone-extent';
+  }
+}
+
+/** Validate a probe form, returning per-field machine codes. */
+export function validateProbeForm(
+  form: ProbeFormState,
+  creating: boolean,
+): FieldErrors<ProbeField> {
+  const errors: FieldErrors<ProbeField> = {};
+  if (creating && form.id.trim() === '') {
+    errors.id = 'required';
+  }
+  if (form.name.trim() === '') {
+    errors.name = 'required';
+  }
+  if (form.cell.trim() === '') {
+    errors.cell = 'required';
+  }
+  switch (form.kind) {
+    case 'black': {
+      const code = intRangeError(form.lumaThreshold, 0, 255);
+      if (code !== undefined) {
+        errors.lumaThreshold = code;
+      }
+      break;
+    }
+    case 'freeze': {
+      const code = intRangeError(form.differenceThreshold, 0, 1000);
+      if (code !== undefined) {
+        errors.differenceThreshold = code;
+      }
+      break;
+    }
+    case 'silence':
+      if (parseNumberStrict(form.levelDbfs) === undefined) {
+        errors.levelDbfs = 'number';
+      }
+      break;
+    case 'loudness':
+      if (parseNumberStrict(form.loudnessTarget) === undefined) {
+        errors.loudnessTarget = 'number';
+      }
+      if (parseNumberStrict(form.loudnessTruePeak) === undefined) {
+        errors.loudnessTruePeak = 'number';
+      }
+      break;
+  }
+  if ((form.kind === 'black' || form.kind === 'freeze') && form.zoneEnabled) {
+    validateZone(form, errors);
+  }
+  const up = intRangeError(form.dwellUpMs, 0, Number.MAX_SAFE_INTEGER);
+  if (up !== undefined) {
+    errors.dwellUpMs = up;
+  }
+  const down = intRangeError(form.dwellDownMs, 0, Number.MAX_SAFE_INTEGER);
+  if (down !== undefined) {
+    errors.dwellDownMs = down;
+  }
+  return errors;
+}
+
+/**
+ * Collect the cell ids offered by the layout documents, for the probe form's
+ * cell picker: cells of canvas-bearing (working) layouts first, then draft
+ * cells, deduplicated in encounter order. Malformed bodies are skipped — the
+ * picker degrades to a free-text field when nothing is found.
+ */
+export function cellIdsFromLayouts(
+  layouts: readonly { readonly body: unknown }[],
+): readonly string[] {
+  const fromWorking: string[] = [];
+  const fromDrafts: string[] = [];
+  for (const layout of layouts) {
+    const body = asRecord(layout.body);
+    if (body === undefined) {
+      continue;
+    }
+    const cells = Array.isArray(body.cells) ? body.cells : [];
+    const bucket = body.canvas === undefined ? fromDrafts : fromWorking;
+    for (const cell of cells) {
+      const id = asString(asRecord(cell)?.id);
+      if (id !== undefined && id !== '') {
+        bucket.push(id);
+      }
+    }
+  }
+  const out: string[] = [];
+  for (const id of [...fromWorking, ...fromDrafts]) {
+    if (!out.includes(id)) {
+      out.push(id);
+    }
+  }
+  return out;
 }
