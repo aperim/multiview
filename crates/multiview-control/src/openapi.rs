@@ -95,6 +95,9 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::alarms::list_alarms,
         crate::routes::alarms::ack_alarm,
         crate::routes::health::list_health,
+        crate::routes::licence::get_licence,
+        crate::routes::licence::install_lease,
+        crate::routes::licence::get_challenge,
         crate::routes::salvos::list_salvos,
         crate::routes::salvos::put_salvo,
         crate::routes::salvos::arm_salvo,
@@ -188,6 +191,20 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::openapi_schemas::HealthWarningDoc,
         crate::openapi_schemas::WarningSeverityDoc,
         crate::openapi_schemas::WarningCodeDoc,
+        // Local licence (Conspect, CONSPECT-1 / ADR-0050): the computed licence
+        // resource + the lease-install response. The Doc mirrors match the
+        // multiview-licence serde shapes (pinned by a round-trip test).
+        crate::routes::licence::LicenceResource,
+        crate::routes::licence::LeaseInstalled,
+        crate::openapi_schemas::LicenceStatusDoc,
+        crate::openapi_schemas::LeaseSourceDoc,
+        crate::openapi_schemas::HardwareClassDoc,
+        crate::openapi_schemas::HardwareClassViewDoc,
+        crate::openapi_schemas::GpuLimitDoc,
+        crate::openapi_schemas::LadderStateDoc,
+        crate::openapi_schemas::EnforcementLevelDoc,
+        crate::openapi_schemas::LeaseDoc,
+        crate::openapi_schemas::LeaseInstalledDoc,
         crate::openapi_schemas::AlarmKindDoc,
         crate::openapi_schemas::AlarmScopeDoc,
         crate::openapi_schemas::AckStateDoc,
@@ -254,6 +271,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         (name = "commands", description = "Operational commands (start/stop/swap)"),
         (name = "alarms", description = "Monitoring alarms: list + acknowledge"),
         (name = "health", description = "Health warnings: active capability mismatches + remediation (read-only)"),
+        (name = "licence", description = "Local licence (Conspect): the computed licence resource + ladder (enforcement is data), lease install, and the salted challenge export. All-local; never off air."),
         (name = "salvos", description = "Salvo definitions + arm/take/cancel"),
         (name = "routing", description = "Per-stream crosspoint routing: classify (plan) + apply (take)"),
         (name = "tally", description = "Tally state, profiles, and manual override"),
@@ -270,6 +288,12 @@ impl ApiDoc {
     /// The static list of REST routes this API exposes, in the order they are
     /// registered. Used by tests to assert the surface is complete without
     /// depending on utoipa's `#[utoipa::path]` macro wiring for every handler.
+    // This is a single flat `(method, path)` table mirroring the router; it grows
+    // by one line per route as the surface expands (now past 100 with the
+    // Conspect licence routes). Splitting it would only obscure the one-line-per-
+    // route correspondence the test relies on, so the line-count lint is allowed
+    // here with justification.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn rest_routes() -> &'static [(&'static str, &'static str)] {
         &[
@@ -332,6 +356,9 @@ impl ApiDoc {
             ("POST", "/api/v1/alarms/{id}/ack"),
             // Read-only health warnings (SA-0 / ADR-0035).
             ("GET", "/api/v1/health"),
+            ("GET", "/api/v1/licence"),
+            ("POST", "/api/v1/licence/lease"),
+            ("GET", "/api/v1/licence/challenge"),
             ("GET", "/api/v1/salvos"),
             ("GET", "/api/v1/salvos/{id}"),
             ("PUT", "/api/v1/salvos/{id}"),

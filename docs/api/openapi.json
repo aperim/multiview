@@ -1749,6 +1749,174 @@
         }
       }
     },
+    "/api/v1/licence": {
+      "get": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`GET /api/v1/licence` — the computed licence resource (role: read).",
+        "description": "Always `200` (enforcement is **data**, never an error path): a `licensed:true`\nresource with the computed ladder `state`/`enforcement` when a lease is\ninstalled, a `licensed:false` resource otherwise.",
+        "operationId": "get_licence",
+        "responses": {
+          "200": {
+            "description": "The computed licence resource (enforcement is data; always 200).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LicenceResource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/licence/challenge": {
+      "get": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`GET /api/v1/licence/challenge` — the `<host>.challenge` export as an\n`application/cbor` attachment (role: read).",
+        "description": "The challenge carries **only** salted digests + monotonic counters — never a\nraw serial, MAC, or hostname (data minimisation, brief §3/§8). The digests +\ncounters are sourced from the entitlement plane; CONSPECT-1 renders the\nmachine's current installed-lease count and an empty salted-digest set when\nthe cli has not yet supplied a salted machine fingerprint (the cli wiring is\nCONSPECT-10). The body is canonical CBOR a portal consumes byte-for-byte.",
+        "operationId": "get_challenge",
+        "responses": {
+          "200": {
+            "description": "The salted challenge export (CBOR attachment).",
+            "content": {
+              "application/cbor": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/licence/lease": {
+      "post": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`POST /api/v1/licence/lease` — verify + install a presented signed lease\nbinding (CBOR body; role: write).",
+        "description": "Returns `200 {lease, valid_to}` on success, or an RFC 9457 problem on\nrejection: `signature_invalid` (422), `fingerprint_mismatch` (409),\n`lease_stale` (409). A binding that is not well-formed CBOR is a `422`\n`malformed_binding` (bad-inputs-are-the-purpose). When no issuer key has been\npinned, the install is refused with a `409` `no_pinned_key`. A rejection never\ndegrades the machine — the previously-installed (or empty) state stays put\n(fail toward leniency).",
+        "operationId": "install_lease",
+        "requestBody": {
+          "description": "The signed lease binding, canonical CBOR.",
+          "content": {
+            "application/cbor": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Lease verified + installed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeaseInstalled"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to install.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Fingerprint mismatch, stale grant, or no pinned key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The binding body exceeds the size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed CBOR or an invalid signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/outputs": {
       "get": {
         "tags": [
@@ -6156,6 +6324,88 @@
         },
         "additionalProperties": false
       },
+      "EnforcementLevelDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::EnforcementLevel`].\n\nSerde-equivalent: a unit enum rendered `kebab-case`. Every level keeps a\nrunning program **on air** (ADR-0050 §6.3, invariant #1) — enforcement is\ndata the surface renders, never a control-flow decision.",
+        "enum": [
+          "active",
+          "warning",
+          "config-locked",
+          "watermark",
+          "block-new-instance",
+          "unlicensed-build"
+        ]
+      },
+      "GpuLimitDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No GPU cap — the `over_gpu` reason can never fire.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unlimited"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "At most this many GPUs may be in use before the `over_gpu` reason fires.",
+            "required": [
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "limited"
+                ]
+              },
+              "value": {
+                "type": "integer",
+                "format": "int32",
+                "description": "At most this many GPUs may be in use before the `over_gpu` reason fires.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_licence::GpuLimit`].\n\nSerde-equivalent: adjacently tagged on `kind`, value under `value`,\n`snake_case` tags (`{\"kind\":\"unlimited\"}` / `{\"kind\":\"limited\",\"value\":2}`)."
+      },
+      "HardwareClassDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::HardwareClass`].\n\nSerde-equivalent: a unit enum rendered `snake_case`.",
+        "enum": [
+          "standard",
+          "datacenter",
+          "edge"
+        ]
+      },
+      "HardwareClassViewDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_licence::HardwareClassView` (the\nlicensed-vs-detected class pair).",
+        "required": [
+          "licensed",
+          "detected"
+        ],
+        "properties": {
+          "detected": {
+            "$ref": "#/components/schemas/HardwareClassDoc",
+            "description": "The class detected on the machine (a mismatch is a ladder reason)."
+          },
+          "licensed": {
+            "$ref": "#/components/schemas/HardwareClassDoc",
+            "description": "The class the entitlement is licensed for."
+          }
+        },
+        "additionalProperties": false
+      },
       "HealthWarningDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).\n\nThe body of `GET /api/v1/health`: an actionable health warning carrying a\nstable `code` + a `remediation`. A round-trip test (`tests/health.rs`) pins\nthis shape to the real `multiview_events::HealthWarning` so they cannot drift.",
@@ -6261,6 +6511,19 @@
           }
         }
       },
+      "LadderStateDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::LadderState`] (the seven conditions).\n\nSerde-equivalent: a unit enum rendered `snake_case`.",
+        "enum": [
+          "compliant",
+          "grace",
+          "lapsed_soft",
+          "lapsed_hard",
+          "evaluation",
+          "class_mismatch",
+          "over_gpu"
+        ]
+      },
       "Layout": {
         "type": "object",
         "description": "A persisted layout resource.\n\nThe `body` is the opaque, validated layout document the editor produces; the\ncontrol plane stores and version-stamps it without interpreting its\ninternals here. (Engine-side validation against `multiview-config` happens\nbefore a layout is applied.)",
@@ -6299,6 +6562,195 @@
             "description": "Human-friendly name."
           }
         }
+      },
+      "LeaseDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_licence::Lease`] (the dated entitlement\nbounds, ADR-0050 §4).\n\nSerde-equivalent: the dated fields are RFC 3339 date-time strings (how\n`chrono`'s `DateTime<Utc>` serialises), the day counts are integers.",
+        "required": [
+          "serial",
+          "source",
+          "granted_at",
+          "expires_at",
+          "grace_days",
+          "grace_until",
+          "hard_at",
+          "next_contact_due"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "description": "When the lease term expires (RFC 3339)."
+          },
+          "grace_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The number of grace days that follow expiry."
+          },
+          "grace_until": {
+            "type": "string",
+            "description": "The end of the grace window (RFC 3339)."
+          },
+          "granted_at": {
+            "type": "string",
+            "description": "When the lease was granted (RFC 3339)."
+          },
+          "hard_at": {
+            "type": "string",
+            "description": "The absolute hard bound from grant (RFC 3339)."
+          },
+          "next_contact_due": {
+            "type": "string",
+            "description": "When the next heartbeat is due (RFC 3339)."
+          },
+          "serial": {
+            "type": "string",
+            "description": "The opaque lease serial (server-issued; not a hardware identifier)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/LeaseSourceDoc",
+            "description": "Where this grant came from (drives the term)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LeaseInstalled": {
+        "type": "object",
+        "description": "The `200` body of a successful `POST /api/v1/licence/lease` install: the\ninstalled lease's serial and its `valid_to` (the lease term expiry, RFC 3339).",
+        "required": [
+          "serial",
+          "valid_to"
+        ],
+        "properties": {
+          "serial": {
+            "type": "string",
+            "description": "The serial of the lease that was verified + installed."
+          },
+          "valid_to": {
+            "type": "string",
+            "description": "The instant the installed lease term expires (RFC 3339)."
+          }
+        }
+      },
+      "LeaseInstalledDoc": {
+        "type": "object",
+        "description": "`OpenAPI` body of a successful `POST /api/v1/licence/lease` install: the\ninstalled lease's serial + its `valid_to` (the lease's `expires_at`, RFC\n3339). Mirrors the [`crate::routes::licence::LeaseInstalled`] handler shape.",
+        "required": [
+          "serial",
+          "valid_to"
+        ],
+        "properties": {
+          "serial": {
+            "type": "string",
+            "description": "The serial of the lease that was verified + installed."
+          },
+          "valid_to": {
+            "type": "string",
+            "description": "The instant the installed lease term expires (RFC 3339)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LeaseSourceDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::LeaseSource`].\n\nSerde-equivalent: a unit enum rendered `snake_case` (`online`/`relay`/`file`).",
+        "enum": [
+          "online",
+          "relay",
+          "file"
+        ]
+      },
+      "LicenceResource": {
+        "type": "object",
+        "description": "The computed licence resource rendered at `GET /api/v1/licence`.\n\nA single shape that always serialises (never `5xx`): `licensed` is `true` with\nthe full computed `status` when a verified lease is installed, and `false`\nwith `status: null` when none is — an honest \"unlicensed\" data report rather\nthan an error. The control plane, the chrome banner, and the portals all read\nthe same computed `status.enforcement` level; there is no second opinion.",
+        "required": [
+          "licensed"
+        ],
+        "properties": {
+          "licensed": {
+            "type": "boolean",
+            "description": "Whether a verified lease is currently installed."
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LicenceStatusDoc",
+                "description": "The computed licence status when a lease is installed; `None` otherwise."
+              }
+            ]
+          }
+        }
+      },
+      "LicenceStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_licence::LicenceStatusView`] — the computed\nlicence resource `GET /api/v1/licence` renders.\n\nSerde-equivalent to the real view. The `state`/`enforcement` are **computed**\n(the ladder, off the hot loop); every value keeps a running program on air.",
+        "required": [
+          "tier",
+          "state",
+          "enforcement",
+          "hardware_class",
+          "gpu_limit",
+          "gpus_in_use",
+          "config_locked",
+          "watermark",
+          "blocks_new_instances",
+          "lease",
+          "reasons"
+        ],
+        "properties": {
+          "blocks_new_instances": {
+            "type": "boolean",
+            "description": "Whether the startup gate should refuse a new engine instance (S1)."
+          },
+          "config_locked": {
+            "type": "boolean",
+            "description": "Whether the engine should deny hot-reconfiguration (derived, S2)."
+          },
+          "enforcement": {
+            "$ref": "#/components/schemas/EnforcementLevelDoc",
+            "description": "The canonical enforcement level derived from the state."
+          },
+          "gpu_limit": {
+            "$ref": "#/components/schemas/GpuLimitDoc",
+            "description": "The GPU allowance carried by the entitlement."
+          },
+          "gpus_in_use": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The number of GPUs currently in use (informs the `over_gpu` reason only).",
+            "minimum": 0
+          },
+          "hardware_class": {
+            "$ref": "#/components/schemas/HardwareClassViewDoc",
+            "description": "The licensed-vs-detected hardware class."
+          },
+          "lease": {
+            "$ref": "#/components/schemas/LeaseDoc",
+            "description": "The dated lease this status reflects."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Machine-readable reason codes the UI renders."
+          },
+          "state": {
+            "$ref": "#/components/schemas/LadderStateDoc",
+            "description": "The computed ladder state (the seven conditions)."
+          },
+          "tier": {
+            "type": "string",
+            "description": "The opaque commercial tier (rendered, never computed)."
+          },
+          "watermark": {
+            "type": "boolean",
+            "description": "Whether the engine should stamp a corner watermark (derived, S3)."
+          }
+        },
+        "additionalProperties": false
       },
       "LoudnessTargetDoc": {
         "oneOf": [
@@ -9208,6 +9660,10 @@
     {
       "name": "health",
       "description": "Health warnings: active capability mismatches + remediation (read-only)"
+    },
+    {
+      "name": "licence",
+      "description": "Local licence (Conspect): the computed licence resource + ladder (enforcement is data), lease install, and the salted challenge export. All-local; never off air."
     },
     {
       "name": "salvos",
