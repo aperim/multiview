@@ -89,6 +89,13 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
           them all off the mix.
         </Trans>
       );
+    case 'rational-fps':
+      return (
+        <Trans>
+          Enter an exact rational rate like 60000/1001, or a whole number like
+          50 — never a decimal.
+        </Trans>
+      );
   }
 }
 

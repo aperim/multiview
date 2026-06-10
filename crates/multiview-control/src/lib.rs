@@ -45,6 +45,7 @@ pub mod audit;
 pub mod auth;
 pub mod command;
 pub mod concurrency;
+pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
@@ -98,6 +99,10 @@ pub use command::{
     command_bus, Command, CommandReceiver, CommandSender, OperationId, ResolvedLayout, SubmitError,
 };
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
+pub use devices::{
+    DeviceBroadcaster, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent, OutputTarget,
+    SourceCandidate,
+};
 pub use error::{ControlError, ControlResult};
 pub use is07::{
     tally_color_from_is07, tally_color_to_is07, tally_event_to_is07, GpiEvent, Is07Command,
@@ -123,9 +128,10 @@ pub use problem::{Problem, PROBLEM_JSON};
 pub use realtime::{CorrKey, CorrRegistry, RealtimeFrame, SessionStream};
 pub use repository::{InMemoryRepository, Layout, LayoutInput, Repository, VersionedLayout};
 pub use resource_store::{
-    InMemoryOutputStore, InMemoryOverlayStore, InMemoryResourceStore, InMemorySourceStore,
-    OutputKind, OverlayKind, Resource, ResourceInput, ResourceKind, ResourceRepository, SourceKind,
-    VersionedResource, OUTPUT_KIND, OVERLAY_KIND, SOURCE_KIND,
+    DeviceKind, InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore,
+    InMemoryResourceStore, InMemorySourceStore, InMemorySyncGroupStore, OutputKind, OverlayKind,
+    Resource, ResourceInput, ResourceKind, ResourceRepository, SourceKind, SyncGroupKind,
+    VersionedResource, DEVICE_KIND, OUTPUT_KIND, OVERLAY_KIND, SOURCE_KIND, SYNC_GROUP_KIND,
 };
 pub use router::{
     ingest_route, route_follow, route_follow_all, RouteBinding, RouteFollowUpdate, RouteTable,

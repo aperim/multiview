@@ -264,7 +264,7 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **DEV-A4** `XL` — `zowietek` driver: typed HTTP client + poller actor + three facets + device state machine (feature-gated; socket-free tests) (ADR-M009)  ·  _deps: DEV-A3_
 - [ ] **DEV-A5** `M` — Discovery infra: mDNS browse (new — none exists in-repo) + `/discovery/devices` endpoints + untrusted-inventory confirm-adopt flow  ·  _deps: DEV-A3_
 - [ ] **DEV-A6** `L` — SPA: DevicesPage, adopt flow, detail tabs, "From device" pickers, help pages  ·  _deps: DEV-A3, DEV-A4_
-- [ ] **DEV-B1** `XL` — `multiview-output/src/display/` behind `display-kms`: drm-rs sink + mailbox/atomic-flip loop + TEST_ONLY probe + EDID/forced-mode policy; `Output::Display` wired through the five config matches + cli `build_outputs` + SPA form (ADR-0044)  ·  _deps: — (1-day fence spike first)_
+- [x] **DEV-B1** `XL` — `multiview-output/src/display/` behind `display-kms`: drm-rs sink + mailbox/atomic-flip loop + TEST_ONLY probe + EDID/forced-mode policy; `Output::Display` wired through the five config matches + cli `build_outputs` + SPA form (ADR-0044)  ·  _deps: — (1-day fence spike first)_
 - [ ] **DEV-B2** `L` — HAL/placement scanout affinity: KMS connector discovery in probe, sink-locality constraint in select, placement migration gate  ·  _deps: DEV-B1_
 - [ ] **DEV-B3** `L` — Render path: wgpu NV12→XRGB into a GBM/dmabuf scanout buffer (AMD/fallback) + NV12 direct scanout (Intel/Pi) + the wgpu version-pin decision  ·  _deps: DEV-B1_
 - [ ] **DEV-B4** `L` — ALSA HDMI audio sink: ELD gating, hdmi:/vc4 card config, buffer-level servo + adaptive resampler  ·  _deps: DEV-B1_
@@ -1177,7 +1177,8 @@ no Pi 5 exists).
 - **Touches:** `web/src/pages/` (DevicesPage, device detail tabs, Sync Groups page), `web/src/layout/components/SourcePalette.tsx` ("From device" picker), generated OpenAPI client, in-app help.
 - **Acceptance (done when):** list shows state badge (never colour-alone), mode, firmware chip, temperature, sync-group chip, last-seen; adopt flow from discovery inventory; detail tabs (Overview/Display/Streams/Sync/Maintenance/Events); Sources/Outputs pickers gain "From device" sections; 202 actions ride `submitOperation`; `/help/devices`, `/help/devices/adopt`, `/help/display-nodes`, `/help/sync` pages exist; vitest component tests + `tsc`/`eslint` clean.
 
-### `[ ]` DEV-B1 — `display-kms` sink + `Output::Display` wired end-to-end (ADR-0044) · effort: XL · deps: none (1-day fence spike first: IN_FENCE_FD/OUT_FENCE_PTR via the drm-rs property API; syncobjs fallback)
+### `[x]` DEV-B1 — `display-kms` sink + `Output::Display` wired end-to-end (ADR-0044) · effort: XL · deps: none (1-day fence spike first: IN_FENCE_FD/OUT_FENCE_PTR via the drm-rs property API; syncobjs fallback)
+- **Status:** SHIPPED (branch `ship/dev-b1-display-kms`). Spike verdict: both fence properties ARE expressible via drm-rs 0.15's generic property path (`Value::SignedRange` / `Value::Unknown`), but `OUT_FENCE_PTR` needs raw-pointer plumbing for zero v1 benefit (the v1 producer is the CPU; `PageFlipEvent` timestamps already cover skew telemetry) — **flip-event-only v1**, syncobjs (verified present) reserved for DEV-B3's GPU path. gbm 0.18's BO API suffices for XRGB scanout (`SCANOUT|WRITE|LINEAR` + `map_mut`); its `drm-support` targets drm 0.14, so GEM handles cross via prime-fd export/import (zero `unsafe`). v1 frame path: CPU NV12→XRGB (BT.709, integer 8.8) into GBM-allocated buffers, dumb-buffer fallback (NVIDIA). Hardware-only code is confined to `display/kms.rs`; everything else (mailbox, mode policy + kernel-golden CVT-RB, FlipDriver, sink thread over the `KmsBackend` mock seam) is CI-tested hardware-free. Hardware validation legs (TEST_ONLY probe on real planes, t630/NVIDIA smoke) ride DEV-B2/B3 hardware time.
 - **Goal:** The raw-frame DRM/KMS display sink — the long pole of lane B.
 - **Touches:** new `crates/multiview-output/src/display/` behind a new off-by-default `display-kms` feature (drm + gbm crates; `cargo deny` green); `crates/multiview-config/src/schema.rs` `Output::Display` threaded through the five exhaustive same-crate matches (`explicit_id`/`gpu_pin`/`audio`/`label`/`validate_outputs`); `crates/multiview-cli/src/pipeline.rs` `build_outputs` (pipeline.rs:3724); the SPA output form (a schema-only edit would be a parseable-but-skipped output — ships fully wired).
 - **Acceptance (done when):** a dedicated sink thread owns the DRM fd; flip loop = page-flip-complete → take latest mailbox frame → `atomic_commit(NONBLOCK | PAGE_FLIP_EVENT)`, at most one in-flight commit per CRTC, no-new-frame → do nothing (KMS repeats); a wedged display provably cannot stall the canvas publish (mailbox conflation test — inv #1/#10); `ALLOW_MODESET` never on the frame path; `TEST_ONLY` probes validate plane formats/modifiers at startup; EDID preferred mode chosen by **exact-rational** refresh match (never float fps) + CVT-RB forced-mode fallback for EDID-less heads (per-connector config override); `Output::Display` parses, round-trips, and is built (not skipped) by `build_outputs`; KMS-less CI green via a fake-DRM seam.
@@ -1442,3 +1443,252 @@ change**. The binding *supports* 8.1, but bumping it is FF-0b, not FF-0.
 | **FF-2** | Multi-arch: per-arch native **buildx** for `linux/amd64` + `linux/arm64`; QSV (`--enable-libvpl`) guarded amd64-only; cache builder as a digest-pinned image. | `deploy/Dockerfile.ffmpeg`, CI workflow | `linux/arm64` + `linux/amd64` images build green from one builder def; arm64 omits QSV; builder image cache-hits when ARGs unchanged. |
 | **FF-3** | Static-link option: `ffmpeg-sys-next` `static` feature + `FFMPEG_DIR`/`PKG_CONFIG_PATH` at our prefix → single self-contained `multiview` binary, no runtime soname coupling; document the LGPL-2.1 §6 relinkability obligation (satisfied by the shipped source tarball). | `crates/multiview-ffmpeg` build config, `deploy/Dockerfile*` | A statically-linked `multiview` runs with **no** `LD_LIBRARY_PATH` and no libav\* `.so` in the runtime image; `ldd` shows no libav\*; source-tarball artifact published. |
 | **FF-4** | Reduce-reliance pilots (feature-flagged, A/B vs libav): (a) pure-Rust **egress muxers** `mpegts`/`flv`/fMP4 displacing `Muxer::create_as` (`multiview-output/src/sink.rs:1109,1163`); (b) pure-Rust **ingest protocols** `retina`/`rml_rtmp`/`srt-tokio` feeding FFmpeg decode. Codecs/hwaccel stay FFmpeg. | `crates/multiview-output/src/sink.rs`, `crates/multiview-input/`, new feature flags | Each pilot passes byte/SSIM parity vs the libav path on golden fixtures behind its flag; libav muxer/protocol unused when the flag is on; FFmpeg surface documented as "codec + hwaccel only." |
+
+---
+
+## Workstream CONSPECT — the account-side subsystem (entitlement · mesh · two-pipe · support)
+
+Drives [ADR-0050](../decisions/ADR-0050.md) (entitlement + enforcement-ladder-as-data + never-off-air),
+[ADR-0051](../decisions/ADR-0051.md) (mesh discovery/relay), [ADR-0052](../decisions/ADR-0052.md)
+(two-pipe heartbeat/telemetry + consent + retention), [ADR-0053](../decisions/ADR-0053.md)
+(support/ticketing + context-pack + data-request approval + audit). Brief:
+[conspect-account-architecture](../research/conspect-account-architecture.md).
+
+**Shape of the work.** Two **greenfield** leaf crates (`multiview-licence`, `multiview-mesh`) are built
+**first** — they depend only on `multiview-core`(+`events`)(+`licence`), collide with **no** file the
+parallel WebUI-owner session touches, and are fully testable against an in-process fake licence
+server/peer. The shared surfaces (`multiview-control` routes + OpenAPI, `web/`) come **after** and are
+**sequenced behind a single route/OpenAPI-registration owner** (the LANE-API pattern). The **live wire**
+(real heartbeat against the licence server, real mesh relay) is **last** and gated on operator
+confirmations (brief §14: O1 wire protocol · O2 Ed25519 key-pinning/rotation · O3 claim-code glyph
+alphabet · O5 mDNS dependency · O6 salt provenance · O7 tier-gating). **EXACT constants** (brief §2,
+used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_REJECT_WINDOW`=24h ·
+`TRANSFER_WINDOW`=72h · `ACTIVATION_WINDOW`=31d · `LEASE_FULL`=35d · `LEASE_GRACE`=14d · `LEASE_HARD`=90d
+· `FINGERPRINT_MATCH_STRONG`=100 · `FINGERPRINT_MATCH_THRESHOLD`=70 · `CLAIM_CODE_LEN`=6 · Ed25519.
+
+**Dependency order (waves):** `CONSPECT-0 → 1 → {2,3} | 4 | 6` (greenfield fan-out) → `5` → `7 → 8 → 9`
+(shared control, single route/OpenAPI owner) → `10` (cli wiring) → `11` (web, behind WebUI coord) →
+`12` (live wire + hardware, behind operator confirmations). Critical path:
+`0 → 1 → {2,3} → 7 → 9 → 11 → 12`.
+
+### `[ ]` CONSPECT-0 — `multiview-licence` shell: EXACT constants + `LicenceStatus` types · effort: M · deps: none
+- **Goal:** Stand up the greenfield leaf crate with the §2 constants as named items, the
+  `LicenceStatus`/`Enforcement{level,reasons,since,lease}` published types, and the
+  `enforcement.level` enum — the *data* every surface renders. Pure-Rust shell; no network.
+- **Touches:** new `crates/multiview-licence/` (lib `multiview_licence`, deps `multiview-core`,
+  `multiview-events`, `thiserror`, `tracing`, `chrono`, `ed25519-dalek`); workspace `Cargo.toml`
+  members; `conventions §3` crate-table row.
+- **Approach:** define the constants module with the §2 values; the `EnforcementLevel`
+  `#[non_exhaustive]` enum (`active`/`warning`/`config-locked`/`watermark`/`block-new-instance`/
+  `unlicensed-build`); `LicenceStatus` + `Lease` (chrono instants, exact — no float); a `LicenceError`
+  enum. Default features empty (pure shell), `heartbeat` reserved for CONSPECT-3.
+- **Acceptance:** `cargo check --workspace` + `cargo deny check` stay green with the crate added; unit
+  tests assert each §2 constant equals its exact value (e.g. `LEASE_FULL == Duration::days(35)`,
+  `FINGERPRINT_MATCH_THRESHOLD == 70`); `LicenceStatus` serde round-trips; `#![warn(missing_docs)]`.
+- **Risks/notes:** `ed25519-dalek` + `chrono` must be deny-clean (both `MIT OR Apache-2.0`); keep the
+  default build network-free so CI stays pure.
+- **Read first:** brief §2, §6.1; [conventions §3](../architecture/conventions.md); [ADR-0050](../decisions/ADR-0050.md) §1–§4.
+
+### `[ ]` CONSPECT-1 — entitlement/lease/claim/transfer/fingerprint state machines (data, not control flow) · effort: L · deps: CONSPECT-0
+- **Goal:** Implement the pure state machines that *compute* `enforcement.level` off the hot loop, plus
+  the salted-digest fingerprint **score**, all as data — tested with `proptest-state-machine`.
+- **Touches:** `crates/multiview-licence/src/{lease,claim,transfer,fingerprint,ladder}.rs`.
+- **Approach:** lease arithmetic (§2.2) → level mapping (§6.2); claim
+  `Unclaimed→CodeIssued(15m)→{Confirmed→Claimed|Rejected(24h)|Expired}`; transfer
+  `Claimed→TransferPending(72h)→{Confirmed→Claimed(new)|Cancelled/Expired→Claimed(old)}`; fingerprint
+  = salted component digests → score, threshold 70. **Fail-safe:** on indeterminate input publish
+  `warning`, never a harder rung (§6.3 rule 4).
+- **Acceptance:** property tests assert the exact constants (15m≠14m; 35d lease; 70 threshold) and the
+  level transitions; a "successful heartbeat resets to active" property; an "indeterminate → warning,
+  never harder" property; below-70 forces re-claim, ≥70 tolerates drift. No `unwrap`/`as` in non-test
+  code.
+- **Risks/notes:** clock skew is an *input* to the machine, never an engine concern; model it. Salt
+  provenance is operator-confirm O6 — take it as a constructor parameter for now.
+- **Read first:** brief §6, §12; [ADR-0050](../decisions/ADR-0050.md) §2, §4, §6, §8.
+
+### `[ ]` CONSPECT-2 — engine seams S1/S2/S3 + the never-off-air chaos test · effort: M · deps: CONSPECT-1
+- **Goal:** Wire the three engine seams as **two pre-derived atomics + a startup gate**, and prove
+  never-off-air with an executable chaos test (the §6.3 proof made real).
+- **Touches:** `crates/multiview-cli/src/run.rs` (S1 at `SoftwareEngine::build()` before
+  `EngineRuntime::new()`); `crates/multiview-engine/src/runtime.rs` (S2 frame-boundary control hook
+  reads `config_locked`); `crates/multiview-engine/src/drive.rs` (S3 post-composite NV12 watermark
+  reads `watermark`); the two `Arc<AtomicBool>` derived from `LicenceStatus`.
+- **Approach:** S1 returns a typed `LicenceError` when `level == block-new-instance` (mirror the NDI
+  pre-flight gate); S2 skips `apply_layout`/`rebind_cell` when `config_locked`; S3 region-limited NV12
+  corner blit (ADR-0023 dirty-rect bake) when `watermark`. No licence logic on the loop — only the two
+  atomic loads.
+- **Acceptance:** chaos test drives **every** ladder rung (incl. `block-new-instance`) against a
+  **running** engine and asserts the output clock still emits exactly N valid frames for N ticks on
+  every rung (inv #1); a wedged/crashed entitlement task leaves the last status in place and never
+  stalls the loop (inv #10); S2 denies a hot-reconfig while the scene keeps playing; S3 stamps the
+  canvas without dropping a tick. Watermark blit is NV12 (inv #5).
+- **Risks/notes:** any change that puts lease arithmetic or a network call on the loop is a
+  #1-breaking change — forbidden; the seam reads atomics only. Keep the watermark region-limited
+  (no full-canvas colour round-trip).
+- **Read first:** brief §5, §6.3, §16; [ADR-0050](../decisions/ADR-0050.md) §3, §5; [ADR-I001](../decisions/ADR-I001.md); [ADR-T001](../decisions/ADR-T001.md).
+
+### `[ ]` CONSPECT-3 — heartbeat client (feature-gated) + S4 status surface + lease renew · effort: L · deps: CONSPECT-1
+- **Goal:** The `heartbeat`-feature network client that contacts the licence server (monthly minimum),
+  renews the lease on success, and publishes `LicenceStatus` wait-free (seam S4). State model stays
+  always-compiled; a build with the feature **off** reports `unlicensed-build` honestly.
+- **Touches:** `crates/multiview-licence/src/heartbeat.rs` (feature `heartbeat`); the `arc_swap`
+  `LatestState<LicenceStatus>` publisher.
+- **Approach:** Ed25519-sign the request (salted fingerprint digest + lease request), verify the
+  server's signed response, reset the lease to `Active` on success; on failure keep computing the
+  ladder from `last_contact_at`. Wire protocol + server key-pinning/rotation are operator-confirm
+  O1/O2 — code against a `LicenceServer` trait with an in-process fake.
+- **Acceptance:** with `heartbeat` off, the crate compiles and reports `unlicensed-build`; with it on
+  (fake server), a successful heartbeat resets the lease to `Active(35d)` and publishes it; a tampered
+  server response is rejected. No raw identifier in the request payload (data-minimisation test, §8).
+- **Risks/notes:** the honest source-build caveat (§4) — never fake `active` when the client is off.
+  The client is off in default/CI, on in shipped presets.
+- **Read first:** brief §4, §7, §8; [ADR-0050](../decisions/ADR-0050.md) §3, §7; [ADR-0052](../decisions/ADR-0052.md) §1.
+
+### `[ ]` CONSPECT-4 — `multiview-mesh` discovery: always-on mDNS + signed summaries + untrusted confirm-adopt · effort: M · deps: CONSPECT-1
+- **Goal:** The greenfield mesh crate's discovery half — IPv6-first mDNS announce/browse of
+  Ed25519-signed salted-digest summaries into a bounded **untrusted** inventory with explicit
+  confirm-adopt (the ADR-0041 doctrine).
+- **Touches:** new `crates/multiview-mesh/` (lib `multiview_mesh`, deps `multiview-core`,
+  `multiview-licence`, `multiview-events`, `tokio`/`mdns` feature, `ed25519-dalek`, `thiserror`,
+  `tracing`); workspace members; `conventions §3` row.
+- **Approach:** announce/browse a Conspect mDNS service type over `ff02::fb` (IPv4 `224.0.0.251`
+  legacy) per ADR-0042; sign the summary (level + lease bounds + salted digest set) — never raw
+  identity; populate a bounded untrusted inventory; adopt/forget are explicit operator actions
+  (control-plane actor over channels, inv #10). mDNS dependency is operator-confirm O5 — pick a
+  deny-clean maintained crate behind the `mdns` feature; the signing/inventory core is always
+  compiled + tested.
+- **Acceptance:** default build is a pure shell, deny-clean; unit tests assert an announcement carries
+  a valid signature + salted digest and **no** raw identifier; a forged-signature announcement is
+  rejected; the inventory is bounded (drop-oldest) and never auto-adopts.
+- **Risks/notes:** auto-adopt is the classic mDNS footgun — forbidden; confirm-adopt only.
+- **Read first:** brief §9.1, §8; [ADR-0051](../decisions/ADR-0051.md) §2, §3; [ADR-0041](../decisions/ADR-0041.md); [ADR-0042](../decisions/ADR-0042.md).
+
+### `[ ]` CONSPECT-5 — mesh relay (end-to-end signed, bounded, dumb carrier) · effort: L · deps: CONSPECT-3, CONSPECT-4
+- **Goal:** Relay an adopted offline neighbour's heartbeat to the licence server and carry the signed
+  response back — the relayer a **dumb carrier** that cannot read/forge/alter the assertion.
+- **Touches:** `crates/multiview-mesh/src/relay.rs`; the bounded drop-oldest relay queue; the cli
+  relayer task.
+- **Approach:** the originating machine signs the request and the server signs the response
+  end-to-end; the relayer forwards bytes it lacks the keys to interpret. Opt-in per machine
+  (`PUT /api/v1/mesh/relay`); bounded queue, never blocks on a neighbour; off-hot-loop (inv #10).
+- **Acceptance:** a relayer cannot forge or alter an assertion (it lacks the keys — test); a tampered
+  relay payload fails the originator/server signature check; a relayed heartbeat resets the offline
+  machine's lease exactly as a direct one; the relay queue is bounded drop-oldest and never
+  back-pressures. Relayer earns no entitlement from carrying traffic.
+- **Risks/notes:** relay framing is shared with the licence-server wire protocol (operator-confirm
+  O1/O2) — code against the same `LicenceServer`/fake.
+- **Read first:** brief §9.2; [ADR-0051](../decisions/ADR-0051.md) §4, §5.
+
+### `[ ]` CONSPECT-6 — telemetry two-pipe + consent (LWW) + S5 consent-independent retention · effort: M · deps: CONSPECT-0
+- **Goal:** Add the **opt-in daily telemetry** pipe (distinct from the heartbeat), the LWW consent
+  document, and the **consent-independent** bounded local metrics buffer (seam S5) — all additive in
+  `multiview-telemetry`, never co-mingled with the heartbeat.
+- **Touches:** `crates/multiview-telemetry/src/{telemetry_pipe,consent,local_metrics}.rs` (additive;
+  existing tracing/Prometheus/health untouched).
+- **Approach:** consent `{telemetry,updated_at,updated_by}` resolved LWW by `updated_at`; telemetry
+  outbound off by default, aggregated/anonymised counters only; the local buffer samples engine
+  metrics off the hot loop into a bounded auto-pruned ring, retained **regardless** of consent.
+- **Acceptance:** test asserts **no** telemetry field appears in a heartbeat payload and vice-versa;
+  turning telemetry **off** stops the outbound pipe but the local buffer keeps populating; no raw
+  identifier in either payload (§8); LWW resolves concurrent consent edits by timestamp.
+- **Risks/notes:** the separation is a hard directive — the buffer must not be gated on consent; the
+  UI/API copy must never present the two pipes as one switch.
+- **Read first:** brief §7, §8; [ADR-0052](../decisions/ADR-0052.md) §1–§5.
+
+### `[ ]` CONSPECT-7 — control routes batch A: licence/claim/transfer/fingerprint/enforcement + OpenAPI · effort: L · deps: CONSPECT-1, CONSPECT-3
+- **Goal:** The §11 routes 1–15 in **new** `routes/account/*.rs`, registered + documented by the
+  **single** route/OpenAPI owner (§15 coordination) so the WebUI session codes against named routes.
+- **Touches:** new `crates/multiview-control/src/routes/account/{licence,claim,transfer,fingerprint}.rs`;
+  `routes/mod.rs` (registration — single owner); `openapi.rs` (paths + schemas — single owner);
+  `state.rs` (account stores). RFC 9457, `ETag`/`If-Match`, `202+operation_id` (heartbeat now),
+  `Idempotency-Key` (claim/transfer), RBAC.
+- **Approach:** mirror the established CRUD/command patterns; `GET /api/v1/account/licence` renders
+  the published `LicenceStatus` incl. `enforcement`; `GET /api/v1/account/enforcement` is the
+  chrome-banner read; claim/transfer commands drive the CONSPECT-1 state machines.
+- **Acceptance:** per-route tests (CRUD/command + ETag round-trip + If-Match + RBAC + 422 validation)
+  mirror `tests/probes.rs`; every route is in `rest_routes()`; `cargo test -p multiview-control openapi`
+  green; the fingerprint route returns digests + score, **never** raw identifiers (§8).
+- **Risks/notes:** **one owner** registers all account routes + schemas to avoid `openapi.rs`/
+  `routes/mod.rs` churn (§15); the WebUI session is told the route/schema names up front.
+- **Read first:** brief §11, §15; [ADR-0050](../decisions/ADR-0050.md) §8; control-api scout patterns.
+
+### `[ ]` CONSPECT-8 — control routes batch B: telemetry/consent/metrics/mesh · effort: M · deps: CONSPECT-6, CONSPECT-4
+- **Goal:** The §11 routes 16–25 — telemetry/consent/local-metrics + mesh peers/adopt/relay.
+- **Touches:** new `routes/account/telemetry.rs` + `routes/mesh.rs`; `routes/mod.rs`/`openapi.rs`
+  (single owner); `state.rs` (mesh + telemetry stores).
+- **Approach:** consent `GET/PUT` (LWW, `If-Match`); `GET /metrics/local?window=7d`; mesh `peers`
+  list + `adopt` (Class-1) + `DELETE`; `relay` `GET/PUT` opt-in.
+- **Acceptance:** route tests + ETag/If-Match/RBAC; consent PUT resolves LWW; mesh adopt is Class-1
+  and forgettable; metrics-local returns even with telemetry disabled (consent-independent, §7.2);
+  all in `rest_routes()`; OpenAPI green.
+- **Risks/notes:** same single-owner registration discipline (§15).
+- **Read first:** brief §7, §9, §11; [ADR-0052](../decisions/ADR-0052.md); [ADR-0051](../decisions/ADR-0051.md).
+
+### `[ ]` CONSPECT-9 — support: ticketing + context-pack + data-request approval + append-only audit · effort: L · deps: CONSPECT-7, CONSPECT-6
+- **Goal:** The §11 routes 26–34 — tickets, the **redacted** context-pack, **data-request local
+  approval**, and the **append-only** account audit.
+- **Touches:** new `routes/account/{support,audit}.rs`; the support/audit stores (in-memory default,
+  sqlite under the `sqlite` feature, ADR-I003 pattern); `state.rs`.
+- **Approach:** tickets CRUD + append-only thread; context-pack (`202`) assembled from the local
+  metrics buffer + licence/enforcement state + config-as-code with reference-only secrets (ADR-M006)
+  — diagnostics only; data-requests as pending actions requiring `approve`/`deny`; audit append-only
+  (no update/delete route).
+- **Acceptance:** context-pack contains **no** media/raw-identifiers/secret-values (§8 test); **no**
+  data egress without an approved data-request (test); audit has no update/delete route and entries
+  are immutable + timestamped; every account action (claim/transfer/lease/enforcement/consent/
+  context-pack/data-request) is audited.
+- **Risks/notes:** reuse the existing audit-log rotation; keep secrets reference-only (ADR-M006).
+- **Read first:** brief §10, §11; [ADR-0053](../decisions/ADR-0053.md); [ADR-M006](../decisions/ADR-M006.md); [ADR-W015](../decisions/ADR-W015.md); [ADR-I003](../decisions/ADR-I003.md).
+
+### `[ ]` CONSPECT-10 — cli wiring: spawn the plane tasks + thread the two atomics · effort: M · deps: CONSPECT-2, CONSPECT-3, CONSPECT-4, CONSPECT-6
+- **Goal:** Wire the planes into `multiview run`: spawn the heartbeat (S4), local-metrics (S5), and
+  mesh announce/relay tasks; derive the two engine atomics (config-lock/watermark) from
+  `LicenceStatus`; gate S1 at `SoftwareEngine::build()`. Additive, behind the `account` aggregation.
+- **Touches:** `crates/multiview-cli/src/{run,pipeline}.rs` (additive task spawns + atomic threading);
+  the `account` cli feature aggregation; shipped presets turn `heartbeat`/`mdns` on.
+- **Approach:** spawn the off-hot-loop tasks; publish `LicenceStatus`; derive the atomics; the engine
+  reads only the atomics (CONSPECT-2). Default build leaves the network clients off.
+- **Acceptance:** `multiview run` with the account plane spawns the tasks and renders licence state at
+  `/api/v1/account/licence`; a chaos run (every ladder rung) keeps output on air (re-asserts
+  CONSPECT-2 end-to-end); default/CI build stays pure (clients off, `unlicensed-build` honest).
+- **Risks/notes:** `pipeline.rs`/`run.rs` are the LANE-CORE long-pole — coordinate with the
+  data-plane integrator; keep the additions strictly additive + off-hot-loop.
+- **Read first:** brief §5, §13.6; [ADR-0050](../decisions/ADR-0050.md) §5, §9.
+
+### `[ ]` CONSPECT-11 — web/: 7 screens + chrome + generated-client regen · effort: XL · deps: CONSPECT-7, CONSPECT-8, CONSPECT-9
+- **Goal:** The 7 account screens (`/welcome`, `/settings/account`, `/licence`, `/data`, `/mesh`,
+  `/system/actions`, account-side `/help` nested under DocsLayout) + global chrome (header chip,
+  ladder banner, pending-action strip, config-lock interceptor), behind the WebUI-owner coordination.
+- **Touches:** `web/src/pages/*` (new screens); `web/src/app/{router,navigation,AppLayout}.tsx`
+  (co-review files — extend `NAV_ITEMS` with a grouped Account section, nest `/help`); `web/src/api/
+  schema.ts` (regenerated once per merged backend batch by the single owner); i18n catalogs.
+- **Approach:** singleton-form pattern (like SettingsPage) for account/licence/data; the **Data**
+  screen presents the **two pipes** with distinct copy (§7 — never one switch); the chrome renders
+  `enforcement.level` (no-colour-alone, ADR-W011); config-lock interceptor disables resource forms
+  (API also returns the lock — UI is courtesy). Reuse the existing `:root` token palette (no new
+  tokens). Tile watermark is engine-side — the SPA only explains it.
+- **Acceptance:** Playwright e2e drives claim onboarding, a heartbeat-now, a consent toggle (telemetry
+  off ⇒ local buffer still shown), a mesh adopt, a data-request approval, and a config-locked
+  read-only form; WCAG 2.2 AA; the generated client compiles against the regenerated schema; mobile
+  layout preserved.
+- **Risks/notes:** the **single coordination point** with the WebUI session (§15) — schema regen is
+  single-owner, chrome files are co-review; `/help` collision resolved by nesting under DocsLayout.
+- **Read first:** brief §13.7, §15; web-spa scout report; [ADR-W011](../decisions/ADR-W011.md)/[ADR-W012](../decisions/ADR-W012.md).
+
+### `[ ]` CONSPECT-12 — live-wire integration + hardware validation · effort: M · deps: CONSPECT-10, CONSPECT-11
+- **Goal:** Replace the fake licence server/peer with the real wire: a real heartbeat against the
+  licence server and a real mesh relay between two boxes — gated on the operator confirmations.
+- **Touches:** the `LicenceServer` impl (real wire); key-pinning/rotation config; the mDNS dependency
+  finalised; salt provisioning.
+- **Approach:** implement O1 (wire protocol), O2 (Ed25519 key-pin + rotation), O3 (glyph alphabet
+  verbatim), O5 (mDNS dep), O6 (salt provenance) once the operator confirms them; hardware-validate
+  on the test fleet (a box that goes offline relays via a LAN neighbour and stays licensed; every
+  ladder rung keeps output on air on real hardware).
+- **Acceptance:** an official-preset build heartbeats successfully against the real server, renews the
+  lease, and survives a server outage by riding `LEASE_FULL`; an offline box relays via a neighbour;
+  on-hardware chaos confirms never-off-air on every rung. **Blocked until** the §14 operator
+  confirmations land.
+- **Risks/notes:** this is the only item with a real external blocker (operator confirmations +
+  licence-server availability) — explicitly gated, not parked. Everything upstream is buildable
+  against the fake.
+- **Read first:** brief §14; [ADR-0050](../decisions/ADR-0050.md)/[ADR-0051](../decisions/ADR-0051.md) operator-confirm sections.

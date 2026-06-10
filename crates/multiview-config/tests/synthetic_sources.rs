@@ -315,16 +315,141 @@ fn clock_without_timezone_still_range_checks_the_offset() {
 
 #[test]
 fn a_full_multiview_of_synthetic_sources_validates() {
-    // bars + clock + solid wired into a 1x1 each must validate — proving they are
-    // first-class peers of a decoded feed, not a special case.
+    // bars + clock + solid + timer wired into a 1x1 each must validate — proving
+    // they are first-class peers of a decoded feed, not a special case.
     for fields in [
         "kind = \"bars\"",
         "kind = \"clock\"\nface = \"analog\"",
         "kind = \"solid\"\ncolor = \"#000000\"",
+        "kind = \"timer\"\ntarget = \"time_of_day\"\nat = \"14:30:00\"\ntimezone = \"UTC\"",
     ] {
         let cfg = MultiviewConfig::load_from_toml(&config_with_source(fields))
             .unwrap_or_else(|e| panic!("parse {fields:?}: {e}"));
         cfg.validate()
             .unwrap_or_else(|e| panic!("validate {fields:?}: {e}"));
     }
+}
+
+#[test]
+fn timer_is_synthetic() {
+    let doc = config_with_source(
+        "kind = \"timer\"\ntarget = \"date_time\"\nat = \"2026-07-01T09:00:00\"\ntimezone = \"UTC\"",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    assert!(
+        cfg.sources[0].kind.is_synthetic(),
+        "a timer is an in-process synthetic source"
+    );
+}
+
+#[test]
+fn timer_time_of_day_round_trips_tagged_on_kind_and_target() {
+    // The operator's "ON AIR IN" daily countdown: kind=timer, target=time_of_day,
+    // recurring, rolling into the overrun count-up. Two distinct tag keys (`kind`
+    // and `target`) must coexist without clashing (the flatten note in §6.2).
+    let doc = config_with_source(
+        "kind = \"timer\"\ntarget = \"time_of_day\"\nat = \"14:30:00\"\n\
+         timezone = \"Australia/Sydney\"\nrecur_daily = true\ndirection = \"down\"\n\
+         on_target = \"zero_then_up\"\nformat = \"auto\"\nlabel = \"ON AIR IN\"",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    cfg.validate().expect("validate");
+    let src = &cfg.sources[0];
+    match &src.kind {
+        SourceKind::Timer {
+            target,
+            direction,
+            on_target,
+            format,
+            label,
+            overrun_badge,
+            ..
+        } => {
+            assert!(matches!(
+                target,
+                multiview_config::TimerTarget::TimeOfDay {
+                    recur_daily: true,
+                    ..
+                }
+            ));
+            assert_eq!(*direction, multiview_config::TimerDirection::Down);
+            assert_eq!(*on_target, multiview_config::TimerOnTarget::ZeroThenUp);
+            assert_eq!(*format, multiview_config::TimerFormat::Auto);
+            assert_eq!(label.as_deref(), Some("ON AIR IN"));
+            // overrun_badge defaults to true (the opt-out boolean).
+            assert!(*overrun_badge, "overrun_badge defaults to true");
+        }
+        other => panic!("expected a Timer, got {other:?}"),
+    }
+    // Re-serialize: both tags survive a TOML round-trip.
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(toml.contains("kind = \"timer\""), "kind tag: {toml}");
+    assert!(
+        toml.contains("target = \"time_of_day\""),
+        "target tag: {toml}"
+    );
+}
+
+#[test]
+fn timer_datetime_round_trips_with_an_absolute_instant() {
+    let doc = config_with_source(
+        "kind = \"timer\"\ntarget = \"date_time\"\nat = \"2026-07-01T09:00:00\"\n\
+         timezone = \"UTC\"\ndirection = \"down\"\non_target = \"hold\"\nformat = \"d_hh_mm_ss\"",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    cfg.validate().expect("validate");
+    assert!(matches!(
+        &cfg.sources[0].kind,
+        SourceKind::Timer {
+            target: multiview_config::TimerTarget::DateTime { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn timer_rejects_a_malformed_time_and_unknown_zone() {
+    let bad_time = config_with_source(
+        "kind = \"timer\"\ntarget = \"time_of_day\"\nat = \"99:99:99\"\ntimezone = \"UTC\"",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&bad_time).expect("parse");
+    cfg.validate()
+        .expect_err("a malformed time-of-day must fail validation");
+
+    let bad_zone = config_with_source(
+        "kind = \"timer\"\ntarget = \"date_time\"\nat = \"2026-07-01T09:00:00\"\n\
+         timezone = \"Mars/Olympus_Mons\"",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&bad_zone).expect("parse");
+    cfg.validate()
+        .expect_err("an unknown IANA zone must fail validation");
+}
+
+#[test]
+fn timer_recur_requires_a_recurring_time_of_day_target() {
+    // `recur` on a date_time target is rejected (it would silently degrade).
+    let doc = config_with_source(
+        "kind = \"timer\"\ntarget = \"date_time\"\nat = \"2026-07-01T09:00:00\"\n\
+         timezone = \"UTC\"\non_target = \"recur\"",
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+    cfg.validate()
+        .expect_err("on_target = recur on a date_time target must fail validation");
+
+    // `recur` on a non-recurring time_of_day is also rejected.
+    let doc2 = config_with_source(
+        "kind = \"timer\"\ntarget = \"time_of_day\"\nat = \"14:30:00\"\ntimezone = \"UTC\"\n\
+         on_target = \"recur\"",
+    );
+    let cfg2 = MultiviewConfig::load_from_toml(&doc2).expect("parse");
+    cfg2.validate()
+        .expect_err("on_target = recur without recur_daily must fail validation");
+
+    // `recur` with recur_daily = true is accepted.
+    let ok = config_with_source(
+        "kind = \"timer\"\ntarget = \"time_of_day\"\nat = \"14:30:00\"\ntimezone = \"UTC\"\n\
+         recur_daily = true\non_target = \"recur\"",
+    );
+    let cfg3 = MultiviewConfig::load_from_toml(&ok).expect("parse");
+    cfg3.validate().expect("recur with recur_daily is valid");
 }

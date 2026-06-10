@@ -30,6 +30,7 @@ const EXAMPLES: &[&str] = &[
     "broadcast-monitor.toml",
     "world-clock.toml",
     "webrtc.toml",
+    "countdown-timer.toml",
 ];
 
 #[test]

@@ -481,6 +481,844 @@
         }
       }
     },
+    "/api/v1/devices": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`GET /api/v1/devices` — list all devices, id-sorted (role: read).",
+        "operationId": "list_managed_devices",
+        "responses": {
+          "200": {
+            "description": "All devices, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`GET /api/v1/devices/{id}` — fetch one device (role: read; per-object authz).",
+        "operationId": "get_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The device (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`PUT /api/v1/devices/{id}` — replace a device (role: write; If-Match → 412).",
+        "operationId": "update_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced device (new ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid device document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`POST /api/v1/devices/{id}` — adopt/create a device (role: write).",
+        "description": "Validates the body against `multiview_config::Device` (`422` on an invalid\ndocument) and seeds the runtime status registry in `ADOPTING` so\n`GET /devices/{id}/status` answers immediately — the first probe lands with\nthe driver actors (DEV-A4/A5).",
+        "operationId": "create_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The adopted device (ETag in the response header; X-Multiview-Apply declares how it takes effect).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid device document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`DELETE /api/v1/devices/{id}` — drop a device (role: administer; If-Match).",
+        "description": "Refused `409 /problems/conflict` while any Source or Output still references\nthis device via `device_ref` (ADR-M009): the problem detail names the\nblocking resource so the operator knows what to unbind. The delete is never\npartially applied — a refused delete leaves the device intact.",
+        "operationId": "delete_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The device was dropped."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to administer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A Source/Output still references this device via device_ref.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/identify": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`POST /api/v1/devices/{id}/identify` — flash the device's identify indicator\n(role: write; fire-and-forget `204`).",
+        "operationId": "identify_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id to identify.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Identify acknowledged."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to identify.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/output-targets": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`GET /api/v1/devices/{id}/output-targets` — the declared output-binding\nprojection (ADR-M009 facet (b)).",
+        "description": "Honestly empty until a driver enumerates decode slots (no live driver in this\nslice): never fabricated live telemetry.",
+        "operationId": "output_targets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The declared output targets (empty until a driver enumerates).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OutputTarget"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/probe": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).",
+        "description": "A synchronous management verb (ADR-W017): in this slice (no driver actor) it\nconfirms the device exists and acknowledges the probe request (`200`). The\nreal probe round-trip lands with the driver actors (DEV-A4/A5).",
+        "operationId": "probe_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id to probe.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Probe acknowledged."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to probe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/reboot": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`POST /api/v1/devices/{id}/reboot` — reboot the device (role: write; `202`).",
+        "description": "A long-running management verb (ADR-W017): the operation id is minted and\n`202`'d; the outcome arrives on the realtime stream once the driver lands.",
+        "operationId": "reboot_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id to reboot.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Reboot accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to reboot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/set-mode": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`POST /api/v1/devices/{id}/set-mode` — converge the device to a mode\n(role: write; `202` + operation id + declared DEV-class impact).",
+        "description": "The device-side impact is **declared in the body before apply** (ADR-M009):\nthe device restarts its pipeline; bound sources ride the tile ladder to\n`NO_SIGNAL` during the switch; no Multiview output is interrupted. In this\nslice the operation id is minted and `202`'d; the `device.mode` outcome\narrives on the realtime stream once the driver actor lands.",
+        "operationId": "set_mode",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetModeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Mode change accepted (impact declared); outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetModeAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to change the mode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/source-candidates": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`GET /api/v1/devices/{id}/source-candidates` — the declared source-binding\nprojection (ADR-M009 facet (a)).",
+        "description": "Honestly empty until a driver enumerates streams (no live driver in this\nslice): never fabricated live telemetry.",
+        "operationId": "source_candidates",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The declared source candidates (empty until a driver enumerates).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SourceCandidate"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/status": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`GET /api/v1/devices/{id}/status` — the read-only runtime status snapshot.",
+        "description": "Reads the latest-wins [`DeviceStatusRegistry`](crate::devices::DeviceStatusRegistry)\n(never persisted/exported). A freshly-adopted device with no driver probe yet\nsits in `ADOPTING`. `404` when the device is not adopted.",
+        "operationId": "get_device_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The device's latest-wins runtime status (never persisted).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceStatusDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id is adopted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{id}/test-pattern": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "`POST /api/v1/devices/{id}/test-pattern` — display a test pattern on the\ndevice (role: write; fire-and-forget `204`).",
+        "operationId": "test_pattern",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Test-pattern acknowledged."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
@@ -3178,6 +4016,399 @@
         }
       }
     },
+    "/api/v1/sync-groups": {
+      "get": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`GET /api/v1/sync-groups` — list all sync groups, id-sorted (role: read).",
+        "operationId": "list_sync_groups",
+        "responses": {
+          "200": {
+            "description": "All sync groups, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sync-groups/{id}": {
+      "get": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`GET /api/v1/sync-groups/{id}` — fetch one (role: read; per-object authz).",
+        "operationId": "get_sync_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sync group (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No sync group with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`PUT /api/v1/sync-groups/{id}` — replace (role: write; If-Match → 412).",
+        "operationId": "update_sync_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncGroupResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced sync group (new ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No sync group with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid sync-group document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`POST /api/v1/sync-groups/{id}` — create a sync group (role: write).",
+        "description": "Validates the body against `multiview_config::SyncGroup` (`422` on an invalid\ndocument, e.g. an empty member list).",
+        "operationId": "create_sync_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncGroupResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created sync group (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid sync-group document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`DELETE /api/v1/sync-groups/{id}` — delete (role: administer; If-Match).",
+        "operationId": "delete_sync_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The sync group was deleted."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to administer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No sync group with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sync-groups/{id}/measure": {
+      "post": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`POST /api/v1/sync-groups/{id}/measure` — kick off a skew measurement\n(role: write; `202` + operation id).",
+        "description": "In this slice (no driver actor) the operation id is minted and `202`'d; the\nmeasurement result (`device.sync`) arrives on the realtime stream once the\ndriver actors land (DEV-A4/A5). A retried `Idempotency-Key` returns the\noriginal id.",
+        "operationId": "measure_sync_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id to measure.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Measurement accepted; result on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to measure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No sync group with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tally": {
       "get": {
         "tags": [
@@ -4458,7 +5689,8 @@
         "description": "`OpenAPI` mirror of `multiview_config::ClockFaceConfig`.",
         "enum": [
           "analog",
-          "digital"
+          "digital",
+          "dual"
         ]
       },
       "ColorOverrideDoc": {
@@ -4700,6 +5932,98 @@
         ],
         "description": "An IS-04 **Device**: a logical grouping of senders/receivers on a node."
       },
+      "DeviceAuthDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of the `[devices.auth]` block: a write-only secret reference.",
+        "required": [
+          "secret_ref"
+        ],
+        "properties": {
+          "secret_ref": {
+            "type": "string",
+            "description": "A secret-store reference (e.g. `op://Site/foyer-decoder/credentials`);\nnever plaintext."
+          }
+        }
+      },
+      "DeviceBodyDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::Device`] (ADR-M008): the config-as-code\nmanaged-device document.\n\nSerde-equivalent to the config type field-for-field; the runtime status is a\nseparate read-only projection ([`DeviceStatusDoc`]), never carried here.",
+        "required": [
+          "driver"
+        ],
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Management address, IPv6-first (e.g. `http://[fd00:db8::42]`). Required\nfor `zowietek`/`cast`; optional for `displaynode`."
+          },
+          "alarm_on_offline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The lowercase X.733 severity raised when the device stays offline\n(`warning`/`minor`/`major`/`critical`); absent disables the alarm."
+          },
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeviceAuthDoc",
+                "description": "Write-only credentials (the export emits the ref string only)."
+              }
+            ]
+          },
+          "desired_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The desired converged work mode (driver vocabulary, e.g. `decoder`)."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-friendly display name."
+          },
+          "driver": {
+            "$ref": "#/components/schemas/DeviceDriverDoc",
+            "description": "The compiled-in driver family managing this device."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable device id; may be omitted (the path id is injected)."
+          },
+          "reconnect": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReconnectPolicyDoc",
+                "description": "Supervised-reconnect backoff bounds; absent uses the driver defaults."
+              }
+            ]
+          }
+        }
+      },
+      "DeviceDriverDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_config::DeviceDriver`] (ADR-M008): the\ncompiled-in device-driver families, `snake_case` on the wire.",
+        "enum": [
+          "zowietek",
+          "displaynode",
+          "cast"
+        ]
+      },
       "DevicePinDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of `multiview_config::placement::DevicePin`.",
@@ -4715,6 +6039,65 @@
           "vendor": {
             "$ref": "#/components/schemas/PinVendorDoc",
             "description": "The vendor family."
+          }
+        }
+      },
+      "DeviceResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/devices/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/DeviceBodyDoc",
+            "description": "The device document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
+      "DeviceStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_events::DeviceStatus`] (ADR-M008 §2.1): the\nread-only latest-wins runtime status `GET /devices/{id}/status` returns.\n\nSerde-equivalent to the event type; runtime telemetry only — never persisted\nor exported (config-as-code carries the durable desired state).",
+        "required": [
+          "device_id",
+          "state"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The registry device id this snapshot describes."
+          },
+          "last_seen_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Engine monotonic nanoseconds the device last answered, once it has."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's current converged mode (driver vocabulary), once known."
+          },
+          "state": {
+            "type": "string",
+            "description": "The device's lifecycle state, uppercase on the wire (e.g. `ADOPTING`,\n`ONLINE`, `DEGRADED`, `AUTH_FAILED`, `UNREACHABLE`)."
+          },
+          "temperature_c": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Device-reported temperature (°C), where the vendor exposes it."
           }
         }
       },
@@ -5535,6 +6918,31 @@
           }
         }
       },
+      "OutputTarget": {
+        "type": "object",
+        "description": "One decode-side entry point on a device, bindable as an ordinary managed\nOutput with a `device_ref` (ADR-M009 facet (b)).",
+        "required": [
+          "id",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A stable id for this target within the device (driver-assigned)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The transport kind the device decodes (`rtsp` / `srt` / `rtmp` / `ndi`)."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A human-friendly label for the decode slot, if the driver reports one."
+          }
+        }
+      },
       "OverlayBodyDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of `multiview_config::Overlay` — the body accepted by\n`POST`/`PUT /api/v1/overlays/{id}`.\n\nOverlay kinds carry a large, kind-dependent parameter set captured verbatim\n(lossless round-trip), so the schema documents the common envelope and\nleaves the per-kind extras additive.",
@@ -5858,6 +7266,28 @@
           }
         ],
         "description": "An IS-04 **Receiver**: an ingress flow (a Multiview input)."
+      },
+      "ReconnectPolicyDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of the `[devices.reconnect]` block: supervised-reconnect\nbackoff bounds.",
+        "required": [
+          "initial_ms",
+          "max_ms"
+        ],
+        "properties": {
+          "initial_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "First-retry delay in milliseconds (`>= 1`).",
+            "minimum": 0
+          },
+          "max_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Backoff ceiling in milliseconds (`initial_ms..=3_600_000`).",
+            "minimum": 0
+          }
+        }
       },
       "Registration": {
         "type": "object",
@@ -6257,6 +7687,42 @@
         ],
         "description": "An IS-04 **Sender**: an egress flow (a Multiview program/preview output)."
       },
+      "SetModeAccepted": {
+        "type": "object",
+        "description": "The `202 Accepted` body for `set-mode`: the operation id, the **declared**\npre-apply impact class, and the human-readable impact statement (ADR-M009 —\nthe API surfaces the impact BEFORE applying).",
+        "required": [
+          "operation_id",
+          "impact",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "The human-readable impact statement declared before apply."
+          },
+          "impact": {
+            "type": "string",
+            "description": "The declared impact class: a device-side (`dev`) impact — the device\nrestarts its pipeline; Multiview program output is never interrupted."
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id correlating this mode change's eventual outcome on the\nrealtime stream (`device.mode`)."
+          }
+        }
+      },
+      "SetModeRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/devices/{id}/set-mode` request body.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "The desired converged work mode (driver vocabulary, e.g. `encoder`)."
+          }
+        }
+      },
       "SourceAuthDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of `multiview_config::SourceAuth` (reference-only secret).",
@@ -6353,6 +7819,36 @@
         ],
         "description": "`OpenAPI` mirror of `multiview_config::Source` — the body accepted by\n`POST`/`PUT /api/v1/sources/{id}`."
       },
+      "SourceCandidate": {
+        "type": "object",
+        "description": "One stream a device serves or can push, bindable as an ordinary managed\nSource with a `device_ref` (ADR-M009 facet (a)).",
+        "required": [
+          "id",
+          "kind",
+          "unverified"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A stable id for this candidate within the device (driver-assigned)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The transport kind the bound Source would use (`rtsp` / `srt` / `ndi`)."
+          },
+          "unverified": {
+            "type": "boolean",
+            "description": "`true` when the URL is unverified (operator-suppliable, undocumented by\nthe vendor) — never silently guessed (ADR-M009)."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The served URL, IPv6-first where known. `None` when the vendor does not\ndocument its mount path — the operator supplies it and it is flagged\n[`unverified`](SourceCandidate::unverified)."
+          }
+        }
+      },
       "SourceKindDoc": {
         "oneOf": [
           {
@@ -6399,13 +7895,39 @@
             "properties": {
               "face": {
                 "$ref": "#/components/schemas/ClockFaceDoc",
-                "description": "Analog (default) or digital face."
+                "description": "Analog (default), digital, or dual face."
               },
               "kind": {
                 "type": "string",
                 "enum": [
                   "clock"
                 ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Operator location/label drawn on the face."
+              },
+              "numerals": {
+                "type": "boolean",
+                "description": "Draw hour numerals on the analogue / dual face."
+              },
+              "show_offset": {
+                "type": "boolean",
+                "description": "Draw a `UTC±HH:MM` offset badge for the displayed instant."
+              },
+              "show_reference": {
+                "type": "boolean",
+                "description": "Draw the disciplined-reference (PTP/NTP/SYS) badge. Display only."
+              },
+              "timezone": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "IANA timezone id (e.g. `Australia/Sydney`), preferred over\n`tz_offset_minutes` and DST-resolved per displayed instant."
               },
               "twelve_hour": {
                 "type": "boolean",
@@ -6414,9 +7936,68 @@
               "tz_offset_minutes": {
                 "type": "integer",
                 "format": "int32",
-                "description": "Timezone offset from UTC in minutes (`-720..=840`)."
+                "description": "Fixed timezone offset from UTC in minutes (`-720..=840`); ignored when\n`timezone` is set."
               }
             }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TimerTargetDoc",
+                "description": "The target instant (tagged on `target`, flattened to the top level)."
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "direction": {
+                    "$ref": "#/components/schemas/TimerDirectionDoc",
+                    "description": "Count `down` (default) to the target or `up` from it."
+                  },
+                  "format": {
+                    "$ref": "#/components/schemas/TimerFormatDoc",
+                    "description": "Display format (default `d_hh_mm_ss`)."
+                  },
+                  "label": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Operator label drawn with the count."
+                  },
+                  "on_target": {
+                    "$ref": "#/components/schemas/TimerOnTargetDoc",
+                    "description": "At/after-target behaviour (default `hold`)."
+                  },
+                  "overrun_badge": {
+                    "type": "boolean",
+                    "description": "Draw the overrun a11y badge (`OVER` / `ELAPSED`) past the target."
+                  },
+                  "overrun_prefix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Overrun prefix override (default `+` past the target)."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "description": "A digital countdown / count-up to a target (ADR-0047).",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "timer"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "A digital countdown / count-up to a target (ADR-0047)."
           },
           {
             "type": "object",
@@ -7141,6 +8722,79 @@
           }
         }
       },
+      "SyncGroupBodyDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_config::SyncGroup`] (ADR-M008/M010): the\nconfig-as-code presentation-sync-group document.",
+        "required": [
+          "target_skew_ms",
+          "members"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable sync-group id; may be omitted (the path id is injected)."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncMemberDoc"
+            },
+            "description": "The member devices (at least one; `cast` devices are never members)."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How the group claims its achieved tier (`auto` = weakest member)."
+          },
+          "target_skew_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The drift-alarm threshold in milliseconds (`1..=10_000`).",
+            "minimum": 0
+          }
+        }
+      },
+      "SyncGroupResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/sync-groups/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/SyncGroupBodyDoc",
+            "description": "The sync-group document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
+      },
+      "SyncMemberDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of one sync-group member (`{ device, offset_ms }`).",
+        "required": [
+          "device"
+        ],
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "The member device id (must resolve to a declared device)."
+          },
+          "offset_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The per-member presentation offset trim in milliseconds (defaults to 0)."
+          }
+        }
+      },
       "TakeApplied": {
         "type": "object",
         "description": "The `200` body of a hot (Class-1 / Reset-lite) `/routing/{kind}/take`.",
@@ -7324,6 +8978,108 @@
           "generated"
         ]
       },
+      "TimerDirectionDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::timer::TimerDirection`.",
+        "enum": [
+          "down",
+          "up"
+        ]
+      },
+      "TimerFormatDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::timer::TimerFormat`.",
+        "enum": [
+          "d_hh_mm_ss",
+          "hh_mm_ss",
+          "mm_ss",
+          "hh_mm_ss_ff",
+          "auto"
+        ]
+      },
+      "TimerOnTargetDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::timer::TimerOnTarget`.",
+        "enum": [
+          "hold",
+          "continue",
+          "zero_then_up",
+          "recur"
+        ]
+      },
+      "TimerTargetDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A wall-clock time-of-day in a zone; the next (down) or most-recent (up)\noccurrence. `recur_daily` re-arms each day.",
+            "required": [
+              "at",
+              "target"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "description": "The wall-clock time `\"HH:MM:SS\"` (24-hour)."
+              },
+              "recur_daily": {
+                "type": "boolean",
+                "description": "Re-arm to the next day's occurrence each day."
+              },
+              "target": {
+                "type": "string",
+                "enum": [
+                  "time_of_day"
+                ]
+              },
+              "timezone": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "IANA timezone id; preferred over `tz_offset_minutes`."
+              },
+              "tz_offset_minutes": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Fixed UTC offset in minutes (legacy / no-DST). Ignored when set."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An absolute date+time `\"YYYY-MM-DDTHH:MM:SS\"` resolved in the zone.",
+            "required": [
+              "at",
+              "target"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "description": "Local wall-clock date+time (RFC3339 without a trailing zone)."
+              },
+              "target": {
+                "type": "string",
+                "enum": [
+                  "date_time"
+                ]
+              },
+              "timezone": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "IANA timezone id; preferred over `tz_offset_minutes`."
+              },
+              "tz_offset_minutes": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Fixed UTC offset in minutes (legacy / no-DST). Ignored when set."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::timer::TimerTarget` (tagged by\n`target`; flattened into the `Timer` source variant alongside `kind`)."
+      },
       "TransportParams": {
         "type": "object",
         "description": "One leg's RTP transport parameters (IS-05 supports up to two legs for\nST 2022-7 redundancy; this models one).",
@@ -7428,6 +9184,14 @@
     {
       "name": "probes",
       "description": "Probe (per-cell fail-state detection: black/freeze/silence/loudness) resource CRUD"
+    },
+    {
+      "name": "devices",
+      "description": "Managed-device registry CRUD + status + bare-verb actions + stream-binding projections (ADR-M008/M009/W017)"
+    },
+    {
+      "name": "sync-groups",
+      "description": "Presentation-sync-group CRUD + skew measurement (ADR-M008/M010)"
     },
     {
       "name": "audio",

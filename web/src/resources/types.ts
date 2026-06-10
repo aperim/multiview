@@ -103,7 +103,7 @@ export interface SourceView {
 }
 
 /** The output transport display kinds (config `Output`, folded for display). */
-export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt';
+export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt' | 'display';
 
 /** All output kinds, for building selectors. */
 export const OUTPUT_KINDS: readonly OutputKind[] = [
@@ -113,6 +113,7 @@ export const OUTPUT_KINDS: readonly OutputKind[] = [
   'ndi',
   'rtmp',
   'srt',
+  'display',
 ];
 
 /** A configured output sink/server. */
@@ -129,10 +130,13 @@ export interface OutputView {
   readonly editable: boolean;
   /**
    * The kind's key field for display: the RTSP `mount`, the HLS/LL-HLS `path`,
-   * the RTMP/SRT `url`, or the NDI source `name`.
+   * the RTMP/SRT `url`, the NDI source `name`, or the display `connector`.
    */
   readonly target: string | undefined;
-  /** The video codec (absent for NDI, which carries no codec). */
+  /**
+   * The video codec (absent for NDI and display, which carry raw frames, not
+   * an encoded rendition).
+   */
   readonly codec: string | undefined;
 }
 

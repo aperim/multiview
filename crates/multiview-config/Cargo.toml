@@ -23,6 +23,14 @@ toml = "0.8.19"
 # with the render-time `resolve_offset`). Pure Rust, no native deps; the IANA tz
 # database is bundled at build time by `chrono-tz` (deny-clean, default build).
 multiview-overlay = { workspace = true }
+# Date/time + IANA-zone instant resolution for the timer synthetic source
+# (ADR-0047): a `timer` target ("HH:MM:SS" time-of-day or RFC3339 "datetime") is
+# parsed and resolved to an absolute UTC instant in its zone (DST-correct via
+# `chrono-tz`), so the displayed count is integer seconds against a real instant —
+# never float fps. `default-features = false` (no system-clock features): every
+# instant is injected, so the math is deterministic and testable.
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.5.0"

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+use multiview_config::timer::{TimerDirection, TimerFormat, TimerOnTarget, TimerTarget};
 use multiview_config::{ClockFaceConfig, SourceKind};
 use multiview_core::time::{MediaTime, Rational};
 use multiview_framestore::TileStore;
@@ -81,6 +82,25 @@ pub enum SyntheticKind {
         /// Draw hour numerals on the analogue / dual face.
         numerals: bool,
     },
+    /// A digital countdown / count-up to a target (ADR-0047 / brief §3).
+    Timer {
+        /// The target instant descriptor (resolved to an absolute instant per
+        /// render against the sampled `now`).
+        target: TimerTarget,
+        /// Count down to (default) or up from the target.
+        direction: TimerDirection,
+        /// At/after-target behaviour (`hold` / `continue` / `zero_then_up` /
+        /// `recur`).
+        on_target: TimerOnTarget,
+        /// Display format (D:HH:MM:SS / HH:MM:SS / MM:SS / HH:MM:SS:FF / Auto).
+        format: TimerFormat,
+        /// Operator label drawn above the count (e.g. `ON AIR IN`).
+        label: Option<String>,
+        /// Overrun prefix override (default `+` past target).
+        overrun_prefix: Option<String>,
+        /// Draw the overrun a11y badge (`OVER` / `ELAPSED`) past the target.
+        overrun_badge: bool,
+    },
 }
 
 impl SyntheticKind {
@@ -120,6 +140,23 @@ impl SyntheticKind {
                 show_reference: *show_reference,
                 numerals: *numerals,
             }),
+            SourceKind::Timer {
+                target,
+                direction,
+                on_target,
+                format,
+                label,
+                overrun_prefix,
+                overrun_badge,
+            } => Some(Self::Timer {
+                target: target.clone(),
+                direction: *direction,
+                on_target: *on_target,
+                format: *format,
+                label: label.clone(),
+                overrun_prefix: overrun_prefix.clone(),
+                overrun_badge: *overrun_badge,
+            }),
             _ => None,
         }
     }
@@ -128,7 +165,20 @@ impl SyntheticKind {
     /// re-render, not just republish a cached frame).
     #[must_use]
     pub const fn animated(&self) -> bool {
-        matches!(self, Self::Clock { .. })
+        matches!(self, Self::Clock { .. } | Self::Timer { .. })
+    }
+
+    /// Whether this source's display advances at the **frame** cadence (an
+    /// `hh_mm_ss_ff` timer) rather than once a second. Drives `render_key`.
+    #[must_use]
+    pub const fn frame_resolution(&self) -> bool {
+        matches!(
+            self,
+            Self::Timer {
+                format: TimerFormat::HhMmSsFf,
+                ..
+            }
+        )
     }
 }
 
@@ -144,24 +194,62 @@ fn face_mode(face: ClockFaceConfig) -> ClockFaceMode {
     }
 }
 
-/// Render one frame for displayed wall time `now`. `bars`/`solid` ignore `now`.
+/// Render one frame for displayed wall time `now` at whole-second resolution.
+/// `bars`/`solid` ignore `now`. A convenience over [`render_at`] for the sources
+/// whose picture changes at most once a second (the frames field is zero); the
+/// generator uses [`render_at`] so a frame-resolution timer gets the sub-second
+/// part.
 ///
 /// # Errors
 ///
 /// [`SynthError::Compositor`] on a geometry/colour failure, or
-/// [`SynthError::OverlayRequired`] for a `clock` source in a build without the
-/// `overlay` feature.
-// `now` is the displayed instant; only the `overlay`-gated clock arm reads it
-// (bars/solid ignore it, and without `overlay` the clock arm short-circuits), so
-// it is unused in the default build — the parameter stays part of the public
-// signature regardless of feature set.
-#[cfg_attr(not(feature = "overlay"), allow(unused_variables))]
+/// [`SynthError::OverlayRequired`] for a `clock`/`timer` source in a build
+/// without the `overlay` feature.
 pub fn render(
     kind: &SyntheticKind,
     width: u32,
     height: u32,
     canvas: CanvasColor,
     now: WallTime,
+) -> Result<Nv12Image, SynthError> {
+    // 25 fps is an arbitrary cadence here: it is only consulted by an
+    // `hh_mm_ss_ff` timer, whose frames field is anyway zero at `subsecond_ns = 0`.
+    render_at(
+        kind,
+        width,
+        height,
+        canvas,
+        now,
+        0,
+        Rational { num: 25, den: 1 },
+    )
+}
+
+/// Render one frame for the sampled instant `(now, subsecond_ns)` at the canvas
+/// `cadence`.
+///
+/// `subsecond_ns` is the sub-second part of the *sampled* wall instant and
+/// `cadence` the canvas frame rate; both are used only by an `hh_mm_ss_ff`
+/// timer (to derive the integer frame field) and ignored by every other source.
+///
+/// # Errors
+///
+/// [`SynthError::Compositor`] on a geometry/colour failure, or
+/// [`SynthError::OverlayRequired`] for a `clock`/`timer` source in a build
+/// without the `overlay` feature.
+// `now`/`subsecond_ns`/`cadence` are the displayed instant; only the
+// `overlay`-gated clock/timer arms read them (bars/solid ignore them, and without
+// `overlay` those arms short-circuit), so they are unused in the default build —
+// the parameters stay part of the public signature regardless of feature set.
+#[cfg_attr(not(feature = "overlay"), allow(unused_variables))]
+pub fn render_at(
+    kind: &SyntheticKind,
+    width: u32,
+    height: u32,
+    canvas: CanvasColor,
+    now: WallTime,
+    subsecond_ns: u64,
+    cadence: Rational,
 ) -> Result<Nv12Image, SynthError> {
     match kind {
         SyntheticKind::Bars => Nv12Image::color_bars(width, height, canvas)
@@ -202,10 +290,47 @@ pub fn render(
                 now,
             )
         }
-        // Without the `overlay` feature a clock cannot be baked; the caller falls
-        // back honestly (ADR-0027) rather than panicking.
+        #[cfg(feature = "overlay")]
+        SyntheticKind::Timer {
+            target,
+            direction,
+            on_target,
+            format,
+            label,
+            overrun_prefix,
+            overrun_badge,
+        } => {
+            // Resolve the target to an absolute instant for THIS sampled `now`
+            // (DST-correct via the shared tz resolver), compute the integer
+            // displayed duration + state, and bake the readout. Resolution can
+            // only fail on a malformed target — rejected at config load — but is
+            // defended here (never a panic on the data plane, safety rule #3).
+            let resolved = target
+                .resolve(now, *direction)
+                .map_err(|e| SynthError::Compositor(e.to_string()))?;
+            let readout = multiview_config::timer::compute(resolved, now, *direction, *on_target);
+            render_timer(
+                width,
+                height,
+                canvas,
+                TimerRender {
+                    readout,
+                    direction: *direction,
+                    format: *format,
+                    label: label.as_deref(),
+                    overrun_prefix: overrun_prefix.as_deref(),
+                    overrun_badge: *overrun_badge,
+                    subsecond_ns,
+                    cadence,
+                },
+            )
+        }
+        // Without the `overlay` feature a clock/timer cannot be baked; the caller
+        // falls back honestly (ADR-0027) rather than panicking.
         #[cfg(not(feature = "overlay"))]
-        SyntheticKind::Clock { .. } => Err(SynthError::OverlayRequired),
+        SyntheticKind::Clock { .. } | SyntheticKind::Timer { .. } => {
+            Err(SynthError::OverlayRequired)
+        }
     }
 }
 
@@ -233,14 +358,22 @@ struct ClockRender<'a> {
     numerals: bool,
 }
 
-/// The key that decides when a generator must re-render: the displayed second
-/// for a clock (the picture only changes once a second), a constant otherwise.
+/// The key that decides when a generator must re-render: the displayed **field**
+/// (brief §3.3 / §6.3 — `render_key` generalises from "second" to a field index).
+/// A static source is a constant `0` (one bake); a clock or whole-second timer
+/// changes once a second (the displayed second); a frame-resolution timer
+/// (`hh_mm_ss_ff`) changes once per **frame** — `second·fps + frame_index`.
 #[must_use]
-fn render_key(kind: &SyntheticKind, now: WallTime) -> i64 {
-    if kind.animated() {
+fn render_key(kind: &SyntheticKind, now: WallTime, frame_in_second: u64) -> i64 {
+    if !kind.animated() {
+        return 0;
+    }
+    if kind.frame_resolution() {
         now.unix_seconds()
+            .saturating_mul(1_000)
+            .saturating_add(i64::try_from(frame_in_second).unwrap_or(i64::MAX))
     } else {
-        0
+        now.unix_seconds()
     }
 }
 
@@ -305,6 +438,121 @@ fn render_clock(
             strip_h,
             spec,
         )?;
+    }
+
+    apply_overlays_to_nv12(&bg, &list, canvas).map_err(cc)
+}
+
+/// The resolved-per-instant timer render parameters handed to `render_timer`.
+#[cfg(feature = "overlay")]
+#[derive(Debug, Clone, Copy)]
+struct TimerRender<'a> {
+    /// The computed display value + state at the sampled instant.
+    readout: multiview_config::timer::TimerReadout,
+    /// The count direction (selects the `OVER` vs `ELAPSED` a11y badge word).
+    direction: TimerDirection,
+    /// The display format.
+    format: TimerFormat,
+    /// Operator label drawn above the count.
+    label: Option<&'a str>,
+    /// Overrun prefix override (default `+` past target).
+    overrun_prefix: Option<&'a str>,
+    /// Draw the overrun a11y badge past the target.
+    overrun_badge: bool,
+    /// Sub-second nanoseconds of the sampled instant (the frames field source).
+    subsecond_ns: u64,
+    /// The canvas cadence (frames/second) for the integer frame field.
+    cadence: Rational,
+}
+
+/// Render a timer readout: a centred mono count, an optional label line above,
+/// and an optional overrun a11y badge below (drawn past the target). Reuses the
+/// same `TextEngine` + linear NV12 bake as the clock (brief §4.2/§4.3) — no new
+/// drawing primitive.
+#[cfg(feature = "overlay")]
+fn render_timer(
+    width: u32,
+    height: u32,
+    canvas: CanvasColor,
+    spec: TimerRender<'_>,
+) -> Result<Nv12Image, SynthError> {
+    use multiview_compositor::overlay::subpass::{
+        apply_overlays_to_nv12, OverlayColor, OverlayDrawList,
+    };
+    use multiview_compositor::overlay::text::{FontFamily, TextEngine};
+    use multiview_config::timer::overrun_badge_word;
+
+    let cc = |e: multiview_compositor::Error| SynthError::Compositor(e.to_string());
+    let bg = Nv12Image::solid_rgb(width, height, 8, 8, 12, canvas).map_err(cc)?;
+    let mut engine = TextEngine::new().map_err(cc)?;
+    let mut list = OverlayDrawList::new();
+
+    let is_overrun = spec.readout.state.is_overrun();
+    // Vertical layout: an optional label band on top, the count in the middle, an
+    // optional badge band at the bottom (only when overrunning). All integer-
+    // derived from the tile height — no magic px.
+    let has_label = spec.label.is_some_and(|s| !s.is_empty());
+    let show_badge = spec.overrun_badge && is_overrun;
+    let band_h = (height.saturating_mul(18) / 100).max(1);
+    let label_h = if has_label { band_h } else { 0 };
+    let badge_h = if show_badge { band_h } else { 0 };
+    let count_top = label_h;
+    let count_h = height
+        .saturating_sub(label_h)
+        .saturating_sub(badge_h)
+        .max(1);
+
+    // The label line (top band), left-of-centre — Sans, like the clock label.
+    if let Some(label) = spec.label {
+        if !label.is_empty() {
+            let size_px = (f32_of(label_h) * 0.55).max(8.0);
+            let color = OverlayColor::opaque(0.90, 0.90, 0.90);
+            let run = engine
+                .rasterize_run(label, FontFamily::Sans, size_px, [0.90, 0.90, 0.90, 1.0])
+                .map_err(cc)?;
+            let cy = round_to_i32(f32_of(label_h) / 2.0);
+            push_run_centred_at(&mut list, &run, i32_of(width) / 2, cy, color);
+        }
+    }
+
+    // The count itself — a centred mono run of the formatted duration. The
+    // overrun state brightens to white; running/held stays the same light grey
+    // as the clock readout (colour is NOT the sole signal — the prefix + badge
+    // carry the state for accessibility).
+    let text = spec.format.format(
+        spec.readout,
+        spec.subsecond_ns,
+        spec.cadence,
+        spec.overrun_prefix,
+    );
+    let rgba = if is_overrun {
+        [1.0, 1.0, 1.0, 1.0]
+    } else {
+        [0.95, 0.95, 0.95, 1.0]
+    };
+    let size_px = (f32_of(count_h) / 2.5).max(8.0);
+    let run = engine
+        .rasterize_run(&text, FontFamily::Mono, size_px, rgba)
+        .map_err(cc)?;
+    let count_cy = round_to_i32(f32_of(count_top) + f32_of(count_h) / 2.0);
+    push_run_centred_at(
+        &mut list,
+        &run,
+        i32_of(width) / 2,
+        count_cy,
+        OverlayColor::opaque(rgba[0], rgba[1], rgba[2]),
+    );
+
+    // The overrun a11y badge (bottom band) — reads the state without colour.
+    if show_badge {
+        let word = overrun_badge_word(spec.direction);
+        let size_px = (f32_of(badge_h) * 0.55).max(8.0);
+        let color = OverlayColor::opaque(1.0, 0.85, 0.30);
+        let run = engine
+            .rasterize_run(word, FontFamily::Sans, size_px, [1.0, 0.85, 0.30, 1.0])
+            .map_err(cc)?;
+        let cy = round_to_i32(f32_of(height.saturating_sub(badge_h)) + f32_of(badge_h) / 2.0);
+        push_run_centred_at(&mut list, &run, i32_of(width) / 2, cy, color);
     }
 
     apply_overlays_to_nv12(&bg, &list, canvas).map_err(cc)
@@ -621,16 +869,23 @@ fn push_run_left_at(
     }
 }
 
-/// The host wall clock as whole UNIX seconds (the clock face's resolution is one
-/// second). Independent of the `overlay`-gated `wallclock` module so the
-/// generator compiles in every build.
+/// The host wall clock as `(whole UNIX seconds, sub-second nanoseconds)`. The
+/// clock face resolves to the second; a frame-resolution timer (`hh_mm_ss_ff`)
+/// uses the sub-second part for its integer frame field. Independent of the
+/// `overlay`-gated `wallclock` module so the generator compiles in every build.
+///
+/// This is the **sampled** wall clock (inv #1): the displayed time is read here,
+/// it never paces the engine — the output clock paces and the frame is stamped
+/// from the generator's monotonic elapsed below.
 #[must_use]
-fn unix_now_seconds() -> i64 {
+fn unix_now_parts() -> (i64, u64) {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or(0)
+        .map_or((0, 0), |d| {
+            let secs = i64::try_from(d.as_secs()).unwrap_or(0);
+            (secs, u64::from(d.subsec_nanos()))
+        })
 }
 
 /// The wall-clock duration of one output tick at `cadence` (`den/num` seconds).
@@ -670,11 +925,15 @@ pub fn generator_loop(
     let mut cached: Option<(i64, Arc<Nv12Image>)> = None;
 
     while !stop.load(Ordering::Acquire) {
-        let now = WallTime::from_unix_seconds(unix_now_seconds());
-        let key = render_key(&kind, now);
+        let (secs, subsecond_ns) = unix_now_parts();
+        let now = WallTime::from_unix_seconds(secs);
+        // The displayed frame within the second (integer division against the
+        // cadence) — the field a frame-resolution timer keys on.
+        let frame_in_second = multiview_config::timer::frame_index(subsecond_ns, cadence);
+        let key = render_key(&kind, now, frame_in_second);
         let frame = match &cached {
             Some((k, f)) if *k == key => Arc::clone(f),
-            _ => match render(&kind, width, height, canvas, now) {
+            _ => match render_at(&kind, width, height, canvas, now, subsecond_ns, cadence) {
                 Ok(image) => {
                     let f = Arc::new(image);
                     cached = Some((key, Arc::clone(&f)));
@@ -1033,20 +1292,30 @@ segment_ms = 1000
     #[cfg(feature = "overlay")]
     #[test]
     fn show_offset_badge_differs_across_a_dst_boundary_for_one_zone() {
-        // Same Sydney clock, two instants either side of the austral DST change:
-        // the resolved offset (UTC+11:00 vs UTC+10:00) changes the badge text, so
-        // the rendered strip must differ. Inject both instants (deterministic).
+        // Two checks, both deterministic (injected instants, no system clock):
+        //
+        // 1. The badge block DRAWS: at the SAME instant, `show_offset: true` vs
+        //    `false` must render different planes (the `labeled_clock_differs_
+        //    from_unlabeled` pattern — comparing across instants is tautological
+        //    because the displayed time itself changes). A label is set on BOTH
+        //    renders so the metadata strip is reserved either way (`has_strip`
+        //    depends on the flag); the only delta is the badge glyphs themselves,
+        //    so deleting the badge-draw block fails this assert. Checked at BOTH
+        //    DST states so the badge is proven in summer and winter alike.
+        //
+        // 2. The badge TEXT follows DST: the resolved Sydney offset reads
+        //    UTC+11:00 in the austral summer and UTC+10:00 in winter.
         let c = canvas();
         let syd = multiview_overlay::clock::parse_tz("Australia/Sydney").expect("zone");
-        let make = |unix: i64| {
+        let make = |unix: i64, show_offset: bool| {
             render(
                 &SyntheticKind::Clock {
                     mode: ClockFaceMode::Dual,
                     twelve_hour: false,
                     tz: Some(syd),
                     tz_offset_minutes: 0,
-                    label: None,
-                    show_offset: true,
+                    label: Some("Sydney".to_owned()),
+                    show_offset,
                     show_reference: false,
                     numerals: false,
                 },
@@ -1057,13 +1326,63 @@ segment_ms = 1000
             )
             .expect("sydney clock")
         };
-        // 2026-01-15 00:00 UTC (DST, +11) vs 2026-07-15 00:00 UTC (standard, +10).
-        let jan = make(1_768_435_200);
-        let jul = make(1_784_073_600);
+        // 2026-01-15 00:00 UTC (DST, +11) and 2026-07-15 00:00 UTC (standard, +10).
+        let jan = 1_768_435_200_i64;
+        let jul = 1_784_073_600_i64;
+        for at in [jan, jul] {
+            assert_ne!(
+                make(at, true).y_plane(),
+                make(at, false).y_plane(),
+                "the UTC-offset badge must draw glyphs at instant {at} that the \
+                 badge-less clock does not"
+            );
+        }
+        let badge_at = |unix: i64| {
+            multiview_overlay::clock::resolve_offset(syd, WallTime::from_unix_seconds(unix))
+                .utc_badge()
+        };
+        assert_eq!(badge_at(jan), "UTC+11:00", "Sydney is on DST in January");
+        assert_eq!(
+            badge_at(jul),
+            "UTC+10:00",
+            "Sydney is on standard time in July"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn show_reference_badge_differs_from_unbadged_at_the_same_instant() {
+        // The disciplined-reference badge (display only, ADR-T012) must DRAW:
+        // at the SAME injected instant, `show_reference: true` vs `false` render
+        // different planes (same-instant comparison — the `labeled_clock_differs_
+        // from_unlabeled` pattern). A label is set on BOTH renders so the metadata
+        // strip is reserved either way (`has_strip` depends on the flag); the only
+        // delta is the badge glyphs, so deleting the badge-draw block fails this.
+        let c = canvas();
+        let at = WallTime::from_unix_seconds(9 * 3600);
+        let make = |show_reference: bool| {
+            render(
+                &SyntheticKind::Clock {
+                    mode: ClockFaceMode::Dual,
+                    twelve_hour: false,
+                    tz: None,
+                    tz_offset_minutes: 0,
+                    label: Some("Sydney".to_owned()),
+                    show_offset: false,
+                    show_reference,
+                    numerals: false,
+                },
+                320,
+                320,
+                c,
+                at,
+            )
+            .expect("reference clock")
+        };
         assert_ne!(
-            jan.y_plane(),
-            jul.y_plane(),
-            "the UTC-offset badge follows DST (UTC+11:00 in Jan vs UTC+10:00 in Jul)"
+            make(true).y_plane(),
+            make(false).y_plane(),
+            "the reference badge drew glyphs that the badge-less clock did not"
         );
     }
 
@@ -1096,5 +1415,215 @@ segment_ms = 1000
             without.y_plane(),
             "hour numerals drew glyphs at the tick positions"
         );
+    }
+
+    // --- timer (SYN-TIMER-3) ----------------------------------------------
+
+    #[test]
+    fn from_source_kind_maps_a_timer() {
+        let kind = kind_of(
+            "kind = \"timer\"\ntarget = \"time_of_day\"\nat = \"14:30:00\"\ntimezone = \"UTC\"\n\
+             direction = \"down\"\non_target = \"zero_then_up\"\nformat = \"auto\"\n\
+             label = \"ON AIR IN\"",
+        );
+        assert!(matches!(
+            kind,
+            SyntheticKind::Timer {
+                direction: TimerDirection::Down,
+                on_target: TimerOnTarget::ZeroThenUp,
+                format: TimerFormat::Auto,
+                ..
+            }
+        ));
+        // A timer is animated (a generator drives it).
+        assert!(kind.animated());
+    }
+
+    /// A bare countdown to a `time_of_day` in UTC, at the given format/policy.
+    /// Only the `overlay`-gated render tests use it.
+    #[cfg(feature = "overlay")]
+    fn timer_kind(format: TimerFormat, on_target: TimerOnTarget) -> SyntheticKind {
+        SyntheticKind::Timer {
+            target: TimerTarget::TimeOfDay {
+                at: "14:30:00".to_owned(),
+                timezone: Some("UTC".to_owned()),
+                tz_offset_minutes: 0,
+                recur_daily: false,
+            },
+            direction: TimerDirection::Down,
+            on_target,
+            format,
+            label: None,
+            overrun_prefix: None,
+            overrun_badge: true,
+        }
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn timer_render_changes_with_the_remaining_second() {
+        let c = canvas();
+        // 14:29:55 ⇒ 00:00:05, 14:29:54 ⇒ 00:00:06 (the readout advanced).
+        let base = 14 * 3600 + 29 * 60;
+        let cad = Rational { num: 25, den: 1 };
+        let five = render_at(
+            &timer_kind(TimerFormat::HhMmSs, TimerOnTarget::Hold),
+            320,
+            120,
+            c,
+            WallTime::from_unix_seconds(base + 55),
+            0,
+            cad,
+        )
+        .expect("timer :05");
+        let six = render_at(
+            &timer_kind(TimerFormat::HhMmSs, TimerOnTarget::Hold),
+            320,
+            120,
+            c,
+            WallTime::from_unix_seconds(base + 54),
+            0,
+            cad,
+        )
+        .expect("timer :06");
+        let bg = Nv12Image::solid_rgb(320, 120, 8, 8, 12, c).expect("bg");
+        assert_ne!(five.y_plane(), bg.y_plane(), "the timer drew the count");
+        assert_ne!(
+            five.y_plane(),
+            six.y_plane(),
+            "the timer readout advances with the remaining second"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn timer_overrun_frame_differs_from_a_pre_target_frame() {
+        // zero_then_up: one second before target (00:00:01) vs one second past
+        // (+00:00:01 with the OVER badge) must render differently (the prefix +
+        // badge drew, and the count colour brightened).
+        let c = canvas();
+        let target = 14 * 3600 + 30 * 60; // 14:30:00 UTC
+        let cad = Rational { num: 25, den: 1 };
+        let before = render_at(
+            &timer_kind(TimerFormat::HhMmSs, TimerOnTarget::ZeroThenUp),
+            320,
+            160,
+            c,
+            WallTime::from_unix_seconds(target - 1),
+            0,
+            cad,
+        )
+        .expect("pre-target");
+        let after = render_at(
+            &timer_kind(TimerFormat::HhMmSs, TimerOnTarget::ZeroThenUp),
+            320,
+            160,
+            c,
+            WallTime::from_unix_seconds(target + 1),
+            0,
+            cad,
+        )
+        .expect("overrun");
+        assert_ne!(
+            before.y_plane(),
+            after.y_plane(),
+            "the overrun frame (prefix + OVER badge) differs from the pre-target frame"
+        );
+    }
+
+    #[cfg(feature = "overlay")]
+    #[test]
+    fn timer_frames_format_advances_within_a_second() {
+        // hh_mm_ss_ff at 25 fps: the same whole second but two different sub-second
+        // samples (frame 0 vs frame 12) must render different readouts.
+        let c = canvas();
+        let at = WallTime::from_unix_seconds(14 * 3600 + 29 * 60 + 55);
+        let cad = Rational { num: 25, den: 1 };
+        let f0 = render_at(
+            &timer_kind(TimerFormat::HhMmSsFf, TimerOnTarget::Hold),
+            320,
+            120,
+            c,
+            at,
+            0,
+            cad,
+        )
+        .expect("frame 0");
+        let f12 = render_at(
+            &timer_kind(TimerFormat::HhMmSsFf, TimerOnTarget::Hold),
+            320,
+            120,
+            c,
+            at,
+            500_000_000,
+            cad,
+        )
+        .expect("frame 12");
+        assert_ne!(
+            f0.y_plane(),
+            f12.y_plane(),
+            "the frames field advances within the same second"
+        );
+    }
+
+    #[test]
+    fn render_key_keys_a_frame_timer_on_the_frame_not_the_second() {
+        // A whole-second timer (hh_mm_ss) keys on the second: the frame index does
+        // not change the key. A frame timer (hh_mm_ss_ff) keys on the frame.
+        let now = WallTime::from_unix_seconds(100);
+        let whole = SyntheticKind::Timer {
+            target: TimerTarget::TimeOfDay {
+                at: "14:30:00".to_owned(),
+                timezone: Some("UTC".to_owned()),
+                tz_offset_minutes: 0,
+                recur_daily: false,
+            },
+            direction: TimerDirection::Down,
+            on_target: TimerOnTarget::Hold,
+            format: TimerFormat::HhMmSs,
+            label: None,
+            overrun_prefix: None,
+            overrun_badge: true,
+        };
+        assert_eq!(render_key(&whole, now, 0), render_key(&whole, now, 7));
+        let frames = SyntheticKind::Timer {
+            target: TimerTarget::TimeOfDay {
+                at: "14:30:00".to_owned(),
+                timezone: Some("UTC".to_owned()),
+                tz_offset_minutes: 0,
+                recur_daily: false,
+            },
+            direction: TimerDirection::Down,
+            on_target: TimerOnTarget::Hold,
+            format: TimerFormat::HhMmSsFf,
+            label: None,
+            overrun_prefix: None,
+            overrun_badge: true,
+        };
+        assert_ne!(render_key(&frames, now, 0), render_key(&frames, now, 7));
+        assert!(frames.frame_resolution());
+        assert!(!whole.frame_resolution());
+    }
+
+    #[cfg(not(feature = "overlay"))]
+    #[test]
+    fn timer_render_without_overlay_is_an_honest_refusal() {
+        let kind = SyntheticKind::Timer {
+            target: TimerTarget::TimeOfDay {
+                at: "14:30:00".to_owned(),
+                timezone: Some("UTC".to_owned()),
+                tz_offset_minutes: 0,
+                recur_daily: false,
+            },
+            direction: TimerDirection::Down,
+            on_target: TimerOnTarget::Hold,
+            format: TimerFormat::HhMmSs,
+            label: None,
+            overrun_prefix: None,
+            overrun_badge: true,
+        };
+        let err = render(&kind, 64, 64, canvas(), WallTime::from_unix_seconds(0))
+            .expect_err("a timer needs the overlay feature");
+        assert!(matches!(err, SynthError::OverlayRequired));
     }
 }

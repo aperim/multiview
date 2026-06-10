@@ -43,6 +43,7 @@ pub mod salvo;
 pub mod schema;
 pub mod sync_group;
 pub mod tally;
+pub mod timer;
 pub mod wall;
 pub mod webrtc;
 
@@ -71,11 +72,16 @@ pub use routing::{
 };
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
-    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride, Fps,
-    Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth, SourceKind,
+    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride,
+    DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth,
+    SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
+pub use timer::{
+    compute as compute_timer, decompose as decompose_duration, frame_index, overrun_badge_word,
+    TimerDirection, TimerError, TimerFormat, TimerOnTarget, TimerReadout, TimerState, TimerTarget,
+};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 pub use webrtc::{DurationString, WebrtcConfig};
 
@@ -1049,6 +1055,37 @@ impl Source {
                     )));
                 }
             }
+            SourceKind::Timer {
+                target,
+                on_target,
+                ..
+            } => {
+                // The target's `at` must parse and any IANA `timezone` must be a
+                // known id (typed error, never a panic — ADR-0047 §5.2).
+                target.validate().map_err(|e| {
+                    ConfigError::Validation(format!("source {:?}: {e}", self.id))
+                })?;
+                // `recur` is only meaningful for a recurring time-of-day target;
+                // reject it on a `date_time` or a non-recurring time-of-day so the
+                // configuration is unambiguous (it would otherwise silently
+                // degrade to `hold`).
+                if matches!(on_target, crate::timer::TimerOnTarget::Recur) {
+                    let recurs = matches!(
+                        target,
+                        crate::timer::TimerTarget::TimeOfDay {
+                            recur_daily: true,
+                            ..
+                        }
+                    );
+                    if !recurs {
+                        return Err(ConfigError::Validation(format!(
+                            "source {:?}: on_target = \"recur\" requires a time_of_day target \
+                             with recur_daily = true",
+                            self.id
+                        )));
+                    }
+                }
+            }
             // Network/synthetic kinds carry no kind-specific field that can be
             // validated structurally here (a URL's reachability is a runtime
             // concern, not a config one). The `youtube` URL is resolved at
@@ -1075,8 +1112,13 @@ impl Source {
     ///
     /// The one current advisory: when a clock sets **both** `timezone` (IANA) and
     /// `tz_offset_minutes`, the IANA zone wins (DST-correct per instant) and the
-    /// fixed offset is ignored — surfaced here so the operator/UI can flag the
-    /// redundant field without failing the config (both-present is legal).
+    /// fixed offset is ignored — both-present is legal, never an error.
+    ///
+    /// Surfacing: `multiview validate` renders each advisory as a `WARN` line in
+    /// its report, and `multiview run` emits each via `tracing::warn!` at startup
+    /// (both through the cli's `config_warnings` collector). The control API's
+    /// typed validation rejects invalid bodies but carries no warnings channel,
+    /// so advisories are not part of REST responses today.
     #[must_use]
     pub fn clock_warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -1117,9 +1159,9 @@ impl Output {
             | Output::Srt { codec, .. }
             | Output::Webrtc { codec, .. }
             | Output::WhipPush { codec, .. } => Some(codec),
-            // NDI carries a channel-map, AES67 sends raw PCM — neither has a
-            // (video) codec to validate.
-            Output::Ndi { .. } | Output::Aes67 { .. } => None,
+            // NDI carries a channel-map, AES67 sends raw PCM, and a display
+            // head scans out raw frames — none has a (video) codec to validate.
+            Output::Ndi { .. } | Output::Aes67 { .. } | Output::Display { .. } => None,
         };
         if let Some(codec) = codec {
             if codec.is_empty() {
@@ -1139,6 +1181,15 @@ impl Output {
         if let Some(pin) = self.gpu_pin() {
             pin.validate()
                 .map_err(|e| ConfigError::Validation(format!("output gpu_pin: {e}")))?;
+        }
+        if let Output::Display {
+            connector,
+            mode,
+            forced_mode,
+            ..
+        } = self
+        {
+            validate_display_output(connector, mode.as_ref(), forced_mode.as_ref())?;
         }
         self.validate_webrtc_rules()
     }
@@ -1179,7 +1230,8 @@ impl Output {
             | Output::Ndi { .. }
             | Output::Rtmp { .. }
             | Output::Srt { .. }
-            | Output::Aes67 { .. } => Ok(()),
+            | Output::Aes67 { .. }
+            | Output::Display { .. } => Ok(()),
         }
     }
 
@@ -1235,4 +1287,50 @@ impl Output {
             ))),
         }
     }
+}
+
+/// Validate an [`Output::Display`]'s connector + mode block (ADR-0044):
+/// non-empty connector, `mode`/`forced_mode` mutual exclusion (an explicit
+/// EDID override and an EDID-less forced timing are contradictory requests),
+/// and a structurally sound [`DisplayModeSpec`] wherever one is given.
+fn validate_display_output(
+    connector: &str,
+    mode: Option<&DisplayModeSpec>,
+    forced_mode: Option<&DisplayModeSpec>,
+) -> Result<(), ConfigError> {
+    if connector.trim().is_empty() {
+        return Err(ConfigError::Validation(
+            "output display: connector must not be empty (use \"auto\" for the first \
+             connected connector)"
+                .to_owned(),
+        ));
+    }
+    if mode.is_some() && forced_mode.is_some() {
+        return Err(ConfigError::Validation(format!(
+            "output \"display {connector}\": `mode` and `forced_mode` are mutually \
+             exclusive (`mode` overrides among EDID modes; `forced_mode` is the \
+             CVT-RB timing for an EDID-less head)"
+        )));
+    }
+    for (field, spec) in [("mode", mode), ("forced_mode", forced_mode)] {
+        let Some(spec) = spec else { continue };
+        if spec.width == 0 {
+            return Err(ConfigError::Validation(format!(
+                "output \"display {connector}\": {field}.width must be positive"
+            )));
+        }
+        if spec.height == 0 {
+            return Err(ConfigError::Validation(format!(
+                "output \"display {connector}\": {field}.height must be positive"
+            )));
+        }
+        let refresh = spec.refresh.rational();
+        if !refresh.is_valid() || refresh.num <= 0 || refresh.den <= 0 {
+            return Err(ConfigError::Validation(format!(
+                "output \"display {connector}\": {field}.refresh must be a positive \
+                 exact rational (e.g. \"60000/1001\"), got {refresh:?}"
+            )));
+        }
+    }
+    Ok(())
 }

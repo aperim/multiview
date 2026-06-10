@@ -261,6 +261,37 @@ pub enum SourceKind {
         #[serde(default)]
         numerals: bool,
     },
+    /// A digital countdown / count-up to a target instant (ADR-0047). The target
+    /// is a wall-clock time-of-day (optionally recurring) or an absolute
+    /// date+time, resolved in an IANA zone (DST-correct) or a fixed offset; the
+    /// displayed duration is **integer seconds** (never float). Silent, pure
+    /// pixels, in-process — a synthetic source like `clock`.
+    Timer {
+        /// The target instant, internally tagged on `target`
+        /// (`time_of_day` | `date_time`) and flattened to the top level.
+        #[serde(flatten)]
+        target: crate::timer::TimerTarget,
+        /// Count `down` (default) to the target or `up` from it.
+        #[serde(default)]
+        direction: crate::timer::TimerDirection,
+        /// What to do at/after the target: `hold` (default) | `continue` |
+        /// `zero_then_up` | `recur`.
+        #[serde(default)]
+        on_target: crate::timer::TimerOnTarget,
+        /// The display format: `d_hh_mm_ss` (default) | `hh_mm_ss` | `mm_ss` |
+        /// `hh_mm_ss_ff` | `auto`.
+        #[serde(default)]
+        format: crate::timer::TimerFormat,
+        /// Operator label drawn with the count (e.g. `ON AIR IN`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Overrun prefix override (default `+` past the target; `-`/none before).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overrun_prefix: Option<String>,
+        /// Draw the overrun a11y badge (`OVER` / `ELAPSED`) past the target.
+        #[serde(default = "default_true")]
+        overrun_badge: bool,
+    },
     /// RTSP pull.
     Rtsp {
         /// Source URL.
@@ -396,7 +427,10 @@ impl SourceKind {
     /// renderer (`SyntheticKind::from_source_kind`) accepts exactly this set.
     #[must_use]
     pub const fn is_synthetic(&self) -> bool {
-        matches!(self, Self::Bars | Self::Solid { .. } | Self::Clock { .. })
+        matches!(
+            self,
+            Self::Bars | Self::Solid { .. } | Self::Clock { .. } | Self::Timer { .. }
+        )
     }
 }
 
@@ -953,6 +987,72 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
+    /// Local DRM/KMS display-head output (HDMI/DisplayPort glass) — ADR-0044.
+    ///
+    /// A **raw-frame sink**: it scans the pre-encode NV12 canvas out to one
+    /// KMS connector via atomic page flips and never joins the packet fan-out
+    /// (invariant #7 untouched — no encode, no mux). Runnable only in a
+    /// `display-kms` build of the `multiview` binary; a build without that
+    /// feature **fails validation** of a document declaring one (never a
+    /// silent skip).
+    Display {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// KMS connector name (`DP-1`, `HDMI-A-1`, …); `"auto"` selects the
+        /// first connected connector. Defaults to `"auto"`.
+        #[serde(default = "default_display_connector")]
+        connector: String,
+        /// Optional explicit mode override: the EDID mode matching this exact
+        /// geometry + exact-rational refresh is committed; no match is a
+        /// startup error naming the available modes. Absent ⇒ automatic
+        /// selection (EDID preferred mode, engine-cadence rational match).
+        /// Mutually exclusive with `forced_mode`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<DisplayModeSpec>,
+        /// CVT-RB computed forced mode for **EDID-less** connectors (a
+        /// verified field condition — brief §6): used only when the connector
+        /// exposes no EDID modes. Mutually exclusive with `mode`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forced_mode: Option<DisplayModeSpec>,
+        /// Operator pin to a stable GPU ([`DevicePin`], ADR-0018 §2.1).
+        /// Scanout additionally implies the connector-owning-GPU locality
+        /// constraint (ADR-0044 §3), which this hint never overrides.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. HDMI/DP audio carries one LPCM
+        /// channel-map feed (ELD-gated at runtime), never selectable discrete
+        /// tracks — like NDI/AES67, a discrete-track route is a capability
+        /// error.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
+    },
+}
+
+/// A display mode requested for an [`Output::Display`] head: exact pixel
+/// geometry plus the refresh as an **exact rational** `"num/den"` string
+/// (never a float — invariant #3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DisplayModeSpec {
+    /// Active width in pixels (`> 0`).
+    pub width: u32,
+    /// Active height in pixels (`> 0`).
+    pub height: u32,
+    /// Refresh rate as an exact rational string (e.g. `"60000/1001"`).
+    pub refresh: Fps,
+}
+
+/// Default [`Output::Display`] connector selector: the first connected one.
+fn default_display_connector() -> String {
+    "auto".to_owned()
+}
+
+/// Default `true` (serde `default` for an opt-out boolean, e.g. the timer
+/// overrun badge).
+const fn default_true() -> bool {
+    true
 }
 
 /// Default AES67 output PCM depth (Class A interop): 24-bit L24.
@@ -1005,7 +1105,8 @@ impl Output {
             | Output::Srt { id, .. }
             | Output::Webrtc { id, .. }
             | Output::WhipPush { id, .. }
-            | Output::Aes67 { id, .. } => id.as_deref(),
+            | Output::Aes67 { id, .. }
+            | Output::Display { id, .. } => id.as_deref(),
         }
     }
 
@@ -1041,7 +1142,10 @@ impl Output {
             | Output::WhipPush { gpu_pin, .. }
             // AES67 carries a `gpu_pin` field that is always `None` (no encode
             // stage); it is matched uniformly here and returns `None`.
-            | Output::Aes67 { gpu_pin, .. } => gpu_pin.as_ref(),
+            | Output::Aes67 { gpu_pin, .. }
+            // Display has no encode stage either; its pin is a scanout-device
+            // hint consumed by placement (ADR-0044 §3), matched uniformly.
+            | Output::Display { gpu_pin, .. } => gpu_pin.as_ref(),
         }
     }
 
@@ -1058,7 +1162,8 @@ impl Output {
             | Output::Srt { audio, .. }
             | Output::Webrtc { audio, .. }
             | Output::WhipPush { audio, .. }
-            | Output::Aes67 { audio, .. } => audio.as_ref(),
+            | Output::Aes67 { audio, .. }
+            | Output::Display { audio, .. } => audio.as_ref(),
         }
     }
 
@@ -1090,11 +1195,12 @@ impl Output {
             Output::Hls { .. } | Output::LlHls { .. } => {
                 OutputAudioCapability::new(TrackDelivery::SelectOne, TrackCapacity::Unlimited)
             }
-            // NDI and AES67 / ST 2110-30 both carry one multiplexed PCM channel-map
-            // flow, never selectable discrete tracks — a discrete-track route is a
-            // capability error for either. (Multiple program tracks would be multiple
-            // NDI senders / AES67 SDP sessions, each its own channel-map flow.)
-            Output::Ndi { .. } | Output::Aes67 { .. } => {
+            // NDI, AES67 / ST 2110-30, and a local display head all carry one
+            // multiplexed PCM channel-map flow, never selectable discrete tracks —
+            // a discrete-track route is a capability error for any of them.
+            // (HDMI/DP audio is the sink's ELD-gated LPCM channel map; multiple
+            // program tracks would be multiple heads/senders/sessions.)
+            Output::Ndi { .. } | Output::Aes67 { .. } | Output::Display { .. } => {
                 OutputAudioCapability::new(TrackDelivery::None, TrackCapacity::AtMost(0))
             }
             // WebRTC (WHEP serve and WHIP push): one Opus m-line per session —
@@ -1136,6 +1242,8 @@ impl Output {
             // WebRTC (WHEP serve) and AES67 carry an explicit operator label
             // (they have no mount/path/url to derive one from); use it verbatim.
             Output::Webrtc { label, .. } | Output::Aes67 { label, .. } => label.clone(),
+            // A display head is addressed by its KMS connector.
+            Output::Display { connector, .. } => format!("display {connector}"),
         }
     }
 }

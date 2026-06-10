@@ -27,6 +27,7 @@ pub mod alarms;
 pub mod audio;
 pub mod audit;
 pub mod config;
+pub mod devices;
 pub mod health;
 pub mod inputs;
 pub mod outputs;
@@ -36,6 +37,7 @@ pub mod probes;
 pub mod routing;
 pub mod salvos;
 pub mod sources;
+pub mod sync_groups;
 pub mod tally;
 
 /// A `202 Accepted` body returned for an asynchronously-applied command.
@@ -663,6 +665,47 @@ fn resource_router() -> Router<AppState> {
                 .post(probes::create_probe)
                 .put(probes::update_probe)
                 .delete(probes::delete_probe),
+        )
+        // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
+        // plus the read-only runtime status snapshot, the bare-verb actions
+        // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+        .route("/devices", get(devices::list_devices))
+        .route(
+            "/devices/{id}",
+            get(devices::get_device)
+                .post(devices::create_device)
+                .put(devices::update_device)
+                .delete(devices::delete_device),
+        )
+        .route("/devices/{id}/status", get(devices::get_device_status))
+        .route("/devices/{id}/probe", post(devices::probe_device))
+        .route("/devices/{id}/set-mode", post(devices::set_mode))
+        .route("/devices/{id}/reboot", post(devices::reboot_device))
+        .route("/devices/{id}/identify", post(devices::identify_device))
+        .route(
+            "/devices/{id}/test-pattern",
+            post(devices::test_pattern),
+        )
+        .route(
+            "/devices/{id}/source-candidates",
+            get(devices::source_candidates),
+        )
+        .route(
+            "/devices/{id}/output-targets",
+            get(devices::output_targets),
+        )
+        // Presentation-sync-groups CRUD (ADR-M008/M010) + the measure action.
+        .route("/sync-groups", get(sync_groups::list_sync_groups))
+        .route(
+            "/sync-groups/{id}",
+            get(sync_groups::get_sync_group)
+                .post(sync_groups::create_sync_group)
+                .put(sync_groups::update_sync_group)
+                .delete(sync_groups::delete_sync_group),
+        )
+        .route(
+            "/sync-groups/{id}/measure",
+            post(sync_groups::measure_sync_group),
         )
 }
 

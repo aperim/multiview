@@ -51,6 +51,13 @@ pub enum ControlError {
     #[error("validation failed: {0}")]
     Validation(String),
 
+    /// The request conflicts with the resource's current state in a way an
+    /// `If-Match` cannot express — e.g. deleting a device while a Source/Output
+    /// still references it via `device_ref` (ADR-M009). The detail names the
+    /// blocking references so the operator knows what to unbind.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// Authentication failed: no credential, or an unrecognized API key.
     #[error("authentication required")]
     Unauthenticated,
@@ -94,6 +101,9 @@ impl ControlError {
             }
             Self::Validation(msg) => {
                 Problem::new(422, "validation", "Request validation failed").with_detail(msg)
+            }
+            Self::Conflict(msg) => {
+                Problem::new(409, "conflict", "Conflict with current state").with_detail(msg)
             }
             Self::Unauthenticated => {
                 Problem::new(401, "unauthenticated", "Authentication required")
