@@ -20,7 +20,9 @@ use multiview_ffmpeg::to_annexb;
 fn annexb_input_passes_through_borrowed() {
     // Already start-code framed (4-byte and 3-byte variants): the hot path must
     // not copy — a borrowed Cow proves zero-copy passthrough.
-    let four = [0x00, 0x00, 0x00, 0x01, 0x67, 0xAA, 0x00, 0x00, 0x01, 0x68, 0xBB];
+    let four = [
+        0x00, 0x00, 0x00, 0x01, 0x67, 0xAA, 0x00, 0x00, 0x01, 0x68, 0xBB,
+    ];
     assert!(
         matches!(to_annexb(&four), Cow::Borrowed(b) if b == four),
         "4-byte start-code AU must pass through borrowed"
@@ -104,6 +106,9 @@ fn malformed_inputs_degrade_to_bare_nal_wrapping_never_panic() {
 #[test]
 fn empty_input_yields_empty_output() {
     let out = to_annexb(&[]);
-    assert!(out.is_empty(), "empty AU must stay empty (and not allocate)");
+    assert!(
+        out.is_empty(),
+        "empty AU must stay empty (and not allocate)"
+    );
     assert!(matches!(out, Cow::Borrowed(_)));
 }

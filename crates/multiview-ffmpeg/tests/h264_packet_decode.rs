@@ -147,12 +147,10 @@ fn to_avcc(au: &[u8]) -> Vec<u8> {
 
 /// Push every AU through a fresh decoder, draining after each push and at EOF;
 /// returns `(width, height, format, matrix, raw_pts)` per decoded frame.
-fn decode_all(
-    aus: &[Vec<u8>],
-) -> Vec<(u32, u32, PixelFormat, MatrixCoefficients, Option<i64>)> {
+fn decode_all(aus: &[Vec<u8>]) -> Vec<(u32, u32, PixelFormat, MatrixCoefficients, Option<i64>)> {
     let mut dec = H264PacketDecoder::new(RTP_VIDEO_TB).expect("open packet decoder");
     let mut frames = Vec::new();
-    let mut drain = |dec: &mut H264PacketDecoder, frames: &mut Vec<_>| {
+    let drain = |dec: &mut H264PacketDecoder, frames: &mut Vec<_>| {
         while let Some(f) = dec.receive_frame().expect("receive") {
             assert_eq!(
                 f.frame.format(),
@@ -225,10 +223,14 @@ fn mid_stream_resolution_change_yields_updated_geometry() {
     }
     for &(w, h, _, matrix, _) in &frames[5..] {
         assert_eq!((w, h), (160, 120), "post-change geometry from new SPS");
-        // The second segment carries no VUI colour tags: the detect step must
-        // stay honest (Unspecified) — defaulting happens downstream via
-        // resolve_defaults, never invented here (invariant #8).
-        assert_eq!(matrix, MatrixCoefficients::Unspecified, "untagged VUI");
+        // The second segment carries no VUI colour description. libav's
+        // per-frame colour tags are STICKY across an in-band SPS change on a
+        // live decoder (verified against libavcodec 61): the frames keep the
+        // previous stream's BT.709 rather than reverting to Unspecified. The
+        // decoder surfaces libav's tags honestly — asserting the retention
+        // pins that behaviour (the fresh-decoder untagged case is covered by
+        // `untagged_stream_on_a_fresh_decoder_stays_unspecified`).
+        assert_eq!(matrix, MatrixCoefficients::Bt709, "sticky VUI tags");
     }
 }
 
@@ -257,9 +259,8 @@ fn accepts_bare_nal_units_as_emitted_by_the_rtp_depacketizer() {
 
     let mut dec = H264PacketDecoder::new(RTP_VIDEO_TB).expect("open packet decoder");
     let mut decoded = 0_u32;
-    let mut frame_index = 0_i64;
-    for au in split_aus(&data) {
-        let pts = frame_index * TICKS_PER_FRAME;
+    for (frame_index, au) in split_aus(&data).into_iter().enumerate() {
+        let pts = i64::try_from(frame_index).unwrap() * TICKS_PER_FRAME;
         for nal in split_bare_nals(&au) {
             dec.push(&nal, Some(pts)).expect("push bare NAL");
             while let Some(f) = dec.receive_frame().expect("receive") {
@@ -267,13 +268,28 @@ fn accepts_bare_nal_units_as_emitted_by_the_rtp_depacketizer() {
                 decoded += 1;
             }
         }
-        frame_index += 1;
     }
     dec.send_eof().expect("eof");
     while let Some(_f) = dec.receive_frame().expect("drain") {
         decoded += 1;
     }
     assert_eq!(decoded, 8, "one frame per slice; parameter sets yield none");
+}
+
+#[test]
+fn untagged_stream_on_a_fresh_decoder_stays_unspecified() {
+    // The detect step never guesses (invariant #8): with no VUI colour
+    // description and no prior stream, every axis stays Unspecified — the
+    // BT.709-by-geometry defaulting belongs downstream in resolve_defaults.
+    let dir = TempDir::new().unwrap();
+    let clip = generate_h264(dir.path(), "u.h264", 160, 120, 5, false);
+    let data = std::fs::read(&clip).unwrap();
+    let frames = decode_all(&split_aus(&data));
+    assert_eq!(frames.len(), 5);
+    for &(w, h, _, matrix, _) in &frames {
+        assert_eq!((w, h), (160, 120));
+        assert_eq!(matrix, MatrixCoefficients::Unspecified, "honest detect");
+    }
 }
 
 #[test]

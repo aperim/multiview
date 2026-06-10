@@ -142,7 +142,7 @@ fn codec_options_validate_interior_nul() {
     // interior NUL can never become an av_dict entry — typed error, never UB.
     assert!(CodecOptions::new().try_set("g", "30").is_ok());
     assert!(CodecOptions::new().try_set("g\0", "30").is_err());
-    assert!(CodecOptions::new().try_set("g", "3\00").is_err());
+    assert!(CodecOptions::new().try_set("g", "3\x000").is_err());
     assert!(CodecOptions::from_pairs(&[("a", "1"), ("b\0", "2")]).is_err());
 
     let opts = CodecOptions::from_pairs(&[("a", "1"), ("b", "2")]).unwrap();

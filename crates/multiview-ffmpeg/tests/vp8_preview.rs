@@ -137,8 +137,7 @@ mod gated {
             return; // the absent-build contract was fully asserted above
         }
         let options = preview_vp8_options(Rational::new(FPS, 1));
-        let mut enc =
-            VideoEncoder::new_with_options(&vp8_target(), &options).expect("open libvpx");
+        let mut enc = VideoEncoder::new_with_options(&vp8_target(), &options).expect("open libvpx");
         assert_eq!(enc.time_base(), Rational::new(1, FPS));
 
         // 40 frames at 15 fps with a 2 s GOP (g=30): realtime deadline +
@@ -152,9 +151,7 @@ mod gated {
         assert!(keys.contains(&0), "stream starts with a keyframe");
         assert!(keys.contains(&30), "2 s GOP places a keyframe at pts 30");
         assert!(
-            !packets
-                .iter()
-                .any(|&(pts, key)| key && pts > 0 && pts < 30),
+            !packets.iter().any(|&(pts, key)| key && pts > 0 && pts < 30),
             "no stray keyframe inside the GOP: {packets:?}"
         );
     }
@@ -165,18 +162,16 @@ mod gated {
             return;
         }
         let options = preview_vp8_options(Rational::new(FPS, 1));
-        let mut enc =
-            VideoEncoder::new_with_options(&vp8_target(), &options).expect("open libvpx");
+        let mut enc = VideoEncoder::new_with_options(&vp8_target(), &options).expect("open libvpx");
 
         // Force before frame 10 (mid-GOP). The PLI -> force-IDR seam of
         // ADR-0049/ADR-P006: the NEXT encoded frame must be a keyframe.
         let packets = encode_collect(&mut enc, 21, Some(10));
         let key_at = |pts: i64| {
-            packets
-                .iter()
-                .find(|&&(p, _)| p == pts)
-                .map(|&(_, k)| k)
-                .unwrap_or_else(|| panic!("no packet with pts {pts}: {packets:?}"))
+            packets.iter().find(|&&(p, _)| p == pts).map_or_else(
+                || panic!("no packet with pts {pts}: {packets:?}"),
+                |&(_, k)| k,
+            )
         };
         assert!(key_at(0), "first frame is a keyframe");
         assert!(key_at(10), "forced frame must be a keyframe");

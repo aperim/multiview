@@ -53,7 +53,7 @@ fn gray_yuv420p(pts: i64) -> Video {
 fn keyframe_pts(force_at: Option<i64>) -> Vec<i64> {
     let mut enc = VideoEncoder::new(&target()).expect("open mpeg2video");
     let mut keys = Vec::new();
-    let mut collect = |pkt: &ffmpeg::codec::packet::Packet, keys: &mut Vec<i64>| {
+    let collect = |pkt: &ffmpeg::codec::packet::Packet, keys: &mut Vec<i64>| {
         if pkt.is_key() {
             keys.push(pkt.pts().expect("packet pts"));
         }

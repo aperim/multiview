@@ -59,8 +59,11 @@ fn generate_opus_ogg(dir: &Path) -> PathBuf {
     out
 }
 
+/// One demuxed Opus packet: its raw bytes and container PTS.
+type OpusPacket = (Vec<u8>, Option<i64>);
+
 /// Demux every Opus data packet `(bytes, pts)` from the fixture.
-fn demux_opus_packets(path: &Path) -> (Vec<(Vec<u8>, Option<i64>)>, Rational) {
+fn demux_opus_packets(path: &Path) -> (Vec<OpusPacket>, Rational) {
     let mut demux = Demuxer::open(path).expect("open ogg");
     let audio_index = demux
         .best_stream(MediaKind::Audio)
@@ -76,7 +79,11 @@ fn demux_opus_packets(path: &Path) -> (Vec<(Vec<u8>, Option<i64>)>, Rational) {
         let data = pkt.packet.data().expect("opus packet has data").to_vec();
         packets.push((data, pkt.packet.pts()));
     }
-    assert!(packets.len() > 40, "1 s of 20 ms packets (got {})", packets.len());
+    assert!(
+        packets.len() > 40,
+        "1 s of 20 ms packets (got {})",
+        packets.len()
+    );
     (packets, time_base)
 }
 
@@ -99,10 +106,7 @@ fn decodes_raw_opus_packets_to_stereo_48k_f32_blocks() {
     let mut total_frames = 0_usize;
     let mut all_samples: Vec<f32> = Vec::new();
     let mut last_pts = i64::MIN;
-    let mut drain = |dec: &mut OpusDecoder,
-                     total: &mut usize,
-                     all: &mut Vec<f32>,
-                     last: &mut i64| {
+    let drain = |dec: &mut OpusDecoder, total: &mut usize, all: &mut Vec<f32>, last: &mut i64| {
         while let Some(block) = dec.receive_block().expect("receive") {
             assert_eq!(block.rate, OPUS_SAMPLE_RATE, "blocks are 48 kHz");
             assert_eq!(block.channels, OPUS_CHANNELS, "blocks are stereo");
@@ -158,7 +162,7 @@ fn opus_encoder_round_trips_pcm_with_sane_length_and_energy() {
     }
 
     let mut packets = Vec::new();
-    let mut drain = |enc: &mut OpusEncoder, packets: &mut Vec<_>| {
+    let drain = |enc: &mut OpusEncoder, packets: &mut Vec<_>| {
         while let Some(pkt) = enc.receive_packet().expect("recv") {
             assert_eq!(pkt.kind(), StreamKind::Audio, "audio-tagged packets");
             assert!(!pkt.is_empty(), "coded packets carry payload");
@@ -180,12 +184,15 @@ fn opus_encoder_round_trips_pcm_with_sane_length_and_energy() {
     );
     // PTS is a sample counter (the audio analogue of the output tick).
     let pts: Vec<i64> = packets.iter().map(|p| p.pts().expect("pts")).collect();
-    assert!(pts.windows(2).all(|w| w[1] > w[0]), "PTS strictly increases");
+    assert!(
+        pts.windows(2).all(|w| w[1] > w[0]),
+        "PTS strictly increases"
+    );
 
     // Decode the coded packets back and check duration + energy.
     let mut dec = OpusDecoder::new(Rational::new(1, 48_000)).expect("open opus decoder");
     let mut decoded: Vec<f32> = Vec::new();
-    let mut drain_dec = |dec: &mut OpusDecoder, decoded: &mut Vec<f32>| {
+    let drain_dec = |dec: &mut OpusDecoder, decoded: &mut Vec<f32>| {
         while let Some(block) = dec.receive_block().expect("receive") {
             decoded.extend_from_slice(&block.interleaved);
         }
