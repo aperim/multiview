@@ -169,6 +169,7 @@ Decisions **Accepted** during the foundation build-out — the as-built state of
 - [ADR-I002](ADR-I002.md) — GPU compositor: wgpu behind an off-by-default `wgpu` feature; WGSL shaders are naga-validated GPU-free and SSIM≥0.98/PSNR≥40 dB-gated at runtime (follow-up: flip `wgpu` to default per conventions §3)
 - [ADR-I003](ADR-I003.md) — Control persistence: SQLite/sqlx behind an off-by-default `sqlite` feature; in-memory trait `Repository` is the tested default; scoped cargo-deny ignore of RUSTSEC-2024-0436
 - [ADR-I004](ADR-I004.md) — Broadcast multiviewer (M10–M12) feature placement: modules inside the existing 16 crates (no new crates), native/hardware behind off-by-default features
+- [ADR-I005](ADR-I005.md) — One packet carrier (RT-13): `multiview_ffmpeg::EncodedPacket` (the `AVPacket` wrapper, `StreamKind`-tagged) is the single production fan-out type; retire the `fanout::EncodedPacket` `Arc<[u8]>` carrier (demote `PacketRouter`/`EncodeOnceDriver` to the GPU-free encode-once proof harness), fold `PacketKind` → `StreamKind` + keyframe flag, payload zero-copy via `AVBufferRef` refcount + per-muxer-private writable header (in-place `rescale_ts`); AUD-4 / OUT-2 / PRV-5 all build against it
 
 ## Accessibility & Internationalization
 
