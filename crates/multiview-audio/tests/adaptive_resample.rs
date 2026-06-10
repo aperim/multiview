@@ -62,7 +62,10 @@ fn positive_ppm_emits_more_frames_negative_emits_fewer() {
     let down = slower.process(&stereo_ramp(2000)).frame_count() as i64;
 
     assert!(up > 2000, "positive ppm must yield MORE frames, got {up}");
-    assert!(down < 2000, "negative ppm must yield FEWER frames, got {down}");
+    assert!(
+        down < 2000,
+        "negative ppm must yield FEWER frames, got {down}"
+    );
 }
 
 #[test]

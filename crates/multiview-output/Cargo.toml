@@ -19,6 +19,16 @@ multiview-core = { workspace = true }
 # is clean (output is a leaf media crate; framestore depends only on core — no
 # cycle), and `cargo deny` (all-features=false) sees only this pure-Rust crate.
 multiview-framestore = { workspace = true }
+# The display-audio sink (`display::audio`, DEV-B4) reuses multiview-audio's
+# canonical 48 kHz float `AudioBlock`/`AudioFormat` and its ratio-driven
+# `AdaptiveResampler` (ADR-R005, display-out §5) — the three-clock servo DRIVES
+# that resampler rather than reimplementing resampling. multiview-audio's
+# DEFAULT build is pure Rust (no native deps; its libav path is behind its own
+# off-by-default `ffmpeg` feature, NOT pulled here), so the baseline stays
+# native-dep-free. Dependency direction is clean: audio and output are both leaf
+# media crates and audio does not depend on output — no cycle. `cargo deny`
+# (all-features=false) sees only this pure-Rust crate.
+multiview-audio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # `fs` + `io-util` serve the HLS delivery surface (`hls::http`): async file
@@ -71,6 +81,18 @@ drm = { workspace = true, optional = true }
 drm-ffi = { workspace = true, optional = true }
 gbm = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }
+
+# Off-by-default `display-kms` path ONLY (DEV-B4 / ADR-0044 §5): the real ALSA
+# HDMI audio sink (`display::audio::alsa`). `alsa` is the SAFE Rust wrapper over
+# libasound (no `unsafe` in this crate; it stays `forbid(unsafe_code)`); the
+# libasound2 C library is LGPL-2.1, resolved by DYNAMIC LINK at run time (never
+# vendored), so this does not escalate the licence. The pure
+# servo/ELD/xrun/FIFO/sink-seam (`display::audio`, over the `AlsaSink`/
+# `EldSource` trait seams) is ALWAYS compiled and CI-tested over a scripted
+# mock; this feature only adds the libasound-speaking `alsa::AlsaPcmSink` and
+# the `/proc/asound` ELD reader. `cargo deny` runs with all-features=false so
+# the default graph never sees it.
+alsa = { workspace = true, optional = true }
 
 # Real libav* encode/mux path — opt-in only behind the `ffmpeg` feature so the
 # DEFAULT build stays pure-Rust / native-dep-free. All raw FFI is owned by
@@ -165,7 +187,7 @@ multiview-input = { workspace = true }
 # always-compiled display seam (mailbox/mode-policy/flip-loop over the mock)
 # is what CI tests. Building this feature needs Mesa's libgbm development
 # files present (libgbm-dev); the binary then dynamically links libgbm.
-"display-kms" = ["dep:drm", "dep:drm-ffi", "dep:gbm", "dep:rustix"]
+"display-kms" = ["dep:drm", "dep:drm-ffi", "dep:gbm", "dep:rustix", "dep:alsa"]
 
 [lints]
 workspace = true

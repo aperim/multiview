@@ -109,7 +109,10 @@ fn valid_eld_drains_the_fifo_into_the_pcm() {
         std::thread::sleep(Duration::from_millis(1));
     }
     std::thread::sleep(Duration::from_millis(60));
-    assert!(alsa.opened.load(Ordering::SeqCst), "valid ELD opens the PCM");
+    assert!(
+        alsa.opened.load(Ordering::SeqCst),
+        "valid ELD opens the PCM"
+    );
     assert!(
         alsa.frames_written.load(Ordering::SeqCst) > 0,
         "valid ELD must drain audio frames into the PCM"

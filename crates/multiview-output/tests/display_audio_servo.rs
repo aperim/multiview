@@ -28,15 +28,27 @@ fn too_full_speeds_audio_up_too_empty_slows_it_down() {
     let servo = BufferServo::new();
     let up = servo.clone().correction(0.9, 0.0);
     let down = servo.clone().correction(0.1, 0.0);
-    assert!(up.ppm() > 0.0, "too-full FIFO must speed audio up, got {}", up.ppm());
-    assert!(down.ppm() < 0.0, "too-empty FIFO must slow audio down, got {}", down.ppm());
+    assert!(
+        up.ppm() > 0.0,
+        "too-full FIFO must speed audio up, got {}",
+        up.ppm()
+    );
+    assert!(
+        down.ppm() < 0.0,
+        "too-empty FIFO must slow audio down, got {}",
+        down.ppm()
+    );
 }
 
 #[test]
 fn at_setpoint_with_no_skew_holds_unity() {
     let servo = BufferServo::new();
     let c = servo.clone().correction(0.5, 0.0);
-    assert!(c.ppm().abs() < 1e-3, "balanced FIFO + no skew => ~unity, got {}", c.ppm());
+    assert!(
+        c.ppm().abs() < 1e-3,
+        "balanced FIFO + no skew => ~unity, got {}",
+        c.ppm()
+    );
 }
 
 #[test]

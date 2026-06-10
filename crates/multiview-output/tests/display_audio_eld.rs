@@ -105,7 +105,10 @@ fn rate_not_advertised_is_rejected() {
     let bytes = lpcm_eld("MON", 2);
     let cap = parse_eld(&bytes).expect("valid");
     // 88.2 kHz was never set in our rate bitmap.
-    assert!(!cap.supports_rate(88_200), "unadvertised rate must be false");
+    assert!(
+        !cap.supports_rate(88_200),
+        "unadvertised rate must be false"
+    );
 }
 
 #[test]
@@ -118,7 +121,11 @@ fn capability_negotiates_a_supported_format() {
     // A request the ELD cannot satisfy (8 channels on a stereo sink) clamps to
     // the ELD ceiling rather than failing the whole audio path.
     let clamped = cap.negotiate(48_000, 8);
-    assert_eq!(clamped, Some((48_000, 2)), "channel request clamps to the ELD max");
+    assert_eq!(
+        clamped,
+        Some((48_000, 2)),
+        "channel request clamps to the ELD max"
+    );
 }
 
 #[test]

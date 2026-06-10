@@ -33,7 +33,10 @@ fn underrun_triggers_recovery_then_resumes() {
     // An -EPIPE underrun: the machine must request a recover action, not crash.
     let action = sm.on_outcome(PcmOutcome::Underrun);
     assert_eq!(sm.state(), XrunState::Recovering);
-    assert!(action.recover, "underrun must request a PCM prepare/recover");
+    assert!(
+        action.recover,
+        "underrun must request a PCM prepare/recover"
+    );
     // After a successful recover + first good write, back to Running.
     sm.on_outcome(PcmOutcome::Recovered);
     sm.on_outcome(PcmOutcome::Wrote(480));
