@@ -64,6 +64,20 @@ impl AlarmHysteresis {
         }
     }
 
+    /// Construct hysteresis from a config [`Dwell`](multiview_config::probe::Dwell),
+    /// converting its millisecond raise/clear windows to the media timeline.
+    ///
+    /// This is the conversion the engine uses to honour an operator-authored
+    /// probe declaration; the windows are non-negative by construction (`u32`
+    /// milliseconds), so no clamping is needed.
+    #[must_use]
+    pub fn from_dwell(dwell: multiview_config::probe::Dwell) -> Self {
+        Self {
+            dwell_up: millis_to_media_time(dwell.up_ms),
+            dwell_down: millis_to_media_time(dwell.down_ms),
+        }
+    }
+
     /// The raise (dwell-up) window.
     #[must_use]
     pub const fn dwell_up(self) -> MediaTime {
@@ -182,6 +196,35 @@ impl AlarmStateMachine {
     pub const fn latching(mut self) -> Self {
         self.latching = true;
         self
+    }
+
+    /// Build a fresh, clear alarm state machine from an operator-authored config
+    /// [`Probe`](multiview_config::probe::Probe).
+    ///
+    /// This is the integration seam between the declarative probe layer
+    /// ([`multiview_config::probe`]) and the engine X.733 lifecycle: the probe's
+    /// `id` becomes the [`AlarmId`] and (as the watched leaf) the
+    /// [`AlarmScope::Probe`]; its [`ProbeKind`](multiview_config::probe::ProbeKind)
+    /// maps to the [`AlarmKind`] it raises; its millisecond
+    /// [`Dwell`](multiview_config::probe::Dwell) becomes the [`AlarmHysteresis`];
+    /// and its `severity`/`latched` policy is carried verbatim. The probe is read
+    /// only — the engine never mutates the config.
+    #[must_use]
+    pub fn from_probe(probe: &multiview_config::probe::Probe) -> Self {
+        let machine = Self::new(
+            AlarmId::new(probe.id.clone()),
+            probe.kind.alarm_kind(),
+            AlarmScope::Probe {
+                id: probe.id.clone(),
+            },
+            probe.severity,
+            AlarmHysteresis::from_dwell(probe.dwell),
+        );
+        if probe.latched {
+            machine.latching()
+        } else {
+            machine
+        }
     }
 
     /// The alarm's stable identity.
@@ -370,4 +413,12 @@ fn non_negative(t: MediaTime) -> MediaTime {
     } else {
         t
     }
+}
+
+/// Convert a non-negative millisecond window to a [`MediaTime`].
+///
+/// `u32` milliseconds times 1e6 ns fits in `i64` (`u32::MAX * 1_000_000`
+/// ≈ 4.29e15 < `i64::MAX`), so the widen-then-multiply is exact with no overflow.
+fn millis_to_media_time(ms: u32) -> MediaTime {
+    MediaTime::from_nanos(i64::from(ms).saturating_mul(1_000_000))
 }
