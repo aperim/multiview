@@ -21,6 +21,9 @@ import { renderWithProviders } from "../test/render";
 const SOURCES = [
   { id: "cam-1", name: "Camera 1", body: { id: "cam-1", kind: "rtsp", url: "rtsp://host/one" } },
   { id: "cam-2", name: "Camera 2", body: { id: "cam-2", kind: "bars" } },
+  // A kind this UI has no form for: rendered + deletable, but NOT editable —
+  // the authored document must never be folded onto a different kind.
+  { id: "aoip-1", name: "AoIP feed", body: { id: "aoip-1", kind: "aes67", url: "aes67://x" } },
 ];
 
 const OUTPUTS = [
@@ -128,6 +131,24 @@ describe("SourcesPage honest surfaces", () => {
     // explained placeholder (text, not colour).
     const dashes = screen.getAllByText("Not in the running engine", { exact: false });
     expect(dashes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders an unknown-kind row as authored but refuses to edit it", async () => {
+    renderSources();
+    // The row renders normally, showing the RAW authored kind (never folded
+    // to bars — the old fold silently rewrote the record on save).
+    expect(await screen.findByText("AoIP feed")).toBeInTheDocument();
+    expect(screen.getByText("aes67")).toBeInTheDocument();
+    // Edit is disabled with an accessible explanation; delete stays allowed.
+    const edit = screen.getByRole("button", { name: /Edit source: AoIP feed/ });
+    expect(edit).toHaveAttribute("aria-disabled", "true");
+    expect(edit.getAttribute("aria-label")).toMatch(/isn't editable in this UI/i);
+    await userEvent.click(edit);
+    // No edit dialog opened — the document is preserved as authored.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Delete source: AoIP feed" }),
+    ).toBeEnabled();
   });
 
   it("renders inline per-field errors on an invalid submit", async () => {

@@ -131,21 +131,26 @@ export function CodecsPage(): JSX.Element {
             <Trans>
               Multiview composites the canvas <em>once</em> per tick, encodes
               it <em>once per rendition</em>, and fans the same encoded
-              packets out to every output that wants that rendition. Serving
-              the wall over HLS, RTSP, and an SRT push at the same codec,
-              resolution, and bitrate costs one encode — not three. A second
-              encode is created only when an output genuinely needs a
-              different codec, resolution, or bitrate.
+              packets out to every output that wants that rendition. Writing
+              the wall to HLS while pushing it to an RTMP and an SRT
+              destination at the same codec, resolution, and bitrate costs one
+              encode — not three. A second encode is created only when an
+              output genuinely needs a different codec, resolution, or
+              bitrate.
             </Trans>
           </Prose>
           <Prose>
             <Trans>
-              Changing an output's codec is a controlled restart of that
-              output (consumers reconnect); it never interrupts the
-              compositor or the other outputs. The codec field on an output is
-              validated against what the transport can carry — for example{" "}
-              <Code>h265</Code> is rejected on classic RTMP — and against what
-              the host can actually encode.
+              Changing an output's codec today is a configuration change, not
+              a live switch: stored edits take effect by exporting the config
+              and restarting the engine (the API marks these resources{" "}
+              <Code>apply: restart</Code>). The codec token is also only
+              lightly checked at present — if the build cannot encode the
+              requested codec, the pipeline logs a warning and falls back to
+              MPEG-2 rather than failing the run. So choose a codec your build
+              and transport are known to carry (classic RTMP, for example,
+              carries H.264 only), and verify the output really uses it — for
+              example with <Code>ffprobe</Code>.
             </Trans>
           </Prose>
           <HelpLink

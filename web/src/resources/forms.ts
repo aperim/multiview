@@ -137,7 +137,16 @@ function asPinVendor(value: unknown): PinVendor {
   return PIN_VENDORS.find((vendor) => vendor === value) ?? 'nvidia';
 }
 
-/** The body keys NOT managed by a form, preserved verbatim across an edit. */
+/**
+ * The body keys NOT managed by a form, preserved verbatim across an edit.
+ *
+ * Keys land via `Object.defineProperty`, never plain assignment: a stored body
+ * can carry an OWN `__proto__` key (JSON allows it), and `extra[key] = value`
+ * for that key would swap the accumulator's prototype and silently drop the
+ * key. `defineProperty` always creates an own data property, and the later
+ * body spreads (`{ ...form.extra }`) copy it back as an own data property too
+ * (spread uses CreateDataProperty, never the inherited setter).
+ */
 function extraOf(
   body: Record<string, unknown>,
   managedKeys: readonly string[],
@@ -145,7 +154,12 @@ function extraOf(
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
     if (!managedKeys.includes(key)) {
-      extra[key] = value;
+      Object.defineProperty(extra, key, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
   }
   return extra;
@@ -421,29 +435,45 @@ function captionsBody(form: SourceFormState): Record<string, unknown> | undefine
   }
 }
 
-/** Project a stored record back onto the editable source form. */
-export function sourceFormFromRecord(record: ResourceRecord): SourceFormState {
+/**
+ * Parse a stored source kind tag onto the editable form kind. The legacy
+ * `test` alias canonicalizes to `bars` (the schema does the same); any OTHER
+ * unknown/absent tag returns `undefined` — an explicit refusal, never a fold
+ * (folding would silently rewrite the authored document on the next save).
+ */
+export function parseSourceFormKind(tag: string | undefined): SourceFormKind | undefined {
+  if (tag === 'test') {
+    return 'bars';
+  }
+  return (
+    [
+      'bars',
+      'solid',
+      'clock',
+      'rtsp',
+      'hls',
+      'youtube',
+      'ts',
+      'srt',
+      'rtmp',
+      'ndi',
+      'file',
+    ] as const
+  ).find((k) => k === tag);
+}
+
+/**
+ * Project a stored record back onto the editable source form, or `undefined`
+ * when the body's kind is not one this UI can edit (the page disables Edit;
+ * the document is preserved as authored).
+ */
+export function sourceFormFromRecord(record: ResourceRecord): SourceFormState | undefined {
   const body = record.body;
   const empty = emptySourceForm();
-  const kindTag = asString(body.kind);
-  const kind: SourceFormKind =
-    kindTag === 'test'
-      ? 'bars'
-      : ((
-          [
-            'bars',
-            'solid',
-            'clock',
-            'rtsp',
-            'hls',
-            'youtube',
-            'ts',
-            'srt',
-            'rtmp',
-            'ndi',
-            'file',
-          ] as const
-        ).find((k) => k === kindTag) ?? 'bars');
+  const kind = parseSourceFormKind(asString(body.kind));
+  if (kind === undefined) {
+    return undefined;
+  }
 
   const rtsp = asRecord(body.rtsp);
   const transport = asString(rtsp?.transport);
@@ -462,7 +492,10 @@ export function sourceFormFromRecord(record: ResourceRecord): SourceFormState {
   return {
     ...empty,
     id: record.id,
-    name: record.name,
+    // An authored `display_name` wins over the store name: the form writes its
+    // Name back as `display_name`, so seeding from the store name would
+    // clobber a differing authored value on the first save.
+    name: asString(body.display_name) ?? record.name,
     kind,
     url: asString(body.url) ?? '',
     ndiName: kind === 'ndi' ? (asString(body.name) ?? '') : '',
@@ -706,9 +739,16 @@ export function emptyOutputForm(): OutputFormState {
   };
 }
 
-/** The body keys the output form manages (everything else is preserved). */
+/**
+ * The body keys the output form manages (everything else is preserved).
+ *
+ * Deliberately NOT here: `id`. The output config-level `id` is OPTIONAL,
+ * label-derived when absent (ADR-0034), and lives in a DIFFERENT namespace
+ * from the resource/store id (seeded stores use `output-0..n`): crosspoints /
+ * `OutputRef`s bind to the config id, so the form never writes it — an
+ * authored `id` rides the extra-preservation path verbatim instead.
+ */
 const OUTPUT_MANAGED_KEYS: readonly string[] = [
-  'id',
   'kind',
   'mount',
   'path',
@@ -723,11 +763,14 @@ const OUTPUT_MANAGED_KEYS: readonly string[] = [
   'audio',
 ];
 
-/** Build the exact config `Output` body from a valid form. */
+/**
+ * Build the exact config `Output` body from a valid form. The routable
+ * config-level `id` is never derived from the form/store id (see
+ * {@link OUTPUT_MANAGED_KEYS}); an authored one is re-emitted via `extra`.
+ */
 export function outputFormToBody(form: OutputFormState): Record<string, unknown> {
   const body: Record<string, unknown> = { ...form.extra };
   body.kind = outputWireKind(form.kind);
-  body.id = form.id.trim();
   switch (form.kind) {
     case 'rtsp':
       body.mount = form.mount.trim();
@@ -791,17 +834,32 @@ export function parseTrackList(value: string): string[] {
     .filter((track) => track !== '');
 }
 
-/** Project a stored record back onto the editable output form. */
-export function outputFormFromRecord(record: ResourceRecord): OutputFormState {
+/**
+ * Parse a stored output wire kind onto the display kind, or `undefined` for a
+ * kind this UI cannot edit — an explicit refusal, never a fold.
+ */
+export function parseOutputFormKind(tag: string | undefined): OutputKind | undefined {
+  if (tag === 'rtsp_server') {
+    return 'rtsp';
+  }
+  if (tag === 'll_hls') {
+    return 'll-hls';
+  }
+  return (['hls', 'ndi', 'rtmp', 'srt'] as const).find((k) => k === tag);
+}
+
+/**
+ * Project a stored record back onto the editable output form, or `undefined`
+ * when the body's kind is not one this UI can edit (the page disables Edit;
+ * the document is preserved as authored).
+ */
+export function outputFormFromRecord(record: ResourceRecord): OutputFormState | undefined {
   const body = record.body;
   const empty = emptyOutputForm();
-  const wire = asString(body.kind);
-  const kind: OutputKind =
-    wire === 'rtsp_server'
-      ? 'rtsp'
-      : wire === 'll_hls'
-        ? 'll-hls'
-        : ((['hls', 'ndi', 'rtmp', 'srt'] as const).find((k) => k === wire) ?? 'hls');
+  const kind = parseOutputFormKind(asString(body.kind));
+  if (kind === undefined) {
+    return undefined;
+  }
   const audio = asRecord(body.audio);
   const audioMode = asString(audio?.mode);
   const rawTracks = audio?.tracks;
@@ -980,21 +1038,28 @@ export function emptyOverlayForm(): OverlayFormState {
   };
 }
 
-/** The flattened param keys the overlay form manages, per kind. */
-const OVERLAY_MANAGED_KEYS: readonly string[] = [
-  'id',
-  'kind',
-  'target',
-  'z',
-  'face',
-  'tz_minutes',
-  'x',
-  'y',
-  'radius',
-  'width_px',
-  'color',
-  'binding',
-];
+/** The body keys every overlay kind's writer re-emits. */
+const OVERLAY_BASE_KEYS: readonly string[] = ['id', 'kind', 'target', 'z'];
+
+/**
+ * The flattened param keys the overlay form manages for ONE kind — exactly
+ * the keys that kind's writer re-emits. Stripping must be kind-scoped: a
+ * `label` overlay carrying e.g. `color` or `x` (param names another kind also
+ * uses) must keep them via the extra-preservation path, because the label
+ * writer would never re-emit them.
+ */
+function overlayManagedKeys(kind: OverlayKind): readonly string[] {
+  switch (kind) {
+    case 'clock':
+      return [...OVERLAY_BASE_KEYS, 'face', 'tz_minutes', 'x', 'y', 'radius'];
+    case 'tally_border':
+      return [...OVERLAY_BASE_KEYS, 'width_px', 'color', 'binding'];
+    case 'label':
+    case 'image':
+    case 'subtitle':
+      return OVERLAY_BASE_KEYS;
+  }
+}
 
 /**
  * Switch an overlay form to a new kind. Params are kind-scoped (the config
@@ -1060,14 +1125,28 @@ export function overlayFormToBody(form: OverlayFormState): Record<string, unknow
   return body;
 }
 
-/** Project a stored record back onto the editable overlay form. */
-export function overlayFormFromRecord(record: ResourceRecord): OverlayFormState {
+/**
+ * Parse a stored overlay kind tag, or `undefined` for a kind this UI cannot
+ * edit — an explicit refusal, never a fold.
+ */
+export function parseOverlayFormKind(tag: string | undefined): OverlayKind | undefined {
+  return (['clock', 'label', 'tally_border', 'image', 'subtitle'] as const).find(
+    (k) => k === tag,
+  );
+}
+
+/**
+ * Project a stored record back onto the editable overlay form, or `undefined`
+ * when the body's kind is not one this UI can edit (the page disables Edit;
+ * the document is preserved as authored).
+ */
+export function overlayFormFromRecord(record: ResourceRecord): OverlayFormState | undefined {
   const body = record.body;
   const empty = emptyOverlayForm();
-  const kind =
-    (['clock', 'label', 'tally_border', 'image', 'subtitle'] as const).find(
-      (k) => k === asString(body.kind),
-    ) ?? 'label';
+  const kind = parseOverlayFormKind(asString(body.kind));
+  if (kind === undefined) {
+    return undefined;
+  }
   return {
     ...empty,
     id: record.id,
@@ -1083,7 +1162,7 @@ export function overlayFormFromRecord(record: ResourceRecord): OverlayFormState 
     tallyWidthPx: numberToField(asFiniteNumber(body.width_px)),
     tallyColor: asString(body.color) ?? '',
     tallyBinding: asString(body.binding) ?? '',
-    extra: extraOf(body, OVERLAY_MANAGED_KEYS),
+    extra: extraOf(body, overlayManagedKeys(kind)),
   };
 }
 

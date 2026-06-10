@@ -11,6 +11,11 @@
 // shapes and typed field guards. The opaque `body` is read with `stringField`/
 // `numberField`, never an `as`-cast of an untyped value.
 import { getStoredToken } from '../api/token';
+import {
+  parseOutputFormKind,
+  parseOverlayFormKind,
+  parseSourceFormKind,
+} from './forms';
 import type {
   OutputKind,
   OutputView,
@@ -279,25 +284,38 @@ function asOverlayKind(value: string | undefined): OverlayKind {
   return OVERLAY_KINDS.find((k) => k === value) ?? 'label';
 }
 
-/** Project a source record's opaque body into the {@link SourceView}. */
+/**
+ * Project a source record's opaque body into the {@link SourceView}.
+ *
+ * `kind` folds an unknown tag for the typed consumers, but `rawKind` carries
+ * the authored tag for display and `editable` flags whether the typed forms
+ * can round-trip the record (`parseSourceFormKind` refuses unknown kinds —
+ * editing through a fold would rewrite the authored document).
+ */
 export function toSourceView(record: ResourceRecord): SourceView {
-  const kind = asSourceKind(stringField(record.body, 'kind'));
+  const raw = stringField(record.body, 'kind');
+  const kind = asSourceKind(raw);
   const locatorKey = sourceLocatorKey(kind);
   return {
     id: record.id,
     name: record.name,
     kind,
+    rawKind: raw ?? kind,
+    editable: parseSourceFormKind(raw) !== undefined,
     locator: locatorKey !== undefined ? stringField(record.body, locatorKey) : undefined,
   };
 }
 
 /** Project an output record's opaque body into the {@link OutputView}. */
 export function toOutputView(record: ResourceRecord): OutputView {
-  const kind = asOutputKind(stringField(record.body, 'kind'));
+  const raw = stringField(record.body, 'kind');
+  const kind = asOutputKind(raw);
   return {
     id: record.id,
     name: record.name,
     kind,
+    rawKind: raw ?? kind,
+    editable: parseOutputFormKind(raw) !== undefined,
     target: stringField(record.body, outputTargetKey(kind)),
     codec: outputHasCodec(kind) ? stringField(record.body, 'codec') : undefined,
   };
@@ -305,10 +323,14 @@ export function toOutputView(record: ResourceRecord): OutputView {
 
 /** Project an overlay record's opaque body into the {@link OverlayView}. */
 export function toOverlayView(record: ResourceRecord): OverlayView {
+  const raw = stringField(record.body, 'kind');
+  const kind = asOverlayKind(raw);
   return {
     id: record.id,
     name: record.name,
-    kind: asOverlayKind(stringField(record.body, 'kind')),
+    kind,
+    rawKind: raw ?? kind,
+    editable: parseOverlayFormKind(raw) !== undefined,
     target: stringField(record.body, 'target') ?? 'canvas',
     z: numberField(record.body, 'z') ?? 0,
   };

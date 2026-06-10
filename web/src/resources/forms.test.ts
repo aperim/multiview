@@ -26,6 +26,18 @@ import {
 } from './forms';
 import type { OutputFormState, OverlayFormState, SourceFormState } from './forms';
 
+/**
+ * Narrow a parsed form: `*FormFromRecord` refuses an unknown kind with
+ * `undefined` (an explicit non-editable sentinel), so the known-kind fixtures
+ * here assert through this helper.
+ */
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) {
+    throw new Error('expected a parsed form for a known kind');
+  }
+  return value;
+}
+
 function sourceForm(over: Partial<SourceFormState> = {}): SourceFormState {
   return { ...emptySourceForm(), id: 'cam1', name: 'Cam 1', ...over };
 }
@@ -192,15 +204,86 @@ describe('sourceFormToBody', () => {
         future_field: { keep: true },
       },
     };
-    const form = sourceFormFromRecord(record);
+    const form = defined(sourceFormFromRecord(record));
     const body = sourceFormToBody(form);
     expect(body.future_field).toEqual({ keep: true });
+  });
+
+  it('round-trips an own __proto__ body key as plain data (no prototype swap)', () => {
+    // A hostile/odd stored body can carry an OWN `__proto__` key (JSON allows
+    // it). The extra-preservation path must treat it as data: never mutate the
+    // accumulator's prototype, never drop the key.
+    const storedBody: Record<string, unknown> = { id: 'cam1', kind: 'bars' };
+    Object.defineProperty(storedBody, '__proto__', {
+      value: { x: 1 },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    const form = defined(
+      sourceFormFromRecord({ id: 'cam1', name: 'Cam 1', body: storedBody }),
+    );
+    // Preserved as an own data key on the extra map…
+    expect(Object.getOwnPropertyDescriptor(form.extra, '__proto__')?.value).toEqual({
+      x: 1,
+    });
+    // …and re-emitted as an own data key on the body, whose prototype is the
+    // ordinary Object.prototype (not the smuggled object).
+    const body = sourceFormToBody(form);
+    expect(Object.getOwnPropertyDescriptor(body, '__proto__')?.value).toEqual({ x: 1 });
+    expect(Object.getPrototypeOf(body)).toBe(Object.prototype);
+    expect(body.kind).toBe('bars');
   });
 });
 
 describe('sourceFormFromRecord', () => {
+  it('refuses an unknown kind with the undefined sentinel (never folds)', () => {
+    expect(
+      sourceFormFromRecord({
+        id: 'aoip',
+        name: 'AoIP feed',
+        body: { id: 'aoip', kind: 'aes67', url: 'aes67://x' },
+      }),
+    ).toBeUndefined();
+    // An absent kind tag is equally unknown (the schema requires the tag).
+    expect(
+      sourceFormFromRecord({ id: 'x', name: 'X', body: { id: 'x' } }),
+    ).toBeUndefined();
+  });
+
+  it('still canonicalizes the legacy test alias to bars (a KNOWN kind)', () => {
+    const form = defined(
+      sourceFormFromRecord({ id: 't', name: 'T', body: { id: 't', kind: 'test' } }),
+    );
+    expect(form.kind).toBe('bars');
+  });
+
+  it('seeds the name from an authored display_name, not the store name', () => {
+    const form = defined(
+      sourceFormFromRecord({
+        id: 'cam1',
+        name: 'Store name',
+        body: { id: 'cam1', kind: 'bars', display_name: 'Authored name' },
+      }),
+    );
+    expect(form.name).toBe('Authored name');
+    // Round-trip is stable: the authored display_name is written back intact.
+    expect(sourceFormToBody(form).display_name).toBe('Authored name');
+  });
+
+  it('falls back to the store name when no display_name was authored', () => {
+    const form = defined(
+      sourceFormFromRecord({
+        id: 'cam1',
+        name: 'Store name',
+        body: { id: 'cam1', kind: 'bars' },
+      }),
+    );
+    expect(form.name).toBe('Store name');
+  });
+
   it('prefills the kind payload and the advanced blocks', () => {
-    const form = sourceFormFromRecord({
+    const form = defined(sourceFormFromRecord({
       id: 'cam1',
       name: 'Cam 1',
       body: {
@@ -214,7 +297,7 @@ describe('sourceFormFromRecord', () => {
         wallclock: { use: 'discard' },
         color_override: { primaries: 'bt2020', transfer: 'auto', matrix: 'auto', range: 'auto' },
       },
-    });
+    }));
     expect(form.kind).toBe('rtsp');
     expect(form.url).toBe('rtsp://h/x');
     expect(form.rtspTransport).toBe('udp');
@@ -230,11 +313,11 @@ describe('sourceFormFromRecord', () => {
   });
 
   it('parses the youtube kind', () => {
-    const form = sourceFormFromRecord({
+    const form = defined(sourceFormFromRecord({
       id: 'yt',
       name: 'YT',
       body: { id: 'yt', kind: 'youtube', url: 'https://www.youtube.com/watch?v=abc' },
-    });
+    }));
     expect(form.kind).toBe('youtube');
     expect(form.url).toBe('https://www.youtube.com/watch?v=abc');
   });
@@ -343,11 +426,36 @@ describe('outputFormToBody', () => {
     );
     expect(body).toEqual({
       kind: 'rtsp_server',
-      id: 'out1',
       mount: '/multiview',
       codec: 'h264',
       latency_profile: 'low_latency',
     });
+  });
+
+  it('NEVER writes the routable config id from the store id', () => {
+    // The output config-level `id` is OPTIONAL, label-derived when absent, and
+    // a DIFFERENT namespace from the resource/store id (seeded stores use
+    // `output-0..n`): crosspoints/OutputRefs bind to the config id, so writing
+    // the store id over it would silently re-route. The form must not emit it.
+    const body = outputFormToBody(
+      outputForm({ id: 'output-0', kind: 'hls', path: '/hls/m', codec: 'h264' }),
+    );
+    expect(body).not.toHaveProperty('id');
+  });
+
+  it('preserves an AUTHORED config-level id verbatim across an edit', () => {
+    const form = defined(
+      outputFormFromRecord({
+        id: 'output-0',
+        name: 'Program HLS',
+        body: { kind: 'hls', id: 'svc-main', path: '/hls/m', codec: 'h264' },
+      }),
+    );
+    // The form addresses the STORE record…
+    expect(form.id).toBe('output-0');
+    // …while the routable config id rides the extra-preservation path intact.
+    const body = outputFormToBody(form);
+    expect(body.id).toBe('svc-main');
   });
 
   it('builds an ll_hls body with part/segment/gop in ms', () => {
@@ -363,7 +471,6 @@ describe('outputFormToBody', () => {
     );
     expect(body).toEqual({
       kind: 'll_hls',
-      id: 'out1',
       path: '/hls/multiview',
       codec: 'h264',
       part_target_ms: 200,
@@ -376,7 +483,7 @@ describe('outputFormToBody', () => {
     const body = outputFormToBody(
       outputForm({ kind: 'hls', path: '/hls/multiview', codec: 'h264' }),
     );
-    expect(body).toEqual({ kind: 'hls', id: 'out1', path: '/hls/multiview', codec: 'h264' });
+    expect(body).toEqual({ kind: 'hls', path: '/hls/multiview', codec: 'h264' });
   });
 
   it('builds hls with segment_ms, ndi by name (no codec), rtmp/srt by url', () => {
@@ -384,13 +491,13 @@ describe('outputFormToBody', () => {
       outputFormToBody(outputForm({ kind: 'hls', path: '/hls/m', codec: 'hevc', segmentMs: '4000' })),
     ).toMatchObject({ kind: 'hls', segment_ms: 4000 });
     const ndi = outputFormToBody(outputForm({ kind: 'ndi', ndiName: 'Multiview PGM' }));
-    expect(ndi).toEqual({ kind: 'ndi', id: 'out1', name: 'Multiview PGM' });
+    expect(ndi).toEqual({ kind: 'ndi', name: 'Multiview PGM' });
     expect(
       outputFormToBody(outputForm({ kind: 'rtmp', url: 'rtmp://i.example/app/key', codec: 'h264' })),
-    ).toEqual({ kind: 'rtmp', id: 'out1', url: 'rtmp://i.example/app/key', codec: 'h264' });
+    ).toEqual({ kind: 'rtmp', url: 'rtmp://i.example/app/key', codec: 'h264' });
     expect(
       outputFormToBody(outputForm({ kind: 'srt', url: 'srt://[2001:db8::1]:7001', codec: 'h264' })),
-    ).toEqual({ kind: 'srt', id: 'out1', url: 'srt://[2001:db8::1]:7001', codec: 'h264' });
+    ).toEqual({ kind: 'srt', url: 'srt://[2001:db8::1]:7001', codec: 'h264' });
   });
 
   it('carries the audio selection and gpu pin per schema when set', () => {
@@ -417,8 +524,18 @@ describe('outputFormToBody', () => {
 });
 
 describe('outputFormFromRecord', () => {
+  it('refuses an unknown kind with the undefined sentinel (never folds)', () => {
+    expect(
+      outputFormFromRecord({
+        id: 'out-x',
+        name: 'Mystery',
+        body: { kind: 'aes67', url: 'aes67://x' },
+      }),
+    ).toBeUndefined();
+  });
+
   it('round-trips an ll_hls record including the advanced fields', () => {
-    const form = outputFormFromRecord({
+    const form = defined(outputFormFromRecord({
       id: 'llh',
       name: 'LL-HLS',
       body: {
@@ -432,7 +549,7 @@ describe('outputFormFromRecord', () => {
         audio: { mode: 'tracks', tracks: ['prog'] },
         gpu_pin: { vendor: 'nvidia', stable_id: 'GPU-1' },
       },
-    });
+    }));
     expect(form.kind).toBe('ll-hls');
     expect(form.path).toBe('/hls/m');
     expect(form.codec).toBe('hevc');
@@ -593,11 +710,42 @@ describe('overlayFormToBody', () => {
         offset: { x: -20, y: -16 },
       },
     };
-    const form = overlayFormFromRecord(record);
+    const form = defined(overlayFormFromRecord(record));
     const body = overlayFormToBody(form);
     expect(body.format).toBe('%H:%M:%S');
     expect(body.anchor).toBe('bottom_right');
     expect(body.offset).toEqual({ x: -20, y: -16 });
+  });
+
+  it('preserves another kind\'s param NAMES on a label overlay (kind-scoped stripping)', () => {
+    // `color` and `x` are managed keys for tally_border/clock — but on a LABEL
+    // overlay the writer never re-emits them, so stripping them would lose the
+    // authored document on every edit. Stripping must be scoped to the keys the
+    // CURRENT kind's writer actually re-emits.
+    const record = {
+      id: 'ov_label',
+      name: 'Label',
+      body: {
+        id: 'ov_label',
+        kind: 'label',
+        target: 'canvas',
+        z: 10,
+        color: '#00FF00',
+        x: 42,
+      },
+    };
+    const form = defined(overlayFormFromRecord(record));
+    const body = overlayFormToBody(form);
+    expect(body.color).toBe('#00FF00');
+    expect(body.x).toBe(42);
+    expect(body).toEqual({
+      id: 'ov_label',
+      kind: 'label',
+      target: 'canvas',
+      z: 10,
+      color: '#00FF00',
+      x: 42,
+    });
   });
 
   it('drops the previous kind params when the kind switches', () => {
@@ -606,9 +754,21 @@ describe('overlayFormToBody', () => {
       name: 'Clock',
       body: { id: 'ov_clock', kind: 'clock', target: 'canvas', z: 100, face: 'analog', format: '%H' },
     };
-    const switched = withOverlayKind(overlayFormFromRecord(record), 'label');
+    const switched = withOverlayKind(defined(overlayFormFromRecord(record)), 'label');
     const body = overlayFormToBody(switched);
     expect(body).toEqual({ id: 'ov_clock', kind: 'label', target: 'canvas', z: 100 });
+  });
+});
+
+describe('overlayFormFromRecord', () => {
+  it('refuses an unknown kind with the undefined sentinel (never folds)', () => {
+    expect(
+      overlayFormFromRecord({
+        id: 'ov-x',
+        name: 'Mystery',
+        body: { id: 'ov-x', kind: 'scoreboard', target: 'canvas', z: 1 },
+      }),
+    ).toBeUndefined();
   });
 });
 

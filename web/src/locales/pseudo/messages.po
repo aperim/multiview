@@ -242,7 +242,7 @@ msgstr ""
 msgid "A source is a managed input. Each one owns its ingest, decode, color handling, and reconnect behaviour, and is referenced by tiles via a stable id. Supported kinds include RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, file, and a built-in synthetic test pattern. When a source stops delivering frames, its tile holds the last good frame and moves through a clear state machine — live, stale, reconnecting, no-signal — while the engine reconnects without disturbing the rest of the wall."
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:513
+#: src/pages/SourcesPage.tsx:518
 msgid "A source is an ingest input bound into the multiview by id."
 msgstr ""
 
@@ -283,13 +283,13 @@ msgstr ""
 msgid "About output transports"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:215
+#: src/pages/OverlaysPage.tsx:220
 msgid "About overlays"
 msgstr ""
 
 #: src/pages/docs/FeaturesPage.tsx:53
-#: src/pages/SourcesPage.tsx:507
-#: src/pages/SourcesPage.tsx:573
+#: src/pages/SourcesPage.tsx:512
+#: src/pages/SourcesPage.tsx:578
 msgid "About source transports"
 msgstr ""
 
@@ -337,7 +337,7 @@ msgstr ""
 
 #: src/pages/AlarmsPage.tsx:221
 #: src/pages/LayoutsPage.tsx:86
-#: src/pages/OutputsPage.tsx:424
+#: src/pages/OutputsPage.tsx:433
 #: src/pages/OverlaysPage.tsx:194
 #: src/pages/SourcesPage.tsx:486
 #: src/pages/TallyPage.tsx:367
@@ -372,7 +372,7 @@ msgstr ""
 msgid "Add"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:506
+#: src/pages/SourcesPage.tsx:511
 msgid "Add and manage live ingest sources."
 msgstr ""
 
@@ -451,11 +451,11 @@ msgstr ""
 #~ msgid "An identifier is required."
 #~ msgstr ""
 
-#: src/pages/OutputsPage.tsx:454
+#: src/pages/OutputsPage.tsx:468
 msgid "An output is a sink/server that publishes the program."
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:221
+#: src/pages/OverlaysPage.tsx:226
 msgid "An overlay is a layer composited over the program at a stacking order."
 msgstr ""
 
@@ -671,8 +671,8 @@ msgstr ""
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
 #: src/pages/TallyPage.tsx:432
-#: src/resources/CrudPage.tsx:307
-#: src/resources/CrudPage.tsx:352
+#: src/resources/CrudPage.tsx:340
+#: src/resources/CrudPage.tsx:385
 msgid "Cancel"
 msgstr ""
 
@@ -691,7 +691,7 @@ msgstr ""
 msgid "Canvas height in pixels."
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:280
+#: src/pages/OverlaysPage.tsx:285
 msgid "canvas or a cell id"
 msgstr ""
 
@@ -747,7 +747,11 @@ msgid "Changes saved here are stored, not yet live: the engine does not hot-add 
 msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:142
-msgid "Changing an output's codec is a controlled restart of that output (consumers reconnect); it never interrupts the compositor or the other outputs. The codec field on an output is validated against what the transport can carry — for example <0>h265</0> is rejected on classic RTMP — and against what the host can actually encode."
+#~ msgid "Changing an output's codec is a controlled restart of that output (consumers reconnect); it never interrupts the compositor or the other outputs. The codec field on an output is validated against what the transport can carry — for example <0>h265</0> is rejected on classic RTMP — and against what the host can actually encode."
+#~ msgstr ""
+
+#: src/pages/docs/concepts/CodecsPage.tsx:143
+msgid "Changing an output's codec today is a configuration change, not a live switch: stored edits take effect by exporting the config and restarting the engine (the API marks these resources <0>apply: restart</0>). The codec token is also only lightly checked at present — if the build cannot encode the requested codec, the pipeline logs a warning and falls back to MPEG-2 rather than failing the run. So choose a codec your build and transport are known to carry (classic RTMP, for example, carries H.264 only), and verify the output really uses it — for example with <1>ffprobe</1>."
 msgstr ""
 
 #: src/auth/LoginPage.tsx:102
@@ -880,11 +884,11 @@ msgstr ""
 msgid "Configuration exported"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:444
+#: src/pages/OutputsPage.tsx:458
 msgid "Configure output servers and renditions."
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:514
+#: src/pages/SourcesPage.tsx:519
 msgid "Configured ingest sources."
 msgstr ""
 
@@ -892,11 +896,11 @@ msgstr ""
 msgid "Configured multiview layouts."
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:455
+#: src/pages/OutputsPage.tsx:469
 msgid "Configured output sinks."
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:222
+#: src/pages/OverlaysPage.tsx:227
 msgid "Configured overlay layers."
 msgstr ""
 
@@ -920,11 +924,11 @@ msgstr ""
 msgid "Could not apply layout"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:208
+#: src/resources/CrudPage.tsx:241
 msgid "Could not create"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:227
+#: src/resources/CrudPage.tsx:260
 msgid "Could not delete"
 msgstr ""
 
@@ -948,7 +952,7 @@ msgstr ""
 msgid "Could not load alarms:"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:175
+#: src/resources/CrudPage.tsx:208
 msgid "Could not load for editing"
 msgstr ""
 
@@ -956,11 +960,11 @@ msgstr ""
 msgid "Could not load layouts:"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:458
+#: src/pages/OutputsPage.tsx:472
 msgid "Could not load outputs:"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:225
+#: src/pages/OverlaysPage.tsx:230
 msgid "Could not load overlays:"
 msgstr ""
 
@@ -972,7 +976,7 @@ msgstr ""
 msgid "Could not load salvos:"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:517
+#: src/pages/SourcesPage.tsx:522
 msgid "Could not load sources:"
 msgstr ""
 
@@ -988,7 +992,7 @@ msgstr ""
 msgid "Could not reach the control plane. Is it running?"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:208
+#: src/resources/CrudPage.tsx:241
 msgid "Could not save"
 msgstr ""
 
@@ -1020,7 +1024,7 @@ msgstr ""
 msgid "CPU utilisation trend: ours over host total"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:310
+#: src/resources/CrudPage.tsx:343
 msgid "Create"
 msgstr ""
 
@@ -1032,7 +1036,7 @@ msgstr ""
 msgid "Create your first salvo"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:201
+#: src/resources/CrudPage.tsx:234
 msgid "Created"
 msgstr ""
 
@@ -1111,8 +1115,8 @@ msgstr ""
 #: src/pages/SalvosPage.tsx:436
 #: src/pages/TallyPage.tsx:392
 #: src/pages/TallyPage.tsx:435
-#: src/resources/CrudPage.tsx:88
-#: src/resources/CrudPage.tsx:359
+#: src/resources/CrudPage.tsx:107
+#: src/resources/CrudPage.tsx:392
 msgid "Delete"
 msgstr ""
 
@@ -1124,7 +1128,7 @@ msgstr ""
 msgid "Delete layout?"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:430
+#: src/pages/OutputsPage.tsx:439
 msgid "Delete output"
 msgstr ""
 
@@ -1152,11 +1156,11 @@ msgstr ""
 msgid "Delete tally profile?"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:329
+#: src/resources/CrudPage.tsx:362
 msgid "Delete this resource?"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:223
+#: src/resources/CrudPage.tsx:256
 msgid "Deleted"
 msgstr ""
 
@@ -1239,7 +1243,7 @@ msgstr ""
 msgid "DVB teletext page"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:550
+#: src/pages/SourcesPage.tsx:555
 msgid "e.g. cam-north"
 msgstr ""
 
@@ -1247,11 +1251,11 @@ msgstr ""
 msgid "e.g. Main wall"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:491
+#: src/pages/OutputsPage.tsx:505
 msgid "e.g. program-hls"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:251
+#: src/pages/OverlaysPage.tsx:256
 msgid "e.g. wall-clock"
 msgstr ""
 
@@ -1275,13 +1279,13 @@ msgstr ""
 msgid "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</0> field."
 msgstr ""
 
-#: src/pages/docs/concepts/ResiliencePage.tsx:75
+#: src/pages/docs/concepts/ResiliencePage.tsx:79
 msgid "Each input continuously writes its newest decoded frame into a small per-tile store; the compositor reads the latest complete frame from that store at every output tick and never waits for an input. When a source hiccups, the store simply keeps handing out the most recent frame it has — the \"last good\" one. A brief network blip is therefore invisible: the tile holds a fraction-of-a-second-old picture until fresh frames resume."
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:106
 #: src/pages/SalvosPage.tsx:296
-#: src/resources/CrudPage.tsx:77
+#: src/resources/CrudPage.tsx:96
 msgid "Edit"
 msgstr ""
 
@@ -1292,13 +1296,13 @@ msgstr ""
 msgid "Edit layout"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:429
-#: src/pages/OutputsPage.tsx:453
+#: src/pages/OutputsPage.tsx:438
+#: src/pages/OutputsPage.tsx:467
 msgid "Edit output"
 msgstr ""
 
 #: src/pages/OverlaysPage.tsx:199
-#: src/pages/OverlaysPage.tsx:220
+#: src/pages/OverlaysPage.tsx:225
 msgid "Edit overlay"
 msgstr ""
 
@@ -1308,7 +1312,7 @@ msgid "Edit salvo"
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:491
-#: src/pages/SourcesPage.tsx:512
+#: src/pages/SourcesPage.tsx:517
 msgid "Edit source"
 msgstr ""
 
@@ -1458,7 +1462,7 @@ msgstr ""
 msgid "Fit"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:302
+#: src/resources/CrudPage.tsx:335
 msgid "Fix the highlighted fields, then save again."
 msgstr ""
 
@@ -1531,7 +1535,7 @@ msgstr ""
 msgid "Glass-to-glass latency, what each protocol adds, and the trade-offs against robustness."
 msgstr ""
 
-#: src/pages/docs/concepts/ResiliencePage.tsx:111
+#: src/pages/docs/concepts/ResiliencePage.tsx:115
 msgid "Glitchy, corrupt, and malformed inputs are the expected workload, not an edge case: decode errors on one stream are tolerated and recovered per tile, and a broken track inside a transport (for example a damaged subtitle rendition) is warned about and recovered without killing the streams alongside it."
 msgstr ""
 
@@ -1687,8 +1691,8 @@ msgstr ""
 msgid "Host memory: ours / used / total"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:463
-#: src/pages/SourcesPage.tsx:522
+#: src/pages/OutputsPage.tsx:477
+#: src/pages/SourcesPage.tsx:527
 msgid "How configuration applies"
 msgstr ""
 
@@ -1717,11 +1721,11 @@ msgid "Idempotency"
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:70
-#: src/pages/OutputsPage.tsx:487
-#: src/pages/OverlaysPage.tsx:247
+#: src/pages/OutputsPage.tsx:501
+#: src/pages/OverlaysPage.tsx:252
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
-#: src/pages/SourcesPage.tsx:546
+#: src/pages/SourcesPage.tsx:551
 #: src/pages/TallyPage.tsx:364
 msgid "Identifier"
 msgstr ""
@@ -1794,10 +1798,17 @@ msgstr ""
 
 #: src/pages/AlarmsPage.tsx:218
 #: src/pages/OverlaysPage.tsx:173
-#: src/pages/OverlaysPage.tsx:268
+#: src/pages/OverlaysPage.tsx:273
 #: src/pages/SourcesPage.tsx:456
-#: src/pages/SourcesPage.tsx:567
+#: src/pages/SourcesPage.tsx:572
 msgid "Kind"
+msgstr ""
+
+#. placeholder {0}: ctx.row.original.rawKind
+#: src/pages/OutputsPage.tsx:443
+#: src/pages/OverlaysPage.tsx:204
+#: src/pages/SourcesPage.tsx:496
+msgid "kind \"{0}\" isn't editable in this UI; the document is preserved as authored"
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:154
@@ -1824,7 +1835,7 @@ msgid "Last-good frame"
 msgstr ""
 
 #: src/docs/registry.ts:433
-#: src/pages/docs/concepts/ResiliencePage.tsx:73
+#: src/pages/docs/concepts/ResiliencePage.tsx:77
 msgid "Last-good frames"
 msgstr ""
 
@@ -1833,7 +1844,7 @@ msgstr ""
 msgid "Latency"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:447
+#: src/pages/OutputsPage.tsx:461
 msgid "Latency & protocol guide"
 msgstr ""
 
@@ -1982,11 +1993,11 @@ msgstr ""
 msgid "Loading layouts…"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:457
+#: src/pages/OutputsPage.tsx:471
 msgid "Loading outputs…"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:224
+#: src/pages/OverlaysPage.tsx:229
 msgid "Loading overlays…"
 msgstr ""
 
@@ -1998,7 +2009,7 @@ msgstr ""
 msgid "Loading salvos…"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:516
+#: src/pages/SourcesPage.tsx:521
 msgid "Loading sources…"
 msgstr ""
 
@@ -2050,7 +2061,7 @@ msgstr ""
 msgid "Magazine-addressed page, 100–899."
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:214
+#: src/pages/OverlaysPage.tsx:219
 msgid "Manage overlay layers and subtitles."
 msgstr ""
 
@@ -2136,7 +2147,11 @@ msgid "Multiview"
 msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:131
-msgid "Multiview composites the canvas <0>once</0> per tick, encodes it <1>once per rendition</1>, and fans the same encoded packets out to every output that wants that rendition. Serving the wall over HLS, RTSP, and an SRT push at the same codec, resolution, and bitrate costs one encode — not three. A second encode is created only when an output genuinely needs a different codec, resolution, or bitrate."
+#~ msgid "Multiview composites the canvas <0>once</0> per tick, encodes it <1>once per rendition</1>, and fans the same encoded packets out to every output that wants that rendition. Serving the wall over HLS, RTSP, and an SRT push at the same codec, resolution, and bitrate costs one encode — not three. A second encode is created only when an output genuinely needs a different codec, resolution, or bitrate."
+#~ msgstr ""
+
+#: src/pages/docs/concepts/CodecsPage.tsx:131
+msgid "Multiview composites the canvas <0>once</0> per tick, encodes it <1>once per rendition</1>, and fans the same encoded packets out to every output that wants that rendition. Writing the wall to HLS while pushing it to an RTMP and an SRT destination at the same codec, resolution, and bitrate costs one encode — not three. A second encode is created only when an output genuinely needs a different codec, resolution, or bitrate."
 msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:35
@@ -2173,12 +2188,12 @@ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:61
 #: src/pages/OutputsPage.tsx:391
-#: src/pages/OutputsPage.tsx:499
+#: src/pages/OutputsPage.tsx:513
 #: src/pages/OverlaysPage.tsx:168
-#: src/pages/OverlaysPage.tsx:259
+#: src/pages/OverlaysPage.tsx:264
 #: src/pages/SalvosPage.tsx:210
 #: src/pages/SourcesPage.tsx:451
-#: src/pages/SourcesPage.tsx:558
+#: src/pages/SourcesPage.tsx:563
 #: src/pages/TallyPage.tsx:241
 msgid "Name"
 msgstr ""
@@ -2236,13 +2251,13 @@ msgstr ""
 msgid "New layout"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:451
-#: src/pages/OutputsPage.tsx:452
+#: src/pages/OutputsPage.tsx:465
+#: src/pages/OutputsPage.tsx:466
 msgid "New output"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:218
-#: src/pages/OverlaysPage.tsx:219
+#: src/pages/OverlaysPage.tsx:223
+#: src/pages/OverlaysPage.tsx:224
 msgid "New overlay"
 msgstr ""
 
@@ -2251,8 +2266,8 @@ msgstr ""
 msgid "New salvo"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:510
-#: src/pages/SourcesPage.tsx:511
+#: src/pages/SourcesPage.tsx:515
+#: src/pages/SourcesPage.tsx:516
 msgid "New source"
 msgstr ""
 
@@ -2304,11 +2319,11 @@ msgstr ""
 msgid "No live tiles yet. They appear once the engine streams a snapshot."
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:456
+#: src/pages/OutputsPage.tsx:470
 msgid "No outputs configured."
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:223
+#: src/pages/OverlaysPage.tsx:228
 msgid "No overlays configured."
 msgstr ""
 
@@ -2336,7 +2351,7 @@ msgstr ""
 msgid "No source"
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:515
+#: src/pages/SourcesPage.tsx:520
 msgid "No sources configured."
 msgstr ""
 
@@ -2362,6 +2377,10 @@ msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:290
 msgid "None needed"
+msgstr ""
+
+#: src/resources/CrudPage.tsx:199
+msgid "Not editable in this UI"
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:83
@@ -2475,7 +2494,7 @@ msgstr ""
 #: src/docs/registry.ts:211
 #: src/pages/docs/ConfigPage.tsx:248
 #: src/pages/docs/FeaturesPage.tsx:65
-#: src/pages/OutputsPage.tsx:441
+#: src/pages/OutputsPage.tsx:455
 msgid "Outputs"
 msgstr ""
 
@@ -2489,7 +2508,7 @@ msgstr ""
 #: src/layout/components/SourcePalette.tsx:224
 #: src/pages/docs/ConfigPage.tsx:226
 #: src/pages/docs/FeaturesPage.tsx:113
-#: src/pages/OverlaysPage.tsx:211
+#: src/pages/OverlaysPage.tsx:216
 msgid "Overlays"
 msgstr ""
 
@@ -2639,7 +2658,7 @@ msgid "Recalled layout"
 msgstr ""
 
 #: src/docs/registry.ts:438
-#: src/pages/docs/concepts/ResiliencePage.tsx:96
+#: src/pages/docs/concepts/ResiliencePage.tsx:100
 msgid "Reconnect behaviour"
 msgstr ""
 
@@ -2676,9 +2695,9 @@ msgstr ""
 msgid "Remove cell"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:467
-#: src/pages/OverlaysPage.tsx:227
-#: src/pages/SourcesPage.tsx:526
+#: src/pages/OutputsPage.tsx:481
+#: src/pages/OverlaysPage.tsx:232
+#: src/pages/SourcesPage.tsx:531
 msgid "Removed from the store. The running engine is unchanged until a config export + restart."
 msgstr ""
 
@@ -2811,7 +2830,7 @@ msgstr ""
 
 #: src/pages/SalvosPage.tsx:398
 #: src/pages/SettingsPage.tsx:118
-#: src/resources/CrudPage.tsx:310
+#: src/resources/CrudPage.tsx:343
 msgid "Save"
 msgstr ""
 
@@ -2823,7 +2842,7 @@ msgstr ""
 msgid "Save layout"
 msgstr ""
 
-#: src/resources/CrudPage.tsx:201
+#: src/resources/CrudPage.tsx:234
 msgid "Saved"
 msgstr ""
 
@@ -2926,7 +2945,7 @@ msgstr ""
 msgid "Source"
 msgstr ""
 
-#: src/pages/docs/concepts/ResiliencePage.tsx:98
+#: src/pages/docs/concepts/ResiliencePage.tsx:102
 msgid "Source connections are supervised. A stalled read times out rather than hanging forever; the supervisor then reconnects with exponential backoff (so a dead camera is not hammered) and keeps trying indefinitely — sources recover without operator action whenever the far end comes back. Mid-stream surprises that normally break players, like a camera changing resolution or a stream resetting its timestamps, are absorbed inside the tile: the decoder re-initializes behind the frame store while the compositor keeps drawing the last good frame."
 msgstr ""
 
@@ -2940,7 +2959,7 @@ msgstr ""
 #: src/layout/components/SourcePalette.tsx:203
 #: src/pages/docs/ConfigPage.tsx:141
 #: src/pages/docs/FeaturesPage.tsx:38
-#: src/pages/SourcesPage.tsx:503
+#: src/pages/SourcesPage.tsx:508
 msgid "Sources"
 msgstr ""
 
@@ -2969,7 +2988,7 @@ msgstr ""
 msgid "Stacking"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:288
+#: src/pages/OverlaysPage.tsx:293
 msgid "Stacking order"
 msgstr ""
 
@@ -2993,9 +3012,9 @@ msgstr ""
 msgid "Status"
 msgstr ""
 
-#: src/pages/OutputsPage.tsx:466
-#: src/pages/OverlaysPage.tsx:226
-#: src/pages/SourcesPage.tsx:525
+#: src/pages/OutputsPage.tsx:480
+#: src/pages/OverlaysPage.tsx:231
+#: src/pages/SourcesPage.tsx:530
 msgid "Stored. It goes live via config export + restart; the running engine is unchanged until then."
 msgstr ""
 
@@ -3062,7 +3081,7 @@ msgid "Tally shows which sources are on-air. A tally profile maps the bits of an
 msgstr ""
 
 #: src/pages/OverlaysPage.tsx:178
-#: src/pages/OverlaysPage.tsx:277
+#: src/pages/OverlaysPage.tsx:282
 #: src/pages/TallyPage.tsx:205
 #: src/pages/TallyPage.tsx:318
 msgid "Target"
@@ -3189,8 +3208,12 @@ msgid "The management API, its conventions, the realtime event streams, and wher
 msgstr ""
 
 #: src/pages/docs/concepts/ResiliencePage.tsx:65
-msgid "The moment a fresh frame arrives — from any state — the tile snaps straight back to LIVE. The hold, stale, and no-signal windows are configurable per deployment."
+msgid "The moment a fresh frame arrives — from any state — the tile snaps straight back to LIVE. The hold, stale, and no-signal windows are automatic: the engine uses built-in, broadcast-tuned values and derives its stream-liveness checks from each source's own frame cadence, so a low-frame-rate source is not misread as stalled. There is nothing for an operator to configure."
 msgstr ""
+
+#: src/pages/docs/concepts/ResiliencePage.tsx:65
+#~ msgid "The moment a fresh frame arrives — from any state — the tile snaps straight back to LIVE. The hold, stale, and no-signal windows are configurable per deployment."
+#~ msgstr ""
 
 #: src/pages/docs/concepts/GlossaryPage.tsx:113
 msgid "The most recent valid frame a tile has received, held on screen whenever its source hiccups so a brief dropout is invisible. Tiles escalate from holding the last-good frame to a reconnect indicator and finally a \"no signal\" slate if the source stays away."
@@ -3332,11 +3355,15 @@ msgstr ""
 msgid "This control plane does not serve config export yet. Update the server to use it."
 msgstr ""
 
+#: src/resources/CrudPage.tsx:200
+msgid "This entry's kind has no form here; the stored document is preserved as authored."
+msgstr ""
+
 #: src/resources/FormControls.tsx:36
 msgid "This field is required."
 msgstr ""
 
-#: src/pages/docs/concepts/ResiliencePage.tsx:86
+#: src/pages/docs/concepts/ResiliencePage.tsx:90
 msgid "This is also why one bad source can never take down the wall: the disturbance is contained to that tile's rectangle. The output keeps emitting a complete, valid frame every tick regardless — even if every source died at once, the canvas would show slates and a still-ticking clock, not stop."
 msgstr ""
 
@@ -3376,7 +3403,7 @@ msgstr ""
 msgid "This permanently removes the salvo definition."
 msgstr ""
 
-#: src/resources/CrudPage.tsx:332
+#: src/resources/CrudPage.tsx:365
 msgid "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 msgstr ""
 
@@ -3457,7 +3484,7 @@ msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:228
 #: src/pages/OutputsPage.tsx:396
-#: src/pages/OutputsPage.tsx:508
+#: src/pages/OutputsPage.tsx:522
 msgid "Transport"
 msgstr ""
 
@@ -3614,7 +3641,7 @@ msgstr ""
 msgid "Whether pixel values use the limited \"TV\" scale (black at 16, white at 235 in 8-bit) or the full \"PC\" scale (0–255). Reading a stream with the wrong range makes it look washed-out (limited read as full) or crushed (full read as limited). One of the most common picture-quality faults in any video chain."
 msgstr ""
 
-#: src/pages/docs/concepts/CodecsPage.tsx:153
+#: src/pages/docs/concepts/CodecsPage.tsx:158
 msgid "Which transports carry which codecs"
 msgstr ""
 
@@ -3622,7 +3649,7 @@ msgstr ""
 msgid "Whole minutes between −720 and 840 (e.g. 600 = UTC+10)."
 msgstr ""
 
-#: src/pages/docs/concepts/ResiliencePage.tsx:121
+#: src/pages/docs/concepts/ResiliencePage.tsx:125
 msgid "Why the output clock never depends on inputs"
 msgstr ""
 

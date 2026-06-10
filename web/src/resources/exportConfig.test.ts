@@ -15,9 +15,14 @@ let lastAuth: string | null;
 const server = setupServer(
   http.get('*/api/v1/config/export', ({ request }) => {
     lastAuth = request.headers.get('authorization');
+    // The backend sends Content-Disposition (attachment + filename); the client
+    // does not parse it - the download must keep working regardless.
     return new HttpResponse(TOML, {
       status: 200,
-      headers: { 'Content-Type': 'application/toml' },
+      headers: {
+        'Content-Type': 'application/toml',
+        'Content-Disposition': 'attachment; filename="multiview.toml"',
+      },
     });
   }),
 );

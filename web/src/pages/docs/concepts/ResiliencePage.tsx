@@ -65,7 +65,11 @@ export function ResiliencePage(): JSX.Element {
             <Trans>
               The moment a fresh frame arrives — from any state — the tile
               snaps straight back to LIVE. The hold, stale, and no-signal
-              windows are configurable per deployment.
+              windows are automatic: the engine uses built-in,
+              broadcast-tuned values and derives its stream-liveness checks
+              from each source's own frame cadence, so a low-frame-rate
+              source is not misread as stalled. There is nothing for an
+              operator to configure.
             </Trans>
           </Prose>
         </DocSection>

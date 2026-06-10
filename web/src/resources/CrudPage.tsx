@@ -53,6 +53,7 @@ export function RowActions<View>({
   name,
   editLabel,
   deleteLabel,
+  editDisabledReason,
   onEdit,
   onDelete,
 }: {
@@ -60,16 +61,34 @@ export function RowActions<View>({
   readonly name: string;
   readonly editLabel: string;
   readonly deleteLabel: string;
+  /**
+   * When set, Edit is refused with this explanation (e.g. an unknown kind the
+   * typed forms cannot round-trip). `aria-disabled` (not `disabled`) keeps the
+   * control focusable so the reason is discoverable by keyboard/SR users; the
+   * click is a guarded no-op and the stored document stays as authored.
+   */
+  readonly editDisabledReason?: string | undefined;
   readonly onEdit: (row: View) => void;
   readonly onDelete: (row: View) => void;
 }): JSX.Element {
+  const editRefused = editDisabledReason !== undefined && editDisabledReason !== '';
   return (
     <div className="flex items-center gap-2">
       <Button
         variant="outline"
         size="sm"
-        aria-label={`${editLabel}: ${name}`}
+        aria-label={
+          editRefused
+            ? `${editLabel}: ${name} — ${editDisabledReason}`
+            : `${editLabel}: ${name}`
+        }
+        aria-disabled={editRefused}
+        {...(editRefused ? { title: editDisabledReason } : {})}
+        {...(editRefused ? { className: 'cursor-not-allowed opacity-50' } : {})}
         onClick={(): void => {
+          if (editRefused) {
+            return;
+          }
           onEdit(row);
         }}
       >
@@ -121,8 +140,12 @@ export interface CrudPageProps<View, Form, Field extends string> {
   ) => ColumnDef<View>[];
   /** A fresh, empty form for a create. */
   readonly emptyForm: () => Form;
-  /** Project a server record onto the editable form (for edit prefill). */
-  readonly formFromRecord: (record: ResourceRecord) => Form;
+  /**
+   * Project a server record onto the editable form (for edit prefill).
+   * `undefined` = the record's kind has no typed form (the row's Edit action
+   * is already refused; this is the defensive backstop).
+   */
+  readonly formFromRecord: (record: ResourceRecord) => Form | undefined;
   /** Validate the form, returning per-field machine codes (empty = valid). */
   readonly validate: (form: Form, creating: boolean) => FieldErrors<Field>;
   /** Build the save vars (id + payload) from a valid form. */
@@ -168,7 +191,17 @@ export function CrudPage<View, Form, Field extends string>(
     setErrors(NO_ERRORS);
     void getResource(props.kind, props.rowId(row), RESOURCE_CONTEXT)
       .then((result): void => {
-        setForm(props.formFromRecord(result.record));
+        const parsed = props.formFromRecord(result.record);
+        if (parsed === undefined) {
+          // Defensive backstop: the row-level Edit is already refused for an
+          // unknown kind; never open a form that would rewrite the document.
+          toast({
+            title: t`Not editable in this UI`,
+            description: t`This entry's kind has no form here; the stored document is preserved as authored.`,
+          });
+          return;
+        }
+        setForm(parsed);
       })
       .catch((error: unknown): void => {
         toast({

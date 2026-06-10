@@ -171,7 +171,7 @@ export function OverlaysPage(): JSX.Element {
     {
       accessorKey: 'kind',
       header: t`Kind`,
-      cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.kind} />,
+      cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.rawKind} />,
     },
     {
       accessorKey: 'target',
@@ -198,6 +198,11 @@ export function OverlaysPage(): JSX.Element {
           name={ctx.row.original.name}
           editLabel={t`Edit overlay`}
           deleteLabel={t`Delete overlay`}
+          editDisabledReason={
+            ctx.row.original.editable
+              ? undefined
+              : t`kind "${ctx.row.original.rawKind}" isn't editable in this UI; the document is preserved as authored`
+          }
           onEdit={onEdit}
           onDelete={onDelete}
         />

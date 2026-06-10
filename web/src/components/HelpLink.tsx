@@ -13,7 +13,7 @@ import { BookOpen } from "lucide-react";
 import { Link } from "react-router-dom";
 
 interface HelpLinkProps {
-  /** Docs destination, e.g. "/help/concepts/transports#rtsp-vs-ndi". */
+  /** Docs destination, e.g. "/help/concepts/transports#choosing". */
   readonly to: string;
   /**
    * What the destination explains, e.g. "About source transports". Rendered

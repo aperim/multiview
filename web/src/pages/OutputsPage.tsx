@@ -394,7 +394,7 @@ export function OutputsPage(): JSX.Element {
     {
       accessorKey: 'kind',
       header: t`Transport`,
-      cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.kind} />,
+      cell: (ctx): JSX.Element => <KindCell value={ctx.row.original.rawKind} />,
     },
     {
       accessorKey: 'target',
@@ -417,7 +417,16 @@ export function OutputsPage(): JSX.Element {
     {
       id: 'runnability',
       header: t`Status`,
-      cell: (ctx): JSX.Element => <RunnabilityNote kind={ctx.row.original.kind} />,
+      cell: (ctx): JSX.Element =>
+        // Runnability is defined for the kinds this build knows; an unknown
+        // kind gets an honest dash, never a claim about the folded kind.
+        ctx.row.original.editable ? (
+          <RunnabilityNote kind={ctx.row.original.kind} />
+        ) : (
+          <span className="text-sm text-muted-foreground" aria-hidden="true">
+            —
+          </span>
+        ),
     },
     {
       id: 'actions',
@@ -428,6 +437,11 @@ export function OutputsPage(): JSX.Element {
           name={ctx.row.original.name}
           editLabel={t`Edit output`}
           deleteLabel={t`Delete output`}
+          editDisabledReason={
+            ctx.row.original.editable
+              ? undefined
+              : t`kind "${ctx.row.original.rawKind}" isn't editable in this UI; the document is preserved as authored`
+          }
           onEdit={onEdit}
           onDelete={onDelete}
         />

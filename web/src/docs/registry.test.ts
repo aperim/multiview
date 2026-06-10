@@ -206,6 +206,19 @@ describe("anchor redirects", () => {
     });
   });
 
+  it("no redirect target is itself a redirect source (no ping-pong)", () => {
+    // A target that is also a source would make DocsLayout's resolve-then-
+    // navigate effect alternate between the two URLs forever. The map is
+    // empty today; this pins the invariant for future rename entries.
+    const sources = new Set(Object.keys(DOCS_REDIRECTS));
+    for (const [from, to] of Object.entries(DOCS_REDIRECTS)) {
+      expect(
+        sources.has(to),
+        `redirect ${from} → ${to} targets another redirect source`,
+      ).toBe(false);
+    }
+  });
+
   it("every live redirect target resolves to a registered page section", () => {
     for (const [from, to] of Object.entries(DOCS_REDIRECTS)) {
       const hashIndex = to.indexOf("#");
