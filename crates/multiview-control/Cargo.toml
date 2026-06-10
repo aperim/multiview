@@ -114,9 +114,11 @@ rumqttd = { version = "0.20", default-features = false }
 toml = "0.8"
 # Build signed lease bindings in the licence-route tests (Conspect, ADR-0050):
 # generate a test keypair, sign a lease, and CBOR-encode the binding the
-# `POST /api/v1/licence/lease` route ingests. Test-only; the non-test control
-# build never mints keys (the licence crate is verification-only). All
+# `POST /api/v1/licence/lease` route ingests, and drive the store clock across
+# day boundaries. Test-only; the non-test control build never mints keys nor
+# reads a clock (the licence crate is verification-only / clock-injected). All
 # `MIT`/`Apache-2.0`, already on the deny.toml allowlist.
+chrono = { workspace = true, features = ["alloc"] }
 ed25519-dalek = { version = "2", default-features = false, features = [
     "alloc",
     "rand_core",
