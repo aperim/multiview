@@ -5,8 +5,11 @@
 //! silence, and loudness-violation, each with a detection **zone**, a level
 //! **threshold**, and **dwell** windows (up/down) so a transient blip does not
 //! raise (or clear) an alarm. The actual X.733 state machine lives in
-//! `multiview-engine` in a later wave; this crate only owns the *declarative shape*
-//! and its validation.
+//! `multiview-engine`
+//! ([`AlarmStateMachine`](../../multiview_engine/alarm/state/struct.AlarmStateMachine.html)),
+//! which builds one of these declarations into a driveable machine via
+//! `AlarmStateMachine::from_probe`; this crate owns the *declarative shape*, its
+//! validation, and the programmatic constructors the engine consumes.
 //!
 //! All unions are **internally tagged** by `kind` (`#[serde(tag = "kind")]`),
 //! never `untagged` (ADR-0010).
@@ -112,6 +115,14 @@ impl Default for Dwell {
     }
 }
 
+impl Dwell {
+    /// Construct dwell windows from explicit raise/clear debounce milliseconds.
+    #[must_use]
+    pub const fn new(up_ms: u32, down_ms: u32) -> Self {
+        Self { up_ms, down_ms }
+    }
+}
+
 /// The loudness compliance target a [`ProbeKind::Loudness`] probe checks
 /// against, internally tagged by `kind`.
 ///
@@ -205,6 +216,37 @@ pub enum ProbeKind {
 }
 
 impl ProbeKind {
+    /// A black-picture probe over the given luma ceiling and detection zone.
+    #[must_use]
+    pub const fn black(luma_threshold: u8, zone: DetectionZone) -> Self {
+        Self::Black {
+            luma_threshold,
+            zone,
+        }
+    }
+
+    /// A freeze probe over the given inter-frame difference floor (per-mille) and
+    /// detection zone.
+    #[must_use]
+    pub const fn freeze(difference_threshold: u16, zone: DetectionZone) -> Self {
+        Self::Freeze {
+            difference_threshold,
+            zone,
+        }
+    }
+
+    /// A silence probe over the given level ceiling in dBFS.
+    #[must_use]
+    pub const fn silence(level_dbfs: f32) -> Self {
+        Self::Silence { level_dbfs }
+    }
+
+    /// A loudness-violation probe against the given compliance target.
+    #[must_use]
+    pub const fn loudness(target: LoudnessTarget) -> Self {
+        Self::Loudness { target }
+    }
+
     /// The [`multiview_core::alarm::AlarmKind`] this probe raises.
     #[must_use]
     pub const fn alarm_kind(&self) -> multiview_core::alarm::AlarmKind {
@@ -269,6 +311,30 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// Construct a probe from its declarative parts.
+    ///
+    /// The result is **not** validated; call [`Probe::validate`] (or
+    /// [`crate::MultiviewConfig::validate`] for cell-reference resolution) before
+    /// using it.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        cell: impl Into<String>,
+        kind: ProbeKind,
+        dwell: Dwell,
+        severity: multiview_core::alarm::PerceivedSeverity,
+        latched: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            cell: cell.into(),
+            kind,
+            dwell,
+            severity,
+            latched,
+        }
+    }
+
     /// Validate this probe's geometry and thresholds in isolation.
     ///
     /// Cell-reference resolution is the document's responsibility (it needs the
@@ -340,10 +406,7 @@ mod tests {
             ProbeKind::freeze(5, DetectionZone::default()).alarm_kind(),
             AlarmKind::Freeze
         );
-        assert_eq!(
-            ProbeKind::silence(-60.0).alarm_kind(),
-            AlarmKind::Silence
-        );
+        assert_eq!(ProbeKind::silence(-60.0).alarm_kind(), AlarmKind::Silence);
         assert_eq!(
             ProbeKind::loudness(LoudnessTarget::R128 {
                 target_lufs: -23.0,

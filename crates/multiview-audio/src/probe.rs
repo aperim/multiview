@@ -11,8 +11,9 @@
 //!
 //! The probes are pure DSP and read-only (ADR-R006): they observe the same PCM
 //! the meters do, on a thread that never back-pressures the engine. They emit
-//! value-type [`AlarmRecord`]s; the engine's
-//! X.733 state machine consumes them in a later wave.
+//! value-type [`AlarmRecord`]s; the engine's X.733 state machine
+//! (`multiview_engine::alarm::state::AlarmStateMachine`) is the lifecycle that
+//! raises/clears and rolls these up.
 use multiview_core::alarm::{AlarmId, AlarmKind, AlarmRecord, AlarmScope, PerceivedSeverity};
 use multiview_core::time::MediaTime;
 

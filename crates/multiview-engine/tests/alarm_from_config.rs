@@ -14,7 +14,7 @@
     clippy::indexing_slicing
 )]
 
-use multiview_config::probe::{Dwell, Probe, ProbeKind};
+use multiview_config::probe::{DetectionZone, Dwell, Probe, ProbeKind};
 use multiview_core::alarm::{AlarmKind, AlarmScope, PerceivedSeverity};
 use multiview_core::time::MediaTime;
 use multiview_engine::alarm::state::{AlarmHysteresis, AlarmStateMachine, AlarmTransition, Phase};
@@ -24,39 +24,26 @@ fn ms(n: i64) -> MediaTime {
 }
 
 fn black_probe(dwell: Dwell, severity: PerceivedSeverity, latched: bool) -> Probe {
-    Probe {
-        id: "probe-1".to_owned(),
-        cell: "cam-1".to_owned(),
-        kind: ProbeKind::Black {
-            luma_threshold: 16,
-            zone: Default::default(),
-        },
+    Probe::new(
+        "probe-1",
+        "cam-1",
+        ProbeKind::black(16, DetectionZone::default()),
         dwell,
         severity,
         latched,
-    }
+    )
 }
 
 #[test]
 fn hysteresis_from_dwell_converts_milliseconds_to_media_time() {
-    let hys = AlarmHysteresis::from_dwell(Dwell {
-        up_ms: 250,
-        down_ms: 750,
-    });
+    let hys = AlarmHysteresis::from_dwell(Dwell::new(250, 750));
     assert_eq!(hys.dwell_up(), ms(250));
     assert_eq!(hys.dwell_down(), ms(750));
 }
 
 #[test]
 fn from_probe_maps_kind_scope_severity_and_dwell() {
-    let probe = black_probe(
-        Dwell {
-            up_ms: 100,
-            down_ms: 200,
-        },
-        PerceivedSeverity::Major,
-        false,
-    );
+    let probe = black_probe(Dwell::new(100, 200), PerceivedSeverity::Major, false);
     let m = AlarmStateMachine::from_probe(&probe);
 
     // Identity, taxonomy and scope are carried from the declaration.
@@ -76,14 +63,7 @@ fn from_probe_maps_kind_scope_severity_and_dwell() {
 
 #[test]
 fn from_probe_respects_the_declared_dwell_up() {
-    let probe = black_probe(
-        Dwell {
-            up_ms: 100,
-            down_ms: 0,
-        },
-        PerceivedSeverity::Major,
-        false,
-    );
+    let probe = black_probe(Dwell::new(100, 0), PerceivedSeverity::Major, false);
     let mut m = AlarmStateMachine::from_probe(&probe);
 
     // Condition present from t=0: still pending until 100 ms elapse.
@@ -100,14 +80,7 @@ fn from_probe_respects_the_declared_dwell_up() {
 
 #[test]
 fn from_probe_respects_the_declared_dwell_down() {
-    let probe = black_probe(
-        Dwell {
-            up_ms: 0,
-            down_ms: 300,
-        },
-        PerceivedSeverity::Minor,
-        false,
-    );
+    let probe = black_probe(Dwell::new(0, 300), PerceivedSeverity::Minor, false);
     let mut m = AlarmStateMachine::from_probe(&probe);
 
     // Zero dwell-up: raises on the first present sample.
@@ -128,7 +101,7 @@ fn from_probe_respects_the_declared_dwell_down() {
 
 #[test]
 fn from_probe_latched_holds_through_clear() {
-    let probe = black_probe(Dwell { up_ms: 0, down_ms: 0 }, PerceivedSeverity::Critical, true);
+    let probe = black_probe(Dwell::new(0, 0), PerceivedSeverity::Critical, true);
     let mut m = AlarmStateMachine::from_probe(&probe);
     assert!(!m.is_latched());
 
@@ -152,30 +125,24 @@ fn from_probe_latched_holds_through_clear() {
 fn from_probe_maps_each_probe_kind_to_its_alarm_kind() {
     let cases = [
         (
-            ProbeKind::Black {
-                luma_threshold: 16,
-                zone: Default::default(),
-            },
+            ProbeKind::black(16, DetectionZone::default()),
             AlarmKind::Black,
         ),
         (
-            ProbeKind::Freeze {
-                difference_threshold: 5,
-                zone: Default::default(),
-            },
+            ProbeKind::freeze(5, DetectionZone::default()),
             AlarmKind::Freeze,
         ),
-        (ProbeKind::Silence { level_dbfs: -60.0 }, AlarmKind::Silence),
+        (ProbeKind::silence(-60.0), AlarmKind::Silence),
     ];
     for (kind, expected) in cases {
-        let probe = Probe {
-            id: "p".to_owned(),
-            cell: "c".to_owned(),
+        let probe = Probe::new(
+            "p",
+            "c",
             kind,
-            dwell: Dwell::default(),
-            severity: PerceivedSeverity::Warning,
-            latched: false,
-        };
+            Dwell::default(),
+            PerceivedSeverity::Warning,
+            false,
+        );
         assert_eq!(AlarmStateMachine::from_probe(&probe).kind(), expected);
     }
 }
