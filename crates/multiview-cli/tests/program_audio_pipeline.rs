@@ -218,7 +218,9 @@ fn build_av_fixture(path: &Path, seconds: f64) {
         ])
         .arg(format!("testsrc=size=320x240:rate=25:duration={seconds}"))
         .args(["-f", "lavfi", "-i"])
-        .arg(format!("sine=frequency=1000:sample_rate=48000:duration={seconds}"))
+        .arg(format!(
+            "sine=frequency=1000:sample_rate=48000:duration={seconds}"
+        ))
         .args([
             "-c:v",
             "mpeg2video",
@@ -242,12 +244,7 @@ fn build_av_fixture(path: &Path, seconds: f64) {
 /// proof genuinely end-to-end.
 fn output_audio_mean_square(path: &Path) -> f64 {
     let out = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(path)
         .args([
             "-map", "a:0", "-f", "f32le", "-ac", "2", "-ar", "48000", "pipe:1",
