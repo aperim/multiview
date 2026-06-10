@@ -267,4 +267,54 @@ mod tests {
         let err = nv12_to_xrgb(&solid(2, 2, 16, 128, 128), &mut dst, 2, 2, 8);
         assert!(matches!(err, Err(CanvasError::Destination(_))));
     }
+
+    #[test]
+    fn default_canvas_delivery_is_cpu_planes() {
+        // A canvas that does not override `delivery` is CPU-resident planes —
+        // the DEV-B1 path. The strategy selector reads this to refuse
+        // direct/GPU scanout for a CPU-only canvas (no dmabuf to import).
+        use crate::display::strategy::CanvasDelivery;
+        let frame = solid(2, 2, 16, 128, 128);
+        assert_eq!(
+            DisplayCanvas::delivery(&frame),
+            CanvasDelivery::CpuPlanes
+        );
+    }
+
+    #[test]
+    fn a_canvas_can_advertise_an_importable_nv12_dmabuf() {
+        use crate::display::strategy::{CanvasDelivery, DrmFormat, DRM_FORMAT_MOD_LINEAR};
+
+        // A canvas wrapping an imported NV12 dmabuf overrides `delivery`; the
+        // selector then becomes eligible for NV12-direct / wgpu-pass scanout.
+        struct DmabufFrame(Frame);
+        impl DisplayCanvas for DmabufFrame {
+            fn width(&self) -> u32 {
+                self.0.width()
+            }
+            fn height(&self) -> u32 {
+                self.0.height()
+            }
+            fn y_plane(&self) -> &[u8] {
+                self.0.y_plane()
+            }
+            fn uv_plane(&self) -> &[u8] {
+                self.0.uv_plane()
+            }
+            fn delivery(&self) -> CanvasDelivery {
+                CanvasDelivery::Dmabuf {
+                    format: DrmFormat::NV12,
+                    modifier: Some(DRM_FORMAT_MOD_LINEAR),
+                }
+            }
+        }
+        let frame = DmabufFrame(solid(2, 2, 16, 128, 128));
+        assert_eq!(
+            frame.delivery(),
+            CanvasDelivery::Dmabuf {
+                format: DrmFormat::NV12,
+                modifier: Some(DRM_FORMAT_MOD_LINEAR),
+            }
+        );
+    }
 }
