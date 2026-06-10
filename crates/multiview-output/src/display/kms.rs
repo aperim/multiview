@@ -9,14 +9,56 @@
 //! safe Rust: drm-rs is a pure-ioctl safe wrapper, and GBM GEM handles are
 //! obtained via prime-fd export/import rather than the C union accessor.
 //!
-//! v1 frame path (DEV-B1): CPU NV12→XRGB conversion
-//! ([`super::canvas::nv12_to_xrgb`]) into a double-buffered XRGB8888 scanout
-//! pool — GBM-allocated (`SCANOUT | WRITE | LINEAR`) where the device has a
-//! Mesa GBM backend, with KMS **dumb buffers** as the universal fallback
-//! (NVIDIA's proprietary driver documents GBM scanout allocation as
-//! unsupported). DEV-B3 replaces this with NV12 direct scanout (Intel/vc4)
-//! and the wgpu render pass (AMD DCE11 class), per the module-level spike
-//! verdict.
+//! ## Frame path — the per-hardware buffer strategy (DEV-B3, brief §2)
+//!
+//! On first frame the backend resolves the head's
+//! [`BufferStrategy`](super::strategy::BufferStrategy) from the probed primary
+//! plane's formats/modifiers (`get_plane` + the `IN_FORMATS` blob), the
+//! canvas's delivery shape ([`DisplayCanvas::delivery`]), and whether a wgpu
+//! importer is wired (see the wgpu-version verdict below). Three paths:
+//!
+//! * **NV12-direct** (Intel Gen9+ / vc4, incl. the SAND128 modifier): the
+//!   canvas's NV12/P010 dmabuf is `prime_fd_to_buffer`-imported and turned into
+//!   a planar framebuffer (`add_planar_framebuffer`, `ADDFB2` with modifiers)
+//!   that is flipped straight onto the plane — **0 copies, 0 render passes**.
+//!   This is drm/gbm-only (no wgpu, no `unsafe`) and runs on the current pin.
+//! * **CPU NV12→XRGB** (the guaranteed default, DEV-B1): the CPU conversion
+//!   ([`super::canvas::nv12_to_xrgb`], BT.709 limited→full, 8.8 integer) into a
+//!   double-buffered XRGB8888 scanout pool — GBM-allocated
+//!   (`SCANOUT | WRITE | LINEAR`) where a Mesa GBM backend exists, KMS **dumb
+//!   buffers** otherwise (NVIDIA, or no GBM).
+//! * **wgpu NV12→XRGB pass** (AMD DCE11 with a GPU): see the verdict below —
+//!   **not wired in this crate on the current wgpu pin**; the selector never
+//!   resolves to it here, and the backend treats it as the CPU path.
+//!
+//! ## wgpu-version verdict (DEV-B3) — dmabuf import is deferred; CPU path ships
+//!
+//! Verified against the workspace pin **wgpu 29.0.3** (the compositor's pin):
+//!
+//! * `wgpu::SurfaceTargetUnsafe::Drm` **exists** (the NVIDIA tier-2
+//!   DRM-surface path) and `wgpu::Device::create_texture_from_hal` **exists**.
+//! * `wgpu_hal::vulkan::Device::texture_from_raw(.., external_memory_image_create_info)`
+//!   **exists** — the dmabuf-import primitive — but there is **no** safe
+//!   high-level `texture_from_dmabuf_fd` in wgpu 29 (that lands in a later
+//!   release). Importing an NV12 dmabuf as a wgpu texture on this pin therefore
+//!   requires `wgpu-hal` + `ash` as new **direct** deps of `multiview-output`
+//!   and a block of raw-Vulkan `unsafe` (build a `vk::Image` with
+//!   `VK_EXT_image_drm_format_modifier`, import the fd via
+//!   `VK_EXT_external_memory_dma_buf`).
+//! * **Verdict: the wgpu render pass is deferred — the CPU NV12→XRGB path is
+//!   the shipped AMD/fallback default**, for two reasons honestly stated:
+//!   (1) pulling raw-Vulkan `unsafe` into this `forbid(unsafe_code)` crate to
+//!   hand-roll dmabuf import is not warranted while the CPU path is correct and
+//!   the AMD budget (~0.7 GB/s @ 1080p60) is modest; (2) bumping the **whole
+//!   workspace** wgpu to a release with safe dmabuf import risks every GPU
+//!   crate and is exactly the unilateral bump DEV-B3 says not to make. The
+//!   selector's `WgpuXrgbPass` variant + the `gpu_pass_available` seam compile
+//!   and are unit-tested; flipping the seam on is a localized follow-up when
+//!   the workspace wgpu pin advances (or a dmabuf-canvas reaches a vc4/Intel
+//!   target, where NV12-direct skips the pass entirely).
+//!
+//! [`BufferStrategy`]: super::strategy::BufferStrategy
+//! [`DisplayCanvas::delivery`]: super::canvas::DisplayCanvas::delivery
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -24,20 +66,24 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use drm::buffer::{Buffer as DrmBuffer, DrmFourcc};
+use drm::buffer::{Buffer as DrmBuffer, DrmFourcc, DrmModifier, Handle as DrmBufferHandle};
 use drm::control::dumbbuffer::DumbBuffer;
 use drm::control::{
     atomic::AtomicModeReq, connector, crtc, framebuffer, plane, property, AtomicCommitFlags,
-    Device as ControlDevice, Mode, ModeFlags, ModeTypeFlags,
+    Device as ControlDevice, FbCmd2Flags, Mode, ModeFlags, ModeTypeFlags,
 };
 use drm::{ClientCapability, Device as BaseDevice};
 use rustix::event::{PollFd, PollFlags};
 
-use super::canvas::{nv12_to_xrgb, DisplayCanvas};
+use super::canvas::{nv12_to_xrgb, DisplayCanvas, DmabufImage};
 use super::device::{
     ConnectorDesc, ConnectorSelector, DisplayError, FlipEvent, HeadSetup, KmsBackend, SubmitError,
 };
 use super::mode::DisplayModeInfo;
+use super::strategy::{
+    parse_in_formats_blob, select_buffer_strategy, BufferStrategy, DrmFormat, PlaneFormatCaps,
+    ScanoutCaps,
+};
 
 /// `DRM_PLANE_TYPE_PRIMARY` (uapi `drm_mode.h`): the value of a plane's
 /// `type` property identifying the primary plane.
@@ -124,6 +170,17 @@ struct PreparedHead {
     front: usize,
     width: u32,
     height: u32,
+    /// The primary plane's probed formats/modifiers (`get_plane` +
+    /// `IN_FORMATS`) — the NV12-direct gate input (DEV-B3 / brief §2).
+    plane_caps: PlaneFormatCaps,
+    /// The chosen per-frame buffer strategy, resolved on the **first** frame
+    /// from the canvas's delivery shape + `plane_caps` + GPU availability, then
+    /// cached (the canvas delivery shape is stable for a run).
+    strategy: Option<BufferStrategy>,
+    /// The NV12-direct framebuffer most recently imported + flipped. Held so
+    /// the GEM handle stays alive while it is on glass; replaced (and the old
+    /// fb removed) on the next direct frame.
+    direct_fb: Option<framebuffer::Handle>,
 }
 
 /// The real KMS backend: owns the card fd (and the GBM device dup'd onto it)
@@ -143,6 +200,12 @@ pub struct KmsDisplayDevice {
     gbm: Option<gbm::Device<Card>>,
     probed: HashMap<String, ProbedConnector>,
     head: Option<PreparedHead>,
+    /// Whether a wgpu NV12→XRGB import-and-render pass is wired for this build.
+    /// **`false` on the current wgpu 29 pin** (no safe dmabuf-import API; see
+    /// the module-level wgpu-version verdict) — so the strategy selector never
+    /// resolves to `WgpuXrgbPass` here, and AMD/RGB-only heads take the CPU
+    /// NV12→XRGB path. The seam exists so flipping it on is a localized change.
+    gpu_pass_available: bool,
 }
 
 impl std::fmt::Debug for KmsDisplayDevice {
@@ -198,6 +261,9 @@ impl KmsDisplayDevice {
             gbm,
             probed: HashMap::new(),
             head: None,
+            // No wgpu importer is wired in this crate on the current wgpu 29
+            // pin (module-level verdict): AMD/RGB-only heads take the CPU path.
+            gpu_pass_available: false,
         })
     }
 
@@ -285,6 +351,54 @@ impl KmsDisplayDevice {
         Err(DisplayError::Device(
             "no XRGB8888-capable primary plane for the chosen CRTC".to_owned(),
         ))
+    }
+
+    /// Probe a plane's advertised scanout formats and modifiers into the pure
+    /// [`PlaneFormatCaps`] the strategy selector reasons over (DEV-B3): the
+    /// format list from `get_plane`, and the modifier list from the plane's
+    /// `IN_FORMATS` property blob where the driver exposes one (legacy drivers
+    /// without the blob are treated as linear-only by the pure layer).
+    fn probe_plane_caps(&self, plane: plane::Handle) -> Result<PlaneFormatCaps, DisplayError> {
+        let info = self
+            .card
+            .get_plane(plane)
+            .map_err(|e| dev_err("reading plane formats", &e))?;
+        let formats: Vec<DrmFormat> = info
+            .formats()
+            .iter()
+            .map(|raw| DrmFormat::from_fourcc(raw.to_le_bytes()))
+            .collect();
+        // IN_FORMATS carries the per-format modifier set; absent on legacy
+        // drivers, in which case `parse_in_formats_blob` is never reached and
+        // we keep the format list with an empty (linear-only) modifier list.
+        if let Some(blob_id) = self.in_formats_blob_id(plane)? {
+            if let Ok(bytes) = self.card.get_property_blob(blob_id) {
+                if let Some(caps) = parse_in_formats_blob(&bytes) {
+                    return Ok(caps);
+                }
+            }
+        }
+        Ok(PlaneFormatCaps::new(formats, Vec::new()))
+    }
+
+    /// The `IN_FORMATS` blob id for a plane, if the property exists and is set.
+    fn in_formats_blob_id(&self, plane: plane::Handle) -> Result<Option<u64>, DisplayError> {
+        let props = self
+            .card
+            .get_properties(plane)
+            .map_err(|e| dev_err("reading plane properties", &e))?;
+        let (handles, values) = props.as_props_and_values();
+        for (ph, value) in handles.iter().zip(values.iter()) {
+            let info = self
+                .card
+                .get_property(*ph)
+                .map_err(|e| dev_err("reading property", &e))?;
+            if info.name().to_str() == Ok("IN_FORMATS") {
+                // A zero blob id means the property exists but is unset.
+                return Ok((*value != 0).then_some(*value));
+            }
+        }
+        Ok(None)
     }
 
     /// Read a plane's `type` property value.
@@ -485,6 +599,7 @@ impl KmsDisplayDevice {
             self.allocate_buffer(setup.mode.width, setup.mode.height)?,
             self.allocate_buffer(setup.mode.width, setup.mode.height)?,
         ];
+        let plane_caps = self.probe_plane_caps(plane)?;
         self.head = Some(PreparedHead {
             connector: conn_handle,
             crtc,
@@ -495,6 +610,9 @@ impl KmsDisplayDevice {
             front: 0,
             width: setup.mode.width,
             height: setup.mode.height,
+            plane_caps,
+            strategy: None,
+            direct_fb: None,
         });
         Ok(())
     }
@@ -579,6 +697,196 @@ impl KmsDisplayDevice {
             None => Err(DisplayError::Device("scanout buffer missing".to_owned())),
         }
     }
+
+    /// Resolve (and cache) the head's buffer strategy from `frame`'s delivery
+    /// shape, the probed plane caps, and GPU availability (DEV-B3 / brief §2).
+    /// Resolved once on the first frame (the canvas delivery shape is stable
+    /// for a run); cached thereafter. Falls back to the CPU convert when no
+    /// head is prepared (defensive — `submit_frame` errors on that anyway).
+    fn resolve_strategy(&mut self, frame: &dyn DisplayCanvas) -> BufferStrategy {
+        let gpu = self.gpu_pass_available;
+        let Some(head) = self.head.as_mut() else {
+            return BufferStrategy::CpuXrgbConvert;
+        };
+        if let Some(cached) = head.strategy {
+            return cached;
+        }
+        let caps = ScanoutCaps {
+            plane: head.plane_caps.clone(),
+            canvas: frame.delivery(),
+            gpu_pass_available: gpu,
+        };
+        let chosen = select_buffer_strategy(&caps);
+        tracing::info!(strategy = ?chosen, "display buffer strategy resolved");
+        head.strategy = Some(chosen);
+        chosen
+    }
+
+    /// The CPU NV12→XRGB path (DEV-B1): convert into the back scanout buffer,
+    /// then flip it. The portable, always-correct default.
+    fn submit_xrgb(&mut self, frame: &dyn DisplayCanvas) -> Result<(), SubmitError> {
+        let back = match self.head.as_ref() {
+            Some(head) => 1 - head.front,
+            None => {
+                return Err(SubmitError::Device(DisplayError::Device(
+                    "no lit head".to_owned(),
+                )))
+            }
+        };
+        self.write_frame(back, frame).map_err(SubmitError::Device)?;
+        let fb = match self.head.as_ref() {
+            Some(head) => head.buffers.get(back).map(ScanoutBuffer::framebuffer),
+            None => None,
+        }
+        .ok_or_else(|| {
+            SubmitError::Device(DisplayError::Device("scanout buffer missing".to_owned()))
+        })?;
+        self.flip_to(fb, Some(back))
+    }
+
+    /// The NV12-direct path (DEV-B3, brief §2): `prime_fd_to_buffer`-import the
+    /// canvas's NV12/P010 dmabuf, build a planar framebuffer over it
+    /// (`add_planar_framebuffer` / `ADDFB2` with modifiers), and flip it — **0
+    /// copies, 0 render passes**. The strategy gate guarantees the format +
+    /// modifier are plane-compatible; we re-validate the canvas actually offers
+    /// a matching dmabuf image and error (→ caller's CPU fallback) otherwise.
+    fn submit_direct(
+        &mut self,
+        frame: &dyn DisplayCanvas,
+        format: DrmFormat,
+        modifier: Option<u64>,
+    ) -> Result<(), SubmitError> {
+        let image = frame.dmabuf_image().ok_or_else(|| {
+            SubmitError::Device(DisplayError::Device(
+                "NV12-direct chosen but the canvas exposed no dmabuf image".to_owned(),
+            ))
+        })?;
+        let new_fb = self
+            .import_planar_fb(&image, format, modifier)
+            .map_err(SubmitError::Device)?;
+        // Flip the imported framebuffer (no XRGB-pool buffer index — the direct
+        // fb lives outside that double-buffered pool).
+        match self.flip_to(new_fb, None) {
+            // Accepted: `new_fb` is now (about to be) on glass. Retire the
+            // previously-scanned direct fb — it is no longer referenced.
+            Ok(()) => {
+                let retired = self
+                    .head
+                    .as_mut()
+                    .and_then(|head| head.direct_fb.replace(new_fb));
+                if let Some(old) = retired {
+                    // Best-effort teardown; a failure leaks one fb, not a frame.
+                    let _ = self.card.destroy_framebuffer(old);
+                }
+                Ok(())
+            }
+            // EBUSY (conflation) or a device error: nothing flipped, so retire
+            // the just-created fb. The next flip event re-imports the latest
+            // frame — we never queue or leak across the retry.
+            Err(e) => {
+                let _ = self.card.destroy_framebuffer(new_fb);
+                Err(e)
+            }
+        }
+    }
+
+    /// Import a canvas dmabuf image into a planar KMS framebuffer (`ADDFB2`
+    /// with per-plane prime-fd→GEM imports and the format modifier). Pure
+    /// drm/gbm — no wgpu, no `unsafe`.
+    fn import_planar_fb(
+        &self,
+        image: &DmabufImage<'_>,
+        format: DrmFormat,
+        modifier: Option<u64>,
+    ) -> Result<framebuffer::Handle, DisplayError> {
+        let fourcc = DrmFourcc::try_from(format.fourcc()).map_err(|_| {
+            DisplayError::Device(format!(
+                "unsupported direct-scanout fourcc {:#x}",
+                format.fourcc()
+            ))
+        })?;
+        if image.planes.is_empty() || image.planes.len() > 4 {
+            return Err(DisplayError::Device(format!(
+                "direct-scanout image has {} planes (need 1..=4)",
+                image.planes.len()
+            )));
+        }
+        let mut handles: [Option<DrmBufferHandle>; 4] = [None; 4];
+        let mut pitches: [u32; 4] = [0; 4];
+        let mut offsets: [u32; 4] = [0; 4];
+        // Zip the (≤4) source planes onto the fixed-size ADDFB2 arrays without
+        // indexing — each prime fd is imported to a GEM handle in place.
+        for (((slot, pitch), offset), plane) in handles
+            .iter_mut()
+            .zip(pitches.iter_mut())
+            .zip(offsets.iter_mut())
+            .zip(image.planes.iter())
+        {
+            let handle = self
+                .card
+                .prime_fd_to_buffer(plane.fd)
+                .map_err(|e| dev_err("importing canvas dmabuf plane", &e))?;
+            *slot = Some(handle);
+            *pitch = plane.pitch;
+            *offset = plane.offset;
+        }
+        let adapter = PlanarPrimeBuffer {
+            size: (image.width, image.height),
+            format: fourcc,
+            modifier: modifier.map(DrmModifier::from),
+            handles,
+            pitches,
+            offsets,
+        };
+        let flags = if modifier.is_some() {
+            FbCmd2Flags::MODIFIERS
+        } else {
+            FbCmd2Flags::empty()
+        };
+        self.card
+            .add_planar_framebuffer(&adapter, flags)
+            .map_err(|e| dev_err("adding NV12-direct planar framebuffer", &e))
+    }
+
+    /// Issue the one flip commit: set `fb` on the primary plane,
+    /// `NONBLOCK | PAGE_FLIP_EVENT`, never `ALLOW_MODESET` (ADR-0044 §1). On
+    /// success advances `front` to `back` when the XRGB pool is in use.
+    /// `EBUSY` is the kernel's one-in-flight conflation (never queue/retry).
+    fn flip_to(&mut self, fb: framebuffer::Handle, back: Option<usize>) -> Result<(), SubmitError> {
+        let plane = match self.head.as_ref() {
+            Some(head) => head.plane,
+            None => {
+                return Err(SubmitError::Device(DisplayError::Device(
+                    "no lit head".to_owned(),
+                )))
+            }
+        };
+        let fb_id = match self.head.as_ref() {
+            Some(head) => head.props.plane_fb_id,
+            None => {
+                return Err(SubmitError::Device(DisplayError::Device(
+                    "no lit head".to_owned(),
+                )))
+            }
+        };
+        let mut req = AtomicModeReq::new();
+        req.add_property(plane, fb_id, property::Value::Framebuffer(Some(fb)));
+        match self.card.atomic_commit(
+            AtomicCommitFlags::NONBLOCK | AtomicCommitFlags::PAGE_FLIP_EVENT,
+            req,
+        ) {
+            Ok(()) => {
+                if let (Some(back), Some(head)) = (back, self.head.as_mut()) {
+                    head.front = back;
+                }
+                Ok(())
+            }
+            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) => {
+                Err(SubmitError::Busy)
+            }
+            Err(e) => Err(SubmitError::Device(dev_err("flip commit failed", &e))),
+        }
+    }
 }
 
 impl KmsBackend for KmsDisplayDevice {
@@ -653,47 +961,29 @@ impl KmsBackend for KmsDisplayDevice {
     }
 
     fn submit_frame(&mut self, frame: &dyn DisplayCanvas) -> Result<(), SubmitError> {
-        let back = match self.head.as_ref() {
-            Some(head) => 1 - head.front,
-            None => {
-                return Err(SubmitError::Device(DisplayError::Device(
-                    "no lit head".to_owned(),
-                )))
+        match self.resolve_strategy(frame) {
+            // Intel/vc4: import the canvas NV12 dmabuf and flip it — 0 copies,
+            // 0 render passes. If the dmabuf import fails for any reason, fall
+            // back to the always-correct CPU XRGB path rather than dropping a
+            // frame (bad inputs are the purpose — the display never falters).
+            BufferStrategy::Nv12Direct { format, modifier } => {
+                match self.submit_direct(frame, format, modifier) {
+                    Ok(()) => Ok(()),
+                    Err(SubmitError::Busy) => Err(SubmitError::Busy),
+                    Err(SubmitError::Device(e)) => {
+                        tracing::warn!(
+                            error = %e,
+                            "NV12-direct scanout failed; this frame via the CPU XRGB path"
+                        );
+                        self.submit_xrgb(frame)
+                    }
+                }
             }
-        };
-        self.write_frame(back, frame).map_err(SubmitError::Device)?;
-        let Some(head) = self.head.as_mut() else {
-            return Err(SubmitError::Device(DisplayError::Device(
-                "no lit head".to_owned(),
-            )));
-        };
-        let fb = head
-            .buffers
-            .get(back)
-            .map(ScanoutBuffer::framebuffer)
-            .ok_or_else(|| {
-                SubmitError::Device(DisplayError::Device("scanout buffer missing".to_owned()))
-            })?;
-        // The flip commit: just the new framebuffer on the primary plane —
-        // NONBLOCK + PAGE_FLIP_EVENT, never ALLOW_MODESET (ADR-0044 §1).
-        let mut req = AtomicModeReq::new();
-        req.add_property(
-            head.plane,
-            head.props.plane_fb_id,
-            property::Value::Framebuffer(Some(fb)),
-        );
-        match self.card.atomic_commit(
-            AtomicCommitFlags::NONBLOCK | AtomicCommitFlags::PAGE_FLIP_EVENT,
-            req,
-        ) {
-            Ok(()) => {
-                head.front = back;
-                Ok(())
+            // AMD/RGB-only, and the GPU pass is not wired on this wgpu pin
+            // (module verdict): the CPU NV12→XRGB conversion is the path.
+            BufferStrategy::WgpuXrgbPass | BufferStrategy::CpuXrgbConvert => {
+                self.submit_xrgb(frame)
             }
-            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) => {
-                Err(SubmitError::Busy)
-            }
-            Err(e) => Err(SubmitError::Device(dev_err("flip commit failed", &e))),
         }
     }
 
@@ -747,6 +1037,40 @@ impl DrmBuffer for PrimeBuffer {
     }
     fn handle(&self) -> drm::buffer::Handle {
         self.handle
+    }
+}
+
+/// A drm [`PlanarBuffer`](drm::buffer::PlanarBuffer) view over a
+/// prime-imported, possibly multi-plane canvas dmabuf (NV12/P010 + modifier) —
+/// enough for `add_planar_framebuffer` (`ADDFB2`). Built by
+/// [`KmsDisplayDevice::import_planar_fb`] for the NV12-direct scanout path.
+struct PlanarPrimeBuffer {
+    size: (u32, u32),
+    format: DrmFourcc,
+    modifier: Option<DrmModifier>,
+    handles: [Option<DrmBufferHandle>; 4],
+    pitches: [u32; 4],
+    offsets: [u32; 4],
+}
+
+impl drm::buffer::PlanarBuffer for PlanarPrimeBuffer {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+    fn format(&self) -> DrmFourcc {
+        self.format
+    }
+    fn modifier(&self) -> Option<DrmModifier> {
+        self.modifier
+    }
+    fn pitches(&self) -> [u32; 4] {
+        self.pitches
+    }
+    fn handles(&self) -> [Option<DrmBufferHandle>; 4] {
+        self.handles
+    }
+    fn offsets(&self) -> [u32; 4] {
+        self.offsets
     }
 }
 

@@ -161,7 +161,10 @@ fn rgb_only_plane_without_gpu_falls_back_to_the_cpu_convert() {
         },
         gpu_pass_available: false,
     };
-    assert_eq!(select_buffer_strategy(&caps), BufferStrategy::CpuXrgbConvert);
+    assert_eq!(
+        select_buffer_strategy(&caps),
+        BufferStrategy::CpuXrgbConvert
+    );
 }
 
 #[test]
@@ -174,7 +177,10 @@ fn cpu_only_canvas_never_chooses_direct_scanout_even_on_an_nv12_plane() {
         canvas: CanvasDelivery::CpuPlanes,
         gpu_pass_available: true,
     };
-    assert_eq!(select_buffer_strategy(&caps), BufferStrategy::CpuXrgbConvert);
+    assert_eq!(
+        select_buffer_strategy(&caps),
+        BufferStrategy::CpuXrgbConvert
+    );
 }
 
 #[test]
@@ -191,7 +197,10 @@ fn nv12_plane_but_modifier_mismatch_falls_back_not_direct() {
         },
         gpu_pass_available: false,
     };
-    assert_eq!(select_buffer_strategy(&caps), BufferStrategy::CpuXrgbConvert);
+    assert_eq!(
+        select_buffer_strategy(&caps),
+        BufferStrategy::CpuXrgbConvert
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,10 +240,7 @@ fn build_in_formats_blob(formats: &[[u8; 4]], modifiers: &[(u64, u64)]) -> Vec<u
 fn in_formats_blob_parses_formats_and_modifiers() {
     // Two formats (NV12, XR24); two modifiers each applying to both (bitmask
     // 0b11 = formats[0] and formats[1]).
-    let blob = build_in_formats_blob(
-        &[*b"NV12", *b"XR24"],
-        &[(0b11, 0), (0b11, SAND128)],
-    );
+    let blob = build_in_formats_blob(&[*b"NV12", *b"XR24"], &[(0b11, 0), (0b11, SAND128)]);
     let caps = parse_in_formats_blob(&blob).expect("valid blob parses");
     assert!(caps.has_format(DrmFormat::NV12));
     assert!(caps.has_format(DrmFormat::XRGB8888));

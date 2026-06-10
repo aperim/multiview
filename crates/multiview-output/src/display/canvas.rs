@@ -342,10 +342,7 @@ mod tests {
         // direct/GPU scanout for a CPU-only canvas (no dmabuf to import).
         use crate::display::strategy::CanvasDelivery;
         let frame = solid(2, 2, 16, 128, 128);
-        assert_eq!(
-            DisplayCanvas::delivery(&frame),
-            CanvasDelivery::CpuPlanes
-        );
+        assert_eq!(DisplayCanvas::delivery(&frame), CanvasDelivery::CpuPlanes);
     }
 
     #[test]
@@ -398,8 +395,6 @@ mod tests {
         use crate::display::strategy::{DrmFormat, DRM_FORMAT_MOD_LINEAR};
         use std::os::fd::AsFd;
 
-        // Use a real fd (stdin) just to have a valid BorrowedFd for the test.
-        let stdin = std::io::stdin();
         struct DmabufFrame<'a> {
             inner: Frame,
             fd: std::os::fd::BorrowedFd<'a>,
@@ -438,6 +433,9 @@ mod tests {
                 })
             }
         }
+
+        // Use a real fd (stdin) just to have a valid BorrowedFd for the test.
+        let stdin = std::io::stdin();
         let frame = DmabufFrame {
             inner: solid(4, 4, 16, 128, 128),
             fd: stdin.as_fd(),
