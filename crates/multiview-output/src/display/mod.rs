@@ -82,6 +82,7 @@ pub mod flip;
 pub mod mailbox;
 pub mod mode;
 pub mod sink;
+pub mod strategy;
 
 /// The real drm-rs + gbm KMS backend (feature `display-kms`). Everything that
 /// touches an ioctl lives here; its hardware paths are exercised only on
@@ -100,3 +101,7 @@ pub use mode::{
     SelectedMode,
 };
 pub use sink::{DisplaySink, DisplaySinkConfig, DisplaySinkHandle, DisplayStats, StatsSnapshot};
+pub use strategy::{
+    parse_in_formats_blob, plane_supports_nv12, select_buffer_strategy, BufferStrategy,
+    CanvasDelivery, DrmFormat, PlaneFormatCaps, ScanoutCaps,
+};

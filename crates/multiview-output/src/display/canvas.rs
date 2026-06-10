@@ -16,6 +16,8 @@
 
 use thiserror::Error;
 
+use super::strategy::CanvasDelivery;
+
 /// An NV12 frame the display sink can scan out: tightly-packed planes
 /// (`y.len() == width*height`, `uv.len() == width*height/2`), even
 /// dimensions (4:2:0 chroma).
@@ -28,6 +30,21 @@ pub trait DisplayCanvas {
     fn y_plane(&self) -> &[u8];
     /// The interleaved Cb/Cr plane, `width * height / 2` bytes, no padding.
     fn uv_plane(&self) -> &[u8];
+
+    /// How this canvas is delivered — CPU-resident planes (the default,
+    /// DEV-B1) or an importable dmabuf. The buffer-strategy selector
+    /// ([`super::strategy::select_buffer_strategy`]) reads this to decide
+    /// NV12-direct / wgpu-pass scanout vs the portable CPU conversion: a
+    /// CPU-planes canvas always takes the CPU convert (there is no dmabuf to
+    /// import or flip).
+    ///
+    /// The default is [`CanvasDelivery::CpuPlanes`]; a canvas backed by a
+    /// decoder/compositor dmabuf overrides it. The `y_plane`/`uv_plane`
+    /// accessors must remain valid regardless (they are the universal CPU
+    /// fallback path even for a dmabuf-backed canvas).
+    fn delivery(&self) -> CanvasDelivery {
+        CanvasDelivery::CpuPlanes
+    }
 }
 
 /// A structurally invalid conversion request (geometry/plane mismatch).
