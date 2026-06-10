@@ -272,6 +272,18 @@ dominate wall‑clock; the six parallel lanes finish well before it.
 - [ ] **DEV-D3** `M` — SPA cast flow: ad-hoc sheet, ephemeral sessions, save-as-device, latency badge, help page  ·  _deps: DEV-D2_
 - [ ] **DEV-D4** `M` — Cast hardware validation across ≥2 device generations + firmware-pinned notes (**gated on hardware acquisition**)  ·  _deps: DEV-D2, DEV-D3_
 
+### SYN — Clock & timer synthetic sources (extends ADR-0027; brief [clock-timer-sources](../research/clock-timer-sources.md); [ADR-0047](../decisions/ADR-0047.md))
+
+> Pure-Rust, default-build (no `ffmpeg`/GPL); the clock/timer **render** is `overlay`-gated like the as-built clock (`synth.rs:150`). All time is integer/`chrono` (inv #3/#6), wall-clock is **sampled** not pacing (inv #1), the disciplined reference is display-only (ADR-T012). Builds on the as-built `clock_face` SDF primitives + `TextEngine` runs + NV12/linear bake — **no new renderer**.
+
+- [ ] **SYN-CLOCK-1** `M` — Pure tz resolver + dual-face/metadata model: `chrono`+`chrono-tz` dep (deny-clean), `resolve_offset(Tz, WallTime) -> TimeZoneOffset` (DST-correct per displayed instant), `UTC±HH:MM` badge formatter; golden tests at DST boundaries  ·  _deps: —_
+- [ ] **SYN-CLOCK-2** `S` — Config: `ClockFaceConfig::Dual` + `Clock` fields (`timezone`, `label`, `show_offset`, `show_reference`, `numerals`); validation (unknown IANA id → typed `ConfigError`; `timezone` wins over `tz_offset_minutes` + warn); round-trip TOML/JSON  ·  _deps: SYN-CLOCK-1_
+- [ ] **SYN-CLOCK-3** `M` — Renderer: `dual` placement (`clock_face` upper + centred readout lower) + metadata strip (label + offset/reference badges) in `render_clock`; per-render tz resolution wired into `SyntheticKind::Clock` + `render_key` field index; content-aware goldens  ·  _deps: SYN-CLOCK-2_
+- [ ] **SYN-TIMER-1** `M` — Pure timer math: `TimerTarget` next-occurrence resolution (time-of-day across midnight/DST; absolute datetime), `displayed_seconds` (down/up), at-target clamp (`hold`/`continue`/`zero_then_up`/`recur`), duration decompose + `TimerFormat` (incl. frames from the cadence `Rational`, drop-leading-zero `auto`); property + golden tests  ·  _deps: SYN-CLOCK-1_
+- [ ] **SYN-TIMER-2** `S` — Config: `SourceKind::Timer` + `TimerTarget`/`TimerDirection`/`TimerOnTarget`/`TimerFormat` enums (`#[serde(flatten)]` target tagged on `target`, distinct from `kind`); validation + round-trip TOML/JSON  ·  _deps: SYN-TIMER-1, SYN-CLOCK-2_
+- [ ] **SYN-TIMER-3** `M` — Renderer + generator: timer render (centred mono run + overrun prefix/badge) + `SyntheticKind::Timer` resolved descriptor wired into `generator_loop` (field-index `render_key`; `_ff` bakes at cadence); content-aware goldens (count, at-zero, overrun)  ·  _deps: SYN-TIMER-2, SYN-CLOCK-3_
+- [ ] **SYN-CLOCK-UI** `L` — SPA + spec: source-kind picker entries for the extended clock + new timer; IANA zone dropdown from `chrono_tz::TZ_VARIANTS`; clock/timer forms; OpenAPI/JSON-schema regen; `examples/clock-timer.toml`; in-app docs  ·  _deps: SYN-CLOCK-3, SYN-TIMER-3_
+
 
 ---
 
@@ -382,6 +394,94 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - /workspaces/mosaic/crates/multiview-audio/src/mixer.rs
 - /workspaces/mosaic/crates/multiview-ffmpeg/src/encode.rs
 - /workspaces/mosaic/crates/multiview-cli/src/synth.rs
+
+
+## SYN — Clock & timer synthetic sources (extends ADR-0027; brief [clock-timer-sources](../research/clock-timer-sources.md); [ADR-0047](../decisions/ADR-0047.md))
+
+
+### `[ ]` SYN-CLOCK-1 — Pure tz resolver + dual-face/metadata model · effort: M · deps: none
+- **Goal:** Add the missing **upstream offset resolver** the clock model already anticipates (`clock.rs:57` "DST resolved upstream to a concrete offset") so an IANA `timezone` renders a DST-correct offset for the *displayed* instant, plus the formatters the dual-face + metadata need — all pure, deterministic, injected-time.
+- **Touches:** workspace `Cargo.toml` + `crates/multiview-cli/Cargo.toml` (add `chrono` + `chrono-tz`, `default-features = false`); a new pure helper (in `multiview-config` or a `multiview-overlay::tz` module) `resolve_offset(tz: chrono_tz::Tz, at: WallTime) -> TimeZoneOffset`; a `format_utc_offset(TimeZoneOffset) -> String` (`UTC±HH:MM`). Reuses `multiview_overlay::clock::{WallTime, TimeZoneOffset}` (clock.rs:30/:57).
+- **Approach:**
+  1. Add the deps; run `cargo deny check` (chrono/chrono-tz closure is `MIT OR Apache-2.0`/`Unicode-3.0`, all on `deny.toml:65`); commit `Cargo.lock`.
+  2. `resolve_offset`: `tz.offset_from_utc_datetime(DateTime::from_timestamp(at.unix_seconds(),0).naive_utc()).fix().local_minus_utc() / 60` → `TimeZoneOffset::from_minutes(…)`. No `as`-cast — narrow via `i32::try_from`/clamped helpers (guardrail).
+  3. `format_utc_offset`: integer h/m from the signed minutes, `UTC` for zero — never float.
+- **Acceptance (done when):** golden tests: `Australia/Sydney` at `2026-01-15T00:00:00Z` ⇒ `+11:00`, at `2026-07-15` ⇒ `+10:00`; `America/New_York` across spring-forward/fall-back instants; `UTC` ⇒ `+00:00`; `format_utc_offset` round-trips the badge text. `cargo deny check` green. Guardrail: pure (no `SystemTime::now`), integer math, no panic on any `Tz`.
+- **Risks/notes:** Bound binary size with `chrono-tz` `default-features=false` (+ `filter-by-regex` if needed). Keep the resolver pure so the control plane can reuse it for the form preview. The bundled tz db means a tz-rule change needs a dep bump (documented in the brief §9 / ADR-0047).
+- **Read first:** brief [clock-timer-sources](../research/clock-timer-sources.md) §5; [ADR-0047](../decisions/ADR-0047.md); `multiview-overlay/src/clock.rs` header + `:57`.
+
+### `[ ]` SYN-CLOCK-2 — Config: `Dual` face + clock metadata fields · effort: S · deps: SYN-CLOCK-1
+- **Goal:** Extend `SourceKind::Clock` additively (`schema_version` unchanged) with `ClockFaceConfig::Dual`, `timezone` (IANA), `label`, `show_offset`, `show_reference`, `numerals`, validated and serde-round-tripping across TOML+JSON.
+- **Touches:** `crates/multiview-config/src/schema.rs:197` (`ClockFaceConfig::Dual`) + `:225` (the `Clock` variant fields per brief §6.1); `crates/multiview-config/src/error.rs` (unknown-IANA-id `ConfigError`); the example-validation test.
+- **Approach:**
+  1. Add the variant + fields exactly as brief §6.1 (`#[serde(default, skip_serializing_if = "Option::is_none")]` on the `Option`s; `Dual` is `#[non_exhaustive]`-safe).
+  2. Validate `timezone` against `chrono_tz::Tz::from_str` at load → typed `ConfigError`; if both `timezone` and a non-zero `tz_offset_minutes` are set, accept with a `tracing::warn!` and let `timezone` win (documented precedence).
+- **Acceptance (done when):** round-trip TOML+JSON for `face="dual"` + every new field; an unknown IANA id is a typed error (no panic); both-present emits the warning and resolves to `timezone`; `examples/*.toml` still parse. Guardrail: no `unwrap` on parse; serde tagged (no `untagged`).
+- **Risks/notes:** Keep `tz_offset_minutes` working (legacy fixed offset). `Dual` must default-skip nothing existing.
+- **Read first:** brief §6.1; conventions §5 (serde policy); `schema.rs:189-239`.
+
+### `[ ]` SYN-CLOCK-3 — Renderer: dual placement + metadata strip + per-render tz · effort: M · deps: SYN-CLOCK-2
+- **Goal:** Render `dual` (analogue face + digital readout) and the metadata strip (label + `UTC±HH:MM` + optional reference badge) onto the slate, resolving the IANA offset **per render** so a long-running clock follows DST.
+- **Touches:** `crates/multiview-cli/src/synth.rs:150` (`render_clock` `dual` branch + strip), `:45/:72` (`SyntheticKind::Clock` carries `mode`, `tz: Option<Tz>`, `label`, `show_offset`, `show_reference`, `numerals`), `:138` (`render_key` → field index). Reuses `clock_face`/`ClockFaceStyle::at` (subpass.rs:328/:342) + `TextEngine::rasterize_run` (text.rs).
+- **Approach:**
+  1. `dual`: place `clock_face` via `ClockFaceStyle::at(cx, upper_cy, radius)` in the upper region; centre the digital run in the lower region (reuse the existing extent-measure/centre logic, synth.rs:210-244).
+  2. Strip: two left/right-aligned runs (label, offset badge) in the bottom `~18%`; reference badge from a passed-in `TimeRef` (display only — never sampled into timing).
+  3. Per render: `let zone = SyntheticKind::Clock.tz.map(|tz| resolve_offset(tz, now)).unwrap_or(fixed_offset);` so DST is live; `render_key` becomes the displayed-second (clock) field index.
+- **Acceptance (done when):** content-aware goldens extending synth.rs:464 — `dual` differs from both `analog` and `digital` at the same instant and from the slate; a labelled clock differs from unlabelled; a `show_offset` Sydney clock's frame differs between a January and a July instant (badge text changed). Sample-based (`Nv12Image::sample`/`y_plane`), never an assertion-free hash. `overlay`-gated like the as-built tests.
+- **Risks/notes:** Keep the bake NV12/linear (inv #5/#8) — only text placement is new. Cost stays one bake/visible-field change (inv #9). Reference badge is display-only (ADR-T012, inv #1).
+- **Read first:** brief §2, §4, §5.2-5.3; `synth.rs:150-261` + `:464-556`; `subpass.rs:283-417`.
+
+### `[ ]` SYN-TIMER-1 — Pure timer math: target resolution, direction, at-target, format · effort: M · deps: SYN-CLOCK-1
+- **Goal:** All countdown/countup math, pure and deterministic (injected now + target + cadence): next-occurrence resolution, `displayed_seconds`, the at-target clamp policies, and the duration→string formats including frames from the cadence rational.
+- **Touches:** a new pure module (in `multiview-overlay` or `multiview-config`): `resolve_target(TimerTarget, now: WallTime) -> i64` (target Unix), `displayed_seconds(direction, target, now, on_target) -> i64`, `format_duration(seconds: i64, sub_ns: i64, cadence: Rational, fmt: TimerFormat, overrun: …) -> String`.
+- **Approach:**
+  1. `time_of_day`: resolve the next (down) / most-recent (up) occurrence of `HH:MM:SS` in the zone, across midnight and a DST gap (`02:30` on a spring-forward day → the realised instant); `recur_daily` re-arms.
+  2. `datetime`: parse `at` as a naive local datetime, attach the zone offset (DST-correct), → Unix.
+  3. `displayed_seconds` = `target-now` (down) / `now-target` (up); apply `on_target` (`hold` clamps at 0; `continue`/`zero_then_up` allow negative→overrun; `recur` re-arms). Decompose abs seconds → d/h/m/s; frames = `floor(sub_ns * num / (den * 1e9))` (integer, no float); `auto` drops leading zero units.
+- **Acceptance (done when):** golden: `14:29:55` vs target `14:30:00` ⇒ `00:00:05` (down); at-zero ⇒ `00:00:00`; one second past with `zero_then_up` ⇒ `+00:00:01`; `up` is the negative of `down` at the same instant; `recur_daily` re-arms to next day. Property (`proptest`): `format(decompose(n))` monotone in `n`, day field dropped iff zero, `_ff` frames in `0..fps`. Mutation: a flipped `Down`↔`Up`, a dropped clamp, an offset-sign error must fail. Guardrail: integer/`chrono` only, no float seconds (inv #3/#6).
+- **Risks/notes:** Midnight/DST edge cases are the footguns — test them explicitly. Frames only meaningful for `_ff`; keep it integer division against the `Rational`.
+- **Read first:** brief §3, §5.4; [ADR-0047](../decisions/ADR-0047.md) (Decision 4, alt F); `multiview-core::time::Rational`.
+
+### `[ ]` SYN-TIMER-2 — Config: `SourceKind::Timer` + target/direction/policy/format enums · effort: S · deps: SYN-TIMER-1, SYN-CLOCK-2
+- **Goal:** Add the `Timer` source variant + its enums per brief §6.2, internally tagged (target on `target`, flattened under `kind = "timer"`), validated and round-tripping.
+- **Touches:** `crates/multiview-config/src/schema.rs` (new `SourceKind::Timer`, `TimerTarget`, `TimerDirection`, `TimerOnTarget`, `TimerFormat`); `error.rs` (bad `at` string / unknown zone / `recur` without `recur_daily` → typed errors).
+- **Approach:**
+  1. Add exactly the shape in brief §6.2; `TimerTarget` is `#[serde(tag="target", rename_all="snake_case")]` `#[serde(flatten)]`ed into the variant (two distinct tag keys — `kind` and `target` — no clash, same pattern as `Source.kind` flatten, schema.rs:332).
+  2. Validate: `at` parses for the target kind; `on_target = recur` only with `time_of_day`+`recur_daily`; zone resolves (reuse SYN-CLOCK-2's validator).
+- **Acceptance (done when):** round-trip TOML+JSON for both targets + every enum; `kind="timer", target="time_of_day", at="14:30:00"` parses; invalid `at`/zone/`recur` combos are typed errors (no panic); `examples/*.toml` parse. Guardrail: tagged serde, no `untagged`, no `unwrap`.
+- **Risks/notes:** Double-tag (`kind` + `target`) is intentional — assert it in a test so a future refactor can't collapse them.
+- **Read first:** brief §6.2 (incl. the tag-collision note); conventions §5.
+
+### `[ ]` SYN-TIMER-3 — Renderer + generator: timer render + overrun + generator wiring · effort: M · deps: SYN-TIMER-2, SYN-CLOCK-3
+- **Goal:** Render the timer (centred mono duration run + optional overrun prefix/badge) and wire `SyntheticKind::Timer` into the per-tick `generator_loop`, re-rendering once per displayed field.
+- **Touches:** `crates/multiview-cli/src/synth.rs` (`render` arm for `Timer`, `SyntheticKind::Timer` resolved descriptor, `from_source_kind` mapping, `render_key` field index incl. `_ff` per-frame, `animated()==true`).
+- **Approach:**
+  1. Render: format the duration (SYN-TIMER-1) → centred `rasterize_run` (mono); when past target and styled overrun, prepend the prefix and draw the `OVER`/`ELAPSED` a11y badge run.
+  2. Generator: resolve "now" from the sampled wall clock each iteration (synth.rs:322), compute `displayed_seconds`, key on the displayed field (`_ff` keys on the frame index, others on the second); republish last-good on a render miss (synth.rs:332).
+- **Acceptance (done when):** content-aware goldens: `00:00:05` differs from `00:00:04`; the at-zero frame; an overrun frame differs from a pre-target frame (prefix/badge drew). Generator test: across simulated ticks a `down` timer's published frames change at field boundaries and hold otherwise. Invariants: #1 (never paces; PTS from the tick), #2 (holds last-good), #9 (one bake/field). `overlay`-gated.
+- **Risks/notes:** `_ff` is the one cadence-rate baker — keep it opt-in and cheap (one text run). Never read wall clock outside the generator (tests inject `now`).
+- **Read first:** brief §3.3, §4.2, §4.4; `synth.rs:107-344`.
+
+### `[ ]` SYN-CLOCK-UI — SPA + spec surface for the extended clock + timer · effort: L · deps: SYN-CLOCK-3, SYN-TIMER-3
+- **Goal:** Surface the new clock fields + the `timer` source in the WebUI source-kind picker/forms with an IANA zone dropdown, regenerate the OpenAPI/JSON-schema, ship an example, and document it in-app.
+- **Touches:** `web/src/` source-kind picker + forms (clock `face`/`timezone`/`label`/`show_offset`/`numerals`; timer target/direction/on_target/format/label); zone dropdown from `chrono_tz::TZ_VARIANTS` (exposed via a `/capabilities/timezones` endpoint or a generated list); `cargo xtask gen-openapi`; `examples/clock-timer.toml`; in-app docs/concepts page.
+- **Approach:**
+  1. Extend the generated API bindings (the SPA client is OpenAPI-generated); add the clock/timer forms following the existing source-form conventions + `.test.tsx` peers.
+  2. Populate the zone `<Combobox>` from the typed timezone list (don't hand-type IANA ids); show a live offset preview using the SYN-CLOCK-1 resolver via the API.
+  3. Ship `examples/clock-timer.toml` (a world-clock-wall + a show-countdown) mirroring `examples/synthetic-sources.toml`.
+- **Acceptance (done when):** component tests render the clock + timer forms and assert the zone dropdown + a forbidden combo (e.g. `recur` without `recur_daily`) is disabled/flagged; `tsc`/eslint/vitest green; OpenAPI regen committed; `examples/clock-timer.toml` parses in the example-validation test. UI-only — no engine-path code (inv #10).
+- **Risks/notes:** Keep the zone list server-sourced/generated, not duplicated in TS. WCAG 2.1 AA on the new forms.
+- **Read first:** brief §6.4, §9; conventions §6 (API) + §8 (frontend); `examples/synthetic-sources.toml`.
+
+
+---
+
+### Critical Files for Implementation
+- /workspaces/mosaic/crates/multiview-cli/src/synth.rs
+- /workspaces/mosaic/crates/multiview-config/src/schema.rs
+- /workspaces/mosaic/crates/multiview-overlay/src/clock.rs
+- /workspaces/mosaic/crates/multiview-compositor/src/overlay/subpass.rs
+- /workspaces/mosaic/examples/synthetic-sources.toml
 
 
 ## OUT — Output servers (RTSP, NDI)
