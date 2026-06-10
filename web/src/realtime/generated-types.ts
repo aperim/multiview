@@ -42,6 +42,58 @@ export interface AudioMeter {
   readonly track: number;
 }
 
+/** A per-GPU utilisation sample. Optional fields are absent where the vendor does not expose that signal. */
+export interface GpuMetrics {
+  /** Compute (graphics/CUDA) utilisation, 0.0-1.0. */
+  readonly compute_util: number;
+  /** Decoder (NVDEC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent). */
+  readonly decoder_util?: number;
+  /** Runtime-discovered concurrent encode-session ceiling (NVIDIA). */
+  readonly encoder_session_ceiling?: number;
+  /** DEVICE-WIDE active concurrent encode sessions (NVIDIA) across all processes. */
+  readonly encoder_sessions?: number;
+  /** Encoder (NVENC/QSV) ASIC utilisation, 0.0-1.0 (vendor-dependent). */
+  readonly encoder_util?: number;
+  /** Stable device identity (UUID where available, else an index). */
+  readonly id: string;
+  /** Total VRAM (bytes). */
+  readonly mem_total_bytes: number;
+  /** VRAM in use (bytes). */
+  readonly mem_used_bytes: number;
+  /** Human-readable device name, if known. */
+  readonly name?: string;
+  /** Our process's compute (SM) utilisation on this GPU, 0.0-1.0. */
+  readonly self_compute_util?: number;
+  /** Our process's decoder (NVDEC) utilisation, 0.0-1.0. */
+  readonly self_decoder_util?: number;
+  /** Encode sessions owned by our process on this GPU. */
+  readonly self_encoder_sessions?: number;
+  /** Our process's encoder (NVENC) utilisation, 0.0-1.0. */
+  readonly self_encoder_util?: number;
+  /** VRAM (bytes) attributed to our process on this GPU. */
+  readonly self_mem_used_bytes?: number;
+  readonly vendor: GpuVendor;
+}
+
+/** GPU/accelerator hardware vendor (selects which per-engine signals to expect). */
+export type GpuVendor = "nvidia" | "intel" | "amd" | "apple" | "other";
+
+/** Data body of `health.warning.raised` and `health.warning.cleared`. A richer sibling of `Alert`: the `code` is the stable dedupe key, and `remediation` carries the concrete fix. Capability-mismatch codes are latched build-time facts (raised once, cleared on reconfigure/restart). */
+export interface HealthWarning {
+  /** Whether the condition is currently active (raise vs clear). */
+  readonly active: boolean;
+  readonly code: WarningCode;
+  /** A clear, human-readable description of the condition. */
+  readonly message: string;
+  /** The concrete remediation — what the operator must do to fix it. */
+  readonly remediation: string;
+  readonly severity: WarningSeverity;
+  /** When the condition was first raised (engine monotonic nanoseconds). */
+  readonly since: number;
+  /** The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`). */
+  readonly subsystem: string;
+}
+
 /** Data body of `$hello`: the first server frame after auth. */
 export interface Hello {
   /** Default wire cadence when `rate_hz` is omitted from `$subscribe`. */
@@ -65,6 +117,19 @@ export interface InputConnection {
   /** Reconnect attempt counter, if reconnecting. */
   readonly attempt?: number;
   readonly state: LifecycleState;
+}
+
+/** Data body of the `input.streams` event: an input's full elementary-stream inventory (RT-3). */
+export interface InputStreams {
+  /** The owning input's configured source id. */
+  readonly input_id: string;
+  /** The StreamInventory (multiview_core::stream::StreamInventory): every elementary stream the input offers. */
+  readonly inventory: {
+    /** The input id the inventory is bound to, if known. */
+    readonly input_id?: unknown;
+    /** Every elementary stream, in container order. */
+    readonly streams: readonly Record<string, unknown>[];
+  };
 }
 
 /** Data body of `job.progress`; correlated to a REST command via the envelope `corr`. */
@@ -170,6 +235,22 @@ export interface Subscribed {
   readonly topic: string;
 }
 
+/** Data body of the `system.metrics` event: a high-rate whole-system sample (cpu / gpu / encoder-decoder). Numeric only; conflated at ~1-2 Hz (high-rate lane). */
+export interface SystemMetrics {
+  /** Whole-system CPU utilisation, 0.0-1.0. */
+  readonly cpu_util: number;
+  /** Per-GPU utilisation samples; empty on a GPU-free host. */
+  readonly gpus?: readonly GpuMetrics[];
+  /** Total host memory (bytes), if known. */
+  readonly mem_total_bytes?: number;
+  /** Host memory in use (bytes), if known. */
+  readonly mem_used_bytes?: number;
+  /** Aggregate program output rate (fps), if running. */
+  readonly program_fps?: number;
+  /** Effective wire sampling cadence (Hz). */
+  readonly sampled_hz: number;
+}
+
 /** Data body of `tally.state`: resolved tally lamp/UMD state for one element. */
 export interface TallyEvent {
   /** The resolved tally lamp/UMD state. */
@@ -190,6 +271,15 @@ export type TallyTarget =
   readonly name: string;
 };
 
+/** One tile's current lifecycle state inside a `tiles` `$snapshot`. The `id` is the same key the sparse `tile.state` deltas scope their envelope `id` with, so a snapshot-rebuilt cache and its delta patches address the same rows. */
+export interface TileSnapshotEntry {
+  /** The tile id (the bound source id in the run projection). */
+  readonly id: string;
+  /** The input bound to the tile, if known. */
+  readonly input?: string;
+  readonly state: LifecycleState;
+}
+
 /** Data body of the `tile.state` event: a tile lifecycle transition. */
 export interface TileState {
   readonly from: LifecycleState;
@@ -200,8 +290,22 @@ export interface TileState {
   readonly trigger: string;
 }
 
+/** Data body of the `tiles`-topic `$snapshot` frame: the full current per-tile lifecycle baseline sent once at connect (after `$hello`). A receiver MUST rebuild (replace) its tile state from it, never merge. */
+export interface TilesSnapshot {
+  /** The engine state sequence this baseline is current as of. */
+  readonly as_of_seq: number;
+  /** Every tile's current lifecycle state. */
+  readonly tiles: readonly TileSnapshotEntry[];
+}
+
 /** Data body of `$unsubscribe` (client→server): stop receiving topics. */
 export interface Unsubscribe {
   /** Topics to stop receiving. */
   readonly topics: readonly string[];
 }
+
+/** Stable catalog code of a health warning (kebab-case). `#[non_exhaustive]`: the catalog grows over time, so a client must treat an unknown code as a forward-compatible warning, not an error. */
+export type WarningCode = "gpu-present-no-vulkan-adapter";
+
+/** Severity of a health warning (sibling of AlertSeverity). */
+export type WarningSeverity = "info" | "warning" | "critical";
