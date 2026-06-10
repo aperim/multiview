@@ -57,7 +57,7 @@ Every edit is classified and surfaced **before apply** via `POST /v1/outputs/{id
 | Source | id | POST /v1/sources · GET /v1/sources/{id} | Inputs > New Source (ID, auto-suggested) | Hot | Immutable; renaming orphans bindings. |
 | Source | display_name | PATCH /v1/sources/{id} {display_name} | Source editor > General > Name | Hot | Cosmetic. |
 | Source | enabled | POST .../enable · POST .../disable · PATCH {enabled} | Row toggle; General > Enabled | Hot | Disable → tile to NO-SIGNAL; no output reset. |
-| Source | kind/protocol | PATCH {kind,...transport} | Protocol selector (dynamic form) | Hot (reconnect) | rtsp\|hls\|ts\|srt\|rtmp\|ndi\|file\|test. |
+| Source | kind/protocol | PATCH {kind,...transport} | Protocol selector (dynamic form) | Hot (reconnect) | rtsp\|hls\|ts\|srt\|rtmp\|ndi\|webrtc\|file\|test. |
 | Source | url/uri | PATCH {url} | URL field + ffprobe Test | Hot (reconnect) | Move secrets to secret_ref. |
 | Source | rtsp.ingest_backend | PATCH {rtsp.ingest_backend} | RTSP > Advanced > Ingest backend | Hot (reconnect) | ffmpeg\|retina (retina = TCP only). |
 | Source | rtsp.transport | PATCH {rtsp.transport} | RTSP > Transport radio | Hot (reconnect) | tcp\|udp\|udp_multicast\|prefer_tcp. |
@@ -84,6 +84,7 @@ Every edit is classified and surfaced **before apply** via `POST /v1/outputs/{id
 | Source | ndi.source_name | PATCH {ndi.name}; GET /v1/discovery/ndi | NDI > Source picker (live + manual) | Hot | Bind-by-name; offline card if unresolved. |
 | Source | ndi.receive_color_format | PATCH {ndi.color_format} | NDI > Color format | Hot (reconnect) | fastest\|best. |
 | Source | ndi.bandwidth_mode | PATCH {ndi.bandwidth} | NDI > Bandwidth | Hot | highest\|lowest (proxy). |
+| Source | webrtc.token/audio | PATCH {webrtc.token,webrtc.audio} | WebRTC (WHIP) > Bearer token + Accept audio; derived publish URL (copy button) | Hot (republish) | RFC 9725 ingest at POST /v1/whip/{source_id}; add/remove/edit classified like the other network sources (the publisher re-publishes; outputs untouched); configured-but-unpublished = NO_SIGNAL card (ADR-T014). |
 | Source | bars/solid/clock (synthetic) | PATCH {kind; solid.color; clock.face,twelve_hour,tz_offset_minutes} | Synthetic > Bars \| Solid (colour) \| Clock (face/12h/UTC offset) | Hot | In-process pure-Rust synthetic kinds; `test`=`bars` alias (ADR-0027). |
 | Source | file.path/loop | PATCH {file.path,file.loop} | File > Path + Loop | Hot (reconnect) | Slate/standby clip. |
 | Source.color_override | primaries | PATCH {color_override.primaries} | Color > Primaries (detected+override) | Hot | AXIS 1; auto = detection precedence. |
@@ -261,11 +262,15 @@ Every edit is classified and surfaced **before apply** via `POST /v1/outputs/{id
 | Container (TS) | continuity/PSI | PATCH .../container/ts {*} | Container > MPEG-TS > Continuity | Hot/Class-2 (PIDs) | Color in ES VUI only. |
 | Container (RTSP) | mount/transport/config-interval/shared | PATCH .../container/rtsp {*} | Container > RTSP | Hot | config_interval=-1 late joiners. |
 | Container (push) | url/auth/srt/rist | PATCH .../container/push {*} | Container > Push destination | Hot (reconnect) | SRT latency µs; key as secret. |
+| Container (webrtc) | max_viewers/token/audio | PATCH .../container/webrtc {max_viewers,token,audio} | Container > WebRTC (WHEP) > Viewer cap/Token/Audio | Hot | WHEP serve of the REAL program rendition at POST /v1/whep/{output_id} (encode-once route()+1); rendition must be H.264 + B-frames off (config-time validated); over max_viewers → 503 + Retry-After (ADR-0049). |
+| Container (whip push) | url/token/audio | PATCH .../container/whip {url,token,audio} | Container > WHIP push destination | Hot (reconnect) | RFC 9725 client publish; Bearer; follows 307/308 redirects (https-only, depth-capped); supervised reconnect like RTMP/SRT push (ADR-0049). |
 | Container (NDI) | sender_name/groups/color_format/clock | PATCH .../container/ndi {*} | Container > NDI | Hot | No CICP; convention. |
 | Container (file) | path/format/rotate/write_colr | PATCH .../container/file {*} | Container > File | Hot (path) | nclx colr. |
 | Output lifecycle | pinned summary + plan | GET .../pinned; POST .../plan | Banner; Pinned-params panel | RO/plan | Seamless\|reset-lite\|migration. |
 | Output lifecycle | controlled reset/migration | POST .../migrate {new_config,cutover} | Apply-with-restart wizard | Class-2 | Make-before-break. |
 | Output | config-as-code | GET .../config?format; PUT /v1/config; POST /v1/config/rollback | Config drawer; View as TOML | Hot/Class-2 | — |
+
+> **WebRTC `token` doctrine:** the `token` fields above (webrtc source, webrtc/whip-push containers) are plaintext config values in v1 — the same posture as url-embedded RTMP/SRT stream keys (returned to authorized readers, present in config export); they migrate together with those keys if/when a `secret_ref` indirection lands.
 
 ### 2.4 AUDIO (program bus + discrete tracks + routing matrix)
 
@@ -341,6 +346,8 @@ Covered fully in §2.2 (Layout) — overlays are first-class layers in the layou
 | Observability | alerts.active | GET .../alerts/active; WS | Dashboard > Alerts; bell | RO | — |
 | Observability | slo_dashboard | GET .../observability/slo; WS | Dashboard > Output Validity | RO | Zero-gap/PTS/TR101290. |
 | Observability | live_preview | GET/PUT .../observability/preview; WS /v1/ws/preview | Dashboard > Live Preview | Hot start/stop | Extra encode session. |
+| Preview (WHEP) | program/input/output focus sessions | POST/DELETE /v1/preview/program/whep · /v1/preview/inputs/{id}/whep · /v1/preview/outputs/{id}/whep | Monitoring program card; tile focus dialog; Outputs preview; layout-editor live preview | Hot start/stop | Sub-second WebRTC focus preview; FocusGate-capped, shed-first (ADR-P006); output scope labels real-vs-approx (ADR-P005). |
+| Preview | transport capabilities | GET /v1/preview/capabilities | Preview panes (transport auto-select; WHEP → JPEG fallback badge) | RO | {webrtc, scopes{program{whep,fidelity},inputs{whep},outputs{whep}}, fallback:"jpeg"}; drives the SPA fallback ladder (ADR-W020). |
 | Observability | tile_thumbnails | GET .../observability/tiles; WS /v1/ws/thumbnails | Dashboard > Tiles | RO | 1-5 Hz. |
 | Observability | audio_meters_ws | GET/PUT .../observability/metering; WS /v1/ws/meters | Dashboard > Audio Meters | Hot config | 10-25 Hz numeric. |
 | Output health | per-output health/metrics/preview | GET /v1/outputs/{id}/health; .../metrics; .../preview.jpg; WS | Outputs > Health panel + thumbnail | RO | Validity SLO. |

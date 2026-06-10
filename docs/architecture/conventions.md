@@ -61,13 +61,14 @@ off-by-default Cargo features** so the default `cargo check` builds the pure-Rus
 | `multiview-events` | Shared realtime **event types + versioned envelope** (used by engine, control, clients). | — |
 | `multiview-control` | The **axum** REST + WebSocket + SSE API: OpenAPI (utoipa+Scalar), auth, SQLite (sqlx), the **command-bus shell**, embedded SPA serving. | `openapi` (default), `embed-web` |
 | `multiview-preview` | Preview **taps** (input/program/output), the preview **encoder pool**, WHEP/MJPEG/snapshot endpoints. Strictly isolated from the program path. | `webrtc` |
+| `multiview-webrtc` | The shared **native WebRTC transport endpoint** (str0m): one dual-stack `[::]` UDP socket muxing **all** sessions (WHIP ingest, WHEP preview + output viewers, WHIP push), full-ICE with IPv6-first candidates, per-run DTLS cert, one bounded driver task + session GC. Default build is a pure shell; the native transport relocated here from `multiview-preview` (ADR-0048). | `native` |
 | `multiview-telemetry` | `tracing` + Prometheus metrics + health (`/livez`,`/readyz`). | — |
 | `multiview-cli` | Binary **`multiview`**: wires the engine + control plane; config load; run/validate subcommands. | aggregates feature flags |
 | `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint, etc.). | — |
 
 **Dependency direction:** `core` ← everything; leaf crates depend on `core` (+ `hal`, `ffmpeg`,
 `events` as needed); `engine` depends on the media crates; `control`/`preview` depend on `engine` +
-`events`; `cli` depends on all. No cycles.
+`events`; `webrtc` depends on `preview` + `input` (+ `core`); `cli` depends on all. No cycles.
 
 ---
 
@@ -81,8 +82,9 @@ Default features build a **pure-Rust, LGPL-clean, no-native-deps** check (CI gre
 - **Codecs licensing:** `gpl-codecs` (x264/x265 → makes the build GPL; **off by default**).
 - **NDI:** `ndi` (proprietary SDK; **off by default**, runtime-loaded; see §7).
 - **Subtitles:** `libass`.
-- **Web/API:** `openapi` (default), `embed-web` (embed the SPA), `webrtc` (WHEP preview).
-- **Umbrella presets (in `multiview-cli`):** `nvidia` = cuda+ffmpeg+wgpu; `apple` = videotoolbox+metal+ffmpeg; `linux-vaapi` = vaapi+qsv+ffmpeg+wgpu; `full` = everything non-GPL.
+- **Web/API:** `openapi` (default), `embed-web` (embed the SPA), `webrtc` (the pure WHEP/WHIP seams; native-free).
+- **WebRTC native transport:** `native` on `multiview-webrtc` (str0m ICE/DTLS/SRTP; off by default); in `multiview-cli`: `webrtc` (pure seams) and `webrtc-native` (= `webrtc` + `multiview-webrtc/native` + `ffmpeg`). `multiview-preview`'s former `webrtc-native` flag is **removed** — the native transport relocated to `multiview-webrtc` (ADR-0048).
+- **Umbrella presets (in `multiview-cli`):** `nvidia` = cuda+ffmpeg+wgpu+webrtc-native; `apple` = videotoolbox+metal+ffmpeg+webrtc-native; `linux-vaapi` = vaapi+qsv+ffmpeg+wgpu+webrtc-native; `full` = everything non-GPL (incl. webrtc-native).
 
 ---
 
