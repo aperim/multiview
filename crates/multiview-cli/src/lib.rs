@@ -50,6 +50,13 @@ pub mod outputs;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
+
+/// The ~1 Hz outbound presentation-epoch publisher (DEV-C1 / ADR-M010): one
+/// `WallClockRef` per program on the control WS (`timing.status`, conflated)
+/// plus the shared HLS-PDT cell, derived off the hot path from the run's
+/// tick-0 anchor and the disciplined wall clock. Never paces the tick loop
+/// (invariant #1).
+pub mod timing_status;
 pub mod validate;
 
 /// The overlay draw-data baker (feature `overlay`): builds the per-frame overlay

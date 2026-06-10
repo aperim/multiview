@@ -178,7 +178,11 @@ fn stamper_builds_the_sr_from_the_live_epoch() {
     assert_eq!(sr.ssrc, 0xDEAD_BEEF);
     assert_eq!(sr.ntp.seconds, 1_750_000_000 + 2_208_988_800);
     assert_eq!(sr.ntp.fraction, 0x4000_0000);
-    assert_eq!(sr.rtp_timestamp, 1_000 + 22_500, "0.25 s at 90 kHz = 22 500");
+    assert_eq!(
+        sr.rtp_timestamp,
+        1_000 + 22_500,
+        "0.25 s at 90 kHz = 22 500"
+    );
     assert_eq!(sr.packet_count, 7);
     assert_eq!(sr.octet_count, 700);
 
@@ -187,7 +191,10 @@ fn stamper_builds_the_sr_from_the_live_epoch() {
     let sr2 = stamper
         .report(1_750_000_001_000_000_000, 8, 800)
         .expect("epoch present");
-    assert_eq!(sr2.rtp_timestamp, 1_000, "the new anchor maps this wall to pts 0");
+    assert_eq!(
+        sr2.rtp_timestamp, 1_000,
+        "the new anchor maps this wall to pts 0"
+    );
 }
 
 #[test]
@@ -196,8 +203,12 @@ fn rtsp_server_sink_carries_the_stamper_seam() {
     // obtains epoch-stamped SRs from the same sink it drains packets from.
     let cell = SharedEpoch::new();
     cell.set(WallClockRef::new(1_750_000_000_000_000_000, 0, rate_ns()));
-    let sink = RtspServerSink::new("rtsp0", 8)
-        .with_sr_stamper(SrStamper::new(cell, 90_000, 0x0BAD_F00D, 0));
+    let sink = RtspServerSink::new("rtsp0", 8).with_sr_stamper(SrStamper::new(
+        cell,
+        90_000,
+        0x0BAD_F00D,
+        0,
+    ));
     let sr = sink
         .sender_report(1_750_000_000_500_000_000, 3, 333)
         .expect("stamper attached + epoch present");

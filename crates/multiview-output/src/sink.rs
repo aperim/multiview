@@ -47,6 +47,7 @@ use multiview_ffmpeg::{
     StreamCodecParameters, StreamKind, VideoEncodeTarget, VideoEncoder,
 };
 
+use crate::epoch::SharedEpoch;
 use crate::error::{Error, Result};
 use crate::hls::{LivePlaylist, MediaPlaylist, Segment, SegmentType};
 
@@ -1228,6 +1229,11 @@ enum PacketMuxKind {
         playlist_path: PathBuf,
         /// The bounded segment window (playlist length + on-disk segment count).
         window: usize,
+        /// The shared outbound presentation epoch (ADR-M010, DEV-C1): the
+        /// rolling playlist stamps each closed segment's
+        /// `EXT-X-PROGRAM-DATE-TIME` from `epoch.wall_at(segment first PTS)`.
+        /// An empty cell (sampler not anchored yet) stamps nothing.
+        epoch: SharedEpoch,
     },
 }
 
@@ -1287,6 +1293,7 @@ impl PacketMuxSink {
         prefix: impl Into<String>,
         playlist_path: impl Into<PathBuf>,
         window: usize,
+        epoch: SharedEpoch,
     ) -> Self {
         Self {
             kind: PacketMuxKind::SegmentLive {
@@ -1294,6 +1301,7 @@ impl PacketMuxSink {
                 prefix: prefix.into(),
                 playlist_path: playlist_path.into(),
                 window,
+                epoch,
             },
         }
     }
@@ -1378,6 +1386,7 @@ impl PacketMuxSink {
                 prefix,
                 playlist_path,
                 window,
+                epoch,
             } => {
                 let mut state = SegmentState::new(
                     StreamSeed::Params(video.params),
@@ -1387,8 +1396,11 @@ impl PacketMuxSink {
                     prefix,
                 );
                 // The rolling-live driver: each closed segment is published into a
-                // windowed `.m3u8` on disk (atomic) and the evicted `.ts` pruned.
-                state.live = Some(LivePlaylist::new(playlist_path.clone(), *window));
+                // windowed `.m3u8` on disk (atomic) and the evicted `.ts` pruned,
+                // PDT-stamped from the shared outbound epoch (ADR-M010).
+                let mut live = LivePlaylist::new(playlist_path.clone(), *window);
+                live.set_epoch_source(epoch.clone());
+                state.live = Some(live);
                 let driven = state.drive_from_packets(source);
                 finish_segments(state, driven, video.time_base)
                     .map(|result| PacketMuxOutcome::Segment(Box::new(result)))
@@ -1729,7 +1741,14 @@ impl<'a> SegmentState<'a> {
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)
                 .ok_or_else(|| Error::Output("segment path has no file name".to_owned()))?;
-            live.push_closed_segment(uri.to_owned(), segment.path.clone(), duration)?;
+            // The segment's first-sample PTS on the tick-derived internal ns
+            // timeline — the exact input the ADR-M010 epoch maps to wall time.
+            live.push_closed_segment(
+                uri.to_owned(),
+                segment.path.clone(),
+                duration,
+                segment.start_pts.as_nanos(),
+            )?;
         }
         self.done.push((segment.path, duration));
         Ok(())

@@ -309,6 +309,24 @@ async fn run_pipeline_until_ctrl_c(
         None,
     );
 
+    // DEV-C1 (ADR-M010): the ~1 Hz outbound presentation-epoch publisher — one
+    // `WallClockRef` per program as conflated `timing.status` on the control WS
+    // plus the shared HLS-PDT cell every HLS sink stamps from. It binds lazily
+    // to the run's tick-0 anchor (published when the clock seeds) and never
+    // touches the engine (inv #1/#10); it self-stops on the run's StopSignal.
+    let timing_cfg = config.timing.clone().unwrap_or_default();
+    let timing_task = multiview_cli::timing_status::spawn(
+        Arc::clone(&publisher),
+        pipeline.epoch_anchor_slot(),
+        pipeline.shared_epoch(),
+        multiview_cli::timing_status::TimingStatusOptions {
+            stream_id: multiview_config::ProgramId::MAIN.to_owned(),
+            link_offset_ns: timing_cfg.link_offset_ns(),
+            ptp_phc: timing_cfg.ptp_phc.clone(),
+        },
+        stop.clone(),
+    );
+
     // SA-0 (ADR-0035): at build time, off the output-clock thread (the clock is
     // not yet constructed → inv #1), cross-check the wgpu compositor adapter
     // against discovered hardware. If a real GPU is present but compositing
@@ -339,10 +357,11 @@ async fn run_pipeline_until_ctrl_c(
         drive_main_program_in_set(pipeline, cadence, &stop, &publisher, &preview_slot, drain)
             .await?;
 
-    // The pipeline loop returned; stop the metrics poller (it also self-stops on
-    // the StopSignal within one sample period) and tear down the live-source hub
-    // (it stops + joins every runtime producer).
+    // The pipeline loop returned; stop the metrics + timing pollers (both also
+    // self-stop on the StopSignal within one sample period) and tear down the
+    // live-source hub (it stops + joins every runtime producer).
     metrics_task.abort();
+    timing_task.abort();
     if let Some(hub) = live_hub {
         hub.shutdown();
     }
@@ -553,15 +572,34 @@ async fn run_software_until_ctrl_c(
         None,
     );
 
+    // DEV-C1 (ADR-M010): the outbound presentation epoch publishes on the
+    // software path too — `timing.status` per program on the same drop-oldest
+    // broadcast. The software run has no HLS sinks, so its epoch cell has no
+    // PDT consumer; the WS surface is identical to the full-pipeline path.
+    let timing_cfg = config.timing.clone().unwrap_or_default();
+    let timing_task = multiview_cli::timing_status::spawn(
+        Arc::clone(&publisher),
+        engine.epoch_anchor_slot(),
+        multiview_output::SharedEpoch::new(),
+        multiview_cli::timing_status::TimingStatusOptions {
+            stream_id: multiview_config::ProgramId::MAIN.to_owned(),
+            link_offset_ns: timing_cfg.link_offset_ns(),
+            ptp_phc: timing_cfg.ptp_phc.clone(),
+        },
+        stop.clone(),
+    );
+
     let report = engine
         .run_until_stopped_with_control(&stop, publisher.as_ref(), drain)
         .await
         .context("headless run until Ctrl-C")?;
 
-    // The engine loop returned; stop the metrics poller (it also self-stops on the
-    // StopSignal within one sample period), tear down the live-source hub (it
-    // stops + joins every runtime producer), and bring the control server down.
+    // The engine loop returned; stop the metrics + timing pollers (both also
+    // self-stop on the StopSignal within one sample period), tear down the
+    // live-source hub (it stops + joins every runtime producer), and bring the
+    // control server down.
     metrics_task.abort();
+    timing_task.abort();
     if let Some(hub) = live_hub {
         hub.shutdown();
     }

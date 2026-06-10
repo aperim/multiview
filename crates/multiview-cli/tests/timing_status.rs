@@ -76,8 +76,7 @@ fn publish_once_emits_a_correct_timing_status_and_mirrors_the_hls_epoch() {
     let hls_epoch = SharedEpoch::new();
     let mut s = sampler(0, 1_781_049_600_000_000_000);
 
-    let status =
-        timing_status::publish_once(&mut s, &publisher, &hls_epoch, "main", 150_000_000);
+    let status = timing_status::publish_once(&mut s, &publisher, &hls_epoch, "main", 150_000_000);
 
     let evt = sub.try_recv().expect("one published event");
     let Event::TimingStatus(ts) = &*evt.event else {

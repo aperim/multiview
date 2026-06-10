@@ -33,8 +33,8 @@ use proptest::prelude::*;
 /// A policy with easy-to-reason-about thresholds for the tests.
 fn policy() -> EpochPolicy {
     EpochPolicy {
-        deadband_ns: 2_000_000,        // 2 ms
-        slew_max_ns: 5_000_000,        // 5 ms per observation
+        deadband_ns: 2_000_000,         // 2 ms
+        slew_max_ns: 5_000_000,         // 5 ms per observation
         step_threshold_ns: 250_000_000, // 250 ms
     }
 }
@@ -54,7 +54,11 @@ fn tracker_anchors_on_the_first_observation() {
     assert_eq!(t.current(), None, "no epoch before the first observation");
     let c = candidate(1_750_000_000_000_000_000);
     assert_eq!(t.observe(c), EpochUpdate::Anchored);
-    assert_eq!(t.current(), Some(c), "the first observation anchors exactly");
+    assert_eq!(
+        t.current(),
+        Some(c),
+        "the first observation anchors exactly"
+    );
 }
 
 #[test]
@@ -66,7 +70,11 @@ fn tracker_holds_inside_the_deadband() {
     // must NOT move (consumers present against a stable map).
     let jittered = candidate(1_750_000_000_001_500_000);
     assert_eq!(t.observe(jittered), EpochUpdate::Held);
-    assert_eq!(t.current(), Some(c), "the epoch must hold inside the deadband");
+    assert_eq!(
+        t.current(),
+        Some(c),
+        "the epoch must hold inside the deadband"
+    );
 }
 
 #[test]
@@ -221,7 +229,10 @@ fn sampler_derives_the_anchor_exactly_from_the_system_clock() {
     let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), sampler_config());
     let status = s.sample_once();
     assert_eq!(status.epoch.rate, EPOCH_RATE);
-    assert_eq!(status.epoch.media_at_anchor, 0, "anchored at tick 0 (pts 0)");
+    assert_eq!(
+        status.epoch.media_at_anchor, 0,
+        "anchored at tick 0 (pts 0)"
+    );
     assert_eq!(
         status.epoch.wall_at(0),
         1_700_000_000_000_000_000 - 3_000_000_000,
@@ -243,8 +254,8 @@ fn sampler_prefers_a_disciplined_ptp_reference_and_applies_its_offset() {
     // local - master = +250 ns: the local clock is ahead, so the disciplined
     // wall estimate is local - offset.
     handle.publish(ptp_status(LockState::Locked, 250));
-    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), sampler_config())
-        .with_ptp(handle);
+    let mut s =
+        EpochSampler::new(2_000_000_000, wall, FakeNtp(None), sampler_config()).with_ptp(handle);
     let status = s.sample_once();
     assert_eq!(status.source, ClockSource::Ptp);
     assert_eq!(status.quality, ClockQuality::Locked);

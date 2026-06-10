@@ -42,6 +42,11 @@ area = "a"
 fit = "contain"
 [cells.source]
 input_id = "in_a"
+
+[[outputs]]
+kind = "rtsp_server"
+mount = "/multiview"
+codec = "h264"
 "##;
 
 #[test]
@@ -58,9 +63,7 @@ fn timing_block_is_optional_and_defaults_apply() {
 
 #[test]
 fn timing_block_parses_from_toml() {
-    let doc = format!(
-        "{BASE}\n[timing]\nlink_offset_ms = 200\nptp_phc = \"/dev/ptp0\"\n"
-    );
+    let doc = format!("{BASE}\n[timing]\nlink_offset_ms = 200\nptp_phc = \"/dev/ptp0\"\n");
     let cfg = MultiviewConfig::load_from_toml(&doc).unwrap();
     cfg.validate().expect("a 200 ms link offset is valid");
     let timing = cfg.timing.expect("timing block present");
@@ -87,7 +90,9 @@ fn an_absurd_link_offset_is_rejected() {
     // (the same bound rationale as the sync-group offset cap).
     let doc = format!("{BASE}\n[timing]\nlink_offset_ms = 10001\n");
     let cfg = MultiviewConfig::load_from_toml(&doc).unwrap();
-    let err = cfg.validate().expect_err("a 10+ second link offset must fail");
+    let err = cfg
+        .validate()
+        .expect_err("a 10+ second link offset must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("link_offset"),

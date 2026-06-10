@@ -190,6 +190,13 @@ display-kms = ["multiview-output/display-kms"]
 # elsewhere / on a denied read the badge honestly shows the assumed default.
 ntp = ["multiview-engine/ntp"]
 
+# Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline
+# the outbound presentation epoch's wall estimate (DEV-C1 / ADR-M010): PTP then
+# outranks the system clock while disciplined (ADR-T012). Off by default; pulls
+# the engine's `ptp` feature (safe `rustix` PHC reads -- no unsafe in this crate).
+# Compile-verified only in CI (no PTP NIC); PTP NEVER paces the tick loop.
+ptp = ["multiview-engine/ptp"]
+
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once
 # (LGPL `mpeg2video` by default) -> fan out to the file + HLS output sinks. Wires

@@ -16,7 +16,9 @@
 
 use multiview_core::time::Rational;
 use multiview_core::wallclock::WallClockRef;
-use multiview_output::hls::{format_program_date_time, LivePlaylist, MediaPlaylist, Segment, SegmentType};
+use multiview_output::hls::{
+    format_program_date_time, LivePlaylist, MediaPlaylist, Segment, SegmentType,
+};
 use multiview_output::SharedEpoch;
 
 /// The outbound-epoch media timebase: output-PTS nanoseconds.
@@ -137,15 +139,21 @@ fn live_playlist_stamps_every_segment_from_the_shared_epoch() {
 
     let manifest = std::fs::read_to_string(&playlist_path).expect("published manifest");
     assert!(
-        manifest.contains("#EXT-X-PROGRAM-DATE-TIME:2026-06-10T00:00:00.000Z\n#EXTINF:2.000,\nseg0.ts\n"),
+        manifest.contains(
+            "#EXT-X-PROGRAM-DATE-TIME:2026-06-10T00:00:00.000Z\n#EXTINF:2.000,\nseg0.ts\n"
+        ),
         "segment 0 PDT must be the exact epoch instant, got:\n{manifest}"
     );
     assert!(
-        manifest.contains("#EXT-X-PROGRAM-DATE-TIME:2026-06-10T00:00:02.000Z\n#EXTINF:2.000,\nseg1.ts\n"),
+        manifest.contains(
+            "#EXT-X-PROGRAM-DATE-TIME:2026-06-10T00:00:02.000Z\n#EXTINF:2.000,\nseg1.ts\n"
+        ),
         "segment 1 PDT = wall_at(2s), got:\n{manifest}"
     );
     assert!(
-        manifest.contains("#EXT-X-PROGRAM-DATE-TIME:2026-06-10T00:00:04.000Z\n#EXTINF:2.000,\nseg2.ts\n"),
+        manifest.contains(
+            "#EXT-X-PROGRAM-DATE-TIME:2026-06-10T00:00:04.000Z\n#EXTINF:2.000,\nseg2.ts\n"
+        ),
         "segment 2 PDT = wall_at(4s), got:\n{manifest}"
     );
 }
@@ -176,10 +184,11 @@ fn live_playlist_with_an_empty_epoch_cell_emits_no_pdt_until_set() {
     // 1 Hz sampler has not yet anchored) — never a fabricated wall time.
     let p0 = dir.path().join("seg0.ts");
     std::fs::write(&p0, b"x").expect("segment file");
-    live.push_closed_segment("seg0.ts", p0, 2.0, 0).expect("publish");
-    assert!(
-        !std::fs::read_to_string(&playlist_path).expect("manifest").contains("PROGRAM-DATE-TIME")
-    );
+    live.push_closed_segment("seg0.ts", p0, 2.0, 0)
+        .expect("publish");
+    assert!(!std::fs::read_to_string(&playlist_path)
+        .expect("manifest")
+        .contains("PROGRAM-DATE-TIME"));
 
     // Once the epoch lands, subsequent segments are stamped.
     epoch.set(WallClockRef::new(1_781_049_600_000_000_000, 0, rate_ns()));
