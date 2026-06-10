@@ -19,8 +19,7 @@ use std::sync::Arc;
 
 use multiview_preview::whep::transport::{
     sample_feed, DtlsFingerprint, DtlsSetup, EncodedSample, PreviewMediaSource, SampleFeed,
-    SampleKind, SampleSink, SessionHandle, SessionId, SessionState, TransportAnswer,
-    WhepTransport,
+    SampleKind, SampleSink, SessionHandle, SessionId, SessionState, TransportAnswer, WhepTransport,
 };
 use multiview_preview::whep::{PreviewCodec, WhepSession};
 use multiview_preview::AccessScope;
