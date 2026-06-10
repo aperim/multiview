@@ -173,16 +173,11 @@ async fn sse_connect_without_engine_tiles_sends_only_hello() {
     // Read the first chunk(s): $hello arrives immediately; give the (absent)
     // tiles frame a short window to show up before asserting it did not.
     let deadline = std::time::Duration::from_millis(500);
-    loop {
-        match tokio::time::timeout(deadline, body.frame()).await {
-            Ok(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref() {
-                    text.push_str(&String::from_utf8_lossy(data));
-                }
-            }
-            // Timed out (no more connect-time frames) or the stream yielded
-            // nothing further: stop collecting.
-            _ => break,
+    // Collect until a timeout (no more connect-time frames) or the stream
+    // yields nothing further.
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout(deadline, body.frame()).await {
+        if let Some(data) = frame.data_ref() {
+            text.push_str(&String::from_utf8_lossy(data));
         }
     }
     assert_eq!(

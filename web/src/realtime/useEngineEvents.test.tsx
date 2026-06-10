@@ -34,7 +34,7 @@ class FakeWebSocket {
 
   /** Deliver a raw text frame as the server would. */
   emit(text: string): void {
-    this.onmessage?.({ data: text } as MessageEvent<unknown>);
+    this.onmessage?.(new MessageEvent<unknown>('message', { data: text }));
   }
 }
 

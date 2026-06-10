@@ -67,7 +67,11 @@ fn tiles_snapshot_wire_shape_matches_realtime_md() {
     assert_eq!(v["data"]["tiles"][1]["state"], json!("NO_SIGNAL"));
     // An absent input is omitted, not serialized as null.
     assert!(
-        v["data"]["tiles"][1].as_object().unwrap().get("input").is_none(),
+        v["data"]["tiles"][1]
+            .as_object()
+            .unwrap()
+            .get("input")
+            .is_none(),
         "a None input must be omitted from the wire entry"
     );
 }
@@ -97,7 +101,8 @@ fn asyncapi_document_declares_the_tiles_snapshot() {
         "components.schemas must declare TilesSnapshot"
     );
     assert!(
-        doc.pointer("/components/schemas/TileSnapshotEntry").is_some(),
+        doc.pointer("/components/schemas/TileSnapshotEntry")
+            .is_some(),
         "components.schemas must declare TileSnapshotEntry"
     );
     let one_of = doc

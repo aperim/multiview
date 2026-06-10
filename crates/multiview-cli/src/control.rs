@@ -231,6 +231,50 @@ pub fn insert_input_fragment(
     obj.insert("inputs".to_owned(), fragment.clone());
 }
 
+/// Fold each source's current lifecycle state into the conflated engine-state
+/// snapshot blob as `tiles: [{ "id", "state" }, …]`, sorted by id, using the
+/// SAME [`multiview_events::LifecycleState`] wire strings the `tile.state`
+/// events carry (`LIVE`/`STALE`/`RECONNECTING`/`NO_SIGNAL`).
+///
+/// The control plane reads this fragment back out at client connect to emit
+/// the `tiles` `$snapshot` baseline (realtime-api §5), so a fresh page shows
+/// the current per-tile state without waiting for the next sparse delta.
+///
+/// Per-tick cost: one small Vec build + sort over the source map (tiles are
+/// few) into the wait-free, conflated latest-state slot — never a channel a
+/// client can fill (inv #10). An empty map still inserts `tiles: []` so a
+/// connected client rebuilds to an EMPTY cache, never a stale one. A
+/// non-object `snapshot` is left unchanged (defensive — the caller always
+/// passes the base [`state_snapshot`] blob).
+pub fn fold_tile_states<S: std::hash::BuildHasher>(
+    snapshot: &mut EngineStateSnapshot,
+    source_states: &std::collections::HashMap<String, multiview_core::traits::SourceState, S>,
+) {
+    let Some(obj) = snapshot.as_object_mut() else {
+        return;
+    };
+    // Sort by id: HashMap iteration order is non-deterministic and the wire
+    // (and golden tests) must not be.
+    let mut entries: Vec<(&str, multiview_core::traits::SourceState)> = source_states
+        .iter()
+        .map(|(id, &state)| (id.as_str(), state))
+        .collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let tiles: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|(id, state)| {
+            // `LifecycleState` is a plain unit-variant enum: serialising it is
+            // infallible in practice; the guardrails forbid `unwrap`, so a
+            // (never-occurring) fault degrades to a `null` state the control
+            // plane skips rather than panicking on the publish path.
+            let state = serde_json::to_value(multiview_events::LifecycleState::from(state))
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::json!({ "id": id, "state": state })
+        })
+        .collect();
+    obj.insert("tiles".to_owned(), serde_json::Value::Array(tiles));
+}
+
 /// Build one `input.streams` realtime event per input from its [`StreamInventory`]
 /// (RT-3): the delta clients see when an input's inventory first appears or
 /// changes on re-probe.
@@ -1257,8 +1301,14 @@ input_id = "in_b"
     #[test]
     fn fold_tile_states_adds_sorted_lifecycle_tiles() {
         let mut states = std::collections::HashMap::new();
-        states.insert("zeta".to_owned(), multiview_core::traits::SourceState::NoSignal);
-        states.insert("alpha".to_owned(), multiview_core::traits::SourceState::Live);
+        states.insert(
+            "zeta".to_owned(),
+            multiview_core::traits::SourceState::NoSignal,
+        );
+        states.insert(
+            "alpha".to_owned(),
+            multiview_core::traits::SourceState::Live,
+        );
         states.insert(
             "mid".to_owned(),
             multiview_core::traits::SourceState::Reconnecting,
