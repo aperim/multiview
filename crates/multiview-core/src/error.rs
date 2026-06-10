@@ -33,9 +33,33 @@ pub enum Error {
     /// A configuration or template-validation error.
     #[error("config error: {0}")]
     Config(String),
-    /// Functionality not yet implemented in this scaffold.
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
+    /// An audio-pipeline failure: per-input decode/resample/mix/route or EBU
+    /// R128 metering. The audio stage ([`multiview-audio`]) is first-class
+    /// alongside video decode/encode, so it owns a dedicated arm rather than
+    /// folding into [`Error::Config`].
+    ///
+    /// [`multiview-audio`]: https://docs.rs/multiview-audio
+    #[error("audio error: {0}")]
+    Audio(String),
+    /// A hardware-abstraction / backend-selection failure: capability detection,
+    /// per-stage backend negotiation, or admission against an engine budget
+    /// (the inputs to the planner in `multiview-hal`). Distinct from
+    /// [`Error::Config`] (the operator's request was structurally valid; the
+    /// host simply cannot satisfy it as asked).
+    #[error("backend error: {0}")]
+    Backend(String),
+    /// A bounded operation exceeded its deadline (e.g. a GPU readback, a
+    /// device-probe, or a graceful-drain wait that is given a finite timeout so
+    /// it can never block the data plane forever — safety rule #1). Recoverable:
+    /// callers retry, fall back, or hold last-good rather than treating it as a
+    /// permanent fault.
+    #[error("operation timed out: {0}")]
+    Timeout(String),
+    /// An operation was cancelled before completing — typically a controlled
+    /// shutdown or a reconfiguration that superseded an in-flight request. The
+    /// payload names what was cancelled; it is not a failure of the work itself.
+    #[error("operation cancelled: cancelled during {0}")]
+    Cancelled(String),
 }
 
 #[cfg(test)]
