@@ -100,18 +100,28 @@ impl RetentionWindow {
 
 /// Why the resource-adaptive controller shed load rather than holding/migrating.
 ///
-/// Mirrors `multiview_telemetry::placement::SuppressReason` and the engine's
-/// `ShedReason` as a self-contained value (retention stays a leaf — it depends on
-/// no engine type), so the CONSPECT feed maps the engine's reason onto this.
+/// Mirrors `multiview_telemetry::placement::SuppressReason`, the engine's
+/// `multiview_engine::placement::ShedReason`, and the wire
+/// `multiview_events::ShedReason` as a self-contained value (retention stays a
+/// leaf — it depends on no engine/events type), so the CONSPECT feed maps the
+/// wire reason onto this. `#[non_exhaustive]` so a future reason is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ShedReason {
     /// The overloaded pipeline is pinned to its device and cannot migrate.
     Pinned,
+    /// The pipeline feeds a local display sink whose framebuffer must live on the
+    /// connector-owning GPU (ADR-0044 §3), so composite may not migrate off it —
+    /// the only relief is a local shed.
+    DisplayBound,
     /// No materially-better home exists; moving would not cure the imbalance.
     NoBetterHome,
     /// A better home exists but cooldown / per-GPU budget forbids moving now.
     AntiStorm,
+    /// The encode/egress stage could not keep up at the output cadence, so a
+    /// composited frame was shed (drop-on-overload) rather than blocking the
+    /// output clock (invariants #1 + #10) — the real live shed today.
+    EncoderOverload,
 }
 
 impl ShedReason {
@@ -120,8 +130,10 @@ impl ShedReason {
     pub const fn label(self) -> &'static str {
         match self {
             ShedReason::Pinned => "pinned",
+            ShedReason::DisplayBound => "display_bound",
             ShedReason::NoBetterHome => "no_better_home",
             ShedReason::AntiStorm => "anti_storm",
+            ShedReason::EncoderOverload => "encoder_overload",
         }
     }
 }

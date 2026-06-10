@@ -319,6 +319,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "payload": { "$ref": "#/components/schemas/Alert" }
     }));
     map.insert("HealthWarning".to_owned(), health_warning_message());
+    map.insert("ShedLoad".to_owned(), shed_load_message());
     map.insert("InputConnection".to_owned(), json!({
         "name": "InputConnection",
         "title": "Input source connection state change",
@@ -405,6 +406,28 @@ fn health_warning_message() -> Value {
         ),
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/HealthWarning" }
+    })
+}
+
+/// The `shed.load` `AsyncAPI` message definition. Factored out so the
+/// data-events builder stays within the line budget.
+fn shed_load_message() -> Value {
+    json!({
+        "name": "ShedLoad",
+        "title": "Resource-adaptive shed-load decision",
+        "summary": "The engine shed work to relieve sustained overload (shed.load on topic `alerts`).",
+        "description": concat!(
+            "A discrete, lossless degradation-signal event (invariant #9): the ",
+            "engine relieved sustained overload by shedding work rather than ",
+            "blocking the output clock (invariants #1 + #10). The `reason` says ",
+            "why a shed was chosen over hold/migrate; `scope` says what was shed ",
+            "(program / a specific input / a shared resource); `level` is the ",
+            "degradation-ladder rung after the shed and `dropped` the cumulative ",
+            "frames/units shed. The consent-independent retention store records ",
+            "these for the §7.2 support bundle (ADR-0052).",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/ShedLoad" }
     })
 }
 
@@ -678,6 +701,9 @@ fn core_event_schemas() -> Value {
         "WarningSeverity": warning_severity_schema(),
         "WarningCode": warning_code_schema(),
         "HealthWarning": health_warning_schema(),
+        "ShedReason": shed_reason_schema(),
+        "ShedScope": shed_scope_schema(),
+        "ShedLoad": shed_load_schema(),
         "InputConnection": input_connection_schema(),
         "InputStreams": input_streams_schema(),
         "JobProgress": job_progress_schema(),
@@ -1044,6 +1070,81 @@ fn health_warning_schema() -> Value {
             "active": {
                 "type": "boolean",
                 "description": "Whether the condition is currently active (raise vs clear)."
+            }
+        }
+    })
+}
+
+fn shed_reason_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": concat!(
+            "Why the resource-adaptive controller shed load rather than holding ",
+            "or migrating the pipeline (invariant #9). Mirrors the engine's ",
+            "`ShedReason`; additive + non-exhaustive (ADR-RT002/RT003).",
+        ),
+        "enum": ["pinned", "display_bound", "no_better_home", "anti_storm", "encoder_overload"]
+    })
+}
+
+fn shed_scope_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "What a shed-load decision applied to (tagged by `kind`).",
+        "required": ["kind"],
+        // AsyncAPI 3.0 Schema Object: `discriminator` is the property NAME.
+        "discriminator": "kind",
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "type": "string", "const": "program" }
+                },
+                "description": "The shed touched the whole-program encode/egress path (a composited frame was dropped)."
+            },
+            {
+                "type": "object",
+                "required": ["kind", "id"],
+                "properties": {
+                    "kind": { "type": "string", "const": "input" },
+                    "id": { "type": "string", "description": "The configured input/source id the shed degraded." }
+                },
+                "description": "The shed degraded a specific input/tile (cheapest-impact-first ladder)."
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "type": "string", "const": "shared" }
+                },
+                "description": "The shed degraded a shared resource (e.g. a preview/encode pool)."
+            }
+        ]
+    })
+}
+
+fn shed_load_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of the `shed.load` event: a resource-adaptive shed-load ",
+            "decision (invariant #9). The consent-independent retention store ",
+            "records these for the §7.2 support bundle (ADR-0052).",
+        ),
+        "required": ["reason", "scope", "level", "dropped"],
+        "properties": {
+            "reason": { "$ref": "#/components/schemas/ShedReason" },
+            "scope": { "$ref": "#/components/schemas/ShedScope" },
+            "level": {
+                "type": "integer",
+                "format": "uint32",
+                "description": "The degradation-ladder level after the shed (0 = full quality)."
+            },
+            "dropped": {
+                "type": "integer",
+                "format": "uint64",
+                "description": "Cumulative frames/units shed under this condition at the time of the event."
             }
         }
     })
