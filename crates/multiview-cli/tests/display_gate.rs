@@ -13,11 +13,17 @@ use multiview_cli::outputs::ensure_display_outputs_supported;
 use multiview_config::MultiviewConfig;
 
 fn config_with_display_output() -> MultiviewConfig {
-    let doc = r#"
+    let doc = r##"
+schema_version = 1
+
 [canvas]
 width = 640
 height = 360
 fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
 
 [layout]
 kind = "preset"
@@ -41,7 +47,7 @@ connector = "DP-1"
 kind = "hls"
 path = "/tmp/x.m3u8"
 codec = "mpeg2video"
-"#;
+"##;
     let cfg = MultiviewConfig::load_from_toml(doc).expect("document parses");
     cfg.validate().expect("document validates");
     cfg
@@ -73,11 +79,17 @@ fn display_output_passes_the_gate_with_the_feature() {
 
 #[test]
 fn non_display_outputs_always_pass_the_gate() {
-    let doc = r#"
+    let doc = r##"
+schema_version = 1
+
 [canvas]
 width = 640
 height = 360
 fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
 
 [layout]
 kind = "preset"
@@ -97,7 +109,7 @@ input_id = "in_a"
 kind = "hls"
 path = "/tmp/x.m3u8"
 codec = "mpeg2video"
-"#;
+"##;
     let cfg = MultiviewConfig::load_from_toml(doc).expect("document parses");
     ensure_display_outputs_supported(&cfg.outputs).expect("no display outputs => always fine");
 }

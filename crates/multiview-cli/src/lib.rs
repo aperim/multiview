@@ -41,6 +41,11 @@
 pub mod capability_warn;
 pub mod cli;
 pub mod control;
+/// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
+/// `display` output must FAIL a non-`display-kms` build with a clear error —
+/// never be silently skipped. Always compiled, so the default build tests the
+/// rejection path and a `display-kms` build tests the acceptance path.
+pub mod outputs;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
