@@ -110,6 +110,121 @@ codec = "h264"
 }
 
 #[test]
+fn clock_advisory_warnings_are_surfaced_in_the_validate_report() {
+    // A clock that sets BOTH `timezone` (IANA, authoritative) and a non-zero
+    // `tz_offset_minutes` is legal but redundant: `Source::clock_warnings()`
+    // reports the ignored offset. That advisory must reach the operator — the
+    // rendered validate report carries it as a WARN line (the config still
+    // validates OK).
+    let toml = r##"
+schema_version = 1
+
+[canvas]
+width = 1280
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+
+[[sources]]
+id = "clock_syd"
+kind = "clock"
+timezone = "Australia/Sydney"
+tz_offset_minutes = 600
+
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "clock_syd"
+
+[[outputs]]
+kind = "rtsp_server"
+mount = "/multiview"
+codec = "h264"
+"##;
+
+    let dir = tempdir();
+    let path = dir.join("clock-both.toml");
+    fs::write(&path, toml).expect("write temp config");
+
+    let report = validate_config(&path).expect("validate_config returns a report");
+    assert!(
+        report.is_ok(),
+        "a both-present clock is legal (timezone wins); got: {report:?}"
+    );
+    let rendered = report.render();
+    assert!(
+        rendered.contains("WARN"),
+        "the report must carry the advisory as a WARN line; got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("tz_offset_minutes") && rendered.contains("clock_syd"),
+        "the warning must name the source and the ignored field; got:\n{rendered}"
+    );
+}
+
+#[test]
+fn clock_without_conflicts_renders_no_warn_lines() {
+    // The inverse guard: a clean clock (timezone only) must NOT emit WARN lines,
+    // so the advisory path cannot fire spuriously.
+    let toml = r##"
+schema_version = 1
+
+[canvas]
+width = 1280
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+
+[[sources]]
+id = "clock_syd"
+kind = "clock"
+timezone = "Australia/Sydney"
+
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "clock_syd"
+
+[[outputs]]
+kind = "rtsp_server"
+mount = "/multiview"
+codec = "h264"
+"##;
+
+    let dir = tempdir();
+    let path = dir.join("clock-clean.toml");
+    fs::write(&path, toml).expect("write temp config");
+
+    let report = validate_config(&path).expect("validate_config returns a report");
+    assert!(report.is_ok(), "a timezone-only clock validates: {report:?}");
+    let rendered = report.render();
+    assert!(
+        !rendered.contains("WARN"),
+        "no advisory applies, so no WARN line; got:\n{rendered}"
+    );
+}
+
+#[test]
 fn malformed_toml_fails_with_a_parse_message() {
     let dir = tempdir();
     let path = dir.join("garbage.toml");
