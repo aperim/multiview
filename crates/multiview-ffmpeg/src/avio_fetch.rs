@@ -21,7 +21,7 @@
 // carries a `// SAFETY:` note (the crate is otherwise `unsafe = deny`).
 #![allow(unsafe_code)]
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::ptr;
 
 use ffmpeg::ffi;
@@ -30,6 +30,28 @@ use ffmpeg_next as ffmpeg;
 use crate::decode::ensure_initialized;
 use crate::error::{FfmpegError, Result};
 
+/// A fetched text resource: its body plus the **effective** URL it was actually
+/// read from — i.e. the final URL **after any HTTP(S) redirects** were followed.
+///
+/// Relative child URIs in an HLS playlist resolve against the playlist's effective
+/// URI, not the URL originally requested (RFC 3986 §5 / RFC 8216): a redirecting or
+/// CDN-fronted master only resolves its relative variant/rendition children
+/// correctly when they are joined onto this post-redirect base. When the fetch did
+/// not redirect — or the protocol exposes no final location (e.g. `file:`) — [`url`]
+/// equals the requested URL.
+///
+/// [`url`]: FetchedText::url
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FetchedText {
+    /// The effective (final, post-redirect) URL the body was read from. For HTTP(S)
+    /// this is libav's `location` option after redirects; otherwise the requested
+    /// URL verbatim.
+    pub url: String,
+    /// The fetched body text.
+    pub body: String,
+}
+
 /// Read-loop chunk size (bytes).
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -37,7 +59,9 @@ const READ_CHUNK: usize = 16 * 1024;
 /// the previous `curl --max-time 30`, so a hung connection cannot block forever.
 const RW_TIMEOUT_US: &str = "30000000";
 
-/// Fetch the **text** at `url` over libav I/O, capping the body at `max_bytes`.
+/// Fetch the **text** at `url` over libav I/O, capping the body at `max_bytes`,
+/// and surface the **effective** post-redirect URL alongside the body (see
+/// [`FetchedText`]).
 ///
 /// `allowed_protocols` is a comma list of permitted URL schemes (e.g.
 /// `"http,https,tls,tcp"`): `url`'s scheme must be one of them (checked in Rust
@@ -46,12 +70,19 @@ const RW_TIMEOUT_US: &str = "30000000";
 /// KB; a body exceeding `max_bytes` is rejected so a misbehaving server cannot
 /// grow memory without bound.
 ///
+/// libav's HTTP(S) protocol follows redirects transparently; after the first read
+/// drains the (possibly redirected) response, the http context's `location` option
+/// holds the final URL. This reads it back via `av_opt_get(.., AV_OPT_SEARCH_CHILDREN)`
+/// so HLS child URIs can resolve against the correct base. If the protocol exposes
+/// no `location` (e.g. `file:`) or it is empty, the requested `url` is reported as
+/// the effective URL (a non-redirecting fetch).
+///
 /// # Errors
 ///
 /// [`FfmpegError::Fetch`] if `url`'s scheme is not in `allowed_protocols`, the
 /// open fails (bad URL, network error), the body exceeds `max_bytes`, or the
 /// body is not valid UTF-8.
-pub fn fetch_url_text(url: &str, max_bytes: usize, allowed_protocols: &str) -> Result<String> {
+pub fn fetch_url_text(url: &str, max_bytes: usize, allowed_protocols: &str) -> Result<FetchedText> {
     // Hard, Rust-side scheme guarantee (independent of libav's own enforcement).
     let scheme = url.split(':').next().unwrap_or("");
     if scheme.is_empty() || !allowed_protocols.split(',').any(|p| p == scheme) {
@@ -78,6 +109,9 @@ pub fn fetch_url_text(url: &str, max_bytes: usize, allowed_protocols: &str) -> R
     unsafe { fetch_inner(url, &curl, &wl_key, &wl_val, &to_key, &to_val, max_bytes) }
 }
 
+/// `AVOption` name for the HTTP(S) protocol's current/final URL after redirects.
+const LOCATION_OPT: &[u8] = b"location\0";
+
 /// Build a `CString`, mapping an interior NUL to a [`FfmpegError::Fetch`].
 fn c_string(s: &str, url: &str) -> Result<CString> {
     CString::new(s).map_err(|_| fetch_err(url, format_args!("{s:?} has an interior NUL")))
@@ -94,7 +128,7 @@ unsafe fn fetch_inner(
     to_key: &CString,
     to_val: &CString,
     max_bytes: usize,
-) -> Result<String> {
+) -> Result<FetchedText> {
     let mut opts: *mut ffi::AVDictionary = ptr::null_mut();
     // SAFETY: `opts` starts null; av_dict_set allocates and links entries into it.
     // We free it (whether or not avio_open2 consumes it) before returning.
@@ -125,11 +159,55 @@ unsafe fn fetch_inner(
         return Err(fetch_err(url, ffmpeg::Error::from(open)));
     }
 
-    let result = read_to_end(url, ctx, max_bytes);
+    let body = read_to_end(url, ctx, max_bytes);
+
+    // Read the effective (final, post-redirect) URL from the http context's
+    // `location` option *before* closing the context. This is best-effort: a
+    // protocol with no `location` (e.g. `file:`) leaves the requested URL as the
+    // effective base. Only meaningful once the body has been read (the redirect is
+    // followed lazily on the first read), so this runs after `read_to_end`.
+    // SAFETY: `ctx` is still the live context avio_open2 returned (not yet closed).
+    let effective = effective_url(url, ctx);
 
     // SAFETY: `ctx` is the live context avio_open2 returned; closed + nulled once.
     ffi::avio_closep(&raw mut ctx);
-    result
+    body.map(|body| FetchedText {
+        url: effective,
+        body,
+    })
+}
+
+/// Read the effective (final, post-redirect) URL of the open context `ctx` from
+/// the http protocol's `location` option, falling back to the requested `url` when
+/// the protocol exposes no such option (e.g. `file:`) or it is empty/non-UTF-8.
+///
+/// `av_opt_get` searches the context's children (`AV_OPT_SEARCH_CHILDREN`), where
+/// the http `URLContext` lives, and allocates the value the caller must `av_free`.
+unsafe fn effective_url(url: &str, ctx: *mut ffi::AVIOContext) -> String {
+    let mut out: *mut u8 = ptr::null_mut();
+    // SAFETY: `ctx` is the live AVIOContext (an AVClass-bearing object); `LOCATION_OPT`
+    // is a NUL-terminated static; libav allocates `*out` on success (we free it
+    // below). A negative return (AVERROR_OPTION_NOT_FOUND for `file:` etc.) leaves
+    // `out` null.
+    let rc = ffi::av_opt_get(
+        ctx.cast::<core::ffi::c_void>(),
+        LOCATION_OPT.as_ptr().cast::<core::ffi::c_char>(),
+        ffi::AV_OPT_SEARCH_CHILDREN,
+        &raw mut out,
+    );
+    if rc < 0 || out.is_null() {
+        return url.to_owned();
+    }
+    // SAFETY: `out` is a libav-allocated NUL-terminated string; we copy it into an
+    // owned `String` and then free the libav allocation, regardless of UTF-8 result.
+    let effective = CStr::from_ptr(out.cast::<core::ffi::c_char>())
+        .to_str()
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| url.to_owned(), str::to_owned);
+    // SAFETY: `out` was allocated by `av_opt_get`; free it through libav's allocator.
+    ffi::av_free(out.cast::<core::ffi::c_void>());
+    effective
 }
 
 /// Drain `ctx` into a `String`, bounded by `max_bytes`.
@@ -184,8 +262,14 @@ mod tests {
         let path = temp("multiview_avio_fetch_ok.m3u8");
         std::fs::write(&path, b"#EXTM3U\nhello-playlist\n").expect("write fixture");
         let url = format!("file:{}", path.display());
-        let text = fetch_url_text(&url, 64 * 1024, "file").expect("fetch local file");
-        assert!(text.contains("hello-playlist"), "got: {text:?}");
+        let fetched = fetch_url_text(&url, 64 * 1024, "file").expect("fetch local file");
+        assert!(fetched.body.contains("hello-playlist"), "got: {fetched:?}");
+        // The `file:` protocol exposes no `location` option (and never redirects),
+        // so the effective URL falls back to the requested URL verbatim.
+        assert_eq!(
+            fetched.url, url,
+            "a non-redirecting fetch reports the requested URL as effective"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

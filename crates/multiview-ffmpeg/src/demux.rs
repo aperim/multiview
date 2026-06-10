@@ -557,14 +557,20 @@ impl Demuxer {
 /// fetching it (HLS: `recheck_discard_flags` drops the rendition on the first
 /// read), **except** the optional routed stream named by `keep` (ADR-T011).
 ///
-/// This is the main demuxer's defence against the HLS `WebVTT`-rendition footgun:
-/// libav can fold a `TYPE=SUBTITLES` rendition into the one shared
-/// `AVFormatContext` it opens for the video, so a corrupt/404/expired `.vtt`
-/// either aborts the open or makes `av_read_frame` return that rendition's error
-/// for the whole context — blacking out the video tile. The main demuxer needs
-/// nothing from a `WebVTT` rendition (the isolated `read_captions` reader is the
-/// sole `WebVTT` path), so discarding it loses no stream while keeping the video
-/// alive.
+/// This is **defence-in-depth** against the HLS `WebVTT`-rendition footgun: libav
+/// can fold a `TYPE=SUBTITLES` rendition into the one shared `AVFormatContext` it
+/// opens for the video, so a corrupt/404/expired `.vtt` either aborts the open or
+/// makes `av_read_frame` return that rendition's error for the whole context —
+/// blacking out the video tile. The PRIMARY guard is the caller's **variant-pin
+/// pre-open** (point the main demuxer at one VIDEO variant media playlist, which
+/// carries no SUBTITLES rendition), because on `FFmpeg` **8.x** the open ABORTS while
+/// loading the rendition's first `.vtt` segment — *before* this post-open discard
+/// could run (8.x removed the `strict` rendition gate that 7.x used to drop it
+/// pre-probe). This discard remains as a backstop on the fall-through path (the
+/// master could not be fetched/parsed, or a build still folds a subtitle in): the
+/// main demuxer needs nothing from a `WebVTT` rendition (the isolated
+/// `read_captions` reader is the sole `WebVTT` path), so discarding it loses no
+/// stream while keeping the video alive.
 ///
 /// `keep` (a routed in-container DVB-sub stream index — the MPEG-TS DVB-sub
 /// route) is preserved. **Audio renditions are never touched**: the guard keys

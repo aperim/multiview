@@ -118,6 +118,13 @@ pub struct VariantStream {
     pub uri: String,
     /// `SUBTITLES="group"` — the subtitle rendition group this variant uses.
     pub subtitles_group: Option<String>,
+    /// `BANDWIDTH` — the variant's peak bits/second, if declared. Used to pick the
+    /// best variant when no display height is known (highest = best quality).
+    pub bandwidth: Option<u64>,
+    /// The vertical resolution (the `h` of `RESOLUTION=wxh`), if declared. Used to
+    /// pick the variant nearest the displayed tile height
+    /// (decode-at-display-resolution, invariant #6).
+    pub resolution_height: Option<u32>,
 }
 
 /// A parsed HLS master playlist: its renditions and variant streams.
@@ -150,7 +157,9 @@ impl MasterPlaylist {
 
         let mut renditions = Vec::new();
         let mut variants = Vec::new();
-        let mut pending_subtitles_group: Option<Option<String>> = None;
+        // The attributes parsed from the most recent `#EXT-X-STREAM-INF`, awaiting
+        // its URI on the following non-comment line. `None` until a STREAM-INF tag.
+        let mut pending_variant: Option<PendingVariant> = None;
         let mut scanned = 1usize;
 
         for raw in lines {
@@ -164,16 +173,24 @@ impl MasterPlaylist {
             }
             if let Some(attrs) = line.strip_prefix("#EXT-X-MEDIA:") {
                 renditions.push(parse_media(attrs));
-                pending_subtitles_group = None;
+                pending_variant = None;
             } else if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
-                // The URI is on the following non-comment line; stash the group.
-                pending_subtitles_group = Some(attr_value(attrs, "SUBTITLES"));
+                // The URI is on the following non-comment line; stash the variant's
+                // group + selection metrics (bandwidth, resolution height).
+                pending_variant = Some(PendingVariant {
+                    subtitles_group: attr_value(attrs, "SUBTITLES"),
+                    bandwidth: attr_value(attrs, "BANDWIDTH").and_then(|v| v.parse().ok()),
+                    resolution_height: attr_value(attrs, "RESOLUTION")
+                        .and_then(|v| parse_resolution_height(&v)),
+                });
             } else if line.starts_with('#') {
                 // Any other tag — ignore, but do not consume a pending variant.
-            } else if let Some(group) = pending_subtitles_group.take() {
+            } else if let Some(pending) = pending_variant.take() {
                 variants.push(VariantStream {
                     uri: line.to_owned(),
-                    subtitles_group: group,
+                    subtitles_group: pending.subtitles_group,
+                    bandwidth: pending.bandwidth,
+                    resolution_height: pending.resolution_height,
                 });
             }
             // A bare URI with no pending STREAM-INF is ignored (not a variant).
@@ -183,6 +200,63 @@ impl MasterPlaylist {
             renditions,
             variants,
         })
+    }
+
+    /// Pick the **video variant** media playlist to pin the main demuxer to,
+    /// given the displayed tile height (`target_height`).
+    ///
+    /// Pinning the main video/audio demuxer to one variant media playlist — rather
+    /// than opening the master with its selectable `TYPE=SUBTITLES` group — is what
+    /// stops libav (notably `FFmpeg` 8.x, which dropped the `strict` rendition
+    /// gate) from ever fetching the `WebVTT` rendition's `.vtt` segments and
+    /// aborting the open (ADR-T011). A variant media playlist carries only its own
+    /// video/audio segments, no subtitle rendition.
+    ///
+    /// Selection (decode-at-display-resolution, invariant #6):
+    /// * With a `target_height`: the variant with the **smallest** declared height
+    ///   that still **meets or exceeds** the target (so a 360-px tile decodes the
+    ///   360p rung, never 1080p); if every declared height is below the target,
+    ///   the **tallest** available; variants with no declared height are considered
+    ///   only when none carry a height.
+    /// * With no `target_height`: the **highest-`BANDWIDTH`** variant (best
+    ///   quality).
+    /// * If no variant carries either metric, the **first** declared variant.
+    ///
+    /// Returns `None` only when the playlist declares no variants at all (it is a
+    /// media playlist, not a master) — the caller then leaves the URL unchanged.
+    #[must_use]
+    pub fn pick_video_variant(&self, target_height: Option<u32>) -> Option<&VariantStream> {
+        if self.variants.is_empty() {
+            return None;
+        }
+        if let Some(target) = target_height {
+            // Prefer the smallest height that meets/exceeds the target.
+            let at_or_above = self
+                .variants
+                .iter()
+                .filter(|v| v.resolution_height.is_some_and(|h| h >= target))
+                .min_by_key(|v| v.resolution_height.unwrap_or(u32::MAX));
+            if let Some(v) = at_or_above {
+                return Some(v);
+            }
+            // Every declared height is below the target: take the tallest declared.
+            let tallest = self
+                .variants
+                .iter()
+                .filter(|v| v.resolution_height.is_some())
+                .max_by_key(|v| v.resolution_height.unwrap_or(0));
+            if let Some(v) = tallest {
+                return Some(v);
+            }
+            // No declared heights at all: fall through to the bandwidth/first pick.
+        }
+        // No target (or no heights declared): the highest-bandwidth variant, else
+        // the first declared variant.
+        self.variants
+            .iter()
+            .filter(|v| v.bandwidth.is_some())
+            .max_by_key(|v| v.bandwidth.unwrap_or(0))
+            .or_else(|| self.variants.first())
     }
 
     /// Iterate the `TYPE=SUBTITLES` renditions.
@@ -319,6 +393,26 @@ fn synthesised_name(group_id: &str, name: &str, ordinal: u32) -> String {
     } else {
         name.to_owned()
     }
+}
+
+/// The attributes parsed from an `#EXT-X-STREAM-INF` tag, held until its URI line
+/// (the following non-comment line) is read and the [`VariantStream`] is built.
+struct PendingVariant {
+    /// `SUBTITLES="group"`, if declared.
+    subtitles_group: Option<String>,
+    /// `BANDWIDTH`, if declared (a valid non-negative integer).
+    bandwidth: Option<u64>,
+    /// The `h` of `RESOLUTION=wxh`, if declared.
+    resolution_height: Option<u32>,
+}
+
+/// Parse the vertical resolution (the `h`) from a `RESOLUTION=wxh` attribute value
+/// (e.g. `"1280x720"` → `Some(720)`). A malformed value yields `None`.
+fn parse_resolution_height(value: &str) -> Option<u32> {
+    // RFC 8216 §4.2 decimal-resolution is `<width>x<height>` (lowercase `x`); be
+    // lenient and also accept an uppercase `X`.
+    let (_, height) = value.split_once(['x', 'X'])?;
+    height.trim().parse().ok()
 }
 
 /// Build a [`MediaRendition`] from an `#EXT-X-MEDIA` attribute list.
@@ -869,6 +963,94 @@ mod tests {
         let variant = master.variants.first().expect("one variant");
         assert_eq!(variant.uri, "video/variant_2000.m3u8");
         assert_eq!(variant.subtitles_group.as_deref(), Some("subs"));
+    }
+
+    /// A multi-rendition master with several `#EXT-X-STREAM-INF` variants at
+    /// different resolutions + bandwidths and a SUBTITLES group — the shape of the
+    /// ABC-News-AU footgun master that aborts the libav 8.x HLS open. The fix pins
+    /// the MAIN demuxer to one VIDEO variant media playlist (which carries no
+    /// SUBTITLES rendition), so libav never fetches the broken `.vtt`.
+    const ABR_MASTER: &str = "#EXTM3U\n\
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"index_7_0.m3u8\"\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS=\"avc1.4d401e\",SUBTITLES=\"subs\"\n\
+        index_0.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS=\"avc1.4d401f\",SUBTITLES=\"subs\"\n\
+        index_2.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS=\"avc1.640028\",SUBTITLES=\"subs\"\n\
+        index_4.m3u8\n";
+
+    #[test]
+    fn variant_parsing_captures_bandwidth_and_resolution_height() {
+        let master = MasterPlaylist::parse(ABR_MASTER).expect("parse");
+        assert_eq!(master.variants.len(), 3);
+        let v0 = &master.variants[0];
+        assert_eq!(v0.uri, "index_0.m3u8");
+        assert_eq!(v0.bandwidth, Some(800_000));
+        assert_eq!(v0.resolution_height, Some(360));
+        let v2 = &master.variants[2];
+        assert_eq!(v2.bandwidth, Some(5_000_000));
+        assert_eq!(v2.resolution_height, Some(1080));
+    }
+
+    #[test]
+    fn pick_video_variant_targets_the_closest_height_at_or_above_the_tile() {
+        let master = MasterPlaylist::parse(ABR_MASTER).expect("parse");
+        // A 360-px tile: the 360p variant is the smallest that meets/exceeds it
+        // (decode-at-display-resolution, invariant #6 — never decode 1080p for a
+        // 360p tile).
+        let pick = master.pick_video_variant(Some(360)).expect("a variant");
+        assert_eq!(pick.uri, "index_0.m3u8");
+        // A 700-px tile: 360p is too small, so the 720p variant is the smallest
+        // that meets/exceeds the target.
+        let pick = master.pick_video_variant(Some(700)).expect("a variant");
+        assert_eq!(pick.uri, "index_2.m3u8");
+    }
+
+    #[test]
+    fn pick_video_variant_above_the_top_rung_takes_the_highest() {
+        let master = MasterPlaylist::parse(ABR_MASTER).expect("parse");
+        // A tile taller than every rung: take the tallest available (1080p), never
+        // nothing.
+        let pick = master.pick_video_variant(Some(4000)).expect("a variant");
+        assert_eq!(pick.uri, "index_4.m3u8");
+    }
+
+    #[test]
+    fn pick_video_variant_with_no_target_takes_the_highest_bandwidth() {
+        let master = MasterPlaylist::parse(ABR_MASTER).expect("parse");
+        // No tile size known: prefer the highest-bandwidth (best-quality) variant.
+        let pick = master.pick_video_variant(None).expect("a variant");
+        assert_eq!(pick.uri, "index_4.m3u8");
+    }
+
+    #[test]
+    fn pick_video_variant_falls_back_to_first_when_no_metrics() {
+        // A master whose variants carry neither RESOLUTION nor BANDWIDTH: pick the
+        // first declared variant rather than nothing.
+        let text = "#EXTM3U\n\
+            #EXT-X-STREAM-INF:CODECS=\"avc1.4d401e\"\n\
+            a.m3u8\n\
+            #EXT-X-STREAM-INF:CODECS=\"avc1.4d401f\"\n\
+            b.m3u8\n";
+        let master = MasterPlaylist::parse(text).expect("parse");
+        let pick = master.pick_video_variant(Some(720)).expect("a variant");
+        assert_eq!(pick.uri, "a.m3u8");
+        let pick = master.pick_video_variant(None).expect("a variant");
+        assert_eq!(pick.uri, "a.m3u8");
+    }
+
+    #[test]
+    fn pick_video_variant_none_for_a_media_playlist_with_no_variants() {
+        // A media playlist (no #EXT-X-STREAM-INF) parses to zero variants, so the
+        // pin has nothing to select — the caller leaves the URL unchanged.
+        let text = "#EXTM3U\n\
+            #EXT-X-TARGETDURATION:6\n\
+            #EXTINF:6.0,\n\
+            seg0.ts\n";
+        let master = MasterPlaylist::parse(text).expect("parse");
+        assert!(master.variants.is_empty());
+        assert!(master.pick_video_variant(Some(360)).is_none());
+        assert!(master.pick_video_variant(None).is_none());
     }
 
     #[test]
