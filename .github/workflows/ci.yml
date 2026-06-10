@@ -19,7 +19,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── change classification (CI efficiency, ADR-0044) ──────────────────────────
+  # ── change classification (CI efficiency, ADR-0046) ──────────────────────────
   # Classify the PR diff as "code" (anything that can affect build/test/lint or a
   # generated spec) vs "docs-only" (a STRICT prose allowlist). The heavy matrix
   # below is gated on `code == 'true'`; a docs-only PR skips it and only the
@@ -67,7 +67,7 @@ jobs:
               # web/ images) stay `code`. When in doubt the file stays `code`.
               # Verified empirically against all tracked files: the only files
               # classified docs-only are .md / .txt / images / LICENSE* / NOTICE
-              # outside docs/api/** (see ADR-0044 truth table).
+              # outside docs/api/** (see ADR-0046 truth table).
               #
               # Markdown prose. docs/!(api)/** excludes the docs tree EXCEPT the
               # docs/api spec dir, so docs/api/*.md prose pages stay `code` (the

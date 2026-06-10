@@ -24,6 +24,34 @@ const OUTPUTS = [
   },
 ];
 
+const PROBES = [
+  {
+    id: "black-1",
+    name: "Black on PGM",
+    body: {
+      id: "black-1",
+      cell: "cell-a",
+      kind: "black",
+      luma_threshold: 16,
+      dwell: { up_ms: 2000, down_ms: 1000 },
+      severity: "Major",
+      latched: false,
+    },
+  },
+];
+
+const LAYOUTS = [
+  {
+    id: "working",
+    name: "working",
+    body: {
+      canvas: { width: 1920, height: 1080 },
+      layout: { kind: "absolute" },
+      cells: [{ id: "cell-a" }, { id: "cell-b" }],
+    },
+  },
+];
+
 test.beforeEach(async ({ page }) => {
   // Catch-all FIRST so the specific routes registered after it take precedence
   // (Playwright matches most-recently-added routes first).
@@ -39,6 +67,11 @@ test.beforeEach(async ({ page }) => {
   await page.route(/\/api\/v1\/outputs\/[^/?]+$/, (route) =>
     route.fulfill({ json: OUTPUTS[0], headers: { ETag: '"1"' } }),
   );
+  await page.route("**/api/v1/probes", (route) => route.fulfill({ json: PROBES }));
+  await page.route(/\/api\/v1\/probes\/[^/?]+$/, (route) =>
+    route.fulfill({ json: PROBES[0], headers: { ETag: '"1"' } }),
+  );
+  await page.route("**/api/v1/layouts", (route) => route.fulfill({ json: LAYOUTS }));
 });
 
 test("create / edit / delete dialogs open without crashing the renderer", async ({ page }) => {
@@ -95,6 +128,44 @@ test("the kind-specific outputs dialog (selects + advanced disclosure) opens cle
   await page.getByRole("button", { name: "Edit output: Program HLS" }).click();
   await expect(page.getByRole("dialog")).toBeVisible({ timeout: 5000 });
   await expect(page.getByLabel("Output path")).toHaveValue("/hls/m");
+
+  expect(crashed, crashed.join(",")).toHaveLength(0);
+});
+
+test("the probes dialog (cell select + zone + policy disclosure) opens cleanly", async ({
+  page,
+}) => {
+  // Structural selectors (testids / element ids / row data) throughout:
+  // freshly-added localized strings render as catalog hash ids in the built
+  // bundle until the i18n lane runs `lingui extract`/`compile`, so text
+  // matching would be brittle here (same note as the runnability markers).
+  const crashed: string[] = [];
+  page.on("crash", () => crashed.push("renderer crashed"));
+
+  await page.goto("/probes");
+  await expect(page.getByText("Black on PGM")).toBeVisible();
+
+  // Create — Selects (cell/kind/severity) + the policy disclosure render over
+  // the populated table without looping the renderer.
+  await page.getByTestId("crud-new").click();
+  await expect(page.getByRole("dialog")).toBeVisible({ timeout: 5000 });
+  // The cell picker is fed from the mocked working layout's cells.
+  await page.getByTestId("probe-cell-select").click();
+  await expect(page.getByRole("option", { name: "cell-a" })).toBeVisible();
+  await page.keyboard.press("Escape"); // close the select
+  await page.getByTestId("advanced-toggle").click();
+  await expect(page.getByTestId("advanced-section")).toHaveAttribute("open", "");
+  await page.keyboard.press("Escape");
+
+  // Edit prefills the kind-specific threshold field (the single mocked row).
+  await page.getByTestId("row-edit").click();
+  await expect(page.getByRole("dialog")).toBeVisible({ timeout: 5000 });
+  await expect(page.locator("#probe-luma")).toHaveValue("16");
+  await page.keyboard.press("Escape");
+
+  // Delete confirmation ("Delete this resource?" is in the compiled catalog).
+  await page.getByTestId("row-delete").click();
+  await expect(page.getByText("Delete this resource?")).toBeVisible({ timeout: 5000 });
 
   expect(crashed, crashed.join(",")).toHaveLength(0);
 });

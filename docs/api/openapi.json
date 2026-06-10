@@ -177,6 +177,127 @@
         }
       }
     },
+    "/api/v1/audio-routing": {
+      "get": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "`GET /api/v1/audio-routing` — the singleton document (role: read).",
+        "description": "**404-free**: an unconfigured deployment answers `200` with\n`configured: false`, `routing: null`, and `selectable_tracks: [\"prog\"]`\n(the program bus is always selectable). The response `ETag` is the document\nversion a later `PUT` must present as `If-Match`.",
+        "operationId": "get_audio_routing",
+        "responses": {
+          "200": {
+            "description": "The audio-routing document (404-free: `configured: false` + a null document when none is set; ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioRoutingStateDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "`PUT /api/v1/audio-routing` — replace the singleton document (role: write;\n`If-Match` required → `428`/`412`).",
+        "operationId": "put_audio_routing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AudioRoutingDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced document (new ETag in the response header; X-Multiview-Apply: restart — it takes effect via config export + restart).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioRoutingStateDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid audio-routing document (detail names the field path or the violated routing invariant; references to undeclared sources are checked at config export, not here).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "No If-Match precondition was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -304,7 +425,7 @@
           "config"
         ],
         "summary": "`GET /api/v1/config/export` — render the live resource stores as a complete\n`multiview.toml` document (ADR-W015).",
-        "description": "Composes the working layout (the id-sorted first layout whose body carries a\n`canvas`) with every stored source/output/overlay into a\n[`multiview_config::MultiviewConfig`], validates the whole document, and\nreturns it as TOML. This closes the management loop honestly today: edit in\nthe UI → export → persist as the config file → the next start applies it.",
+        "description": "Composes the working layout (the id-sorted first layout whose body carries a\n`canvas`) with every stored source/output/overlay/probe into a\n[`multiview_config::MultiviewConfig`], validates the whole document, and\nreturns it as TOML. This closes the management loop honestly today: edit in\nthe UI → export → persist as the config file → the next start applies it.",
         "operationId": "export_config",
         "responses": {
           "200": {
@@ -1836,6 +1957,335 @@
           },
           "404": {
             "description": "No such live focus session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/probes": {
+      "get": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`GET /api/v1/probes` — list all probes (role: read).",
+        "operationId": "list_probes",
+        "responses": {
+          "200": {
+            "description": "All probes, id-sorted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/probes/{id}": {
+      "get": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`GET /api/v1/probes/{id}` — fetch one probe (role: read; per-object authz).",
+        "operationId": "get_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The probe (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this probe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No probe with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`PUT /api/v1/probes/{id}` — replace a probe (role: write; If-Match → 412).",
+        "operationId": "update_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProbeResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced probe (new ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No probe with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid probe document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`POST /api/v1/probes/{id}` — create a probe (role: write; per-object authz).",
+        "operationId": "create_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProbeResourceInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created probe (ETag in the response header; X-Multiview-Apply declares how it takes effect).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is not a valid probe document (detail names the field path).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "probes"
+        ],
+        "summary": "`DELETE /api/v1/probes/{id}` — delete a probe (role: administer; If-Match).",
+        "operationId": "delete_probe",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Probe id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The probe was deleted."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to administer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No probe with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match precondition failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3496,6 +3946,161 @@
           }
         }
       },
+      "AudioChannelsDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mono"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stereo"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "five_point_one"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by\n`kind`, `snake_case`)."
+      },
+      "AudioRouteDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::audio::AudioRoute` — one per-input\nroute in the audio-routing document.",
+        "required": [
+          "input_id",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "$ref": "#/components/schemas/AudioChannelsDoc",
+            "description": "The channel layout requested for this input."
+          },
+          "gain_db": {
+            "type": "number",
+            "format": "float",
+            "description": "Program-bus contribution gain in dB (`0.0` ⇒ unity; must be finite)."
+          },
+          "include_in_program_bus": {
+            "type": "boolean",
+            "description": "Whether this input contributes to the mixed program bus."
+          },
+          "input_id": {
+            "type": "string",
+            "description": "The managed source id (`sources[].id`) this route takes audio from."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO-639 language tag advertised for the discrete track (e.g. `\"eng\"`)."
+          },
+          "mute": {
+            "type": "boolean",
+            "description": "Whether this input is muted on the program bus (its discrete track, if\nany, stays declared)."
+          },
+          "target_track": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The named discrete output track (absent ⇒ program bus only). `\"prog\"`\nis reserved for the mixed program bus."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-friendly track title."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AudioRoutingDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::AudioRouting` — the body accepted by\n`PUT /api/v1/audio-routing` (the whole-document `[audio]` block).",
+        "required": [
+          "sample_rate_hz"
+        ],
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AudioRouteDoc"
+            },
+            "description": "The per-input routes."
+          },
+          "sample_rate_hz": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The working/program-bus sample rate in Hz (exact integer, > 0).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AudioRoutingStateDoc": {
+        "type": "object",
+        "description": "The response envelope of `GET`/`PUT /api/v1/audio-routing`.\n\nThe GET is **404-free**: an unconfigured deployment answers\n`configured: false` with a `null` document and `selectable_tracks` of just\nthe always-available program bus `\"prog\"`.",
+        "required": [
+          "configured",
+          "selectable_tracks"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether an audio-routing document is configured."
+          },
+          "routing": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioRoutingDoc",
+                "description": "The routing document, or `null` when unconfigured."
+              }
+            ]
+          },
+          "selectable_tracks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`\"prog\"` + every declared discrete track, in declaration order — the\nset per-output `audio.tracks` selections resolve against."
+          }
+        }
+      },
       "AuditAction": {
         "type": "string",
         "description": "The kind of mutation an audit entry records.",
@@ -3992,6 +4597,39 @@
           "klv"
         ]
       },
+      "DetectionZoneDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::DetectionZone` (normalized\nsub-rectangle of a tile, `0.0..=1.0` on both axes).",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "h": {
+            "type": "number",
+            "format": "float",
+            "description": "Height (fraction of tile height)."
+          },
+          "w": {
+            "type": "number",
+            "format": "float",
+            "description": "Width (fraction of tile width)."
+          },
+          "x": {
+            "type": "number",
+            "format": "float",
+            "description": "Left edge (fraction of tile width)."
+          },
+          "y": {
+            "type": "number",
+            "format": "float",
+            "description": "Top edge (fraction of tile height)."
+          }
+        },
+        "additionalProperties": false
+      },
       "Device": {
         "allOf": [
           {
@@ -4081,6 +4719,29 @@
             "description": "Keys present in the old document but not the new (sorted)."
           }
         }
+      },
+      "DwellDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::Dwell` (raise/clear debounce\nmilliseconds).",
+        "required": [
+          "up_ms",
+          "down_ms"
+        ],
+        "properties": {
+          "down_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Milliseconds the condition must clear before the alarm **clears**.",
+            "minimum": 0
+          },
+          "up_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Milliseconds the condition must persist before the alarm **raises**.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "HealthWarningDoc": {
         "type": "object",
@@ -4225,6 +4886,65 @@
             "description": "Human-friendly name."
           }
         }
+      },
+      "LoudnessTargetDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "EBU R128 (default integrated target −23.0 LUFS).",
+            "required": [
+              "target_lufs",
+              "max_true_peak_dbtp",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "r128"
+                ]
+              },
+              "max_true_peak_dbtp": {
+                "type": "number",
+                "format": "float",
+                "description": "Maximum permitted true-peak in dBTP (e.g. `-1.0`)."
+              },
+              "target_lufs": {
+                "type": "number",
+                "format": "float",
+                "description": "Integrated-loudness target in LUFS (e.g. `-23.0`)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "ATSC A/85 (default integrated target −24.0 LKFS).",
+            "required": [
+              "target_lkfs",
+              "max_true_peak_dbtp",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "a85"
+                ]
+              },
+              "max_true_peak_dbtp": {
+                "type": "number",
+                "format": "float",
+                "description": "Maximum permitted true-peak in dBTP (e.g. `-2.0`)."
+              },
+              "target_lkfs": {
+                "type": "number",
+                "format": "float",
+                "description": "Integrated-loudness target in LKFS (e.g. `-24.0`)."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,\n`snake_case`)."
       },
       "MediaFormat": {
         "type": "string",
@@ -4875,6 +5595,162 @@
           "amd",
           "apple"
         ]
+      },
+      "ProbeBodyDoc": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProbeKindDoc",
+            "description": "The kind-specific payload (`kind` + its fields sit at top level)."
+          },
+          {
+            "type": "object",
+            "required": [
+              "cell"
+            ],
+            "properties": {
+              "cell": {
+                "type": "string",
+                "description": "The cell id this probe watches."
+              },
+              "dwell": {
+                "$ref": "#/components/schemas/DwellDoc",
+                "description": "Dwell windows (raise/clear debounce; defaults to 1 s each way)."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable probe id; may be omitted (the path id is injected)."
+              },
+              "latched": {
+                "type": "boolean",
+                "description": "Whether the alarm latches (held until explicitly reset)."
+              },
+              "severity": {
+                "$ref": "#/components/schemas/PerceivedSeverityDoc",
+                "description": "The perceived severity (X.733) asserted when this probe fires."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::Probe` — the body accepted by\n`POST`/`PUT /api/v1/probes/{id}`."
+      },
+      "ProbeKindDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Black-picture detection within the zone.",
+            "required": [
+              "luma_threshold",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "black"
+                ]
+              },
+              "luma_threshold": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Luma ceiling (8-bit, `0..=255`) at or below which a pixel is \"black\".",
+                "minimum": 0
+              },
+              "zone": {
+                "$ref": "#/components/schemas/DetectionZoneDoc",
+                "description": "Detection zone within the tile (defaults to the full frame)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Freeze detection within the zone.",
+            "required": [
+              "difference_threshold",
+              "kind"
+            ],
+            "properties": {
+              "difference_threshold": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Inter-frame difference floor (per-mille, `0..=1000`) below which the\npicture counts as frozen.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "freeze"
+                ]
+              },
+              "zone": {
+                "$ref": "#/components/schemas/DetectionZoneDoc",
+                "description": "Detection zone within the tile (defaults to the full frame)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Silence detection on the cell's audio.",
+            "required": [
+              "level_dbfs",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "silence"
+                ]
+              },
+              "level_dbfs": {
+                "type": "number",
+                "format": "float",
+                "description": "Level ceiling in dBFS at or below which audio counts as silent."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Loudness-violation detection against a compliance target.",
+            "required": [
+              "target",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "loudness"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/LoudnessTargetDoc",
+                "description": "The loudness compliance target."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of `multiview_config::ProbeKind` (tagged by `kind`,\n`snake_case`, flattened into the probe body)."
+      },
+      "ProbeResourceInputDoc": {
+        "type": "object",
+        "description": "The request envelope for `POST`/`PUT /api/v1/probes/{id}` (`name` + body).",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/ProbeBodyDoc",
+            "description": "The probe document."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name."
+          }
+        }
       },
       "Problem": {
         "type": "object",
@@ -6518,6 +7394,14 @@
     {
       "name": "overlays",
       "description": "Overlay (managed overlay layer) resource CRUD"
+    },
+    {
+      "name": "probes",
+      "description": "Probe (per-cell fail-state detection: black/freeze/silence/loudness) resource CRUD"
+    },
+    {
+      "name": "audio",
+      "description": "Audio routing: the document-level program-bus membership + discrete-track wiring per-output selections resolve against"
     },
     {
       "name": "commands",

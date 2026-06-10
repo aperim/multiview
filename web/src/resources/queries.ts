@@ -27,6 +27,7 @@ import {
   ResourceApiError,
   toOutputView,
   toOverlayView,
+  toProbeView,
   toSourceView,
   writeResource,
 } from './api';
@@ -34,6 +35,7 @@ import type { ResourceWithEtag } from './api';
 import type {
   OutputView,
   OverlayView,
+  ProbeView,
   ResourceInput,
   ResourceKind,
   ResourceRecord,
@@ -147,6 +149,9 @@ export const useOutputs = makeListHook<OutputView>('outputs', toOutputView);
 
 /** List the configured overlays, projected to {@link OverlayView}. */
 export const useOverlays = makeListHook<OverlayView>('overlays', toOverlayView);
+
+/** List the configured fail-state probes, projected to {@link ProbeView}. */
+export const useProbes = makeListHook<ProbeView>('probes', toProbeView);
 
 /** The variables passed to a save mutation. */
 export interface SaveResourceVars {

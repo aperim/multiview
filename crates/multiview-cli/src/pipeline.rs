@@ -2028,6 +2028,10 @@ impl Pipeline {
             // every stream (RT-3). The fragment is pre-built (a tiny static clone
             // per tick); a `None` fragment (no inputs probed) is a no-op.
             crate::control::insert_input_fragment(&mut snapshot, input_fragment.as_ref());
+            // And the per-tile lifecycle states, so a connecting client is
+            // seeded with the CURRENT tile states (the `tiles` `$snapshot`)
+            // instead of waiting for the next sparse `tile.state` delta.
+            crate::control::fold_tile_states(&mut snapshot, &frame.source_states);
             snapshot
         };
         // Sparse tile-state events: emit at most one `tile.state` change per tick

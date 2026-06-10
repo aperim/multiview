@@ -113,6 +113,9 @@
                   "$ref": "#/components/schemas/TileState"
                 },
                 {
+                  "$ref": "#/components/schemas/TilesSnapshot"
+                },
+                {
                   "$ref": "#/components/schemas/AudioMeter"
                 },
                 {
@@ -335,6 +338,16 @@
         },
         "summary": "A tile transitioned between lifecycle states (LIVE/STALE/RECONNECTING/NO_SIGNAL).",
         "title": "Tile state machine transition"
+      },
+      "TilesSnapshot": {
+        "contentType": "application/json",
+        "description": "Emitted once at connect (after `$hello`) on topic `tiles` with `t` `$snapshot` (realtime.md §5): the snapshot-then-delta baseline (`snapshot ⊕ ordered deltas = current truth`, ADR-RT003). A receiver MUST treat it as a state REBUILD, never a merge. Despite the `$`-prefixed tag it rides its data topic, not `$control`.",
+        "name": "TilesSnapshot",
+        "payload": {
+          "$ref": "#/components/schemas/TilesSnapshot"
+        },
+        "summary": "Full current per-tile lifecycle state a fresh client rebuilds its tile cache from.",
+        "title": "Connect-time tiles baseline ($snapshot on topic tiles)"
       }
     },
     "schemas": {
@@ -1055,6 +1068,27 @@
         ],
         "type": "object"
       },
+      "TileSnapshotEntry": {
+        "description": "One tile's current lifecycle state inside a `tiles` `$snapshot`. The `id` is the same key the sparse `tile.state` deltas scope their envelope `id` with, so a snapshot-rebuilt cache and its delta patches address the same rows.",
+        "properties": {
+          "id": {
+            "description": "The tile id (the bound source id in the run projection).",
+            "type": "string"
+          },
+          "input": {
+            "description": "The input bound to the tile, if known.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/LifecycleState"
+          }
+        },
+        "required": [
+          "id",
+          "state"
+        ],
+        "type": "object"
+      },
       "TileState": {
         "description": "Data body of the `tile.state` event: a tile lifecycle transition.",
         "properties": {
@@ -1077,6 +1111,28 @@
           "from",
           "to",
           "trigger"
+        ],
+        "type": "object"
+      },
+      "TilesSnapshot": {
+        "description": "Data body of the `tiles`-topic `$snapshot` frame: the full current per-tile lifecycle baseline sent once at connect (after `$hello`). A receiver MUST rebuild (replace) its tile state from it, never merge.",
+        "properties": {
+          "as_of_seq": {
+            "description": "The engine state sequence this baseline is current as of.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "tiles": {
+            "description": "Every tile's current lifecycle state.",
+            "items": {
+              "$ref": "#/components/schemas/TileSnapshotEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "as_of_seq",
+          "tiles"
         ],
         "type": "object"
       },

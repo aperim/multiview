@@ -273,7 +273,21 @@ impl ProbeKind {
     /// Validate the kind-specific parameters (zone geometry, sane thresholds).
     fn validate(&self, probe_id: &str) -> Result<(), ConfigError> {
         match self {
-            Self::Black { zone, .. } | Self::Freeze { zone, .. } => zone.validate(probe_id),
+            Self::Black { zone, .. } => zone.validate(probe_id),
+            Self::Freeze {
+                difference_threshold,
+                zone,
+            } => {
+                // The threshold is a per-mille of full-scale luma (`0..=1000`);
+                // the u16 representation admits more, so bound it here.
+                if *difference_threshold > 1000 {
+                    return Err(ConfigError::Validation(format!(
+                        "probe {probe_id:?}: freeze difference_threshold must be \
+                         0..=1000 per-mille (got {difference_threshold})"
+                    )));
+                }
+                zone.validate(probe_id)
+            }
             Self::Silence { level_dbfs } => {
                 if !level_dbfs.is_finite() {
                     return Err(ConfigError::Validation(format!(
@@ -443,6 +457,36 @@ mod tests {
             })
             .alarm_kind(),
             AlarmKind::LoudnessViolation
+        );
+    }
+
+    #[test]
+    fn freeze_difference_threshold_is_bounded_to_per_mille() {
+        // The doc contract: `difference_threshold` is a per-mille of full-scale
+        // luma, `0..=1000`. The u16 type admits up to 65535, so validation must
+        // reject anything above 1000 — the boundary itself is valid.
+        let at_limit = Probe::new(
+            "p-limit",
+            "c",
+            ProbeKind::freeze(1000, DetectionZone::default()),
+            Dwell::default(),
+            PerceivedSeverity::Warning,
+            false,
+        );
+        at_limit.validate().unwrap();
+
+        let over_limit = Probe::new(
+            "p-over",
+            "c",
+            ProbeKind::freeze(1001, DetectionZone::default()),
+            Dwell::default(),
+            PerceivedSeverity::Warning,
+            false,
+        );
+        let err = over_limit.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("difference_threshold"),
+            "the error names the offending field, got: {err}"
         );
     }
 

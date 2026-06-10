@@ -71,6 +71,39 @@ pub struct TileState {
     pub trigger: String,
 }
 
+/// One tile's current lifecycle state as carried in the `tiles` `$snapshot`
+/// baseline (realtime-api §5).
+///
+/// In today's run projection the tile `id` is the bound source id (the same
+/// key the sparse `tile.state` deltas scope their envelope `id` with), so a
+/// client's snapshot-rebuilt cache and its delta patches address the same rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileSnapshotEntry {
+    /// The tile id (the bound source id in the run projection).
+    pub id: String,
+    /// The tile's current lifecycle state.
+    pub state: LifecycleState,
+    /// The input bound to the tile, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+}
+
+/// The full current per-tile lifecycle baseline (the `data` body of the
+/// `tiles`-topic `$snapshot` frame, realtime-api §5).
+///
+/// Sent once at connect (after `$hello`) so a fresh client REBUILDS its tile
+/// cache to the current truth instead of waiting for the next sparse
+/// `tile.state` delta (`snapshot ⊕ ordered deltas = current truth`,
+/// ADR-RT003). [`as_of_seq`](TilesSnapshot::as_of_seq) is the engine state
+/// sequence the baseline is current as of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TilesSnapshot {
+    /// The engine state sequence this baseline is current as of.
+    pub as_of_seq: u64,
+    /// Every tile's current lifecycle state.
+    pub tiles: Vec<TileSnapshotEntry>,
+}
+
 /// A high-rate audio meter sample (numeric only — never audio).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioMeter {
@@ -549,6 +582,14 @@ pub enum Event {
     /// Tile state-machine transition (topic `tiles`).
     #[serde(rename = "tile.state")]
     TileState(TileState),
+    /// Full current per-tile lifecycle baseline (topic `tiles`): the
+    /// connect-time `$snapshot` a client REBUILDS its tile cache from before
+    /// any sparse `tile.state` delta (realtime-api §5, ADR-RT003). Despite the
+    /// `$`-prefixed tag this is **not** a control frame: the documented
+    /// per-topic `$snapshot` rides its DATA topic (`tiles`), never `$control`,
+    /// and clients discriminate it by `t` **plus** `topic`.
+    #[serde(rename = "$snapshot")]
+    TilesSnapshot(TilesSnapshot),
     /// High-rate audio meter sample (topic `audio.meters`).
     #[serde(rename = "audio.meter")]
     AudioMeter(AudioMeter),
@@ -632,6 +673,7 @@ impl Event {
             Self::Pong => "$pong",
             Self::Error(_) => "$error",
             Self::TileState(_) => "tile.state",
+            Self::TilesSnapshot(_) => "$snapshot",
             Self::AudioMeter(_) => "audio.meter",
             Self::SystemMetrics(_) => "system.metrics",
             Self::OutputStatus(_) => "output.status",
