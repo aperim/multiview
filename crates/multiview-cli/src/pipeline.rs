@@ -4551,14 +4551,14 @@ fn resolve_hls_variant_url_with(
     target_height: Option<u32>,
     fetcher: &dyn crate::captions::PlaylistFetcher,
 ) -> Option<String> {
-    let fetched = match fetcher.fetch(master_url) {
-        Ok(fetched) => fetched,
+    let playlist = match fetcher.fetch(master_url) {
+        Ok(playlist) => playlist,
         Err(reason) => {
             tracing::warn!(%master_url, %reason, "could not fetch HLS master for variant pin; opening URL as-is");
             return None;
         }
     };
-    let master = match multiview_input::hls::MasterPlaylist::parse(&fetched.body) {
+    let master = match multiview_input::hls::MasterPlaylist::parse(&playlist.body) {
         Ok(master) => master,
         Err(err) => {
             tracing::warn!(%master_url, error = %err, "HLS master parse failed for variant pin; opening URL as-is");
@@ -4567,9 +4567,16 @@ fn resolve_hls_variant_url_with(
     };
     // A media playlist (no variants) has nothing to pin — open the URL as-is.
     let variant = master.pick_video_variant(target_height)?;
-    let variant_url = crate::captions::resolve_rendition_uri(master_url, &variant.uri);
+    // Resolve the (usually relative) variant URI against the master's EFFECTIVE
+    // (post-redirect) URL — a redirecting/CDN-fronted master (c.mjh.nz -> a signed
+    // Akamai master with relative variant URIs) serves children that only resolve
+    // under the final base, not the requested one (RFC 3986 §5 / RFC 8216).
+    // Resolving against the requested origin yields a 404 that aborts the ingest.
+    // For a non-redirecting fetch the effective URL equals the requested URL.
+    let variant_url = crate::captions::resolve_rendition_uri(&playlist.url, &variant.uri);
     tracing::info!(
         %master_url,
+        effective_url = %playlist.url,
         %variant_url,
         target_height = ?target_height,
         variant_height = ?variant.resolution_height,
@@ -6070,16 +6077,13 @@ mod variant_pin_tests {
         // against the EFFECTIVE (post-redirect) Akamai base — resolving against the
         // requested `c.mjh.nz` origin yields a 404 that aborts the ingest.
         let fetcher = RedirectingFetcher {
-            effective_url:
-                "https://abc-iview.akamaized.net/out/v1/abcd/master.m3u8?hdnea=token".to_owned(),
+            effective_url: "https://abc-iview.akamaized.net/out/v1/abcd/master.m3u8?hdnea=token"
+                .to_owned(),
             body: ABR_MASTER_WITH_SUBS.to_owned(),
         };
-        let pinned = resolve_hls_variant_url_with(
-            "https://c.mjh.nz/abc-news.m3u8",
-            Some(700),
-            &fetcher,
-        )
-        .expect("a redirected ABR master pins a variant");
+        let pinned =
+            resolve_hls_variant_url_with("https://c.mjh.nz/abc-news.m3u8", Some(700), &fetcher)
+                .expect("a redirected ABR master pins a variant");
         assert_eq!(
             pinned, "https://abc-iview.akamaized.net/out/v1/abcd/index_2.m3u8",
             "the relative variant URI must resolve under the post-redirect Akamai base, \
@@ -6092,12 +6096,9 @@ mod variant_pin_tests {
         // The non-redirect relative-child case must not regress: when the effective
         // URL equals the requested URL, the variant resolves against that base.
         let fetcher = CannedFetcher(Ok(ABR_MASTER_WITH_SUBS.to_owned()));
-        let pinned = resolve_hls_variant_url_with(
-            "https://cdn.test/live/master.m3u8",
-            Some(700),
-            &fetcher,
-        )
-        .expect("a non-redirecting ABR master pins a variant");
+        let pinned =
+            resolve_hls_variant_url_with("https://cdn.test/live/master.m3u8", Some(700), &fetcher)
+                .expect("a non-redirecting ABR master pins a variant");
         assert_eq!(pinned, "https://cdn.test/live/index_2.m3u8");
     }
 

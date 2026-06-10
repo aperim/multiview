@@ -549,14 +549,14 @@ fn resolve_caption_plan(
     language: Option<&str>,
     fetcher: &dyn PlaylistFetcher,
 ) -> Option<CaptionPlan> {
-    let fetched = match fetcher.fetch(master_url) {
-        Ok(fetched) => fetched,
+    let playlist = match fetcher.fetch(master_url) {
+        Ok(playlist) => playlist,
         Err(reason) => {
             tracing::warn!(source = %id, %reason, "could not fetch HLS master for captions");
             return None;
         }
     };
-    let master = match MasterPlaylist::parse(&fetched.body) {
+    let master = match MasterPlaylist::parse(&playlist.body) {
         Ok(master) => master,
         Err(err) => {
             tracing::warn!(source = %id, error = %err, "HLS master parse failed; no captions");
@@ -565,7 +565,12 @@ fn resolve_caption_plan(
     };
     let rendition = master.pick_subtitle(language)?;
     let uri = rendition.uri.as_deref()?;
-    let rendition_url = resolve_rendition_uri(master_url, uri);
+    // Resolve the (usually relative) rendition URI against the master's EFFECTIVE
+    // (post-redirect) URL — a redirecting/CDN-fronted master (c.mjh.nz -> Akamai)
+    // serves relative children that only resolve under the final base, not the
+    // requested one (RFC 3986 §5 / RFC 8216). For a non-redirecting fetch the
+    // effective URL equals the requested URL, so this is unchanged.
+    let rendition_url = resolve_rendition_uri(&playlist.url, uri);
     tracing::info!(
         source = %id,
         language = ?rendition.language,
@@ -1091,8 +1096,8 @@ mod tests {
         // must resolve against the EFFECTIVE (post-redirect) Akamai base, NOT the
         // requested `c.mjh.nz` origin (which would 404).
         let fetcher = RedirectingFetcher {
-            effective_url:
-                "https://abc.akamaized.net/out/v1/abcd/master.m3u8?hdnea=token".to_owned(),
+            effective_url: "https://abc.akamaized.net/out/v1/abcd/master.m3u8?hdnea=token"
+                .to_owned(),
             body: MASTER_WITH_SUBS.to_owned(),
         };
         let plan = resolve_caption_plan(

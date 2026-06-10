@@ -109,7 +109,7 @@ pub fn fetch_url_text(url: &str, max_bytes: usize, allowed_protocols: &str) -> R
     unsafe { fetch_inner(url, &curl, &wl_key, &wl_val, &to_key, &to_val, max_bytes) }
 }
 
-/// AVOption name for the HTTP(S) protocol's current/final URL after redirects.
+/// `AVOption` name for the HTTP(S) protocol's current/final URL after redirects.
 const LOCATION_OPT: &[u8] = b"location\0";
 
 /// Build a `CString`, mapping an interior NUL to a [`FfmpegError::Fetch`].
@@ -182,7 +182,7 @@ unsafe fn fetch_inner(
 /// the protocol exposes no such option (e.g. `file:`) or it is empty/non-UTF-8.
 ///
 /// `av_opt_get` searches the context's children (`AV_OPT_SEARCH_CHILDREN`), where
-/// the http URLContext lives, and allocates the value the caller must `av_free`.
+/// the http `URLContext` lives, and allocates the value the caller must `av_free`.
 unsafe fn effective_url(url: &str, ctx: *mut ffi::AVIOContext) -> String {
     let mut out: *mut u8 = ptr::null_mut();
     // SAFETY: `ctx` is the live AVIOContext (an AVClass-bearing object); `LOCATION_OPT`
