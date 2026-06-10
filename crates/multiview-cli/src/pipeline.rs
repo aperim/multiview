@@ -4551,14 +4551,14 @@ fn resolve_hls_variant_url_with(
     target_height: Option<u32>,
     fetcher: &dyn crate::captions::PlaylistFetcher,
 ) -> Option<String> {
-    let text = match fetcher.fetch(master_url) {
-        Ok(text) => text,
+    let fetched = match fetcher.fetch(master_url) {
+        Ok(fetched) => fetched,
         Err(reason) => {
             tracing::warn!(%master_url, %reason, "could not fetch HLS master for variant pin; opening URL as-is");
             return None;
         }
     };
-    let master = match multiview_input::hls::MasterPlaylist::parse(&text) {
+    let master = match multiview_input::hls::MasterPlaylist::parse(&fetched.body) {
         Ok(master) => master,
         Err(err) => {
             tracing::warn!(%master_url, error = %err, "HLS master parse failed for variant pin; opening URL as-is");
@@ -5996,14 +5996,34 @@ mod reconnect_tests {
 #[cfg(test)]
 mod variant_pin_tests {
     use super::resolve_hls_variant_url_with;
-    use crate::captions::PlaylistFetcher;
+    use crate::captions::{FetchedPlaylist, PlaylistFetcher};
 
-    /// A [`PlaylistFetcher`] returning a fixed canned result — drives the
-    /// fetch→parse→pick→resolve seam offline (no network, no FFI).
+    /// A [`PlaylistFetcher`] returning a fixed canned body, echoing the requested
+    /// URL as the effective URL (no redirect) — drives the fetch→parse→pick→resolve
+    /// seam offline (no network, no FFI).
     struct CannedFetcher(Result<String, String>);
     impl PlaylistFetcher for CannedFetcher {
-        fn fetch(&self, _url: &str) -> Result<String, String> {
-            self.0.clone()
+        fn fetch(&self, url: &str) -> Result<FetchedPlaylist, String> {
+            self.0.clone().map(|body| FetchedPlaylist {
+                url: url.to_owned(),
+                body,
+            })
+        }
+    }
+
+    /// A [`PlaylistFetcher`] simulating a redirecting/CDN-fronted master: the canned
+    /// body is reported as fetched from a different **effective** URL. Relative
+    /// variant URIs must resolve against this effective base (the ABC/Akamai case).
+    struct RedirectingFetcher {
+        effective_url: String,
+        body: String,
+    }
+    impl PlaylistFetcher for RedirectingFetcher {
+        fn fetch(&self, _url: &str) -> Result<FetchedPlaylist, String> {
+            Ok(FetchedPlaylist {
+                url: self.effective_url.clone(),
+                body: self.body.clone(),
+            })
         }
     }
 
@@ -6041,6 +6061,44 @@ mod variant_pin_tests {
         )
         .expect("an ABR master pins a variant");
         assert_eq!(pinned, "https://c.test/abc-news/index_2.m3u8");
+    }
+
+    #[test]
+    fn a_relative_variant_uri_resolves_against_the_redirected_master_base() {
+        // The box-found defect: `c.mjh.nz/abc-news.m3u8` 302-redirects to a signed
+        // Akamai master whose variant URIs are RELATIVE. The variant must resolve
+        // against the EFFECTIVE (post-redirect) Akamai base — resolving against the
+        // requested `c.mjh.nz` origin yields a 404 that aborts the ingest.
+        let fetcher = RedirectingFetcher {
+            effective_url:
+                "https://abc-iview.akamaized.net/out/v1/abcd/master.m3u8?hdnea=token".to_owned(),
+            body: ABR_MASTER_WITH_SUBS.to_owned(),
+        };
+        let pinned = resolve_hls_variant_url_with(
+            "https://c.mjh.nz/abc-news.m3u8",
+            Some(700),
+            &fetcher,
+        )
+        .expect("a redirected ABR master pins a variant");
+        assert_eq!(
+            pinned, "https://abc-iview.akamaized.net/out/v1/abcd/index_2.m3u8",
+            "the relative variant URI must resolve under the post-redirect Akamai base, \
+             not the requested c.mjh.nz origin"
+        );
+    }
+
+    #[test]
+    fn a_relative_variant_uri_resolves_against_the_master_base_without_redirect() {
+        // The non-redirect relative-child case must not regress: when the effective
+        // URL equals the requested URL, the variant resolves against that base.
+        let fetcher = CannedFetcher(Ok(ABR_MASTER_WITH_SUBS.to_owned()));
+        let pinned = resolve_hls_variant_url_with(
+            "https://cdn.test/live/master.m3u8",
+            Some(700),
+            &fetcher,
+        )
+        .expect("a non-redirecting ABR master pins a variant");
+        assert_eq!(pinned, "https://cdn.test/live/index_2.m3u8");
     }
 
     #[test]
