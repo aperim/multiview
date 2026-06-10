@@ -13,13 +13,32 @@ msgstr ""
 "Language-Team: \n"
 "Plural-Forms: \n"
 
+#: src/layout/components/CellPropertiesPanel.tsx:120
+msgid "\"No signal\" card"
+msgstr "\"No signal\" card"
+
+#: src/resources/FormControls.tsx:81
+msgid "“prog” is reserved for the program mix — choose another track name."
+msgstr "“prog” is reserved for the program mix — choose another track name."
+
+#: src/layout/components/GridLayoutEditor.tsx:831
+msgid "({rawCellCount} absolutely-placed cell(s) ride along unchanged — edit them via Convert to free-form.)"
+msgstr "({rawCellCount} absolutely-placed cell(s) ride along unchanged — edit them via Convert to free-form.)"
+
 #: src/pages/docs/ApiPage.tsx:52
 msgid "(opens in a new tab)"
 msgstr "(opens in a new tab)"
 
+#. placeholder {0}: names.length
+#. placeholder {1}: editableCells(model).length
+#. placeholder {2}: sourceLabels.size
+#: src/layout/components/GridLayoutEditor.tsx:824
+msgid "{0} area(s) · {1} cell(s) · {2} bound to a source"
+msgstr "{0} area(s) · {1} cell(s) · {2} bound to a source"
+
 #. placeholder {0}: editor.model.cells.length
 #. placeholder {1}: editor.model.cells.filter((c) => c.sourceId !== undefined).length
-#: src/layout/components/LayoutEditor.tsx:387
+#: src/layout/components/LayoutEditor.tsx:388
 msgid "{0} cell(s) · {1} bound to a source"
 msgstr "{0} cell(s) · {1} bound to a source"
 
@@ -27,6 +46,12 @@ msgstr "{0} cell(s) · {1} bound to a source"
 #: src/pages/docs/DocsSearch.tsx:109
 msgid "{0} documentation results"
 msgstr "{0} documentation results"
+
+#: src/layout/components/CellPropertiesPanel.tsx:124
+#: src/layout/components/CellPropertiesPanel.tsx:221
+#: src/layout/components/CellPropertiesPanel.tsx:317
+msgid "{option} (custom — preserved)"
+msgstr "{option} (custom — preserved)"
 
 #: src/components/SystemFooter.tsx:147
 msgid "{short} compute utilisation {computeTotal} (device total)"
@@ -148,6 +173,10 @@ msgstr "2×2"
 msgid "3×3"
 msgstr "3×3"
 
+#: src/pages/AudioPage.tsx:63
+msgid "5.1 surround"
+msgstr "5.1 surround"
+
 #: src/pages/SimplePages.tsx:945
 #~ msgid "A codec is required for this output kind."
 #~ msgstr "A codec is required for this output kind."
@@ -168,11 +197,15 @@ msgstr "A feed crossing the internet: SRT (tune the latency window to the link).
 msgid "A file source plays media from disk, paced to real time so it behaves like a live feed on the wall (and can loop). Synthetic sources — color bars, solid fills, and a ticking clock — are generated in-process with no network or decode at all. They are ideal for layout work, burn-in tests, and proving the output path end to end before any real feed is connected."
 msgstr "A file source plays media from disk, paced to real time so it behaves like a live feed on the wall (and can loop). Synthetic sources — color bars, solid fills, and a ticking clock — are generated in-process with no network or decode at all. They are ideal for layout work, burn-in tests, and proving the output path end to end before any real feed is connected."
 
+#: src/layout/components/GridLayoutEditor.tsx:288
+msgid "A grid layout places cells by named areas on column/row tracks — resize whole rows and columns at once, with even gaps."
+msgstr "A grid layout places cells by named areas on column/row tracks — resize whole rows and columns at once, with even gaps."
+
 #: src/pages/docs/FeaturesPage.tsx:27
 msgid "A layout decides where every tile sits on the canvas. Use a factory preset (such as 2x2 or 1+5), a CSS-grid with named areas and fractional tracks, or absolute normalized rectangles for full control. A cell's fit mode controls how a source is scaled into its tile — contain to letterbox, cover to crop and fill, or fill to stretch."
 msgstr "A layout decides where every tile sits on the canvas. Use a factory preset (such as 2x2 or 1+5), a CSS-grid with named areas and fractional tracks, or absolute normalized rectangles for full control. A cell's fit mode controls how a source is scaled into its tile — contain to letterbox, cover to crop and fill, or fill to stretch."
 
-#: src/layout/components/validationMessages.tsx:18
+#: src/layout/components/validationMessages.tsx:19
 msgid "A layout name is required."
 msgstr "A layout name is required."
 
@@ -180,7 +213,7 @@ msgstr "A layout name is required."
 #~ msgid "A locator is required for this source kind."
 #~ msgstr "A locator is required for this source kind."
 
-#: src/resources/FormControls.tsx:61
+#: src/resources/FormControls.tsx:70
 msgid "A mount point must start with /, e.g. /multiview."
 msgstr "A mount point must start with /, e.g. /multiview."
 
@@ -209,6 +242,10 @@ msgstr "A named, atomically applied recall of multiview state: one salvo can swi
 #: src/pages/docs/ConfigPage.tsx:209
 msgid "A per-cell <0>qos</0> block sets a degradation <1>priority</1> and strategy, so the engine sheds the cheapest tiles first under load before touching the program output."
 msgstr "A per-cell <0>qos</0> block sets a degradation <1>priority</1> and strategy, so the engine sheds the cheapest tiles first under load before touching the program output."
+
+#: src/pages/ProbesPage.tsx:487
+msgid "A probe watches one cell for a fail state and raises an alarm after its dwell window."
+msgstr "A probe watches one cell for a fail state and raises an alarm after its dwell window."
 
 #: src/pages/SourcesPage.tsx:430
 msgid "A reference only — never a plaintext secret. Leave blank for none."
@@ -275,6 +312,7 @@ msgstr "About codecs and transcoding"
 msgid "About color spaces and range"
 msgstr "About color spaces and range"
 
+#: src/layout/components/GridLayoutEditor.tsx:292
 #: src/pages/LayoutsPage.tsx:202
 msgid "About layouts"
 msgstr "About layouts"
@@ -283,9 +321,19 @@ msgstr "About layouts"
 msgid "About output transports"
 msgstr "About output transports"
 
+#: src/pages/AudioPage.tsx:344
+msgid "About outputs and audio"
+msgstr "About outputs and audio"
+
 #: src/pages/OverlaysPage.tsx:220
 msgid "About overlays"
 msgstr "About overlays"
+
+#: src/pages/ProbesPage.tsx:436
+#: src/pages/ProbesPage.tsx:481
+#: src/pages/ProbesPage.tsx:547
+msgid "About probes and alarms"
+msgstr "About probes and alarms"
 
 #: src/pages/docs/FeaturesPage.tsx:53
 #: src/pages/SourcesPage.tsx:512
@@ -336,9 +384,11 @@ msgid "Action"
 msgstr "Action"
 
 #: src/pages/AlarmsPage.tsx:221
+#: src/pages/AudioPage.tsx:429
 #: src/pages/LayoutsPage.tsx:86
 #: src/pages/OutputsPage.tsx:433
 #: src/pages/OverlaysPage.tsx:194
+#: src/pages/ProbesPage.tsx:452
 #: src/pages/SourcesPage.tsx:486
 #: src/pages/TallyPage.tsx:367
 msgid "Actions"
@@ -376,13 +426,26 @@ msgstr "Add"
 msgid "Add and manage live ingest sources."
 msgstr "Add and manage live ingest sources."
 
-#: src/layout/components/validationMessages.tsx:38
+#: src/layout/components/validationMessages.tsx:39
 msgid "Add at least one cell to the layout."
 msgstr "Add at least one cell to the layout."
 
+#: src/layout/components/GridLayoutEditor.tsx:651
 #: src/layout/components/LayoutEditor.tsx:180
 msgid "Add cell"
 msgstr "Add cell"
+
+#: src/layout/components/GridLayoutEditor.tsx:422
+msgid "Add column"
+msgstr "Add column"
+
+#: src/pages/AudioPage.tsx:479
+msgid "Add route"
+msgstr "Add route"
+
+#: src/layout/components/GridLayoutEditor.tsx:432
+msgid "Add row"
+msgstr "Add row"
 
 #: src/layout/components/SourcePalette.tsx:159
 msgid "Add to layout"
@@ -402,11 +465,19 @@ msgstr "Advanced"
 msgid "Advertise the canvas as an NDI source by <0>name</0>."
 msgstr "Advertise the canvas as an NDI source by <0>name</0>."
 
+#: src/layout/components/GridLayoutEditor.tsx:460
+msgid "Advisories (saving still allowed):"
+msgstr "Advisories (saving still allowed):"
+
 #: src/pages/AlarmsPage.tsx:137
 msgid "Alarm acknowledged"
 msgstr "Alarm acknowledged"
 
-#: src/app/navigation.tsx:42
+#: src/pages/ProbesPage.tsx:354
+msgid "Alarm policy (dwell, severity, latching)"
+msgstr "Alarm policy (dwell, severity, latching)"
+
+#: src/app/navigation.tsx:46
 #: src/docs/registry.ts:231
 #: src/pages/AlarmsPage.tsx:152
 #: src/pages/docs/FeaturesPage.tsx:149
@@ -420,6 +491,10 @@ msgstr "Alarms are raised by content-aware fault probes attached to a tile. Prob
 #: src/pages/AlarmsPage.tsx:214
 msgid "Alarms matching the current filter."
 msgstr "Alarms matching the current filter."
+
+#: src/layout/components/CellPropertiesPanel.tsx:204
+msgid "Align"
+msgstr "Align"
 
 #: src/pages/LayoutsPage.tsx:237
 msgid "All configured layouts."
@@ -471,6 +546,14 @@ msgstr "An RTSP source URL must start with rtsp:// (or rtsps://)."
 msgid "An SRT URL must start with srt://."
 msgstr "An SRT URL must start with srt://."
 
+#: src/resources/FormControls.tsx:76
+msgid "Another route already claims this track name."
+msgstr "Another route already claims this track name."
+
+#: src/resources/FormControls.tsx:78
+msgid "Another route already uses this input."
+msgstr "Another route already uses this input."
+
 #: src/pages/AlarmsPage.tsx:171
 msgid "Any severity"
 msgstr "Any severity"
@@ -510,6 +593,7 @@ msgstr "API token cleared"
 msgid "API token saved"
 msgstr "API token saved"
 
+#: src/layout/components/CellPropertiesPanel.tsx:182
 #: src/pages/SettingsPage.tsx:55
 msgid "Appearance"
 msgstr "Appearance"
@@ -538,6 +622,22 @@ msgstr "Apply layout to engine"
 msgid "Apply-layout accepted"
 msgstr "Apply-layout accepted"
 
+#: src/layout/components/GridLayoutEditor.tsx:566
+msgid "Area cell"
+msgstr "Area cell"
+
+#: src/layout/components/AreaMatrixEditor.tsx:256
+msgid "Area name"
+msgstr "Area name"
+
+#: src/layout/components/GridLayoutEditor.tsx:567
+msgid "Areas"
+msgstr "Areas"
+
+#: src/layout/components/GridLayoutEditor.tsx:548
+msgid "Areas & cells"
+msgstr "Areas & cells"
+
 #: src/pages/SalvosPage.tsx:257
 msgid "Arm"
 msgstr "Arm"
@@ -550,11 +650,38 @@ msgstr "Arm salvo"
 msgid "As an input, HLS arrives in bursts (whole segments at a time), so Multiview paces it back to real time internally before it is sampled onto the wall. As an output it is the easiest way to let many people open the multiview in a browser or player."
 msgstr "As an input, HLS arrives in bursts (whole segments at a time), so Multiview paces it back to real time internally before it is sampled onto the wall. As an output it is the easiest way to let many people open the multiview in a browser or player."
 
+#: src/layout/components/AreaMatrixEditor.tsx:281
+msgid "Assign to selection"
+msgstr "Assign to selection"
+
+#. placeholder {0}: name.trim()
+#: src/layout/components/AreaMatrixEditor.tsx:159
+msgid "Assigned the selection to area \"{0}\"."
+msgstr "Assigned the selection to area \"{0}\"."
+
+#: src/pages/ProbesPage.tsx:90
+msgid "ATSC A/85 (−24 LKFS)"
+msgstr "ATSC A/85 (−24 LKFS)"
+
+#: src/app/navigation.tsx:41
+#: src/pages/AudioPage.tsx:338
 #: src/pages/OutputsPage.tsx:319
 msgid "Audio"
 msgstr "Audio"
 
-#: src/app/navigation.tsx:44
+#: src/pages/ProbesPage.tsx:293
+msgid "Audio at or below this level counts as silent (e.g. −60)."
+msgstr "Audio at or below this level counts as silent (e.g. −60)."
+
+#: src/pages/AudioPage.tsx:394
+msgid "Audio routes"
+msgstr "Audio routes"
+
+#: src/pages/ProbesPage.tsx:60
+msgid "Audio silence"
+msgstr "Audio silence"
+
+#: src/app/navigation.tsx:48
 #: src/pages/AuditPage.tsx:55
 msgid "Audit"
 msgstr "Audit"
@@ -599,7 +726,7 @@ msgstr "Back to dashboard"
 msgid "Background fill as a hex color (e.g. #101014)."
 msgstr "Background fill as a hex color (e.g. #101014)."
 
-#: src/layout/components/CellsForm.tsx:334
+#: src/layout/components/CellsForm.tsx:348
 msgid "Backward"
 msgstr "Backward"
 
@@ -620,17 +747,37 @@ msgstr "Bit→colour rules"
 msgid "Bitrate"
 msgstr "Bitrate"
 
+#: src/layout/components/CellPropertiesPanel.tsx:122
+msgid "Black"
+msgstr "Black"
+
+#: src/pages/ProbesPage.tsx:56
+msgid "Black picture"
+msgstr "Black picture"
+
 #: src/pages/OverlaysPage.tsx:66
 msgid "Blank renders UTC."
 msgstr "Blank renders UTC."
+
+#: src/layout/components/CellPropertiesPanel.tsx:261
+msgid "Border"
+msgstr "Border"
 
 #: src/pages/OverlaysPage.tsx:124
 msgid "Border colour"
 msgstr "Border colour"
 
+#: src/layout/components/validationMessages.tsx:47
+msgid "Border colour must be a hex value like #101014 or #abc."
+msgstr "Border colour must be a hex value like #101014 or #abc."
+
 #: src/pages/OverlaysPage.tsx:113
 msgid "Border width (px)"
 msgstr "Border width (px)"
+
+#: src/layout/components/validationMessages.tsx:45
+msgid "Border width must be a whole number of pixels (0 or more)."
+msgstr "Border width must be a whole number of pixels (0 or more)."
 
 #: src/pages/docs/DocsLayout.tsx:151
 msgid "Breadcrumb"
@@ -640,7 +787,7 @@ msgstr "Breadcrumb"
 msgid "Brightness"
 msgstr "Brightness"
 
-#: src/layout/components/CellsForm.tsx:375
+#: src/layout/components/CellsForm.tsx:389
 msgid "Bring forward"
 msgstr "Bring forward"
 
@@ -665,14 +812,19 @@ msgstr "Buffers and lags under loss"
 msgid "Bus"
 msgstr "Bus"
 
-#: src/layout/components/LayoutEditor.tsx:431
+#: src/pages/AudioPage.tsx:214
+msgid "Camera 1"
+msgstr "Camera 1"
+
+#: src/layout/components/GridLayoutEditor.tsx:867
+#: src/layout/components/LayoutEditor.tsx:432
 #: src/pages/LayoutsPage.tsx:308
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
 #: src/pages/TallyPage.tsx:432
-#: src/resources/CrudPage.tsx:340
-#: src/resources/CrudPage.tsx:385
+#: src/resources/CrudPage.tsx:342
+#: src/resources/CrudPage.tsx:387
 msgid "Cancel"
 msgstr "Cancel"
 
@@ -680,7 +832,29 @@ msgstr "Cancel"
 msgid "Cancel salvo"
 msgstr "Cancel salvo"
 
+#: src/layout/components/AreaMatrixEditor.tsx:170
+msgid "Cannot assign: area(s) {broken} would no longer be a rectangle. Areas must stay contiguous rectangles."
+msgstr "Cannot assign: area(s) {broken} would no longer be a rectangle. Areas must stay contiguous rectangles."
+
+#: src/pages/LayoutEditorPage.tsx:264
+msgid "Cannot convert this preset"
+msgstr "Cannot convert this preset"
+
+#: src/pages/LayoutEditorPage.tsx:252
+msgid "Cannot convert this preset to a grid"
+msgstr "Cannot convert this preset to a grid"
+
+#: src/layout/components/GridLayoutEditor.tsx:474
+msgid "Cannot convert: fix the grid errors first so every area solves to a rectangle."
+msgstr "Cannot convert: fix the grid errors first so every area solves to a rectangle."
+
+#. placeholder {0}: result.areas.join(', ')
+#: src/layout/components/GridLayoutEditor.tsx:623
+msgid "Cannot rename: area(s) {0} would no longer be a rectangle."
+msgstr "Cannot rename: area(s) {0} would no longer be a rectangle."
+
 #: src/docs/registry.ts:128
+#: src/layout/components/GridLayoutEditor.tsx:298
 #: src/layout/components/LayoutEditor.tsx:210
 #: src/layout/components/LayoutEditor.tsx:321
 #: src/pages/docs/ConfigPage.tsx:66
@@ -695,7 +869,7 @@ msgstr "Canvas height in pixels."
 msgid "canvas or a cell id"
 msgstr "canvas or a cell id"
 
-#: src/layout/components/validationMessages.tsx:20
+#: src/layout/components/validationMessages.tsx:21
 msgid "Canvas width and height must be positive whole numbers."
 msgstr "Canvas width and height must be positive whole numbers."
 
@@ -711,11 +885,21 @@ msgstr "Caption field / service"
 msgid "Captions"
 msgstr "Captions"
 
-#: src/layout/components/validationMessages.tsx:30
+#: src/pages/ProbesPage.tsx:117
+#: src/pages/ProbesPage.tsx:132
+#: src/pages/ProbesPage.tsx:424
+msgid "Cell"
+msgstr "Cell"
+
+#: src/layout/components/GridLayoutEditor.tsx:657
+msgid "Cell id:"
+msgstr "Cell id:"
+
+#: src/layout/components/validationMessages.tsx:31
 msgid "Cell identifiers must be unique within a layout."
 msgstr "Cell identifiers must be unique within a layout."
 
-#: src/layout/components/CellsForm.tsx:364
+#: src/layout/components/CellsForm.tsx:378
 msgid "Cell name"
 msgstr "Cell name"
 
@@ -742,7 +926,7 @@ msgstr "Centre y (px)"
 msgid "Change log, newest first."
 msgstr "Change log, newest first."
 
-#: src/resources/FormControls.tsx:259
+#: src/resources/FormControls.tsx:333
 msgid "Changes saved here are stored, not yet live: the engine does not hot-add sources or outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
 msgstr "Changes saved here are stored, not yet live: the engine does not hot-add sources or outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
 
@@ -754,9 +938,21 @@ msgstr "Changes saved here are stored, not yet live: the engine does not hot-add
 msgid "Changing an output's codec today is a configuration change, not a live switch: stored edits take effect by exporting the config and restarting the engine (the API marks these resources <0>apply: restart</0>). The codec token is also only lightly checked at present — if the build cannot encode the requested codec, the pipeline logs a warning and falls back to MPEG-2 rather than failing the run. So choose a codec your build and transport are known to carry (classic RTMP, for example, carries H.264 only), and verify the output really uses it — for example with <1>ffprobe</1>."
 msgstr "Changing an output's codec today is a configuration change, not a live switch: stored edits take effect by exporting the config and restarting the engine (the API marks these resources <0>apply: restart</0>). The codec token is also only lightly checked at present — if the build cannot encode the requested codec, the pipeline logs a warning and falls back to MPEG-2 rather than failing the run. So choose a codec your build and transport are known to carry (classic RTMP, for example, carries H.264 only), and verify the output really uses it — for example with <1>ffprobe</1>."
 
+#: src/pages/AudioPage.tsx:407
+msgid "Channels"
+msgstr "Channels"
+
+#: src/pages/AudioPage.tsx:138
+msgid "Channels (route {row})"
+msgstr "Channels (route {row})"
+
 #: src/auth/LoginPage.tsx:102
 msgid "Checking…"
 msgstr "Checking…"
+
+#: src/pages/AudioPage.tsx:113
+msgid "Choose an input"
+msgstr "Choose an input"
 
 #: src/pages/SettingsPage.tsx:58
 msgid "Choose light, dark, or follow the system."
@@ -781,9 +977,17 @@ msgstr "Clauses"
 msgid "Clear"
 msgstr "Clear"
 
+#: src/pages/ProbesPage.tsx:369
+msgid "Clear dwell (ms)"
+msgstr "Clear dwell (ms)"
+
 #: src/pages/TallyPage.tsx:295
 msgid "Clear override"
 msgstr "Clear override"
+
+#: src/pages/ProbesPage.tsx:70
+msgid "Cleared (no alarm)"
+msgstr "Cleared (no alarm)"
 
 #: src/pages/AlarmsPage.tsx:192
 msgid "Cleared only"
@@ -830,6 +1034,22 @@ msgstr "Color spaces, limited vs full range, and HDR — why mismatches look was
 #~ msgid "Colour"
 #~ msgstr "Colour"
 
+#: src/layout/components/CellPropertiesPanel.tsx:275
+msgid "Colour (hex)"
+msgstr "Colour (hex)"
+
+#: src/layout/components/CellPropertiesPanel.tsx:118
+msgid "Colour bars (line-up signal)"
+msgstr "Colour bars (line-up signal)"
+
+#: src/layout/components/GridLayoutEditor.tsx:399
+msgid "Column gap"
+msgstr "Column gap"
+
+#: src/layout/components/GridLayoutEditor.tsx:421
+msgid "Columns"
+msgstr "Columns"
+
 #: src/pages/SalvosPage.tsx:153
 msgid "Command accepted"
 msgstr "Command accepted"
@@ -842,6 +1062,10 @@ msgstr "Command failed"
 msgid "Commands"
 msgstr "Commands"
 
+#: src/pages/ProbesPage.tsx:303
+msgid "Compliance standard"
+msgstr "Compliance standard"
+
 #: src/pages/docs/ComposePage.tsx:83
 msgid "Compose merges files left to right. The GPU overlay files swap the <0>multiview</0> image and add device access; the other services are inherited unchanged. Layer an overlay on top of the base file:"
 msgstr "Compose merges files left to right. The GPU overlay files swap the <0>multiview</0> image and add device access; the other services are inherited unchanged. Layer an overlay on top of the base file:"
@@ -851,7 +1075,7 @@ msgstr "Compose merges files left to right. The GPU overlay files swap the <0>mu
 msgid "Compose reference"
 msgstr "Compose reference"
 
-#: src/pages/LayoutEditorPage.tsx:162
+#: src/pages/LayoutEditorPage.tsx:334
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 msgstr "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
 
@@ -880,13 +1104,17 @@ msgstr "Config-as-code"
 msgid "Configuration export"
 msgstr "Configuration export"
 
-#: src/resources/FormControls.tsx:288
+#: src/resources/FormControls.tsx:362
 msgid "Configuration exported"
 msgstr "Configuration exported"
 
 #: src/pages/OutputsPage.tsx:458
 msgid "Configure output servers and renditions."
 msgstr "Configure output servers and renditions."
+
+#: src/pages/ProbesPage.tsx:488
+msgid "Configured fail-state probes."
+msgstr "Configured fail-state probes."
 
 #: src/pages/SourcesPage.tsx:519
 msgid "Configured ingest sources."
@@ -916,6 +1144,39 @@ msgstr "Connecting"
 msgid "Connecting…"
 msgstr "Connecting…"
 
+#: src/layout/components/GridLayoutEditor.tsx:870
+msgid "Convert"
+msgstr "Convert"
+
+#: src/layout/components/GridLayoutEditor.tsx:850
+msgid "Convert to a free-form layout?"
+msgstr "Convert to a free-form layout?"
+
+#: src/layout/components/GridLayoutEditor.tsx:258
+#: src/pages/LayoutEditorPage.tsx:299
+msgid "Convert to free-form"
+msgstr "Convert to free-form"
+
+#: src/pages/LayoutEditorPage.tsx:291
+msgid "Convert to grid"
+msgstr "Convert to grid"
+
+#: src/pages/LayoutEditorPage.tsx:168
+msgid "Converted to a grid (not yet saved). Save to keep the grid form."
+msgstr "Converted to a grid (not yet saved). Save to keep the grid form."
+
+#: src/pages/LayoutEditorPage.tsx:190
+msgid "Converted to free-form (not yet saved). Save to keep the absolute placement."
+msgstr "Converted to free-form (not yet saved). Save to keep the absolute placement."
+
+#: src/layout/components/CellPropertiesPanel.tsx:195
+msgid "Corner radius (px)"
+msgstr "Corner radius (px)"
+
+#: src/layout/components/validationMessages.tsx:43
+msgid "Corner radius must be a whole number of pixels (0 or more)."
+msgstr "Corner radius must be a whole number of pixels (0 or more)."
+
 #: src/pages/AlarmsPage.tsx:141
 msgid "Could not acknowledge alarm"
 msgstr "Could not acknowledge alarm"
@@ -924,11 +1185,11 @@ msgstr "Could not acknowledge alarm"
 msgid "Could not apply layout"
 msgstr "Could not apply layout"
 
-#: src/resources/CrudPage.tsx:241
+#: src/resources/CrudPage.tsx:243
 msgid "Could not create"
 msgstr "Could not create"
 
-#: src/resources/CrudPage.tsx:260
+#: src/resources/CrudPage.tsx:262
 msgid "Could not delete"
 msgstr "Could not delete"
 
@@ -944,7 +1205,7 @@ msgstr "Could not delete profile"
 msgid "Could not delete salvo"
 msgstr "Could not delete salvo"
 
-#: src/resources/FormControls.tsx:302
+#: src/resources/FormControls.tsx:376
 msgid "Could not export configuration"
 msgstr "Could not export configuration"
 
@@ -952,7 +1213,7 @@ msgstr "Could not export configuration"
 msgid "Could not load alarms:"
 msgstr "Could not load alarms:"
 
-#: src/resources/CrudPage.tsx:208
+#: src/resources/CrudPage.tsx:210
 msgid "Could not load for editing"
 msgstr "Could not load for editing"
 
@@ -967,6 +1228,10 @@ msgstr "Could not load outputs:"
 #: src/pages/OverlaysPage.tsx:230
 msgid "Could not load overlays:"
 msgstr "Could not load overlays:"
+
+#: src/pages/ProbesPage.tsx:491
+msgid "Could not load probes:"
+msgstr "Could not load probes:"
 
 #: src/pages/TallyPage.tsx:353
 msgid "Could not load profiles:"
@@ -984,6 +1249,10 @@ msgstr "Could not load sources:"
 msgid "Could not load tally state:"
 msgstr "Could not load tally state:"
 
+#: src/pages/AudioPage.tsx:357
+msgid "Could not load the audio routing:"
+msgstr "Could not load the audio routing:"
+
 #: src/pages/AuditPage.tsx:96
 msgid "Could not load the audit log:"
 msgstr "Could not load the audit log:"
@@ -992,18 +1261,22 @@ msgstr "Could not load the audit log:"
 msgid "Could not reach the control plane. Is it running?"
 msgstr "Could not reach the control plane. Is it running?"
 
-#: src/resources/CrudPage.tsx:241
+#: src/resources/CrudPage.tsx:243
 msgid "Could not save"
 msgstr "Could not save"
 
-#: src/pages/LayoutEditorPage.tsx:68
-#: src/pages/LayoutEditorPage.tsx:104
+#: src/pages/LayoutEditorPage.tsx:94
+#: src/pages/LayoutEditorPage.tsx:130
 msgid "Could not save layout"
 msgstr "Could not save layout"
 
 #: src/pages/SalvosPage.tsx:118
 msgid "Could not save salvo"
 msgstr "Could not save salvo"
+
+#: src/pages/AudioPage.tsx:500
+msgid "Could not save the audio routing:"
+msgstr "Could not save the audio routing:"
 
 #: src/components/SystemFooter.tsx:230
 #: src/pages/SystemPage.tsx:253
@@ -1024,7 +1297,7 @@ msgstr "CPU utilisation trend (host total)"
 msgid "CPU utilisation trend: ours over host total"
 msgstr "CPU utilisation trend: ours over host total"
 
-#: src/resources/CrudPage.tsx:343
+#: src/resources/CrudPage.tsx:345
 msgid "Create"
 msgstr "Create"
 
@@ -1036,7 +1309,7 @@ msgstr "Create your first layout"
 msgid "Create your first salvo"
 msgstr "Create your first salvo"
 
-#: src/resources/CrudPage.tsx:234
+#: src/resources/CrudPage.tsx:236
 msgid "Created"
 msgstr "Created"
 
@@ -1049,6 +1322,7 @@ msgid "Credentials secret reference"
 msgstr "Credentials secret reference"
 
 #: src/components/HealthBanner.tsx:29
+#: src/pages/ProbesPage.tsx:80
 msgid "Critical"
 msgstr "Critical"
 
@@ -1064,7 +1338,7 @@ msgstr "Custom codec name"
 msgid "Custom…"
 msgstr "Custom…"
 
-#: src/app/navigation.tsx:34
+#: src/app/navigation.tsx:36
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "Dashboard"
@@ -1101,6 +1375,30 @@ msgstr "Decoder utilisation: ours over device total"
 msgid "Decoding compressed video and recompressing it into a different codec, resolution, or bitrate. Each transcode costs quality (a new lossy generation), latency, and compute, so well-designed systems transcode once and reuse the result everywhere."
 msgstr "Decoding compressed video and recompressing it into a different codec, resolution, or bitrate. Each transcode costs quality (a new lossy generation), latency, and compute, so well-designed systems transcode once and reuse the result everywhere."
 
+#: src/layout/components/CellPropertiesPanel.tsx:217
+msgid "Default (auto)"
+msgstr "Default (auto)"
+
+#: src/layout/components/CellPropertiesPanel.tsx:313
+msgid "Default (balanced)"
+msgstr "Default (balanced)"
+
+#: src/layout/components/CellPropertiesPanel.tsx:116
+msgid "Default (colour bars)"
+msgstr "Default (colour bars)"
+
+#: src/layout/components/GridLayoutEditor.tsx:725
+msgid "Default (contain)"
+msgstr "Default (contain)"
+
+#: src/layout/components/CellPropertiesPanel.tsx:250
+msgid "Default (off)"
+msgstr "Default (off)"
+
+#: src/layout/components/CellPropertiesPanel.tsx:236
+msgid "Default (visible)"
+msgstr "Default (visible)"
+
 #: src/pages/docs/ContainerPage.tsx:43
 msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
 msgstr "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
@@ -1109,14 +1407,18 @@ msgstr "Default software image. Also carries the VAAPI userspace and Mesa or Int
 msgid "Definition"
 msgstr "Definition"
 
+#: src/layout/components/CellPropertiesPanel.tsx:295
+msgid "Degradation"
+msgstr "Degradation"
+
 #: src/pages/LayoutsPage.tsx:118
 #: src/pages/LayoutsPage.tsx:311
 #: src/pages/SalvosPage.tsx:307
 #: src/pages/SalvosPage.tsx:436
 #: src/pages/TallyPage.tsx:392
 #: src/pages/TallyPage.tsx:435
-#: src/resources/CrudPage.tsx:107
-#: src/resources/CrudPage.tsx:392
+#: src/resources/CrudPage.tsx:109
+#: src/resources/CrudPage.tsx:394
 msgid "Delete"
 msgstr "Delete"
 
@@ -1135,6 +1437,10 @@ msgstr "Delete output"
 #: src/pages/OverlaysPage.tsx:200
 msgid "Delete overlay"
 msgstr "Delete overlay"
+
+#: src/pages/ProbesPage.tsx:458
+msgid "Delete probe"
+msgstr "Delete probe"
 
 #: src/pages/TallyPage.tsx:386
 msgid "Delete profile"
@@ -1156,11 +1462,11 @@ msgstr "Delete source"
 msgid "Delete tally profile?"
 msgstr "Delete tally profile?"
 
-#: src/resources/CrudPage.tsx:362
+#: src/resources/CrudPage.tsx:364
 msgid "Delete this resource?"
 msgstr "Delete this resource?"
 
-#: src/resources/CrudPage.tsx:256
+#: src/resources/CrudPage.tsx:258
 msgid "Deleted"
 msgstr "Deleted"
 
@@ -1178,6 +1484,14 @@ msgstr "Destination"
 msgid "Destination URL"
 msgstr "Destination URL"
 
+#: src/pages/ProbesPage.tsx:477
+msgid "Detect per-cell fail states — black, freeze, silence, and loudness violations — and raise X.733 alarms."
+msgstr "Detect per-cell fail states — black, freeze, silence, and loudness violations — and raise X.733 alarms."
+
+#: src/pages/ProbesPage.tsx:265
+msgid "Difference threshold (0–1000 per-mille)"
+msgstr "Difference threshold (0–1000 per-mille)"
+
 #: src/pages/SimplePages.tsx:672
 #~ msgid "Disabled"
 #~ msgstr "Disabled"
@@ -1189,6 +1503,14 @@ msgstr "Discard the source wall-clock"
 #: src/components/ConnectionStatus.tsx:47
 msgid "Disconnected"
 msgstr "Disconnected"
+
+#: src/pages/AudioPage.tsx:419
+msgid "Discrete track"
+msgstr "Discrete track"
+
+#: src/pages/AudioPage.tsx:186
+msgid "Discrete track name (route {row})"
+msgstr "Discrete track name (route {row})"
 
 #: src/pages/SalvosPage.tsx:357
 msgid "Display name"
@@ -1203,7 +1525,7 @@ msgstr "docker run"
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 
-#: src/app/navigation.tsx:45
+#: src/app/navigation.tsx:49
 msgid "Docs"
 msgstr "Docs"
 
@@ -1243,10 +1565,27 @@ msgstr "Dropped outside any target; nothing changed."
 msgid "DVB teletext page"
 msgstr "DVB teletext page"
 
+#: src/pages/ProbesPage.tsx:524
+msgid "e.g. black-cam-1"
+msgstr "e.g. black-cam-1"
+
 #: src/pages/SourcesPage.tsx:555
 msgid "e.g. cam-north"
 msgstr "e.g. cam-north"
 
+#: src/pages/AudioPage.tsx:189
+msgid "e.g. cam1-clean"
+msgstr "e.g. cam1-clean"
+
+#: src/pages/ProbesPage.tsx:120
+msgid "e.g. cell-1"
+msgstr "e.g. cell-1"
+
+#: src/layout/components/CellPropertiesPanel.tsx:206
+msgid "e.g. center or top_left"
+msgstr "e.g. center or top_left"
+
+#: src/layout/components/GridLayoutEditor.tsx:241
 #: src/layout/components/LayoutEditor.tsx:153
 msgid "e.g. Main wall"
 msgstr "e.g. Main wall"
@@ -1254,6 +1593,10 @@ msgstr "e.g. Main wall"
 #: src/pages/OutputsPage.tsx:505
 msgid "e.g. program-hls"
 msgstr "e.g. program-hls"
+
+#: src/layout/components/CellPropertiesPanel.tsx:286
+msgid "e.g. solid"
+msgstr "e.g. solid"
 
 #: src/pages/OverlaysPage.tsx:256
 msgid "e.g. wall-clock"
@@ -1275,6 +1618,10 @@ msgstr "Each <0>[[overlays]]</0> entry attaches a layer to the whole <1>canvas</
 msgid "Each <0>[[sources]]</0> entry is a managed input with a stable <1>id</1>, an optional <2>display_name</2>, and a <3>kind</3> that selects the transport. The network kinds carry a <4>url</4>; NDI binds by <5>name</5>; file inputs use a <6>path</6>; <7>test</7> is a built-in synthetic pattern with no parameters."
 msgstr "Each <0>[[sources]]</0> entry is a managed input with a stable <1>id</1>, an optional <2>display_name</2>, and a <3>kind</3> that selects the transport. The network kinds carry a <4>url</4>; NDI binds by <5>name</5>; file inputs use a <6>path</6>; <7>test</7> is a built-in synthetic pattern with no parameters."
 
+#: src/layout/components/validationMessages.tsx:61
+msgid "Each axis needs at least one track (e.g. 1fr)."
+msgstr "Each axis needs at least one track (e.g. 1fr)."
+
 #: src/pages/docs/ConfigPage.tsx:133
 msgid "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</0> field."
 msgstr "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</0> field."
@@ -1283,16 +1630,29 @@ msgstr "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect<
 msgid "Each input continuously writes its newest decoded frame into a small per-tile store; the compositor reads the latest complete frame from that store at every output tick and never waits for an input. When a source hiccups, the store simply keeps handing out the most recent frame it has — the \"last good\" one. A brief network blip is therefore invisible: the tile holds a fraction-of-a-second-old picture until fresh frames resume."
 msgstr "Each input continuously writes its newest decoded frame into a small per-tile store; the compositor reads the latest complete frame from that store at every output tick and never waits for an input. When a source hiccups, the store simply keeps handing out the most recent frame it has — the \"last good\" one. A brief network blip is therefore invisible: the tile holds a fraction-of-a-second-old picture until fresh frames resume."
 
+#: src/pages/AudioPage.tsx:265
+msgid "Each output picks its audio from this set: “program” mode carries the prog mix; “tracks” mode selects any of the names above. Manage that per-output choice on the Outputs page."
+msgstr "Each output picks its audio from this set: “program” mode carries the prog mix; “tracks” mode selects any of the names above. Manage that per-output choice on the Outputs page."
+
+#: src/pages/ProbesPage.tsx:88
+msgid "EBU R128 (−23 LUFS)"
+msgstr "EBU R128 (−23 LUFS)"
+
 #: src/pages/LayoutsPage.tsx:106
 #: src/pages/SalvosPage.tsx:296
-#: src/resources/CrudPage.tsx:96
+#: src/resources/CrudPage.tsx:97
 msgid "Edit"
 msgstr "Edit"
 
-#: src/pages/LayoutEditorPage.tsx:116
-#: src/pages/LayoutEditorPage.tsx:127
-#: src/pages/LayoutEditorPage.tsx:140
-#: src/pages/LayoutEditorPage.tsx:160
+#: src/pages/LayoutEditorPage.tsx:142
+#: src/pages/LayoutEditorPage.tsx:153
+#: src/pages/LayoutEditorPage.tsx:166
+#: src/pages/LayoutEditorPage.tsx:188
+#: src/pages/LayoutEditorPage.tsx:213
+#: src/pages/LayoutEditorPage.tsx:226
+#: src/pages/LayoutEditorPage.tsx:275
+#: src/pages/LayoutEditorPage.tsx:312
+#: src/pages/LayoutEditorPage.tsx:332
 msgid "Edit layout"
 msgstr "Edit layout"
 
@@ -1305,6 +1665,11 @@ msgstr "Edit output"
 #: src/pages/OverlaysPage.tsx:225
 msgid "Edit overlay"
 msgstr "Edit overlay"
+
+#: src/pages/ProbesPage.tsx:457
+#: src/pages/ProbesPage.tsx:486
+msgid "Edit probe"
+msgstr "Edit probe"
 
 #: src/pages/SalvosPage.tsx:290
 #: src/pages/SalvosPage.tsx:328
@@ -1362,6 +1727,19 @@ msgstr "Enter a full URL with a host. Wrap an IPv6 literal in brackets, e.g. rts
 msgid "Enter a hex colour like #101014 or #abc."
 msgstr "Enter a hex colour like #101014 or #abc."
 
+#: src/resources/FormControls.tsx:74
+msgid "Enter a number (decibels may be negative, e.g. -3)."
+msgstr "Enter a number (decibels may be negative, e.g. -3)."
+
+#: src/resources/FormControls.tsx:61
+msgid "Enter a number (decimals allowed, e.g. -23.5)."
+msgstr "Enter a number (decimals allowed, e.g. -23.5)."
+
+#: src/layout/components/AreaMatrixEditor.tsx:165
+#: src/layout/components/GridLayoutEditor.tsx:620
+msgid "Enter a single-word area name (no spaces)."
+msgstr "Enter a single-word area name (no spaces)."
+
 #: src/pages/TallyPage.tsx:131
 msgid "Enter a valid target"
 msgstr "Enter a valid target"
@@ -1386,13 +1764,21 @@ msgstr "Enter an API key."
 msgid "Errors"
 msgstr "Errors"
 
-#: src/layout/components/validationMessages.tsx:28
+#: src/layout/components/validationMessages.tsx:29
 msgid "Every cell needs a non-empty identifier."
 msgstr "Every cell needs a non-empty identifier."
 
 #: src/pages/docs/ConfigPage.tsx:36
 msgid "Every document starts with a <0>schema_version</0> and then declares the canvas, the layout strategy, the managed sources, the cells (tiles) that place those sources, overlays, and outputs. Optional blocks add fault probes, tally profiles, salvos, and video walls."
 msgstr "Every document starts with a <0>schema_version</0> and then declares the canvas, the layout strategy, the managed sources, the cells (tiles) that place those sources, overlays, and outputs. Optional blocks add fault probes, tally profiles, salvos, and video walls."
+
+#: src/resources/FormControls.tsx:87
+msgid "Every input on the program mix is muted. Unmute at least one, or take them all off the mix."
+msgstr "Every input on the program mix is muted. Unmute at least one, or take them all off the mix."
+
+#: src/layout/components/validationMessages.tsx:69
+msgid "Every named area must form a contiguous rectangle."
+msgstr "Every named area must form a contiguous rectangle."
 
 #: src/pages/docs/concepts/ResiliencePage.tsx:28
 msgid "Every tile rides its own four-state ladder, independently of every other tile. The state is shown as a badge in the UI and decides what the tile draws:"
@@ -1406,11 +1792,11 @@ msgstr "Exact \"num/den\", e.g. 30/1 or 30000/1001 — never a float."
 msgid "Explicit track list"
 msgstr "Explicit track list"
 
-#: src/resources/FormControls.tsx:311
+#: src/resources/FormControls.tsx:385
 msgid "Export configuration"
 msgstr "Export configuration"
 
-#: src/resources/FormControls.tsx:295
+#: src/resources/FormControls.tsx:369
 msgid "Export not available"
 msgstr "Export not available"
 
@@ -1458,14 +1844,16 @@ msgstr "Fill colour"
 msgid "Filter by object id"
 msgstr "Filter by object id"
 
-#: src/layout/components/CellsForm.tsx:370
+#: src/layout/components/CellsForm.tsx:384
+#: src/layout/components/GridLayoutEditor.tsx:704
 msgid "Fit"
 msgstr "Fit"
 
-#: src/resources/CrudPage.tsx:335
+#: src/resources/CrudPage.tsx:337
 msgid "Fix the highlighted fields, then save again."
 msgstr "Fix the highlighted fields, then save again."
 
+#: src/layout/components/GridLayoutEditor.tsx:446
 #: src/layout/components/LayoutEditor.tsx:306
 msgid "Fix these before saving:"
 msgstr "Fix these before saving:"
@@ -1474,19 +1862,24 @@ msgstr "Fix these before saving:"
 msgid "Force lamp"
 msgstr "Force lamp"
 
-#: src/layout/components/CellsForm.tsx:321
+#: src/layout/components/CellsForm.tsx:335
 msgid "Forward"
 msgstr "Forward"
+
+#: src/pages/ProbesPage.tsx:209
+msgid "Fractions of the tile, so a static logo or lower-third cannot mask a black or frozen background."
+msgstr "Fractions of the tile, so a static logo or lower-third cannot mask a black or frozen background."
 
 #: src/pages/DashboardPage.tsx:119
 msgid "Frame rate"
 msgstr "Frame rate"
 
+#: src/layout/components/GridLayoutEditor.tsx:344
 #: src/layout/components/LayoutEditor.tsx:256
 msgid "Frame rate (rational)"
 msgstr "Frame rate (rational)"
 
-#: src/layout/components/validationMessages.tsx:23
+#: src/layout/components/validationMessages.tsx:24
 msgid "Frame rate must be an exact rational like 30000/1001 — not a decimal."
 msgstr "Frame rate must be an exact rational like 30000/1001 — not a decimal."
 
@@ -1498,6 +1891,10 @@ msgstr "Frame-accurate facilities use PTP because it is the only way to make man
 msgid "Fresh frames are arriving; the tile shows the newest one. This is the normal state."
 msgstr "Fresh frames are arriving; the tile shows the newest one. This is the normal state."
 
+#: src/pages/ProbesPage.tsx:58
+msgid "Frozen picture"
+msgstr "Frozen picture"
+
 #: src/pages/docs/concepts/ColorPage.tsx:71
 msgid "Full content interpreted as limited: shadows <0>crush to solid black</0> and highlights clip to white."
 msgstr "Full content interpreted as limited: shadows <0>crush to solid black</0> and highlights clip to white."
@@ -1505,6 +1902,26 @@ msgstr "Full content interpreted as limited: shadows <0>crush to solid black</0>
 #: src/pages/docs/concepts/TransportsPage.tsx:291
 msgid "Fully deterministic"
 msgstr "Fully deterministic"
+
+#: src/pages/AudioPage.tsx:413
+msgid "Gain (dB)"
+msgstr "Gain (dB)"
+
+#: src/pages/AudioPage.tsx:162
+msgid "Gain in dB (route {row})"
+msgstr "Gain in dB (route {row})"
+
+#: src/layout/components/GridLayoutEditor.tsx:365
+msgid "Gap"
+msgstr "Gap"
+
+#: src/layout/components/GridLayoutEditor.tsx:361
+msgid "Gaps (px)"
+msgstr "Gaps (px)"
+
+#: src/layout/components/validationMessages.tsx:67
+msgid "Gaps must be whole pixel counts (0 or more)."
+msgstr "Gaps must be whole pixel counts (0 or more)."
 
 #: src/docs/registry.ts:325
 #: src/docs/registry.ts:491
@@ -1543,6 +1960,10 @@ msgstr "Glitchy, corrupt, and malformed inputs are the expected workload, not an
 #: src/pages/docs/concepts/GlossaryPage.tsx:16
 msgid "Glossary"
 msgstr "Glossary"
+
+#: src/pages/AudioPage.tsx:245
+msgid "Glossary: program bus and tracks"
+msgstr "Glossary: program bus and tracks"
 
 #: src/pages/docs/concepts/TimingSyncPage.tsx:151
 msgid "Glossary: PTP"
@@ -1608,6 +2029,11 @@ msgstr "GPUs"
 msgid "Green"
 msgstr "Green"
 
+#: src/layout/components/AreaMatrixEditor.tsx:187
+#: src/layout/components/GridLayoutEditor.tsx:557
+msgid "Grid areas"
+msgstr "Grid areas"
+
 #: src/pages/docs/concepts/CodecsPage.tsx:52
 msgid "H.264 (also called AVC) is the most widely supported video codec in existence: every browser, phone, set-top box, and hardware decoder of the last 15+ years plays it. It is the safe default for compatibility. Note that software H.264/H.265 encoders carry a GPL license obligation in Multiview's build, so the default (license-clean) image encodes them only with a hardware encoder; choosing a software H.264 encode means using the GPL image variant."
 msgstr "H.264 (also called AVC) is the most widely supported video codec in existence: every browser, phone, set-top box, and hardware decoder of the last 15+ years plays it. It is the safe default for compatibility. Note that software H.264/H.265 encoders carry a GPL license obligation in Multiview's build, so the default (license-clean) image encodes them only with a hardware encoder; choosing a software H.264 encode means using the GPL image variant."
@@ -1654,17 +2080,26 @@ msgstr "HDR (high dynamic range) streams use a different brightness curve — PQ
 msgid "Healthcheck"
 msgstr "Healthcheck"
 
-#: src/layout/components/CellsForm.tsx:368
+#: src/layout/components/CellsForm.tsx:382
 msgid "Height (%)"
 msgstr "Height (%)"
 
+#: src/layout/components/GridLayoutEditor.tsx:323
 #: src/layout/components/LayoutEditor.tsx:235
 msgid "Height (px)"
 msgstr "Height (px)"
 
+#: src/layout/components/CellPropertiesPanel.tsx:238
+msgid "Hidden (decode-skip)"
+msgstr "Hidden (decode-skip)"
+
 #: src/pages/docs/concepts/TransportsPage.tsx:275
 msgid "High (6–30 s) / medium (2–5 s)"
 msgstr "High (6–30 s) / medium (2–5 s)"
+
+#: src/layout/components/CellPropertiesPanel.tsx:301
+msgid "Higher priority is shed last under load."
+msgstr "Higher priority is shed last under load."
 
 #: src/pages/docs/concepts/TransportsPage.tsx:151
 msgid "HLS (HTTP Live Streaming) delivers video as a playlist of small media segments over plain HTTP. That makes it the most firewall-friendly and scalable transport — any web server or CDN can fan it out to thousands of viewers — at the cost of latency: a player typically starts several segments behind the live edge, so 6–30 seconds of delay is normal. Low-Latency HLS (LL-HLS) publishes partial segments and lets players request the next part before it is complete, bringing latency down to roughly 2–5 seconds while keeping HTTP delivery."
@@ -1691,7 +2126,9 @@ msgstr "Host memory used of total"
 msgid "Host memory: ours / used / total"
 msgstr "Host memory: ours / used / total"
 
+#: src/pages/AudioPage.tsx:351
 #: src/pages/OutputsPage.tsx:477
+#: src/pages/ProbesPage.tsx:496
 #: src/pages/SourcesPage.tsx:527
 msgid "How configuration applies"
 msgstr "How configuration applies"
@@ -1723,6 +2160,7 @@ msgstr "Idempotency"
 #: src/pages/LayoutsPage.tsx:70
 #: src/pages/OutputsPage.tsx:501
 #: src/pages/OverlaysPage.tsx:252
+#: src/pages/ProbesPage.tsx:520
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
 #: src/pages/SourcesPage.tsx:551
@@ -1751,6 +2189,10 @@ msgstr "In this UI, set your token under Settings, then API access. For a contai
 msgid "In-facility broadcast distribution"
 msgstr "In-facility broadcast distribution"
 
+#: src/pages/ProbesPage.tsx:72
+msgid "Indeterminate"
+msgstr "Indeterminate"
+
 #: src/pages/TallyPage.tsx:226
 msgid "Index"
 msgstr "Index"
@@ -1758,6 +2200,15 @@ msgstr "Index"
 #: src/pages/TallyPage.tsx:366
 msgid "Index→cell rules"
 msgstr "Index→cell rules"
+
+#: src/pages/AudioPage.tsx:404
+msgid "Input"
+msgstr "Input"
+
+#: src/pages/AudioPage.tsx:109
+#: src/pages/AudioPage.tsx:124
+msgid "Input (route {row})"
+msgstr "Input (route {row})"
 
 #: src/pages/MonitoringPage.tsx:156
 msgid "Inputs"
@@ -1770,6 +2221,14 @@ msgstr "Inputs are sampled, never trusted to pace the output. A single fixed-cad
 #: src/pages/docs/concepts/TransportsPage.tsx:304
 msgid "Inside a production network that already speaks it: NDI."
 msgstr "Inside a production network that already speaks it: NDI."
+
+#: src/pages/ProbesPage.tsx:316
+msgid "Integrated target (LKFS)"
+msgstr "Integrated target (LKFS)"
+
+#: src/pages/ProbesPage.tsx:317
+msgid "Integrated target (LUFS)"
+msgstr "Integrated target (LUFS)"
 
 #: src/pages/SystemPage.tsx:89
 msgid "Intel"
@@ -1791,6 +2250,10 @@ msgstr "Internet / unmanaged links"
 msgid "IP cameras, fixed encoders"
 msgstr "IP cameras, fixed encoders"
 
+#: src/pages/LayoutEditorPage.tsx:253
+msgid "Its tiles overlap (picture-in-picture), which a grid cannot express. Convert to free-form instead."
+msgstr "Its tiles overlap (picture-in-picture), which a grid cannot express. Convert to free-form instead."
+
 #: src/docs/registry.ts:506
 #: src/pages/docs/concepts/GlossaryPage.tsx:99
 msgid "Jitter buffer"
@@ -1799,6 +2262,8 @@ msgstr "Jitter buffer"
 #: src/pages/AlarmsPage.tsx:218
 #: src/pages/OverlaysPage.tsx:173
 #: src/pages/OverlaysPage.tsx:273
+#: src/pages/ProbesPage.tsx:419
+#: src/pages/ProbesPage.tsx:542
 #: src/pages/SourcesPage.tsx:456
 #: src/pages/SourcesPage.tsx:572
 msgid "Kind"
@@ -1807,6 +2272,7 @@ msgstr "Kind"
 #. placeholder {0}: ctx.row.original.rawKind
 #: src/pages/OutputsPage.tsx:443
 #: src/pages/OverlaysPage.tsx:204
+#: src/pages/ProbesPage.tsx:462
 #: src/pages/SourcesPage.tsx:496
 msgid "kind \"{0}\" isn't editable in this UI; the document is preserved as authored"
 msgstr "kind \"{0}\" isn't editable in this UI; the document is preserved as authored"
@@ -1825,9 +2291,14 @@ msgid "LAN / routed networks"
 msgstr "LAN / routed networks"
 
 #: src/components/LocaleSwitcher.tsx:35
+#: src/pages/AudioPage.tsx:422
 #: src/pages/SettingsPage.tsx:72
 msgid "Language"
 msgstr "Language"
+
+#: src/pages/AudioPage.tsx:199
+msgid "Language (route {row})"
+msgstr "Language (route {row})"
 
 #: src/docs/registry.ts:511
 #: src/pages/docs/concepts/GlossaryPage.tsx:111
@@ -1838,6 +2309,14 @@ msgstr "Last-good frame"
 #: src/pages/docs/concepts/ResiliencePage.tsx:77
 msgid "Last-good frames"
 msgstr "Last-good frames"
+
+#: src/pages/ProbesPage.tsx:390
+msgid "Latch the alarm (held until explicitly reset)"
+msgstr "Latch the alarm (held until explicitly reset)"
+
+#: src/pages/ProbesPage.tsx:444
+msgid "latched"
+msgstr "latched"
 
 #: src/docs/registry.ts:446
 #: src/pages/docs/concepts/LatencyPage.tsx:16
@@ -1869,6 +2348,7 @@ msgstr "Layout"
 msgid "Layout deleted"
 msgstr "Layout deleted"
 
+#: src/layout/components/GridLayoutEditor.tsx:232
 #: src/layout/components/LayoutEditor.tsx:144
 msgid "Layout name"
 msgstr "Layout name"
@@ -1877,19 +2357,19 @@ msgstr "Layout name"
 msgid "Layout or preset name (optional)"
 msgstr "Layout or preset name (optional)"
 
-#: src/pages/LayoutEditorPage.tsx:63
+#: src/pages/LayoutEditorPage.tsx:89
 msgid "Layout saved"
 msgstr "Layout saved"
 
-#: src/pages/LayoutEditorPage.tsx:96
+#: src/pages/LayoutEditorPage.tsx:122
 msgid "Layout saved, but apply failed"
 msgstr "Layout saved, but apply failed"
 
-#: src/pages/LayoutEditorPage.tsx:89
+#: src/pages/LayoutEditorPage.tsx:115
 msgid "Layout saved; apply accepted"
 msgstr "Layout saved; apply accepted"
 
-#: src/app/navigation.tsx:35
+#: src/app/navigation.tsx:37
 #: src/docs/registry.ts:201
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:25
@@ -1905,13 +2385,17 @@ msgstr "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what 
 msgid "Leave empty for all objects"
 msgstr "Leave empty for all objects"
 
-#: src/layout/components/CellsForm.tsx:365
+#: src/layout/components/CellsForm.tsx:379
 msgid "Left (%)"
 msgstr "Left (%)"
 
 #: src/pages/docs/concepts/TransportsPage.tsx:315
 msgid "Letting many viewers watch the composed wall: HLS, or LL-HLS when delay matters."
 msgstr "Letting many viewers watch the composed wall: HLS, or LL-HLS when delay matters."
+
+#: src/pages/ProbesPage.tsx:164
+msgid "Limit detection to a zone (default: the full frame)"
+msgstr "Limit detection to a zone (default: the full frame)"
 
 #: src/pages/docs/concepts/ColorPage.tsx:65
 msgid "Limited content interpreted as full: blacks turn grey, the picture looks <0>washed out and low-contrast</0>."
@@ -1926,7 +2410,7 @@ msgstr "Limited vs full range"
 msgid "Link to section"
 msgstr "Link to section"
 
-#: src/resources/FormControls.tsx:63
+#: src/resources/FormControls.tsx:72
 msgid "List at least one track name (comma-separated)."
 msgstr "List at least one track name (comma-separated)."
 
@@ -1977,6 +2461,10 @@ msgstr "LL-HLS (Low-Latency HLS)"
 msgid "Loading alarms…"
 msgstr "Loading alarms…"
 
+#: src/pages/AudioPage.tsx:362
+msgid "Loading audio routing…"
+msgstr "Loading audio routing…"
+
 #: src/pages/AuditPage.tsx:92
 msgid "Loading audit log…"
 msgstr "Loading audit log…"
@@ -1985,7 +2473,7 @@ msgstr "Loading audit log…"
 msgid "Loading canvas…"
 msgstr "Loading canvas…"
 
-#: src/pages/LayoutEditorPage.tsx:118
+#: src/pages/LayoutEditorPage.tsx:144
 msgid "Loading layout…"
 msgstr "Loading layout…"
 
@@ -2000,6 +2488,14 @@ msgstr "Loading outputs…"
 #: src/pages/OverlaysPage.tsx:229
 msgid "Loading overlays…"
 msgstr "Loading overlays…"
+
+#: src/layout/components/GridLayoutEditor.tsx:808
+msgid "Loading preview…"
+msgstr "Loading preview…"
+
+#: src/pages/ProbesPage.tsx:490
+msgid "Loading probes…"
+msgstr "Loading probes…"
 
 #: src/pages/TallyPage.tsx:349
 msgid "Loading profiles…"
@@ -2045,6 +2541,10 @@ msgstr "Long-running ops"
 msgid "Loss recovery + encryption"
 msgstr "Loss recovery + encryption"
 
+#: src/pages/ProbesPage.tsx:62
+msgid "Loudness violation"
+msgstr "Loudness violation"
+
 #: src/pages/docs/concepts/TransportsPage.tsx:247
 msgid "Low (~0.2–1 s)"
 msgstr "Low (~0.2–1 s)"
@@ -2057,9 +2557,17 @@ msgstr "Low-latency HLS, adding <0>part_target_ms</0> and <1>gop_ms</1> tuning."
 msgid "Low–medium (window-tuned)"
 msgstr "Low–medium (window-tuned)"
 
+#: src/pages/ProbesPage.tsx:241
+msgid "Luma threshold (0–255)"
+msgstr "Luma threshold (0–255)"
+
 #: src/pages/SourcesPage.tsx:291
 msgid "Magazine-addressed page, 100–899."
 msgstr "Magazine-addressed page, 100–899."
+
+#: src/pages/ProbesPage.tsx:78
+msgid "Major"
+msgstr "Major"
 
 #: src/pages/OverlaysPage.tsx:219
 msgid "Manage overlay layers and subtitles."
@@ -2077,6 +2585,10 @@ msgstr "Manual override"
 msgid "Matrix"
 msgstr "Matrix"
 
+#: src/pages/ProbesPage.tsx:328
+msgid "Max true-peak (dBTP)"
+msgstr "Max true-peak (dBTP)"
+
 #: src/pages/AuditPage.tsx:112
 msgid "Media time"
 msgstr "Media time"
@@ -2093,6 +2605,15 @@ msgstr "Memory"
 msgid "Minimum severity"
 msgstr "Minimum severity"
 
+#: src/pages/ProbesPage.tsx:76
+msgid "Minor"
+msgstr "Minor"
+
+#. placeholder {0}: cell.area
+#: src/layout/components/GridLayoutEditor.tsx:499
+msgid "missing area: {0}"
+msgstr "missing area: {0}"
+
 #: src/docs/registry.ts:521
 #: src/pages/docs/concepts/GlossaryPage.tsx:134
 msgid "MLDv2"
@@ -2102,7 +2623,7 @@ msgstr "MLDv2"
 msgid "Modern GPUs and SoCs contain dedicated video engines — separate silicon for decode and encode that runs at a fraction of the power of a CPU doing the same work. Multiview uses them through each platform's standard interface: NVDEC/NVENC on NVIDIA, VAAPI on Intel and AMD (including Quick Sync), and VideoToolbox on Apple Silicon. With acceleration, decoding a wall of sources and encoding the canvas leaves the CPU almost idle; without it, a handful of HD decodes can saturate a machine."
 msgstr "Modern GPUs and SoCs contain dedicated video engines — separate silicon for decode and encode that runs at a fraction of the power of a CPU doing the same work. Multiview uses them through each platform's standard interface: NVDEC/NVENC on NVIDIA, VAAPI on Intel and AMD (including Quick Sync), and VideoToolbox on Apple Silicon. With acceleration, decoding a wall of sources and encoding the canvas leaves the CPU almost idle; without it, a handful of HD decodes can saturate a machine."
 
-#: src/app/navigation.tsx:39
+#: src/app/navigation.tsx:42
 #: src/pages/MonitoringPage.tsx:131
 msgid "Monitoring"
 msgstr "Monitoring"
@@ -2111,6 +2632,14 @@ msgstr "Monitoring"
 msgid "Monitoring cameras where they are installed: RTSP."
 msgstr "Monitoring cameras where they are installed: RTSP."
 
+#: src/pages/AudioPage.tsx:59
+msgid "Mono"
+msgstr "Mono"
+
+#: src/layout/components/CellPropertiesPanel.tsx:252
+msgid "Mostly static"
+msgstr "Mostly static"
+
 #: src/pages/docs/ContainerPage.tsx:68
 msgid "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 msgstr "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
@@ -2118,6 +2647,14 @@ msgstr "Mount a config file and an output directory, then point the binary at th
 #: src/pages/OutputsPage.tsx:99
 msgid "Mount point"
 msgstr "Mount point"
+
+#: src/layout/components/GridLayoutEditor.tsx:510
+msgid "Move cell to area"
+msgstr "Move cell to area"
+
+#: src/layout/components/GridLayoutEditor.tsx:514
+msgid "Move to area…"
+msgstr "Move to area…"
 
 #: src/docs/registry.ts:526
 #: src/pages/docs/concepts/GlossaryPage.tsx:146
@@ -2186,11 +2723,21 @@ msgstr "Multiview's output is paced by exactly one thing: a fixed-cadence intern
 msgid "Mutable resources carry an <0>ETag</0>. Send it back as <1>If-Match</1> on a write; a stale tag is rejected with <2>412 Precondition Failed</2> so two editors never silently clobber each other."
 msgstr "Mutable resources carry an <0>ETag</0>. Send it back as <1>If-Match</1> on a write; a stale tag is rejected with <2>412 Precondition Failed</2> so two editors never silently clobber each other."
 
+#: src/pages/AudioPage.tsx:416
+msgid "Mute"
+msgstr "Mute"
+
+#: src/pages/AudioPage.tsx:175
+msgid "Mute on the program mix (route {row})"
+msgstr "Mute on the program mix (route {row})"
+
 #: src/pages/LayoutsPage.tsx:61
 #: src/pages/OutputsPage.tsx:391
 #: src/pages/OutputsPage.tsx:513
 #: src/pages/OverlaysPage.tsx:168
 #: src/pages/OverlaysPage.tsx:264
+#: src/pages/ProbesPage.tsx:414
+#: src/pages/ProbesPage.tsx:532
 #: src/pages/SalvosPage.tsx:210
 #: src/pages/SourcesPage.tsx:451
 #: src/pages/SourcesPage.tsx:563
@@ -2246,7 +2793,7 @@ msgstr "Network fit"
 msgid "New cell"
 msgstr "New cell"
 
-#: src/pages/LayoutEditorPage.tsx:160
+#: src/pages/LayoutEditorPage.tsx:332
 #: src/pages/LayoutsPage.tsx:209
 msgid "New layout"
 msgstr "New layout"
@@ -2260,6 +2807,11 @@ msgstr "New output"
 #: src/pages/OverlaysPage.tsx:224
 msgid "New overlay"
 msgstr "New overlay"
+
+#: src/pages/ProbesPage.tsx:484
+#: src/pages/ProbesPage.tsx:485
+msgid "New probe"
+msgstr "New probe"
 
 #: src/pages/SalvosPage.tsx:182
 #: src/pages/SalvosPage.tsx:328
@@ -2279,7 +2831,7 @@ msgstr "No alarms match the current filter."
 msgid "No audit entries match."
 msgstr "No audit entries match."
 
-#: src/layout/components/CellsForm.tsx:382
+#: src/layout/components/CellsForm.tsx:396
 msgid "No cells yet. Add one to start composing the multiview."
 msgstr "No cells yet. Add one to start composing the multiview."
 
@@ -2311,6 +2863,10 @@ msgstr "No host-memory sample."
 msgid "No inputs are available to preview."
 msgstr "No inputs are available to preview."
 
+#: src/pages/ProbesPage.tsx:122
+msgid "No layout cells found — enter the cell id to watch."
+msgstr "No layout cells found — enter the cell id to watch."
+
 #: src/pages/LayoutsPage.tsx:226
 msgid "No layouts are defined yet."
 msgstr "No layouts are defined yet."
@@ -2327,6 +2883,10 @@ msgstr "No outputs configured."
 msgid "No overlays configured."
 msgstr "No overlays configured."
 
+#: src/pages/ProbesPage.tsx:489
+msgid "No probes configured."
+msgstr "No probes configured."
+
 #: src/pages/docs/concepts/TransportsPage.tsx:284
 msgid "No recovery; loss = glitch"
 msgstr "No recovery; loss = glitch"
@@ -2334,6 +2894,10 @@ msgstr "No recovery; loss = glitch"
 #: src/pages/docs/DocsSearch.tsx:149
 msgid "No results."
 msgstr "No results."
+
+#: src/pages/AudioPage.tsx:438
+msgid "No routes yet — without routes the multiview carries no managed audio."
+msgstr "No routes yet — without routes the multiview carries no managed audio."
 
 #: src/pages/SalvosPage.tsx:198
 msgid "No salvos are defined yet."
@@ -2347,7 +2911,8 @@ msgstr "No signal"
 msgid "NO SIGNAL"
 msgstr "NO SIGNAL"
 
-#: src/layout/components/CellsForm.tsx:372
+#: src/layout/components/CellsForm.tsx:386
+#: src/layout/components/GridLayoutEditor.tsx:686
 msgid "No source"
 msgstr "No source"
 
@@ -2379,13 +2944,17 @@ msgstr "None (no captions decoded)"
 msgid "None needed"
 msgstr "None needed"
 
-#: src/resources/CrudPage.tsx:199
+#: src/resources/CrudPage.tsx:201
 msgid "Not editable in this UI"
 msgstr "Not editable in this UI"
 
 #: src/pages/SourcesPage.tsx:83
 msgid "Not in the running engine — no live state until a config export + restart binds it to a tile."
 msgstr "Not in the running engine — no live state until a config export + restart binds it to a tile."
+
+#: src/layout/components/CellPropertiesPanel.tsx:252
+msgid "Not static"
+msgstr "Not static"
 
 #: src/pages/OutputsPage.tsx:77
 msgid "Not yet runnable in this build"
@@ -2437,6 +3006,26 @@ msgstr "Off (pinned off)"
 msgid "Offline"
 msgstr "Offline"
 
+#: src/layout/components/CellPropertiesPanel.tsx:166
+msgid "On signal loss"
+msgstr "On signal loss"
+
+#: src/pages/AudioPage.tsx:151
+msgid "On the program mix (route {row})"
+msgstr "On the program mix (route {row})"
+
+#: src/pages/AudioPage.tsx:396
+msgid "One route per input. No track name means the input contributes to the program mix only."
+msgstr "One route per input. No track name means the input contributes to the program mix only."
+
+#: src/layout/components/CellPropertiesPanel.tsx:186
+msgid "Opacity (0–1)"
+msgstr "Opacity (0–1)"
+
+#: src/layout/components/validationMessages.tsx:41
+msgid "Opacity must be between 0 and 1."
+msgstr "Opacity must be between 0 and 1."
+
 #: src/components/HelpLink.tsx:50
 msgid "open documentation"
 msgstr "open documentation"
@@ -2453,7 +3042,7 @@ msgstr "Open the API playground"
 msgid "Open the system metrics page"
 msgstr "Open the system metrics page"
 
-#: src/pages/LayoutEditorPage.tsx:90
+#: src/pages/LayoutEditorPage.tsx:116
 #: src/pages/LayoutsPage.tsx:146
 #: src/pages/SalvosPage.tsx:154
 #: src/pages/TallyPage.tsx:142
@@ -2467,6 +3056,10 @@ msgstr "Optimistic concurrency"
 #: src/pages/docs/ConfigPage.tsx:161
 msgid "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
 msgstr "Optional <0>captions</0> select a caption or subtitle track (auto, teletext page, CEA-608/708 service, a track id, or a sidecar file). The engine never decodes a track it will not show."
+
+#: src/layout/components/GridLayoutEditor.tsx:483
+msgid "Orphaned cells"
+msgstr "Orphaned cells"
 
 #: src/pages/SystemPage.tsx:95
 msgid "Other"
@@ -2489,7 +3082,7 @@ msgstr "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\
 msgid "Output path"
 msgstr "Output path"
 
-#: src/app/navigation.tsx:37
+#: src/app/navigation.tsx:39
 #: src/docs/registry.ts:153
 #: src/docs/registry.ts:211
 #: src/pages/docs/ConfigPage.tsx:248
@@ -2502,7 +3095,7 @@ msgstr "Outputs"
 msgid "Over the layout drop zone."
 msgstr "Over the layout drop zone."
 
-#: src/app/navigation.tsx:38
+#: src/app/navigation.tsx:40
 #: src/docs/registry.ts:148
 #: src/docs/registry.ts:216
 #: src/layout/components/SourcePalette.tsx:224
@@ -2552,6 +3145,14 @@ msgstr "Pass through the host render node and add the container user to the grou
 msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
 msgstr "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
 
+#: src/layout/components/AreaMatrixEditor.tsx:179
+msgid "Pick a rectangle of squares with the arrow keys (hold Shift to extend) or by click-dragging, then type a name and assign it. Every named area must form a contiguous rectangle."
+msgstr "Pick a rectangle of squares with the arrow keys (hold Shift to extend) or by click-dragging, then type a name and assign it. Every named area must form a contiguous rectangle."
+
+#: src/pages/ProbesPage.tsx:142
+msgid "Pick the cell this probe watches."
+msgstr "Pick the cell this probe watches."
+
 #. placeholder {0}: String(active.id)
 #: src/layout/components/SourcePalette.tsx:183
 msgid "Picked up {0}."
@@ -2569,9 +3170,17 @@ msgstr "Pin encode to a specific GPU"
 msgid "PIP"
 msgstr "PIP"
 
+#: src/pages/ProbesPage.tsx:248
+msgid "Pixels at or below this 8-bit luma count as black (16 = broadcast black)."
+msgstr "Pixels at or below this 8-bit luma count as black (16 = broadcast black)."
+
 #: src/pages/docs/concepts/TransportsPage.tsx:186
 msgid "Plain UDP has no recovery at all: a lost packet is a glitch on screen. That is acceptable on a managed facility LAN and wrong for the internet (use SRT there, which wraps the same transport stream in a recovering envelope). Multicast group management is IPv6-first: receivers join groups via MLDv2, with IPv4/IGMP as the legacy path."
 msgstr "Plain UDP has no recovery at all: a lost packet is a glitch on screen. That is acceptable on a managed facility LAN and wrong for the internet (use SRT there, which wraps the same transport stream in a recovering envelope). Multicast group management is IPv6-first: receivers join groups via MLDv2, with IPv4/IGMP as the legacy path."
+
+#: src/layout/components/GridLayoutEditor.tsx:551
+msgid "Preview"
+msgstr "Preview"
 
 #. placeholder {0}: props.id
 #: src/pages/MonitoringPage.tsx:191
@@ -2585,6 +3194,19 @@ msgstr "Primaries"
 #: src/app/Sidebar.tsx:20
 msgid "Primary"
 msgstr "Primary"
+
+#: src/layout/components/CellPropertiesPanel.tsx:299
+msgid "Priority"
+msgstr "Priority"
+
+#: src/layout/components/validationMessages.tsx:49
+msgid "Priority must be a whole number (higher is shed last)."
+msgstr "Priority must be a whole number (higher is shed last)."
+
+#: src/app/navigation.tsx:45
+#: src/pages/ProbesPage.tsx:474
+msgid "Probes"
+msgstr "Probes"
 
 #: src/pages/TallyPage.tsx:162
 msgid "Profile deleted"
@@ -2605,6 +3227,10 @@ msgstr "Program"
 #: src/pages/OutputsPage.tsx:311
 msgid "Program bus only"
 msgstr "Program bus only"
+
+#: src/pages/AudioPage.tsx:410
+msgid "Program mix"
+msgstr "Program mix"
 
 #: src/pages/SystemPage.tsx:318
 msgid "Program output"
@@ -2642,6 +3268,10 @@ msgstr "Push to/from streaming platforms"
 #: src/pages/OverlaysPage.tsx:96
 msgid "Radius (px)"
 msgstr "Radius (px)"
+
+#: src/pages/ProbesPage.tsx:358
+msgid "Raise dwell (ms)"
+msgstr "Raise dwell (ms)"
 
 #: src/pages/SourcesPage.tsx:373
 msgid "Range"
@@ -2687,25 +3317,49 @@ msgstr "Related"
 msgid "Remote contribution feeds"
 msgstr "Remote contribution feeds"
 
-#: src/layout/components/CellsForm.tsx:350
+#: src/layout/components/CellsForm.tsx:364
+#: src/layout/components/GridLayoutEditor.tsx:537
 msgid "Remove"
 msgstr "Remove"
 
-#: src/layout/components/CellsForm.tsx:374
+#: src/layout/components/CellsForm.tsx:388
+#: src/layout/components/GridLayoutEditor.tsx:530
+#: src/layout/components/GridLayoutEditor.tsx:782
 msgid "Remove cell"
 msgstr "Remove cell"
 
+#: src/layout/components/GridLayoutEditor.tsx:423
+msgid "Remove column"
+msgstr "Remove column"
+
+#: src/pages/AudioPage.tsx:226
+msgid "Remove route {row}"
+msgstr "Remove route {row}"
+
+#: src/layout/components/GridLayoutEditor.tsx:433
+msgid "Remove row"
+msgstr "Remove row"
+
 #: src/pages/OutputsPage.tsx:481
 #: src/pages/OverlaysPage.tsx:232
+#: src/pages/ProbesPage.tsx:500
 #: src/pages/SourcesPage.tsx:531
 msgid "Removed from the store. The running engine is unchanged until a config export + restart."
 msgstr "Removed from the store. The running engine is unchanged until a config export + restart."
 
-#: src/layout/components/LayoutEditor.tsx:441
+#: src/layout/components/GridLayoutEditor.tsx:628
+msgid "Rename"
+msgstr "Rename"
+
+#: src/layout/components/GridLayoutEditor.tsx:595
+msgid "Rename area {selectedArea}"
+msgstr "Rename area {selectedArea}"
+
+#: src/layout/components/LayoutEditor.tsx:442
 msgid "Replace cells"
 msgstr "Replace cells"
 
-#: src/layout/components/LayoutEditor.tsx:415
+#: src/layout/components/LayoutEditor.tsx:416
 msgid "Replace the current cells?"
 msgstr "Replace the current cells?"
 
@@ -2747,13 +3401,31 @@ msgstr "Roadmap"
 msgid "Robustness"
 msgstr "Robustness"
 
-#: src/layout/components/CellsForm.tsx:369
+#: src/layout/components/CellsForm.tsx:383
 msgid "Rotation (°)"
 msgstr "Rotation (°)"
 
-#: src/layout/components/validationMessages.tsx:36
+#: src/layout/components/validationMessages.tsx:37
 msgid "Rotation must be between 0 and 359 degrees."
 msgstr "Rotation must be between 0 and 359 degrees."
+
+#: src/pages/AudioPage.tsx:341
+msgid "Route each input's audio: program-mix membership and discrete tracks."
+msgstr "Route each input's audio: program-mix membership and discrete tracks."
+
+#. placeholder {0}: String(rowIndex + 1)
+#. placeholder {1}: String(colIndex + 1)
+#: src/layout/components/AreaMatrixEditor.tsx:217
+msgid "Row {0}, column {1}: area {token}"
+msgstr "Row {0}, column {1}: area {token}"
+
+#: src/layout/components/GridLayoutEditor.tsx:382
+msgid "Row gap"
+msgstr "Row gap"
+
+#: src/layout/components/GridLayoutEditor.tsx:431
+msgid "Rows"
+msgstr "Rows"
 
 #: src/docs/registry.ts:279
 #: src/docs/registry.ts:556
@@ -2821,39 +3493,54 @@ msgstr "Salvo deleted"
 msgid "Salvo saved"
 msgstr "Salvo saved"
 
-#: src/app/navigation.tsx:41
+#: src/app/navigation.tsx:44
 #: src/docs/registry.ts:226
 #: src/pages/docs/FeaturesPage.tsx:137
 #: src/pages/SalvosPage.tsx:171
 msgid "Salvos"
 msgstr "Salvos"
 
+#: src/pages/AudioPage.tsx:370
+msgid "Sample rate (Hz)"
+msgstr "Sample rate (Hz)"
+
 #: src/pages/SalvosPage.tsx:398
 #: src/pages/SettingsPage.tsx:118
-#: src/resources/CrudPage.tsx:343
+#: src/resources/CrudPage.tsx:345
 msgid "Save"
 msgstr "Save"
 
+#: src/layout/components/GridLayoutEditor.tsx:281
 #: src/layout/components/LayoutEditor.tsx:201
 msgid "Save & apply to engine"
 msgstr "Save & apply to engine"
 
+#: src/pages/AudioPage.tsx:487
+msgid "Save audio routing"
+msgstr "Save audio routing"
+
+#: src/layout/components/GridLayoutEditor.tsx:268
 #: src/layout/components/LayoutEditor.tsx:189
 msgid "Save layout"
 msgstr "Save layout"
 
-#: src/resources/CrudPage.tsx:234
+#: src/resources/CrudPage.tsx:236
 msgid "Saved"
 msgstr "Saved"
 
 #. placeholder {0}: result.filename
-#: src/resources/FormControls.tsx:289
+#: src/resources/FormControls.tsx:363
 msgid "Saved as {0}. Restart Multiview with this file to apply stored changes."
 msgstr "Saved as {0}. Restart Multiview with this file to apply stored changes."
 
+#: src/layout/components/GridLayoutEditor.tsx:268
 #: src/layout/components/LayoutEditor.tsx:189
 msgid "Saving…"
 msgstr "Saving…"
+
+#: src/layout/components/CellPropertiesPanel.tsx:212
+msgid "Scaler"
+msgstr "Scaler"
 
 #: src/pages/AlarmsPage.tsx:219
 msgid "Scope"
@@ -2883,7 +3570,7 @@ msgstr "Seed cells from preset"
 msgid "Seed from a preset"
 msgstr "Seed from a preset"
 
-#: src/layout/components/LayoutEditor.tsx:418
+#: src/layout/components/LayoutEditor.tsx:419
 msgid "Seeding from a preset replaces every cell in this draft. Nothing is saved until you save the layout."
 msgstr "Seeding from a preset replaces every cell in this draft. Nothing is saved until you save the layout."
 
@@ -2895,11 +3582,27 @@ msgstr "Segment (ms)"
 msgid "Segment duration (ms, optional)"
 msgstr "Segment duration (ms, optional)"
 
-#: src/layout/components/CellsForm.tsx:373
+#: src/layout/components/GridLayoutEditor.tsx:588
+msgid "Select an area to edit its cell."
+msgstr "Select an area to edit its cell."
+
+#: src/layout/components/CellsForm.tsx:387
 msgid "Select cell"
 msgstr "Select cell"
 
-#: src/layout/components/CellsForm.tsx:376
+#: src/pages/AudioPage.tsx:242
+msgid "Selectable tracks"
+msgstr "Selectable tracks"
+
+#. placeholder {0}: String(selection.top + 1)
+#. placeholder {1}: String(selection.bottom + 1)
+#. placeholder {2}: String(selection.left + 1)
+#. placeholder {3}: String(selection.right + 1)
+#: src/layout/components/AreaMatrixEditor.tsx:174
+msgid "Selected rows {0}–{1}, columns {2}–{3}"
+msgstr "Selected rows {0}–{1}, columns {2}–{3}"
+
+#: src/layout/components/CellsForm.tsx:390
 msgid "Send backward"
 msgstr "Send backward"
 
@@ -2907,14 +3610,19 @@ msgstr "Send backward"
 msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 
-#: src/app/navigation.tsx:46
+#: src/app/navigation.tsx:50
 #: src/pages/SettingsPage.tsx:47
 msgid "Settings"
 msgstr "Settings"
 
 #: src/pages/AlarmsPage.tsx:217
+#: src/pages/ProbesPage.tsx:435
 msgid "Severity"
 msgstr "Severity"
+
+#: src/pages/ProbesPage.tsx:380
+msgid "Severity (X.733)"
+msgstr "Severity (X.733)"
 
 #: src/pages/SettingsPage.tsx:174
 msgid "Show a test notification"
@@ -2933,6 +3641,10 @@ msgstr "Sidecar file path"
 msgid "Sign in"
 msgstr "Sign in"
 
+#: src/pages/ProbesPage.tsx:288
+msgid "Silence level (dBFS)"
+msgstr "Silence level (dBFS)"
+
 #: src/app/AppLayout.tsx:45
 msgid "Skip to content"
 msgstr "Skip to content"
@@ -2941,7 +3653,8 @@ msgstr "Skip to content"
 msgid "Snap to grid"
 msgstr "Snap to grid"
 
-#: src/layout/components/CellsForm.tsx:371
+#: src/layout/components/CellsForm.tsx:385
+#: src/layout/components/GridLayoutEditor.tsx:666
 msgid "Source"
 msgstr "Source"
 
@@ -2949,11 +3662,15 @@ msgstr "Source"
 msgid "Source connections are supervised. A stalled read times out rather than hanging forever; the supervisor then reconnects with exponential backoff (so a dead camera is not hammered) and keeps trying indefinitely — sources recover without operator action whenever the far end comes back. Mid-stream surprises that normally break players, like a camera changing resolution or a stream resetting its timestamps, are absorbed inside the tile: the decoder re-initializes behind the frame store while the compositor keeps drawing the last good frame."
 msgstr "Source connections are supervised. A stalled read times out rather than hanging forever; the supervisor then reconnects with exponential backoff (so a dead camera is not hammered) and keeps trying indefinitely — sources recover without operator action whenever the far end comes back. Mid-stream surprises that normally break players, like a camera changing resolution or a stream resetting its timestamps, are absorbed inside the tile: the decoder re-initializes behind the frame store while the compositor keeps drawing the last good frame."
 
+#: src/pages/AudioPage.tsx:128
+msgid "source id"
+msgstr "source id"
+
 #: src/pages/SourcesPage.tsx:126
 msgid "Source URL"
 msgstr "Source URL"
 
-#: src/app/navigation.tsx:36
+#: src/app/navigation.tsx:38
 #: src/docs/registry.ts:138
 #: src/docs/registry.ts:206
 #: src/layout/components/SourcePalette.tsx:203
@@ -3008,12 +3725,22 @@ msgstr "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retr
 msgid "State"
 msgstr "State"
 
+#: src/layout/components/CellPropertiesPanel.tsx:245
+msgid "Static source hint"
+msgstr "Static source hint"
+
 #: src/pages/OutputsPage.tsx:419
 msgid "Status"
 msgstr "Status"
 
+#: src/pages/AudioPage.tsx:61
+msgid "Stereo"
+msgstr "Stereo"
+
+#: src/pages/AudioPage.tsx:492
 #: src/pages/OutputsPage.tsx:480
 #: src/pages/OverlaysPage.tsx:231
+#: src/pages/ProbesPage.tsx:499
 #: src/pages/SourcesPage.tsx:530
 msgid "Stored. It goes live via config export + restart; the running engine is unchanged until then."
 msgstr "Stored. It goes live via config export + restart; the running engine is unchanged until then."
@@ -3022,6 +3749,10 @@ msgstr "Stored. It goes live via config export + restart; the running engine is 
 msgid "Storing color information at lower resolution than brightness, exploiting the eye's lower sensitivity to color detail. Written as ratios: 4:4:4 keeps full color, 4:2:2 halves it horizontally (production quality), and 4:2:0 quarters it (virtually all delivery video). Almost every stream Multiview ingests and emits is 4:2:0."
 msgstr "Storing color information at lower resolution than brightness, exploiting the eye's lower sensitivity to color detail. Written as ratios: 4:4:4 keeps full color, 4:2:2 halves it horizontally (production quality), and 4:2:0 quarters it (virtually all delivery video). Almost every stream Multiview ingests and emits is 4:2:0."
 
+#: src/layout/components/CellPropertiesPanel.tsx:308
+msgid "Strategy"
+msgstr "Strategy"
+
 #: src/pages/SourcesPage.tsx:159
 msgid "STUDIO (CAM 1)"
 msgstr "STUDIO (CAM 1)"
@@ -3029,6 +3760,10 @@ msgstr "STUDIO (CAM 1)"
 #: src/pages/docs/concepts/TransportsPage.tsx:257
 msgid "Studio sources, production fabric"
 msgstr "Studio sources, production fabric"
+
+#: src/layout/components/CellPropertiesPanel.tsx:284
+msgid "Style"
+msgstr "Style"
 
 #: src/pages/docs/ConfigPage.tsx:203
 msgid "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
@@ -3042,11 +3777,15 @@ msgstr "Subsystem:"
 msgid "Subtitle track (id / language)"
 msgstr "Subtitle track (id / language)"
 
+#: src/pages/ProbesPage.tsx:272
+msgid "Successive frames differing by less than this per-mille of full-scale luma count as frozen."
+msgstr "Successive frames differing by less than this per-mille of full-scale luma count as frozen."
+
 #: src/pages/SettingsPage.tsx:75
 msgid "Switch the interface language and text direction."
 msgstr "Switch the interface language and text direction."
 
-#: src/app/navigation.tsx:43
+#: src/app/navigation.tsx:47
 #: src/pages/SystemPage.tsx:236
 msgid "System"
 msgstr "System"
@@ -3059,7 +3798,7 @@ msgstr "Take"
 msgid "Take salvo"
 msgstr "Take salvo"
 
-#: src/app/navigation.tsx:40
+#: src/app/navigation.tsx:43
 #: src/docs/registry.ts:221
 #: src/docs/registry.ts:576
 #: src/pages/docs/concepts/GlossaryPage.tsx:265
@@ -3107,7 +3846,7 @@ msgstr "Testing, placeholders, layout work"
 msgid "That key was not accepted. Check it and try again."
 msgstr "That key was not accepted. Check it and try again."
 
-#: src/pages/LayoutEditorPage.tsx:129
+#: src/pages/LayoutEditorPage.tsx:155
 msgid "That layout no longer exists."
 msgstr "That layout no longer exists."
 
@@ -3131,11 +3870,11 @@ msgstr "The API authenticates each request with a bearer token in the <0>Authori
 msgid "The building blocks of a Multiview deployment, and what each one does."
 msgstr "The building blocks of a Multiview deployment, and what each one does."
 
-#: src/layout/components/validationMessages.tsx:32
+#: src/layout/components/validationMessages.tsx:33
 msgid "The cell extends outside the canvas."
 msgstr "The cell extends outside the canvas."
 
-#: src/layout/components/validationMessages.tsx:34
+#: src/layout/components/validationMessages.tsx:35
 msgid "The cell is too small."
 msgstr "The cell is too small."
 
@@ -3150,6 +3889,14 @@ msgstr "The compose stack uses a real liveness check: the HLS playlist must have
 #: src/pages/docs/FeaturesPage.tsx:70
 msgid "The composited canvas is encoded once per rendition and the same packets are fanned out to every output. Be honest about the current state of each transport:"
 msgstr "The composited canvas is encoded once per rendition and the same packets are fanned out to every output. Be honest about the current state of each transport:"
+
+#: src/pages/ProbesPage.tsx:362
+msgid "The condition must persist this long before the alarm raises."
+msgstr "The condition must persist this long before the alarm raises."
+
+#: src/pages/ProbesPage.tsx:373
+msgid "The condition must stay clear this long before the alarm clears."
+msgstr "The condition must stay clear this long before the alarm clears."
 
 #: src/pages/docs/ApiPage.tsx:36
 msgid "The control plane serves an interactive OpenAPI reference at the backend <0>/docs</0> path. It is generated from the same spec the UI client is generated from, so it always matches the running server. Open it to browse every endpoint, see schemas, and try requests."
@@ -3179,6 +3926,10 @@ msgstr "The external tally state that drives this border."
 msgid "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
 msgstr "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
 
+#: src/layout/components/GridLayoutEditor.tsx:795
+msgid "The grid cannot be solved yet — fix the validation errors to see the placement preview."
+msgstr "The grid cannot be solved yet — fix the validation errors to see the placement preview."
+
 #: src/pages/SalvosPage.tsx:331
 msgid "The identifier is fixed once created. Source, tally, and UMD recall clauses already on this salvo are preserved when you save."
 msgstr "The identifier is fixed once created. Source, tally, and UMD recall clauses already on this salvo are preserved when you save."
@@ -3206,6 +3957,10 @@ msgstr "The low-latency extension of HLS: segments are published in partial chun
 #: src/pages/docs/ApiPage.tsx:26
 msgid "The management API, its conventions, the realtime event streams, and where to find the live, interactive reference."
 msgstr "The management API, its conventions, the realtime event streams, and where to find the live, interactive reference."
+
+#: src/pages/AudioPage.tsx:257
+msgid "the mixed program bus, always available"
+msgstr "the mixed program bus, always available"
 
 #: src/pages/docs/concepts/ResiliencePage.tsx:65
 msgid "The moment a fresh frame arrives — from any state — the tile snaps straight back to LIVE. The hold, stale, and no-signal windows are automatic: the engine uses built-in, broadcast-tuned values and derives its stream-liveness checks from each source's own frame cadence, so a low-frame-rate source is not misread as stalled. There is nothing for an operator to configure."
@@ -3288,6 +4043,14 @@ msgstr "The stack publishes the management API and this web UI on <0>8080</0> (t
 #~ msgid "The stack publishes the test RTSP feed on <0>8554</0> (for host inspection) and the HLS HTTP server on <1>8888</1>. There is no control-API or web-UI port yet: the current binary composites, encodes, and writes HLS or file output to disk, but does not yet bind a network listener. The live RTSP, NDI, and RTMP output <2>servers</2> and the API listener are on the roadmap."
 #~ msgstr "The stack publishes the test RTSP feed on <0>8554</0> (for host inspection) and the HLS HTTP server on <1>8888</1>. There is no control-API or web-UI port yet: the current binary composites, encodes, and writes HLS or file output to disk, but does not yet bind a network listener. The live RTSP, NDI, and RTMP output <2>servers</2> and the API listener are on the roadmap."
 
+#: src/layout/components/validationMessages.tsx:79
+msgid "The stored area map was ragged and has been normalized for editing; saving will persist the repaired map."
+msgstr "The stored area map was ragged and has been normalized for editing; saving will persist the repaired map."
+
+#: src/pages/LayoutEditorPage.tsx:265
+msgid "The stored preset body could not be expanded."
+msgstr "The stored preset body could not be expanded."
+
 #: src/pages/docs/concepts/GlossaryPage.tsx:289
 msgid "The text label strip under (or on) each tile showing the source name — named for the physical display modules mounted under monitors in traditional galleries. UMD text can be static or driven dynamically by a router or automation system."
 msgstr "The text label strip under (or on) each tile showing the source name — named for the physical display modules mounted under monitors in traditional galleries. UMD text can be static or driven dynamically by a router or automation system."
@@ -3310,6 +4073,10 @@ msgstr "The timestamp on each frame saying when it should be shown. Real-world s
 msgid "The TOML schema: canvas, layout, sources, cells, overlays, and outputs."
 msgstr "The TOML schema: canvas, layout, sources, cells, overlays, and outputs."
 
+#: src/layout/components/validationMessages.tsx:72
+msgid "The tracks overflow the canvas (fixed sizes or percentages exceed it) — an area would land outside the output frame."
+msgstr "The tracks overflow the canvas (fixed sizes or percentages exceed it) — an area would land outside the output frame."
+
 #: src/pages/docs/ApiPage.tsx:98
 msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 msgstr "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
@@ -3331,6 +4098,14 @@ msgstr "The vendor's stable handle (UUID / PCI bus id), never the index."
 msgid "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
 msgstr "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
 
+#: src/pages/AudioPage.tsx:377
+msgid "The working rate every input is resampled to (48000 is the broadcast default)."
+msgstr "The working rate every input is resampled to (48000 is the broadcast default)."
+
+#: src/resources/FormControls.tsx:64
+msgid "The zone must fit inside the frame: x, y at least 0, width and height above 0, and x+width / y+height at most 1."
+msgstr "The zone must fit inside the frame: x, y at least 0, width and height above 0, and x+width / y+height at most 1."
+
 #: src/pages/SettingsPage.tsx:63
 msgid "Theme"
 msgstr "Theme"
@@ -3351,17 +4126,41 @@ msgstr "Theme: system. Switch to light."
 msgid "These are classes, not promises — encoder settings (especially keyframe interval), network conditions, and the viewer's player all move the number."
 msgstr "These are classes, not promises — encoder settings (especially keyframe interval), network conditions, and the viewer's player all move the number."
 
-#: src/resources/FormControls.tsx:296
+#: src/layout/components/GridLayoutEditor.tsx:487
+msgid "These cells reference areas that are no longer in the grid. Move each to a live area (its source binding is kept) or remove it."
+msgstr "These cells reference areas that are no longer in the grid. Move each to a live area (its source binding is kept) or remove it."
+
+#: src/layout/components/GridLayoutEditor.tsx:640
+msgid "This area has no cell yet."
+msgstr "This area has no cell yet."
+
+#: src/layout/components/validationMessages.tsx:94
+msgid "This area has no cell, so nothing will render in it."
+msgstr "This area has no cell, so nothing will render in it."
+
+#: src/layout/components/validationMessages.tsx:86
+msgid "This cell declares both an area and a rect — keep exactly one (the engine rejects the pair)."
+msgstr "This cell declares both an area and a rect — keep exactly one (the engine rejects the pair)."
+
+#: src/layout/components/validationMessages.tsx:92
+msgid "This cell references an area that is not in the grid."
+msgstr "This cell references an area that is not in the grid."
+
+#: src/resources/FormControls.tsx:370
 msgid "This control plane does not serve config export yet. Update the server to use it."
 msgstr "This control plane does not serve config export yet. Update the server to use it."
 
-#: src/resources/CrudPage.tsx:200
+#: src/resources/CrudPage.tsx:202
 msgid "This entry's kind has no form here; the stored document is preserved as authored."
 msgstr "This entry's kind has no form here; the stored document is preserved as authored."
 
 #: src/resources/FormControls.tsx:36
 msgid "This field is required."
 msgstr "This field is required."
+
+#: src/pages/LayoutEditorPage.tsx:215
+msgid "This grid layout's body could not be parsed (its track or area lists are malformed). Fix the stored document via the API."
+msgstr "This grid layout's body could not be parsed (its track or area lists are malformed). Fix the stored document via the API."
 
 #: src/pages/docs/concepts/ResiliencePage.tsx:90
 msgid "This is also why one bad source can never take down the wall: the disturbance is contained to that tile's rectangle. The output keeps emitting a complete, valid frame every tick regardless — even if every source died at once, the canvas would show slates and a still-ticking clock, not stop."
@@ -3371,13 +4170,25 @@ msgstr "This is also why one bad source can never take down the wall: the distur
 msgid "This is one of the most common picture-quality bugs in any video chain. Multiview expands each tile's range exactly once on ingest, composites in a common working space, and compresses exactly once on output — and tags the result, because an untagged-but-correct stream still gets guessed wrong by some players."
 msgstr "This is one of the most common picture-quality bugs in any video chain. Multiview expands each tile's range exactly once on ingest, composites in a common working space, and compresses exactly once on output — and tags the result, because an untagged-but-correct stream still gets guessed wrong by some players."
 
+#: src/layout/components/GridLayoutEditor.tsx:853
+msgid "This is one-way: the grid's tracks and areas become fixed rectangles you move and resize individually. Nothing is saved until you save the layout."
+msgstr "This is one-way: the grid's tracks and areas become fixed rectangles you move and resize individually. Nothing is saved until you save the layout."
+
 #: src/pages/docs/concepts/TimingSyncPage.tsx:41
 msgid "This is why the wall keeps running through any input failure: the output's timing is independent of every input by construction. Frame rates are handled as exact fractions (NTSC 29.97 is <0>30000/1001</0>, never a rounded decimal), so the cadence cannot drift over long runs."
 msgstr "This is why the wall keeps running through any input failure: the output's timing is independent of every input by construction. Frame rates are handled as exact fractions (NTSC 29.97 is <0>30000/1001</0>, never a rounded decimal), so the cadence cannot drift over long runs."
 
 #: src/pages/LayoutEditorPage.tsx:148
-msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
-msgstr "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+#~ msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+#~ msgstr "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
+
+#: src/pages/LayoutEditorPage.tsx:284
+msgid "This layout uses the factory preset \"{preset}\". To edit it, convert it to an editable form first — nothing changes until you save."
+msgstr "This layout uses the factory preset \"{preset}\". To edit it, convert it to an editable form first — nothing changes until you save."
+
+#: src/pages/LayoutEditorPage.tsx:320
+msgid "This layout's body could not be parsed into an editable form. Fix the stored document via the API."
+msgstr "This layout's body could not be parsed into an editable form. Fix the stored document via the API."
 
 #: src/auth/LoginPage.tsx:67
 msgid "This Multiview control plane requires an API key. Paste your admin or operator key to continue."
@@ -3403,7 +4214,7 @@ msgstr "This permanently removes the profile's mapping rules."
 msgid "This permanently removes the salvo definition."
 msgstr "This permanently removes the salvo definition."
 
-#: src/resources/CrudPage.tsx:365
+#: src/resources/CrudPage.tsx:367
 msgid "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 msgstr "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 
@@ -3452,7 +4263,11 @@ msgstr "Timezone offset (minutes from UTC)"
 msgid "Timing & sync"
 msgstr "Timing & sync"
 
-#: src/layout/components/CellsForm.tsx:366
+#: src/pages/AudioPage.tsx:425
+msgid "Title"
+msgstr "Title"
+
+#: src/layout/components/CellsForm.tsx:380
 msgid "Top (%)"
 msgstr "Top (%)"
 
@@ -3460,9 +4275,17 @@ msgstr "Top (%)"
 msgid "Track id or language tag"
 msgstr "Track id or language tag"
 
+#: src/pages/AudioPage.tsx:211
+msgid "Track title (route {row})"
+msgstr "Track title (route {row})"
+
 #: src/pages/OutputsPage.tsx:330
 msgid "Tracks (comma-separated)"
 msgstr "Tracks (comma-separated)"
+
+#: src/layout/components/validationMessages.tsx:64
+msgid "Tracks must be a number with a unit: 1fr, 200px or 25%."
+msgstr "Tracks must be a number with a unit: 1fr, 200px or 25%."
 
 #: src/docs/registry.ts:462
 #: src/pages/docs/concepts/LatencyPage.tsx:100
@@ -3543,6 +4366,14 @@ msgstr "Very low (~1 frame)"
 msgid "Video using a brightness curve (PQ or HLG) and usually the BT.2020 gamut that represents far brighter highlights and deeper shadows than standard dynamic range (SDR). HDR tiles must be tone-mapped onto an SDR canvas or they look dim and grey."
 msgstr "Video using a brightness curve (PQ or HLG) and usually the BT.2020 gamut that represents far brighter highlights and deeper shadows than standard dynamic range (SDR). HDR tiles must be tone-mapped onto an SDR canvas or they look dim and grey."
 
+#: src/layout/components/CellPropertiesPanel.tsx:231
+msgid "Visibility"
+msgstr "Visibility"
+
+#: src/layout/components/CellPropertiesPanel.tsx:238
+msgid "Visible"
+msgstr "Visible"
+
 #: src/docs/registry.ts:70
 #: src/pages/docs/ContainerPage.tsx:131
 msgid "Volumes"
@@ -3582,6 +4413,7 @@ msgid "Wall-clock time is ordinary time-of-day (UTC), kept by the host's system 
 msgstr "Wall-clock time is ordinary time-of-day (UTC), kept by the host's system clock and disciplined by NTP or PTP. Multiview uses it for <0>labels only</0>: on-screen clock overlays, log timestamps, and the date-time stamps in HLS playlists. It never paces frames, because a system clock can step backwards or jump when corrected — exactly what an output clock must never do."
 
 #: src/components/HealthBanner.tsx:35
+#: src/pages/ProbesPage.tsx:74
 msgid "Warning"
 msgstr "Warning"
 
@@ -3657,10 +4489,12 @@ msgstr "Why the output clock never depends on inputs"
 msgid "Wide distribution, browser viewing"
 msgstr "Wide distribution, browser viewing"
 
-#: src/layout/components/CellsForm.tsx:367
+#: src/layout/components/CellsForm.tsx:381
 msgid "Width (%)"
 msgstr "Width (%)"
 
+#: src/layout/components/CellPropertiesPanel.tsx:266
+#: src/layout/components/GridLayoutEditor.tsx:302
 #: src/layout/components/LayoutEditor.tsx:214
 msgid "Width (px)"
 msgstr "Width (px)"
@@ -3678,6 +4512,26 @@ msgid "You can also run the binary directly against a config file with <0>multiv
 msgstr "You can also run the binary directly against a config file with <0>multiview run path/to/multiview.toml</0>. See the sections below for the container, compose, config, and API details."
 
 #. placeholder {0}: cell.z
-#: src/layout/components/CellsForm.tsx:337
+#: src/layout/components/CellsForm.tsx:351
 msgid "z = {0}"
 msgstr "z = {0}"
+
+#: src/layout/components/GridLayoutEditor.tsx:738
+msgid "Z order"
+msgstr "Z order"
+
+#: src/pages/ProbesPage.tsx:204
+msgid "Zone height (0–1)"
+msgstr "Zone height (0–1)"
+
+#: src/pages/ProbesPage.tsx:174
+msgid "Zone left (x, 0–1)"
+msgstr "Zone left (x, 0–1)"
+
+#: src/pages/ProbesPage.tsx:184
+msgid "Zone top (y, 0–1)"
+msgstr "Zone top (y, 0–1)"
+
+#: src/pages/ProbesPage.tsx:194
+msgid "Zone width (0–1)"
+msgstr "Zone width (0–1)"
