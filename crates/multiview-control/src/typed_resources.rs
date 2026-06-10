@@ -66,6 +66,10 @@ pub(crate) enum TypedCollection {
     Overlays,
     /// `multiview_config::Probe`.
     Probes,
+    /// `multiview_config::Device`.
+    Devices,
+    /// `multiview_config::SyncGroup`.
+    SyncGroups,
 }
 
 impl TypedCollection {
@@ -76,6 +80,8 @@ impl TypedCollection {
             Self::Outputs => "output",
             Self::Overlays => "overlay",
             Self::Probes => "probe",
+            Self::Devices => "device",
+            Self::SyncGroups => "sync-group",
         }
     }
 }
@@ -155,6 +161,28 @@ pub(crate) fn validated_body(
             probe
                 .validate()
                 .map_err(|err| ControlError::Validation(format!("probe body invalid: {err}")))?;
+        }
+        TypedCollection::Devices => {
+            let device = typecheck::<multiview_config::Device>(collection, &candidate)?;
+            // Per-item semantic checks (driver address requirement, non-empty
+            // strings, definite offline severity, sane reconnect bounds, display
+            // assignment shape). Document-level rules (id uniqueness, output /
+            // wall-head reference resolution, sync-group membership) stay on the
+            // document (`MultiviewConfig::validate`, run by `GET /config/export`).
+            device
+                .validate()
+                .map_err(|err| ControlError::Validation(format!("device body invalid: {err}")))?;
+        }
+        TypedCollection::SyncGroups => {
+            let group = typecheck::<multiview_config::SyncGroup>(collection, &candidate)?;
+            // Per-item semantic checks (non-empty id, target-skew bounds, at
+            // least one member, no duplicate member, member-offset bounds).
+            // Document-level rules (group-id uniqueness, member device
+            // resolution, one-group-per-device, Cast exclusion) stay on the
+            // document (`MultiviewConfig::validate`, run by `GET /config/export`).
+            group.validate().map_err(|err| {
+                ControlError::Validation(format!("sync-group body invalid: {err}"))
+            })?;
         }
     }
     Ok(candidate)

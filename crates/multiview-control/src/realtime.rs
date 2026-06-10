@@ -32,14 +32,15 @@ use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
-use multiview_engine::{EventSubscription, RecvError};
+use multiview_engine::{EventSubscription, RecvError, TryRecvError};
 use multiview_events::{
-    Envelope, Event, FrameKind, Hello, OutputRunState, SalvoPhase, SchemaVersion, Seq,
-    TileSnapshotEntry, TilesSnapshot, Topic,
+    DeviceStatus, Envelope, Event, FrameKind, Hello, OutputRunState, SalvoPhase, SchemaVersion,
+    Seq, TileSnapshotEntry, TilesSnapshot, Topic,
 };
 
 use crate::auth::{Action, Principal};
 use crate::command::{Command, OperationId};
+use crate::devices::DeviceStatusRegistry;
 use crate::state::{AppState, EngineStateSnapshot};
 
 /// The session heartbeat interval advertised in `$hello`.
@@ -455,6 +456,71 @@ impl SessionStream {
         })
     }
 
+    /// Build the connect-time device-status `$snapshot` frame for the **first**
+    /// device the registry tracks (id-sorted), or [`None`] when no device has a
+    /// status yet — then nothing extra is sent.
+    ///
+    /// The `devices` topic carries a conflated, latest-wins `device.status` lane
+    /// that is **excluded from the lossless replay ring** (ADR-RT007): a
+    /// resuming client never replays stale gap samples, it re-snapshots from the
+    /// registry instead. This is that re-snapshot frame: a single
+    /// [`Event::DeviceStatus`] carrying the registry's current latest-wins value
+    /// for the first device. The N-device connect path uses
+    /// [`SessionStream::devices_snapshot_frames`]; this single-frame form is the
+    /// minimal building block (and what the broadcaster test drives directly).
+    /// Reading the registry is a wait-free control-plane map load — never a
+    /// request the engine services (invariant #10).
+    #[must_use]
+    pub fn devices_snapshot_frame(
+        &mut self,
+        registry: &DeviceStatusRegistry,
+        snapshot_seq: u64,
+    ) -> Option<RealtimeFrame> {
+        let status = registry.snapshot_all().into_iter().next()?;
+        Some(self.device_status_frame(status, snapshot_seq))
+    }
+
+    /// Build the connect-time device-status `$snapshot` frames for **every**
+    /// device the registry tracks (id-sorted), one frame per device — the full
+    /// re-snapshot a freshly-connecting client rebuilds its device cache from
+    /// (ADR-RT003 / ADR-RT007). Empty when the registry tracks no device.
+    ///
+    /// Each frame carries that device's latest-wins [`Event::DeviceStatus`]; the
+    /// conflated lane never replays from the ring, so this snapshot is the sole
+    /// way a connecting/resuming client learns current device status. Reading the
+    /// registry is a wait-free control-plane map load (invariant #10).
+    #[must_use]
+    pub fn devices_snapshot_frames(
+        &mut self,
+        registry: &DeviceStatusRegistry,
+        snapshot_seq: u64,
+    ) -> Vec<RealtimeFrame> {
+        registry
+            .snapshot_all()
+            .into_iter()
+            .map(|status| self.device_status_frame(status, snapshot_seq))
+            .collect()
+    }
+
+    /// Wrap one latest-wins [`DeviceStatus`] in a `Snapshot`-kind realtime frame
+    /// on the `devices` topic, scoped (envelope `id`) by its device id so an
+    /// `ids` filter narrows the coarse topic to a detail view (ADR-RT007).
+    fn device_status_frame(&mut self, status: DeviceStatus, snapshot_seq: u64) -> RealtimeFrame {
+        let seq = self.issue_seq();
+        let device_id = status.device_id.clone();
+        let envelope = Envelope::new(
+            Topic::Devices,
+            seq,
+            MediaTime::from_nanos(i64::try_from(snapshot_seq).unwrap_or(i64::MAX)),
+            Event::DeviceStatus(status),
+        )
+        .with_id(device_id);
+        RealtimeFrame {
+            kind: FrameKind::Snapshot,
+            envelope,
+        }
+    }
+
     /// Receive the next delta frame, applying **lagged-skip** isolation.
     ///
     /// Returns:
@@ -472,49 +538,31 @@ impl SessionStream {
     ///
     /// [`RecvError::Closed`] when every engine publish handle has been dropped.
     pub async fn next_delta(&mut self) -> Result<Option<RealtimeFrame>, RecvError> {
+        // Two read modes:
+        // * **Resume replay** (`resume_after` set): drain the bounded broadcast
+        //   ring **non-blocking** via `try_recv`. The gap is finite (it cannot
+        //   exceed the ring), so once it is drained `Empty` ends the replay with
+        //   `Ok(None)` rather than awaiting — the resuming client re-snapshots
+        //   the conflated lanes and tails live deltas from a fresh subscription.
+        //   Awaiting here would wedge a caller that polls past the gap.
+        // * **Live tail** (`resume_after == None`, the connect path): `await` the
+        //   next event cooperatively. A slow client lags and is skipped; the
+        //   engine is never back-pressured (invariant #10).
+        if self.resume_after.is_some() {
+            return match self.sub.try_recv() {
+                Ok(seq_event) => Ok(self.frame_for(&seq_event)),
+                // The gap is fully replayed: nothing more buffered. End the
+                // replay (the live tail resumes on the next live `recv`).
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Lagged(_)) => {
+                    self.sub = self.sub.resubscribe();
+                    Ok(None)
+                }
+                Err(TryRecvError::Closed) => Err(RecvError::Closed),
+            };
+        }
         match self.sub.recv().await {
-            Ok(seq_event) => {
-                // Skip events the resuming client already observed.
-                if let Some(after) = self.resume_after {
-                    if seq_event.seq <= after {
-                        return Ok(None);
-                    }
-                }
-                let seq = self.issue_seq();
-                let event = (*seq_event.event).clone();
-                let topic = topic_for_event(&event);
-                // Resource scope (the tile/input/output id) the client keys this
-                // delta by — read before the event is moved into the envelope.
-                let scope = event_scope_id(&event);
-                // The command-outcome correlation, read before the event moves:
-                // if this event is the outcome of an accepted command, resolve the
-                // op id the 202'd request recorded so the envelope echoes it as
-                // `corr` (ADR-W008). Keyed by the engine seq so every subscriber
-                // stamps a consistent `corr` for one outcome, while a re-emitted
-                // outcome (a new engine seq) does not reuse a consumed
-                // correlation. Non-command events stay uncorrelated. The registry
-                // lock is control-plane-only and never touches the engine hot loop
-                // (invariant #10).
-                let corr = self.corr.as_ref().and_then(|registry| {
-                    CorrKey::for_event(&event).and_then(|key| registry.resolve(&key, seq_event.seq))
-                });
-                let mut envelope = Envelope::new(
-                    topic,
-                    seq,
-                    MediaTime::from_nanos(i64::try_from(seq_event.seq).unwrap_or(i64::MAX)),
-                    event,
-                );
-                if let Some(id) = scope {
-                    envelope = envelope.with_id(id);
-                }
-                if let Some(op) = corr {
-                    envelope = envelope.with_corr(op.as_str());
-                }
-                Ok(Some(RealtimeFrame {
-                    kind: FrameKind::Delta,
-                    envelope,
-                }))
-            }
+            Ok(seq_event) => Ok(self.frame_for(&seq_event)),
             Err(RecvError::Lagged(_)) => {
                 // Drop-oldest overflow for THIS slow client only: resubscribe at
                 // the head and let the client re-baseline. The engine never saw
@@ -524,6 +572,67 @@ impl SessionStream {
             }
             Err(RecvError::Closed) => Err(RecvError::Closed),
         }
+    }
+
+    /// Turn one received engine event into a delta frame to emit, or [`None`]
+    /// when this resuming client must skip it (already observed, or a conflated
+    /// latest-wins sample excluded from the lossless replay ring).
+    ///
+    /// The ADR-RT007 replay-ring rule, per event:
+    /// `topic.is_high_rate() || event.is_conflated()`. A resuming client replays
+    /// the gap LOSSLESSLY only for the lossless lanes — the conflated latest-wins
+    /// samples (`device.status`, `timing.status`, `audio.meter`,
+    /// `system.metrics`) are EXCLUDED because a re-snapshot heals them to the
+    /// latest value (a stale gap sample would be worse than none). A fresh
+    /// connection (no resume cursor) delivers everything live, exactly as before.
+    /// This skip is purely a per-client read decision; the engine's publish path
+    /// is untouched (invariant #10).
+    fn frame_for(
+        &mut self,
+        seq_event: &multiview_engine::SeqEvent<Event>,
+    ) -> Option<RealtimeFrame> {
+        if let Some(after) = self.resume_after {
+            if seq_event.seq <= after {
+                return None;
+            }
+            let topic = topic_for_event(&seq_event.event);
+            if topic.is_high_rate() || (*seq_event.event).is_conflated() {
+                return None;
+            }
+        }
+        let seq = self.issue_seq();
+        let event = (*seq_event.event).clone();
+        let topic = topic_for_event(&event);
+        // Resource scope (the tile/input/output id) the client keys this delta
+        // by — read before the event is moved into the envelope.
+        let scope = event_scope_id(&event);
+        // The command-outcome correlation, read before the event moves: if this
+        // event is the outcome of an accepted command, resolve the op id the
+        // 202'd request recorded so the envelope echoes it as `corr` (ADR-W008).
+        // Keyed by the engine seq so every subscriber stamps a consistent `corr`
+        // for one outcome, while a re-emitted outcome (a new engine seq) does not
+        // reuse a consumed correlation. Non-command events stay uncorrelated. The
+        // registry lock is control-plane-only and never touches the engine hot
+        // loop (invariant #10).
+        let corr = self.corr.as_ref().and_then(|registry| {
+            CorrKey::for_event(&event).and_then(|key| registry.resolve(&key, seq_event.seq))
+        });
+        let mut envelope = Envelope::new(
+            topic,
+            seq,
+            MediaTime::from_nanos(i64::try_from(seq_event.seq).unwrap_or(i64::MAX)),
+            event,
+        );
+        if let Some(id) = scope {
+            envelope = envelope.with_id(id);
+        }
+        if let Some(op) = corr {
+            envelope = envelope.with_corr(op.as_str());
+        }
+        Some(RealtimeFrame {
+            kind: FrameKind::Delta,
+            envelope,
+        })
     }
 }
 
@@ -778,6 +887,18 @@ async fn run_ws_session(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+    // Seed the device cache: one latest-wins `device.status` snapshot per tracked
+    // device (ADR-RT007). The conflated status lane is excluded from the lossless
+    // replay ring, so this re-snapshot is the only way a connecting client learns
+    // current device status. Reading the registry is a wait-free control-plane
+    // load (invariant #10).
+    for frame in session.devices_snapshot_frames(&state.device_status, snapshot_seq) {
+        if let Ok(text) = frame.to_json() {
+            if socket.send(Message::Text(text.into())).await.is_err() {
+                return;
+            }
+        }
+    }
 
     loop {
         match session.next_delta().await {
@@ -837,6 +958,15 @@ pub async fn sse_handler(
         // the engine blob carries one (realtime-api §5) — labelled
         // `event: snapshot` exactly like `$hello`.
         if let Some(frame) = session.tiles_snapshot_frame(&snapshot, snapshot_seq) {
+            if let Ok(text) = frame.to_json() {
+                yield Ok(SseEvent::default().event("snapshot").data(text));
+            }
+        }
+        // Seed the device cache: one latest-wins `device.status` snapshot per
+        // tracked device (ADR-RT007), labelled `event: snapshot` exactly like
+        // `$hello`. The conflated status lane is ring-excluded, so this
+        // re-snapshot is the only way a connecting client learns current status.
+        for frame in session.devices_snapshot_frames(&state.device_status, snapshot_seq) {
             if let Ok(text) = frame.to_json() {
                 yield Ok(SseEvent::default().event("snapshot").data(text));
             }

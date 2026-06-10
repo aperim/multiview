@@ -313,8 +313,8 @@ mod tests {
 
     use super::{
         InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore,
-        InMemorySourceStore, InMemorySyncGroupStore, ResourceInput, ResourceRepository, DEVICE_KIND,
-        OUTPUT_KIND, OVERLAY_KIND, PROBE_KIND, SOURCE_KIND, SYNC_GROUP_KIND,
+        InMemorySourceStore, InMemorySyncGroupStore, ResourceInput, ResourceRepository,
+        DEVICE_KIND, OUTPUT_KIND, OVERLAY_KIND, PROBE_KIND, SOURCE_KIND, SYNC_GROUP_KIND,
     };
     use crate::concurrency::Version;
     use crate::error::ControlError;

@@ -72,17 +72,23 @@ impl DeviceBroadcaster {
     /// [`DeviceDriver::as_str`] — never hand-typed (ADR-RT007 guard).
     ///
     /// Returns the engine sequence number the event was published at.
+    // The publish is the point; the returned seq is informational (a resume
+    // cursor / test anchor), so a caller may legitimately ignore it — not a
+    // `must_use` value.
+    #[allow(clippy::must_use_candidate)]
     pub fn adopted(&self, device_id: &str, driver: DeviceDriver, name: Option<String>) -> u64 {
         self.registry.ensure(device_id);
-        self.engine.publish_event(Event::DeviceAdopted(DeviceAdopted {
-            device_id: device_id.to_owned(),
-            driver: driver.as_str().to_owned(),
-            name,
-        }))
+        self.engine
+            .publish_event(Event::DeviceAdopted(DeviceAdopted {
+                device_id: device_id.to_owned(),
+                driver: driver.as_str().to_owned(),
+                name,
+            }))
     }
 
     /// Publish `device.removed` (lossless lifecycle) and drop the device's
     /// runtime status.
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn removed(&self, device_id: &str) -> u64 {
         self.registry.forget(device_id);
         self.engine
@@ -92,12 +98,14 @@ impl DeviceBroadcaster {
     /// Publish a conflated `device.status` snapshot (latest-wins) for
     /// `device_id` in `state`, updating the registry first so a resuming client
     /// re-snapshots the latest value (the conflated lane is ring-excluded).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn status(&self, device_id: &str, state: DeviceState) -> u64 {
         let status = DeviceStatus::new(device_id, state);
         self.publish_status(status)
     }
 
     /// Publish an explicit conflated `device.status` snapshot (latest-wins).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn publish_status(&self, status: DeviceStatus) -> u64 {
         self.registry.set_status(status.clone());
         self.engine.publish_event(Event::DeviceStatus(status))
@@ -105,6 +113,7 @@ impl DeviceBroadcaster {
 
     /// Publish `device.mode` with phase `Started` for a mode convergence whose
     /// device-side (DEV-class) impact was declared before apply (ADR-M009).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn mode_started(&self, device_id: &str, mode: &str) -> u64 {
         self.engine.publish_event(Event::DeviceMode(DeviceMode {
             device_id: device_id.to_owned(),
@@ -116,6 +125,7 @@ impl DeviceBroadcaster {
     }
 
     /// Publish `device.error` (lossless lifecycle).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn error(&self, device_id: &str, message: &str) -> u64 {
         self.engine.publish_event(Event::DeviceError(DeviceError {
             device_id: device_id.to_owned(),

@@ -95,7 +95,14 @@ impl DeviceLifecycle {
     /// Kept pure (no `&self`) so the transition table is unit-testable in
     /// isolation and the driver code can reason about an edge without a live
     /// instance.
+    // The table is intentionally written one explicit `(state, event)` arm per
+    // edge (ADR-M008 §2.2), grouped by source state, so each transition reads as
+    // a row of the documented diagram. Several edges share a destination
+    // (`AuthFailed` / `Unreachable` / `Online`); merging those arms by
+    // destination would scramble the per-state grouping and obscure the table —
+    // the explicit edges are the design, so `match_same_arms` is suppressed here.
     #[must_use]
+    #[allow(clippy::match_same_arms)]
     pub fn transition(state: DeviceState, event: LifecycleEvent) -> DeviceState {
         match (state, event) {
             // ADOPTING: the first probe resolves it.
@@ -118,10 +125,9 @@ impl DeviceLifecycle {
 
             // UNREACHABLE: supervised reconnect (or a fresh probe) brings it
             // back; an auth rejection during reconnect opens the breaker.
-            (
-                DeviceState::Unreachable,
-                LifecycleEvent::Reconnect | LifecycleEvent::ProbeOk,
-            ) => DeviceState::Online,
+            (DeviceState::Unreachable, LifecycleEvent::Reconnect | LifecycleEvent::ProbeOk) => {
+                DeviceState::Online
+            }
             (DeviceState::Unreachable, LifecycleEvent::AuthRejected) => DeviceState::AuthFailed,
 
             // AUTH_FAILED: the breaker is open. Only a credential update re-arms
