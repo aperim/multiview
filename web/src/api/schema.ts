@@ -101,14 +101,18 @@ export interface paths {
          * @description The stored layout body is resolved from the layouts repository and solved
          *     **here, at request time** (off the engine hot path): an unknown id, a body
          *     that does not parse as a `{canvas, layout, cells}` document, one that does
-         *     not solve (bad grid / geometry), or a pinned-canvas mismatch (a Class-2
-         *     change — ADR-R004) is an honest `422` **before** any `202`. On `202` the
+         *     not solve (bad grid / geometry), a pinned-canvas mismatch (a Class-2
+         *     change — ADR-R004), or an unknown running canvas (no seeded snapshot — the
+         *     gate fails closed) is an honest `422` **before** any `202`. On `202` the
          *     command carries the solved layout, so the engine's frame-boundary drain
          *     only swaps (O(cells), no I/O — invariants #1/#10); the `202` body's
          *     `applied_live`/`carried_only` arrays state which per-cell property classes
-         *     genuinely apply on screen. The submit itself mirrors [`cmd_swap`]
-         *     (idempotency + shed-on-full) and never blocks the engine (invariant #10);
-         *     the outcome rides the realtime stream as a `job.progress` event (ADR-W008).
+         *     genuinely apply on screen. Idempotency reserves **before** resolution: a
+         *     replayed `Idempotency-Key` returns the original operation id (kind
+         *     `replay`, undecorated) without re-resolving, and a refused resolve
+         *     releases the key. The submit mirrors [`cmd_swap`] (shed-on-full) and never
+         *     blocks the engine (invariant #10); the outcome rides the realtime stream
+         *     as a `job.progress` event (ADR-W008).
          */
         post: operations["cmd_apply_layout"];
         delete?: never;
@@ -2658,7 +2662,7 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The layout id does not exist, its stored body does not parse/solve, or its canvas differs from the running session's pinned canvas (Class-2). */
+            /** @description The layout id does not exist, its stored body does not parse/solve, its canvas differs from the running session's pinned canvas (Class-2), or the running canvas is unknown (no seeded snapshot — the gate fails closed). */
             422: {
                 headers: {
                     [name: string]: unknown;
