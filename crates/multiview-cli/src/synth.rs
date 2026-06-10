@@ -1342,7 +1342,11 @@ segment_ms = 1000
                 .utc_badge()
         };
         assert_eq!(badge_at(jan), "UTC+11:00", "Sydney is on DST in January");
-        assert_eq!(badge_at(jul), "UTC+10:00", "Sydney is on standard time in July");
+        assert_eq!(
+            badge_at(jul),
+            "UTC+10:00",
+            "Sydney is on standard time in July"
+        );
     }
 
     #[cfg(feature = "overlay")]

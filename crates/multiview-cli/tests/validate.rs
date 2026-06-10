@@ -216,7 +216,10 @@ codec = "h264"
     fs::write(&path, toml).expect("write temp config");
 
     let report = validate_config(&path).expect("validate_config returns a report");
-    assert!(report.is_ok(), "a timezone-only clock validates: {report:?}");
+    assert!(
+        report.is_ok(),
+        "a timezone-only clock validates: {report:?}"
+    );
     let rendered = report.render();
     assert!(
         !rendered.contains("WARN"),
