@@ -70,6 +70,7 @@ pub mod mixer;
 pub mod probe;
 pub mod program;
 pub mod store;
+pub mod tone;
 pub mod truepeak;
 
 pub use ballistics::{Ballistics, MeterScale, PeakMode, PpmKind, SampleScale};
@@ -86,6 +87,9 @@ pub use meterdata::{Conflator, MeterSample, StereoMeterSample, DISPLAY_HZ};
 pub use mixer::{GainRamp, Mixer, RoutePoint};
 pub use probe::{AudioProbeBank, AudioProbeConfig, ProbeSeverityProfile};
 pub use program::{ApplyClass, ProgramBus, SwitchTier};
+pub use tone::{
+    line_up_tone_amplitude, ToneGenerator, LINE_UP_TONE_PEAK_DBFS, REFERENCE_TONE_HZ,
+};
 #[cfg(feature = "ffmpeg")]
 pub use store::audio_decode_loop;
 pub use store::AudioStore;
