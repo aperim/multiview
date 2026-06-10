@@ -444,3 +444,151 @@ fn openapi_mirrors_reject_what_the_config_types_reject() {
             .is_err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-W018: live source apply — per-kind `X-Multiview-Apply` truth + the
+// UpsertSource/RemoveSource commands the routes enqueue for the engine drain.
+// ---------------------------------------------------------------------------
+
+/// The apply header on `resp`, as a string.
+fn apply_header(resp: &axum::http::Response<axum::body::Body>) -> String {
+    resp.headers()
+        .get(APPLY_HEADER)
+        .expect("mutation declares apply semantics")
+        .to_str()
+        .expect("ascii header")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn synthetic_source_create_applies_live_and_enqueues_upsert() {
+    let mut h = harness();
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "Bars", "body": { "id": "cam1", "kind": "bars" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        apply_header(&resp),
+        "live",
+        "a synthetic source mutation applies LIVE (ADR-W018)"
+    );
+
+    // The engine side receives the validated source on the bounded bus.
+    let drained = h.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            multiview_control::Command::UpsertSource { source, .. }
+                if source.id == "cam1"
+                    && matches!(source.kind, multiview_config::SourceKind::Bars)
+        )),
+        "POST of a synthetic source must enqueue UpsertSource, got {drained:?}"
+    );
+}
+
+#[tokio::test]
+async fn synthetic_source_delete_applies_live_and_enqueues_remove() {
+    let mut h = harness();
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "Bars", "body": { "id": "cam1", "kind": "bars" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let _ = h.commands.try_drain();
+
+    let resp = send(
+        &h.router,
+        support::delete_if_match("/api/v1/sources/cam1", support::ADMIN_TOKEN, Some("W/\"1\"")),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(apply_header(&resp), "live", "a delete applies LIVE");
+    let drained = h.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            multiview_control::Command::RemoveSource { id, .. } if id == "cam1"
+        )),
+        "DELETE must enqueue RemoveSource, got {drained:?}"
+    );
+}
+
+#[tokio::test]
+async fn kind_change_off_synthetic_stops_the_generator_but_stays_restart() {
+    let mut h = harness();
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "Bars", "body": { "id": "cam1", "kind": "bars" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let _ = h.commands.try_drain();
+
+    // bars -> rtsp: the stored doc only applies on restart, but the running
+    // generator must STOP (a stale bars picture pretending to be the new URL
+    // would be dishonest), so a RemoveSource rides the bus.
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            Some("W/\"1\""),
+            &json!({
+                "name": "Cam 1",
+                "body": { "id": "cam1", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam1" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(apply_header(&resp), "restart");
+    let drained = h.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            multiview_control::Command::RemoveSource { id, .. } if id == "cam1"
+        )),
+        "a synthetic->network kind change must enqueue RemoveSource, got {drained:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_apply_degrades_to_restart_when_the_engine_is_gone() {
+    let h = harness();
+    let support::Harness {
+        router, commands, ..
+    } = h;
+    // No engine drains the bus (the receiver is gone): the mutation is stored
+    // but can only apply on restart — the header must say so honestly.
+    drop(commands);
+    let resp = send(
+        &router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "Bars", "body": { "id": "cam1", "kind": "bars" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        apply_header(&resp),
+        "restart",
+        "with no engine draining, live apply must degrade to restart"
+    );
+}
