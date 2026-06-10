@@ -421,6 +421,26 @@ pub fn command_drain(
     }
 }
 
+/// Build the per-tick control hook **with the live-source seam** (ADR-W018)
+/// threaded in, so `UpsertSource`/`RemoveSource` apply to the running engine:
+/// the drain registers/unregisters the source's frame store + route key at the
+/// frame boundary (cheap binding mutations) and hands every heavy step
+/// (producer spawn/teardown, preview registry) to the
+/// [`LiveSourceHub`](crate::live_sources::LiveSourceHub) behind `live` over a
+/// bounded, non-blocking channel (invariants #1 + #10). The binary wires this
+/// on the software-engine run path.
+pub fn command_drain_with_live_sources(
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    live: crate::live_sources::LiveSourceHandle,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    let mut drain = CommandDrain::new(commands, config, publisher).with_live_sources(live);
+    move |drive: &mut CompositorDrive<Nv12Image>| {
+        let _applied = drain.apply(drive);
+    }
+}
+
 /// Build the per-tick control hook **with the live run-side routing seams**
 /// threaded in, so per-stream routing commands reach their live crosspoints in the
 /// real run (RT-11 / ADR-0034).
@@ -446,9 +466,11 @@ pub fn command_drain_with_seams(
     config: MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
+    live: crate::live_sources::LiveSourceHandle,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
-    let mut drain =
-        CommandDrain::new(commands, config, publisher).with_subtitle_route(subtitle_route);
+    let mut drain = CommandDrain::new(commands, config, publisher)
+        .with_subtitle_route(subtitle_route)
+        .with_live_sources(live);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
     }
@@ -509,6 +531,13 @@ pub struct CommandDrain {
     /// logged held action.
     #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
     subtitle_route: Option<Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>>,
+    /// The live-source producer seam (ADR-W018), when wired
+    /// ([`command_drain_with_live_sources`] / [`command_drain_with_seams`]): the
+    /// bounded, non-blocking handle to the off-thread
+    /// [`LiveSourceHub`](crate::live_sources::LiveSourceHub) that owns producer
+    /// spawn/teardown + the preview registry. `None` ⇒ `UpsertSource`/
+    /// `RemoveSource` are surfaced held actions (never a silent drop).
+    live_sources: Option<crate::live_sources::LiveSourceHandle>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
     cell_ids_set: bool,
     /// Test-only spy counting how many times this drain calls `solve_layout`.
@@ -534,10 +563,20 @@ impl CommandDrain {
             resolution: RouteResolution::default(),
             #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
             subtitle_route: None,
+            live_sources: None,
             cell_ids_set: false,
             #[cfg(test)]
             resolve_spy: None,
         }
+    }
+
+    /// Thread in the live-source producer seam (ADR-W018) so
+    /// `UpsertSource`/`RemoveSource` reach the running engine. See
+    /// [`command_drain_with_live_sources`].
+    #[must_use]
+    fn with_live_sources(mut self, live: crate::live_sources::LiveSourceHandle) -> Self {
+        self.live_sources = Some(live);
+        self
     }
 
     /// Thread in the live run-side subtitle re-point seam (RT-10b) so a
@@ -867,6 +906,12 @@ impl CommandDrain {
                         head,
                     )));
             }
+            Command::UpsertSource { ref source, .. } => {
+                self.upsert_source(source, drive);
+            }
+            Command::RemoveSource { ref id, .. } => {
+                self.remove_source(id, drive);
+            }
             Command::SetTallyOverride { target, color, .. } => {
                 // No tally arbiter is wired into the software engine yet, so this
                 // emits a TallyState echo rather than silently no-op'ing: a forced
@@ -953,6 +998,150 @@ impl CommandDrain {
             SalvoPhase::Taken,
             head,
         )));
+    }
+
+    /// Apply an `UpsertSource` (ADR-W018 live add/edit) at the frame boundary.
+    ///
+    /// Only the **cheap binding mutations** happen here on the output-clock
+    /// loop: create *or reuse* the source's `TileStore` (reuse on an edit — the
+    /// bound tile holds last-good through the producer swap, never a slate
+    /// flash), register it with the drive (`insert_store`), register the route
+    /// key so a follow-up `RouteVideo`/`SwapSource` resolves, and mirror the
+    /// source into the working config (so `ApplyLayout` re-solves and export
+    /// stay coherent). The **heavy** half — spawning the producer thread and
+    /// the preview-registry RCU — is handed to the off-thread
+    /// [`LiveSourceHub`](crate::live_sources::LiveSourceHub) over a bounded,
+    /// non-blocking channel (invariants #1 + #10; a full queue is shed with a
+    /// warning and the tile rides the slate — re-applying retries).
+    ///
+    /// Kinds: this slice ships **synthetic** sources (`bars`/`solid`/`clock`,
+    /// ADR-0027) live; a decoded kind is a surfaced held action (the stored
+    /// document applies on restart — exactly what the route's
+    /// `X-Multiview-Apply: restart` told the client). The route only enqueues
+    /// `UpsertSource` for synthetic kinds, so the held arm is defence in depth.
+    fn upsert_source(
+        &mut self,
+        source: &multiview_config::Source,
+        drive: &mut CompositorDrive<Nv12Image>,
+    ) {
+        let Some(seam) = self.live_sources.clone() else {
+            tracing::warn!(
+                source = %source.id,
+                "upsert_source held: no live-source hub wired on this run path \
+                 (the stored document applies on restart)"
+            );
+            return;
+        };
+        let Some(kind) = crate::synth::SyntheticKind::from_source_kind(&source.kind) else {
+            tracing::warn!(
+                source = %source.id,
+                "upsert_source held: this kind is not live-appliable yet \
+                 (network live-add is the next ADR-W018 slice); it applies on restart"
+            );
+            return;
+        };
+        let id = source.id.clone();
+        // Reuse the registered store on an edit-by-id so the tile holds
+        // last-good while the hub swaps the producer behind it.
+        let store = drive.store(&id).map_or_else(
+            || {
+                Arc::new(multiview_framestore::TileStore::new(
+                    id.clone(),
+                    multiview_framestore::TileThresholds::default(),
+                    multiview_framestore::NoSignalPolicy::HoldForever,
+                ))
+            },
+            Arc::clone,
+        );
+        // Heavy half off-thread FIRST: the hub tears down any previous
+        // producer under this id (and its `{id}/` companions) before spawning
+        // the SAME generator_loop the startup path runs, and RCUs the preview
+        // map. Requesting this BEFORE the binding mutations below gives the
+        // hub a head start on stopping a replaced producer, shrinking the
+        // bounded window in which old and new frames can interleave in the
+        // reused store on an edit (ADR-W018 §5).
+        match seam.request_spawn_synth(crate::live_sources::SynthSpawn {
+            id: id.clone(),
+            kind,
+            store: Arc::clone(&store),
+            width: self.config.canvas.width,
+            height: self.config.canvas.height,
+            canvas: multiview_compositor::pipeline::CanvasColor::default(),
+            cadence: self.config.canvas.fps.rational(),
+        }) {
+            crate::live_sources::HubSubmit::Accepted => {}
+            crate::live_sources::HubSubmit::Full => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub queue full; producer spawn shed — the tile \
+                     rides the slate (re-apply the source to retry)"
+                );
+            }
+            crate::live_sources::HubSubmit::Gone => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub gone — live producer apply is disabled until \
+                     restart; the tile rides the slate"
+                );
+            }
+        }
+        drive.insert_store(id.clone(), store);
+        // Register the route key so a follow-up RouteVideo/SwapSource resolves:
+        // in the run, the CompositorDrive store key IS the source id.
+        let stream = multiview_config::routing::StreamRef::best(
+            id.clone(),
+            multiview_core::stream::StreamKind::Video,
+        );
+        self.resolution.set_video_store_key(&stream, id.clone());
+        // Mirror into the working config (replace-or-append) so ApplyLayout's
+        // re-solve treats the live source as declared.
+        match self.config.sources.iter_mut().find(|s| s.id == id) {
+            Some(slot) => *slot = source.clone(),
+            None => self.config.sources.push(source.clone()),
+        }
+    }
+
+    /// Apply a `RemoveSource` (ADR-W018 live remove) at the frame boundary:
+    /// unregister the frame store (cells bound to the id composite their
+    /// `on_loss` failover slate from the next tick — the honest `NoSignal` path),
+    /// mirror the removal out of the working config, and hand the producer
+    /// teardown (stop-flag raise + bounded join) and the preview-registry RCU
+    /// to the off-thread hub. Removing an unknown id is a logged no-op.
+    fn remove_source(&mut self, id: &str, drive: &mut CompositorDrive<Nv12Image>) {
+        let Some(seam) = self.live_sources.clone() else {
+            tracing::warn!(
+                source = %id,
+                "remove_source held: no live-source hub wired on this run path \
+                 (the stored removal applies on restart)"
+            );
+            return;
+        };
+        // Teardown-request FIRST (the hub starts raising the producer's stop
+        // flags while the drain finishes the binding mutations — the same
+        // window-shrinking order as upsert), then unregister the store.
+        match seam.request_teardown(id) {
+            crate::live_sources::HubSubmit::Accepted => {}
+            crate::live_sources::HubSubmit::Full => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub queue full; producer teardown shed — the store \
+                     is unregistered (slate) but the producer stops only at run teardown"
+                );
+            }
+            crate::live_sources::HubSubmit::Gone => {
+                tracing::warn!(
+                    source = %id,
+                    "live-source hub gone — live apply disabled until restart; the \
+                     store is unregistered (slate) but the producer stops only at \
+                     run teardown"
+                );
+            }
+        }
+        let removed = drive.remove_store(id);
+        if !removed {
+            tracing::info!(source = %id, "remove_source: no registered store under that id");
+        }
+        self.config.sources.retain(|s| s.id != id);
     }
 
     /// Apply a `RouteSubtitle` by driving the run's live subtitle re-point seam
