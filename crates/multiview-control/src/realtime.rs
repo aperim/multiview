@@ -770,6 +770,10 @@ pub fn topic_for_event(event: &Event) -> Topic {
     match event {
         Event::TileState(_) | Event::TilesSnapshot(_) => Topic::Tiles,
         Event::AudioMeter(_) => Topic::AudioMeters,
+        // The program-bus EBU R128 loudness compliance lane (AUD-8) rides its own
+        // conflated `audio.loudness` topic so the loudness meter can subscribe to
+        // it independently of the high-rate per-track peak/RMS meters.
+        Event::AudioLoudness(_) => Topic::AudioLoudness,
         // High-rate whole-system metrics (cpu/gpu/encoder) ride the conflated
         // `system` lane the footer subscribes to — NOT the control firehose.
         Event::SystemMetrics(_) => Topic::System,
@@ -1095,7 +1099,7 @@ mod topic_routing_tests {
 
     use super::topic_for_event;
     use multiview_core::stream::StreamInventory;
-    use multiview_events::{Event, InputStreams, SystemMetrics, Topic};
+    use multiview_events::{AudioLoudness, Event, InputStreams, SystemMetrics, Topic};
 
     /// The `input.streams` inventory-discovery event MUST ride the existing
     /// `inputs` lane (RT-3) — a delta on re-probe / PMT-version bump, not a new
@@ -1133,6 +1137,37 @@ mod topic_routing_tests {
         assert_eq!(topic_for_event(&event), Topic::System);
         // And `system` is a high-rate conflated lane (pushed, never polled).
         assert!(Topic::System.is_high_rate());
+    }
+
+    /// The program-bus loudness compliance lane (AUD-8) MUST route to its own
+    /// conflated `audio.loudness` topic (so the meter subscribes independently of
+    /// the per-track peak/RMS meters) and be a high-rate, conflated, latest-wins
+    /// sample (excluded from the lossless replay ring; pushed, never polled —
+    /// inv #10).
+    #[test]
+    fn audio_loudness_routes_to_the_audio_loudness_topic_and_is_conflated() {
+        let event = Event::AudioLoudness(AudioLoudness {
+            program: 0,
+            momentary: Some(-22.5),
+            short_term: Some(-23.0),
+            integrated: Some(-23.0),
+            lra: Some(4.0),
+            true_peak_dbtp: Some(-2.5),
+            target_lufs: -23.0,
+            ceiling_dbtp: -1.5,
+            tolerance_lu: 1.0,
+            gain_db: Some(0.0),
+            sampled_hz: 10,
+        });
+        assert_eq!(topic_for_event(&event), Topic::AudioLoudness);
+        assert!(
+            Topic::AudioLoudness.is_high_rate(),
+            "audio.loudness is a conflated high-rate lane"
+        );
+        assert!(
+            event.is_conflated(),
+            "a loudness sample is conflated latest-wins, never lossless"
+        );
     }
 
     /// A shed-load decision is a discrete, lossless degradation-signal event:

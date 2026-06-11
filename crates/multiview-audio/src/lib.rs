@@ -82,7 +82,9 @@ pub use decode::{meter_file, AudioFileDecoder, DecodedBlock};
 pub use error::{AudioError, Result};
 pub use format::{AudioBlock, AudioFormat, ChannelLayout};
 pub use loudness::LoudnessMeter;
-pub use loudnorm::{LoudnessTarget, LoudnormProcessor, DEFAULT_TRUE_PEAK_CEILING_DBTP};
+pub use loudnorm::{
+    LoudnessTarget, LoudnormProcessor, DEFAULT_TRUE_PEAK_CEILING_DBTP, LIVE_TOLERANCE_LU,
+};
 pub use meterdata::{Conflator, MeterSample, StereoMeterSample, DISPLAY_HZ};
 pub use mixer::{GainRamp, Mixer, RoutePoint};
 pub use probe::{AudioProbeBank, AudioProbeConfig, ProbeSeverityProfile};

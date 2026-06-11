@@ -1980,6 +1980,30 @@ impl Pipeline {
         // streaming/web level (this output is a live streaming multiview).
         let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
+        // The program-bus EBU R128 loudness telemetry (AUD-8): a read-only
+        // compliance meter measuring the EMITTED program (post-loudnorm) and
+        // pushing a conflated `audio.loudness` sample (M/S/I/LRA/dBTP +
+        // compliance reference) onto the engine event stream at ~10 Hz. Built
+        // when (and only when) audio is on, at the same format as the bus + the
+        // SAME compliance target/ceiling/tolerance the loudnorm processor uses
+        // (so the browser meter colours against exactly that). `None` when audio
+        // is off (no loudness lane) OR when the meter fails to build (the run
+        // continues without the meter rather than failing — telemetry is
+        // best-effort, inv #10). Moves into the bake consumer (it is `Send`); it
+        // never runs on the engine hot loop.
+        let audio_loudness = self
+            .encode_cfg
+            .audio
+            .as_ref()
+            .and_then(|cfg| program_loudness_telemetry(cfg, audio_loudnorm.as_ref()));
+
+        // A cheap clone of the engine's outbound publisher (Arc-backed, drop-
+        // oldest): the bake consumer publishes loudness samples through it. The
+        // clone shares the same broadcast, so a sample published from the consumer
+        // thread reaches every subscriber exactly like a hot-loop event; it can
+        // neither block the engine nor be back-pressured by a slow UI (inv #10).
+        let loudness_publisher = audio_loudness.is_some().then(|| publisher.clone());
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -1994,6 +2018,8 @@ impl Pipeline {
             encoder,
             audio_bus,
             audio_loudnorm,
+            audio_loudness,
+            loudness_publisher,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -2765,6 +2791,7 @@ impl StreamEgress {
     /// on. Dropping that sender (when the engine loop ends) closes the hot queue
     /// → the consumer drains, fans the remainder, drops the sink senders → each
     /// sink sees end-of-program and finalises → [`StreamEgress::join`] folds stats.
+    #[allow(clippy::too_many_arguments)] // reason: the bake consumer threads the encode, the audio bus + loudnorm + loudness meter, and the publisher — each a distinct, irreducible owned input to the off-hot-path consumer.
     fn spawn(
         ctx: BakeContext,
         runners: Vec<SinkRunner>,
@@ -2772,6 +2799,8 @@ impl StreamEgress {
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
         audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+        audio_loudness: Option<crate::loudness_telemetry::LoudnessTelemetry>,
+        loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -2829,6 +2858,8 @@ impl StreamEgress {
                     encoder,
                     audio_bus,
                     audio_loudnorm,
+                    audio_loudness,
+                    loudness_publisher,
                     &consumer_in_flight,
                 )
             })
@@ -2969,6 +3000,47 @@ fn program_loudnorm(
     multiview_audio::LoudnormProcessor::new(format, multiview_audio::LoudnessTarget::Streaming).ok()
 }
 
+/// Build the program-bus loudness **telemetry** meter (AUD-8) for the run's audio
+/// config: a read-only EBU R128 compliance meter (true-peak ON) over the EMITTED
+/// program, reporting against the same target/ceiling/tolerance the loudnorm
+/// processor uses (so the browser meter colours against exactly that compliance).
+///
+/// When a [`LoudnormProcessor`](multiview_audio::LoudnormProcessor) is present the
+/// reference is read from it (its `target_lufs` / `ceiling_dbtp`); otherwise the
+/// streaming defaults (`-16` LUFS, `-1.5` dBTP) — matching [`program_loudnorm`].
+/// The live tolerance is the `±1 LU` single-pass live bound (ADR-R006). The format
+/// mirrors [`program_audio_bus`]. Returns `None` if the format is unusable (the
+/// run then continues with no loudness lane — telemetry is best-effort, inv #10).
+fn program_loudness_telemetry(
+    cfg: &multiview_output::AudioEncodeConfig,
+    loudnorm: Option<&multiview_audio::LoudnormProcessor>,
+) -> Option<crate::loudness_telemetry::LoudnessTelemetry> {
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    let format = multiview_audio::AudioFormat::new(cfg.sample_rate, layout);
+    // The compliance reference: prefer the loudnorm processor's live target +
+    // ceiling so the meter and the normaliser agree; else the streaming defaults.
+    let (target_lufs, ceiling_dbtp) = loudnorm.map_or(
+        (
+            multiview_audio::LoudnessTarget::Streaming.lufs(),
+            multiview_audio::DEFAULT_TRUE_PEAK_CEILING_DBTP,
+        ),
+        |n| (n.target_lufs(), n.ceiling_dbtp()),
+    );
+    // Narrow the f64 reference values to the wire f32 without an `as` cast.
+    let to_f32 = |v: f64| v.to_string().parse::<f32>().unwrap_or(0.0);
+    crate::loudness_telemetry::LoudnessTelemetry::new(
+        format,
+        0,
+        to_f32(target_lufs),
+        to_f32(ceiling_dbtp),
+        to_f32(multiview_audio::LIVE_TOLERANCE_LU),
+    )
+    .ok()
+}
+
 /// Drive the program-audio bus to the output **tick index** of one surviving
 /// [`StreamItem`] and return that frame's audio block (RT-8b, the lip-sync fix).
 ///
@@ -3012,6 +3084,9 @@ fn drive_audio_for_item(
 /// # Errors
 /// Returns [`PipelineError`] if building the baker, baking a frame, or the single
 /// encode fails.
+#[allow(clippy::too_many_arguments)]
+// reason: the consumer owns each pipeline tail input distinctly (encode, audio bus + loudnorm + loudness meter + publisher, in-flight counter); bundling them would only obscure the data flow.
+#[allow(clippy::needless_pass_by_value)] // reason: `loudness_publisher` is owned BY VALUE so it lives in the consumer thread's frame for the whole run (it cannot borrow from `drive_streaming`, which returns before this thread joins); the body only needs `&` access but the ownership is load-bearing.
 fn consumer_main(
     ctx: BakeContext,
     hot_rx: &Receiver<StreamItem>,
@@ -3019,9 +3094,15 @@ fn consumer_main(
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
     mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+    mut audio_loudness: Option<crate::loudness_telemetry::LoudnessTelemetry>,
+    loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
+    // A monotonic clock for rate-bounding the loudness emit, sampled OFF the hot
+    // loop (this is the bake-consumer thread). The epoch is the consumer start;
+    // the conflator only ever sees a non-decreasing `now_ns`.
+    let loudness_epoch = Instant::now();
     // Track which sinks are still live (their receiver has not hung up) so a sink
     // that ended early does not wedge or repeatedly error the consumer.
     let mut live: Vec<bool> = vec![true; sink_txs.len()];
@@ -3060,10 +3141,32 @@ fn consumer_main(
             // preserved exactly, so the AAC encode sees the same frame count it
             // would have. `None` (no normaliser) emits the mixed bus unaltered.
             // Discrete tracks never pass through here (program-bus-only — ADR-R006).
+            let gain_db = audio_loudnorm
+                .as_ref()
+                .map(multiview_audio::LoudnormProcessor::current_gain_db);
             let block = match audio_loudnorm.as_mut() {
                 Some(norm) => norm.process(block),
                 None => block,
             };
+            // Program-bus loudness telemetry (AUD-8), still on THIS bake-consumer
+            // thread (off the engine hot loop): meter the EMITTED block read-only
+            // and, at ~10 Hz (conflated/drop-oldest), publish an `audio.loudness`
+            // sample onto the engine event stream so the UI loudness meter lights
+            // up. The publish is a single non-blocking broadcast send — it can
+            // neither block the engine nor be back-pressured by a slow UI (inv
+            // #10); a stalled UI just skips loudness samples. `None` (audio off /
+            // meter unavailable) skips this entirely.
+            if let (Some(meter), Some(publisher)) =
+                (audio_loudness.as_mut(), loudness_publisher.as_ref())
+            {
+                // Narrow the makeup gain to the wire `f32` without an `as` cast.
+                let gain_f32 = gain_db.map(|g| g.to_string().parse::<f32>().unwrap_or(0.0));
+                let now_ns = loudness_epoch.elapsed().as_nanos();
+                let now_ns = i64::try_from(now_ns).unwrap_or(i64::MAX);
+                if let Some(sample) = meter.push(&block, gain_f32, now_ns) {
+                    publisher.publish_event(Event::AudioLoudness(sample));
+                }
+            }
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {

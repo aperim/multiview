@@ -86,6 +86,16 @@
         "summary": "An alert was raised (alert.raised) or cleared (alert.cleared) on topic `alerts`.",
         "title": "Operator alert raised or cleared"
       },
+      "AudioLoudness": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `audio.loudness` (AUD-8). A high-rate CONFLATED compliance lane (BS.1770-4 / EBU Tech 3341/3342, ADR-R006): the slow-cadence M/S/I/LRA/dBTP sample the loudness meter measures read-only off the audio bus, pushed at ~10 Hz and excluded from the lossless replay ring. A slow consumer can only lose its own samples — the engine never back-pressures (inv #10). BALLISTICS are applied client-side: the wire carries raw measured values; the browser meter applies the display decay/peak-hold. The compliance reference (`target_lufs`/`ceiling_dbtp`/`tolerance_lu`) rides every sample so the meter colours against the same target the program bus is normalised toward.",
+        "name": "AudioLoudness",
+        "payload": {
+          "$ref": "#/components/schemas/AudioLoudness"
+        },
+        "summary": "Momentary/short-term/integrated LUFS + LRA + true-peak (dBTP) + compliance reference (numeric only).",
+        "title": "Program-bus EBU R128 loudness sample"
+      },
       "AudioMeter": {
         "contentType": "application/json",
         "description": "Emitted on topic `audio.meters`. This is the sole high-rate conflated topic; frames are conflated/sampled at 10–30 Hz on the wire. A slow consumer can only lose its own meter frames — the engine never back-pressures. The binary fast-path (subprotocol `multiview.bin.v1`) carries the same fields in compact form; this schema describes the decoded (JSON) shape.",
@@ -183,6 +193,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/AudioMeter"
+                },
+                {
+                  "$ref": "#/components/schemas/AudioLoudness"
                 },
                 {
                   "$ref": "#/components/schemas/OutputStatus"
@@ -524,6 +537,74 @@
           "critical"
         ],
         "type": "string"
+      },
+      "AudioLoudness": {
+        "description": "Data body of the `audio.loudness` event: a program-bus EBU R128 loudness sample (M/S/I LUFS, LRA, true-peak dBTP) plus the compliance reference. Numeric metadata only — never audio content. Conflated/sampled at ~10 Hz on the wire (high-rate lane); ballistics are applied client-side. The integrating fields are absent below the -70 LUFS absolute gate (no fabricated value).",
+        "properties": {
+          "ceiling_dbtp": {
+            "description": "True-peak ceiling, dBTP (compliance reference, e.g. -1.5).",
+            "format": "float",
+            "type": "number"
+          },
+          "gain_db": {
+            "description": "Makeup gain the loudnorm processor is applying, dB. Absent when no normaliser is engaged.",
+            "format": "float",
+            "type": "number"
+          },
+          "integrated": {
+            "description": "Integrated (gated) loudness, LUFS. Absent until enough gated audio.",
+            "format": "float",
+            "type": "number"
+          },
+          "lra": {
+            "description": "Loudness range (EBU Tech 3342), LU. Absent until enough gated audio.",
+            "format": "float",
+            "type": "number"
+          },
+          "momentary": {
+            "description": "Momentary loudness (400 ms window), LUFS. Absent below the absolute gate.",
+            "format": "float",
+            "type": "number"
+          },
+          "program": {
+            "description": "Program/bus index this loudness sample is for.",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "sampled_hz": {
+            "description": "Effective wire cadence (Hz).",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "short_term": {
+            "description": "Short-term loudness (3 s window), LUFS. Absent below the absolute gate.",
+            "format": "float",
+            "type": "number"
+          },
+          "target_lufs": {
+            "description": "Normalisation target loudness, LUFS (compliance reference, e.g. -23 / -16).",
+            "format": "float",
+            "type": "number"
+          },
+          "tolerance_lu": {
+            "description": "Live convergence tolerance, LU (the in-spec band is target ± tolerance).",
+            "format": "float",
+            "type": "number"
+          },
+          "true_peak_dbtp": {
+            "description": "Maximum true-peak across channels (4x oversampled), dBTP. Absent when disabled.",
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "program",
+          "target_lufs",
+          "ceiling_dbtp",
+          "tolerance_lu",
+          "sampled_hz"
+        ],
+        "type": "object"
       },
       "AudioMeter": {
         "description": "Data body of the `audio.meter` event: a high-rate per-input/track peak/RMS/clip sample. This is numeric metadata only — never audio content. Conflated/sampled at 10–30 Hz on the wire (high-rate lane).",
