@@ -70,7 +70,10 @@ impl StartConfig {
 /// exactly when they take effect. Without the splice, a boot-file
 /// `[control] listen` edit would be silently lost on the very restart the
 /// operator performed to apply it (the stale `active.toml` copy would win).
-fn splice_storeless_sections(mut running: MultiviewConfig, boot: &MultiviewConfig) -> MultiviewConfig {
+fn splice_storeless_sections(
+    mut running: MultiviewConfig,
+    boot: &MultiviewConfig,
+) -> MultiviewConfig {
     running.schema_version = boot.schema_version;
     running.control = boot.control.clone();
     running.placement = boot.placement.clone();

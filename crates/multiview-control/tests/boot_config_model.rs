@@ -809,7 +809,9 @@ async fn active_toml_round_trips_validate() {
     let r = rig(BOOT_DOC);
     recolor_in_a(&r, "#b0b0b0").await;
 
-    persist_running_now(&r.state).await.expect("persist Running");
+    persist_running_now(&r.state)
+        .await
+        .expect("persist Running");
 
     let active_path = r
         .state
@@ -1187,7 +1189,11 @@ async fn a_failed_promote_write_releases_the_banked_expect_token() {
 
     // Force the atomic write to fail: occupy write_atomic's deterministic
     // temp name with a DIRECTORY (root-proof, unlike a permissions trick).
-    let tmp_blocker = r.boot_path.parent().expect("dir").join(".multiview.toml.tmp");
+    let tmp_blocker = r
+        .boot_path
+        .parent()
+        .expect("dir")
+        .join(".multiview.toml.tmp");
     std::fs::create_dir(&tmp_blocker).expect("block the temp path");
     let before = std::fs::read_to_string(&r.boot_path).expect("read boot file");
     let resp = send(

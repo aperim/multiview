@@ -646,24 +646,26 @@ pub(crate) async fn revert_to_start(
     // Surface it on the same `config-file-apply-incomplete` warning path the
     // watcher uses, with revert-specific remediation.
     if outcome.shed > 0 {
-        state.engine.publish_event(
-            multiview_events::Event::HealthWarningRaised(multiview_events::HealthWarning {
-                code: multiview_events::WarningCode::ConfigFileApplyIncomplete,
-                severity: multiview_events::WarningSeverity::Warning,
-                subsystem: "config".to_owned(),
-                message: format!(
-                    "revert-to-start applied only PARTIALLY: {} engine command(s) were shed \
+        state
+            .engine
+            .publish_event(multiview_events::Event::HealthWarningRaised(
+                multiview_events::HealthWarning {
+                    code: multiview_events::WarningCode::ConfigFileApplyIncomplete,
+                    severity: multiview_events::WarningSeverity::Warning,
+                    subsystem: "config".to_owned(),
+                    message: format!(
+                        "revert-to-start applied only PARTIALLY: {} engine command(s) were shed \
                      on a full command bus; the control stores were reverted but the engine \
                      may not reflect every reverted change.",
-                    outcome.shed
-                ),
-                remediation: "Retry the revert once the command bus drains; the stores \
+                        outcome.shed
+                    ),
+                    remediation: "Retry the revert once the command bus drains; the stores \
                               already hold the start values."
-                    .to_owned(),
-                since: state.ack_now().as_nanos(),
-                active: true,
-            }),
-        );
+                        .to_owned(),
+                    since: state.ack_now().as_nanos(),
+                    active: true,
+                },
+            ));
     }
     state.audit(
         &principal.key_id,
