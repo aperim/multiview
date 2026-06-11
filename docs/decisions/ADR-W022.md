@@ -95,10 +95,15 @@ own command submissions).
   `active.toml` atomically (same-directory temp file → `fsync` → `rename(2)` → directory
   `fsync`). Any failure — a store fault, a document that does not compose, an I/O error —
   is a `tracing::warn!` and a skipped write; the task never exits on error and nothing else
-  is touched (fail-soft). At startup the starting Running state is persisted once (so a
-  stale `active.toml` from a previous run can never outlive the run that supersedes it),
-  and at graceful teardown a final best-effort persist captures changes younger than the
-  debounce.
+  is touched (fail-soft). The file I/O rides `spawn_blocking` (review m1: the fsync'd write
+  never parks the control-plane reactor; the boot-model status route's file read rides
+  `tokio::fs` for the same reason). At startup the starting Running state is persisted once
+  (so a stale `active.toml` from a previous run can never outlive the run that supersedes
+  it), and at graceful teardown — reached on Ctrl-C **and SIGTERM** (review m2: `docker
+  stop`/systemd) — `finish_running_persist` aborts the task, **awaits its termination**
+  (review M2: the deterministic `.tmp` is single-writer only if the final persist can never
+  overlap a write the dying task is still finishing on a blocking thread), then runs one
+  final best-effort persist capturing changes younger than the debounce.
 * **Audit-trigger over-approximation, accepted:** some audit entries (e.g. a config-revision
   commit, an alarm ack) do not change the composed document; the debounced persister then
   rewrites an identical `active.toml`. That costs one small atomic file write per ~2 s worst
@@ -109,15 +114,26 @@ own command submissions).
 `ControlConfig` gains `start: StartMode` (`boot` | `resume`; serde-typed, so an unknown
 token fails parse — validated by construction; default `boot`). The **boot** file's policy
 decides. On `resume`, the run reads `<config-dir>/.multiview/active.toml`; if it reads,
-parses, and validates, that document becomes the starting Running state **wholesale**: the
-engine is built from it, the control stores are seeded from it, the export base document is
-it, and the ADR-W020 watcher's baseline is it — while the watcher keeps watching the BOOT
-path, so an external boot-file edit during a resumed run still hot-applies (the diff is
-computed against the resumed baseline). A missing/unreadable/invalid `active.toml` falls
-back to the boot document with a `tracing::warn!` naming the reason (also surfaced on
-`GET /api/v1/config/boot-model` as `resume_fallback`). **Loaded stays the boot snapshot in
-both modes** (the model pins it: revert-to-start targets the deliberate cold-start
-baseline, not the resumed state).
+parses, and validates, that document becomes the starting Running state — with the
+**storeless restart-only sections spliced from the BOOT document** (review M1: `control`,
+`placement`, `salvos`, `tally_profiles`, `walls`, `routing`, `schema_version` have no
+control store; the boot file is their durable truth and a restart is exactly when they
+take effect, so a boot-file `[control] listen` edit lands on the restart the operator
+performed instead of losing to the stale machine-written copy). The spliced document is
+re-validated; a combination that no longer validates falls back to boot with the reason
+surfaced. The engine is built from the result, the control stores are seeded from it, the
+export base document is it, and the ADR-W020 watcher's baseline is it — while the watcher
+keeps watching the BOOT path, so an external boot-file edit during a resumed run still
+hot-applies (the diff is computed against the resumed baseline). The watcher's
+**last-observed content is seeded with the boot-load text** (review m4): a settled
+observation whose content still equals it — the unchanged boot file under a resume, or a
+touch/identical rewrite — is adopted without applying, so the resumed state is never
+clobbered by a file that did not actually change; an edit landing in the boot window
+differs from that text and still applies (the ADR-W020 review-M2 semantics hold). A
+missing/unreadable/invalid `active.toml` falls back to the boot document with a
+`tracing::warn!` naming the reason (also surfaced on `GET /api/v1/config/boot-model` as
+`resume_fallback`). **Loaded stays the boot snapshot in both modes** (the model pins it:
+revert-to-start targets the deliberate cold-start baseline, not the resumed state).
 
 ### 5. `POST /api/v1/config/revert-to-start` (role: write, `Idempotency-Key`, audited)
 
@@ -131,7 +147,14 @@ response's `restart_only` (in the common boot-start case the engine never adopte
 sections' drift, so reverting their stores actually re-converges doc and engine; after a
 resume with a different canvas the Class-2 hold applies exactly as in ADR-W020). The
 response is `202` with the per-section summary. An empty diff returns `202` with
-`reverted: false` and applies nothing. The ADR-W020 watcher's *file* baseline is
+`reverted: false` and applies nothing. The response is **shed-aware** (review M4):
+`reverted: true` with the full summary only when every engine command landed on the
+bounded bus; a shed apply answers `202` with `reverted: false`, the `shed` count, the
+partial summary, and raises the `config-file-apply-incomplete` warning with
+revert-specific remediation — unlike the watcher nothing retries a revert, so the operator
+is told to retry once the bus drains (the stores already hold the start values). A
+composition failure (`422`) releases the `Idempotency-Key` reservation so a corrected
+retry with the same key actually runs. The ADR-W020 watcher's *file* baseline is
 deliberately untouched — its baseline tracks the last applied **file** content (W020
 semantics; API edits already moved Running without moving it), and the latched
 `config-file-requires-restart` warning stays honest because the file still differs from
@@ -141,12 +164,18 @@ what the engine adopted.
 
 Write the current Running document to the **boot file path**, server-side: compose →
 deserialize → `validate()` → `to_toml()` → `expect_write()` on the installed watch handle
-(ADR-W020 §7 — this is the seam's first and intended caller; the watcher adopts the write
-as its new baseline without re-applying) → atomic write to the boot path → a
-config-versioning commit (target **`boot`**, the promoted JSON document, the principal,
-message `promote running configuration to boot`) → audit. Returns `200` with the written
-path, byte count, and the committed revision id. With no watcher installed (store-only
-deployments) the suppression step is skipped — there is nothing to suppress.
+(ADR-W020 §7 — this is the seam's first and intended caller; the token is
+**content-paired**, so an unrelated external edit landing inside the settle window is
+still applied, never adopted) → atomic write to the boot path → a config-versioning commit
+(target **`boot`**, the promoted JSON document, the principal, message `promote running
+configuration to boot`) → audit. Returns `200` with the written path, byte count, and the
+committed revision id. With no watcher installed (store-only deployments) the suppression
+step is skipped — there is nothing to suppress. A **failed write releases the banked
+token** (review B1: a leaked token would silently adopt a later real edit carrying the
+same content) and releases the idempotency reservation. The atomic write **preserves the
+destination's mode** (review M3: a chmod-600 boot file stays 600 across the temp-file +
+rename), and the boot path is canonicalized at startup so a symlinked config is promoted
+at its real file — the rename replaces the file, never the symlink.
 
 ### 7. Observability: `GET /api/v1/config/boot-model` (role: read)
 
