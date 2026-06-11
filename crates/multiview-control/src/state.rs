@@ -452,6 +452,11 @@ pub struct AppState {
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
+    /// What the **running** engine can take live, per stored collection
+    /// (ADR-W021): injected by the binary at wiring time so mutation routes
+    /// declare `X-Multiview-Apply` honestly per build + run path. The default
+    /// carries no capability (everything is `restart`).
+    pub live_apply: crate::live_apply::LiveApplyCaps,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -519,7 +524,19 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // Honest default: nothing applies live until the binary declares
+            // what the running engine can take (ADR-W021).
+            live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
+    }
+
+    /// Declare what the **running** engine can take live (ADR-W021). The
+    /// binary calls this with the capabilities of the chosen run path + build;
+    /// the honest default (nothing live) stands otherwise.
+    #[must_use]
+    pub fn with_live_apply(mut self, live_apply: crate::live_apply::LiveApplyCaps) -> Self {
+        self.live_apply = live_apply;
+        self
     }
 
     /// Replace the live-preview provider (the binary wires an engine-backed one;

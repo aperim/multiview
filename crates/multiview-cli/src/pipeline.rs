@@ -903,11 +903,20 @@ pub struct Pipeline {
     /// wins (config validation already rejects duplicate probe ids).
     #[cfg(feature = "overlay")]
     declared_probes: Vec<multiview_config::probe::Probe>,
-    /// An optional **analog** clock face requested by a `[[overlays]]` entry with
-    /// `kind = "clock"` + `face = "analog"`. `None` ⇒ only the default digital
-    /// clock label is drawn.
+    /// The **analog** clock faces requested by `[[overlays]]` entries with
+    /// `kind = "clock"` + `face = "analog"` — one face per entry, working-set
+    /// order (ADR-W021). Empty ⇒ only the default digital clock label is drawn.
     #[cfg(feature = "overlay")]
-    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    analog_clocks: Vec<crate::overlays::AnalogClockSpec>,
+    /// ADR-W021: the live overlay working-set slot, seeded with the boot
+    /// config's overlays (generation 0). The command drain publishes each
+    /// applied overlay change through it (via
+    /// [`overlay_apply_slot`](Self::overlay_apply_slot) → the binary's drain
+    /// wiring) and the bake consumer re-derives its overlay render state from
+    /// it at the next frame — a lock-free `ArcSwap`, so neither side can pace
+    /// the other (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    overlay_apply: crate::live_overlays::OverlayApplySlot,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
@@ -1158,10 +1167,10 @@ impl Pipeline {
                 (s.id.clone(), label)
             })
             .collect();
-        // Read an optional analog clock face from a `[[overlays]]` clock entry.
+        // Read the analog clock faces from the `[[overlays]]` clock entries.
         #[cfg(feature = "overlay")]
-        let analog_clock =
-            analog_clock_from_config(&config.overlays, config.canvas.width, config.canvas.height);
+        let analog_clocks =
+            analog_clocks_from_config(&config.overlays, config.canvas.width, config.canvas.height);
 
         // The legacy `--subtitles` sidecar (if attached later) burns into the
         // first source-bound cell. Pre-resolve that target id once here.
@@ -1223,7 +1232,9 @@ impl Pipeline {
             #[cfg(feature = "overlay")]
             declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
-            analog_clock,
+            analog_clocks,
+            #[cfg(feature = "overlay")]
+            overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
         })
     }
 
@@ -1472,6 +1483,19 @@ impl Pipeline {
         &self,
     ) -> Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>> {
         Arc::clone(&self.subtitle_route)
+    }
+
+    /// ADR-W021: the **shared** live overlay working-set slot. The binary
+    /// threads a clone into the command drain
+    /// ([`command_drain_with_seams`](crate::control::command_drain_with_seams))
+    /// so `UpsertOverlay`/`RemoveOverlay` publish through it at the frame
+    /// boundary; the bake consumer re-derives its overlay render state from it
+    /// at the next frame. Reading/writing is a lock-free `ArcSwap` load/store,
+    /// so neither side can pace or stall the output clock (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn overlay_apply_slot(&self) -> crate::live_overlays::OverlayApplySlot {
+        Arc::clone(&self.overlay_apply)
     }
 
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
@@ -2101,9 +2125,10 @@ impl Pipeline {
             meter_db_timelines: self.meter_db_timelines.clone(),
             subtitles: self.subtitles.clone(),
             sidecar_target: self.sidecar_target.clone(),
-            analog_clock: self.analog_clock,
+            analog_clocks: self.analog_clocks.clone(),
             canvas_color: self.canvas_color,
             cadence: self.cadence,
+            overlay_apply: Some(Arc::clone(&self.overlay_apply)),
         }
     }
 
@@ -2134,15 +2159,20 @@ struct BakeContext {
     /// The source id the sidecar burns into (the first source-bound cell).
     #[cfg(feature = "overlay")]
     sidecar_target: Option<String>,
-    /// An optional analog clock face placement.
+    /// The analog clock face placements (one per analog-face entry).
     #[cfg(feature = "overlay")]
-    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    analog_clocks: Vec<crate::overlays::AnalogClockSpec>,
     /// The fixed canvas color (for the overlay blend + output tag).
     #[cfg(feature = "overlay")]
     canvas_color: CanvasColor,
     /// The fixed output cadence (for the per-frame media time).
     #[cfg(feature = "overlay")]
     cadence: Rational,
+    /// ADR-W021: the live overlay working-set slot the consumer re-derives
+    /// from (one wait-free load + generation compare per frame). `None` ⇒ no
+    /// live seam (the boot-derived `analog_clock` stands for the whole run).
+    #[cfg(feature = "overlay")]
+    overlay_apply: Option<crate::live_overlays::OverlayApplySlot>,
 }
 
 impl BakeContext {
@@ -2186,6 +2216,10 @@ struct StreamBaker {
     canvas_color: CanvasColor,
     cadence: Rational,
     meter: BakeContext,
+    /// The last live overlay-set generation this baker derived its render
+    /// state from (ADR-W021). `None` until the first bake, so a wired slot's
+    /// seeded set drives the very first frame (one truth: the slot).
+    overlay_generation: Option<u64>,
 }
 
 #[cfg(not(feature = "overlay"))]
@@ -2207,15 +2241,37 @@ impl StreamBaker {
             crate::wallclock::WallClockSource::system(),
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
-        if let Some(spec) = ctx.analog_clock {
-            baker = baker.with_analog_clock(spec);
-        }
+        baker.set_analog_clocks(ctx.analog_clocks.clone());
         Ok(Self {
             baker,
             canvas_color: ctx.canvas_color,
             cadence: ctx.cadence,
             meter: ctx,
+            overlay_generation: None,
         })
+    }
+
+    /// Re-derive the overlay render state from the live working-set slot iff
+    /// its generation advanced (ADR-W021). The steady-state per-frame cost is
+    /// one wait-free `ArcSwap` load plus an integer compare; on a change the
+    /// re-derivation is O(overlays) pure math (no I/O, no rasterization), and
+    /// the frame baked next is drawn entirely from the new set — a clean
+    /// frame-boundary (Class-1) transition. Without a wired slot the
+    /// boot-derived state stands.
+    fn refresh_overlays(&mut self, canvas_w: u32, canvas_h: u32) {
+        let Some(slot) = self.meter.overlay_apply.as_ref() else {
+            return;
+        };
+        let set = slot.load();
+        if self.overlay_generation == Some(set.generation()) {
+            return;
+        }
+        self.baker.set_analog_clocks(analog_clocks_from_config(
+            set.overlays(),
+            canvas_w,
+            canvas_h,
+        ));
+        self.overlay_generation = Some(set.generation());
     }
 
     /// Bake one streamed tick's overlays into its canvas, returning the overlaid
@@ -2226,6 +2282,10 @@ impl StreamBaker {
     /// Returns [`PipelineError::Engine`] if the baker/sub-pass rejects the canvas.
     fn bake(&mut self, item: &StreamItem) -> Result<Arc<Nv12Image>, PipelineError> {
         use multiview_compositor::overlay::apply_overlays_to_nv12;
+
+        // ADR-W021: pick up a live overlay-set change before drawing, so this
+        // frame is baked entirely from one set (frame-boundary apply).
+        self.refresh_overlays(item.canvas.width(), item.canvas.height());
 
         let i = usize::try_from(item.tick_index).unwrap_or(usize::MAX);
         let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
@@ -3918,57 +3978,64 @@ fn u32_from_usize_audio(value: usize) -> u32 {
 }
 
 /// The codec token a config output names, if it carries one.
-/// Read an optional analog clock face from the config `[[overlays]]` list: the
-/// first entry whose `kind == "clock"` and whose `face` param is `"analog"`.
+/// Read the analog clock faces from the config `[[overlays]]` list: one face
+/// per entry whose `kind == "clock"` and whose `face` param is `"analog"`, in
+/// working-set order (ADR-W021 — EVERY analog entry renders; no first-wins).
 ///
-/// Placement comes from optional `x`/`y`/`radius` params (canvas pixels); a
-/// missing placement defaults the face to the bottom-right corner sized to the
-/// canvas. An optional `tz_minutes` param sets the timezone offset (default UTC).
-/// Returns `None` when no analog clock is requested (the digital label still
-/// renders). Without the `overlay` feature this is never called.
+/// Placement comes from each entry's optional `x`/`y`/`radius` params (canvas
+/// pixels); a missing placement defaults that face to the bottom-right corner
+/// sized to the canvas. An optional `tz_minutes` param sets the timezone
+/// offset (default UTC). Returns an empty set when no analog clock is
+/// requested (the digital label still renders). Without the `overlay` feature
+/// this is never called.
 #[cfg(feature = "overlay")]
-fn analog_clock_from_config(
+fn analog_clocks_from_config(
     overlays: &[multiview_config::Overlay],
     canvas_w: u32,
     canvas_h: u32,
-) -> Option<crate::overlays::AnalogClockSpec> {
+) -> Vec<crate::overlays::AnalogClockSpec> {
     use multiview_overlay::clock::TimeZoneOffset;
-
-    let entry = overlays.iter().find(|o| {
-        o.kind == "clock"
-            && o.params
-                .get("face")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
-    })?;
 
     let cw = u32_to_f32(canvas_w);
     let ch = u32_to_f32(canvas_h);
     // A face sized to ~22% of the shorter canvas side by default.
     let default_radius = cw.min(ch) * 0.11;
-    // Config placement is whole-pixel / whole-minute; round each param to an i32
-    // and widen it losslessly to f32 (no `as` cast), or fall back to the default.
-    let param_f32 = |key: &str| -> Option<f32> {
-        entry
-            .params
-            .get(key)
-            .and_then(serde_json::Value::as_f64)
-            .map(|v| i32_to_f32(round_f64_to_i32(v)))
-    };
-    let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
-    // Default placement: bottom-right corner, inset by the radius + a margin.
-    let margin = radius * 0.25;
-    let cx = param_f32("x").unwrap_or(cw - radius - margin);
-    let cy = param_f32("y").unwrap_or(ch - radius - margin);
-    let zone = entry
-        .params
-        .get("tz_minutes")
-        .and_then(serde_json::Value::as_f64)
-        .map_or(TimeZoneOffset::UTC, |m| {
-            TimeZoneOffset::from_minutes(round_f64_to_i32(m))
-        });
 
-    Some(crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius))
+    overlays
+        .iter()
+        .filter(|o| {
+            o.kind == "clock"
+                && o.params
+                    .get("face")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
+        })
+        .map(|entry| {
+            // Config placement is whole-pixel / whole-minute; round each param
+            // to an i32 and widen it losslessly to f32 (no `as` cast), or fall
+            // back to the default.
+            let param_f32 = |key: &str| -> Option<f32> {
+                entry
+                    .params
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| i32_to_f32(round_f64_to_i32(v)))
+            };
+            let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
+            // Default placement: bottom-right corner, inset by radius + margin.
+            let margin = radius * 0.25;
+            let cx = param_f32("x").unwrap_or(cw - radius - margin);
+            let cy = param_f32("y").unwrap_or(ch - radius - margin);
+            let zone = entry
+                .params
+                .get("tz_minutes")
+                .and_then(serde_json::Value::as_f64)
+                .map_or(TimeZoneOffset::UTC, |m| {
+                    TimeZoneOffset::from_minutes(round_f64_to_i32(m))
+                });
+            crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius)
+        })
+        .collect()
 }
 
 /// Exact small-`u32` → `f32` widening (canvas sizes are well under `2^24`), no
@@ -5824,18 +5891,21 @@ mod overlay_clock_tests {
     }
 
     #[test]
-    fn no_clock_overlay_yields_none() {
-        assert!(analog_clock_from_config(&[], 1280, 720).is_none());
-        // A digital clock overlay does NOT request the analog face.
+    fn no_clock_overlay_yields_an_empty_set() {
+        assert!(analog_clocks_from_config(&[], 1280, 720).is_empty());
+        // A digital clock overlay does NOT request an analog face.
         let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
-        assert!(analog_clock_from_config(&[digital], 1280, 720).is_none());
+        assert!(analog_clocks_from_config(&[digital], 1280, 720).is_empty());
     }
 
     #[test]
     fn analog_face_param_requests_the_face() {
         let analog = clock_overlay(serde_json::json!({ "face": "analog" }));
-        let spec = analog_clock_from_config(&[analog], 1280, 720)
+        let specs = analog_clocks_from_config(&[analog], 1280, 720);
+        let spec = *specs
+            .first()
             .expect("an analog clock overlay yields a spec");
+        assert_eq!(specs.len(), 1);
         // Default placement is the bottom-right quadrant of the canvas.
         assert!(
             spec.cx() > 640.0 && spec.cy() > 360.0,
@@ -5849,13 +5919,39 @@ mod overlay_clock_tests {
         let analog = clock_overlay(
             serde_json::json!({ "face": "analog", "x": 200, "y": 150, "radius": 64 }),
         );
-        let spec = analog_clock_from_config(&[analog], 1280, 720).unwrap();
+        let specs = analog_clocks_from_config(&[analog], 1280, 720);
+        let spec = *specs.first().expect("spec");
         assert!((spec.cx() - 200.0).abs() < 0.5, "explicit x honoured");
         assert!((spec.cy() - 150.0).abs() < 0.5, "explicit y honoured");
         assert!(
             (spec.radius() - 64.0).abs() < 0.5,
             "explicit radius honoured"
         );
+    }
+
+    #[test]
+    fn every_analog_entry_yields_a_face_in_set_order() {
+        // MAJOR-1: ALL analog-face entries render — no first-wins. The specs
+        // come back in working-set order, each honouring its own placement,
+        // with the interleaved digital entry contributing nothing.
+        let a = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 100, "y": 100, "radius": 32 }),
+        );
+        let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
+        let b = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 900, "y": 500, "radius": 48 }),
+        );
+        let specs = analog_clocks_from_config(&[a, digital, b], 1280, 720);
+        assert_eq!(specs.len(), 2, "both analog entries yield faces");
+        assert!(
+            (specs[0].cx() - 100.0).abs() < 0.5,
+            "first face keeps its x"
+        );
+        assert!(
+            (specs[1].cx() - 900.0).abs() < 0.5,
+            "second face keeps its x"
+        );
+        assert!((specs[1].radius() - 48.0).abs() < 0.5);
     }
 }
 
@@ -7151,5 +7247,218 @@ segment_ms = 1000
             .expect("the caption reader registers under {id}/captions");
         flag.store(true, Ordering::Release);
         supervisor.shutdown();
+    }
+}
+
+#[cfg(all(test, feature = "overlay"))]
+mod live_overlay_bake_tests {
+    //! ADR-W021: the bake consumer re-derives its overlay render state from the
+    //! live [`OverlayApplySlot`](crate::live_overlays::OverlayApplySlot) on a
+    //! generation change — proven at the pixel level on the baked NV12 frame.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+    use multiview_core::time::Rational;
+
+    use super::{BakeContext, StreamBaker, StreamItem};
+
+    /// A pixel region (x, y, w, h) the tests assert over — placed well clear
+    /// of the top-left digital-clock chrome (whose readout changes with the
+    /// wall clock and would otherwise alias the diff).
+    type Region = (u32, u32, u32, u32);
+
+    /// The single-face region: a box around a face at (200, 120) radius 40 on
+    /// a 320x180 canvas.
+    const FACE: Region = (150, 70, 100, 100);
+    /// Region around face A at (80, 120) radius 30 (the two-clock test).
+    const FACE_A: Region = (45, 85, 70, 70);
+    /// Region around face B at (240, 120) radius 30 (the two-clock test).
+    const FACE_B: Region = (205, 85, 70, 70);
+
+    /// Count samples inside `region` whose full (y, u, v) tuple differs
+    /// between frames — chroma included, so a restore is proven on every
+    /// plane, not luma alone.
+    fn region_diff(a: &Nv12Image, b: &Nv12Image, region: Region) -> usize {
+        let (x0, y0, w, h) = region;
+        let mut differ = 0_usize;
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let pa = a.sample(x, y).expect("in bounds");
+                let pb = b.sample(x, y).expect("in bounds");
+                if pa != pb {
+                    differ += 1;
+                }
+            }
+        }
+        differ
+    }
+
+    /// A bake context with no tiles and no boot analog clock, wired to `slot`.
+    fn bake_context(slot: &crate::live_overlays::OverlayApplySlot) -> BakeContext {
+        BakeContext {
+            tile_specs: Vec::new(),
+            meter_db_timelines: HashMap::new(),
+            subtitles: None,
+            sidecar_target: None,
+            analog_clocks: Vec::new(),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            overlay_apply: Some(Arc::clone(slot)),
+        }
+    }
+
+    /// One streamed tick over a uniform dark canvas.
+    fn item(tick_index: u64) -> StreamItem {
+        let tag = CanvasColor::default().output_tag();
+        StreamItem {
+            canvas: Arc::new(Nv12Image::solid(320, 180, 16, 128, 128, tag).expect("solid")),
+            tick_index,
+            source_states: HashMap::new(),
+            captions: HashMap::new(),
+            caption_bitmaps: HashMap::new(),
+            faults: HashMap::new(),
+        }
+    }
+
+    /// An analog wall-clock overlay document at the given placement.
+    fn analog_clock_at(id: &str, x: i64, y: i64, radius: i64) -> multiview_config::Overlay {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "kind": "clock", "target": "canvas",
+            "face": "analog", "x": x, "y": y, "radius": radius
+        }))
+        .expect("valid overlay document")
+    }
+
+    /// An analog wall-clock overlay document centred in [`FACE`].
+    fn analog_clock_doc() -> multiview_config::Overlay {
+        analog_clock_at("clk", 200, 120, 40)
+    }
+
+    /// A frame baked from an EMPTY overlay set (the bare-canvas reference).
+    fn blank_frame() -> Arc<Nv12Image> {
+        let empty = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut bare = StreamBaker::new(bake_context(&empty)).expect("bare baker");
+        bare.bake(&item(0)).expect("bare bake")
+    }
+
+    #[test]
+    fn stream_baker_rederives_the_analog_clock_from_the_live_slot() {
+        // Generation 0: an empty boot set ⇒ no analog face anywhere.
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let before = baker.bake(&item(0)).expect("bake gen 0");
+
+        // LIVE APPLY: publish a set carrying the analog clock. The next baked
+        // frame must ink the face (the bezel ring + hands) into the region.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let with_face = baker.bake(&item(1)).expect("bake gen 1");
+        let inked = region_diff(&before, &with_face, FACE);
+        assert!(
+            inked > 50,
+            "the live-applied analog face must visibly ink the region \
+             (differing samples: {inked})"
+        );
+
+        // LIVE REMOVE: publish the empty set again — the face disappears and
+        // the region returns to the bare-canvas pixels (every plane).
+        let _gen = crate::live_overlays::publish_set(&slot, Vec::new());
+        let removed = baker.bake(&item(2)).expect("bake gen 2");
+        assert_eq!(
+            region_diff(&before, &removed, FACE),
+            0,
+            "removing the overlay must restore the bare-canvas face region"
+        );
+    }
+
+    #[test]
+    fn two_analog_clocks_both_ink_and_removing_one_keeps_the_other() {
+        // MAJOR-1: EVERY analog-face clock entry renders its own face — there
+        // is no first-wins. Two clocks at distinct placements both ink, and
+        // removing one keeps the other while restoring the removed region.
+        let blank = blank_frame();
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let _gen = crate::live_overlays::publish_set(
+            &slot,
+            vec![
+                analog_clock_at("clk_a", 80, 120, 30),
+                analog_clock_at("clk_b", 240, 120, 30),
+            ],
+        );
+        let both = baker.bake(&item(0)).expect("bake both");
+        let a_ink = region_diff(&blank, &both, FACE_A);
+        let b_ink = region_diff(&blank, &both, FACE_B);
+        assert!(
+            a_ink > 50,
+            "the FIRST analog face must ink its region (got {a_ink})"
+        );
+        assert!(
+            b_ink > 50,
+            "the SECOND analog face must ink its region too — no first-wins \
+             (got {b_ink})"
+        );
+
+        // Remove clk_b: clk_a keeps drawing, clk_b's region restores exactly.
+        let _gen =
+            crate::live_overlays::publish_set(&slot, vec![analog_clock_at("clk_a", 80, 120, 30)]);
+        let only_a = baker.bake(&item(1)).expect("bake only_a");
+        assert!(
+            region_diff(&blank, &only_a, FACE_A) > 50,
+            "removing the OTHER clock must not disturb the kept face"
+        );
+        assert_eq!(
+            region_diff(&blank, &only_a, FACE_B),
+            0,
+            "the removed clock's region must restore to the bare canvas"
+        );
+    }
+
+    #[test]
+    fn seeded_slot_drives_the_first_bake() {
+        // The context carries no boot analog clock, but the slot's
+        // generation-0 set does: the FIRST bake must already honour the slot
+        // (the seeded set is the boot truth — one source of truth).
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+        let first = baker.bake(&item(0)).expect("bake");
+        assert!(
+            region_diff(&blank_frame(), &first, FACE) > 50,
+            "the seeded slot set must drive the very first bake"
+        );
+    }
+
+    #[test]
+    fn same_generation_bake_skips_rederivation() {
+        // The generation gate genuinely skips: perturb the baker's derived
+        // face state BEHIND the gate and prove a same-generation bake does
+        // NOT restore it (no re-derive happened), while a new generation does.
+        let blank = blank_frame();
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let first = baker.bake(&item(0)).expect("bake gen 0");
+        assert!(region_diff(&blank, &first, FACE) > 50, "gen-0 face inks");
+
+        // PERTURB: clear the derived faces directly. If the gate works, the
+        // next bake (same generation) must NOT re-derive them from the slot.
+        baker.baker.set_analog_clocks(Vec::new());
+        let second = baker.bake(&item(1)).expect("bake same gen");
+        assert_eq!(
+            region_diff(&blank, &second, FACE),
+            0,
+            "a same-generation bake must skip re-derivation (gate holds)"
+        );
+
+        // A NEW generation re-derives from the slot: the face returns.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let third = baker.bake(&item(2)).expect("bake new gen");
+        assert!(
+            region_diff(&blank, &third, FACE) > 50,
+            "a new generation must re-derive (the face returns)"
+        );
     }
 }

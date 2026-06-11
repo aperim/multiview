@@ -302,6 +302,7 @@ async fn run_capturing(
         config.clone(),
         Arc::clone(&publisher),
         subtitle_slot,
+        pipeline.overlay_apply_slot(),
         live_hub.handle(),
     );
 
@@ -432,6 +433,7 @@ async fn run_command_to_hls(pipeline: &mut Pipeline, config: &MultiviewConfig, c
         config.clone(),
         Arc::clone(&publisher),
         subtitle_slot,
+        pipeline.overlay_apply_slot(),
         live_hub.handle(),
     );
 

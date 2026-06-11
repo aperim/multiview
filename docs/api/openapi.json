@@ -2289,7 +2289,7 @@
         },
         "responses": {
           "200": {
-            "description": "The replaced overlay (new ETag in the response header).",
+            "description": "The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the edit was applied at a frame boundary and the running picture visibly follows it — the renderer draws the new document, or it drew the previous one (editing a rendered face away makes it vanish, itself a live change); `restart` otherwise (ADR-W021).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2369,7 +2369,7 @@
         },
         "responses": {
           "201": {
-            "description": "The created overlay (ETag in the response header).",
+            "description": "The created overlay (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine's renderer draws the document (e.g. an analog-face clock on an overlay-rendering build) and it was applied at a frame boundary; `restart` otherwise — non-rendering kinds are stored losslessly and mirrored to the engine with a warning, never lied about (ADR-W021).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2429,7 +2429,7 @@
         ],
         "responses": {
           "204": {
-            "description": "The overlay was deleted."
+            "description": "The overlay was deleted. X-Multiview-Apply: `live` when the running renderer drew the document (its face disappears at the next frame boundary), `restart` otherwise (ADR-W021)."
           },
           "401": {
             "description": "Missing or invalid credentials.",
