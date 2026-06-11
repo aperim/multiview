@@ -110,6 +110,115 @@ async fn relay_toggle_round_trips_and_persists() {
 }
 
 #[tokio::test]
+async fn relay_toggle_records_an_actor_attributed_audit_entry() {
+    // The seam (Conspect ADR-0053 §4 / brief §10/§11): every successful relay
+    // toggle is an immutable, timestamped, actor-attributed account-audit entry.
+    // Drive the real PUT then read the trail back over GET /api/v1/account/audit
+    // filtered to the relay-toggle kind (end-to-end, no peeking at the store).
+    let mesh = Arc::new(MeshState::new());
+    let h = harness_with({
+        let mesh = Arc::clone(&mesh);
+        move |state| state.with_mesh(mesh)
+    });
+
+    // Toggle relay ON as the admin principal (a write action).
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/mesh/relay",
+            ADMIN_TOKEN,
+            &serde_json::json!({"enabled": true}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The trail, filtered to relay-toggle, carries exactly one entry: the ON
+    // toggle, attributed to the admin key, detailing the new state.
+    let page = body_json(
+        send(
+            &h.router,
+            get("/api/v1/account/audit?filter=relay-toggle", ADMIN_TOKEN),
+        )
+        .await,
+    )
+    .await;
+    let entries = page["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1, "the ON toggle is audited exactly once");
+    let entry = &entries[0];
+    assert_eq!(entry["kind"], "relay-toggle", "the right audit kind");
+    assert_eq!(
+        entry["actor"], "admin-key",
+        "the actor is the toggling principal's key id"
+    );
+    assert_eq!(
+        entry["detail"]["enabled"], true,
+        "the detail carries the new relay state"
+    );
+
+    // Toggle OFF — a second, distinct audit entry (detail reflects the new state).
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/mesh/relay",
+            ADMIN_TOKEN,
+            &serde_json::json!({"enabled": false}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let page = body_json(
+        send(
+            &h.router,
+            get("/api/v1/account/audit?filter=relay-toggle", ADMIN_TOKEN),
+        )
+        .await,
+    )
+    .await;
+    let entries = page["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2, "each successful toggle is one entry");
+    assert_eq!(
+        entries[1]["detail"]["enabled"], false,
+        "the OFF toggle's detail reflects the new state"
+    );
+    assert_eq!(entries[1]["actor"], "admin-key");
+}
+
+#[tokio::test]
+async fn a_denied_relay_toggle_records_no_audit_entry() {
+    // A forbidden toggle (a read-only Viewer) must NOT write to the trail — only
+    // a SUCCESSFUL toggle is an auditable account action.
+    let h = harness_with(|state| state.with_mesh(Arc::new(MeshState::new())));
+    let resp = send(
+        &h.router,
+        put_json(
+            "/api/v1/mesh/relay",
+            VIEWER_TOKEN,
+            &serde_json::json!({"enabled": true}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let page = body_json(
+        send(
+            &h.router,
+            get("/api/v1/account/audit?filter=relay-toggle", ADMIN_TOKEN),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        page["entries"]
+            .as_array()
+            .expect("entries array")
+            .is_empty(),
+        "a denied toggle never touched the relay state, so it is not audited"
+    );
+}
+
+#[tokio::test]
 async fn peers_lists_the_untrusted_inventory() {
     let mesh = Arc::new(MeshState::new());
     // Seed two discovered peers directly into the shared store (as the announce
