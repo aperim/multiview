@@ -44,6 +44,7 @@ use crate::support_store::{
 use crate::tally_state::{
     InMemoryProfileStore, OverrideRegistry, TallyMirror, TallyProfileRepository,
 };
+use crate::telemetry_consent::{ConsentState, DiagnosticsSnapshotStore};
 use crate::versioning::{ConfigVersionStore, InMemoryConfigVersionStore};
 use crate::warning_store::{InMemoryWarningStore, WarningRepository};
 
@@ -554,6 +555,23 @@ pub struct AppState {
     /// bounded inventory, no engine handle) — it can never back-pressure the engine
     /// (invariant #10). The default is an empty, relay-declined state.
     pub mesh: Arc<MeshState>,
+    /// The **telemetry-consent** record (Conspect, ADR-0052 §2): the single
+    /// last-writer-wins document governing the (future, O1-gated) **outbound daily
+    /// telemetry pipe**. Off by default (opt-in, incl. the free tier). This is the
+    /// TELEMETRY pipe's consent — deliberately separate from the licensing
+    /// heartbeat (which lives under `/api/v1/licensing/`, never `/telemetry/`). It
+    /// gates **no** local route; staying off costs none of the local UI/API.
+    /// Control-plane only (a `Mutex` over one record, no engine handle) — it can
+    /// never back-pressure the engine (invariant #10). The default is off/local.
+    pub consent: Arc<ConsentState>,
+    /// The **diagnostics-snapshot** store (Conspect, spec §4.2 / ADR-0053): the
+    /// bounded, in-memory store of assembled `GET /api/v1/diagnostics/{id}`
+    /// bundles, keyed by id, the `POST /api/v1/diagnostics/snapshot` writes. The
+    /// bundle is composed by the shared [`crate::support_bundle::compose_bundle`]
+    /// machinery (#111) from the consent-independent retention store + redacted
+    /// config — logs + engine state, never media. Control-plane only; cannot
+    /// back-pressure the engine (invariant #10).
+    pub diagnostics_snapshots: Arc<DiagnosticsSnapshotStore>,
     /// The **local support ticket store** (Conspect, ADR-0053 §3 / brief §10/§11):
     /// `CS-xxxx`-identified tickets with an append-only thread + the auto-attached
     /// machine context (§7.1). The complete local lifecycle (raise/read/reply/
@@ -572,10 +590,10 @@ pub struct AppState {
     pub support_bundles: Arc<dyn BundleRepository>,
     /// The **consent-independent local metrics retention store** (CONSPECT S5,
     /// ADR-0052 §3): the rolling on-box utilisation/shed/reconnect/incident record
-    /// the support bundle draws diagnostics from, retained **regardless** of
-    /// telemetry consent. The binary wires the same store the off-hot-loop sampler
-    /// feeds; the default is empty. Control-plane only; cannot back-pressure the
-    /// engine (inv #10).
+    /// the support bundle + the diagnostics snapshot draw diagnostics from,
+    /// retained **regardless** of telemetry consent. The binary wires the same
+    /// store the off-hot-loop sampler feeds; the default is empty. Control-plane
+    /// only; cannot back-pressure the engine (inv #10).
     pub retention: Arc<RetentionStore>,
 }
 
@@ -654,6 +672,13 @@ impl AppState {
             // and relay declined. The binary swaps in the shared store the
             // announce/browse loop maintains. Control-plane only (invariant #10).
             mesh: Arc::new(MeshState::new()),
+            // Telemetry consent OFF by default (opt-in, incl. the free tier,
+            // ADR-0052 §1). Gates no local route. Control-plane only (inv #10).
+            consent: Arc::new(ConsentState::new()),
+            // An empty diagnostics-snapshot store; bundles are composed on request
+            // (via the shared support_bundle composer) from the retention store.
+            // Control-plane only (inv #10).
+            diagnostics_snapshots: Arc::new(DiagnosticsSnapshotStore::new()),
             // Empty local support state by default (Conspect, ADR-0053): a fresh
             // ticket store, an empty inbound data-request queue, an empty composed-
             // bundle store, and an empty retention store. The binary wires the same
@@ -684,6 +709,27 @@ impl AppState {
     #[must_use]
     pub fn with_mesh(mut self, mesh: Arc<MeshState>) -> Self {
         self.mesh = mesh;
+        self
+    }
+
+    /// Wire the telemetry-consent record (Conspect, ADR-0052): the binary passes
+    /// the persistent/shared record; tests inject a pre-seeded one to exercise
+    /// last-writer-wins. Control-plane only (invariant #10). This is the TELEMETRY
+    /// pipe's consent — never the licensing heartbeat (which is implicit in
+    /// running the official build, not a document).
+    #[must_use]
+    pub fn with_consent(mut self, consent: Arc<ConsentState>) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    /// Replace the diagnostics-snapshot store (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_diagnostics_snapshots(
+        mut self,
+        diagnostics_snapshots: Arc<DiagnosticsSnapshotStore>,
+    ) -> Self {
+        self.diagnostics_snapshots = diagnostics_snapshots;
         self
     }
 
