@@ -205,3 +205,28 @@ fn store_install_err(b: &LeaseBinding, pinned: &PinnedKey, now: DateTime<Utc>) -
         .install_binding(b, pinned, now)
         .expect_err("install must fail")
 }
+
+#[test]
+fn the_store_retains_the_verified_fingerprint_score_for_support_context() {
+    // The support-ticket context auto-attaches the fingerprint *score* (a number,
+    // never a raw identifier — brief §8). The store retains the score the install
+    // verified, and reports `None` before any install.
+    let (key, pinned) = keypair();
+    let now = epoch();
+    let store = LeaseStore::with_clock(Arc::new(move || now));
+    assert_eq!(
+        store.fingerprint_score(),
+        None,
+        "no lease installed yet → no score (never a false zero)"
+    );
+
+    let lease = lease_at("serial-FP", now);
+    store
+        .install_binding(&binding(&key, &lease, 88), &pinned, now)
+        .expect("a valid binding installs");
+    assert_eq!(
+        store.fingerprint_score(),
+        Some(88),
+        "the store retains the exact verified score the install accepted"
+    );
+}
