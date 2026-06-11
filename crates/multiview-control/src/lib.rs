@@ -69,6 +69,7 @@ pub mod support_bundle;
 pub mod support_store;
 pub mod tally_ingest;
 pub mod tally_state;
+pub mod telemetry_consent;
 pub(crate) mod typed_resources;
 pub mod versioning;
 pub mod warning_ingest;
@@ -172,6 +173,10 @@ pub use tally_ingest::{run_tally_ingest, tally_ingest_step, TallyIngestStep};
 pub use tally_state::{
     tally_observation, target_key, InMemoryProfileStore, OverrideRegistry, TallyEntry, TallyMirror,
     TallyProfileRepository, VersionedProfile, TALLY_PROFILE_KIND,
+};
+pub use telemetry_consent::{
+    ConsentActor, ConsentRecord, ConsentState, DiagnosticsSnapshotStore, SnapshotStatus,
+    DEFAULT_SNAPSHOT_CAPACITY,
 };
 pub use versioning::{
     diff_documents, ConfigRevision, ConfigVersionStore, DocumentDiff, InMemoryConfigVersionStore,

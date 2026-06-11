@@ -51,6 +51,12 @@ tower-http = { version = "0.6.11", features = ["trace", "cors"] }
 bytes = "1.10.1"
 async-stream = "0.3.6"
 uuid = { version = "1.23.2", features = ["v4"] }
+# RFC 3339 rendering of the telemetry-consent `changed_at` instant (Conspect,
+# ADR-0052). Pure Rust, no native deps, on the deny.toml allowlist, and already
+# in the CI-green default build (pulled by multiview-licence / multiview-overlay).
+# `alloc` is the only feature we need (no `clock` — the control plane is
+# clock-injected via the ack clock; chrono only formats the instant here).
+chrono = { workspace = true, features = ["alloc"] }
 
 # Auth: HMAC-SHA256 verification of API keys (high-entropy keys -> no slow KDF,
 # per the web-api-stack brief) and HS256 JWT signature verification. RustCrypto

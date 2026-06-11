@@ -104,6 +104,11 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::mesh::get_status,
         crate::routes::mesh::set_relay,
         crate::routes::mesh::list_peers,
+        crate::routes::telemetry::get_consent,
+        crate::routes::telemetry::set_consent,
+        crate::routes::telemetry::get_schema,
+        crate::routes::telemetry::request_snapshot,
+        crate::routes::telemetry::get_snapshot,
         crate::routes::salvos::list_salvos,
         crate::routes::salvos::put_salvo,
         crate::routes::salvos::arm_salvo,
@@ -274,6 +279,19 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         // untrusted discovered-peer inventory. The Doc mirrors match the
         // multiview-mesh serde shapes (pinned byte-for-byte by tests/mesh.rs).
         crate::routes::mesh::RelaySetRequest,
+        // Telemetry pipe (Conspect, ADR-0052): the opt-in daily-pipe consent
+        // document + request body, the published schema (sent + never-sent), and
+        // the diagnostics-snapshot bundle (logs + engine state, never media). The
+        // telemetry consent is separate from the licensing heartbeat (two-pipe).
+        crate::routes::telemetry::ConsentResource,
+        crate::routes::telemetry::ConsentSetRequest,
+        crate::routes::telemetry::TelemetrySchema,
+        crate::routes::telemetry::SnapshotAccepted,
+        // The diagnostics snapshot wraps the shared #111 `Bundle` (registered
+        // above), so no diagnostics mirror types are duplicated here.
+        crate::routes::telemetry::DiagnosticsSnapshot,
+        crate::telemetry_consent::ConsentActor,
+        crate::telemetry_consent::SnapshotStatus,
         crate::openapi_schemas::DiscoveryModeDoc,
         crate::openapi_schemas::MeshRoleDoc,
         crate::openapi_schemas::MeshStatusDoc,
@@ -347,6 +365,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         (name = "health", description = "Health warnings: active capability mismatches + remediation (read-only)"),
         (name = "licence", description = "Local licence (Conspect): the computed licence resource + ladder (enforcement is data), lease install, and the salted challenge export. All-local; never off air."),
         (name = "mesh", description = "Local mesh (Conspect): always-on mDNS discovery status (no off switch), the relay opt-in toggle, and the untrusted discovered-peer inventory. Control-plane only; never back-pressures the engine."),
+        (name = "telemetry", description = "Telemetry pipe (Conspect): the opt-in daily-pipe consent (off by default, last-writer-wins), the published schema (sent + never-sent), and the §4.2 diagnostics snapshot (logs + engine state, never media). DISTINCT from the licensing heartbeat (under /licensing) — the two pipes are never co-mingled. Consent gates no local route; control-plane only."),
         (name = "salvos", description = "Salvo definitions + arm/take/cancel"),
         (name = "routing", description = "Per-stream crosspoint routing: classify (plan) + apply (take)"),
         (name = "tally", description = "Tally state, profiles, and manual override"),
@@ -452,6 +471,17 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/v1/mesh/status"),
     ("PUT", "/api/v1/mesh/relay"),
     ("GET", "/api/v1/mesh/peers"),
+    // Telemetry pipe (Conspect, ADR-0052): opt-in daily-pipe consent (off by
+    // default, LWW) + the published schema (sent + never-sent). Under
+    // `/telemetry/`, NEVER `/licensing/` (the two-pipe separation). Consent gates
+    // no local route.
+    ("GET", "/api/v1/telemetry/consent"),
+    ("PUT", "/api/v1/telemetry/consent"),
+    ("GET", "/api/v1/telemetry/schema"),
+    // Diagnostics snapshot (Conspect, spec §4.2 / ADR-0053): the one-button
+    // support bundle (logs + engine state, never media) — POST → 202, GET by id.
+    ("POST", "/api/v1/diagnostics/snapshot"),
+    ("GET", "/api/v1/diagnostics/{id}"),
     ("GET", "/api/v1/salvos"),
     ("GET", "/api/v1/salvos/{id}"),
     ("PUT", "/api/v1/salvos/{id}"),

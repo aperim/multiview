@@ -1524,6 +1524,111 @@
         }
       }
     },
+    "/api/v1/diagnostics/snapshot": {
+      "post": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`POST /api/v1/diagnostics/snapshot` — assemble the §4.2 one-button support\nbundle (role: write).",
+        "description": "Returns `202 {snapshot_id}`; the assembled bundle is then readable at\n`GET /api/v1/diagnostics/{id}`. The bundle is logs + engine state (the local\nretention buffer), **never** media (ADR-0053, brief §8). Assembly is\nsynchronous (the buffer is in-memory) but the contract is `202 + id` so a\nfuture asynchronous/large-bundle composer is a non-breaking change. A\n`ContextPackExport`-adjacent action is **not** recorded here: the bundle stays\non the machine (no egress) until an explicit operator-approved data request,\nwhich is the audited egress gate, not this assemble step.",
+        "operationId": "request_snapshot",
+        "responses": {
+          "202": {
+            "description": "Snapshot assembled; read it back by id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/{id}": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`GET /api/v1/diagnostics/{id}` — the assembled diagnostics snapshot (role:\nread).",
+        "description": "`200` with the bundle when the id is known; `404` (RFC 9457 problem) when not.",
+        "operationId": "get_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The diagnostics snapshot id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The assembled diagnostics snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No snapshot with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/discovery/devices": {
       "get": {
         "tags": [
@@ -6022,6 +6127,140 @@
         }
       }
     },
+    "/api/v1/telemetry/consent": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`GET /api/v1/telemetry/consent` — the recorded telemetry-consent document\n(role: read).",
+        "description": "Always `200`: a data report. Off by default (opt-in, incl. the free tier).",
+        "operationId": "get_consent",
+        "responses": {
+          "200": {
+            "description": "The recorded telemetry-consent document (off by default).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentResource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`PUT /api/v1/telemetry/consent` — set telemetry consent (role: write).",
+        "description": "Recorded on the machine under last-writer-wins by timestamp: a machine-UI\nwrite is the `local` actor, stamped from the acknowledgement clock. A\nsuccessful change writes a\n[`AccountAuditKind::ConsentChange`](crate::account_audit::AccountAuditKind::ConsentChange)\nentry to the account-side append-only audit store (#106) and the change-audit\nlog. The detail carries only the new boolean — never a raw identifier (data\nminimisation, brief §8).\n\nReturns the updated consent resource. Because the local clock is monotonic the\nmachine-UI write always advances the timestamp, so it always applies; the LWW\nguard exists for the portal mirror's later, out-of-order writes (pinned by the\n`ConsentState` unit + integration LWW tests).",
+        "operationId": "set_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentSetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Consent updated; the new consent document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentResource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/telemetry/schema": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`GET /api/v1/telemetry/schema` — the published daily-pipe telemetry schema\n(role: read).",
+        "description": "A static, versioned report of exactly what the daily pipe sends when consented\nand — load-bearing — what it NEVER sends. Served from the versioned consts so\nthe never-sent guarantee is a single source of truth pinned by test.",
+        "operationId": "get_schema",
+        "responses": {
+          "200": {
+            "description": "The published daily-pipe telemetry schema (sent + never-sent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetrySchema"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
       "patch": {
         "tags": [
@@ -7364,6 +7603,53 @@
           }
         }
       },
+      "ConsentActor": {
+        "type": "string",
+        "description": "Who recorded a telemetry-consent change.\n\nThe local machine UI/API or the (later, O1-gated) portal mirror. Serialised\nlower-case so the slug is stable across the machine and the portal.\n`#[non_exhaustive]` so a future actor is additive on the wire.",
+        "enum": [
+          "local",
+          "portal"
+        ]
+      },
+      "ConsentResource": {
+        "type": "object",
+        "description": "The `GET /api/v1/telemetry/consent` body: the recorded consent document\n(ADR-0052 §2). `enabled` is the outbound-daily-pipe consent (off by default);\n`changed_at` is the RFC 3339 instant it was last written (absent when never\nwritten); `actor` is who wrote it (`local` | `portal`).",
+        "required": [
+          "enabled",
+          "actor"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ConsentActor",
+            "description": "Who wrote the record: `local` (the machine UI/API) or `portal`."
+          },
+          "changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the record was last written (RFC 3339); `None` when never written\n(the opt-in default)."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the outbound daily telemetry pipe is consented (default `false`)."
+          }
+        }
+      },
+      "ConsentSetRequest": {
+        "type": "object",
+        "description": "The `PUT /api/v1/telemetry/consent` request body: the new consent state.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether to consent to the outbound daily telemetry pipe."
+          }
+        },
+        "additionalProperties": false
+      },
       "DataKindDoc": {
         "type": "string",
         "description": "`OpenAPI` mirror of [`multiview_core::stream::DataKind`].",
@@ -7717,6 +8003,36 @@
             "type": "integer",
             "description": "The number of shed-load events recorded in the window.",
             "minimum": 0
+          }
+        }
+      },
+      "DiagnosticsSnapshot": {
+        "type": "object",
+        "description": "The assembled diagnostics snapshot bundle (`GET /api/v1/diagnostics/{id}`).\n\nThe `diagnostics` section is the **shared** [`crate::support_bundle::Bundle`]\nthe #111 context-pack composer produces — utilisation percentiles + shed/\nreconnect counts, incident markers, and the redacted config — so this snapshot\nand the support-ticket context-pack draw their diagnostics from one source of\ntruth (the consent-independent retention store + the config redactor). Logs +\nengine state, **never** media, raw identifiers, or secrets (brief §8).",
+        "required": [
+          "snapshot_id",
+          "status",
+          "assembled_at_unix_seconds",
+          "diagnostics"
+        ],
+        "properties": {
+          "assembled_at_unix_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The Unix second the snapshot was assembled.",
+            "minimum": 0
+          },
+          "diagnostics": {
+            "$ref": "#/components/schemas/Bundle",
+            "description": "The redacted diagnostics bundle (the shared #111 composer output): logs +\nengine state, never media."
+          },
+          "snapshot_id": {
+            "type": "string",
+            "description": "The snapshot id."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SnapshotStatus",
+            "description": "The lifecycle status (`ready` when readable)."
           }
         }
       },
@@ -10117,6 +10433,26 @@
           }
         }
       },
+      "SnapshotAccepted": {
+        "type": "object",
+        "description": "The `202 Accepted` body of `POST /api/v1/diagnostics/snapshot`: the id to read\nthe assembled bundle back with.",
+        "required": [
+          "snapshot_id"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "description": "The id of the assembled diagnostics snapshot."
+          }
+        }
+      },
+      "SnapshotStatus": {
+        "type": "string",
+        "description": "The lifecycle status of a diagnostics snapshot.\n\nSnapshots are assembled synchronously on request (the local retention buffer\nis in-memory), so a returned bundle is always `Ready`; the status is modelled\nexplicitly so the §4.2 one-button flow and the SPA can render a stable shape,\nand so a future asynchronous composer (large bundles, attachment export) can\nadd a `Pending` arm without a breaking change. `#[non_exhaustive]`.",
+        "enum": [
+          "ready"
+        ]
+      },
       "SourceAuthDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of `multiview_config::SourceAuth` (reference-only secret).",
@@ -11413,6 +11749,35 @@
           "generated"
         ]
       },
+      "TelemetrySchema": {
+        "type": "object",
+        "description": "The `GET /api/v1/telemetry/schema` body: the published daily-pipe schema.",
+        "required": [
+          "version",
+          "sent",
+          "never_sent"
+        ],
+        "properties": {
+          "never_sent": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The exhaustive list of categories that are NEVER sent."
+          },
+          "sent": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The exhaustive list of categories sent when consented."
+          },
+          "version": {
+            "type": "string",
+            "description": "The schema version (stable across machine + portal)."
+          }
+        }
+      },
       "Ticket": {
         "type": "object",
         "description": "A ticket: a `CS-xxxx` id, the subject + severity, the auto-attached machine\ncontext, an append-only update thread (opening body first), and the route +\nstate. The portal sync mirrors this local resource over the later transport.",
@@ -11857,6 +12222,10 @@
     {
       "name": "mesh",
       "description": "Local mesh (Conspect): always-on mDNS discovery status (no off switch), the relay opt-in toggle, and the untrusted discovered-peer inventory. Control-plane only; never back-pressures the engine."
+    },
+    {
+      "name": "telemetry",
+      "description": "Telemetry pipe (Conspect): the opt-in daily-pipe consent (off by default, last-writer-wins), the published schema (sent + never-sent), and the §4.2 diagnostics snapshot (logs + engine state, never media). DISTINCT from the licensing heartbeat (under /licensing) — the two pipes are never co-mingled. Consent gates no local route; control-plane only."
     },
     {
       "name": "salvos",
