@@ -106,6 +106,110 @@ pub struct LeaseInstalled {
     pub valid_to: String,
 }
 
+/// The exhaustive list of fields a licensing **heartbeat** payload carries
+/// (brief §7/§8, ADR-0050 §3): the licence id, the salted hardware-fingerprint
+/// digest vector, the app version, and the lease serial. **Reported, never raw**
+/// — these name *what* the heartbeat sends (salted digests, never raw
+/// serials/MACs, §8); the surface is read-only so the operator can see the
+/// minimal licensing-keep-alive payload without it ever co-mingling with the
+/// opt-in telemetry pipe. Stable slugs the portal + machine share.
+const HEARTBEAT_PAYLOAD_FIELDS: &[&str] = &[
+    "licence_id",
+    "fingerprint_digest_vector",
+    "app_version",
+    "lease_serial",
+];
+
+/// The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).
+///
+/// With no licence-server client yet (blocked on the external wire-protocol doc,
+/// brief §14 O1), this reports **honestly from local state**: the transport the
+/// active lease arrived over, the lease install instant as `last_at`, the lease's
+/// `next_contact_due` as `next_due`, and the exhaustive payload-field list. There
+/// is **no** mutating endpoint for the heartbeat (the spec mandates none) — the
+/// `POST /api/v1/account/licence/heartbeat` force-now action is a later,
+/// feature-gated item (brief §11 #4), not this read surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[non_exhaustive]
+pub struct HeartbeatStatus {
+    /// The instant this machine last accepted a lease (the install instant), RFC
+    /// 3339; `None` when no lease is installed (no heartbeat yet — honest).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<String>,
+    /// When the next licensing contact is due (the active lease's
+    /// `next_contact_due`), RFC 3339; `None` when no lease is installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_due: Option<String>,
+    /// The transport the active lease arrived over: `"direct"` (online server
+    /// contact), `"relay"` (mesh relay), or `"file"` (a dropped offline lease).
+    /// `"none"` when no lease is installed.
+    pub transport: String,
+    /// The exhaustive list of fields a heartbeat payload carries
+    /// ([`HEARTBEAT_PAYLOAD_FIELDS`]) — reported, never raw identifiers (§8).
+    pub payload_fields: Vec<String>,
+}
+
+impl HeartbeatStatus {
+    /// The payload-field list, always reported (the shape is fixed regardless of
+    /// lease state).
+    fn payload_fields() -> Vec<String> {
+        HEARTBEAT_PAYLOAD_FIELDS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    }
+}
+
+/// `GET /api/v1/licensing/heartbeat-status` — the read-only heartbeat status
+/// (role: read).
+///
+/// Always `200` (it is a data report, never an error path): the honest local
+/// heartbeat status (transport + last/next contact + payload fields). With no
+/// lease installed it reports `transport: "none"` and null contact instants. The
+/// spec mandates **no** mutating endpoint exists for the heartbeat — this is
+/// read-only, and the router wires only `GET`.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/licensing/heartbeat-status",
+        tag = "licence",
+        responses(
+            (status = 200, description = "The honest local heartbeat status (read-only; no mutating endpoint exists).", body = HeartbeatStatus),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Authenticated but not authorized to read.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn get_heartbeat_status(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> ControlResult<Json<HeartbeatStatus>> {
+    principal.role.require(Action::Read)?;
+    // Honest local report: the active lease (if any) supplies the transport +
+    // next-due; the store supplies the install instant (last contact). No
+    // licence-server call (the client is a later, feature-gated item, §14 O1).
+    let status = match state.licence.store.current() {
+        Some(entitlement) => {
+            let last_at = state.licence.store.installed_at().map(|t| t.to_rfc3339());
+            HeartbeatStatus {
+                last_at,
+                next_due: Some(entitlement.lease.next_contact_due.to_rfc3339()),
+                transport: entitlement.lease.source.transport().to_owned(),
+                payload_fields: HeartbeatStatus::payload_fields(),
+            }
+        }
+        None => HeartbeatStatus {
+            last_at: None,
+            next_due: None,
+            transport: "none".to_owned(),
+            payload_fields: HeartbeatStatus::payload_fields(),
+        },
+    };
+    Ok(Json(status))
+}
+
 /// `GET /api/v1/licence` — the computed licence resource (role: read).
 ///
 /// Always `200` (enforcement is **data**, never an error path): a `licensed:true`

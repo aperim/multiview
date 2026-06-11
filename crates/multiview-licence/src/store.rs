@@ -201,6 +201,13 @@ pub struct LeaseStore {
     /// The most recent GPU-usage sample (informs the `over_gpu` reason only).
     /// `RwLock` for the same reason as `active`.
     gpus_in_use: RwLock<u32>,
+    /// When the currently-active lease was **installed** (the instant passed to
+    /// [`LeaseStore::install_binding`]). `None` until the first install. This is
+    /// the honest "last contact" the heartbeat-status surface reports — the local
+    /// instant this machine last accepted a lease, distinct from the lease's own
+    /// `granted_at` (the server-side grant instant). `RwLock` for the same reason
+    /// as `active`; read off the hot loop only.
+    installed_at: RwLock<Option<DateTime<Utc>>>,
     /// The injected clock; the store never reads a system clock directly.
     clock: Clock,
 }
@@ -229,8 +236,19 @@ impl LeaseStore {
         Self {
             active: RwLock::new(None),
             gpus_in_use: RwLock::new(0),
+            installed_at: RwLock::new(None),
             clock,
         }
+    }
+
+    /// When the currently-active lease was installed (the `now` passed to the
+    /// successful [`LeaseStore::install_binding`]), or `None` if no lease is
+    /// installed. The heartbeat-status surface reports this as the honest local
+    /// "last contact" instant. A poisoned lock fails toward "unknown" (`None`),
+    /// never a panic.
+    #[must_use]
+    pub fn installed_at(&self) -> Option<DateTime<Utc>> {
+        self.installed_at.read().ok().and_then(|g| *g)
     }
 
     /// "Now" as the store sees it, via the injected [`Clock`] seam.
@@ -315,6 +333,12 @@ impl LeaseStore {
         match self.active.write() {
             Ok(mut guard) => *guard = Some(binding.entitlement.clone()),
             Err(poisoned) => *poisoned.into_inner() = Some(binding.entitlement.clone()),
+        }
+        // Record the install instant (the honest local "last contact" the
+        // heartbeat-status surface reports). Same poisoned-lock recovery as above.
+        match self.installed_at.write() {
+            Ok(mut guard) => *guard = Some(now),
+            Err(poisoned) => *poisoned.into_inner() = Some(now),
         }
         Ok(lease)
     }

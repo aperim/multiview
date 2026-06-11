@@ -72,6 +72,7 @@ pub async fn bind_and_serve<F>(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    licence: Option<multiview_control::LicenceState>,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)>
 where
@@ -146,6 +147,16 @@ where
     .with_preview(preview)
     .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);
+
+    // The Conspect entitlement plane (ADR-0050): share the SAME lease store the
+    // cli built (and the engine seams sample), so the API/`GET /api/v1/licence`,
+    // the config-lock interceptor, the start gate, and the heartbeat-status surface
+    // all render the same ladder state the engine reads — there is no second
+    // opinion. `None` keeps the empty unlicensed default (a store-only run / test).
+    let state = match licence {
+        Some(licence) => state.with_licence(licence),
+        None => state,
+    };
 
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
@@ -2159,6 +2170,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            None,
             async move {
                 let _ = shutdown_rx.await;
             },

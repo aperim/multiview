@@ -118,6 +118,43 @@ impl RunReport {
     }
 }
 
+/// The exact operator/portal copy the Conspect startup gate (S1) refuses a NEW
+/// engine instance with at the `block-new-instance` rung (ADR-0050 §5/§6.2, the
+/// brief §6.2). **Verbatim** — the operator, the portal, and the API surface the
+/// same words; do not reword. The trailing clause is the product promise: a
+/// running program is untouched.
+pub const BLOCK_NEW_INSTANCE_REASON: &str =
+    "Lease expired — new engine instances won't start; running ones untouched";
+
+/// The Conspect **startup gate** (S1, ADR-0050 §5): decide whether a NEW engine
+/// instance may be created from the published entitlement [`EnforcementLevel`].
+///
+/// Returns `Ok(())` for every rung except `block-new-instance`, and `None`
+/// (no entitlement plane / no installed lease) always allows a start — the gate
+/// fails toward leniency, hardening only on positive evidence of the hardest
+/// lapse (ADR-0050 §6.3). At `block-new-instance` it returns
+/// [`RunError::LeaseExpired`] carrying [`BLOCK_NEW_INSTANCE_REASON`].
+///
+/// # Never off air (invariant #1)
+///
+/// This gate is consulted **before** an engine is built (mirroring the NDI
+/// pre-flight gate); a **running** engine never re-enters it, so the hardest rung
+/// can only refuse a *new* start — it can never stop a running program. It reads
+/// one pre-derived enum and returns; no engine handle, no I/O, no lock.
+///
+/// # Errors
+///
+/// [`RunError::LeaseExpired`] iff `level` is
+/// [`EnforcementLevel::BlockNewInstance`](multiview_licence::EnforcementLevel::BlockNewInstance).
+pub fn start_gate(level: Option<multiview_licence::EnforcementLevel>) -> Result<(), RunError> {
+    match level {
+        Some(level) if level.blocks_new_instances() => {
+            Err(RunError::LeaseExpired(BLOCK_NEW_INSTANCE_REASON.to_owned()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Errors that can occur building or running the software engine.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -125,6 +162,12 @@ pub enum RunError {
     /// The configuration failed validation before any engine was built.
     #[error("invalid configuration: {0}")]
     Config(#[from] multiview_config::ConfigError),
+    /// The Conspect startup gate (S1) refused creating a **new** engine instance
+    /// because the entitlement lease is at the `block-new-instance` rung. The
+    /// string is [`BLOCK_NEW_INSTANCE_REASON`] — a **running** instance is never
+    /// affected (this gate runs only at build time, ADR-0050 §5/§6.3).
+    #[error("{0}")]
+    LeaseExpired(String),
     /// The output clock rejected the canvas cadence.
     #[error("output clock: {0}")]
     Clock(String),
@@ -327,6 +370,32 @@ impl SoftwareEngine {
             program_preview: crate::preview::program_slot(),
             stop_registry: crate::live_sources::stop_registry(),
         })
+    }
+
+    /// Build a software engine **through the Conspect startup gate** (S1,
+    /// ADR-0050 §5): consult the published entitlement [`EnforcementLevel`]
+    /// (sampled off the hot loop) **before** constructing the engine, and refuse
+    /// to create a NEW instance at the `block-new-instance` rung with
+    /// [`BLOCK_NEW_INSTANCE_REASON`]. Every softer rung (and `None` — no plane /
+    /// no lease) builds exactly as [`SoftwareEngine::build`].
+    ///
+    /// # Never off air (invariant #1)
+    ///
+    /// The gate runs at build time only; a **running** engine never re-enters
+    /// `build`/`build_gated`, so the hardest rung can never stop a running program
+    /// (ADR-0050 §6.3). The binary calls this with the level sampled from the
+    /// entitlement store.
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::LeaseExpired`] when the gate refuses (block-new-instance), else
+    /// the same errors as [`SoftwareEngine::build`].
+    pub fn build_gated(
+        config: &MultiviewConfig,
+        level: Option<multiview_licence::EnforcementLevel>,
+    ) -> Result<Self, RunError> {
+        start_gate(level)?;
+        Self::build(config)
     }
 
     /// The shared per-source producer stop registry (ADR-W018): hand this to
