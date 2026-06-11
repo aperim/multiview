@@ -10,7 +10,7 @@
 //!   one-button support bundle);
 //! * the snapshot carries diagnostics (utilisation / reconnects / sheds /
 //!   incidents), **never** media;
-//! * the telemetry/diagnostics routes are advertised in the OpenAPI surface;
+//! * the telemetry/diagnostics routes are advertised in the `OpenAPI` surface;
 //! * **consent gates no local route** — every local surface answers identically
 //!   whether telemetry consent is on or off (ADR-0052: staying off costs none of
 //!   the local UI/API).
@@ -213,7 +213,7 @@ async fn consent_gates_no_local_route() {
     }
 }
 
-/// The telemetry + diagnostics routes are advertised in the OpenAPI REST surface
+/// The telemetry + diagnostics routes are advertised in the `OpenAPI` REST surface
 /// (no-drift: the served spec lists them), under the telemetry/diagnostics
 /// namespaces — never under /licensing (the two-pipe separation).
 #[test]
@@ -248,7 +248,7 @@ fn telemetry_and_diagnostics_routes_are_advertised() {
     );
 }
 
-/// The OpenAPI document documents the telemetry + diagnostics paths with their
+/// The `OpenAPI` document documents the telemetry + diagnostics paths with their
 /// verbs (the SPA client is generated from this).
 #[test]
 fn openapi_documents_telemetry_and_diagnostics_paths() {

@@ -42,6 +42,7 @@ pub mod salvos;
 pub mod sources;
 pub mod sync_groups;
 pub mod tally;
+pub mod telemetry;
 
 /// A `202 Accepted` body returned for an asynchronously-applied command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,6 +790,25 @@ pub fn api_router() -> Router<AppState> {
         .route("/mesh/status", get(mesh::get_status))
         .route("/mesh/relay", axum::routing::put(mesh::set_relay))
         .route("/mesh/peers", get(mesh::list_peers))
+        // Telemetry pipe (Conspect, ADR-0052): the opt-in daily-pipe consent
+        // (GET + PUT, off by default, last-writer-wins) and the published schema
+        // (sent + never-sent). Deliberately under `/telemetry/`, never co-mingled
+        // with the licensing heartbeat under `/licensing/` (two-pipe separation).
+        // Consent gates NO local route. Control-plane only (invariant #10).
+        .route(
+            "/telemetry/consent",
+            get(telemetry::get_consent).put(telemetry::set_consent),
+        )
+        .route("/telemetry/schema", get(telemetry::get_schema))
+        // Diagnostics snapshot (Conspect, spec §4.2 / ADR-0053): the one-button
+        // support bundle (logs + engine state, never media) — POST assembles →
+        // 202 {snapshot_id}; GET reads it back by id. Assembled from the
+        // consent-independent local retention buffer. Control-plane only (inv #10).
+        .route(
+            "/diagnostics/snapshot",
+            post(telemetry::request_snapshot),
+        )
+        .route("/diagnostics/{id}", get(telemetry::get_snapshot))
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(

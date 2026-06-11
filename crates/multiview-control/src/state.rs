@@ -38,6 +38,7 @@ use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
 use crate::tally_state::{
     InMemoryProfileStore, OverrideRegistry, TallyMirror, TallyProfileRepository,
 };
+use crate::telemetry_consent::{ConsentState, DiagnosticsSnapshotStore};
 use crate::versioning::{ConfigVersionStore, InMemoryConfigVersionStore};
 use crate::warning_store::{InMemoryWarningStore, WarningRepository};
 
@@ -548,6 +549,29 @@ pub struct AppState {
     /// bounded inventory, no engine handle) — it can never back-pressure the engine
     /// (invariant #10). The default is an empty, relay-declined state.
     pub mesh: Arc<MeshState>,
+    /// The **telemetry-consent** record (Conspect, ADR-0052 §2): the single
+    /// last-writer-wins document governing the (future, O1-gated) **outbound daily
+    /// telemetry pipe**. Off by default (opt-in, incl. the free tier). This is the
+    /// TELEMETRY pipe's consent — deliberately separate from the licensing
+    /// heartbeat (which lives under `/api/v1/licensing/`, never `/telemetry/`). It
+    /// gates **no** local route; staying off costs none of the local UI/API.
+    /// Control-plane only (a `Mutex` over one record, no engine handle) — it can
+    /// never back-pressure the engine (invariant #10). The default is off/local.
+    pub consent: Arc<ConsentState>,
+    /// The **consent-independent local metrics retention buffer** (Conspect,
+    /// ADR-0052 §3 / ADR-0053): the rolling, bounded, minute-bucketed on-box record
+    /// the diagnostics snapshot is assembled from. Retained **regardless** of
+    /// telemetry consent (it serves the operator's own support diagnostics, not
+    /// Aperim analytics). The binary feeds it off the engine hot loop (a CONSPECT
+    /// sampler task); the control plane only **reads** it here, off the engine.
+    /// Control-plane-safe (invariant #10).
+    pub retention: Arc<multiview_telemetry::retention::RetentionStore>,
+    /// The **diagnostics-snapshot** store (Conspect, spec §4.2 / ADR-0053): the
+    /// bounded, in-memory store of assembled support bundles, keyed by id, the
+    /// `POST /api/v1/diagnostics/snapshot` writes and `GET /api/v1/diagnostics/{id}`
+    /// reads. Bundles are logs + engine state, never media. Control-plane only;
+    /// cannot back-pressure the engine (invariant #10).
+    pub diagnostics_snapshots: Arc<DiagnosticsSnapshotStore>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -625,6 +649,15 @@ impl AppState {
             // and relay declined. The binary swaps in the shared store the
             // announce/browse loop maintains. Control-plane only (invariant #10).
             mesh: Arc::new(MeshState::new()),
+            // Telemetry consent OFF by default (opt-in, incl. the free tier,
+            // ADR-0052 §1). Gates no local route. Control-plane only (inv #10).
+            consent: Arc::new(ConsentState::new()),
+            // An empty local retention buffer; the binary feeds it off the engine
+            // (a CONSPECT sampler task). Consent-independent (ADR-0052 §3).
+            retention: Arc::new(multiview_telemetry::retention::RetentionStore::new()),
+            // An empty diagnostics-snapshot store; bundles are assembled on
+            // request from the retention buffer. Control-plane only (inv #10).
+            diagnostics_snapshots: Arc::new(DiagnosticsSnapshotStore::new()),
         }
     }
 
@@ -647,6 +680,41 @@ impl AppState {
     #[must_use]
     pub fn with_mesh(mut self, mesh: Arc<MeshState>) -> Self {
         self.mesh = mesh;
+        self
+    }
+
+    /// Wire the telemetry-consent record (Conspect, ADR-0052): the binary passes
+    /// the persistent/shared record; tests inject a pre-seeded one to exercise
+    /// last-writer-wins. Control-plane only (invariant #10). This is the TELEMETRY
+    /// pipe's consent — never the licensing heartbeat (which is implicit in
+    /// running the official build, not a document).
+    #[must_use]
+    pub fn with_consent(mut self, consent: Arc<ConsentState>) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    /// Wire the consent-independent local metrics retention buffer (Conspect,
+    /// ADR-0052 §3 / ADR-0053): the binary passes the same `Arc` its off-engine
+    /// CONSPECT sampler feeds, so the diagnostics snapshot reflects live on-box
+    /// diagnostics; tests inject a pre-seeded buffer. Read-only here, off the
+    /// engine (invariant #10).
+    #[must_use]
+    pub fn with_retention(
+        mut self,
+        retention: Arc<multiview_telemetry::retention::RetentionStore>,
+    ) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// Replace the diagnostics-snapshot store (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_diagnostics_snapshots(
+        mut self,
+        diagnostics_snapshots: Arc<DiagnosticsSnapshotStore>,
+    ) -> Self {
+        self.diagnostics_snapshots = diagnostics_snapshots;
         self
     }
 

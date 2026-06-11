@@ -70,7 +70,10 @@ async fn put_enables_consent_and_is_persisted() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["enabled"], true);
-    assert_eq!(body["actor"], "local", "a machine-UI PUT is the local actor");
+    assert_eq!(
+        body["actor"], "local",
+        "a machine-UI PUT is the local actor"
+    );
     assert!(
         body["changed_at"].as_str().is_some(),
         "a recorded consent carries a changed_at instant"
@@ -127,7 +130,10 @@ async fn put_records_a_consent_change_audit_entry() {
     );
     let entry = &page.entries[0];
     assert_eq!(entry.kind, AccountAuditKind::ConsentChange);
-    assert_eq!(entry.actor, "admin-key", "the toggling principal is the actor");
+    assert_eq!(
+        entry.actor, "admin-key",
+        "the toggling principal is the actor"
+    );
     let detail = entry.detail.as_ref().expect("ConsentChange carries detail");
     assert_eq!(
         detail["enabled"], true,
@@ -185,6 +191,9 @@ fn lww_stale_write_is_rejected() {
     // An equal-timestamp write is also rejected (strictly-later wins; ties keep
     // the incumbent — deterministic and idempotent under replay).
     let applied = state.apply(false, MediaTime::from_nanos(200), ConsentActor::Portal);
-    assert!(!applied, "an equal-timestamp write does not displace the incumbent");
+    assert!(
+        !applied,
+        "an equal-timestamp write does not displace the incumbent"
+    );
     assert!(state.record().enabled);
 }
