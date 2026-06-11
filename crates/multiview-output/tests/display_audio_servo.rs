@@ -99,14 +99,15 @@ fn closed_loop_converges_fill_toward_setpoint() {
 fn skew_term_corrects_long_run_sample_vs_flip_drift() {
     // Even with the FIFO perfectly at setpoint, a persistent measured skew
     // (sample clock running slow/fast vs the flip clock) must bias the ratio so
-    // the audio re-aligns to scanout. Positive skew (audio behind video) =>
-    // slow audio down a touch (negative ppm), and vice-versa.
+    // the audio re-aligns to scanout. Positive skew = audio AHEAD of scanout
+    // (`skew_ms` is audio-elapsed minus scanout-elapsed) => drain slower (a
+    // negative drain ppm) so scanout catches back up, and vice-versa.
     let servo = BufferServo::new();
-    let behind = servo.clone().correction(0.5, 5.0); // audio 5 ms behind scanout
-    let ahead = servo.clone().correction(0.5, -5.0);
-    assert!(behind.ppm() != ahead.ppm(), "skew must move the correction");
+    let ahead = servo.clone().correction(0.5, 5.0); // +5 ms: audio AHEAD of scanout
+    let behind = servo.clone().correction(0.5, -5.0); // -5 ms: audio behind scanout
+    assert!(ahead.ppm() != behind.ppm(), "skew must move the correction");
     assert!(
-        behind.ppm().signum() != ahead.ppm().signum() || behind.ppm() == 0.0,
+        ahead.ppm().signum() != behind.ppm().signum() || ahead.ppm() == 0.0,
         "opposite skew => opposite-sign correction"
     );
 }
