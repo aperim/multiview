@@ -93,6 +93,34 @@ describe('DeviceDetailPage tabs', () => {
       screen.getByText(/program output never depends on this device/i),
     ).toBeInTheDocument();
   });
+
+  it('deep-links to the Streams tab via ?tab=streams (the list stream column target)', async () => {
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/devices/dev-a?tab=streams']}>
+        <Routes>
+          <Route path="/devices/:id" element={<DeviceDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const tab = await screen.findByRole('tab', { name: 'Streams' });
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute(
+      'aria-selected',
+      'false',
+    );
+  });
+
+  it('falls back to Overview for an unknown ?tab= value', async () => {
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/devices/dev-a?tab=nonsense']}>
+        <Routes>
+          <Route path="/devices/:id" element={<DeviceDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const tab = await screen.findByRole('tab', { name: 'Overview' });
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+  });
 });
 
 describe('DeviceDetailPage failure UX (§11)', () => {

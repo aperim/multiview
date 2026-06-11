@@ -69,6 +69,50 @@ describe('SyncGroupsPage', () => {
     expect(screen.getByText(/bounded skew/i)).toBeInTheDocument();
   });
 
+  it('names the unique weakest member limiting the tier (§8 honesty rule)', async () => {
+    renderGroups();
+    expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
+    // dev-a (zowietek, bounded skew) is the sole member dragging the group
+    // below dev-b's frame-accurate tier: say so, per the brief's sketch.
+    expect(screen.getByText('limited by dev-a')).toBeInTheDocument();
+  });
+
+  it('omits the limiter when the weakest tier is shared by several members', async () => {
+    server.use(
+      http.get('*/api/v1/devices', () =>
+        HttpResponse.json([
+          ...DEVICES,
+          {
+            id: 'dev-c',
+            name: 'Stage box',
+            body: { id: 'dev-c', driver: 'zowietek', address: 'http://[fd00::2]' },
+          },
+        ]),
+      ),
+      http.get('*/api/v1/sync-groups', () =>
+        HttpResponse.json([
+          {
+            id: 'pair',
+            name: 'Pair wall',
+            body: {
+              id: 'pair',
+              target_skew_ms: 80,
+              members: [
+                { device: 'dev-a', offset_ms: 0 },
+                { device: 'dev-c', offset_ms: 0 },
+              ],
+            },
+          },
+        ]),
+      ),
+    );
+    renderGroups();
+    expect(await screen.findByText('Pair wall')).toBeInTheDocument();
+    expect(screen.getByText(/bounded skew/i)).toBeInTheDocument();
+    // No single member limits the claim: naming one would be dishonest.
+    expect(screen.queryByText(/limited by/i)).not.toBeInTheDocument();
+  });
+
   it('measure rides the 202 operation path', async () => {
     let measured = 0;
     server.use(

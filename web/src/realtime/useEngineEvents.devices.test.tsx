@@ -209,6 +209,129 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
+  it('throttles engine-clock writes: a burst within 500 ms writes once', () => {
+    const { socket, unmount } = start();
+    act(() => {
+      socket.emit(
+        frame(1, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, {
+          id: 'dev-a',
+          ts: 1_000_000_000,
+        }),
+      );
+    });
+    const first = client.getQueryData<EngineClockRef>(ENGINE_CLOCK_QUERY_KEY);
+    expect(first?.engineTs).toBe(1_000_000_000);
+    act(() => {
+      // A burst advancing < 500 ms: NO new cache write (same object identity),
+      // so pages holding the clock ref are not re-rendered at envelope rate.
+      socket.emit(
+        frame(2, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, {
+          id: 'dev-a',
+          ts: 1_200_000_000,
+        }),
+      );
+      socket.emit(
+        frame(3, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, {
+          id: 'dev-a',
+          ts: 1_499_999_999,
+        }),
+      );
+    });
+    expect(client.getQueryData<EngineClockRef>(ENGINE_CLOCK_QUERY_KEY)).toBe(first);
+    act(() => {
+      // Advancing ≥ 500 ms writes again.
+      socket.emit(
+        frame(4, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, {
+          id: 'dev-a',
+          ts: 1_500_000_000,
+        }),
+      );
+    });
+    expect(
+      client.getQueryData<EngineClockRef>(ENGINE_CLOCK_QUERY_KEY)?.engineTs,
+    ).toBe(1_500_000_000);
+    unmount();
+  });
+
+  it('device.adopted invalidates the devices list (another operator adopted)', () => {
+    const { socket, unmount } = start();
+    client.setQueryData(['resources', 'devices'], []);
+    act(() => {
+      socket.emit(
+        frame(
+          1,
+          'device.mode',
+          { device_id: 'dev-a', mode: 'encoder', phase: 'started', impact: 'dev' },
+          { id: 'dev-a' },
+        ),
+      );
+    });
+    // mode/error churn must NOT refetch the list…
+    expect(client.getQueryState(['resources', 'devices'])?.isInvalidated).toBe(false);
+    act(() => {
+      socket.emit(
+        frame(
+          2,
+          'device.adopted',
+          { device_id: 'dev-x', driver: 'zowietek', name: 'New box' },
+          { id: 'dev-x' },
+        ),
+      );
+    });
+    // …but an adoption elsewhere must surface without an unrelated refetch.
+    expect(client.getQueryState(['resources', 'devices'])?.isInvalidated).toBe(true);
+    unmount();
+  });
+
+  it('device.removed invalidates the devices list', () => {
+    const { socket, unmount } = start();
+    client.setQueryData(['resources', 'devices'], []);
+    act(() => {
+      socket.emit(frame(1, 'device.removed', { device_id: 'dev-a' }, { id: 'dev-a' }));
+    });
+    expect(client.getQueryState(['resources', 'devices'])?.isInvalidated).toBe(true);
+    unmount();
+  });
+
+  it("a new scan's rows prune previous scans' discovered rows", () => {
+    const { socket, unmount } = start();
+    act(() => {
+      socket.emit(
+        frame(
+          1,
+          'device.discovered',
+          { address: '[fd00::42]:80', driver: 'zowietek', family: 'ipv6' },
+          { corr: 'op-1' },
+        ),
+      );
+      socket.emit(
+        frame(
+          2,
+          'device.discovered',
+          { address: '[fd00::43]:80', driver: 'zowietek', family: 'ipv6' },
+          { corr: 'op-1' },
+        ),
+      );
+      socket.emit(
+        frame(
+          3,
+          'device.discovered',
+          { address: '[fd00::44]:80', driver: 'cast', family: 'ipv6' },
+          { corr: 'op-2' },
+        ),
+      );
+    });
+    // Only the active scan's rows remain: the per-corr map is bounded by the
+    // newest scan, not by session length.
+    const byCorr = client.getQueryData<Record<string, readonly DeviceDiscovered[]>>(
+      DISCOVERED_LIVE_QUERY_KEY,
+    );
+    expect(Object.keys(byCorr ?? {})).toEqual(['op-2']);
+    expect(byCorr?.['op-2']).toHaveLength(1);
+    expect(byCorr?.['op-2']?.[0]?.address).toBe('[fd00::44]:80');
+    unmount();
+  });
+
   it('tracks an engine-monotonic clock reference from envelope timestamps', () => {
     const { socket, unmount } = start();
     act(() => {

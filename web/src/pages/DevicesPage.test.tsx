@@ -71,6 +71,10 @@ const server = setupServer(
       mode: 'decoder',
       last_seen_ts: 90,
       temperature_c: 47.5,
+      streams: [
+        { role: 'encode', healthy: true },
+        { role: 'decode', healthy: false },
+      ],
     }),
   ),
   http.get('*/api/v1/devices/dev-b/status', () =>
@@ -116,6 +120,34 @@ describe('DevicesPage list', () => {
     expect(await screen.findByText(/47\.5/)).toBeInTheDocument();
     // dev-b is a member of the "Lobby wall" group: the chip names the group.
     expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
+  });
+
+  it('links the first active stream to the device detail Streams tab', async () => {
+    renderDevices();
+    // dev-a reports streams: the cell shows the FIRST stream's role + health
+    // and deep-links to the detail page's Streams tab (managed-devices.md §9).
+    const link = await screen.findByRole('link', { name: /encode healthy/i });
+    expect(link).toHaveAttribute('href', '/devices/dev-a?tab=streams');
+  });
+
+  it('shows an accessible placeholder when no stream is reported', async () => {
+    renderDevices();
+    // Wait for dev-a's status (the row WITH streams) so the remaining
+    // placeholder is genuinely dev-b's no-streams cell.
+    await screen.findByRole('link', { name: /encode healthy/i });
+    expect(screen.getAllByText('No active stream.')).toHaveLength(1);
+  });
+
+  it('pairs every placeholder em-dash with sr-only text (the State-cell pattern)', async () => {
+    renderDevices();
+    expect(await screen.findByText('Unreachable')).toBeInTheDocument();
+    expect(await screen.findByText('Online')).toBeInTheDocument();
+    expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
+    // dev-b: no mode (and no desired mode), no temperature reported.
+    expect(screen.getByText('No mode reported.')).toBeInTheDocument();
+    expect(screen.getByText('No temperature reported.')).toBeInTheDocument();
+    // dev-a: not a member of any sync group.
+    expect(screen.getByText('Not in a sync group.')).toBeInTheDocument();
   });
 });
 
