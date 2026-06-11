@@ -40,18 +40,27 @@ fn parse_stored_overlay(body: &serde_json::Value) -> Option<multiview_config::Ov
 /// With a capability injected, the document **always** rides the bounded bus
 /// (the engine's working-set mirror stays coherent; the drain warns for kinds
 /// it cannot render — never silently, never lying). The header is `live` only
-/// when the running renderer visibly draws the document
-/// ([`OverlayLiveCapability::renders`](crate::live_apply::OverlayLiveCapability::renders))
-/// **and** the submit was accepted; a shed submit (full/closed bus — inv #10)
-/// or a non-rendering kind degrades honestly to `restart`.
-fn live_apply_upsert(state: &AppState, overlay: Option<multiview_config::Overlay>) -> ApplyMode {
+/// when the submit was accepted **and** the running picture visibly follows
+/// the change: the renderer draws the **new** document, or it drew the
+/// **previous** one (an edit that replaces a rendered face with a
+/// non-rendering body makes that face vanish at the next frame — itself a
+/// live-visible change, ADR-W021 §4). `previous` is the stored document the
+/// upsert replaces (`None` on create). A shed submit (full/closed bus —
+/// inv #10) or a mutation rendering neither before nor after degrades
+/// honestly to `restart`.
+fn live_apply_upsert(
+    state: &AppState,
+    overlay: Option<multiview_config::Overlay>,
+    previous: Option<&multiview_config::Overlay>,
+) -> ApplyMode {
     let Some(capability) = state.live_apply.overlays.as_ref() else {
         return ApplyMode::Restart;
     };
     let Some(overlay) = overlay else {
         return ApplyMode::Restart;
     };
-    let renders = capability.renders(&overlay);
+    let renders =
+        capability.renders(&overlay) || previous.is_some_and(|prev| capability.renders(prev));
     let submitted = state
         .commands
         .try_submit(Command::UpsertOverlay {
@@ -195,7 +204,7 @@ pub(crate) async fn create_overlay(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    let mode = live_apply_upsert(&state, parse_stored_overlay(&versioned.resource.body));
+    let mode = live_apply_upsert(&state, parse_stored_overlay(&versioned.resource.body), None);
     Ok(with_apply(
         mode,
         overlay_response(StatusCode::CREATED, &versioned),
@@ -212,7 +221,7 @@ pub(crate) async fn create_overlay(
         params(("id" = String, Path, description = "Overlay id.")),
         request_body = crate::openapi_schemas::OverlayResourceInputDoc,
         responses(
-            (status = 200, description = "The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running renderer draws the new document and it was applied at a frame boundary, `restart` otherwise (ADR-W021).", body = crate::resource_store::Resource),
+            (status = 200, description = "The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the edit was applied at a frame boundary and the running picture visibly follows it — the renderer draws the new document, or it drew the previous one (editing a rendered face away makes it vanish, itself a live change); `restart` otherwise (ADR-W021).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 404, description = "No overlay with that id.", body = crate::problem::Problem),
@@ -234,6 +243,10 @@ pub(crate) async fn update_overlay(
     // submitted body is itself invalid.
     let current = state.overlays.get(&id)?;
     if_match.require(OVERLAY_KIND, &id, current.version)?;
+    // The document this edit replaces: if the running renderer drew it, the
+    // edit is live-visible even when the NEW body renders nothing (the old
+    // face vanishes at the next frame boundary) — ADR-W021 §4.
+    let previous = parse_stored_overlay(&current.resource.body);
     let input = ResourceInput {
         name: input.name,
         body: validated_body(TypedCollection::Overlays, &id, &input.body)?,
@@ -246,7 +259,11 @@ pub(crate) async fn update_overlay(
         &id,
         Some(versioned.resource.body.clone()),
     );
-    let mode = live_apply_upsert(&state, parse_stored_overlay(&versioned.resource.body));
+    let mode = live_apply_upsert(
+        &state,
+        parse_stored_overlay(&versioned.resource.body),
+        previous.as_ref(),
+    );
     Ok(with_apply(
         mode,
         overlay_response(StatusCode::OK, &versioned),

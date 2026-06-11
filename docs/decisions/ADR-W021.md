@@ -65,7 +65,8 @@ anyway, so the set-level swap happens engine-side from the mirror (one place, on
 command as **pure data mutation**:
 
 1. upsert-by-id / remove-by-id on the working config's `overlays` vec (mirror — same discipline as
-   live sources; removing an unknown id is a logged no-op);
+   live sources; removing an unknown id publishes no new set but is warned **and** surfaced as an
+   `apply_overlay_held` outcome, symmetric with a held upsert — never a silent drop);
 2. bump a monotonic **generation** and publish the full mirrored set as one
    `Arc<OverlaySet { generation, overlays }>` into a shared lock-free
    **`OverlayApplySlot`** (`Arc<ArcSwap<OverlaySet>>` — the same isolation primitive as the
@@ -79,9 +80,10 @@ command as **pure data mutation**:
 
 The bake consumer (already off the clock thread) checks the slot's generation **once per frame**
 (wait-free `ArcSwap::load`); on change it re-derives its overlay render state — today
-`analog_clock_from_config` over the new set, O(overlays) pure math — and the **next baked frame**
-draws the new face. That is a clean frame-boundary (Class-1) transition: a frame is baked entirely
-from the old set or entirely from the new set, never mixed.
+`analog_clocks_from_config` over the new set, O(overlays) pure math, **one face per analog-face
+entry in working-set order** (no first-wins) — and the **next baked frame** draws the new faces.
+That is a clean frame-boundary (Class-1) transition: a frame is baked entirely from the old set or
+entirely from the new set, never mixed.
 
 **Why no `LiveSourceHub`-style worker:** an overlay apply triggers no heavy work. The analog face
 is ring/stroke primitives (no glyphs); text glyphs were already rasterized lazily with a per-glyph
@@ -117,8 +119,10 @@ Route behaviour (`routes/overlays.rs`, after the store write + audit — mirrori
 
 | Mutation | Condition | Header |
 |---|---|---|
-| POST/PUT | capability present ∧ `renders(doc)` ∧ `UpsertOverlay` enqueued | `live` |
-| POST/PUT | capability present ∧ ¬`renders(doc)` (still enqueued — the mirror stays coherent; the drain warns) | `restart` |
+| POST | capability present ∧ `renders(doc)` ∧ `UpsertOverlay` enqueued | `live` |
+| POST | capability present ∧ ¬`renders(doc)` (still enqueued — the mirror stays coherent; the drain warns) | `restart` |
+| PUT | capability present ∧ (`renders(new)` ∨ `renders(previous)`) ∧ `UpsertOverlay` enqueued — editing a rendered face **away** (e.g. analog → digital) makes it vanish at the next frame, itself a live-visible change | `live` |
+| PUT | capability present ∧ ¬`renders(new)` ∧ ¬`renders(previous)` (still enqueued; no pixels change) | `restart` |
 | DELETE | capability present ∧ `renders(previous doc)` ∧ `RemoveOverlay` enqueued | `live` |
 | DELETE | capability present ∧ ¬`renders(previous)` (still enqueued) | `restart` |
 | any | no capability (software path, overlay-less build, no engine), bus full/closed, or stored body does not parse as `Overlay` | `restart` |
@@ -132,8 +136,9 @@ On the `ffmpeg`+`overlay` pipeline run (capability present):
 
 | kind | live apply effect | header |
 |---|---|---|
-| `clock`, `face = "analog"` | the analog face appears / moves / re-zones / disappears on the next baked frame (derivation rule: the **first** analog entry in the set wins, as at boot) | `live` |
-| `clock`, digital/no face | mirrored into the working set; the program's digital readout is independent always-on chrome — no visual change; drain warns | `restart` |
+| `clock`, `face = "analog"` | the analog face appears / moves / re-zones / disappears on the next baked frame (derivation rule: **every** analog-face entry renders its own face, in working-set order — no first-wins) | `live` |
+| `clock`, edited analog → digital/no face | the previously-rendered face **vanishes** on the next baked frame — a live-visible change (`live` iff `renders(new)` ∨ `renders(previous)`) | `live` |
+| `clock`, digital/no face (before and after) | mirrored into the working set; the program's digital readout is independent always-on chrome — no visual change; drain warns | `restart` |
 | `label` / `tally_border` / `image` / `subtitle` / unknown kinds | stored losslessly (params verbatim), mirrored into the working set, drain warns "no renderer in this build" | `restart` |
 
 On `--software` or without the `overlay` feature: **every** kind stores + `restart` (no command is

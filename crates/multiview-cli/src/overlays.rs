@@ -210,7 +210,7 @@ pub struct OverlayBaker {
     tiles: Vec<TileSpec>,
     meters: Vec<TileMeter>,
     clock: Option<ClockModel>,
-    analog_clock: Option<AnalogClockSpec>,
+    analog_clocks: Vec<AnalogClockSpec>,
     /// The injectable source of the **current** wall-clock instant. Sampled at
     /// draw time so the displayed time-of-day tracks the live (NTP-disciplined)
     /// OS clock (anti-drift), never the monotonic output-tick counter — the
@@ -303,7 +303,7 @@ impl OverlayBaker {
                 TimeZoneOffset::UTC,
                 time_ref,
             )),
-            analog_clock: None,
+            analog_clocks: Vec::new(),
             wall_clock,
             per_tile_safe_area: false,
         })
@@ -327,20 +327,22 @@ impl OverlayBaker {
     }
 
     /// Add an **analog** clock face (ring + angled hour/minute/second hands) at
-    /// the given placement, builder-style. Independent of the digital label — a
-    /// config may request either or both.
+    /// the given placement, builder-style. Independent of the digital label —
+    /// a config may request either or both, and EVERY analog-face entry
+    /// renders its own face (ADR-W021: no first-wins).
     #[must_use]
     pub fn with_analog_clock(mut self, spec: AnalogClockSpec) -> Self {
-        self.analog_clock = Some(spec);
+        self.analog_clocks.push(spec);
         self
     }
 
-    /// Set, move, or clear the analog clock face **at runtime** (ADR-W021
-    /// live overlay apply): the bake consumer calls this when the live
-    /// overlay working set's generation advances, so the next baked frame
-    /// draws the re-derived face. `None` clears the face entirely.
-    pub fn set_analog_clock(&mut self, spec: Option<AnalogClockSpec>) {
-        self.analog_clock = spec;
+    /// Replace the whole analog clock face **set** at runtime (ADR-W021 live
+    /// overlay apply): the bake consumer calls this when the live overlay
+    /// working set's generation advances, so the next baked frame draws every
+    /// re-derived face — one per analog-face entry, in working-set order. An
+    /// empty set clears every face.
+    pub fn set_analog_clocks(&mut self, specs: Vec<AnalogClockSpec>) {
+        self.analog_clocks = specs;
     }
 
     /// The tiles this baker draws (their static placement), in declaration order.
@@ -467,14 +469,16 @@ impl OverlayBaker {
             }
         }
 
-        // Program-wide ANALOG clock face: a bezel ring + 12 ticks + three angled
-        // hands, driven by the model's analog hand angles for this instant. The
-        // model owns the time→angle math (the only float); this only maps those
-        // angles into the compositor's ring + stroke primitives.
-        if let Some(analog) = self.analog_clock {
+        // Program-wide ANALOG clock faces: a bezel ring + 12 ticks + three
+        // angled hands per configured face, driven by each model's analog hand
+        // angles for this instant. EVERY analog-face entry draws its own face
+        // (ADR-W021 — no first-wins); the model owns the time→angle math (the
+        // only float), this only maps those angles into the compositor's ring
+        // + stroke primitives.
+        for analog in &self.analog_clocks {
             if let Some(hands) = analog.model.render_analog(wall) {
                 let style = ClockFaceStyle::at(analog.cx, analog.cy, analog.radius);
-                // The program-wide analog clock is a conventional 12-hour dial.
+                // Each program-wide analog clock is a conventional 12-hour dial.
                 for prim in clock_face(hand_angles(hands), style, 12) {
                     list.push(prim);
                 }

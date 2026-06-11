@@ -1373,9 +1373,12 @@ impl CommandDrain {
 
     /// Apply a `RemoveOverlay` (ADR-W021) at the frame boundary: drop the
     /// document from the working overlay set and republish — a rendered face
-    /// disappears on the next baked frame. Removing an unknown id is a logged
-    /// no-op (nothing is published, so the consumer never re-derives
-    /// spuriously). Without a wired seam it is a surfaced held action.
+    /// disappears on the next baked frame. Removing an unknown id publishes
+    /// no new set (the consumer never re-derives spuriously) but is still
+    /// surfaced — warned and observable as a `job.progress`
+    /// `apply_overlay_held` outcome, symmetric with a held upsert, never a
+    /// silent drop. Without a wired seam it is likewise a surfaced held
+    /// action.
     fn remove_overlay(&mut self, id: &str) {
         let Some(slot) = self.live_overlays.as_ref() else {
             tracing::warn!(
@@ -1389,7 +1392,12 @@ impl CommandDrain {
         let before = self.config.overlays.len();
         self.config.overlays.retain(|o| o.id != id);
         if self.config.overlays.len() == before {
-            tracing::warn!(overlay = %id, "remove_overlay: unknown overlay id; ignored");
+            tracing::warn!(
+                overlay = %id,
+                "remove_overlay held: unknown overlay id (nothing to remove); \
+                 no set published"
+            );
+            self.publish_overlay_held(id, "unknown overlay id (nothing to remove)");
             return;
         }
         let generation = crate::live_overlays::publish_set(slot, self.config.overlays.clone());
