@@ -64,7 +64,10 @@ fn minimal_document_parses_with_defaults() {
         other => panic!("expected an rtsp ingest, got {other:?}"),
     }
     assert_eq!(cfg.displays.len(), 1);
-    assert_eq!(cfg.displays[0].connector, "auto", "connector defaults to auto");
+    assert_eq!(
+        cfg.displays[0].connector, "auto",
+        "connector defaults to auto"
+    );
     assert!(!cfg.displays[0].audio, "audio defaults to off");
     assert!(cfg.displays[0].mode.is_none());
     assert!(cfg.displays[0].forced_mode.is_none());
@@ -204,9 +207,7 @@ fn rejects_mismatched_url_schemes() {
         ("hls", "srt://[::1]:9000"),
         ("ts", "no-scheme-here"),
     ] {
-        let text = format!(
-            "[ingest]\nkind = \"{kind}\"\nurl = \"{url}\"\n\n[[displays]]\n"
-        );
+        let text = format!("[ingest]\nkind = \"{kind}\"\nurl = \"{url}\"\n\n[[displays]]\n");
         let err = parse_err(&text);
         assert!(
             err.contains(kind) || err.contains("scheme") || err.contains("url"),
@@ -420,7 +421,10 @@ fn lowering_builds_one_source_one_full_canvas_cell_one_display_per_head() {
     assert_eq!(connector, "HDMI-A-1");
     assert!(mode.is_some());
     assert!(forced_mode.is_none());
-    assert!(audio.is_some(), "audio = true lowers to a program-bus block");
+    assert!(
+        audio.is_some(),
+        "audio = true lowers to a program-bus block"
+    );
     let Output::Display {
         connector: c2,
         audio: a2,
@@ -452,9 +456,7 @@ fn lowering_every_ingest_kind_maps_to_the_matching_source_kind() {
         ("hls", "https://[::1]/x.m3u8", "hls"),
         ("ts", "udp://[ff3e::1]:5004", "ts"),
     ] {
-        let text = format!(
-            "[ingest]\nkind = \"{kind}\"\nurl = \"{url}\"\n\n[[displays]]\n"
-        );
+        let text = format!("[ingest]\nkind = \"{kind}\"\nurl = \"{url}\"\n\n[[displays]]\n");
         let cfg = NodeConfig::load_from_toml(&text).expect("parses");
         let lowered = cfg.to_multiview_config().expect("lowers");
         let got = match &lowered.sources[0].kind {

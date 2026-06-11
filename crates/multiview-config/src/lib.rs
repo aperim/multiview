@@ -36,6 +36,7 @@ pub mod error;
 pub mod failover;
 pub mod grid;
 pub mod layout_doc;
+pub mod node;
 pub mod placement;
 pub mod probe;
 pub mod program;

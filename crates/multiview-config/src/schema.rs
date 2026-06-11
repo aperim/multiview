@@ -77,6 +77,14 @@ impl FromStr for Fps {
     }
 }
 
+impl From<Rational> for Fps {
+    /// Wrap an exact [`Rational`] cadence (the programmatic counterpart of the
+    /// `"num/den"` string form).
+    fn from(rational: Rational) -> Self {
+        Self(rational)
+    }
+}
+
 impl fmt::Display for Fps {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.0.num, self.0.den)
