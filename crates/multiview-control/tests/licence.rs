@@ -331,3 +331,41 @@ async fn get_licence_requires_authentication() {
     let resp = send(&h.router, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn installing_a_lease_writes_an_account_audit_entry_end_to_end() {
+    use multiview_control::{AccountAuditKind, AccountAuditStore, InMemoryAccountAudit};
+
+    let (key, pinned) = keypair();
+    let now = epoch();
+    // Share an account-audit store so the test can read the seam-written entry.
+    let audit: Arc<dyn AccountAuditStore> = Arc::new(InMemoryAccountAudit::new());
+    let shared = Arc::clone(&audit);
+    let h = harness_with(move |state| {
+        state
+            .with_licence(licence_state(pinned, now))
+            .with_account_audit(Arc::clone(&shared))
+    });
+
+    // No account audit entries before the install.
+    assert!(audit.page(None, None, 100).entries.is_empty());
+
+    let cbor = binding(&key, "serial-AUDIT01", now, 100)
+        .to_cbor()
+        .expect("encode binding");
+    let resp = send(
+        &h.router,
+        post_cbor("/api/v1/licence/lease", ADMIN_TOKEN, cbor),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "a valid binding installs");
+
+    // The lease install wrote exactly one append-only audit entry, attributed to
+    // the installing principal, carrying the serial (never a raw identifier).
+    let page = audit.page(None, Some(AccountAuditKind::LeaseInstall), 100);
+    assert_eq!(page.entries.len(), 1, "the install wrote one audit entry");
+    let entry = &page.entries[0];
+    assert_eq!(entry.kind, AccountAuditKind::LeaseInstall);
+    assert_eq!(entry.actor, "admin-key");
+    assert_eq!(entry.detail.as_ref().unwrap()["serial"], "serial-AUDIT01");
+}
