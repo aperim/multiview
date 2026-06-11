@@ -75,12 +75,12 @@ fn splice_storeless_sections(
     boot: &MultiviewConfig,
 ) -> MultiviewConfig {
     running.schema_version = boot.schema_version;
-    running.control = boot.control.clone();
-    running.placement = boot.placement.clone();
-    running.salvos = boot.salvos.clone();
-    running.tally_profiles = boot.tally_profiles.clone();
-    running.walls = boot.walls.clone();
-    running.routing = boot.routing.clone();
+    running.control.clone_from(&boot.control);
+    running.placement.clone_from(&boot.placement);
+    running.salvos.clone_from(&boot.salvos);
+    running.tally_profiles.clone_from(&boot.tally_profiles);
+    running.walls.clone_from(&boot.walls);
+    running.routing.clone_from(&boot.routing);
     running
 }
 

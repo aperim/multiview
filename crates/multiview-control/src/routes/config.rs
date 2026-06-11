@@ -784,7 +784,7 @@ pub(crate) async fn promote_to_boot(
         // banked token so it cannot eat a later REAL external edit that
         // happens to carry the same content.
         if let Some(handle) = watch_handle.as_ref() {
-            handle.release_write(&toml);
+            let _ = handle.release_write(&toml);
         }
         tracing::warn!(
             path = %model.boot_path().display(),

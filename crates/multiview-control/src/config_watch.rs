@@ -143,6 +143,7 @@ impl ConfigWatchHandle {
     /// B1 (3)): a server-side writer whose announced write FAILED must call
     /// this so the token cannot eat a later REAL external edit that happens
     /// to carry the same content. Returns whether a token was released.
+    #[must_use = "whether a token was actually released is diagnostic; ignore it explicitly"]
     pub fn release_write(&self, content: &str) -> bool {
         self.consume_expected_for(content)
     }
@@ -278,6 +279,13 @@ async fn probe(path: &Path) -> Option<Fingerprint> {
 /// The poll loop: debounce (a new fingerprint must be observed on two
 /// consecutive polls), suppress expected writes, and hand a settled change to
 /// [`apply_change`].
+#[allow(clippy::too_many_lines)]
+// reason: the poll loop is one linear settle/adopt/apply state machine whose
+// arms share six pieces of latched state (applied/rejected/candidate
+// fingerprints, last-observed content, the two warning latches — the review
+// M1/M2/m4/m5 interplay); splitting it further would hand most of that state
+// as `&mut` bundles to helpers. Everything separable is already factored out
+// (`resolve_latched_on_unchanged`, `adopt_expected_text`, `apply_change`).
 async fn watch_loop(
     path: PathBuf,
     mut baseline: MultiviewConfig,
@@ -343,22 +351,13 @@ async fn watch_loop(
             // latched condition has resolved without new content to apply
             // (review m5: e.g. the file was renamed away — warned missing —
             // and renamed back).
-            if invalid_active {
-                clear_invalid(
-                    &state,
-                    &path,
-                    "the file is back at the already-applied content",
-                    &mut invalid_active,
-                );
-            }
-            if incomplete_active {
-                // A partial (shed) apply was pending and the ORIGINAL content
-                // returned: nothing is pending for the engine any more, but
-                // the stores may have followed the abandoned content —
-                // re-converge them to the running baseline.
-                resync_all_stores(&state, ACTOR, &baseline);
-                clear_apply_incomplete(&state, &path, &mut incomplete_active);
-            }
+            resolve_latched_on_unchanged(
+                &state,
+                &path,
+                &baseline,
+                &mut invalid_active,
+                &mut incomplete_active,
+            );
             continue;
         }
         if rejected.as_ref() == Some(&now) {
@@ -403,23 +402,17 @@ async fn watch_loop(
         if last_observed.as_deref() == Some(text.as_str()) {
             // Review m4: the CONTENT is unchanged — a touch/identical rewrite
             // or, under `start = "resume"`, the unchanged boot file observed
-            // for the first time. Nothing to apply; mirror the
-            // fingerprint-match branch above (the latched conditions resolve
-            // the same way).
+            // for the first time. Nothing to apply; the latched conditions
+            // resolve exactly as in the fingerprint-match branch above.
             applied = Some(now);
             rejected = None;
-            if invalid_active {
-                clear_invalid(
-                    &state,
-                    &path,
-                    "the file is back at the last observed content",
-                    &mut invalid_active,
-                );
-            }
-            if incomplete_active {
-                resync_all_stores(&state, ACTOR, &baseline);
-                clear_apply_incomplete(&state, &path, &mut incomplete_active);
-            }
+            resolve_latched_on_unchanged(
+                &state,
+                &path,
+                &baseline,
+                &mut invalid_active,
+                &mut incomplete_active,
+            );
             continue;
         }
         match apply_change(
@@ -444,6 +437,35 @@ async fn watch_loop(
                 // poll re-reads and re-applies the whole (idempotent) change.
             }
         }
+    }
+}
+
+/// Resolve the latched warning conditions when the loop settles on content
+/// it has already handled — the fingerprint-match arm (review m5: the file
+/// was renamed away and back) and the content-match arm (review m4: a
+/// touch/identical rewrite, or the unchanged boot file under a resume).
+/// A latched `config-file-invalid` clears, and a pending partial (shed)
+/// apply is abandoned: nothing is pending for the engine any more, but the
+/// stores may have followed the abandoned content — re-converge them to the
+/// running `baseline` before clearing the interim warning.
+fn resolve_latched_on_unchanged(
+    state: &AppState,
+    path: &Path,
+    baseline: &MultiviewConfig,
+    invalid_active: &mut bool,
+    incomplete_active: &mut bool,
+) {
+    if *invalid_active {
+        clear_invalid(
+            state,
+            path,
+            "the file is back at the already-applied content",
+            invalid_active,
+        );
+    }
+    if *incomplete_active {
+        resync_all_stores(state, ACTOR, baseline);
+        clear_apply_incomplete(state, path, incomplete_active);
     }
 }
 

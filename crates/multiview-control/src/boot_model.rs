@@ -301,17 +301,6 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
     Ok(())
 }
 
-/// Spawn the debounced Running persister (ADR-W022 §3): persist the starting
-/// Running state once (a stale `active.toml` from a previous run never
-/// outlives the run that supersedes it), then wait on the `running_changed`
-/// notify the audit choke point fires, sleep the `debounce` (at most one
-/// write per window), and persist. Every failure is a `tracing::warn!` and a
-/// skipped write — the task never exits on error (fail-soft) and nothing it
-/// does can back-pressure the engine (invariant #10).
-///
-/// The caller aborts the returned handle at teardown and runs one final
-/// best-effort [`persist_running_now`] to capture changes younger than the
-/// debounce.
 /// Stop the debounced Running persister at run teardown (review M2): abort
 /// the task, **await its termination**, and only then run one final
 /// best-effort [`persist_running_now`] to capture changes younger than the
@@ -335,6 +324,17 @@ pub async fn finish_running_persist(task: tokio::task::JoinHandle<()>, state: &A
     }
 }
 
+/// Spawn the debounced Running persister (ADR-W022 §3): persist the starting
+/// Running state once (a stale `active.toml` from a previous run never
+/// outlives the run that supersedes it), then wait on the `running_changed`
+/// notify the audit choke point fires, sleep the `debounce` (at most one
+/// write per window), and persist. Every failure is a `tracing::warn!` and a
+/// skipped write — the task never exits on error (fail-soft) and nothing it
+/// does can back-pressure the engine (invariant #10).
+///
+/// The caller stops the returned handle at teardown via
+/// [`finish_running_persist`] (abort → await → one final best-effort persist
+/// capturing changes younger than the debounce).
 #[must_use]
 pub fn spawn_running_persist(state: AppState, debounce: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
