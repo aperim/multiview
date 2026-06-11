@@ -776,6 +776,53 @@ impl DeviceRemoved {
     }
 }
 
+/// An ephemeral cast session was started — the `data` body of
+/// `cast.session.started` (lossless low-rate lifecycle lane on the `devices`
+/// topic, ADR-M011 over ADR-RT007).
+///
+/// Cast-session list **membership** changes ride this lane so a client
+/// refreshes its session list immediately instead of waiting for a REST
+/// re-poll; the session's live *state* stays on the conflated
+/// `device.status` lane keyed by the same session id. Published at the
+/// control-plane accept point (the session record exists and its supervised
+/// actor is spawned); whether the receiver later accepts the LOAD is the
+/// status lane's story.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastSessionStarted {
+    /// The runtime session id (`cast-session-…`, UUID-fresh per start).
+    pub session_id: String,
+    /// The operator-facing name, if given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The device authority dialled (`host[:port]`, IPv6 bracketed).
+    pub address: String,
+    /// The output id whose HLS rendition the session casts.
+    pub output: String,
+}
+
+/// An ephemeral cast session was removed — the `data` body of
+/// `cast.session.removed` (lossless low-rate lifecycle lane on the `devices`
+/// topic).
+///
+/// Removal covers both the operator stop (`DELETE`, the receiver `STOP` that
+/// clears the TV) and the save-as-device promotion (the ephemeral record is
+/// retired while playback continues under the promoted device id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastSessionRemoved {
+    /// The runtime session id that was removed.
+    pub session_id: String,
+}
+
+impl CastSessionRemoved {
+    /// Build a removal event body for `session_id`.
+    #[must_use]
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+        }
+    }
+}
+
 /// The phase of a device mode convergence reported by `device.mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1145,6 +1192,14 @@ pub enum Event {
     /// correlated via the envelope `corr` (lossless lifecycle lane).
     #[serde(rename = "device.discovered")]
     DeviceDiscovered(DeviceDiscovered),
+    /// An ephemeral cast session was started (lossless lifecycle lane;
+    /// membership of the cast-session list changed).
+    #[serde(rename = "cast.session.started")]
+    CastSessionStarted(CastSessionStarted),
+    /// An ephemeral cast session was removed — stopped or promoted to a saved
+    /// device (lossless lifecycle lane; membership changed).
+    #[serde(rename = "cast.session.removed")]
+    CastSessionRemoved(CastSessionRemoved),
     /// F3 sync telemetry: the outbound presentation epoch + per-group achieved
     /// skew (envelope `id` = program or sync-group id). Latest-wins and
     /// ring-excluded like `device.status` — the affine epoch stays valid when
@@ -1196,6 +1251,8 @@ impl Event {
             Self::DeviceError(_) => "device.error",
             Self::DeviceSync(_) => "device.sync",
             Self::DeviceDiscovered(_) => "device.discovered",
+            Self::CastSessionStarted(_) => "cast.session.started",
+            Self::CastSessionRemoved(_) => "cast.session.removed",
             Self::TimingStatus(_) => "timing.status",
         }
     }
