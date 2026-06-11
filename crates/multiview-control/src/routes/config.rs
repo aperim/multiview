@@ -735,18 +735,22 @@ pub(crate) async fn promote_to_boot(
     // Announce the server-side write BEFORE writing (ADR-W020 §7 ordering):
     // the watcher adopts the next settled change as its baseline instead of
     // re-applying it. One thin seam, carrying the exact content written.
-    if let Some(handle) = state.watch_handle() {
-        crate::config_watch::expect_server_write(&handle, &toml);
+    let watch_handle = state.watch_handle();
+    if let Some(handle) = watch_handle.as_ref() {
+        crate::config_watch::expect_server_write(handle, &toml);
     }
     if let Err(error) = crate::boot_model::write_atomic(model.boot_path(), &toml) {
-        // The suppression token above was already consumed-for and cannot be
-        // recalled; the watcher will adopt the NEXT file change silently.
-        // Surface that loudly so a buggy deployment is never quiet about it.
+        // Review B1 (3): the announced content never landed — release the
+        // banked token so it cannot eat a later REAL external edit that
+        // happens to carry the same content.
+        if let Some(handle) = watch_handle.as_ref() {
+            handle.release_write(&toml);
+        }
         tracing::warn!(
             path = %model.boot_path().display(),
             error = %error,
-            "promote: the boot-file write failed AFTER announcing it to the watcher; \
-             the watcher will adopt (not apply) the next external file change"
+            "promote: the boot-file write failed; the announced expect token was \
+             released and file watching continues unaffected"
         );
         return Err(release_and(ControlError::Repository(format!(
             "writing the boot file {}: {error}",

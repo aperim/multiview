@@ -121,6 +121,14 @@ impl ConfigWatchHandle {
         tokens.push_back(content_hash(content));
     }
 
+    /// Release a banked expected-write token for exactly `content` (review
+    /// B1 (3)): a server-side writer whose announced write FAILED must call
+    /// this so the token cannot eat a later REAL external edit that happens
+    /// to carry the same content. Returns whether a token was released.
+    pub fn release_write(&self, content: &str) -> bool {
+        self.consume_expected_for(content)
+    }
+
     /// Stop the watcher (it exits on its next poll tick and marks the
     /// watch-status inactive).
     pub fn stop(&self) {
