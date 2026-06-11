@@ -94,7 +94,7 @@ async fn header_for(capability: LiveSourceCapability) -> Option<String> {
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(8));
     let (commands, _command_rx) = command_bus(8);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (addr, server) = control::bind_and_serve(
+    let (addr, server, _state) = control::bind_and_serve(
         "[::1]:0",
         &cfg,
         publisher,

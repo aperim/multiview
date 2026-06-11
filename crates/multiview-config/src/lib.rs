@@ -31,6 +31,7 @@
 
 pub mod audio;
 pub mod device;
+pub mod diff;
 pub mod discovery;
 pub mod error;
 pub mod failover;
@@ -60,6 +61,7 @@ pub use audio::{
     TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
+pub use diff::{ConfigDiff, SourceChange};
 pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
@@ -101,6 +103,19 @@ pub struct ControlConfig {
     /// default. Validated as a parseable [`std::net::SocketAddr`] by
     /// [`MultiviewConfig::validate`].
     pub listen: String,
+    /// The externally-reachable base URL Cast media URLs are derived from
+    /// (DEV-D2, ADR-M011), e.g. `"http://[2001:db8::7]:8080"` or — Cast
+    /// devices being effectively IPv4-legacy in practice (conventions §10
+    /// carve-out) — `"http://192.0.2.7:8080"`. Cast devices ignore
+    /// DHCP-provided DNS and resolve via hardcoded public resolvers, so this
+    /// must be an **IP literal** the device can reach (never a loopback,
+    /// never `.local`, never a bare LAN name) or a **publicly resolvable**
+    /// name. Scheme + non-emptiness are validated here; the full host rules
+    /// are enforced by the cast driver's base parser at startup. Absent ⇒ no
+    /// Cast delivery (cast sessions cannot derive a device-reachable URL and
+    /// are refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_media_base: Option<String>,
 }
 
 /// A complete Multiview configuration document (config-as-code).
@@ -468,6 +483,25 @@ impl MultiviewConfig {
                         control.listen
                     ))
                 })?;
+            if let Some(base) = &control.cast_media_base {
+                // Shape only: http/https + non-empty. The host rules (IP
+                // literal / publicly resolvable, never loopback or `.local`)
+                // are enforced by the cast driver's base parser at startup
+                // (DEV-D2, ADR-M011) — this layer has no URL model.
+                if base.is_empty() {
+                    return Err(ConfigError::Validation(
+                        "control.cast_media_base is empty (omit the field to disable Cast \
+                         delivery)"
+                            .to_owned(),
+                    ));
+                }
+                if !(base.starts_with("http://") || base.starts_with("https://")) {
+                    return Err(ConfigError::Validation(format!(
+                        "control.cast_media_base {base:?} must be an http:// or https:// base \
+                         URL (Cast receivers fetch HLS over HTTP)"
+                    )));
+                }
+            }
         }
         Ok(())
     }

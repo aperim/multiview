@@ -19,6 +19,8 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
+use crate::devices::cast::media::CastDelivery;
+use crate::devices::cast::store::CastSessionStore;
 use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
@@ -365,6 +367,21 @@ pub struct AppState {
     /// behind the `zowietek` feature. Control-plane-only, `Mutex`-guarded handle
     /// map — it can never back-pressure the engine (invariant #10).
     pub device_pollers: Arc<DevicePollerRegistry>,
+    /// The Cast **delivery map** (DEV-D2, ADR-M011): output id → the
+    /// device-reachable HLS rendition URL + segment format, built by the
+    /// binary from the validated `control.cast_media_base` × the DEV-D1
+    /// `/hls/{output-id}` mounts. [`None`] (the default — no
+    /// `cast_media_base` configured) means no device-reachable URL can be
+    /// derived and the cast-session routes refuse with an honest `409`.
+    /// Read-only control-plane state (invariant #10).
+    pub cast_delivery: Option<Arc<CastDelivery>>,
+    /// The runtime store of **ephemeral** cast sessions (DEV-D2, ADR-M011):
+    /// runtime-only records that never enter the devices store, so a config
+    /// export can never emit them. "Save as device" promotes one into a
+    /// normal `Device{driver: cast}` registry entry and drops the record.
+    /// Bounded by the number of live sessions; control-plane-only
+    /// (invariant #10).
+    pub cast_sessions: Arc<CastSessionStore>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -459,6 +476,11 @@ pub struct AppState {
     /// software-engine truth); the full-pipeline run upgrades to
     /// [`LiveSourceCapability::synthetic_and_network`].
     pub live_sources: LiveSourceCapability,
+    /// The config-file watch status slot (ADR-W020): the CLI's watcher records
+    /// applied/rejected loads + restart-pending sections here, and
+    /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
+    /// "not watched" state. Control-plane-only (invariant #10).
+    pub config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
     /// What the **running** engine can take live, per stored collection
     /// (ADR-W021): injected by the binary at wiring time so mutation routes
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
@@ -569,6 +591,8 @@ impl AppState {
             discovery_config: Arc::new(multiview_config::DiscoveryConfig::default()),
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
+            cast_delivery: None,
+            cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -599,6 +623,8 @@ impl AppState {
             // kinds live-apply. The binary upgrades this per run path
             // (`with_live_sources`) — the header never over-claims.
             live_sources: LiveSourceCapability::synthetic_only(),
+            // No watcher by default: the endpoint reports "not watched".
+            config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W021).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
@@ -612,6 +638,18 @@ impl AppState {
     #[must_use]
     pub const fn with_live_sources(mut self, live_sources: LiveSourceCapability) -> Self {
         self.live_sources = live_sources;
+        self
+    }
+
+    /// Install a shared config-file watch status slot (ADR-W020). The binary
+    /// shares one slot between the spawned watcher and this router; the
+    /// default reports "not watched".
+    #[must_use]
+    pub fn with_config_watch(
+        mut self,
+        config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
+    ) -> Self {
+        self.config_watch = config_watch;
         self
     }
 
@@ -858,6 +896,16 @@ impl AppState {
             .iter()
             .filter(|device| self.device_pollers.start(device, &wiring))
             .count()
+    }
+
+    /// Install the Cast delivery map (DEV-D2): the binary builds it from the
+    /// validated `control.cast_media_base` × the DEV-D1 HLS mounts; tests
+    /// inject a fixed map. Without one (the default), the cast-session routes
+    /// refuse with an honest `409` — no device-reachable URL can be derived.
+    #[must_use]
+    pub fn with_cast_delivery(mut self, delivery: Arc<CastDelivery>) -> Self {
+        self.cast_delivery = Some(delivery);
+        self
     }
 
     /// Replace the audio-routing singleton store (e.g. to share one seeded

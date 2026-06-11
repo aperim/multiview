@@ -92,6 +92,32 @@ impl DevicePollerFactory for NoPollerFactory {
     }
 }
 
+/// Composes several driver factories into one (DEV-D2): the registry holds a
+/// single factory, so a deployment with more than one live driver (`zowietek`
+/// **and** `cast`) installs a composite whose `spawn` asks each member in
+/// order and takes the **first** one that manages the device. Members decline
+/// by driver kind, so order only matters if two members claim the same driver
+/// — which no build does.
+pub struct CompositePollerFactory {
+    members: Vec<Arc<dyn DevicePollerFactory>>,
+}
+
+impl CompositePollerFactory {
+    /// Build a composite over `members`, asked in order.
+    #[must_use]
+    pub fn new(members: Vec<Arc<dyn DevicePollerFactory>>) -> Self {
+        Self { members }
+    }
+}
+
+impl DevicePollerFactory for CompositePollerFactory {
+    fn spawn(&self, device: &Device, wiring: &PollerWiring) -> Option<PollerHandle> {
+        self.members
+            .iter()
+            .find_map(|member| member.spawn(device, wiring))
+    }
+}
+
 /// The runtime registry of spawned poller actors, keyed by device id.
 ///
 /// Holds the [`DevicePollerFactory`] (how to spawn one) and the live
@@ -239,6 +265,34 @@ impl DevicePollerRegistry {
             // The join completes with a cancellation error — expected; what
             // matters is that the task is fully terminated when we return.
             let _ = task.await;
+        }
+    }
+
+    /// Stop the poller/session for `device_id` **gracefully** (DEV-D2): like
+    /// [`stop`](DevicePollerRegistry::stop) — tombstone first, then tear the
+    /// task down and await its termination — but instead of aborting
+    /// immediately, the actor gets a `grace` window to **exit voluntarily**
+    /// (the cast actor's [`PollerControl::StopCast`] teardown sends the
+    /// receiver `STOP` that actually clears the TV, then returns). An actor
+    /// that ignores the window is aborted when it elapses, so the call is
+    /// bounded: after it returns no task for this id is running, exactly the
+    /// `stop` post-condition. Dispatch the voluntary-exit command **before**
+    /// calling this (the route does), or the grace window just elapses.
+    pub async fn stop_graceful(&self, device_id: &str, grace: std::time::Duration) {
+        let handle = {
+            let mut guard = self.lock();
+            guard.tombstones.insert(device_id.to_owned());
+            guard.handles.remove(device_id)
+        };
+        if let Some(handle) = handle {
+            let mut task = handle.into_join_handle();
+            // Voluntary-exit join, bounded by the grace window. The join
+            // result is irrelevant (a clean return or a cancellation both mean
+            // "terminated"); what matters is that the task is gone on return.
+            if tokio::time::timeout(grace, &mut task).await.is_err() {
+                task.abort();
+                let _ = task.await;
+            }
         }
     }
 

@@ -123,6 +123,25 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ], optional = true }
 
+# The live CASTV2 wire layer for the `cast` managed-device driver: OFF by
+# default (`cast` / `devices-net`). The typed protocol payloads, the media-URL
+# rules, the session actor, and the registry wiring are ALWAYS compiled and
+# tested socket-free over the scripted channel seam; only the real TLS +
+# length-prefixed-protobuf framing needs these. The DEV-D2 spike rejected
+# `rust_cast` 0.21 on API fit (blocking reader with no settable read timeout;
+# its `thread_safe` mode serializes send/receive behind ONE mutex held through
+# a blocking `read_exact`, making the mandated 10 s/20 s/5 s heartbeat
+# unimplementable; library-code `unwrap`/`expect` panics) — see
+# `src/devices/cast/net.rs` for the verdict. `prost` (Apache-2.0, prost-derive
+# only — no protoc, no build step) carries the BSD-3-Clause Open Screen
+# `CastMessage` schema; `tokio-rustls` (rustls 0.23, aws-lc-rs — both already
+# in the lock via reqwest's rustls backend) carries the TLS channel with the
+# permissive device-certificate verifier ADR-M011 mandates. Because
+# `deny.toml` has `[graph] all-features = false`, these off-by-default deps
+# stay out of the scanned default graph (the `reqwest`/`ring` posture).
+prost = { version = "0.14", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = [
     "rt-multi-thread",
@@ -183,11 +202,18 @@ toml = "0.8"
 # (`ReqwestTransport`) needs this feature, so the default build stays
 # pure-Rust/socket-free and CI-green.
 "zowietek" = ["dep:reqwest"]
+# Off-by-default live CASTV2 wire layer for the `cast` managed-device driver
+# (DEV-D2, ADR-M011). The protocol payloads + media-URL rules + session actor
+# + registry wiring are ALWAYS compiled and tested socket-free over the
+# scripted channel seam; only the real TLS + length-prefixed-protobuf framing
+# (`TlsCastConnector`/`TlsCastChannel`) needs this feature, so the default
+# build pulls no protobuf/TLS dependency and stays CI-green.
+"cast" = ["dep:prost", "dep:tokio-rustls"]
 # The umbrella feature for managed-device network I/O (so a deployment can turn
 # on every device driver's live transport + the mDNS discovery browse with one
-# flag). Today: the `zowietek` live transport + `discovery`; future drivers
-# (cast, …) join here.
-"devices-net" = ["zowietek", "discovery"]
+# flag): the `zowietek` HTTP transport, the `cast` CASTV2 wire layer, and the
+# `discovery` mDNS browse.
+"devices-net" = ["zowietek", "cast", "discovery"]
 
 [lints]
 workspace = true

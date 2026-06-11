@@ -460,7 +460,7 @@ msgstr ""
 #~ msgid "Accessible editing path: planned (Cells form + Inspector)"
 #~ msgstr ""
 
-#: src/pages/SettingsPage.tsx:161
+#: src/pages/SettingsPage.tsx:263
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
@@ -568,7 +568,7 @@ msgid "Addresses are presented IPv6-first; IPv4 results are explicitly labelled 
 msgstr ""
 
 #: src/auth/LoginPage.tsx:89
-#: src/pages/SettingsPage.tsx:109
+#: src/pages/SettingsPage.tsx:209
 msgid "admin.xxxxxxxx-xxxx-…"
 msgstr ""
 
@@ -768,7 +768,7 @@ msgstr ""
 msgid "API & realtime"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:89
+#: src/pages/SettingsPage.tsx:189
 msgid "API access"
 msgstr ""
 
@@ -781,25 +781,25 @@ msgstr ""
 msgid "API key"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:103
+#: src/pages/SettingsPage.tsx:203
 msgid "API token"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:36
-#: src/pages/SettingsPage.tsx:126
+#: src/pages/SettingsPage.tsx:136
+#: src/pages/SettingsPage.tsx:226
 msgid "API token cleared"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:36
+#: src/pages/SettingsPage.tsx:136
 msgid "API token saved"
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:182
-#: src/pages/SettingsPage.tsx:55
+#: src/pages/SettingsPage.tsx:155
 msgid "Appearance"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:48
+#: src/pages/SettingsPage.tsx:148
 msgid "Appearance and language preferences."
 msgstr ""
 
@@ -1261,7 +1261,7 @@ msgstr ""
 msgid "Choose an input"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:58
+#: src/pages/SettingsPage.tsx:158
 msgid "Choose light, dark, or follow the system."
 msgstr ""
 
@@ -1285,7 +1285,7 @@ msgid "Clauses"
 msgstr ""
 
 #: src/devices/FromDevice.tsx:60
-#: src/pages/SettingsPage.tsx:129
+#: src/pages/SettingsPage.tsx:229
 msgid "Clear"
 msgstr ""
 
@@ -1416,12 +1416,16 @@ msgstr ""
 msgid "Config-as-code"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:138
+#: src/pages/SettingsPage.tsx:240
 msgid "Configuration export"
 msgstr ""
 
 #: src/resources/FormControls.tsx:379
 msgid "Configuration exported"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:60
+msgid "Configuration file"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:572
@@ -1608,6 +1612,10 @@ msgstr ""
 
 #: src/pages/AuditPage.tsx:96
 msgid "Could not load the audit log:"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:45
+msgid "Could not load the configuration file watch status."
 msgstr ""
 
 #: src/pages/DeviceDetailPage.tsx:729
@@ -2025,7 +2033,7 @@ msgstr ""
 msgid "Documentation"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:141
+#: src/pages/SettingsPage.tsx:243
 msgid "Download the current stores (sources, outputs, overlays, layouts, canvas) as multiview.toml. Stored UI edits take effect when Multiview restarts with this file; live actions (apply layout, swap, routing, salvos) act on the running engine immediately."
 msgstr ""
 
@@ -2378,6 +2386,10 @@ msgstr ""
 #: src/docs/registry.ts:109
 #: src/pages/docs/ComposePage.tsx:102
 msgid "Exposed ports and roadmap"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:63
+msgid "External edits to the boot configuration file hot-reload the parts that can apply live; an invalid file changes nothing and is reported here and on the health banner. Sections that cannot hot-apply stay listed until a restart."
 msgstr ""
 
 #: src/pages/OverlaysPage.tsx:52
@@ -2946,12 +2958,20 @@ msgstr ""
 
 #: src/components/LocaleSwitcher.tsx:35
 #: src/pages/AudioPage.tsx:422
-#: src/pages/SettingsPage.tsx:72
+#: src/pages/SettingsPage.tsx:172
 msgid "Language"
 msgstr ""
 
 #: src/pages/AudioPage.tsx:199
 msgid "Language (route {row})"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:98
+msgid "Last applied:"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:105
+msgid "Last rejected:"
 msgstr ""
 
 #: src/pages/DeviceDetailPage.tsx:486
@@ -3202,10 +3222,11 @@ msgid "Loading tally state…"
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:67
+#: src/pages/SettingsPage.tsx:77
 msgid "Loading…"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:80
+#: src/pages/SettingsPage.tsx:180
 msgid "Locale"
 msgstr ""
 
@@ -3843,6 +3864,10 @@ msgstr ""
 msgid "Not synchronized: cast pipelines buffer for multiple seconds under their own control. Cast devices are therefore never offered as sync-group members."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:87
+msgid "Not watched"
+msgstr ""
+
 #: src/pages/OutputsPage.tsx:94
 msgid "Not yet runnable in this build"
 msgstr ""
@@ -3864,7 +3889,7 @@ msgstr ""
 msgid "Notice"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:158
+#: src/pages/SettingsPage.tsx:260
 msgid "Notifications"
 msgstr ""
 
@@ -4077,7 +4102,7 @@ msgstr ""
 msgid "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:92
+#: src/pages/SettingsPage.tsx:192
 msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
 msgstr ""
 
@@ -4379,7 +4404,7 @@ msgstr ""
 msgid "Replace the current cells?"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:39
+#: src/pages/SettingsPage.tsx:139
 msgid "Requests will be unauthenticated."
 msgstr ""
 
@@ -4416,6 +4441,10 @@ msgstr ""
 #: src/docs/registry.ts:187
 #: src/pages/docs/ApiPage.tsx:58
 msgid "REST conventions"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:112
+msgid "Restart pending:"
 msgstr ""
 
 #. placeholder {0}: accepted.note
@@ -4539,7 +4568,7 @@ msgid "Sample rate (Hz)"
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:398
-#: src/pages/SettingsPage.tsx:118
+#: src/pages/SettingsPage.tsx:218
 #: src/resources/CrudPage.tsx:384
 msgid "Save"
 msgstr ""
@@ -4669,7 +4698,7 @@ msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr ""
 
 #: src/app/navigation.tsx:53
-#: src/pages/SettingsPage.tsx:47
+#: src/pages/SettingsPage.tsx:147
 msgid "Settings"
 msgstr ""
 
@@ -4682,7 +4711,7 @@ msgstr ""
 msgid "Severity (X.733)"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:174
+#: src/pages/SettingsPage.tsx:276
 msgid "Show a test notification"
 msgstr ""
 
@@ -4887,7 +4916,7 @@ msgstr ""
 msgid "Supports ZowieBox-class encoder/decoder appliances: probing, encoder/decoder mode convergence, stream enumeration for source binding, decode-slot binding for outputs, reboot, and temperature. Sync is bounded-skew only (see the sync guide)."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:75
+#: src/pages/SettingsPage.tsx:175
 msgid "Switch the interface language and text direction."
 msgstr ""
 
@@ -4990,7 +5019,7 @@ msgstr ""
 msgid "Temperature"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:169
+#: src/pages/SettingsPage.tsx:271
 msgid "Test notification"
 msgstr ""
 
@@ -5315,7 +5344,7 @@ msgstr ""
 msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:40
+#: src/pages/SettingsPage.tsx:140
 msgid "The UI will authenticate with this token."
 msgstr ""
 
@@ -5332,6 +5361,10 @@ msgstr ""
 msgid "The vendor's stable handle (UUID / PCI bus id), never the index."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:75
+msgid "The watch status is unavailable."
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:97
 msgid "The working color space. <0>profile</0> names a preset (e.g. <1>sdr-bt709-limited</1>); <2>custom</2> lets you set primaries, transfer, matrix, and range explicitly."
 msgstr ""
@@ -5344,7 +5377,7 @@ msgstr ""
 msgid "The zone must fit inside the frame: x, y at least 0, width and height above 0, and x+width / y+height at most 1."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:63
+#: src/pages/SettingsPage.tsx:163
 msgid "Theme"
 msgstr ""
 
@@ -5480,7 +5513,7 @@ msgstr ""
 msgid "This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:170
+#: src/pages/SettingsPage.tsx:272
 msgid "This toast is announced to assistive technology."
 msgstr ""
 
@@ -5710,6 +5743,10 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:128
 msgid "Watch / live / channel URL"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:85
+msgid "Watching"
 msgstr ""
 
 #: src/pages/docs/SyncHelpPage.tsx:19
