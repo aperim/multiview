@@ -6,18 +6,24 @@
 //! The **binary** therefore injects, at wiring time, what the *running* engine
 //! can actually take live, and the routes consult it before promising `live`.
 //!
-//! Today the capability covers the overlays collection; source/output
-//! collections plug into the same struct as their live paths land
-//! (`#[non_exhaustive]` + builder, so widening it is non-breaking).
+//! Today the capability covers the overlays collection and the sources
+//! collection ([`LiveSourceCapability`], ADR-W018); the output collection
+//! plugs into the same struct as its live path lands (`#[non_exhaustive]` +
+//! builder, so widening it is non-breaking).
 
 use std::fmt;
 use std::sync::Arc;
 
+use crate::state::LiveSourceCapability;
+
 /// What the **running** engine can take live, per stored collection.
 ///
-/// The default carries no capability: every mutation honestly declares
-/// `restart` (the store-only / test / software-path posture). The binary
-/// widens it with the builder methods where the run path has a live seam.
+/// The default carries the conservative truth: no overlay capability (every
+/// overlay mutation honestly declares `restart` — the store-only / test /
+/// software-path posture) and the synthetic-only source capability (the
+/// software-engine truth, [`LiveSourceCapability::synthetic_only`]). The
+/// binary widens it with the builder methods where the run path has a live
+/// seam.
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct LiveApplyCaps {
@@ -25,6 +31,12 @@ pub struct LiveApplyCaps {
     /// this run path: every overlay mutation is `restart` and no overlay
     /// command is enqueued.
     pub overlays: Option<OverlayLiveCapability>,
+    /// Which source kinds the running engine can apply live (ADR-W018):
+    /// synthetic kinds on both run paths, network/file kinds only when a real
+    /// ingest spawner backs the claim. Defaults to
+    /// [`LiveSourceCapability::synthetic_only`] — the header never
+    /// over-claims.
+    pub sources: LiveSourceCapability,
 }
 
 impl LiveApplyCaps {
@@ -34,12 +46,23 @@ impl LiveApplyCaps {
         self.overlays = Some(capability);
         self
     }
+
+    /// Declare which source kinds the running engine can apply live
+    /// (ADR-W018, builder-style): the binary derives this from the seams it
+    /// actually wired, so the `X-Multiview-Apply` header answers from runtime
+    /// truth, never from wishful classification.
+    #[must_use]
+    pub fn with_sources(mut self, sources: LiveSourceCapability) -> Self {
+        self.sources = sources;
+        self
+    }
 }
 
 impl fmt::Debug for LiveApplyCaps {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveApplyCaps")
             .field("overlays", &self.overlays.as_ref().map(|_| "live"))
+            .field("sources", &self.sources)
             .finish()
     }
 }
@@ -101,6 +124,18 @@ mod tests {
     fn default_caps_carry_no_overlay_capability() {
         let caps = LiveApplyCaps::default();
         assert!(caps.overlays.is_none(), "default = nothing live (honest)");
+        assert_eq!(
+            caps.sources,
+            LiveSourceCapability::synthetic_only(),
+            "default sources = synthetic-only (the software-engine truth; never over-claims network)"
+        );
+    }
+
+    #[test]
+    fn with_sources_widens_the_source_capability() {
+        let caps =
+            LiveApplyCaps::default().with_sources(LiveSourceCapability::synthetic_and_network());
+        assert_eq!(caps.sources, LiveSourceCapability::synthetic_and_network());
     }
 
     #[test]

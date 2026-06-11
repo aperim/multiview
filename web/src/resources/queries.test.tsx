@@ -63,7 +63,10 @@ const server = setupServer(
     const body = lastBody as { name: string; body: Record<string, unknown> };
     const created: Stored = { id, name: body.name, body: body.body };
     sources = [...sources, created];
-    return HttpResponse.json(created, { status: 201, headers: { ETag: '"src-v2"' } });
+    return HttpResponse.json(created, {
+      status: 201,
+      headers: { ETag: '"src-v2"', 'X-Multiview-Apply': 'live' },
+    });
   }),
   http.put(`${BASE}/api/v1/sources/:id`, async ({ request, params }) => {
     lastMethod = 'PUT';
@@ -75,7 +78,9 @@ const server = setupServer(
     const body = lastBody as { name: string; body: Record<string, unknown> };
     const updated: Stored = { id, name: body.name, body: body.body };
     sources = sources.map((s) => (s.id === id ? updated : s));
-    return HttpResponse.json(updated, { headers: { ETag: '"src-v3"' } });
+    return HttpResponse.json(updated, {
+      headers: { ETag: '"src-v3"', 'X-Multiview-Apply': 'restart' },
+    });
   }),
   http.delete(`${BASE}/api/v1/sources/:id`, ({ request, params }) => {
     lastMethod = 'DELETE';
@@ -275,7 +280,7 @@ describe('useSaveResource', () => {
     });
     expect(lastMethod).toBe('POST');
     expect(lastPath).toBe('/api/v1/sources/cam-1');
-    expect(saved.id).toBe('cam-1');
+    expect(saved.record.id).toBe('cam-1');
     expect(lastBody).toEqual({ name: 'Cam 1', body: { kind: 'rtsp', url: 'rtsp://h/1' } });
   });
 
@@ -356,6 +361,51 @@ describe('useSaveResource', () => {
       input: { name: 'Cam 2', body: { kind: 'test' } },
     });
     expect(lastAuth).toBe('Bearer secret-token');
+  });
+
+  it('surfaces the X-Multiview-Apply semantics of the save response', async () => {
+    // The header is the per-request truth (ADR-W018): the engine declares how
+    // THIS mutation applied. The hook must surface it so the UI can tell the
+    // operator honestly (live vs config export + restart).
+    const qc = newClient();
+    const { result } = renderHook(() => useSaveResource('sources', { baseUrl: BASE }), {
+      wrapper: wrapper(qc),
+    });
+    const created = await result.current.mutateAsync({
+      id: 'cam-9',
+      create: true,
+      input: { name: 'Cam 9', body: { kind: 'rtsp', url: 'rtsp://h/9' } },
+    });
+    expect(created.apply).toBe('live');
+
+    const updated = await result.current.mutateAsync({
+      id: 'cam-9',
+      create: false,
+      input: { name: 'Cam 9', body: { kind: 'ndi', name: 'CAM 9' } },
+    });
+    expect(updated.apply).toBe('restart');
+  });
+
+  it('yields no apply semantics when the response carries none', async () => {
+    server.use(
+      http.post(`${BASE}/api/v1/sources/:id`, async ({ request, params }) => {
+        const body = (await request.json()) as { name: string; body: Record<string, unknown> };
+        return HttpResponse.json(
+          { id: String(params.id), name: body.name, body: body.body },
+          { status: 201 },
+        );
+      }),
+    );
+    const qc = newClient();
+    const { result } = renderHook(() => useSaveResource('sources', { baseUrl: BASE }), {
+      wrapper: wrapper(qc),
+    });
+    const saved = await result.current.mutateAsync({
+      id: 'cam-8',
+      create: true,
+      input: { name: 'Cam 8', body: { kind: 'test' } },
+    });
+    expect(saved.apply).toBeUndefined();
   });
 
   it('surfaces a create conflict as an ApiError', async () => {

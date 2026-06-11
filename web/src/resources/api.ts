@@ -128,12 +128,30 @@ function itemUrl(kind: ResourceKind, id: string, options: ResourceRequestOptions
   return `${collectionUrl(kind, options)}/${encodeURIComponent(id)}`;
 }
 
+/**
+ * How a stored mutation took effect (the `X-Multiview-Apply` response header,
+ * ADR-W018): `live` = the running engine applied it at a frame boundary;
+ * `restart` = the stored document takes effect via config export + restart.
+ */
+export type ApplySemantics = 'live' | 'restart';
+
+/** Parse the `X-Multiview-Apply` header of a response, if present and valid. */
+function applySemanticsOf(response: Response): ApplySemantics | undefined {
+  const value = response.headers.get('x-multiview-apply');
+  return value === 'live' || value === 'restart' ? value : undefined;
+}
+
 /** A single record plus the ETag the server stamped it with, when present. */
 export interface ResourceWithEtag {
   /** The stored record. */
   readonly record: ResourceRecord;
   /** The ETag from the response, when one was carried. */
   readonly etag: string | undefined;
+  /**
+   * The apply semantics the server declared for THIS mutation
+   * (`X-Multiview-Apply`, ADR-W018), when carried. Reads (`GET`) carry none.
+   */
+  readonly apply: ApplySemantics | undefined;
 }
 
 /** List a resource collection (`GET /api/v1/{kind}`), id-sorted by the server. */
@@ -173,7 +191,7 @@ export async function getResource(
     throw new ResourceApiError('The server returned an unexpected resource body.');
   }
   const etag = response.headers.get('ETag');
-  return { record: body, etag: etag ?? undefined };
+  return { record: body, etag: etag ?? undefined, apply: undefined };
 }
 
 /**
@@ -200,7 +218,7 @@ export async function writeResource(
     throw new ResourceApiError('The server returned an unexpected resource body.');
   }
   const etag = response.headers.get('ETag');
-  return { record: body, etag: etag ?? undefined };
+  return { record: body, etag: etag ?? undefined, apply: applySemanticsOf(response) };
 }
 
 /** Delete a resource (`DELETE /api/v1/{kind}/{id}`), sending `If-Match` when known. */
