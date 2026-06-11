@@ -1299,9 +1299,12 @@ impl Event {
     /// map that stays valid when stale), while the device lifecycle events on
     /// the same topic stay lossless in the ring. The existing conflated lanes
     /// (`audio.meter`, `system.metrics`) answer `true` here too, so this
-    /// predicate is the single per-event source of truth for conflation. No
-    /// production consumer consults it yet: the pump's Devices handling lands
-    /// with the producers in DEV-A3.
+    /// predicate is the single per-event source of truth for conflation. The
+    /// control session pump consults it in production
+    /// (`multiview-control/src/realtime.rs`: ring exclusion is
+    /// `topic.is_high_rate() || event.is_conflated()`), and the
+    /// `timing.status` producer (`multiview-cli/src/timing_status.rs`)
+    /// publishes through that rule at ~1 Hz.
     #[must_use]
     pub const fn is_conflated(&self) -> bool {
         matches!(

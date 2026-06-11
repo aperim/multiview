@@ -112,6 +112,10 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
           2026-07-01T09:00:00.
         </Trans>
       );
+    case 'members-required':
+      return <Trans>Add at least one member device to the group.</Trans>;
+    case 'duplicate-member':
+      return <Trans>This device is already a member of the group.</Trans>;
   }
 }
 

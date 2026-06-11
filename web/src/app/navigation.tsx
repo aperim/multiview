@@ -5,6 +5,7 @@ import { Trans } from "@lingui/react/macro";
 import {
   Activity,
   BookOpen,
+  HardDrive,
   LayoutDashboard,
   LayoutGrid,
   Radio,
@@ -39,6 +40,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { path: "/outputs", label: <Trans>Outputs</Trans>, Icon: Send },
   { path: "/overlays", label: <Trans>Overlays</Trans>, Icon: Layers },
   { path: "/audio", label: <Trans>Audio</Trans>, Icon: Volume2 },
+  // Devices sits between Outputs and Monitoring (managed-devices.md §9).
+  { path: "/devices", label: <Trans>Devices</Trans>, Icon: HardDrive },
   { path: "/monitoring", label: <Trans>Monitoring</Trans>, Icon: MonitorPlay },
   { path: "/tally", label: <Trans>Tally</Trans>, Icon: CircleDot },
   { path: "/salvos", label: <Trans>Salvos</Trans>, Icon: Zap },

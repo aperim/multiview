@@ -1039,6 +1039,16 @@ pub struct Pipeline {
     /// (invariant #1). Only consumed under `overlay` (the bake renders it).
     #[cfg(feature = "overlay")]
     watermark_signal: Option<crate::licence::WatermarkSignal>,
+    /// The shared outbound presentation epoch (DEV-C1 / ADR-M010): written at
+    /// ~1 Hz by the timing-status task, read by the HLS rolling playlist at
+    /// each segment close to stamp `EXT-X-PROGRAM-DATE-TIME` from the same
+    /// map the control WS publishes. Cloned into each HLS sink at build time.
+    epoch: multiview_output::SharedEpoch,
+    /// The run's epoch **anchor** slot (DEV-C1): `drive_streaming` stores the
+    /// tick-0 seed + the run's monotonic source here when the program clock
+    /// seeds; the timing-status task binds to it lazily (lock-free load —
+    /// publishing/reading can never block the engine, inv #1/#10).
+    epoch_anchor: crate::timing_status::EpochAnchorSlot,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -1277,7 +1287,11 @@ impl Pipeline {
             cuda_ordinal: None,
         };
 
-        let built = build_outputs(&config.outputs)?;
+        // The shared outbound presentation epoch (DEV-C1 / ADR-M010): one cell
+        // per pipeline, written by the timing-status task and read by every
+        // HLS rolling playlist (PDT) — one anchor, every surface agrees.
+        let epoch = multiview_output::SharedEpoch::new();
+        let built = build_outputs(&config.outputs, &epoch)?;
         #[cfg(feature = "display-kms")]
         let has_display = !built.display.is_empty();
         #[cfg(not(feature = "display-kms"))]
@@ -1378,6 +1392,8 @@ impl Pipeline {
             watermark_signal: None,
             #[cfg(feature = "overlay")]
             overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
+            epoch,
+            epoch_anchor: crate::timing_status::anchor_slot(),
         })
     }
 
@@ -1634,6 +1650,24 @@ impl Pipeline {
     #[must_use]
     pub fn preview_stores(&self) -> HashMapStores {
         self.stores.clone()
+    }
+
+    /// DEV-C1 (ADR-M010): the shared outbound presentation-epoch cell this
+    /// pipeline's HLS sinks stamp `EXT-X-PROGRAM-DATE-TIME` from. The
+    /// timing-status task writes it (~1 Hz); reading/writing is a tiny
+    /// lock-guarded `Copy` access on off-hot-path threads only.
+    #[must_use]
+    pub fn shared_epoch(&self) -> multiview_output::SharedEpoch {
+        self.epoch.clone()
+    }
+
+    /// DEV-C1 (ADR-M010): the run's epoch **anchor** slot. `drive_streaming`
+    /// publishes the tick-0 seed + the run's monotonic source into it when the
+    /// program clock seeds; the timing-status task binds to it lazily with a
+    /// lock-free load (inv #1/#10 — neither side can block the engine).
+    #[must_use]
+    pub fn epoch_anchor_slot(&self) -> crate::timing_status::EpochAnchorSlot {
+        Arc::clone(&self.epoch_anchor)
     }
 
     /// RT-10b: the live subtitle re-point handle for the running pipeline, or
@@ -2079,12 +2113,25 @@ impl Pipeline {
         // caller's `stop` (Arc-backed) as its own handle, so the existing Ctrl-C /
         // control-plane stop still ends the run unchanged. A spec/cadence mismatch
         // is a build-assembly bug, surfaced as a typed error (never a panic).
+        // The timing-status task (DEV-C1 / ADR-M010) needs the run's monotonic
+        // source to bracket its wall reads on the SAME timeline tick 0 is
+        // seeded on; clone the handle before the program takes ownership.
+        let ts_for_anchor = Arc::clone(&ts);
         let mut program =
             MultiviewProgram::new(&self.program_spec, clock, drive, ts, pacer, stop.clone())
                 .map_err(|e| PipelineError::Program {
                     program: self.program_spec.id.clone(),
                     reason: e.to_string(),
                 })?;
+        // Publish the run's epoch anchor (tick-0 seed + monotonic source) into
+        // the shared slot — a single lock-free store the off-hot-path
+        // timing-status task reads to derive the outbound presentation epoch.
+        // Publishing a value can never pace the clock (inv #1/#10).
+        self.epoch_anchor
+            .store(Some(Arc::new(multiview_engine::epoch::EpochAnchor::new(
+                ts_for_anchor,
+                program.seed_nanos(),
+            ))));
 
         // The hot-loop drop counter (live drop-on-overload) and the queue
         // high-watermark probe. Both are wait-free atomics shared with the
@@ -4830,7 +4877,10 @@ fn start_display_audio(
 /// proprietary runtime-loaded SDK), so they are honestly skipped with a log
 /// line rather than pretended-runnable — a config mixing one with a supported
 /// output still produces that supported output.
-fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
+fn build_outputs(
+    outputs: &[Output],
+    epoch: &multiview_output::SharedEpoch,
+) -> Result<BuiltOutputs, PipelineError> {
     // A display output in a non-display-kms build is a configuration the
     // binary cannot honour: fail the build clearly, never skip (DEV-B1).
     crate::outputs::ensure_display_outputs_supported(outputs).map_err(|reason| {
@@ -4865,11 +4915,15 @@ fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
                 // and disk bounded, instead of 404ing until a finalize that never
                 // comes. A 6-segment window is the rolling DVR depth.
                 runnable.push(RunnableOutput::Hls {
+                    // The sink shares the pipeline's epoch cell so each closed
+                    // segment is PDT-stamped from the SAME outbound epoch the
+                    // control WS publishes (DEV-C1 / ADR-M010).
                     sink: PacketMuxSink::segment_live(
                         dir,
                         prefix,
                         playlist_path.clone(),
                         HLS_LIVE_WINDOW,
+                        epoch.clone(),
                     ),
                     playlist_path,
                 });
