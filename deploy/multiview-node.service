@@ -1,0 +1,53 @@
+# Multiview display node (DEV-B5 / ADR-0045) — bare-metal systemd unit.
+#
+# The blessed deployment: a minimal Debian (or Raspberry Pi OS Lite) box with
+# NO X11/Wayland/display manager. The node opens /dev/dri/cardN when no other
+# KMS client exists and becomes DRM master implicitly — no VT, no logind.
+# fbcon is an in-kernel client and does not hold master: if the node crashes,
+# the kernel's fbdev-client restore brings the console back by itself (no
+# stuck black screen) and Restart= relights the head seconds later.
+#
+# Install (see deploy/display-node.md for the full walkthrough):
+#   install -m 0644 multiview-node.service /etc/systemd/system/
+#   install -m 0640 -o root -g multiview your-node.toml /etc/multiview/node.toml
+#   systemctl mask getty@tty1            # nothing may fight for the console
+#   systemctl daemon-reload && systemctl enable --now multiview-node
+
+[Unit]
+Description=Multiview display node (HDMI gateway)
+Documentation=https://github.com/aperim/multiview/blob/main/deploy/display-node.md
+# The first GPU's DRM device must exist before (and for as long as) the node
+# runs; adjust card0 for multi-GPU boxes.
+After=dev-dri-card0.device sound.target network-online.target
+BindsTo=dev-dri-card0.device
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/multiview node /etc/multiview/node.toml
+# Unprivileged: `video` opens /dev/dri (implicit DRM master on first open),
+# `render` opens /dev/dri/renderD* (hardware decode), `audio` opens /dev/snd
+# (the ELD-gated ALSA HDMI sink). Kernel hotplug uevents need no privilege.
+User=multiview
+SupplementaryGroups=video render audio
+Restart=always
+RestartSec=2
+# READY=1 is sent at the FIRST output frame (probe → modeset → clock running),
+# so this bounds the whole bring-up, not just the exec.
+TimeoutStartSec=30
+# The node pings WATCHDOG=1 at half this budget ONLY while the output clock
+# advances; a stalled clock withholds the ping and systemd restarts the node
+# (invariant #1, enforced by the supervisor).
+WatchdogSec=30
+# STOPPING=1 is sent on SIGTERM; the engine finishes the current frame.
+TimeoutStopSec=15
+
+# Hardening that does not fight DRM/ALSA device access.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

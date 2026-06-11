@@ -92,6 +92,13 @@ tempfile = "3"
 name = "pipeline_ingest"
 required-features = ["ffmpeg"]
 
+# The node pipeline-wiring test (DEV-B5 / ADR-0045) builds the lowered node
+# document through the standard pipeline (plans only — no hardware) and
+# threads the hotplug polling cadence; it needs the full node feature pair.
+[[test]]
+name = "node_pipeline"
+required-features = ["ffmpeg", "display-kms"]
+
 # The streaming-encode behavioural tests (ADR-0025) drive the bounded
 # bake→encode→fan-out path with injected fake sinks; they need the `ffmpeg`
 # feature (the streaming machinery lives in the `pipeline` module) but no
