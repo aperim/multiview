@@ -337,3 +337,54 @@ async fn starting_a_duplicate_program_id_is_rejected() {
 
     set.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_is_bounded_even_when_a_program_cannot_observe_stop() {
+    // REGRESSION (PR #95 hang): teardown must never block forever on a program
+    // whose run loop cannot reach the top-of-loop stop check.
+    //
+    // We construct exactly the wedge that hung the duplicate-id test on a loaded
+    // runner: a `RealtimePacer` over a `ManualTimeSource` that is NEVER advanced.
+    // Once the program's clock has paced tick 0 (deadline 0, due immediately) it
+    // parks inside the pacer's real `tokio::time::sleep` waiting for tick 1's
+    // deadline — a wall-clock instant the frozen manual source never reaches — so
+    // the loop never returns to its top-of-loop `stop` check. `stop()`/`shutdown()`
+    // raise the signal, but the wedged loop can never see it.
+    //
+    // The engine's teardown posture (`SINK_WEDGE_GRACE` / ENG-1) is "bounded join,
+    // then detach a wedged peer — never a join that cannot return". This asserts
+    // `ProgramSet::shutdown` honours that: it must complete in a bounded time, not
+    // hang. A bounded `tokio::time::timeout` around `shutdown` is the loud-failure
+    // tripwire (the bug manifested as a >35-minute hang to the CI job timeout).
+    //
+    // To make the wedge deterministic (not a start-vs-stop race) we first let the
+    // program demonstrably pace at least one tick, so it is parked in the pacer's
+    // real sleep BEFORE we tear down.
+    let time: Arc<dyn TimeSource> = Arc::new(ManualTimeSource::new());
+    let spec = spec_with_id("wedged-clock", 25, 1);
+    let p = program_at(&spec, Rational::FPS_25, time.clone());
+    let ticks = p.ticks_counter();
+
+    let mut set = ProgramSet::new(time.clone());
+    set.start(p).unwrap();
+
+    // Wait until the program has emitted tick 0 (deadline 0) and is therefore
+    // parked in the pacer waiting for tick 1's deadline — i.e. it is wedged and
+    // can no longer observe a stop. Bounded so the test itself never hangs.
+    let started = Instant::now();
+    while ticks.load(Ordering::Acquire) < 1 {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "program never paced its first tick"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // The fix: shutdown must be bounded. Give it a generous multiple of the
+    // teardown grace; if it has not returned by then it is the regression.
+    tokio::time::timeout(Duration::from_secs(10), set.shutdown())
+        .await
+        .expect("ProgramSet::shutdown must be bounded, not block forever on a program that cannot observe stop");
+
+    assert!(set.is_empty(), "shutdown must drain the set");
+}
