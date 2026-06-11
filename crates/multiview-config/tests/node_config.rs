@@ -490,3 +490,16 @@ fn the_shipped_display_node_example_loads_validates_and_lowers() {
         .expect("the shipped example lowers");
     lowered.validate().expect("the lowered example validates");
 }
+
+#[test]
+fn node_document_sniffing_keys_on_the_top_level_ingest_table() {
+    use multiview_config::node::is_node_document;
+    assert!(is_node_document(MINIMAL));
+    assert!(is_node_document(FULL));
+    // An engine document has no top-level [ingest].
+    assert!(!is_node_document(
+        "schema_version = 1\n[canvas]\nwidth = 1\nheight = 1\nfps = \"60/1\"\n"
+    ));
+    // Malformed TOML is not a node document (the engine parse path reports it).
+    assert!(!is_node_document("this is { not toml"));
+}

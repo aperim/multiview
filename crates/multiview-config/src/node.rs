@@ -260,6 +260,19 @@ const fn default_schema_version() -> u32 {
     1
 }
 
+/// Whether `text` is shaped like a **node** document rather than an engine
+/// document: a parseable TOML body with a top-level `ingest` table (the node
+/// schema's one mandatory section; engine documents have none). Malformed
+/// TOML returns `false` — the caller then reports it through the engine
+/// parse path.
+#[must_use]
+pub fn is_node_document(text: &str) -> bool {
+    toml::from_str::<toml::Value>(text)
+        .ok()
+        .and_then(|value| value.get("ingest").cloned())
+        .is_some()
+}
+
 impl NodeConfig {
     /// Parse a node configuration document from TOML text.
     ///
