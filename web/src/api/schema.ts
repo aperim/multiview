@@ -2352,10 +2352,19 @@ export interface components {
             /** @description The sections that could not hot-revert and re-converge on restart. */
             restart_only: string[];
             /**
-             * @description Whether anything was applied (`false` ⇒ Running already equalled
-             *     Loaded and nothing was enqueued).
+             * @description Whether the revert FULLY applied (`false` ⇒ either Running already
+             *     equalled Loaded and nothing was enqueued, or — when
+             *     [`shed`](Self::shed) is non-zero — the revert applied only partially).
              */
             reverted: boolean;
+            /**
+             * Format: int32
+             * @description How many engine commands were shed on a full command bus (review M4):
+             *     `0` ⇒ every command landed; non-zero ⇒ the stores were reverted but
+             *     the engine may not reflect every change — retry the revert once the
+             *     bus drains (the `config-file-apply-incomplete` warning is raised).
+             */
+            shed: number;
             /**
              * @description Per-section applied/warned summary parts from the one apply machinery
              *     (e.g. `sources: in_a changed`).
@@ -3040,7 +3049,10 @@ export interface components {
             applied_count: number;
             last_applied?: null | components["schemas"]["WatchStamp"];
             last_rejected?: null | components["schemas"]["WatchStamp"];
-            /** @description The watched config file path (absent when not watching). */
+            /**
+             * @description The watched config file path (absent when no watcher was ever
+             *     started; kept after a stop so the status names what *was* watched).
+             */
             path?: string | null;
             /**
              * @description Section names changed on disk that only apply on restart (sorted,

@@ -7742,6 +7742,7 @@
           "operation_id",
           "replayed",
           "reverted",
+          "shed",
           "summary",
           "restart_only"
         ],
@@ -7763,7 +7764,13 @@
           },
           "reverted": {
             "type": "boolean",
-            "description": "Whether anything was applied (`false` ⇒ Running already equalled\nLoaded and nothing was enqueued)."
+            "description": "Whether the revert FULLY applied (`false` ⇒ either Running already\nequalled Loaded and nothing was enqueued, or — when\n[`shed`](Self::shed) is non-zero — the revert applied only partially)."
+          },
+          "shed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many engine commands were shed on a full command bus (review M4):\n`0` ⇒ every command landed; non-zero ⇒ the stores were reverted but\nthe engine may not reflect every change — retry the revert once the\nbus drains (the `config-file-apply-incomplete` warning is raised).",
+            "minimum": 0
           },
           "summary": {
             "type": "array",
@@ -9414,7 +9421,7 @@
               "string",
               "null"
             ],
-            "description": "The watched config file path (absent when not watching)."
+            "description": "The watched config file path (absent when no watcher was ever\nstarted; kept after a stop so the status names what *was* watched)."
           },
           "restart_pending": {
             "type": "array",

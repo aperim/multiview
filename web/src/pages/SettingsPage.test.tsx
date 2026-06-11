@@ -150,6 +150,7 @@ describe("SettingsPage boot-configuration card (ADR-W022)", () => {
             operation_id: "op-1",
             replayed: false,
             reverted: true,
+            shed: 0,
             summary: ["sources: in_a changed"],
             restart_only: [],
           },
@@ -172,6 +173,40 @@ describe("SettingsPage boot-configuration card (ADR-W022)", () => {
       await screen.findByText(/reverted to the start configuration/i),
     ).toBeInTheDocument();
     expect(reverted).toBe(true);
+  });
+
+  it("a partial (shed) revert is reported honestly, never as reverted", async () => {
+    // ADR-W022 review M4: a 202 with shed > 0 means the engine did NOT get
+    // every command — the card must say "partially", not claim the revert.
+    server.use(
+      http.post("*/api/v1/config/revert-to-start", () =>
+        HttpResponse.json(
+          {
+            operation_id: "op-2",
+            replayed: false,
+            reverted: false,
+            shed: 2,
+            summary: ["sources: in_a changed"],
+            restart_only: [],
+          },
+          { status: 202 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(
+      await screen.findByRole("button", { name: /revert to start/i }),
+    );
+    await screen.findByRole("dialog");
+    await user.click(screen.getByRole("button", { name: /^revert$/i }));
+    expect(
+      await screen.findByText(/applied only partially/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/reverted to the start configuration/i),
+    ).not.toBeInTheDocument();
   });
 
   it("promote-to-boot explains the file rewrite and posts after confirm", async () => {

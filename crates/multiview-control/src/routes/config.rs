@@ -536,9 +536,15 @@ pub struct RevertToStartBody {
     /// reservation (nothing was re-applied; the other fields are this
     /// replay's empty defaults, not a record of the original outcome).
     pub replayed: bool,
-    /// Whether anything was applied (`false` ⇒ Running already equalled
-    /// Loaded and nothing was enqueued).
+    /// Whether the revert FULLY applied (`false` ⇒ either Running already
+    /// equalled Loaded and nothing was enqueued, or — when
+    /// [`shed`](Self::shed) is non-zero — the revert applied only partially).
     pub reverted: bool,
+    /// How many engine commands were shed on a full command bus (review M4):
+    /// `0` ⇒ every command landed; non-zero ⇒ the stores were reverted but
+    /// the engine may not reflect every change — retry the revert once the
+    /// bus drains (the `config-file-apply-incomplete` warning is raised).
+    pub shed: u32,
     /// Per-section applied/warned summary parts from the one apply machinery
     /// (e.g. `sources: in_a changed`).
     pub summary: Vec<String>,
@@ -596,6 +602,7 @@ pub(crate) async fn revert_to_start(
                     operation_id: op.to_string(),
                     replayed: true,
                     reverted: false,
+                    shed: 0,
                     summary: Vec::new(),
                     restart_only: Vec::new(),
                 }),
@@ -620,6 +627,7 @@ pub(crate) async fn revert_to_start(
                 operation_id: op.to_string(),
                 replayed: false,
                 reverted: false,
+                shed: 0,
                 summary: Vec::new(),
                 restart_only: Vec::new(),
             }),
@@ -629,6 +637,31 @@ pub(crate) async fn revert_to_start(
     let outcome =
         crate::config_watch::apply_document_diff(&state, &principal.key_id, &diff, model.loaded());
     let restart_only: Vec<String> = outcome.restart.iter().cloned().collect();
+    // Review M4: never claim a full revert while engine command(s) were shed
+    // on a full bus — the stores were reverted but the engine may not reflect
+    // every change, and (unlike the file watcher) nothing retries a revert.
+    // Surface it on the same `config-file-apply-incomplete` warning path the
+    // watcher uses, with revert-specific remediation.
+    if outcome.shed > 0 {
+        state.engine.publish_event(
+            multiview_events::Event::HealthWarningRaised(multiview_events::HealthWarning {
+                code: multiview_events::WarningCode::ConfigFileApplyIncomplete,
+                severity: multiview_events::WarningSeverity::Warning,
+                subsystem: "config".to_owned(),
+                message: format!(
+                    "revert-to-start applied only PARTIALLY: {} engine command(s) were shed \
+                     on a full command bus; the control stores were reverted but the engine \
+                     may not reflect every reverted change.",
+                    outcome.shed
+                ),
+                remediation: "Retry the revert once the command bus drains; the stores \
+                              already hold the start values."
+                    .to_owned(),
+                since: state.ack_now().as_nanos(),
+                active: true,
+            }),
+        );
+    }
     state.audit(
         &principal.key_id,
         AuditAction::Command,
@@ -637,6 +670,7 @@ pub(crate) async fn revert_to_start(
         Some(serde_json::json!({
             "summary": outcome.parts,
             "restart_only": restart_only,
+            "shed": outcome.shed,
         })),
     );
     Ok((
@@ -644,7 +678,8 @@ pub(crate) async fn revert_to_start(
         Json(RevertToStartBody {
             operation_id: op.to_string(),
             replayed: false,
-            reverted: true,
+            reverted: outcome.shed == 0,
+            shed: outcome.shed,
             summary: outcome.parts,
             restart_only,
         }),

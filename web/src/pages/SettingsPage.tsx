@@ -150,6 +150,7 @@ type BootActionOutcome =
   | {
       readonly kind: "revert";
       readonly reverted: boolean;
+      readonly shed: number;
       readonly summary: readonly string[];
       readonly restartOnly: readonly string[];
     }
@@ -211,6 +212,7 @@ function BootConfigCard(): JSX.Element {
       setOutcome({
         kind: "revert",
         reverted: body.reverted,
+        shed: body.shed,
         summary: body.summary,
         restartOnly: body.restart_only,
       });
@@ -353,6 +355,12 @@ function BootConfigCard(): JSX.Element {
               <p>
                 {outcome.reverted ? (
                   <Trans>Reverted to the start configuration.</Trans>
+                ) : outcome.shed > 0 ? (
+                  <Trans>
+                    The revert applied only partially: {outcome.shed} engine
+                    command(s) could not be enqueued. Retry once the system
+                    settles.
+                  </Trans>
                 ) : (
                   <Trans>
                     The running state already matched the start configuration;
