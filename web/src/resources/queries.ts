@@ -31,7 +31,7 @@ import {
   toSourceView,
   writeResource,
 } from './api';
-import type { ResourceWithEtag } from './api';
+import type { ApplySemantics, ResourceWithEtag } from './api';
 import type {
   OutputView,
   OverlayView,
@@ -163,19 +163,34 @@ export interface SaveResourceVars {
   readonly create: boolean;
 }
 
+/** A successful save: the stored record plus how the mutation applied. */
+export interface SavedResource {
+  /** The stored record the server returned. */
+  readonly record: ResourceRecord;
+  /**
+   * The apply semantics the server declared for THIS save
+   * (`X-Multiview-Apply`, ADR-W018): `live` when the running engine applied
+   * it at a frame boundary, `restart` when it takes effect via config export
+   * + restart, `undefined` when the response carried no header.
+   */
+  readonly apply: ApplySemantics | undefined;
+}
+
 /**
  * Create or update a resource of the given kind. On update the stored ETag is
  * read first (or fetched via GET when absent) and echoed as `If-Match`; the
  * response ETag is remembered for the next write. The affected list is
- * invalidated on settle so the projected view re-reads server state.
+ * invalidated on settle so the projected view re-reads server state. The
+ * result surfaces the response's `X-Multiview-Apply` semantics so the page
+ * can tell the operator honestly how THIS save applied.
  */
 export function useSaveResource(
   kind: ResourceKind,
   context: ResourceContext = {},
-): UseMutationResult<ResourceRecord, ApiError, SaveResourceVars> {
+): UseMutationResult<SavedResource, ApiError, SaveResourceVars> {
   const queryClient = useQueryClient();
-  return useMutation<ResourceRecord, ApiError, SaveResourceVars>({
-    mutationFn: async ({ id, input, create }): Promise<ResourceRecord> => {
+  return useMutation<SavedResource, ApiError, SaveResourceVars>({
+    mutationFn: async ({ id, input, create }): Promise<SavedResource> => {
       try {
         let etag = readResourceEtags(queryClient, kind)[id];
         if (!create && etag === undefined) {
@@ -195,7 +210,7 @@ export function useSaveResource(
           },
         );
         rememberEtag(queryClient, kind, result.record.id, result.etag);
-        return result.record;
+        return { record: result.record, apply: result.apply };
       } catch (error) {
         throw toApiError(error);
       }

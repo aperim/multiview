@@ -430,8 +430,10 @@ fn spawn_ctrl_c_watcher(stop: StopSignal) -> tokio::task::JoinHandle<()> {
 /// The per-run-path inputs the control plane is wired from: the live preview
 /// taps (the program slot the run loop fills + the per-source store map), the
 /// producer stop registry the live-source hub shares with the run's startup
-/// supervisors, and what this run path can take live (ADR-W021 — the binary
-/// is the only place that knows both the compiled features and the path).
+/// supervisors, the optional decoded-ingest spawner (ADR-W018 level 2 — the
+/// full-pipeline path only), and what this run path can take live (ADR-W021 —
+/// the binary is the only place that knows both the compiled features and the
+/// path).
 struct ControlPlaneWiring {
     /// The shared program-frame slot the run loop fills for previews.
     program_slot: multiview_cli::preview::ProgramSlot,
@@ -439,6 +441,8 @@ struct ControlPlaneWiring {
     stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
     /// The per-source producer stop registry (shared with the live-source hub).
     registry: multiview_cli::live_sources::StopRegistry,
+    /// The decoded-ingest spawner (`Some` ⇔ network kinds live-apply, ADR-W018).
+    ingest: Option<Arc<dyn multiview_cli::live_sources::IngestSpawner>>,
     /// What the running engine can take live (per-collection header honesty).
     live_apply: multiview_control::LiveApplyCaps,
 }
@@ -458,6 +462,13 @@ struct ControlPlaneWiring {
 /// `expect_write` seam suppresses server-side writes). The hub shares the
 /// wiring's stop registry, so a live remove can tear down a startup producer
 /// (generator or ingest thread) too.
+///
+/// `wiring.ingest` is the run's decoded-ingest spawner (ADR-W018 level 2): the
+/// full-pipeline path passes `Pipeline::live_ingest_spawner` so network/file
+/// sources spawn the same supervised `ingest_loop` live; the software path
+/// passes `None`. The capability declared to the control plane is **derived
+/// from it** — the `X-Multiview-Apply` header claims `live` for network kinds
+/// exactly when a real spawner backs the claim.
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
@@ -475,14 +486,25 @@ async fn serve_control_plane(
         program_slot,
         stores,
         registry,
+        ingest,
         live_apply,
     } = wiring;
     let (commands, command_rx) = command_bus(64);
+    // The honesty keystone (ADR-W018): network kinds are declared live-appliable
+    // exactly when the hub below carries a real ingest spawner.
+    let live_apply = live_apply.with_sources(if ingest.is_some() {
+        multiview_control::LiveSourceCapability::synthetic_and_network()
+    } else {
+        multiview_control::LiveSourceCapability::synthetic_only()
+    });
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
     // the SHARED, live-updatable preview store map, off the clock thread.
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
-    let hub =
-        multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
+    let hub = multiview_cli::live_sources::LiveSourceHub::start_with_ingest(
+        registry,
+        Arc::clone(&shared_stores),
+        ingest,
+    );
     // The live-preview provider reads the program slot the run loop fills + the
     // shared per-input store map — read-only for control (invariant #10).
     let provider: multiview_control::SharedPreview = Arc::new(
@@ -515,6 +537,91 @@ async fn serve_control_plane(
     Ok((handle, command_rx, hub, watch))
 }
 
+/// Wire the control plane for the full-pipeline run, when `[control]` is
+/// configured: declare what THIS build + run path can take live (ADR-W018
+/// sources via the pipeline's real ingest spawner; ADR-W021 overlays iff the
+/// `overlay`-featured bake consumer renders them), serve the plane, and build
+/// the frame-boundary command drain over the run's live seams. Without a
+/// `[control]` section it returns the no-op drain (no server, no hub).
+#[cfg(feature = "ffmpeg")]
+async fn wire_pipeline_control_plane(
+    config: &MultiviewConfig,
+    config_path: &Path,
+    publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    preview_slot: &multiview_cli::preview::ProgramSlot,
+    pipeline: &multiview_cli::pipeline::Pipeline,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<(
+    Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    ControlDrain,
+    Option<multiview_cli::live_sources::LiveSourceHub>,
+    Option<multiview_cli::config_watch::ConfigWatchHandle>,
+)> {
+    let Some(cfg) = config.control.as_ref() else {
+        drop(shutdown_rx);
+        return Ok((
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+            None,
+        ));
+    };
+    // What THIS build + run path can take live (ADR-W021): with the
+    // `overlay` feature the bake consumer renders the overlay working
+    // set, so overlay documents the renderer draws (analog-face
+    // clocks — `live_overlays::renders_live`, the same predicate the
+    // drain warns by) apply live; without it nothing overlay-side
+    // renders and the honest default (everything `restart`) stands.
+    #[cfg(feature = "overlay")]
+    let live_apply = multiview_control::LiveApplyCaps::default().with_overlays(
+        multiview_control::OverlayLiveCapability::new(multiview_cli::live_overlays::renders_live),
+    );
+    #[cfg(not(feature = "overlay"))]
+    let live_apply = multiview_control::LiveApplyCaps::default();
+    let (handle, command_rx, hub, watch) = serve_control_plane(
+        &cfg.listen,
+        config,
+        config_path,
+        publisher,
+        ControlPlaneWiring {
+            program_slot: Arc::clone(preview_slot),
+            stores: pipeline.preview_stores(),
+            registry: pipeline.stop_registry(),
+            // The real decoded-ingest spawner (ADR-W018 level 2):
+            // network/file sources live-apply through the SAME
+            // supervised ingest_loop the startup path builds.
+            ingest: Some(pipeline.live_ingest_spawner()),
+            live_apply,
+        },
+        shutdown_rx,
+    )
+    .await?;
+    // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
+    // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
+    // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
+    // drive start, and the drain reads it wait-free (inv #1/#10). Only under
+    // `overlay` (without it the run renders no subtitles, so there is no layer).
+    // The live overlay seam (ADR-W021) rides the same variant; the
+    // live-source seam (ADR-W018) rides both.
+    #[cfg(feature = "overlay")]
+    let drain: ControlDrain = Box::new(control::command_drain_with_seams(
+        command_rx,
+        config.clone(),
+        Arc::clone(publisher),
+        pipeline.subtitle_route_slot(),
+        pipeline.overlay_apply_slot(),
+        hub.handle(),
+    ));
+    #[cfg(not(feature = "overlay"))]
+    let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+        command_rx,
+        config.clone(),
+        Arc::clone(publisher),
+        hub.handle(),
+    ));
+    Ok((Some(handle), drain, Some(hub), Some(watch)))
+}
+
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
 /// serving the control plane, the embedded web UI, and the live program/input
 /// previews from the SAME run (when `[control]` is configured) — ingestion,
@@ -536,69 +643,15 @@ async fn run_pipeline_until_ctrl_c(
     let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
-        if let Some(cfg) = config.control.as_ref() {
-            // What THIS build + run path can take live (ADR-W021): with the
-            // `overlay` feature the bake consumer renders the overlay working
-            // set, so overlay documents the renderer draws (analog-face
-            // clocks — `live_overlays::renders_live`, the same predicate the
-            // drain warns by) apply live; without it nothing overlay-side
-            // renders and the honest default (everything `restart`) stands.
-            #[cfg(feature = "overlay")]
-            let live_apply = multiview_control::LiveApplyCaps::default().with_overlays(
-                multiview_control::OverlayLiveCapability::new(
-                    multiview_cli::live_overlays::renders_live,
-                ),
-            );
-            #[cfg(not(feature = "overlay"))]
-            let live_apply = multiview_control::LiveApplyCaps::default();
-            let (handle, command_rx, hub, watch) = serve_control_plane(
-                &cfg.listen,
-                config,
-                config_path,
-                &publisher,
-                ControlPlaneWiring {
-                    program_slot: Arc::clone(&preview_slot),
-                    stores: pipeline.preview_stores(),
-                    registry: pipeline.stop_registry(),
-                    live_apply,
-                },
-                shutdown_rx,
-            )
-            .await?;
-            // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
-            // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
-            // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
-            // drive start, and the drain reads it wait-free (inv #1/#10). Only under
-            // `overlay` (without it the run renders no subtitles, so there is no layer).
-            // The live overlay seam (ADR-W021) rides the same variant; the
-            // live-source seam (ADR-W018) rides both.
-            #[cfg(feature = "overlay")]
-            let drain: ControlDrain = Box::new(control::command_drain_with_seams(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                pipeline.subtitle_route_slot(),
-                pipeline.overlay_apply_slot(),
-                hub.handle(),
-            ));
-            #[cfg(not(feature = "overlay"))]
-            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                hub.handle(),
-            ));
-            (Some(handle), drain, Some(hub), Some(watch))
-        } else {
-            drop(shutdown_rx);
-            (
-                None,
-                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
-                None,
-                None,
-            )
-        };
+    let (server, drain, live_hub, config_watch) = wire_pipeline_control_plane(
+        config,
+        config_path,
+        &publisher,
+        &preview_slot,
+        &pipeline,
+        shutdown_rx,
+    )
+    .await?;
 
     let signal = spawn_ctrl_c_watcher(stop.clone());
 
@@ -851,6 +904,10 @@ async fn run_software_until_ctrl_c(
                     program_slot: engine.program_preview(),
                     stores: engine.preview_stores(),
                     registry: engine.stop_registry(),
+                    // The software engine has no decoder: no ingest spawner, so
+                    // the capability (and the apply header) honestly stays
+                    // synthetic-only.
+                    ingest: None,
                     // The software engine has no bake stage: no overlay
                     // document renders on this path, so the honest default
                     // (everything `restart`) is the truth (ADR-W021).

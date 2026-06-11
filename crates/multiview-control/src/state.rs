@@ -469,6 +469,13 @@ pub struct AppState {
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
+    /// Which source kinds the **running engine** can apply live (ADR-W018):
+    /// the binary declares this per run path, so the `X-Multiview-Apply`
+    /// header never claims `live` for a kind the engine cannot ingest at
+    /// runtime. Defaults to [`LiveSourceCapability::synthetic_only`] (the
+    /// software-engine truth); the full-pipeline run upgrades to
+    /// [`LiveSourceCapability::synthetic_and_network`].
+    pub live_sources: LiveSourceCapability,
     /// The config-file watch status slot (ADR-W020): the CLI's watcher records
     /// applied/rejected loads + restart-pending sections here, and
     /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
@@ -479,6 +486,70 @@ pub struct AppState {
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
     /// carries no capability (everything is `restart`).
     pub live_apply: crate::live_apply::LiveApplyCaps,
+}
+
+/// The source kinds the running engine can apply **live** (ADR-W018,
+/// invariant #11) — the run-path capability signal the binary threads into the
+/// control plane so the apply header stays honest per build/run flavour.
+///
+/// * `synthetic` — `bars`/`solid`/`clock` spawn in-process generators through
+///   the live-source hub (both run paths wire this).
+/// * `network` — `rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file` spawn the supervised
+///   `ingest_loop` through the hub's ingest spawner (the full-pipeline /
+///   `ffmpeg` run path only; the software engine has no decoder).
+///
+/// Kinds outside both sets (`ndi`, `youtube`, `aes67`) are never live-applied
+/// in this slice and always answer `restart`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveSourceCapability {
+    /// Synthetic kinds (`bars`/`solid`/`clock`) are live-appliable.
+    pub synthetic: bool,
+    /// Network/file kinds (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`) are
+    /// live-appliable.
+    pub network: bool,
+}
+
+impl LiveSourceCapability {
+    /// The software-engine run path: only in-process synthetic producers can
+    /// be spawned live (no decoder in the build/run).
+    #[must_use]
+    pub const fn synthetic_only() -> Self {
+        Self {
+            synthetic: true,
+            network: false,
+        }
+    }
+
+    /// The full-pipeline (`ffmpeg`) run path: a real ingest spawner is wired
+    /// into the live-source hub, so network/file kinds apply live too.
+    #[must_use]
+    pub const fn synthetic_and_network() -> Self {
+        Self {
+            synthetic: true,
+            network: true,
+        }
+    }
+
+    /// Whether the running engine can apply a mutation of this `kind` live.
+    #[must_use]
+    pub const fn is_live(&self, kind: &multiview_config::SourceKind) -> bool {
+        if kind.is_synthetic() {
+            return self.synthetic;
+        }
+        if kind.is_network_media() {
+            return self.network;
+        }
+        // ndi / youtube / aes67 (and any future kind until explicitly wired):
+        // never live in this slice — restart, honestly.
+        false
+    }
+}
+
+impl Default for LiveSourceCapability {
+    /// Defaults to the conservative truth: synthetic-only (never over-claims).
+    fn default() -> Self {
+        Self::synthetic_only()
+    }
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -548,12 +619,26 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // Conservative default (the software-engine truth): only synthetic
+            // kinds live-apply. The binary upgrades this per run path
+            // (`with_live_sources`) — the header never over-claims.
+            live_sources: LiveSourceCapability::synthetic_only(),
             // No watcher by default: the endpoint reports "not watched".
             config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W021).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
+    }
+
+    /// Declare which source kinds the running engine can apply live
+    /// (ADR-W018): the binary sets this per run path so the
+    /// `X-Multiview-Apply` header answers from the engine's real runtime
+    /// capability, never from wishful classification.
+    #[must_use]
+    pub const fn with_live_sources(mut self, live_sources: LiveSourceCapability) -> Self {
+        self.live_sources = live_sources;
+        self
     }
 
     /// Install a shared config-file watch status slot (ADR-W020). The binary

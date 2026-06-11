@@ -178,3 +178,56 @@ fn a_full_multiview_of_synthetic_sources_validates() {
             .unwrap_or_else(|e| panic!("validate {fields:?}: {e}"));
     }
 }
+
+#[test]
+fn live_apply_classification_partitions_every_kind() {
+    // ADR-W018: `is_synthetic` (level 1) and `is_network_media` (level 2) are
+    // the two live-apply classification points. They must be disjoint, and the
+    // kinds outside both (ndi/youtube/aes67) apply on restart.
+    let parse = |fields: &str| -> SourceKind {
+        let doc = config_with_source(fields);
+        let cfg = MultiviewConfig::load_from_toml(&doc).expect("parse");
+        cfg.sources.into_iter().next().expect("one source").kind
+    };
+
+    let synthetic = [
+        parse("kind = \"bars\""),
+        parse("kind = \"solid\"\ncolor = \"#22aa44\""),
+        parse("kind = \"clock\""),
+    ];
+    for kind in &synthetic {
+        assert!(kind.is_synthetic(), "{kind:?} is synthetic");
+        assert!(
+            !kind.is_network_media(),
+            "{kind:?} must not classify as network media"
+        );
+    }
+
+    let network = [
+        parse("kind = \"rtsp\"\nurl = \"rtsp://[2001:db8::1]/s\""),
+        parse("kind = \"hls\"\nurl = \"https://[2001:db8::1]/m.m3u8\""),
+        parse("kind = \"ts\"\nurl = \"udp://[ff3e::1]:5004\""),
+        parse("kind = \"srt\"\nurl = \"srt://[2001:db8::2]:7001\""),
+        parse("kind = \"rtmp\"\nurl = \"rtmp://ingest.example/app/key\""),
+        parse("kind = \"file\"\npath = \"/media/clip.ts\""),
+    ];
+    for kind in &network {
+        assert!(kind.is_network_media(), "{kind:?} is network media");
+        assert!(
+            !kind.is_synthetic(),
+            "{kind:?} must not classify as synthetic"
+        );
+    }
+
+    let restart_only = [
+        parse("kind = \"ndi\"\nname = \"STUDIO (CAM 1)\""),
+        parse("kind = \"youtube\"\nurl = \"https://www.youtube.com/watch?v=x\""),
+        parse("kind = \"aes67\"\nsdp = \"v=0\""),
+    ];
+    for kind in &restart_only {
+        assert!(
+            !kind.is_synthetic() && !kind.is_network_media(),
+            "{kind:?} stays restart-only (no live-apply classification)"
+        );
+    }
+}

@@ -4356,7 +4356,7 @@
         },
         "responses": {
           "200": {
-            "description": "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds applied to the running engine, `restart` otherwise (ADR-W018).",
+            "description": "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary (synthetic kinds on every run; network/file kinds on a full-engine run — an edit swaps the producer behind the same tile store), `restart` otherwise (ADR-W018). One live-apply gap: a network source edited live reads closed captions only after the next restart (ADR-W018 §4).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4446,7 +4446,7 @@
         },
         "responses": {
           "201": {
-            "description": "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds (bars/solid/clock) applied to the running engine at a frame boundary, `restart` otherwise (ADR-W018).",
+            "description": "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary — synthetic kinds (bars/solid/clock) on every run, network/file kinds (rtsp/hls/ts/srt/rtmp/file) on a full-engine run — `restart` otherwise (ndi/youtube/aes67, or a run without the decoder; ADR-W018). One live-apply gap: a live-added network source's closed captions attach at the next restart (ADR-W018 §4).",
             "content": {
               "application/json": {
                 "schema": {
