@@ -29,8 +29,15 @@
 //! a driver adopted, `GET /devices/{id}/source-candidates` and `/output-targets`
 //! return the driver's real enumerated candidates; without one they stay
 //! honestly empty. The discovery driver actor is DEV-A5.
+//!
+//! The DEV-D2 [`cast`] driver (ADR-M011) is the second: a Google Cast session
+//! actor over the same registry/factory/tombstone machinery, pointing a Cast
+//! device at an HLS rendition the engine already serves — pure control plane,
+//! the media graph untouched. Multiple driver factories compose through the
+//! [`CompositePollerFactory`] (first managing member wins).
 
 pub mod broadcaster;
+pub mod cast;
 pub mod driver_registry;
 pub mod projection;
 pub mod registry;
@@ -46,6 +53,7 @@ pub use zowietek::poller::{PollerConfig, PollerControl, PollerHandle, PollerStep
 #[cfg(feature = "zowietek")]
 pub use zowietek::runtime::ReqwestPollerFactory;
 pub use zowietek::runtime::{
-    DevicePollerFactory, DevicePollerRegistry, NoPollerFactory, PollerWiring,
+    CompositePollerFactory, DevicePollerFactory, DevicePollerRegistry, NoPollerFactory,
+    PollerWiring,
 };
 pub use zowietek::{ModeConvergence, WorkMode, ZowietekDriver};

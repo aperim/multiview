@@ -26,6 +26,7 @@ use crate::state::AppState;
 pub mod alarms;
 pub mod audio;
 pub mod audit;
+pub mod cast_sessions;
 pub mod config;
 pub mod devices;
 pub mod health;
@@ -693,6 +694,26 @@ fn resource_router() -> Router<AppState> {
         .route(
             "/devices/{id}/output-targets",
             get(devices::output_targets),
+        )
+        // Ephemeral Cast sessions (DEV-D2, ADR-M011): start/list/stop an
+        // ad-hoc cast of a served HLS rendition, save-as-device promotion,
+        // and the receiver-namespace volume verb. Runtime-only — never part
+        // of the devices store, never exported.
+        .route(
+            "/cast/sessions",
+            get(cast_sessions::list_cast_sessions).post(cast_sessions::start_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}",
+            get(cast_sessions::get_cast_session).delete(cast_sessions::stop_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/save",
+            post(cast_sessions::save_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/volume",
+            post(cast_sessions::set_cast_volume),
         )
         // Presentation-sync-groups CRUD (ADR-M008/M010) + the measure action.
         .route("/sync-groups", get(sync_groups::list_sync_groups))

@@ -19,6 +19,8 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
+use crate::devices::cast::media::CastDelivery;
+use crate::devices::cast::store::CastSessionStore;
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
@@ -339,6 +341,21 @@ pub struct AppState {
     /// behind the `zowietek` feature. Control-plane-only, `Mutex`-guarded handle
     /// map — it can never back-pressure the engine (invariant #10).
     pub device_pollers: Arc<DevicePollerRegistry>,
+    /// The Cast **delivery map** (DEV-D2, ADR-M011): output id → the
+    /// device-reachable HLS rendition URL + segment format, built by the
+    /// binary from the validated `control.cast_media_base` × the DEV-D1
+    /// `/hls/{output-id}` mounts. [`None`] (the default — no
+    /// `cast_media_base` configured) means no device-reachable URL can be
+    /// derived and the cast-session routes refuse with an honest `409`.
+    /// Read-only control-plane state (invariant #10).
+    pub cast_delivery: Option<Arc<CastDelivery>>,
+    /// The runtime store of **ephemeral** cast sessions (DEV-D2, ADR-M011):
+    /// runtime-only records that never enter the devices store, so a config
+    /// export can never emit them. "Save as device" promotes one into a
+    /// normal `Device{driver: cast}` registry entry and drops the record.
+    /// Bounded by the number of live sessions; control-plane-only
+    /// (invariant #10).
+    pub cast_sessions: Arc<CastSessionStore>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -463,6 +480,8 @@ impl AppState {
             device_status: Arc::new(DeviceStatusRegistry::new()),
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
+            cast_delivery: None,
+            cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -699,6 +718,16 @@ impl AppState {
             .iter()
             .filter(|device| self.device_pollers.start(device, &wiring))
             .count()
+    }
+
+    /// Install the Cast delivery map (DEV-D2): the binary builds it from the
+    /// validated `control.cast_media_base` × the DEV-D1 HLS mounts; tests
+    /// inject a fixed map. Without one (the default), the cast-session routes
+    /// refuse with an honest `409` — no device-reachable URL can be derived.
+    #[must_use]
+    pub fn with_cast_delivery(mut self, delivery: Arc<CastDelivery>) -> Self {
+        self.cast_delivery = Some(delivery);
+        self
     }
 
     /// Replace the audio-routing singleton store (e.g. to share one seeded
