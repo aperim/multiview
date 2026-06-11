@@ -42,18 +42,21 @@
 //! * **Incident markers** ← active [`Event::AlarmRaised`]/[`Event::AlarmUpdated`]
 //!   transitions (mapped by [`AlarmKind`]) and active
 //!   [`Event::HealthWarningRaised`] warnings (mapped by subsystem).
-//!
-//! **Shed-load** is the one §7.2 category with **no live producer yet**: the
-//! engine's resource-adaptive degradation/placement controller computes shed
-//! decisions but does not currently emit a dedicated event onto the outbound
-//! broadcast (the placement counters are a metrics-registry model, unwired to the
-//! `Event` stream). The store's `record_shed_at` API + the [`RetentionUpdate::Shed`]
-//! arm exist and are ready; this feed will populate them the moment the controller
-//! emits a shed event. We do **not** fabricate a shed feed.
+//! * **Shed-load** ← [`Event::ShedLoad`] (mapped by [`WireShedReason`]). The live
+//!   producer today is the pipeline's **encode/egress drop-on-overload** shed
+//!   ([`WireShedReason::EncoderOverload`]): when the bake/encode consumer cannot
+//!   keep up at cadence, the hot loop sheds-and-counts a composited frame rather
+//!   than blocking the output clock (invariants #1 + #10), and emits a
+//!   change-driven `shed.load` through the same drop-oldest publisher. The
+//!   degradation/placement controller's `Pinned`/`DisplayBound`/`NoBetterHome`/
+//!   `AntiStorm` reasons share the same event shape and map here too; those
+//!   reasons have no run-path producer yet (the controller is a pure proposer not
+//!   yet wired into the run loop), so they are reachable but unexercised today. We
+//!   do **not** fabricate any shed — only a real drop emits one.
 
 use multiview_core::alarm::{AlarmKind, AlarmRecord, AlarmScope};
 use multiview_engine::{EventSubscription, RecvError};
-use multiview_events::{Event, LifecycleState, SystemMetrics};
+use multiview_events::{Event, LifecycleState, ShedReason as WireShedReason, SystemMetrics};
 use multiview_telemetry::retention::{IncidentKind, RetentionStore, ShedReason, UtilisationSample};
 
 /// A classified retention update derived from one engine [`Event`] — the pure
@@ -70,8 +73,8 @@ pub enum RetentionUpdate {
         /// The reconnect attempt counter, when the source reported one.
         attempt: u32,
     },
-    /// A load-shed occurrence (reserved — see the module-level honesty note;
-    /// there is no live producer for this on the event stream yet).
+    /// A load-shed occurrence (live producer: [`Event::ShedLoad`] — see the
+    /// module-level coverage note).
     Shed {
         /// Why load was shed.
         reason: ShedReason,
@@ -120,7 +123,34 @@ pub fn classify(event: &Event) -> Option<RetentionUpdate> {
             kind: incident_kind_for_subsystem(&w.subsystem),
             subject: w.subsystem.clone(),
         }),
+        // A shed-load decision is the §7.2 shed category's live producer: map the
+        // wire reason onto the store reason faithfully (no fabrication).
+        Event::ShedLoad(shed) => Some(RetentionUpdate::Shed {
+            reason: shed_reason_from_wire(shed.reason),
+        }),
         _ => None,
+    }
+}
+
+/// Map the wire [`WireShedReason`] onto the retention store's [`ShedReason`].
+///
+/// A faithful 1:1 mapping — the store mirrors the same reason vocabulary. The
+/// wire enum is `#[non_exhaustive]`, so a future reason the store does not yet
+/// know falls back to [`ShedReason::NoBetterHome`] (the conservative "load could
+/// not be relieved by moving" default) rather than dropping the shed or
+/// panicking — the occurrence is still recorded.
+fn shed_reason_from_wire(reason: WireShedReason) -> ShedReason {
+    match reason {
+        WireShedReason::Pinned => ShedReason::Pinned,
+        WireShedReason::DisplayBound => ShedReason::DisplayBound,
+        WireShedReason::AntiStorm => ShedReason::AntiStorm,
+        WireShedReason::EncoderOverload => ShedReason::EncoderOverload,
+        // `WireShedReason::NoBetterHome` maps here. `WireShedReason` is
+        // `#[non_exhaustive]`, so the wildcard also covers any future reason —
+        // recorded as a generic local shed ("load could not be relieved by
+        // moving") rather than losing the occurrence or panicking. The two share
+        // a body, so a single wildcard arm is the clippy-clean expression.
+        _ => ShedReason::NoBetterHome,
     }
 }
 

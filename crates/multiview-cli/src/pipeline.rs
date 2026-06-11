@@ -118,6 +118,16 @@ const LIVE_QUEUE_CAP: usize = 4;
 /// slow sink paces the consumer rather than dropping a baked frame.
 const SINK_QUEUE_CAP: usize = 4;
 
+/// The shed-event debounce window (output ticks) for the live drop-on-overload
+/// shed (invariant #9 emission). A sustained encode/egress overload sheds frames
+/// continuously; we coalesce a burst of drops into at most one `shed.load`
+/// event per this many ticks (≈1 s at 50–60 fps) so the §7.2 retention store and
+/// the web UI see the shed *condition* + its cumulative count without a
+/// per-dropped-frame flood on the drop-oldest broadcast (inv #10). The cumulative
+/// `dropped` rides every emitted event, so the trend is recoverable across
+/// coalesced windows.
+const SHED_EVENT_EVERY_TICKS: u64 = 60;
+
 /// The rolling HLS live-playlist segment window (HLS-0/1, ADR-0032): how many
 /// most-recent segments the live `.m3u8` lists and the sink keeps on disk. Six
 /// 1-GOP segments is a small DVR depth that keeps reload-at-live-edge cheap while
@@ -164,6 +174,43 @@ impl SendPolicy {
             Self::DropOnOverload => LIVE_QUEUE_CAP,
         }
     }
+}
+
+/// The pure, change-driven, rate-limited shed-load emission decision (invariant
+/// #9 emission) for the live encode/egress drop-on-overload shed.
+///
+/// `dropped_now` is the current cumulative drop counter; `tick` is the current
+/// output tick index; `last_dropped`/`last_tick` carry the emitter's debounce
+/// state across ticks and are advanced **only** when an event is emitted. Emits
+/// a [`multiview_events::Event::ShedLoad`] (reason `EncoderOverload`, program
+/// scope) iff the drop counter advanced since the last emit AND at least
+/// [`SHED_EVENT_EVERY_TICKS`] ticks have elapsed — so a sustained-overload drop
+/// storm coalesces into at most one event per window (inv #10), each carrying the
+/// cumulative `dropped` so the trend stays recoverable. Pure + side-effect-free
+/// apart from advancing the two state cells, so it is exhaustively unit-testable.
+fn shed_load_event(
+    dropped_now: u64,
+    tick: u64,
+    last_dropped: &mut u64,
+    last_tick: &mut u64,
+) -> Option<Event> {
+    if dropped_now <= *last_dropped {
+        return None;
+    }
+    if tick.saturating_sub(*last_tick) < SHED_EVENT_EVERY_TICKS {
+        return None;
+    }
+    *last_dropped = dropped_now;
+    *last_tick = tick;
+    Some(Event::ShedLoad(multiview_events::ShedLoad {
+        reason: multiview_events::ShedReason::EncoderOverload,
+        scope: multiview_events::ShedScope::Program,
+        // The program-egress shed is the cheapest-impact rung that touches
+        // program output; report it as ladder level 1 (a single active shed
+        // action), distinct from full quality (0).
+        level: 1,
+        dropped: dropped_now,
+    }))
 }
 
 /// The egress plan for one [`Pipeline::drive_streaming`] call: the send
@@ -1974,6 +2021,13 @@ impl Pipeline {
         let peak_occupancy = Arc::clone(&egress.peak_occupancy);
 
         let hot_dropped = Arc::clone(&dropped);
+        // A read-only clone for the per-tick event projection: it samples this
+        // wait-free counter to emit a change-driven, rate-limited `shed.load`
+        // event when the encode/egress drop-on-overload shed actually fires
+        // (invariants #1/#10 — the publish rides the drop-oldest broadcast and
+        // the engine never blocks on it). Only the producer (`hot_dropped`) ever
+        // writes it; this side only reads.
+        let shed_dropped = Arc::clone(&dropped);
         // The per-tile content-fault detector: shares (by `Arc`) the SAME
         // lock-free per-source last-good stores the engine samples, plus the
         // build-time per-source meter timeline (for silence). Sampling-only and
@@ -2129,6 +2183,15 @@ impl Pipeline {
         // the monitoring UI shows live per-tile lifecycle without a per-tick flood.
         let mut last_states: std::collections::HashMap<String, SourceState> =
             std::collections::HashMap::new();
+        // Change-driven, rate-limited shed-load emission state. A sustained
+        // overload sheds many frames; we emit at most one `shed.load` per
+        // `SHED_EVENT_EVERY_TICKS` window AND only when the cumulative drop
+        // counter advanced — so the §7.2 retention store + the WebUI see the shed
+        // condition without a per-dropped-frame flood (inv #10). Carries the
+        // cumulative `dropped` so the trend is recoverable even across coalesced
+        // windows.
+        let mut last_shed_dropped: u64 = 0;
+        let mut last_shed_tick: u64 = 0;
         let event_of = move |frame: &CompositedFrame| -> Option<Event> {
             for (source, &state) in &frame.source_states {
                 if last_states.get(source) != Some(&state) {
@@ -2142,7 +2205,17 @@ impl Pipeline {
                     }));
                 }
             }
-            None
+            // The live shed: under DropOnOverload the encode/egress consumer fell
+            // behind and the hot loop shed-and-counted a composited frame. Emit a
+            // change-driven, rate-limited `shed.load` (the pure decision lives in
+            // `shed_load_event` so it is exhaustively unit-testable).
+            let dropped_now = shed_dropped.load(Ordering::Acquire);
+            shed_load_event(
+                dropped_now,
+                frame.tick.index,
+                &mut last_shed_dropped,
+                &mut last_shed_tick,
+            )
         };
 
         // Drive the protected per-tick loop through the program. The program owns
@@ -7614,5 +7687,85 @@ segment_ms = 1000
             .expect("the caption reader registers under {id}/captions");
         flag.store(true, Ordering::Release);
         supervisor.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod shed_emission_tests {
+    //! The live encode/egress drop-on-overload shed must emit a real `shed.load`
+    //! onto the outbound event stream (invariant #9 emission) — change-driven and
+    //! rate-limited so a drop storm coalesces into at most one event per window
+    //! (inv #10), never a per-dropped-frame flood. These pin the pure decision in
+    //! [`shed_load_event`]; the per-tick projection + the drop-oldest publish are
+    //! wired in `drive_streaming`.
+    use multiview_events::{Event, ShedReason, ShedScope};
+
+    use super::{shed_load_event, SHED_EVENT_EVERY_TICKS};
+
+    #[test]
+    fn no_drop_emits_nothing() {
+        let (mut last_dropped, mut last_tick) = (0_u64, 0_u64);
+        // The counter never advanced: no shed happened, so no event is emitted.
+        assert!(shed_load_event(0, 100, &mut last_dropped, &mut last_tick).is_none());
+        assert_eq!(last_dropped, 0, "state untouched when nothing was shed");
+    }
+
+    #[test]
+    fn first_real_drop_emits_an_encoder_overload_program_shed() {
+        let (mut last_dropped, mut last_tick) = (0_u64, 0_u64);
+        // The first drop fires at tick `SHED_EVENT_EVERY_TICKS` (one window after
+        // the t=0 start); it carries the cumulative count + the live reason/scope.
+        let event = shed_load_event(3, SHED_EVENT_EVERY_TICKS, &mut last_dropped, &mut last_tick)
+            .expect("a real drop emits a shed.load");
+        match event {
+            Event::ShedLoad(shed) => {
+                assert_eq!(shed.reason, ShedReason::EncoderOverload);
+                assert_eq!(shed.scope, ShedScope::Program);
+                assert_eq!(shed.dropped, 3, "cumulative drop count rides the event");
+                assert_eq!(shed.level, 1, "egress shed is the program-touching rung");
+            }
+            other => panic!("expected ShedLoad, got {other:?}"),
+        }
+        assert_eq!(last_dropped, 3);
+        assert_eq!(last_tick, SHED_EVENT_EVERY_TICKS);
+    }
+
+    #[test]
+    fn a_drop_storm_coalesces_to_at_most_one_event_per_window() {
+        let (mut last_dropped, mut last_tick) = (0_u64, 0_u64);
+        // First emit at the end of the opening window.
+        assert!(
+            shed_load_event(1, SHED_EVENT_EVERY_TICKS, &mut last_dropped, &mut last_tick).is_some()
+        );
+        // Every tick inside the next window keeps shedding (counter advances) but
+        // must NOT emit again until the debounce window has elapsed.
+        for t in 1..SHED_EVENT_EVERY_TICKS {
+            let tick = SHED_EVENT_EVERY_TICKS + t;
+            assert!(
+                shed_load_event(1 + t, tick, &mut last_dropped, &mut last_tick).is_none(),
+                "a within-window drop must coalesce, not flood (tick {tick})"
+            );
+        }
+        // Once the window elapses AND the counter has advanced, a second event
+        // fires carrying the new cumulative total.
+        let tick = SHED_EVENT_EVERY_TICKS * 2;
+        let event = shed_load_event(99, tick, &mut last_dropped, &mut last_tick)
+            .expect("a new window with fresh drops emits again");
+        match event {
+            Event::ShedLoad(shed) => assert_eq!(shed.dropped, 99),
+            other => panic!("expected ShedLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_quiesced_overload_stops_emitting() {
+        let (mut last_dropped, mut last_tick) = (5_u64, SHED_EVENT_EVERY_TICKS);
+        // The drop counter has not advanced past the last emit: the overload
+        // cleared, so no further shed events are emitted even windows later.
+        let tick = SHED_EVENT_EVERY_TICKS * 10;
+        assert!(
+            shed_load_event(5, tick, &mut last_dropped, &mut last_tick).is_none(),
+            "a quiesced overload (no new drops) stops emitting"
+        );
     }
 }

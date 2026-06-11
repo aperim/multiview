@@ -71,6 +71,54 @@ const EGRESS_QUEUE_CAP: usize = 4;
 /// The per-program event-stream depth for the program's own isolated publisher.
 const EVENT_CAP: usize = 8;
 
+/// Bounded grace for joining one program's supervised task on `stop`/`shutdown`.
+///
+/// A healthy program returns within at most one tick + teardown of its stop being
+/// raised (the run loop checks `stop` once per tick), so a real-clock program
+/// joins promptly — well inside this grace. The grace exists for a program whose
+/// run loop **cannot reach** its stop check (e.g. a pacer parked on a deadline its
+/// time source never reaches): such a task is **aborted and detached** at the
+/// grace rather than `await`ed forever, mirroring the engine's `SINK_WEDGE_GRACE`
+/// teardown posture (ENG-1: bounded join, then detach a wedged peer — never a join
+/// that cannot return). 2 s matches the existing egress/sink grace. Teardown is a
+/// control-plane action, not the data plane, so the bounded wait gates nothing on
+/// the output clock (invariants #1 + #10).
+const PROGRAM_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Join one supervised program task with a bounded grace, then abort + detach it.
+///
+/// Raises nothing itself (the caller raises `stop` first): it waits up to
+/// [`PROGRAM_JOIN_GRACE`] for the task to finish on its own (the clean path for a
+/// program that observes its stop within a tick). If it has not finished by then
+/// it is [`abort`](tokio::task::JoinHandle::abort)ed and detached — teardown is
+/// **bounded**, never an unbounded `await` on a task that cannot return. A join
+/// error (panic or the abort-cancellation) is logged, never propagated: stopping
+/// one program must never fail the supervisor.
+async fn join_program_task_bounded(pid: &ProgramId, task: tokio::task::JoinHandle<()>) {
+    // Capture an abort handle BEFORE moving `task` into the bounded wait: if the
+    // grace elapses we must actively `abort()`, because merely dropping a
+    // `JoinHandle` detaches the task (it keeps running) rather than cancelling it.
+    let abort = task.abort_handle();
+    match tokio::time::timeout(PROGRAM_JOIN_GRACE, task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(program = %pid, %error, "program task join error on teardown");
+        }
+        Err(_elapsed) => {
+            // The task did not return within the grace — its run loop cannot reach
+            // its stop check (a wedged pacer/clock). Abort it rather than block
+            // teardown forever (the PR #95 hang). The aborted task's resources are
+            // reclaimed by the runtime; the abort never stalls the caller.
+            abort.abort();
+            tracing::warn!(
+                program = %pid,
+                grace_ms = PROGRAM_JOIN_GRACE.as_millis(),
+                "program task did not stop within grace; aborted and detached (bounded teardown)"
+            );
+        }
+    }
+}
+
 /// One program's egress consumer: a closure run on a **dedicated thread** for each
 /// emitted tick index. Production wires the real per-program output fan-out here;
 /// the MP-1 chaos gate wires a deliberately-wedged consumer to prove a stuck
@@ -571,12 +619,12 @@ impl<P: Pacer + Send + 'static> ProgramSet<P> {
         handle.stop.stop();
         if let Some(task) = handle.task.take() {
             // The program's loop returns after its current tick; the supervisor's
-            // `supervise` then sees a clean `Completed` and the task ends. Joining is
-            // bounded (one tick + teardown). A join error (panic) is logged, never
-            // propagated — stopping one program must never fail the supervisor.
-            if let Err(error) = task.await {
-                tracing::warn!(program = %pid, %error, "program task join error on stop");
-            }
+            // `supervise` then sees a clean `Completed` and the task ends — a join
+            // bounded by one tick + teardown for any program that can observe its
+            // stop. A program whose loop cannot reach its stop check (a wedged
+            // pacer/clock) is aborted + detached at `PROGRAM_JOIN_GRACE` so teardown
+            // is bounded, never an unbounded `await`.
+            join_program_task_bounded(&pid, task).await;
         }
         true
     }
@@ -594,9 +642,10 @@ impl<P: Pacer + Send + 'static> ProgramSet<P> {
         let drained: Vec<(ProgramId, ProgramHandle)> = self.programs.drain().collect();
         for (pid, mut handle) in drained {
             if let Some(task) = handle.task.take() {
-                if let Err(error) = task.await {
-                    tracing::warn!(program = %pid, %error, "program task join error on shutdown");
-                }
+                // Bounded join + abort-on-grace (see `join_program_task_bounded`):
+                // one wedged program whose loop cannot observe stop is aborted +
+                // detached rather than blocking the whole set's teardown forever.
+                join_program_task_bounded(&pid, task).await;
             }
         }
     }

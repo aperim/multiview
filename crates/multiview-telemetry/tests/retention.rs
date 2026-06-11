@@ -182,6 +182,29 @@ fn shed_events_are_recorded_and_windowed() {
 }
 
 #[test]
+fn shed_reason_labels_cover_every_variant() {
+    // Every reason has a stable, distinct lower-case label (the store mirrors the
+    // engine's `ShedReason` + the egress encoder-overload shed).
+    assert_eq!(ShedReason::Pinned.label(), "pinned");
+    assert_eq!(ShedReason::DisplayBound.label(), "display_bound");
+    assert_eq!(ShedReason::NoBetterHome.label(), "no_better_home");
+    assert_eq!(ShedReason::AntiStorm.label(), "anti_storm");
+    assert_eq!(ShedReason::EncoderOverload.label(), "encoder_overload");
+}
+
+#[test]
+fn display_bound_and_encoder_overload_sheds_are_recorded() {
+    let store = RetentionStore::new();
+    let now = 950 * DAY;
+    store.record_shed_at(now - 30, ShedReason::DisplayBound);
+    store.record_shed_at(now - 10, ShedReason::EncoderOverload);
+    let hour = store.shed_window(now, RetentionWindow::LastHour);
+    assert_eq!(hour.len(), 2);
+    assert_eq!(hour[0].reason, ShedReason::DisplayBound);
+    assert_eq!(hour[1].reason, ShedReason::EncoderOverload);
+}
+
+#[test]
 fn incident_markers_carry_kind_and_timestamp() {
     let store = RetentionStore::new();
     let now = 1_100 * DAY;
