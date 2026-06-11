@@ -933,6 +933,16 @@ pub struct Pipeline {
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
     nosignal_card: Nv12Image,
+    /// The per-cell `on_loss` failover-slate policy (ADR-0027 / ADR-0030), in
+    /// config-cell order — exactly `solve_layout`'s core-cell order, the same
+    /// mapping the control drain's `set_cell_slates` uses. Captured at build
+    /// time and attached to the [`CompositorDrive`] by `drive_streaming`
+    /// itself, so a **control-less** run (`multiview node`, a control-free
+    /// `multiview run`, `run_for`) composites the configured slate for a down
+    /// cell — not the default `nosignal_card` (the DEV-B5 F1 fix). Empty for
+    /// a document with no explicit cells (the drive then keeps its
+    /// `nosignal_card` fallback, byte-identical to before).
+    cell_slates: Vec<multiview_config::FailoverSlate>,
     /// The canvas background shown where no tile covers.
     background: LinearRgba,
     /// The resolved concrete encoder (name + fed pixel format).
@@ -1117,6 +1127,13 @@ impl Pipeline {
             Nv12Image::solid(config.canvas.width, config.canvas.height, 16, 128, 128, tag)
                 .map_err(|e| PipelineError::Engine(e.to_string()))?;
 
+        // Capture each explicit cell's `on_loss` policy in config-cell order
+        // (== the solved layout's core-cell order, the order `set_cell_slates`
+        // expects). The run path hands this to the drive directly so the
+        // policy holds with or without a control plane (DEV-B5 F1).
+        let cell_slates: Vec<multiview_config::FailoverSlate> =
+            config.cells.iter().map(|c| c.on_loss).collect();
+
         // Resolve the encoder from the first output that names a codec (file/HLS
         // share one encode — invariant #7). Default to MPEG-2 if none names one.
         let codec_token = config
@@ -1223,6 +1240,7 @@ impl Pipeline {
             caption_plans,
             canvas_color,
             nosignal_card,
+            cell_slates,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
             encoder,
             encode_cfg: cfg,
@@ -1671,7 +1689,13 @@ impl Pipeline {
             self.canvas_color,
             self.background,
         )
-        .map_err(|e| PipelineError::Engine(e.to_string()))?;
+        .map_err(|e| PipelineError::Engine(e.to_string()))?
+        // Attach the per-cell `on_loss` policy HERE, on the run path itself,
+        // so every run — `multiview node`, a control-less `multiview run`,
+        // and the bounded `run_for` — composites the configured slate for a
+        // down cell (DEV-B5 F1). The control drain's one-shot
+        // `set_cell_slates` re-sets the same mapping (idempotent).
+        .with_cell_slates(self.cell_slates.clone());
         // Under the opt-in `gpu` feature the run PREFERS the wgpu GPU
         // compositor. The device is chosen LOAD-AWARE at admission (ADR-0035
         // Tier-1, decide-once): poll NVML ONCE, score every visible GPU, and pin
