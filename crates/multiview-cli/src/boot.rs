@@ -57,14 +57,36 @@ impl StartConfig {
     }
 }
 
+/// Splice the storeless restart-only sections from the BOOT document into a
+/// resumed Running document (ADR-W022 review M1): `control`, `placement`,
+/// `salvos`, `tally_profiles`, `walls`, `routing`, and `schema_version` have
+/// no control store — the boot file is their durable truth, and a restart is
+/// exactly when they take effect. Without the splice, a boot-file
+/// `[control] listen` edit would be silently lost on the very restart the
+/// operator performed to apply it (the stale `active.toml` copy would win).
+fn splice_storeless_sections(mut running: MultiviewConfig, boot: &MultiviewConfig) -> MultiviewConfig {
+    running.schema_version = boot.schema_version;
+    running.control = boot.control.clone();
+    running.placement = boot.placement.clone();
+    running.salvos = boot.salvos.clone();
+    running.tally_profiles = boot.tally_profiles.clone();
+    running.walls = boot.walls.clone();
+    running.routing = boot.routing.clone();
+    running
+}
+
 /// Resolve the starting Running state for a run booted from `boot` (already
 /// parsed + validated) at `boot_path` (ADR-W022 §4).
 ///
 /// Under `start = "resume"` the persisted `active.toml` next to the boot file
-/// becomes Running when it is valid; a missing/unreadable/invalid file falls
-/// back to the boot document with a `tracing::warn!` and the reason recorded
-/// in [`StartConfig::resume_fallback`]. The default `boot` policy never reads
-/// `active.toml`.
+/// becomes Running when it is valid — with the storeless restart-only
+/// sections (`control`, `placement`, `salvos`, `tally_profiles`, `walls`,
+/// `routing`, `schema_version`) spliced from the BOOT document (review M1: a
+/// boot-file edit to a restart-only section must take effect on restart). A
+/// missing/unreadable/invalid file — or a splice that no longer validates —
+/// falls back to the boot document with a `tracing::warn!` and the reason
+/// recorded in [`StartConfig::resume_fallback`]. The default `boot` policy
+/// never reads `active.toml`.
 #[must_use]
 pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartConfig {
     let start = boot
@@ -82,18 +104,43 @@ pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartCon
     }
     match load_resume_config(boot_path) {
         Ok(active) => {
-            tracing::info!(
-                boot = %boot_path.display(),
-                "start = \"resume\": starting from the persisted Running state \
-                 (active.toml); the boot file stays the Loaded snapshot and the \
-                 watch target"
-            );
-            StartConfig {
-                running: active,
-                loaded: boot,
-                start,
-                resumed: true,
-                resume_fallback: None,
+            let running = splice_storeless_sections(active, &boot);
+            match running.validate() {
+                Ok(()) => {
+                    tracing::info!(
+                        boot = %boot_path.display(),
+                        "start = \"resume\": starting from the persisted Running state \
+                         (active.toml) with the restart-only sections from the boot \
+                         file; the boot file stays the Loaded snapshot and the watch \
+                         target"
+                    );
+                    StartConfig {
+                        running,
+                        loaded: boot,
+                        start,
+                        resumed: true,
+                        resume_fallback: None,
+                    }
+                }
+                Err(error) => {
+                    let reason = format!(
+                        "the persisted Running state does not validate once the boot \
+                         file's restart-only sections are spliced in: {error}"
+                    );
+                    tracing::warn!(
+                        boot = %boot_path.display(),
+                        reason = %reason,
+                        "start = \"resume\" requested but the spliced Running state is \
+                         unusable; falling back to the boot document"
+                    );
+                    StartConfig {
+                        running: boot.clone(),
+                        loaded: boot,
+                        start,
+                        resumed: false,
+                        resume_fallback: Some(reason),
+                    }
+                }
             }
         }
         Err(reason) => {
