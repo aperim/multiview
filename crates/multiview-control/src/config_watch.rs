@@ -32,14 +32,18 @@
 //! re-exports it for the binary and the existing ADR-W020 integration tests.
 //!
 //! Isolation (invariants #1 + #10): every engine submission is the
-//! non-blocking `try_submit` (a full bus sheds with a warning — re-saving the
-//! file retries), every publish is the drop-oldest event broadcast, and every
-//! store touched is read-mostly control-plane state. Nothing here can pace,
-//! stall, or back-pressure the engine.
+//! non-blocking `try_submit`. A full bus sheds the submission — the watcher
+//! then leaves the baseline AND the applied fingerprint **un-advanced**,
+//! records a partial-apply rejection, raises the interim
+//! `config-file-apply-incomplete` warning, and **re-applies the whole
+//! (idempotent) change on a later poll** until every command lands; the
+//! warning clears when the apply completes. Every publish is the drop-oldest
+//! event broadcast, and every store touched is read-mostly control-plane
+//! state. Nothing here can pace, stall, or back-pressure the output clock.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,60 +89,86 @@ impl WatchOptions {
     }
 }
 
+/// The most banked expected-write tokens kept at once (a stuck writer must
+/// not grow memory; older banked tokens are shed oldest-first).
+const MAX_EXPECTED_TOKENS: usize = 8;
+
 /// The cloneable handle [`spawn`] returns: self-write suppression for the
 /// promote-to-boot lane ([`ConfigWatchHandle::expect_write`]) and a stop flag
 /// for run teardown.
 #[derive(Debug, Clone)]
 pub struct ConfigWatchHandle {
-    /// Outstanding expected (server-side) writes; each suppresses one reload.
-    expected: Arc<AtomicU64>,
+    /// Hashes of expected (server-side) write contents; each suppresses one
+    /// reload of EXACTLY that content (review m3 — a banked token must never
+    /// eat an unrelated external edit).
+    expected: Arc<std::sync::Mutex<std::collections::VecDeque<u64>>>,
     /// Raised by [`ConfigWatchHandle::stop`]; the loop exits on its next poll.
     stop: Arc<AtomicBool>,
 }
 
 impl ConfigWatchHandle {
-    /// Mark one **expected** write: the next debounced file change is adopted
-    /// as the new baseline WITHOUT applying anything (the server-side writer —
-    /// e.g. a promote-to-boot flow — already applied the state it serialized).
-    /// Call immediately before writing the file. Each call suppresses exactly
-    /// one reload.
-    ///
-    /// Server-side writers should go through [`expect_server_write`] (the one
-    /// thin wrapper that also carries the written content) rather than calling
-    /// this directly.
-    pub fn expect_write(&self) {
-        self.expected.fetch_add(1, Ordering::AcqRel);
+    /// Mark one **expected** write of exactly `content`: when a debounced file
+    /// change carries this content it is adopted as the new baseline WITHOUT
+    /// applying anything (the server-side writer — e.g. a promote-to-boot
+    /// flow — already applied the state it serialized). Call immediately
+    /// before writing the file. The token is content-paired: an unrelated
+    /// external edit landing first is still applied normally (review m3).
+    pub fn expect_write(&self, content: &str) {
+        let mut tokens = lock_tokens(&self.expected);
+        if tokens.len() >= MAX_EXPECTED_TOKENS {
+            tokens.pop_front();
+        }
+        tokens.push_back(content_hash(content));
     }
 
-    /// Stop the watcher (it exits on its next poll tick).
+    /// Stop the watcher (it exits on its next poll tick and marks the
+    /// watch-status inactive).
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
 
-    /// Consume one outstanding expected-write token, if any.
-    fn consume_expected(&self) -> bool {
-        self.expected
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-            .is_ok()
+    /// Consume the banked token matching `text`'s content, if one exists.
+    fn consume_expected_for(&self, text: &str) -> bool {
+        let hash = content_hash(text);
+        let mut tokens = lock_tokens(&self.expected);
+        match tokens.iter().position(|t| *t == hash) {
+            Some(index) => {
+                tokens.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Lock the token queue, recovering from a poisoned lock (a panicked banker
+/// must not wedge the watcher).
+fn lock_tokens(
+    tokens: &std::sync::Mutex<std::collections::VecDeque<u64>>,
+) -> std::sync::MutexGuard<'_, std::collections::VecDeque<u64>> {
+    match tokens.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
 /// The ONE seam every server-side boot-file writer announces itself through
 /// (ADR-W022 §6): call this immediately before atomically writing `content`
-/// to the watched path, so the watcher adopts the write as its new baseline
-/// instead of re-applying it.
-///
-/// Today this consumes one [`ConfigWatchHandle::expect_write`] token per
-/// write; `content` is accepted (and not yet consulted) so every call site
-/// already passes the exact bytes it writes — the config-watch lane's
-/// fingerprint/content-hash pairing rework lands inside this one function
-/// without touching callers.
+/// to the watched path, so the watcher adopts exactly that write as its new
+/// baseline instead of re-applying it. The token is content-paired (review
+/// m3): an unrelated external edit landing first is still applied normally.
 pub fn expect_server_write(handle: &ConfigWatchHandle, content: &str) {
-    debug_assert!(
-        !content.is_empty(),
-        "a server-side config write has content"
-    );
-    handle.expect_write();
+    handle.expect_write(content);
+}
+
+/// A stable in-process hash of a write's content (`DefaultHasher` — this is a
+/// self-match between our own writer and our own watcher, not an adversarial
+/// boundary).
+fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Spawn the config-file watcher over `path` on the control-plane tokio
@@ -158,7 +188,7 @@ pub fn spawn(
     options: WatchOptions,
 ) -> ConfigWatchHandle {
     let handle = ConfigWatchHandle {
-        expected: Arc::new(AtomicU64::new(0)),
+        expected: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         stop: Arc::new(AtomicBool::new(false)),
     };
     state.install_watch_handle(handle.clone());
@@ -168,21 +198,26 @@ pub fn spawn(
         poll = ?options.poll_interval,
         "watching the config file for external changes (ADR-W020)"
     );
-    // Fingerprint the file NOW, synchronously: `baseline` was loaded from this
-    // content, so the baseline fingerprint must be captured before the spawned
-    // task first runs (a write landing in that window must trigger a reload,
-    // not be silently adopted as the baseline).
-    let applied = probe(&path);
+    // The watcher starts with NO applied fingerprint (review M2): the first
+    // SETTLED poll re-reads the file and diffs it against the boot baseline,
+    // so an edit landing between the boot-time `load_validated` and this
+    // spawn is APPLIED — never silently adopted. An unchanged file settles to
+    // an empty diff and is adopted with no commands and no warnings.
     let task_handle = handle.clone();
-    tokio::spawn(watch_loop(
-        path,
-        baseline,
-        applied,
-        state,
-        options,
-        task_handle,
-    ));
+    tokio::spawn(watch_loop(path, baseline, state, options, task_handle));
     handle
+}
+
+/// Marks the watch-status inactive when the watcher task ends — via
+/// [`ConfigWatchHandle::stop`], run teardown, or an unexpected panic
+/// unwinding the task (review m2): the UI must never show "watching" for a
+/// dead watcher.
+struct ActiveGuard(Arc<crate::watch_status::ConfigWatchStatus>);
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.mark_inactive();
+    }
 }
 
 /// A cheap content-change fingerprint of the watched path: length + mtime +
@@ -196,9 +231,10 @@ struct Fingerprint {
 }
 
 /// Probe the path's fingerprint; [`None`] when the file is (transiently)
-/// missing.
-fn probe(path: &Path) -> Option<Fingerprint> {
-    let meta = std::fs::metadata(path).ok()?;
+/// missing. `tokio::fs` so the `stat(2)` rides the blocking pool, never the
+/// control-plane reactor (review m6).
+async fn probe(path: &Path) -> Option<Fingerprint> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
     #[cfg(unix)]
     let inode = {
         use std::os::unix::fs::MetadataExt as _;
@@ -219,25 +255,39 @@ fn probe(path: &Path) -> Option<Fingerprint> {
 async fn watch_loop(
     path: PathBuf,
     mut baseline: MultiviewConfig,
-    // The fingerprint of the content `baseline` reflects (captured at spawn).
-    mut applied: Option<Fingerprint>,
     state: AppState,
     options: WatchOptions,
     handle: ConfigWatchHandle,
 ) {
+    // Inactive-on-drop: stop, teardown, and panic all flip the status
+    // (review m2).
+    let _active = ActiveGuard(Arc::clone(&state.config_watch));
+    // The fingerprint of the content `baseline` reflects. `None` at start
+    // (review M2): the first settled poll diffs the file against the boot
+    // baseline, closing the boot-load → watcher-spawn window.
+    let mut applied: Option<Fingerprint> = None;
+    // The fingerprint of a latched-REJECTED content (invalid / unreadable /
+    // a buggy expected write): handled once, never re-warned each poll —
+    // and, unlike `applied`, never treated as "the file matches the running
+    // configuration".
+    let mut rejected: Option<Fingerprint> = None;
     let mut candidate: Option<Fingerprint> = None;
     let mut missing_polls: u32 = 0;
     let mut missing_reported = false;
     // Whether a `config-file-invalid` warning is currently raised (cleared on
-    // the next valid apply).
+    // the next valid apply, or when the file is back at the applied content).
     let mut invalid_active = false;
+    // Whether a `config-file-apply-incomplete` warning is currently raised
+    // (review M1: engine command(s) shed on a full bus; cleared when the
+    // retried apply completes).
+    let mut incomplete_active = false;
     loop {
         tokio::time::sleep(options.poll_interval).await;
         if handle.stop.load(Ordering::Acquire) {
             tracing::debug!(path = %path.display(), "config-file watcher stopped");
             return;
         }
-        let Some(now) = probe(&path) else {
+        let Some(now) = probe(&path).await else {
             // Mid-rename ENOENT is normal; a file that STAYS missing is
             // reported once (the running configuration is unchanged).
             candidate = None;
@@ -257,6 +307,32 @@ async fn watch_loop(
         missing_reported = false;
         if applied.as_ref() == Some(&now) {
             candidate = None;
+            // The file is present at the already-applied content, so any
+            // latched condition has resolved without new content to apply
+            // (review m5: e.g. the file was renamed away — warned missing —
+            // and renamed back).
+            if invalid_active {
+                clear_invalid(
+                    &state,
+                    &path,
+                    "the file is back at the already-applied content",
+                    &mut invalid_active,
+                );
+            }
+            if incomplete_active {
+                // A partial (shed) apply was pending and the ORIGINAL content
+                // returned: nothing is pending for the engine any more, but
+                // the stores may have followed the abandoned content —
+                // re-converge them to the running baseline.
+                resync_all_stores(&state, ACTOR, &baseline);
+                clear_apply_incomplete(&state, &path, &mut incomplete_active);
+            }
+            continue;
+        }
+        if rejected.as_ref() == Some(&now) {
+            // Already rejected and warned exactly once; latched until the
+            // content changes again.
+            candidate = None;
             continue;
         }
         if candidate.as_ref() != Some(&now) {
@@ -265,29 +341,70 @@ async fn watch_loop(
             candidate = Some(now);
             continue;
         }
-        // Stable across two polls: act on it.
+        // Stable across two polls: act on it. Read the content once — the
+        // expected-write check is content-paired (review m3). `tokio::fs` so
+        // the read rides the blocking pool (review m6).
         candidate = None;
-        applied = Some(now);
-        if handle.consume_expected() {
-            adopt_expected_write(&path, &mut baseline);
+        let text = match tokio::fs::read_to_string(&path).await {
+            Ok(text) => text,
+            Err(error) => {
+                rejected = Some(now);
+                reject(
+                    &state,
+                    &path,
+                    &format!("the file cannot be read: {error}"),
+                    &mut invalid_active,
+                );
+                continue;
+            }
+        };
+        if handle.consume_expected_for(&text) {
+            if adopt_expected_text(&path, &text, &mut baseline) {
+                applied = Some(now);
+                rejected = None;
+            } else {
+                rejected = Some(now);
+            }
             continue;
         }
-        apply_change(&path, &mut baseline, &state, &mut invalid_active);
+        match apply_change(
+            &path,
+            &text,
+            &mut baseline,
+            &state,
+            &mut invalid_active,
+            &mut incomplete_active,
+        ) {
+            ApplyResult::Settled => {
+                applied = Some(now);
+                rejected = None;
+            }
+            ApplyResult::RejectedInvalid => {
+                rejected = Some(now);
+            }
+            ApplyResult::Retry => {
+                // Review M1: engine command(s) were shed — leave `applied`
+                // AND the baseline un-advanced so a later poll re-reads and
+                // re-applies the whole (idempotent) change.
+            }
+        }
     }
 }
 
 /// Adopt an **expected** (server-side) write as the new baseline without
 /// applying anything — the writer already applied the state it serialized. A
 /// write that does not parse/validate is still warned (a buggy writer must
-/// never be silent), and the baseline is kept.
-fn adopt_expected_write(path: &Path, baseline: &mut MultiviewConfig) {
-    match load_validated(path) {
+/// never be silent), and the baseline is kept. Returns whether the write was
+/// adopted.
+fn adopt_expected_text(path: &Path, text: &str, baseline: &mut MultiviewConfig) -> bool {
+    match parse_validated(text) {
         Ok(next) => {
             tracing::debug!(
                 path = %path.display(),
                 "expected (self) config write adopted as the new baseline; no reload"
             );
             *baseline = next;
+            true
         }
         Err(reason) => {
             tracing::warn!(
@@ -296,48 +413,103 @@ fn adopt_expected_write(path: &Path, baseline: &mut MultiviewConfig) {
                 "an EXPECTED config write does not validate — the writer is buggy; \
                  keeping the previous baseline"
             );
+            false
         }
     }
 }
 
-/// Read + parse + validate the whole document, with a human-readable reason on
+/// Parse + validate the whole document text, with a human-readable reason on
 /// any failure.
-fn load_validated(path: &Path) -> Result<MultiviewConfig, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("the file cannot be read: {e}"))?;
-    let next = MultiviewConfig::load_from_toml(&text)
+fn parse_validated(text: &str) -> Result<MultiviewConfig, String> {
+    let next = MultiviewConfig::load_from_toml(text)
         .map_err(|e| format!("the document does not parse: {e}"))?;
     next.validate()
         .map_err(|e| format!("the document does not validate: {e}"))?;
     Ok(next)
 }
 
+/// How the loop must advance its fingerprints after [`apply_change`].
+enum ApplyResult {
+    /// Fully handled — applied (or identical content adopted); the content's
+    /// fingerprint becomes the `applied` baseline fingerprint.
+    Settled,
+    /// The document was invalid: warned + latched once; the fingerprint is
+    /// remembered as rejected (never as applied).
+    RejectedInvalid,
+    /// Only PARTIALLY applied — engine command(s) shed on a full bus (review
+    /// M1). Neither the baseline nor any fingerprint advanced: a later poll
+    /// re-reads and re-applies the whole (idempotent) change.
+    Retry,
+}
+
 /// Handle one settled external change: whole-document validate, per-section
-/// diff, apply through the one machinery, advance the baseline.
+/// diff, apply through the one machinery, advance the baseline — unless a
+/// command was shed, in which case NOTHING advances and the apply is retried
+/// on a later poll (review M1).
 fn apply_change(
     path: &Path,
+    text: &str,
     baseline: &mut MultiviewConfig,
     state: &AppState,
     invalid_active: &mut bool,
-) {
-    let next = match load_validated(path) {
+    incomplete_active: &mut bool,
+) -> ApplyResult {
+    let next = match parse_validated(text) {
         Ok(next) => next,
         Err(reason) => {
             reject(state, path, &reason, invalid_active);
-            return;
+            return ApplyResult::RejectedInvalid;
         }
     };
     let diff = ConfigDiff::between(baseline, &next);
     if diff.is_empty() {
-        // A touch / rewrite with identical content: adopt silently.
+        // A touch / rewrite with identical content: adopt silently. If a
+        // partial (shed) apply was pending, the file was REVERTED to the
+        // running baseline: nothing is pending for the engine any more, but
+        // the stores may have followed the abandoned content — re-converge
+        // them to the file before clearing the interim warning.
+        if *incomplete_active {
+            resync_all_stores(state, ACTOR, &next);
+            clear_apply_incomplete(state, path, incomplete_active);
+        }
         *baseline = next;
-        clear_invalid(state, path, invalid_active);
+        clear_invalid(
+            state,
+            path,
+            "a subsequent valid write applied",
+            invalid_active,
+        );
         tracing::debug!(path = %path.display(), "config file rewritten with identical content");
-        return;
+        return ApplyResult::Settled;
     }
     let outcome = apply_document_diff(state, ACTOR, &diff, &next);
+    // The document is valid either way — the invalid latch clears even when
+    // the apply is incomplete (the conditions are independent).
+    clear_invalid(
+        state,
+        path,
+        "a subsequent valid write applied",
+        invalid_active,
+    );
+    if outcome.shed > 0 {
+        // Review M1: NEVER claim "applied" while a command was shed. Leave
+        // the baseline un-advanced, record the partial apply as a rejection,
+        // raise the interim warning, and let the next poll retry the whole
+        // (idempotent) apply. Restart-pending accounting also waits for the
+        // completed retry, so the status never gets ahead of the engine.
+        state.config_watch.record_rejected(
+            now_ms(state),
+            &format!(
+                "partially applied: {} engine command(s) shed on a full command bus; \
+                 the watcher retries the whole change on its next poll",
+                outcome.shed
+            ),
+        );
+        publish_apply_incomplete(state, path, outcome.shed, incomplete_active);
+        return ApplyResult::Retry;
+    }
     *baseline = next;
-    clear_invalid(state, path, invalid_active);
+    clear_apply_incomplete(state, path, incomplete_active);
     let summary = outcome.summary();
     state.config_watch.record_applied(now_ms(state), &summary);
     if !outcome.restart.is_empty() {
@@ -354,10 +526,14 @@ fn apply_change(
         summary = %summary,
         "applied an external config-file change (ADR-W020)"
     );
+    ApplyResult::Settled
 }
 
-/// What one document-diff apply did: the per-section human summary parts and
-/// the restart-only sections.
+/// What one document-diff apply did: the per-section human summary parts, the
+/// restart-only sections, and how many engine commands were shed on a full
+/// bus (review M1: any shed means the apply is incomplete — the watcher
+/// retries it on a later poll; the revert route reports it as a partial
+/// revert).
 #[derive(Debug, Clone)]
 pub struct ApplyOutcome {
     /// Per-section human-readable summary parts (e.g. `sources: in_a changed`),
@@ -365,6 +541,8 @@ pub struct ApplyOutcome {
     pub parts: Vec<String>,
     /// The sections that could not hot-apply and take effect on restart.
     pub restart: BTreeSet<String>,
+    /// How many engine commands were shed on a full bus (0 = fully applied).
+    pub shed: u32,
 }
 
 impl ApplyOutcome {
@@ -388,11 +566,12 @@ pub fn apply_document_diff(
 ) -> ApplyOutcome {
     let mut restart: BTreeSet<String> = BTreeSet::new();
     let mut parts: Vec<String> = Vec::new();
+    let mut shed: u32 = 0;
 
     // 1. Sources FIRST (FIFO bus): a layout rebinding to a just-added source
     //    must find its store registered in the same frame-boundary pass.
     if !diff.sources.is_empty() {
-        parts.push(apply_source_changes(state, diff, &mut restart));
+        parts.push(apply_source_changes(state, diff, &mut restart, &mut shed));
         resync_store(state, actor, &state.sources, &desired_sources(next));
     }
 
@@ -416,7 +595,14 @@ pub fn apply_document_diff(
     // 3. Layout/cells: the SAME resolve+solve+Class-1-gate as the
     //    apply-layout route, then the same ApplyLayout command (ADR-W019).
     if diff.layout_changed {
-        parts.push(apply_layout_change(state, actor, diff, next, &mut restart));
+        parts.push(apply_layout_change(
+            state,
+            actor,
+            diff,
+            next,
+            &mut restart,
+            &mut shed,
+        ));
     }
 
     // 4. Every other changed section: reseed its store where one exists (the
@@ -448,7 +634,11 @@ pub fn apply_document_diff(
         let names: Vec<&str> = restart.iter().map(String::as_str).collect();
         parts.push(format!("restart pending: {}", names.join(", ")));
     }
-    ApplyOutcome { parts, restart }
+    ApplyOutcome {
+        parts,
+        restart,
+        shed,
+    }
 }
 
 /// Apply the source diff exactly as the sources routes do (ADR-W018):
@@ -460,6 +650,7 @@ fn apply_source_changes(
     state: &AppState,
     diff: &ConfigDiff,
     restart: &mut BTreeSet<String>,
+    shed: &mut u32,
 ) -> String {
     let mut described: Vec<String> = Vec::new();
     for change in &diff.sources {
@@ -467,13 +658,15 @@ fn apply_source_changes(
             SourceChange::Added(source) => {
                 described.push(format!("{} added", source.id));
                 if source.kind.is_synthetic() {
-                    submit(
+                    if !submit(
                         state,
                         Command::UpsertSource {
                             op: OperationId::new(),
                             source: source.clone(),
                         },
-                    );
+                    ) {
+                        *shed = shed.saturating_add(1);
+                    }
                 } else {
                     restart.insert("sources".to_owned());
                     tracing::warn!(
@@ -486,25 +679,29 @@ fn apply_source_changes(
             SourceChange::Changed { previous, next } => {
                 described.push(format!("{} changed", next.id));
                 if next.kind.is_synthetic() {
-                    submit(
+                    if !submit(
                         state,
                         Command::UpsertSource {
                             op: OperationId::new(),
                             source: next.clone(),
                         },
-                    );
+                    ) {
+                        *shed = shed.saturating_add(1);
+                    }
                 } else {
                     if previous.kind.is_synthetic() {
                         // Mirror the sources route: stop the stale generator
                         // now; a frozen synthetic pretending to be the new
                         // URL would be dishonest.
-                        submit(
+                        if !submit(
                             state,
                             Command::RemoveSource {
                                 op: OperationId::new(),
                                 id: next.id.clone(),
                             },
-                        );
+                        ) {
+                            *shed = shed.saturating_add(1);
+                        }
                     }
                     restart.insert("sources".to_owned());
                     tracing::warn!(
@@ -515,13 +712,15 @@ fn apply_source_changes(
             }
             SourceChange::Removed(id) => {
                 described.push(format!("{id} removed"));
-                submit(
+                if !submit(
                     state,
                     Command::RemoveSource {
                         op: OperationId::new(),
                         id: id.clone(),
                     },
-                );
+                ) {
+                    *shed = shed.saturating_add(1);
+                }
             }
         }
     }
@@ -537,6 +736,7 @@ fn apply_layout_change(
     diff: &ConfigDiff,
     next: &MultiviewConfig,
     restart: &mut BTreeSet<String>,
+    shed: &mut u32,
 ) -> String {
     let id = state
         .working_layout_id
@@ -561,15 +761,22 @@ fn apply_layout_change(
     }
     match resolve_layout_document(&id, &body, state.running_canvas.as_ref()) {
         Ok(resolved) => {
-            submit(
+            // Review M1: claim "applied live" ONLY when the command actually
+            // landed on the bus; a shed leaves the apply incomplete and the
+            // watcher retries it on a later poll.
+            if submit(
                 state,
                 Command::ApplyLayout {
                     op: OperationId::new(),
                     layout: id,
                     document: Some(Box::new(resolved)),
                 },
-            );
-            "layout applied live".to_owned()
+            ) {
+                "layout applied live".to_owned()
+            } else {
+                *shed = shed.saturating_add(1);
+                "layout apply shed (retried on the next poll)".to_owned()
+            }
         }
         Err(error) => {
             // The document validated as a whole, so this is the Class-1 gate
@@ -824,16 +1031,23 @@ fn to_body(value: &impl serde::Serialize) -> Option<serde_json::Value> {
     }
 }
 
-/// Submit a command on the bounded, non-blocking bus; a full/closed bus sheds
-/// with a warning (invariant #10) — re-applying retries.
-fn submit(state: &AppState, command: Command) {
+/// Submit a command on the bounded, non-blocking bus (invariant #10). Returns
+/// whether it landed; a full/closed bus sheds with a warning — the caller
+/// counts the shed and the watcher retries the whole apply on a later poll
+/// (review M1).
+fn submit(state: &AppState, command: Command) -> bool {
     let kind = command.kind();
-    if let Err(error) = state.commands.try_submit(command) {
-        tracing::warn!(
-            command = kind,
-            error = %error,
-            "config apply: the engine command bus shed this change (re-apply to retry)"
-        );
+    match state.commands.try_submit(command) {
+        Ok(_op) => true,
+        Err(error) => {
+            tracing::warn!(
+                command = kind,
+                error = %error,
+                "config-file apply: the engine command bus shed this change; \
+                 the watcher retries the whole apply on its next poll"
+            );
+            false
+        }
     }
 }
 
@@ -857,8 +1071,10 @@ fn reject(state: &AppState, path: &Path, reason: &str, invalid_active: &mut bool
         )));
 }
 
-/// Clear a previously-raised `config-file-invalid` warning after a valid apply.
-fn clear_invalid(state: &AppState, path: &Path, invalid_active: &mut bool) {
+/// Clear a previously-raised `config-file-invalid` warning: the invalid
+/// condition resolved, either because a subsequent valid write applied or
+/// because the file is back at the already-applied content (review m5).
+fn clear_invalid(state: &AppState, path: &Path, reason: &str, invalid_active: &mut bool) {
     if !*invalid_active {
         return;
     }
@@ -867,10 +1083,103 @@ fn clear_invalid(state: &AppState, path: &Path, invalid_active: &mut bool) {
         .engine
         .publish_event(Event::HealthWarningCleared(invalid_warning(
             path,
-            "a subsequent valid write applied",
+            reason,
             now_nanos(state),
             false,
         )));
+}
+
+/// Raise (or refresh) the interim `config-file-apply-incomplete` warning: a
+/// valid change was only PARTIALLY applied because `shed` engine command(s)
+/// were shed on a full bus (review M1). The watcher retries the whole apply
+/// on its next poll and clears this when it completes.
+fn publish_apply_incomplete(
+    state: &AppState,
+    path: &Path,
+    shed: u32,
+    incomplete_active: &mut bool,
+) {
+    *incomplete_active = true;
+    state
+        .engine
+        .publish_event(Event::HealthWarningRaised(apply_incomplete_warning(
+            path,
+            shed,
+            now_nanos(state),
+            true,
+        )));
+}
+
+/// Clear a previously-raised `config-file-apply-incomplete` warning: the
+/// retried apply completed (or the file reverted to the running baseline, so
+/// nothing is pending for the engine any more).
+fn clear_apply_incomplete(state: &AppState, path: &Path, incomplete_active: &mut bool) {
+    if !*incomplete_active {
+        return;
+    }
+    *incomplete_active = false;
+    state
+        .engine
+        .publish_event(Event::HealthWarningCleared(apply_incomplete_warning(
+            path,
+            0,
+            now_nanos(state),
+            false,
+        )));
+}
+
+/// Build the `config-file-apply-incomplete` warning (raise and clear share
+/// the shape; the store coalesces on the code).
+fn apply_incomplete_warning(path: &Path, shed: u32, since: i64, active: bool) -> HealthWarning {
+    HealthWarning {
+        code: WarningCode::ConfigFileApplyIncomplete,
+        severity: WarningSeverity::Warning,
+        subsystem: "config".to_owned(),
+        message: format!(
+            "A valid change to the config file {} is only PARTIALLY applied: {shed} engine \
+             command(s) were shed on a full command bus; the watcher retries the whole change \
+             on its next poll.",
+            path.display()
+        ),
+        remediation: "No action needed — the watcher retries automatically and clears this \
+                      warning when the apply completes; investigate a persistently full \
+                      command bus if it does not."
+            .to_owned(),
+        since,
+        active,
+    }
+}
+
+/// Re-converge every store-backed section (and the working layout) to
+/// `config`. Used when a partial (shed) apply is abandoned by a revert: the
+/// stores follow the FILE on the first attempt (ADR-W020 §5), so they may
+/// hold content the engine never adopted; this brings them back in line with
+/// the document that IS the running truth. Idempotent.
+fn resync_all_stores(state: &AppState, actor: &str, config: &MultiviewConfig) {
+    resync_store(state, actor, &state.sources, &desired_sources(config));
+    resync_store(state, actor, &state.outputs, &desired_outputs(config));
+    resync_store(state, actor, &state.overlays, &desired_overlays(config));
+    resync_store(state, actor, &state.probes, &desired_probes(config));
+    resync_store(state, actor, &state.devices, &desired_devices(config));
+    for device in &config.devices {
+        state.device_status.ensure(&device.id);
+    }
+    resync_store(
+        state,
+        actor,
+        &state.sync_groups,
+        &desired_sync_groups(config),
+    );
+    if config.audio.is_some() {
+        resync_audio(state, actor, config);
+    }
+    let id = state
+        .working_layout_id
+        .clone()
+        .unwrap_or_else(|| "working".to_owned());
+    if let Some(body) = working_layout_body(config) {
+        reseed_working_layout(state, actor, &id, &body);
+    }
 }
 
 /// Build the `config-file-invalid` warning (raise and clear share the shape;
@@ -900,8 +1209,12 @@ fn publish_requires_restart(state: &AppState, pending: &[String]) {
     tracing::warn!(
         sections = %sections,
         "config file changed sections that only apply on RESTART; the running process \
-         differs from the file until then"
+         may differ from the file until then"
     );
+    // Review m7: the warning is LATCHED (a later revert cannot un-ring the
+    // bell for state the engine never adopted), so the message says "changed
+    // since boot" / "may differ" — the file's CURRENT content might have been
+    // reverted since the change was seen.
     state
         .engine
         .publish_event(Event::HealthWarningRaised(HealthWarning {
@@ -909,8 +1222,8 @@ fn publish_requires_restart(state: &AppState, pending: &[String]) {
             severity: WarningSeverity::Warning,
             subsystem: "config".to_owned(),
             message: format!(
-                "The config file changed section(s) [{sections}] that cannot hot-apply; \
-                 the running process differs from the file until a restart."
+                "Section(s) [{sections}] of the config file changed since boot in ways that \
+                 cannot hot-apply; the running process may differ from the file until a restart."
             ),
             remediation: "Restart multiview to apply these sections (live-appliable changes \
                           were already applied)."

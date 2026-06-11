@@ -4,6 +4,9 @@
 // Consumers: hand-authored runtime in envelope.ts and connection.ts is NOT
 // replaced — see ADR-RT006. Import from this module for precise payload types.
 
+/** The MEASURED sync tier actually achieved (never aspirational): frame-accurate (our nodes), bounded-skew (vendor decoders, ±100–500 ms drift), or none (never part of a synchronized canvas). */
+export type AchievedSync = "frame-accurate" | "bounded-skew" | "none";
+
 /** Data body of `alarm.raised`, `alarm.updated`, `alarm.cleared`, `alarm.acked`. Carries the current AlarmRecord value after the transition (X.733-aligned). */
 export interface AlarmTransition {
   /** The current alarm record after the transition. */
@@ -40,6 +43,126 @@ export interface AudioMeter {
   readonly sampled_hz: number;
   /** Track index. */
   readonly track: number;
+}
+
+/** Data body of `device.adopted`: a device was adopted into the registry. */
+export interface DeviceAdopted {
+  /** The registry device id. */
+  readonly device_id: string;
+  /** The compiled-in driver managing it (e.g. `zowietek`). */
+  readonly driver: string;
+  /** The operator-facing display name, if set. */
+  readonly name?: string;
+}
+
+/** Fixed probed capability flags — a driver maps its device into exactly this shape. */
+export interface DeviceCapabilities {
+  /** The device handles audio. */
+  readonly audio: boolean;
+  /** The device can decode (receive a Multiview output). */
+  readonly decode: boolean;
+  /** The device drives a physical display. */
+  readonly display: boolean;
+  /** The device can encode (offers streams Multiview ingests as Sources). */
+  readonly encode: boolean;
+  /** The device supports managed firmware update. */
+  readonly firmware_update: boolean;
+  /** The device can be rebooted via the management channel. */
+  readonly reboot: boolean;
+  readonly sync: SyncCapability;
+}
+
+/** Data body of `device.discovered`: one untrusted discovery-inventory row streamed while a scan runs (correlated via the envelope `corr`). Requires explicit confirm-adopt; never auto-ingested. */
+export interface DeviceDiscovered {
+  /** The management endpoint (URL/host; IPv6 literals bracketed). */
+  readonly address: string;
+  /** The candidate driver that recognised the device. */
+  readonly driver: string;
+  /** Address family — IPv6-first; IPv4 results are labelled legacy. */
+  readonly family: "ipv6" | "ipv4-legacy";
+  /** The advertised device name, if any. */
+  readonly name?: string;
+}
+
+/** Data body of `device.error`: a driver-reported device error. */
+export interface DeviceError {
+  /** Short machine-readable code where the driver has one (vendor codes pass through verbatim). */
+  readonly code?: string;
+  /** The registry device id the error concerns. */
+  readonly device_id: string;
+  /** Human-readable description of the error. */
+  readonly message: string;
+}
+
+/** Data body of `device.mode`: a mode convergence started/finished/failed, carrying the impact declared BEFORE apply (instant-apply doctrine). */
+export interface DeviceMode {
+  /** The human-readable declared-impact statement, if the driver provides one. */
+  readonly detail?: string;
+  /** The registry device id converging. */
+  readonly device_id: string;
+  readonly impact: ImpactClass;
+  /** The target mode being converged to (driver vocabulary). */
+  readonly mode: string;
+  /** Which convergence phase this event reports. */
+  readonly phase: "started" | "finished" | "failed";
+}
+
+/** Data body of `device.removed`: a device was removed from the registry. */
+export interface DeviceRemoved {
+  /** The registry device id that was removed. */
+  readonly device_id: string;
+}
+
+/** Managed-device lifecycle state (managed-devices.md §2.2), uppercase on the wire. */
+export type DeviceState = "DISCOVERED" | "ADOPTING" | "ONLINE" | "DEGRADED" | "AUTH_FAILED" | "UNREACHABLE";
+
+/** Data body of `device.status` (managed-devices.md §2.1): the conflated latest-wins per-device runtime snapshot, envelope `id` = device id. Excluded from the lossless replay ring (a re-snapshot heals it); staleness is surfaced via `last_seen_ts`. */
+export interface DeviceStatus {
+  readonly capabilities?: DeviceCapabilities;
+  /** The registry device id this snapshot describes. */
+  readonly device_id: string;
+  /** When the device last answered (engine monotonic nanoseconds). */
+  readonly last_seen_ts?: number;
+  /** The device's current converged mode (driver vocabulary), once known. */
+  readonly mode?: string;
+  readonly state: DeviceState;
+  /** Device-reported active streams (omitted when none / unknown). */
+  readonly streams?: readonly DeviceStreamStatus[];
+  readonly sync?: DeviceSyncSummary;
+  /** Device-reported temperature (°C), where exposed. */
+  readonly temperature_c?: number;
+}
+
+/** One device-reported active stream. Optional fields are absent where the vendor does not report that figure. */
+export interface DeviceStreamStatus {
+  /** Device-reported stream bitrate (bits/sec), if reported. */
+  readonly bitrate_bps?: number;
+  /** Device-reported stream rate (fps), if reported. */
+  readonly fps?: number;
+  /** Whether the device reports this stream as healthy. */
+  readonly healthy: boolean;
+  /** The Multiview output this decode stream is bound to, if any. */
+  readonly output_ref?: string;
+  /** Whether the device is encoding or decoding this stream. */
+  readonly role: "encode" | "decode";
+}
+
+/** Data body of `device.sync`: sync-group membership / achieved-tier / drift change. */
+export interface DeviceSync {
+  readonly change: SyncChange;
+  /** The member device id. */
+  readonly device_id: string;
+  /** The sync group concerned. */
+  readonly group: string;
+}
+
+/** A device's sync-group membership summary inside a device.status snapshot. */
+export interface DeviceSyncSummary {
+  readonly achieved: AchievedSync;
+  /** The sync group this device belongs to. */
+  readonly group: string;
+  /** Per-member presentation offset trim (ms, AES67 link-offset semantics). */
+  readonly offset_ms: number;
 }
 
 /** A per-GPU utilisation sample. Optional fields are absent where the vendor does not expose that signal. */
@@ -111,6 +234,9 @@ export interface Hello {
   /** Server-assigned session id. */
   readonly session_id: string;
 }
+
+/** Declared impact class of a management change: cp (control-plane only), c1 (hot/seamless at a frame boundary), c2 (controlled reset via make-before-break), dev (the DEVICE pipeline restarts; Multiview program output is unaffected). */
+export type ImpactClass = "cp" | "c1" | "c2" | "dev";
 
 /** Data body of the `input.connection` event. */
 export interface InputConnection {
@@ -235,6 +361,42 @@ export interface Subscribed {
   readonly topic: string;
 }
 
+/** How well a device can participate in synchronized presentation (fixed probed tri-state). */
+export type SyncCapability = "frame-accurate" | "offset-only" | "none";
+
+/** What changed about a device's sync participation (tagged by `kind`, never untagged). */
+export type SyncChange =
+  | {
+  readonly kind: "joined";
+  /** The per-member offset trim (ms). */
+  readonly offset_ms: number;
+}
+  | {
+  readonly kind: "left";
+}
+  | {
+  readonly achieved: AchievedSync;
+  readonly kind: "tier";
+}
+  | {
+  /** true = crossed above the target; false = recovered back inside it. */
+  readonly exceeded: boolean;
+  readonly kind: "drift";
+  /** The measured skew for this member (ms). */
+  readonly measured_skew_ms: number;
+  /** The group's configured skew target (ms). */
+  readonly target_skew_ms: number;
+};
+
+/** One sync group's MEASURED skew/tier (achieved tier = weakest member, never over-claimed). */
+export interface SyncGroupSkew {
+  readonly achieved: AchievedSync;
+  /** The sync group measured. */
+  readonly group: string;
+  /** The worst measured member skew (ms), where a measurement exists. */
+  readonly measured_skew_ms?: number;
+}
+
 /** Data body of the `system.metrics` event: a high-rate whole-system sample (cpu / gpu / encoder-decoder). Numeric only; conflated at ~1-2 Hz (high-rate lane). */
 export interface SystemMetrics {
   /** Whole-system CPU utilisation, 0.0-1.0. */
@@ -298,14 +460,44 @@ export interface TilesSnapshot {
   readonly tiles: readonly TileSnapshotEntry[];
 }
 
+/** Data body of `timing.status` (ADR-M010): the outbound presentation epoch plus per-sync-group achieved skew, envelope `id` = program or sync-group id. Latest-wins and ring-excluded: the affine epoch stays valid when stale, so receivers free-run on a missed update — they never stall. */
+export interface TimingStatus {
+  /** The discipline quality of that clock (the engine servo's lock-state lifecycle). */
+  readonly clock_quality: "locked" | "holdover" | "acquiring" | "freerun";
+  /** What disciplines the wall estimate (ST 2059-2 PTP servo or chrony-disciplined system time). The clock labels the timeline; it never paces the tick loop. */
+  readonly clock_source: "ptp" | "system";
+  readonly epoch: WallClockRef;
+  /** Per-sync-group measured skew/tier (omitted when no groups exist). */
+  readonly groups?: readonly SyncGroupSkew[];
+  /** Fixed receiver-side presentation delay (ns, AES67 link-offset semantics): uniformity is the goal, not smallness. */
+  readonly link_offset_ns: number;
+  /** The program/output stream this epoch maps. */
+  readonly stream_id: string;
+}
+
 /** Data body of `$unsubscribe` (client→server): stop receiving topics. */
 export interface Unsubscribe {
   /** Topics to stop receiving. */
   readonly topics: readonly string[];
 }
 
+/** The exact affine media↔wall map (multiview_core::wallclock::WallClockRef, ADR-0038): wall(pts) = wall_at_anchor_ns + rescale(pts − media_at_anchor). Integer/rational arithmetic only — never float. */
+export interface WallClockRef {
+  /** Media PTS of the anchor sample, in units of `rate`. */
+  readonly media_at_anchor: number;
+  /** The media rate (ticks per second) as an exact rational. */
+  readonly rate: {
+    /** Denominator. */
+    readonly den: number;
+    /** Numerator. */
+    readonly num: number;
+  };
+  /** Wall-clock instant (ns past the Unix epoch) at the anchor sample. */
+  readonly wall_at_anchor_ns: number;
+}
+
 /** Stable catalog code of a health warning (kebab-case). `#[non_exhaustive]`: the catalog grows over time, so a client must treat an unknown code as a forward-compatible warning, not an error. */
-export type WarningCode = "gpu-present-no-vulkan-adapter";
+export type WarningCode = "gpu-present-no-vulkan-adapter" | "config-file-invalid" | "config-file-requires-restart" | "config-file-apply-incomplete";
 
 /** Severity of a health warning (sibling of AlertSeverity). */
 export type WarningSeverity = "info" | "warning" | "critical";

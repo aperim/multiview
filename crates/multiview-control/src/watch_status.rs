@@ -28,7 +28,8 @@ pub struct WatchStamp {
 pub struct WatchStatusBody {
     /// Whether a config-file watcher is running for this process.
     pub active: bool,
-    /// The watched config file path (absent when not watching).
+    /// The watched config file path (absent when no watcher was ever
+    /// started; kept after a stop so the status names what *was* watched).
     pub path: Option<String>,
     /// How many file changes have been successfully applied since start.
     pub applied_count: u64,
@@ -79,6 +80,12 @@ impl ConfigWatchStatus {
         let mut inner = self.lock();
         inner.active = true;
         inner.path = Some(path.to_owned());
+    }
+
+    /// Mark the watcher inactive (stopped, shut down, or its task died). The
+    /// path is kept so the status still names what *was* watched.
+    pub fn mark_inactive(&self) {
+        self.lock().active = false;
     }
 
     /// Record a successfully applied file load.

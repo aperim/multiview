@@ -46,7 +46,23 @@ transiently missing file (mid-rename `ENOENT`) is "no change yet", not an error;
 Why a poll and not the `notify` crate: zero new dependencies (`cargo-deny` surface unchanged),
 identical behaviour on Linux/macOS and on network/overlay mounts where inotify is unreliable,
 and a 1–2 s apply latency is well inside what a human editing a file perceives as instant. The
-poll runs on a control-plane tokio task and costs one `stat` per second.
+poll runs on a control-plane tokio task and costs one `stat` per second (the `stat` and the
+settled read go through `tokio::fs`, so even a wedged disk parks a blocking-pool thread, never
+the control-plane reactor).
+
+The watcher starts with **no applied fingerprint**: the first *settled* poll re-reads the file
+and diffs it against the boot baseline, so an edit landing in the window between the boot-time
+config load and the watcher spawn is **applied**, never silently adopted (an unchanged file
+settles to an empty diff and is adopted with no commands and no warnings).
+
+**Known limit (accepted):** the fingerprint is `(len, mtime, inode)`, not a content hash. A
+rewrite that preserves all three — a same-length in-place write combined with an mtime restore
+(e.g. tooling that resets timestamps), or a same-length write landing within the filesystem's
+mtime granularity on a coarse-grained filesystem — is invisible to the poll. Editors and
+deployment tools do not do this in practice (write-temp + `rename(2)` changes the inode; a
+normal write advances mtime); when in doubt, `touch` the file or write via rename to force
+detection. Hashing the content every poll was rejected as a per-second read of the whole file
+for a corner no real writer hits.
 
 ### 2. Invalid file ⇒ warn loudly, change nothing
 
@@ -91,7 +107,16 @@ sync_groups, routing, schema_version.
 
 Source commands are submitted **before** the layout command so a layout binding to a
 just-added source resolves at the same frame boundary (FIFO bus). A full bus sheds the submit
-with a `tracing::warn!` (inv #10 — the watcher never blocks; re-saving the file retries).
+with a `tracing::warn!` (inv #10 — the watcher never blocks), and a shed makes the apply
+**incomplete**: the watcher leaves the baseline *and* the applied fingerprint un-advanced,
+records `last_rejected` (`"partially applied: N engine command(s) shed …"`), raises the interim
+latched warning **`config-file-apply-incomplete`**, and **re-applies the whole change on a
+later poll** — the per-section apply is idempotent (`UpsertSource` upserts, `RemoveSource`
+tolerates an already-removed id, `ApplyLayout` re-applies the same document, store resyncs
+converge), so retrying until every command lands is safe. The status never claims `applied`
+until the apply completes; completion clears the warning. A revert to the running baseline
+while a partial apply is pending also clears it (nothing is pending for the engine) and
+re-converges the stores to the file.
 
 ### 5. The control-plane stores follow the file (the UI's truth)
 
@@ -113,12 +138,14 @@ file write (a revert cannot un-ring the bell for state the engine never adopted)
 
 ### 7. Self-write suppression for the promote-to-boot lane
 
-The spawned watcher returns a cloneable `ConfigWatchHandle` exposing `expect_write()`: each
-call increments a generation counter. When the watcher sees a (debounced) change while the
-counter is positive it consumes one generation and **adopts** the file as the new baseline
-(parse + validate, no commands, no reseed, no warnings — the server-side writer already applied
-the state it serialized). A failed parse of an expected write is still warned (a buggy writer
-must not be silent). The boot-model lane calls `expect_write()` immediately before writing the
+The spawned watcher returns a cloneable `ConfigWatchHandle` exposing `expect_write(content)`:
+each call banks a token **paired with the exact content** the server is about to write (a
+bounded queue of content hashes — a banked token can never suppress an *unrelated* external
+edit that happens to land first). When a debounced change's content matches a banked token the
+watcher consumes it and **adopts** the file as the new baseline (parse + validate, no commands,
+no reseed, no warnings — the server-side writer already applied the state it serialized). A
+failed parse of an expected write is still warned (a buggy writer must not be silent). The
+boot-model lane calls `expect_write(content)` immediately before writing that content to the
 file.
 
 ### 8. Observable status: `GET /api/v1/config/watch-status`
@@ -128,7 +155,9 @@ A small read-only endpoint (role: read) backed by a shared `ConfigWatchStatus` s
 reason}?, restart_pending: [section] }`. The SettingsPage gains a "Configuration file" card
 showing watch active/inactive, the watched path, the last applied/rejected timestamps, and any
 restart-pending sections. Registered in the OpenAPI document; the SPA uses the regenerated
-typed client.
+typed client. `active` is honest: the watcher task holds an inactive-on-drop guard, so a
+stopped (or panicked) watcher flips the status to inactive rather than reporting "watching"
+forever.
 
 ### 9. Scope
 
@@ -158,8 +187,13 @@ bounded `--ticks` smoke runs are not watched.
 * An external edit to the running config file now applies live where the API would apply live,
   reseeds the UI stores, and warns honestly where only a restart can apply — and an invalid
   file changes nothing while telling the operator exactly why.
-* Two new latched `WarningCode`s (`config-file-invalid`, `config-file-requires-restart`) join
-  the catalog (AsyncAPI regenerated); `config-file-invalid` clears on the next valid apply.
+* Three new latched `WarningCode`s join the catalog (AsyncAPI regenerated):
+  `config-file-invalid` (clears on the next valid apply, or when the file is back at the
+  already-applied content — e.g. renamed away and back), `config-file-requires-restart`
+  (latched until restart; its message says sections "changed since boot" and the process "may
+  differ" from the file, because a later revert does not clear it), and
+  `config-file-apply-incomplete` (a valid change partially applied because command(s) were
+  shed; cleared when the retried apply completes).
 * `bind_and_serve` additionally returns the `AppState` so the watcher shares the router's
   stores; `cmd_apply_layout`'s resolve+solve+gate moved into the shared
   `resolve_layout_document` used by both triggers.
