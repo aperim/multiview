@@ -188,6 +188,21 @@ impl SystemRefConfig {
             assumed_when_unavailable: LockState::Locked,
         }
     }
+
+    /// The conservative variant: the same lock tolerance, but an unavailable
+    /// read is assumed [`LockState::Freerun`] — "no measurement" is reported
+    /// as undisciplined, never as an assumed lock. This is the default for
+    /// the **machine-readable epoch path** (`timing.status`, consumed by
+    /// downstream presenters), where over-claiming discipline on a possibly
+    /// undisciplined host would mislead consumers; the on-screen badge keeps
+    /// [`Self::new_default`]'s documented deployment assumption.
+    #[must_use]
+    pub const fn new_conservative() -> Self {
+        Self {
+            est_error_tolerance_ns: 100_000,
+            assumed_when_unavailable: LockState::Freerun,
+        }
+    }
 }
 
 impl Default for SystemRefConfig {

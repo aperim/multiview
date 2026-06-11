@@ -137,6 +137,17 @@ impl<P: Pacer> MultiviewProgram<P> {
         self.runtime.cadence()
     }
 
+    /// The seed instant (time-source nanoseconds) this program's tick 0 is
+    /// anchored to (see [`EngineRuntime::seed_nanos`](crate::EngineRuntime::seed_nanos)).
+    ///
+    /// DEV-C1 (ADR-M010): the outbound presentation epoch binds this anchor to
+    /// disciplined wall time — reading it is a pure value access and can never
+    /// influence the clock.
+    #[must_use]
+    pub const fn seed_nanos(&self) -> i64 {
+        self.runtime.seed_nanos()
+    }
+
     /// A clone of this program's [`StopSignal`] — the "stop handle" the program
     /// owns (ADR-0030 §2.2). MP-1's `ProgramSet::stop(id)` raises this to stop
     /// exactly this program; siblings are untouched.

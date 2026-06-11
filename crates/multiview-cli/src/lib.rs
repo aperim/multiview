@@ -40,6 +40,10 @@
 /// publisher. A thin seam over the pure hal cross-check + the control emit helper.
 pub mod capability_warn;
 pub mod cli;
+/// Config-file watch (ADR-W020): hot-reload the impacted parts of the boot
+/// config when the file changes externally — through the SAME apply machinery
+/// the Web/API uses; an invalid file changes nothing (warn + health event).
+pub mod config_watch;
 pub mod control;
 pub mod live_overlays;
 pub mod live_sources;
@@ -61,6 +65,19 @@ pub mod run;
 /// `SOCK_DGRAM` — best-effort, inert without `NOTIFY_SOCKET`.
 pub mod sdnotify;
 pub mod system_metrics;
+
+/// Build-capability gating for `[timing].ptp_phc` (DEV-C1 / ADR-M010): a
+/// configured PHC device must FAIL a non-`ptp` build at startup with a clear
+/// error — never be silently downgraded to the system clock (the DEV-B1
+/// fail-fast precedent). Always compiled, so the default build tests the
+/// rejection path and a `ptp` build tests the acceptance path.
+pub mod timing_gate;
+/// The ~1 Hz outbound presentation-epoch publisher (DEV-C1 / ADR-M010): one
+/// `WallClockRef` per program on the control WS (`timing.status`, conflated)
+/// plus the shared HLS-PDT cell, derived off the hot path from the run's
+/// tick-0 anchor and the disciplined wall clock. Never paces the tick loop
+/// (invariant #1).
+pub mod timing_status;
 pub mod validate;
 
 /// The overlay draw-data baker (feature `overlay`): builds the per-frame overlay

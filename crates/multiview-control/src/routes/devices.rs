@@ -691,12 +691,13 @@ fn fire_and_forget(
 /// Mint (or replay, by `Idempotency-Key`) an operation id for a long-running
 /// device action.
 ///
-/// Device actions run on the control-plane driver poller (DEV-A4), not the
-/// engine command bus, so this only mints the operation id the `202` returns;
-/// the driver publishes the matching `device.mode`/outcome event on the realtime
-/// stream as the convergence runs. A retried `Idempotency-Key` returns the
-/// original id.
-fn reserve_operation(state: &AppState, idem: &IdempotencyKey) -> OperationId {
+/// Device actions run on the control-plane driver poller (DEV-A4) or session
+/// actor (DEV-D2), not the engine command bus, so this only mints the
+/// operation id the `202` returns; the driver publishes the matching
+/// `device.mode`/outcome event on the realtime stream as the action runs. A
+/// retried `Idempotency-Key` returns the original id. Shared with the
+/// cast-session volume route.
+pub(crate) fn reserve_operation(state: &AppState, idem: &IdempotencyKey) -> OperationId {
     match state.idempotency.reserve(idem.0.as_deref()) {
         Reservation::Fresh(op) | Reservation::Replay(op) => op,
     }
