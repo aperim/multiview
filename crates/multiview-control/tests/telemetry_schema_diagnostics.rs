@@ -119,16 +119,37 @@ async fn snapshot_rides_202_then_ready_and_carries_no_media() {
     let bundle = body_json(resp).await;
     assert_eq!(bundle["snapshot_id"], snapshot_id);
     assert_eq!(bundle["status"], "ready", "the bundle is ready to read");
-    // Diagnostics shape: a utilisation summary + the event windows are present
-    // (even if empty on a fresh machine) — proving it is logs + engine state.
+    // The diagnostics section is the shared #111 context-pack `Bundle` (composed
+    // from the consent-independent retention store + redacted config). Assert its
+    // load-bearing shape: a metrics summary (utilisation percentiles + shed/
+    // reconnect counts), an incident-marker window, the redacted config, and the
+    // redaction record — proving it is logs + engine state, not media.
     assert!(
         bundle.get("diagnostics").is_some(),
-        "the bundle carries a diagnostics section"
+        "the snapshot carries a diagnostics bundle"
     );
-    let diag = &bundle["diagnostics"];
-    assert!(diag.get("reconnects").is_some(), "reconnect window present");
-    assert!(diag.get("sheds").is_some(), "shed window present");
-    assert!(diag.get("incidents").is_some(), "incident window present");
+    let pack = &bundle["diagnostics"];
+    let metrics = &pack["diagnostics"];
+    assert!(
+        metrics.get("cpu_p95").is_some(),
+        "the metrics summary carries CPU percentiles (logs + engine state)"
+    );
+    assert!(
+        metrics.get("reconnects").is_some() && metrics.get("shed_events").is_some(),
+        "the metrics summary carries reconnect + shed counts"
+    );
+    assert!(
+        pack.get("incidents").is_some(),
+        "the incident-marker window is present"
+    );
+    assert!(
+        pack.get("config").is_some(),
+        "the redacted config section is present"
+    );
+    assert!(
+        pack.get("redactions").is_some(),
+        "the redaction record is present (never the redacted values)"
+    );
 
     // Privacy: the bundle carries NO media (the §4.2 / §8 guarantee). A raw scan
     // of the serialized bundle must not contain a media-ish key.

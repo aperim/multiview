@@ -40,6 +40,7 @@ pub mod probes;
 pub mod routing;
 pub mod salvos;
 pub mod sources;
+pub mod support;
 pub mod sync_groups;
 pub mod tally;
 pub mod telemetry;
@@ -754,20 +755,18 @@ fn resource_router() -> Router<AppState> {
         )
 }
 
-/// Build the `/api/v1` resource + command routes (without the realtime or docs
-/// routes, which are wired by [`crate::router()`]).
-pub fn api_router() -> Router<AppState> {
+/// Build the Conspect **account / licensing / telemetry** sub-router: the local
+/// entitlement plane, the local mesh, the telemetry pipe (consent + schema), the
+/// diagnostics snapshot, the account-side audit + pending-actions, and the local
+/// support surface. Split out of [`api_router`] so each stays under the
+/// `too_many_lines` lint, mirroring [`resource_router`]; all control-plane only,
+/// off the engine hot loop (invariant #10).
+///
+/// **Two-pipe separation (ADR-0052 §1):** the licensing heartbeat-status lives
+/// under `/licensing/`; the telemetry consent + schema live under `/telemetry/`.
+/// They are deliberately distinct paths and are **never** co-mingled.
+fn conspect_router() -> Router<AppState> {
     Router::new()
-        .merge(resource_router())
-        .route("/commands/start", post(cmd_start))
-        .route("/commands/stop", post(cmd_stop))
-        .route("/commands/swap", post(cmd_swap))
-        .route("/commands/apply-layout", post(cmd_apply_layout))
-        .route("/alarms", get(alarms::list_alarms))
-        .route("/alarms/{id}/ack", post(alarms::ack_alarm))
-        // Read-only health warnings (SA-0 / ADR-0035): active capability mismatches
-        // (e.g. GPU present but compositing fell back to CPU) with remediation.
-        .route("/health", get(health::list_health))
         // Local licence (Conspect, CONSPECT-1 / ADR-0050): the computed licence
         // resource (enforcement is DATA → always 200), the lease install path
         // (verify + install a presented signed binding), and the salted CBOR
@@ -778,6 +777,7 @@ pub fn api_router() -> Router<AppState> {
         // The read-only heartbeat-status surface (Conspect Hook 4, ADR-0050 §3):
         // the honest local heartbeat status (transport + last/next contact +
         // payload fields). The spec mandates NO mutating endpoint — `get` only.
+        // This is the LICENSING pipe — under `/licensing/`, never `/telemetry/`.
         .route(
             "/licensing/heartbeat-status",
             get(licence::get_heartbeat_status),
@@ -802,13 +802,55 @@ pub fn api_router() -> Router<AppState> {
         .route("/telemetry/schema", get(telemetry::get_schema))
         // Diagnostics snapshot (Conspect, spec §4.2 / ADR-0053): the one-button
         // support bundle (logs + engine state, never media) — POST assembles →
-        // 202 {snapshot_id}; GET reads it back by id. Assembled from the
-        // consent-independent local retention buffer. Control-plane only (inv #10).
-        .route(
-            "/diagnostics/snapshot",
-            post(telemetry::request_snapshot),
-        )
+        // 202 {snapshot_id}; GET reads it back by id. Composed by the shared #111
+        // context-pack composer from the consent-independent local retention
+        // buffer + redacted config. Control-plane only (inv #10).
+        .route("/diagnostics/snapshot", post(telemetry::request_snapshot))
         .route("/diagnostics/{id}", get(telemetry::get_snapshot))
+        // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
+        .route("/account/audit", get(account::list_account_audit))
+        // Pending remote-actions strip + local cancel (local always wins).
+        .route("/actions/pending", get(account::list_pending_actions))
+        .route("/actions/{id}/cancel", post(account::cancel_action))
+        // Local support surface (Conspect §10/§11): tier-derived entitlement
+        // routing, the local ticket store (CS-xxxx, machine-context auto-attach,
+        // reply/close), the previewable redacted media-free context-pack
+        // composer, and local approve/deny of inbound egress data requests.
+        .route("/support/entitlement", get(support::get_entitlement))
+        .route(
+            "/support/tickets",
+            get(support::list_tickets).post(support::raise_ticket),
+        )
+        .route("/support/tickets/{id}", get(support::get_ticket))
+        .route("/support/tickets/{id}/reply", post(support::reply_ticket))
+        .route("/support/tickets/{id}/close", post(support::close_ticket))
+        .route("/support/bundle", post(support::compose))
+        .route("/support/bundle/{id}", get(support::get_bundle))
+        .route(
+            "/support/data-request/{id}/approve",
+            post(support::approve_data_request),
+        )
+        .route(
+            "/support/data-request/{id}/deny",
+            post(support::deny_data_request),
+        )
+}
+
+/// Build the `/api/v1` resource + command routes (without the realtime or docs
+/// routes, which are wired by [`crate::router()`]).
+pub fn api_router() -> Router<AppState> {
+    Router::new()
+        .merge(resource_router())
+        .merge(conspect_router())
+        .route("/commands/start", post(cmd_start))
+        .route("/commands/stop", post(cmd_stop))
+        .route("/commands/swap", post(cmd_swap))
+        .route("/commands/apply-layout", post(cmd_apply_layout))
+        .route("/alarms", get(alarms::list_alarms))
+        .route("/alarms/{id}/ack", post(alarms::ack_alarm))
+        // Read-only health warnings (SA-0 / ADR-0035): active capability mismatches
+        // (e.g. GPU present but compositing fell back to CPU) with remediation.
+        .route("/health", get(health::list_health))
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(
@@ -861,11 +903,8 @@ pub fn api_router() -> Router<AppState> {
         )
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
-        // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
-        .route("/account/audit", get(account::list_account_audit))
-        // Pending remote-actions strip + local cancel (local always wins).
-        .route("/actions/pending", get(account::list_pending_actions))
-        .route("/actions/{id}/cancel", post(account::cancel_action))
+        // (The Conspect account / licensing / telemetry / support routes are
+        // merged from `conspect_router()` above.)
         // Config-as-code export: the live stores rendered as multiview.toml.
         .route("/config/export", get(config::export_config))
         // Config versioning: history + commit, single revision, diff, rollback.

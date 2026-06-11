@@ -64,6 +64,8 @@ pub mod routes;
 pub mod routing;
 pub mod salvo_store;
 pub mod state;
+pub mod support_bundle;
+pub mod support_store;
 pub mod tally_ingest;
 pub mod tally_state;
 pub mod telemetry_consent;
@@ -154,6 +156,16 @@ pub use routing::{classify, DestinationProfile, RouteClass, RoutePlan, RouteRequ
 pub use salvo_store::{InMemorySalvoStore, SalvoRepository, VersionedSalvo, SALVO_KIND};
 pub use state::{
     seed_resources, AckClock, AppState, EngineStateSnapshot, LicenceState, SeededResources,
+};
+pub use support_bundle::{
+    compose_bundle, redact_config, Bundle, BundleInclude, BundleRepository, BundleRequest,
+    BundleStore, BundleWindow, ConfigSources, InMemoryBundles, Redaction, RedactionReason,
+};
+pub use support_store::{
+    support_entitlement, support_route, CloseOutcome, DataRequest, DataRequestOutcome,
+    DataRequestRepository, DataRequestState, DataRequestStore, FirstLine, InMemoryDataRequests,
+    InMemoryTickets, NewTicket, ReplyOutcome, SupportEntitlement, SupportRoute, Ticket,
+    TicketContext, TicketRepository, TicketSeverity, TicketState, TicketStore, TicketSummary,
 };
 pub use tally_ingest::{run_tally_ingest, tally_ingest_step, TallyIngestStep};
 pub use tally_state::{

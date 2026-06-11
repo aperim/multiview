@@ -51,9 +51,6 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use multiview_core::time::MediaTime;
-use multiview_telemetry::retention::{
-    IncidentMarker, ReconnectEvent, RetentionStore, RetentionWindow, ShedEvent, UtilisationSummary,
-};
 
 use crate::account_audit::AccountAuditKind;
 use crate::audit::AuditAction;
@@ -61,6 +58,9 @@ use crate::auth::{Action, Principal};
 use crate::error::ControlResult;
 use crate::problem::Problem;
 use crate::state::AppState;
+use crate::support_bundle::{
+    compose_bundle, Bundle, BundleInclude, BundleRequest, BundleWindow, ConfigSources,
+};
 use crate::telemetry_consent::{ConsentActor, SnapshotStatus};
 
 /// The version of the published telemetry schema. Bumped when the daily-pipe
@@ -156,117 +156,14 @@ pub struct SnapshotAccepted {
     pub snapshot_id: String,
 }
 
-/// A summarised CPU-utilisation report over one retention window (mirrors
-/// [`UtilisationSummary`] as an OpenAPI-friendly wire shape).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct UtilisationReport {
-    /// Total raw samples folded across the window.
-    pub samples: u64,
-    /// The lowest CPU busy fraction observed (p0).
-    pub cpu_p0: f64,
-    /// The median CPU busy fraction (p50).
-    pub cpu_p50: f64,
-    /// The 95th-percentile CPU busy fraction (p95).
-    pub cpu_p95: f64,
-    /// The highest CPU busy fraction observed (p100).
-    pub cpu_p100: f64,
-}
-
-impl From<UtilisationSummary> for UtilisationReport {
-    fn from(s: UtilisationSummary) -> Self {
-        Self {
-            samples: s.samples,
-            cpu_p0: s.cpu_p0,
-            cpu_p50: s.cpu_p50,
-            cpu_p95: s.cpu_p95,
-            cpu_p100: s.cpu_p100,
-        }
-    }
-}
-
-/// One reconnect event in the diagnostics bundle (mirrors [`ReconnectEvent`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ReconnectReport {
-    /// The Unix second the reconnect was recorded.
-    pub at_unix_seconds: u64,
-    /// The configured input/source id that reconnected.
-    pub input_id: String,
-    /// The reconnect attempt counter.
-    pub attempt: u32,
-}
-
-impl From<ReconnectEvent> for ReconnectReport {
-    fn from(e: ReconnectEvent) -> Self {
-        Self {
-            at_unix_seconds: e.at_unix_seconds,
-            input_id: e.input_id,
-            attempt: e.attempt,
-        }
-    }
-}
-
-/// One shed-load event in the diagnostics bundle (mirrors [`ShedEvent`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ShedReport {
-    /// The Unix second the shed was recorded.
-    pub at_unix_seconds: u64,
-    /// Why load was shed rather than held/migrated (stable label).
-    pub reason: String,
-}
-
-impl From<ShedEvent> for ShedReport {
-    fn from(e: ShedEvent) -> Self {
-        Self {
-            at_unix_seconds: e.at_unix_seconds,
-            reason: e.reason.label().to_owned(),
-        }
-    }
-}
-
-/// One incident marker in the diagnostics bundle (mirrors [`IncidentMarker`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct IncidentReport {
-    /// The Unix second the incident was recorded.
-    pub at_unix_seconds: u64,
-    /// The incident class (stable label).
-    pub kind: String,
-    /// What the incident applied to (input id, "program", "system", …).
-    pub subject: String,
-}
-
-impl From<IncidentMarker> for IncidentReport {
-    fn from(m: IncidentMarker) -> Self {
-        Self {
-            at_unix_seconds: m.at_unix_seconds,
-            kind: m.kind.label().to_owned(),
-            subject: m.subject,
-        }
-    }
-}
-
-/// The redacted diagnostics section of a snapshot: utilisation + the discrete
-/// event windows from the consent-independent local retention buffer (ADR-0053).
-/// Diagnostics only — **never** media, raw identifiers, or secrets (brief §8).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[non_exhaustive]
-pub struct DiagnosticsBody {
-    /// CPU-utilisation summary over the last 24 hours (`None` when no samples).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub utilisation_24h: Option<UtilisationReport>,
-    /// Per-input reconnect history over the last 24 hours.
-    pub reconnects: Vec<ReconnectReport>,
-    /// Shed-load events over the last 24 hours.
-    pub sheds: Vec<ShedReport>,
-    /// Incident markers over the last 24 hours.
-    pub incidents: Vec<IncidentReport>,
-}
-
 /// The assembled diagnostics snapshot bundle (`GET /api/v1/diagnostics/{id}`).
+///
+/// The `diagnostics` section is the **shared** [`crate::support_bundle::Bundle`]
+/// the #111 context-pack composer produces — utilisation percentiles + shed/
+/// reconnect counts, incident markers, and the redacted config — so this snapshot
+/// and the support-ticket context-pack draw their diagnostics from one source of
+/// truth (the consent-independent retention store + the config redactor). Logs +
+/// engine state, **never** media, raw identifiers, or secrets (brief §8).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[non_exhaustive]
@@ -277,8 +174,9 @@ pub struct DiagnosticsSnapshot {
     pub status: SnapshotStatus,
     /// The Unix second the snapshot was assembled.
     pub assembled_at_unix_seconds: u64,
-    /// The redacted diagnostics (logs + engine state, never media).
-    pub diagnostics: DiagnosticsBody,
+    /// The redacted diagnostics bundle (the shared #111 composer output): logs +
+    /// engine state, never media.
+    pub diagnostics: Bundle,
 }
 
 /// Render a [`crate::telemetry_consent::ConsentRecord`] as the wire resource.
@@ -421,35 +319,6 @@ pub(crate) async fn get_schema(
     }))
 }
 
-/// Assemble the redacted diagnostics body from the consent-independent local
-/// retention buffer (ADR-0053), over the last-24h window ending at `now_secs`.
-///
-/// Diagnostics only — logs + engine state, **never** media, raw identifiers, or
-/// secrets (brief §8). The retention store is read off the engine hot loop.
-fn assemble_diagnostics(retention: &RetentionStore, now_secs: u64) -> DiagnosticsBody {
-    let window = RetentionWindow::LastDay;
-    DiagnosticsBody {
-        utilisation_24h: retention
-            .utilisation_summary(now_secs, window)
-            .map(UtilisationReport::from),
-        reconnects: retention
-            .reconnect_window(now_secs, window)
-            .into_iter()
-            .map(ReconnectReport::from)
-            .collect(),
-        sheds: retention
-            .shed_window(now_secs, window)
-            .into_iter()
-            .map(ShedReport::from)
-            .collect(),
-        incidents: retention
-            .incident_window(now_secs, window)
-            .into_iter()
-            .map(IncidentReport::from)
-            .collect(),
-    }
-}
-
 /// `POST /api/v1/diagnostics/snapshot` — assemble the §4.2 one-button support
 /// bundle (role: write).
 ///
@@ -482,10 +351,32 @@ pub(crate) async fn request_snapshot(
         return err.into_response();
     }
     // The §4.2 bundle: logs + engine state from the consent-independent local
-    // retention buffer, never media. Assembled off the engine hot loop.
-    let now_secs = unix_seconds(state.ack_now());
-    let diagnostics = assemble_diagnostics(&state.retention, now_secs);
+    // retention buffer + the REDACTED config — composed by the shared #111
+    // context-pack composer so this snapshot and the support-ticket context-pack
+    // share one diagnostics source of truth. Never media (the composer is
+    // media-free by construction). All sections over the last-24h window. Composed
+    // off the engine hot loop (invariant #10).
+    let now = state.ack_now();
+    let now_secs = unix_seconds(now);
+    let request = BundleRequest {
+        window: BundleWindow::LastDay,
+        include: vec![
+            BundleInclude::Diagnostics,
+            BundleInclude::Config,
+            BundleInclude::Incidents,
+        ],
+    };
+    let config = ConfigSources {
+        sources: state.sources.as_ref(),
+        outputs: state.outputs.as_ref(),
+        overlays: state.overlays.as_ref(),
+        probes: state.probes.as_ref(),
+        devices: state.devices.as_ref(),
+    };
     let snapshot_id = uuid::Uuid::new_v4().to_string();
+    let diagnostics = compose_bundle(&request, &state.retention, &config, now_secs, now, || {
+        snapshot_id.clone()
+    });
     let bundle = DiagnosticsSnapshot {
         snapshot_id: snapshot_id.clone(),
         status: SnapshotStatus::Ready,

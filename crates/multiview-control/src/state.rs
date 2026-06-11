@@ -15,6 +15,7 @@ use multiview_events::Event;
 use multiview_licence::verify::PinnedKey;
 use multiview_licence::{ChallengeFile, LeaseStore};
 use multiview_mesh::MeshState;
+use multiview_telemetry::RetentionStore;
 
 use crate::account_audit::{AccountAuditRepository, InMemoryAccountAudit};
 use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
@@ -35,6 +36,11 @@ use crate::resource_store::{
 };
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
+use crate::support_bundle::{BundleRepository, InMemoryBundles};
+use crate::support_store::{
+    support_route, DataRequestRepository, InMemoryDataRequests, InMemoryTickets, SupportRoute,
+    TicketContext, TicketEnforcement, TicketEntitlement, TicketRepository,
+};
 use crate::tally_state::{
     InMemoryProfileStore, OverrideRegistry, TallyMirror, TallyProfileRepository,
 };
@@ -558,20 +564,37 @@ pub struct AppState {
     /// Control-plane only (a `Mutex` over one record, no engine handle) — it can
     /// never back-pressure the engine (invariant #10). The default is off/local.
     pub consent: Arc<ConsentState>,
-    /// The **consent-independent local metrics retention buffer** (Conspect,
-    /// ADR-0052 §3 / ADR-0053): the rolling, bounded, minute-bucketed on-box record
-    /// the diagnostics snapshot is assembled from. Retained **regardless** of
-    /// telemetry consent (it serves the operator's own support diagnostics, not
-    /// Aperim analytics). The binary feeds it off the engine hot loop (a CONSPECT
-    /// sampler task); the control plane only **reads** it here, off the engine.
-    /// Control-plane-safe (invariant #10).
-    pub retention: Arc<multiview_telemetry::retention::RetentionStore>,
     /// The **diagnostics-snapshot** store (Conspect, spec §4.2 / ADR-0053): the
-    /// bounded, in-memory store of assembled support bundles, keyed by id, the
-    /// `POST /api/v1/diagnostics/snapshot` writes and `GET /api/v1/diagnostics/{id}`
-    /// reads. Bundles are logs + engine state, never media. Control-plane only;
-    /// cannot back-pressure the engine (invariant #10).
+    /// bounded, in-memory store of assembled `GET /api/v1/diagnostics/{id}`
+    /// bundles, keyed by id, the `POST /api/v1/diagnostics/snapshot` writes. The
+    /// bundle is composed by the shared [`crate::support_bundle::compose_bundle`]
+    /// machinery (#111) from the consent-independent retention store + redacted
+    /// config — logs + engine state, never media. Control-plane only; cannot
+    /// back-pressure the engine (invariant #10).
     pub diagnostics_snapshots: Arc<DiagnosticsSnapshotStore>,
+    /// The **local support ticket store** (Conspect, ADR-0053 §3 / brief §10/§11):
+    /// `CS-xxxx`-identified tickets with an append-only thread + the auto-attached
+    /// machine context (§7.1). The complete local lifecycle (raise/read/reply/
+    /// close) is functional now; the portal sync mirrors this local source over the
+    /// later O1 transport. Control-plane only; cannot back-pressure the engine
+    /// (inv #10).
+    pub tickets: Arc<dyn TicketRepository>,
+    /// The **inbound data-request store** (Conspect, ADR-0053 §3): egress requests
+    /// awaiting **local approval** — nothing leaves the machine without an explicit
+    /// local yes. Seeded locally now; portal-fed over the later transport.
+    /// Control-plane only; cannot back-pressure the engine (inv #10).
+    pub data_requests: Arc<dyn DataRequestRepository>,
+    /// The **composed support-bundle store** (Conspect, ADR-0053 §3 / brief §7.2):
+    /// previewable, redacted, **media-free** diagnostics packs the operator
+    /// deliberately assembles. Bounded; control-plane only (inv #10).
+    pub support_bundles: Arc<dyn BundleRepository>,
+    /// The **consent-independent local metrics retention store** (CONSPECT S5,
+    /// ADR-0052 §3): the rolling on-box utilisation/shed/reconnect/incident record
+    /// the support bundle + the diagnostics snapshot draw diagnostics from,
+    /// retained **regardless** of telemetry consent. The binary wires the same
+    /// store the off-hot-loop sampler feeds; the default is empty. Control-plane
+    /// only; cannot back-pressure the engine (inv #10).
+    pub retention: Arc<RetentionStore>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -652,12 +675,18 @@ impl AppState {
             // Telemetry consent OFF by default (opt-in, incl. the free tier,
             // ADR-0052 §1). Gates no local route. Control-plane only (inv #10).
             consent: Arc::new(ConsentState::new()),
-            // An empty local retention buffer; the binary feeds it off the engine
-            // (a CONSPECT sampler task). Consent-independent (ADR-0052 §3).
-            retention: Arc::new(multiview_telemetry::retention::RetentionStore::new()),
-            // An empty diagnostics-snapshot store; bundles are assembled on
-            // request from the retention buffer. Control-plane only (inv #10).
+            // An empty diagnostics-snapshot store; bundles are composed on request
+            // (via the shared support_bundle composer) from the retention store.
+            // Control-plane only (inv #10).
             diagnostics_snapshots: Arc::new(DiagnosticsSnapshotStore::new()),
+            // Empty local support state by default (Conspect, ADR-0053): a fresh
+            // ticket store, an empty inbound data-request queue, an empty composed-
+            // bundle store, and an empty retention store. The binary wires the same
+            // retention store its off-hot-loop sampler feeds. Control-plane only.
+            tickets: Arc::new(InMemoryTickets::new()),
+            data_requests: Arc::new(InMemoryDataRequests::new()),
+            support_bundles: Arc::new(InMemoryBundles::new()),
+            retention: Arc::new(RetentionStore::new()),
         }
     }
 
@@ -691,20 +720,6 @@ impl AppState {
     #[must_use]
     pub fn with_consent(mut self, consent: Arc<ConsentState>) -> Self {
         self.consent = consent;
-        self
-    }
-
-    /// Wire the consent-independent local metrics retention buffer (Conspect,
-    /// ADR-0052 §3 / ADR-0053): the binary passes the same `Arc` its off-engine
-    /// CONSPECT sampler feeds, so the diagnostics snapshot reflects live on-box
-    /// diagnostics; tests inject a pre-seeded buffer. Read-only here, off the
-    /// engine (invariant #10).
-    #[must_use]
-    pub fn with_retention(
-        mut self,
-        retention: Arc<multiview_telemetry::retention::RetentionStore>,
-    ) -> Self {
-        self.retention = retention;
         self
     }
 
@@ -834,6 +849,88 @@ impl AppState {
         let _seq = self
             .account_audit
             .record(actor, kind, self.ack_now(), detail);
+    }
+
+    /// Replace the local support ticket store (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_tickets(mut self, tickets: Arc<dyn TicketRepository>) -> Self {
+        self.tickets = tickets;
+        self
+    }
+
+    /// Replace the inbound data-request store (e.g. to share one with a test so it
+    /// can seed an inbound request the portal-fed transport will produce later).
+    #[must_use]
+    pub fn with_data_requests(mut self, data_requests: Arc<dyn DataRequestRepository>) -> Self {
+        self.data_requests = data_requests;
+        self
+    }
+
+    /// Replace the composed support-bundle store (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_support_bundles(mut self, support_bundles: Arc<dyn BundleRepository>) -> Self {
+        self.support_bundles = support_bundles;
+        self
+    }
+
+    /// Wire the consent-independent local metrics retention store the support
+    /// bundle draws diagnostics from (the binary passes the same store its
+    /// off-hot-loop sampler feeds). Control-plane only (invariant #10).
+    #[must_use]
+    pub fn with_retention(mut self, retention: Arc<RetentionStore>) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// The opaque commercial tier of the currently-installed lease (rendered,
+    /// never computed — O7), or `None` when no lease is installed (the free /
+    /// unlicensed machine).
+    #[must_use]
+    pub fn licence_tier(&self) -> Option<String> {
+        self.licence
+            .store
+            .current()
+            .map(|e| e.tier.as_str().to_owned())
+    }
+
+    /// The tier-derived support route this machine raises tickets against (the
+    /// routing half of the entitlement answer; `community` when unlicensed).
+    #[must_use]
+    pub fn support_route(&self) -> SupportRoute {
+        support_route(self.licence_tier().as_deref())
+    }
+
+    /// Build the auto-attached machine [`TicketContext`] every ticket carries
+    /// (§7.1): the build version, the entitlement summary (opaque tier +
+    /// licensed flag), the computed enforcement-ladder level, and the salted
+    /// fingerprint **score** (a number, never a raw identifier — brief §8). All
+    /// **reported, never raw**: derived from the local entitlement store, off the
+    /// engine hot loop.
+    #[must_use]
+    pub fn ticket_context(&self) -> TicketContext {
+        let status = self.licence.store.status();
+        let tier = self.licence_tier();
+        TicketContext {
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            entitlement: TicketEntitlement {
+                licensed: tier.is_some(),
+                tier: tier.unwrap_or_else(|| "none".to_owned()),
+            },
+            enforcement: TicketEnforcement {
+                level: status.map_or_else(
+                    || "unlicensed".to_owned(),
+                    |s| {
+                        // The canonical enforcement-level slug the whole product
+                        // renders identically (kebab-case wire form).
+                        serde_json::to_value(s.enforcement)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| "active".to_owned())
+                    },
+                ),
+            },
+            fingerprint_score: self.licence.store.fingerprint_score(),
+        }
     }
 
     /// Replace the alarm store (e.g. to share one store with an ingest task or
