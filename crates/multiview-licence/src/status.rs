@@ -62,6 +62,49 @@ impl EnforcementLevel {
     pub const fn program_stays_on_air(self) -> bool {
         true
     }
+
+    /// Whether this level asks the engine to **deny hot-reconfiguration** (S2):
+    /// the running scene keeps playing, you simply cannot reconfigure it. True
+    /// from `config-locked` and on the harder rungs that subsume it (`watermark`,
+    /// `block-new-instance`); never on `active`/`warning`/`unlicensed-build`. This
+    /// is one of the two cheap booleans an engine seam derives from the single
+    /// published level (ADR-0050 §3/§5) — data only, no control flow here.
+    #[must_use]
+    pub const fn config_locked(self) -> bool {
+        matches!(
+            self,
+            EnforcementLevel::ConfigLocked
+                | EnforcementLevel::Watermark
+                | EnforcementLevel::BlockNewInstance
+        )
+    }
+
+    /// Whether this level asks the engine to **stamp a corner watermark** (S3) on
+    /// the composited multiview canvas. True for `watermark`, the harder
+    /// `block-new-instance` rung that subsumes it, and the honest
+    /// `unlicensed-build` watermark (ADR-0050 §7). Marking the canvas never stops
+    /// or de-paces output — the watermark rides the overlay sub-pass off the hot
+    /// loop (ADR-0050 §5/§6.3, invariant #1). The other cheap boolean an engine
+    /// seam derives from the single published level.
+    #[must_use]
+    pub const fn watermark(self) -> bool {
+        matches!(
+            self,
+            EnforcementLevel::Watermark
+                | EnforcementLevel::BlockNewInstance
+                | EnforcementLevel::UnlicensedBuild
+        )
+    }
+
+    /// Whether the startup gate should **refuse creating a NEW engine instance**
+    /// (S1). True ONLY at `block-new-instance` — every softer rung allows a start,
+    /// and an unlicensed build is reported honestly but never blocked (ADR-0050
+    /// §7). A **running** instance never re-enters the startup gate, so this can
+    /// never take a running program off air (ADR-0050 §5/§6.3, invariant #1).
+    #[must_use]
+    pub const fn blocks_new_instances(self) -> bool {
+        matches!(self, EnforcementLevel::BlockNewInstance)
+    }
 }
 
 /// The published licence status — the wait-free hand-off the entitlement plane

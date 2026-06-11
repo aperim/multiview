@@ -45,6 +45,7 @@ pub mod audit;
 pub mod auth;
 pub mod command;
 pub mod concurrency;
+pub mod config_lock;
 pub mod devices;
 pub mod error;
 pub mod is07;
@@ -172,7 +173,18 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(realtime::sse_handler))
         // Unauthenticated auth-mode discovery: the SPA reads this before it has a
         // token, to decide whether to show a login gate (and to validate a key).
-        .route("/auth/status", get(realtime::auth_status_handler));
+        .route("/auth/status", get(realtime::auth_status_handler))
+        // The Conspect config-lock interceptor (S2 backend, ADR-0050 §5): one
+        // additive guard over the whole `/api/v1` surface that refuses
+        // *configuration* mutations with a `409 config_locked` problem when the
+        // entitlement ladder is locked. Reads + operational continuity + the
+        // licence recovery path pass through. It is wait-free (a lock-free store
+        // read) and holds no engine handle — a locked config never stops a running
+        // program (invariant #1/#10).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            config_lock::config_lock_guard,
+        ));
 
     let app = Router::new()
         .nest("/api/v1", api)

@@ -2880,6 +2880,7 @@ dependencies = [
  "multiview-framestore",
  "multiview-hal",
  "multiview-input",
+ "multiview-licence",
  "multiview-output",
  "multiview-overlay",
  "multiview-preview",

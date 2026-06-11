@@ -32,6 +32,7 @@ mod fonts;
 pub mod meters;
 pub mod subpass;
 pub mod text;
+pub mod watermark;
 
 /// The GPU overlay compositing sub-pass (feature `overlay` + `wgpu`): one
 /// batched compute pass blending overlay primitives premultiplied-source-over
@@ -56,3 +57,4 @@ pub use subpass::{
 pub use text::{
     FontFamily, PreparedGlyph, PreparedRun, RasterizedGlyph, RasterizedRun, TextEngine,
 };
+pub use watermark::push_tile_watermark;

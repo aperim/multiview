@@ -973,6 +973,16 @@ pub struct Pipeline {
     /// an empty map leaves the snapshot unchanged (inv #10 — never on the hot
     /// loop).
     inventories: std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
+    /// The Conspect tile-watermark signal (S3, ADR-0050 §5): the wait-free
+    /// published [`EnforcementLevel`](multiview_licence::EnforcementLevel) the
+    /// off-hot-path overlay bake samples each frame to decide whether to stamp the
+    /// corner watermark on the composited multiview canvas. `None` (the default)
+    /// never watermarks; the binary wires the shared signal so the engine, the
+    /// API, and the chrome read the same ladder state. Sampled with one wait-free
+    /// load off the hot loop — it can never pace or stall the output clock
+    /// (invariant #1). Only consumed under `overlay` (the bake renders it).
+    #[cfg(feature = "overlay")]
+    watermark_signal: Option<crate::licence::WatermarkSignal>,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -1308,7 +1318,32 @@ impl Pipeline {
             declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
             analog_clock,
+            #[cfg(feature = "overlay")]
+            watermark_signal: None,
         })
+    }
+
+    /// Attach the Conspect tile-watermark signal (S3, ADR-0050 §5): the wait-free
+    /// published ladder level the overlay bake samples each frame to decide
+    /// whether to stamp the corner watermark on the composited multiview canvas.
+    /// The binary wires the shared signal (same store as the control plane), so
+    /// every surface reads the same ladder state. Sampled off the hot loop with a
+    /// single wait-free load — it can never stall the output clock (invariant #1).
+    /// Without the `overlay` feature there is no bake to render it, so this is a
+    /// no-op identity.
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn with_watermark_signal(mut self, signal: crate::licence::WatermarkSignal) -> Self {
+        self.watermark_signal = Some(signal);
+        self
+    }
+
+    /// Tile-watermark attachment is a no-op when the `overlay` feature is disabled
+    /// (there is no overlay bake to render it).
+    #[cfg(not(feature = "overlay"))]
+    #[must_use]
+    pub fn with_watermark_signal(self, _signal: crate::licence::WatermarkSignal) -> Self {
+        self
     }
 
     /// Attach a parsed subtitle track whose active cue is burned into the
@@ -2272,6 +2307,9 @@ impl Pipeline {
             analog_clock: self.analog_clock,
             canvas_color: self.canvas_color,
             cadence: self.cadence,
+            watermark_signal: self.watermark_signal.clone(),
+            canvas_width: self.layout.canvas.width,
+            canvas_height: self.layout.canvas.height,
         }
     }
 
@@ -2311,6 +2349,16 @@ struct BakeContext {
     /// The fixed output cadence (for the per-frame media time).
     #[cfg(feature = "overlay")]
     cadence: Rational,
+    /// The Conspect tile-watermark signal (S3): sampled each baked frame to decide
+    /// whether to stamp the corner watermark. `None` never watermarks.
+    #[cfg(feature = "overlay")]
+    watermark_signal: Option<crate::licence::WatermarkSignal>,
+    /// The canvas width the corner watermark anchors to.
+    #[cfg(feature = "overlay")]
+    canvas_width: u32,
+    /// The canvas height the corner watermark anchors to.
+    #[cfg(feature = "overlay")]
+    canvas_height: u32,
 }
 
 impl BakeContext {
@@ -2377,6 +2425,13 @@ impl StreamBaker {
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
         if let Some(spec) = ctx.analog_clock {
             baker = baker.with_analog_clock(spec);
+        }
+        // The Conspect tile-watermark seam (S3, ADR-0050 §5): when a signal is
+        // wired, the bake stamps the corner watermark on the composited multiview
+        // canvas whenever the published ladder level is at a watermark rung. The
+        // per-frame decision is a single wait-free `arc_swap` load off the hot loop.
+        if let Some(signal) = ctx.watermark_signal.clone() {
+            baker = baker.with_watermark(signal, ctx.canvas_width, ctx.canvas_height);
         }
         Ok(Self {
             baker,
