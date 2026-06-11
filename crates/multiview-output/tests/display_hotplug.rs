@@ -119,14 +119,12 @@ struct ScriptedSource {
 
 impl UeventSource for ScriptedSource {
     fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, String> {
-        match self.datagrams.pop_front() {
-            Some(d) => Ok(Some(d)),
-            None => {
-                // An idle socket: bounded wait, nothing arrived.
-                std::thread::sleep(timeout.min(Duration::from_millis(5)));
-                Ok(None)
-            }
+        if let Some(d) = self.datagrams.pop_front() {
+            return Ok(Some(d));
         }
+        // An idle socket: bounded wait, nothing arrived.
+        std::thread::sleep(timeout.min(Duration::from_millis(5)));
+        Ok(None)
     }
 }
 
@@ -391,7 +389,11 @@ fn a_reconnect_revalidates_and_relights_the_head() {
     sink.connectors.lock().unwrap()[0] = hdmi_connector(false);
     sink.handle.reprobe_flag().request();
     wait_until(|| count(&sink.calls, Call::Probe) >= 2);
-    assert_eq!(count(&sink.calls, Call::Modeset), 1, "no modeset while dark");
+    assert_eq!(
+        count(&sink.calls, Call::Modeset),
+        1,
+        "no modeset while dark"
+    );
 
     // Replug: the next re-probe sees it connected again → TEST_ONLY validate
     // first, then the ONE re-light modeset (DP link retraining and HDMI
