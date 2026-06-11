@@ -422,7 +422,7 @@ msgstr "About probes and alarms"
 
 #: src/pages/docs/FeaturesPage.tsx:53
 #: src/pages/SourcesPage.tsx:514
-#: src/pages/SourcesPage.tsx:594
+#: src/pages/SourcesPage.tsx:608
 msgid "About source transports"
 msgstr "About source transports"
 
@@ -807,6 +807,10 @@ msgstr "Appearance and language preferences."
 msgid "Apple"
 msgstr "Apple"
 
+#: src/pages/SourcesPage.tsx:549
+msgid "Applied to the running engine immediately (the response declared live apply)."
+msgstr "Applied to the running engine immediately (the response declared live apply)."
+
 #: src/pages/LayoutsPage.tsx:101
 msgid "Apply"
 msgstr "Apply"
@@ -1090,8 +1094,8 @@ msgstr "Camera 1"
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
 #: src/pages/TallyPage.tsx:432
-#: src/resources/CrudPage.tsx:370
-#: src/resources/CrudPage.tsx:415
+#: src/resources/CrudPage.tsx:381
+#: src/resources/CrudPage.tsx:426
 msgid "Cancel"
 msgstr "Cancel"
 
@@ -1521,11 +1525,11 @@ msgstr "Could not bind the source"
 msgid "Could not change the mode"
 msgstr "Could not change the mode"
 
-#: src/resources/CrudPage.tsx:271
+#: src/resources/CrudPage.tsx:282
 msgid "Could not create"
 msgstr "Could not create"
 
-#: src/resources/CrudPage.tsx:290
+#: src/resources/CrudPage.tsx:301
 msgid "Could not delete"
 msgstr "Could not delete"
 
@@ -1562,7 +1566,7 @@ msgid "Could not load devices:"
 msgstr "Could not load devices:"
 
 #: src/pages/DevicesPage.tsx:510
-#: src/resources/CrudPage.tsx:238
+#: src/resources/CrudPage.tsx:246
 msgid "Could not load for editing"
 msgstr "Could not load for editing"
 
@@ -1631,7 +1635,7 @@ msgstr "Could not reach the control plane. Is it running?"
 msgid "Could not reboot"
 msgstr "Could not reboot"
 
-#: src/resources/CrudPage.tsx:271
+#: src/resources/CrudPage.tsx:282
 msgid "Could not save"
 msgstr "Could not save"
 
@@ -1677,7 +1681,7 @@ msgstr "CPU utilisation trend: ours over host total"
 
 #: src/pages/DeviceDetailPage.tsx:1077
 #: src/pages/DeviceDetailPage.tsx:1196
-#: src/resources/CrudPage.tsx:373
+#: src/resources/CrudPage.tsx:384
 msgid "Create"
 msgstr "Create"
 
@@ -1689,7 +1693,7 @@ msgstr "Create your first layout"
 msgid "Create your first salvo"
 msgstr "Create your first salvo"
 
-#: src/resources/CrudPage.tsx:264
+#: src/resources/CrudPage.tsx:272
 msgid "Created"
 msgstr "Created"
 
@@ -1832,8 +1836,8 @@ msgstr "Degraded"
 #: src/pages/SalvosPage.tsx:436
 #: src/pages/TallyPage.tsx:392
 #: src/pages/TallyPage.tsx:435
-#: src/resources/CrudPage.tsx:109
-#: src/resources/CrudPage.tsx:422
+#: src/resources/CrudPage.tsx:110
+#: src/resources/CrudPage.tsx:433
 msgid "Delete"
 msgstr "Delete"
 
@@ -1881,11 +1885,11 @@ msgstr "Delete sync group"
 msgid "Delete tally profile?"
 msgstr "Delete tally profile?"
 
-#: src/resources/CrudPage.tsx:392
+#: src/resources/CrudPage.tsx:403
 msgid "Delete this resource?"
 msgstr "Delete this resource?"
 
-#: src/resources/CrudPage.tsx:286
+#: src/resources/CrudPage.tsx:297
 msgid "Deleted"
 msgstr "Deleted"
 
@@ -2085,7 +2089,7 @@ msgstr "DVB teletext page"
 msgid "e.g. black-cam-1"
 msgstr "e.g. black-cam-1"
 
-#: src/pages/SourcesPage.tsx:571
+#: src/pages/SourcesPage.tsx:585
 msgid "e.g. cam-north"
 msgstr "e.g. cam-north"
 
@@ -2180,7 +2184,7 @@ msgstr "EBU R128 (−23 LUFS)"
 
 #: src/pages/LayoutsPage.tsx:106
 #: src/pages/SalvosPage.tsx:296
-#: src/resources/CrudPage.tsx:97
+#: src/resources/CrudPage.tsx:98
 msgid "Edit"
 msgstr "Edit"
 
@@ -2436,7 +2440,7 @@ msgstr "Find devices with a network scan, then adopt them with an explicit confi
 msgid "Fit"
 msgstr "Fit"
 
-#: src/resources/CrudPage.tsx:365
+#: src/resources/CrudPage.tsx:376
 msgid "Fix the highlighted fields, then save again."
 msgstr "Fix the highlighted fields, then save again."
 
@@ -2808,7 +2812,7 @@ msgstr "Idempotency"
 #: src/pages/ProbesPage.tsx:520
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
-#: src/pages/SourcesPage.tsx:567
+#: src/pages/SourcesPage.tsx:581
 #: src/pages/SyncGroupsPage.tsx:379
 #: src/pages/TallyPage.tsx:364
 msgid "Identifier"
@@ -2927,7 +2931,7 @@ msgstr "Jitter buffer"
 #: src/pages/ProbesPage.tsx:419
 #: src/pages/ProbesPage.tsx:542
 #: src/pages/SourcesPage.tsx:458
-#: src/pages/SourcesPage.tsx:588
+#: src/pages/SourcesPage.tsx:602
 msgid "Kind"
 msgstr "Kind"
 
@@ -3552,7 +3556,7 @@ msgstr "Mute on the program mix (route {row})"
 #: src/pages/ProbesPage.tsx:532
 #: src/pages/SalvosPage.tsx:210
 #: src/pages/SourcesPage.tsx:453
-#: src/pages/SourcesPage.tsx:579
+#: src/pages/SourcesPage.tsx:593
 #: src/pages/SyncGroupsPage.tsx:234
 #: src/pages/SyncGroupsPage.tsx:391
 #: src/pages/TallyPage.tsx:241
@@ -3824,7 +3828,7 @@ msgstr "None needed"
 msgid "Not a member of any sync group."
 msgstr "Not a member of any sync group."
 
-#: src/resources/CrudPage.tsx:229
+#: src/resources/CrudPage.tsx:237
 msgid "Not editable in this UI"
 msgstr "Not editable in this UI"
 
@@ -3837,8 +3841,12 @@ msgstr "Not in a sync group."
 #~ msgstr "Not in the running engine — no live state until a config export + restart binds it to a tile."
 
 #: src/pages/SourcesPage.tsx:84
-msgid "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
-msgstr "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgid "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgstr "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+
+#: src/pages/SourcesPage.tsx:84
+msgid "Not in the running engine — no live state. Synthetic, network and file sources join a running full engine when saved; NDI, YouTube and AES67 sources join after a config export + restart."
+msgstr "Not in the running engine — no live state. Synthetic, network and file sources join a running full engine when saved; NDI, YouTube and AES67 sources join after a config export + restart."
 
 #: src/pages/DeviceDetailPage.tsx:189
 msgid "Not probed yet."
@@ -4376,7 +4384,7 @@ msgstr "Removed. An analog clock overlay disappears from the running engine imme
 msgid "Removed. Member devices keep running; only the alignment grouping is gone."
 msgstr "Removed. Member devices keep running; only the alignment grouping is gone."
 
-#: src/pages/SourcesPage.tsx:542
+#: src/pages/SourcesPage.tsx:556
 msgid "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
 msgstr "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
 
@@ -4561,7 +4569,7 @@ msgstr "Sample rate (Hz)"
 
 #: src/pages/SalvosPage.tsx:398
 #: src/pages/SettingsPage.tsx:218
-#: src/resources/CrudPage.tsx:373
+#: src/resources/CrudPage.tsx:384
 msgid "Save"
 msgstr "Save"
 
@@ -4579,7 +4587,7 @@ msgstr "Save audio routing"
 msgid "Save layout"
 msgstr "Save layout"
 
-#: src/resources/CrudPage.tsx:264
+#: src/resources/CrudPage.tsx:272
 msgid "Saved"
 msgstr "Saved"
 
@@ -4587,6 +4595,10 @@ msgstr "Saved"
 #: src/resources/FormControls.tsx:380
 msgid "Saved as {0}. Restart Multiview with this file to apply stored changes."
 msgstr "Saved as {0}. Restart Multiview with this file to apply stored changes."
+
+#: src/pages/SourcesPage.tsx:531
+msgid "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. One gap: a network source added or edited live picks up its closed captions only after the next restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
+msgstr "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. One gap: a network source added or edited live picks up its closed captions only after the next restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
 
 #: src/pages/docs/ConfigPage.tsx:237
 msgid "Saving an overlay through the API or this UI applies it to the running engine at the next frame where the build renders that kind — today an analog-face <0>clock</0> appears, moves, or disappears live. Kinds without a renderer are stored losslessly and take effect via config export + restart; every save response declares which happened in its X-Multiview-Apply header."
@@ -4837,8 +4849,16 @@ msgid "Stored. It goes live via config export + restart; the running engine is u
 msgstr "Stored. It goes live via config export + restart; the running engine is unchanged until then."
 
 #: src/pages/SourcesPage.tsx:541
-msgid "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
-msgstr "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
+#~ msgid "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
+#~ msgstr "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
+
+#: src/pages/SourcesPage.tsx:551
+msgid "Stored. The running engine cannot apply this kind live on this run; it goes live via config export + restart."
+msgstr "Stored. The running engine cannot apply this kind live on this run; it goes live via config export + restart."
+
+#: src/pages/SourcesPage.tsx:553
+msgid "Stored. The save response declared no apply semantics; it goes live at the latest via config export + restart."
+msgstr "Stored. The save response declared no apply semantics; it goes live at the latest via config export + restart."
 
 #: src/pages/docs/concepts/GlossaryPage.tsx:40
 msgid "Storing color information at lower resolution than brightness, exploiting the eye's lower sensitivity to color detail. Written as ratios: 4:4:4 keeps full color, 4:2:2 halves it horizontally (production quality), and 4:2:0 quarters it (virtually all delivery video). Almost every stream Multiview ingests and emits is 4:2:0."
@@ -4925,8 +4945,8 @@ msgid "Synchronized output"
 msgstr "Synchronized output"
 
 #: src/pages/SourcesPage.tsx:531
-msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
-msgstr "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
+#~ msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
+#~ msgstr "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
 
 #: src/app/navigation.tsx:50
 #: src/pages/SystemPage.tsx:236
@@ -5409,7 +5429,7 @@ msgstr "This device is already a member of the group."
 msgid "this document's shape isn't editable in this UI; it is preserved as authored"
 msgstr "this document's shape isn't editable in this UI; it is preserved as authored"
 
-#: src/resources/CrudPage.tsx:230
+#: src/resources/CrudPage.tsx:238
 msgid "This entry's kind has no form here; the stored document is preserved as authored."
 msgstr "This entry's kind has no form here; the stored document is preserved as authored."
 
@@ -5473,7 +5493,7 @@ msgstr "This permanently removes the profile's mapping rules."
 msgid "This permanently removes the salvo definition."
 msgstr "This permanently removes the salvo definition."
 
-#: src/resources/CrudPage.tsx:395
+#: src/resources/CrudPage.tsx:406
 msgid "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 msgstr "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 
@@ -5486,8 +5506,12 @@ msgstr "This screen is part of an upcoming milestone."
 #~ msgstr "This source is not part of the running engine, so it has no live state. It joins after a config export + restart binds it to a tile."
 
 #: src/pages/SourcesPage.tsx:80
-msgid "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
-msgstr "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgid "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+#~ msgstr "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+
+#: src/pages/SourcesPage.tsx:80
+msgid "This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart."
+msgstr "This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart."
 
 #: src/pages/SettingsPage.tsx:272
 msgid "This toast is announced to assistive technology."

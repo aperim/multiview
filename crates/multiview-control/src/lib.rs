@@ -143,7 +143,9 @@ pub use router::{
 };
 pub use routing::{classify, DestinationProfile, RouteClass, RoutePlan, RouteRequest, RouteTarget};
 pub use salvo_store::{InMemorySalvoStore, SalvoRepository, VersionedSalvo, SALVO_KIND};
-pub use state::{seed_resources, AckClock, AppState, EngineStateSnapshot, SeededResources};
+pub use state::{
+    seed_resources, AckClock, AppState, EngineStateSnapshot, LiveSourceCapability, SeededResources,
+};
 pub use tally_ingest::{run_tally_ingest, tally_ingest_step, TallyIngestStep};
 pub use tally_state::{
     tally_observation, target_key, InMemoryProfileStore, OverrideRegistry, TallyEntry, TallyMirror,

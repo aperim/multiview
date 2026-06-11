@@ -330,6 +330,30 @@ impl SourceKind {
     pub const fn is_synthetic(&self) -> bool {
         matches!(self, Self::Bars | Self::Solid { .. } | Self::Clock { .. })
     }
+
+    /// Whether this kind is decoded from a libav-openable URL or path —
+    /// the ADR-W018 **level 2** live-add set (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/
+    /// `file`; `file` rides the same demux/decode ingest path as the network
+    /// transports).
+    ///
+    /// This is the network half of the live-apply classification (ADR-W018):
+    /// on a run whose engine declares the network capability these kinds can
+    /// be added/edited live (a hub-spawned supervised `ingest_loop`).
+    /// `ndi` (runtime-loaded host-memory receive), `youtube` (external
+    /// `yt-dlp` resolution) and `aes67` (audio-only) are **not** in this set —
+    /// they apply on restart.
+    #[must_use]
+    pub const fn is_network_media(&self) -> bool {
+        matches!(
+            self,
+            Self::Rtsp { .. }
+                | Self::Hls { .. }
+                | Self::Ts { .. }
+                | Self::Srt { .. }
+                | Self::Rtmp { .. }
+                | Self::File { .. }
+        )
+    }
 }
 
 /// A managed input: a stable `id`, a display name, the kind-specific payload,
