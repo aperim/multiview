@@ -210,7 +210,10 @@ async fn a_denied_relay_toggle_records_no_audit_entry() {
     )
     .await;
     assert!(
-        page["entries"].as_array().expect("entries array").is_empty(),
+        page["entries"]
+            .as_array()
+            .expect("entries array")
+            .is_empty(),
         "a denied toggle never touched the relay state, so it is not audited"
     );
 }

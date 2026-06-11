@@ -78,8 +78,11 @@ pub(crate) async fn get_status(
 ///
 /// A real, persisted toggle: the new state is written to the shared mesh state
 /// and the updated status is returned. Discovery is unaffected (always-on) — this
-/// toggles only the **relay** opt-in (brief §9.2). The change is recorded in the
-/// audit log (an auditable account-side action, brief §10/§11).
+/// toggles only the **relay** opt-in (brief §9.2). Every successful toggle is
+/// recorded in **both** trails: the change-audit log and — as an
+/// actor-attributed [`AccountAuditKind::RelayToggle`](crate::account_audit::AccountAuditKind::RelayToggle)
+/// entry — the append-only account-audit store (the spec's relay opt-in/out row,
+/// brief §10/§11).
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -101,14 +104,25 @@ pub(crate) async fn set_relay(
 ) -> ControlResult<Json<MeshStatus>> {
     principal.role.require(Action::Write)?;
     state.mesh.set_relay_enabled(req.enabled);
-    // Record the opt-in change (an auditable account action). The mesh has no
-    // serial/identifier to log; the object id is the coarse `relay` toggle, the
-    // detail the new state.
+    // Record the opt-in change in the change-audit log (the engine/config change
+    // trail). The mesh has no serial/identifier to log; the object id is the
+    // coarse `relay` toggle, the detail the new state.
     state.audit(
         &principal.key_id,
         AuditAction::Update,
         "mesh.relay",
         "relay",
+        Some(serde_json::json!({ "enabled": req.enabled })),
+    );
+    // And the account-side evidence trail (Conspect ADR-0053 §4 / brief §10/§11):
+    // a relay opt-in/out is an immutable, timestamped, actor-attributed account
+    // action (the spec's `relay opt-in/out` row). The actor is the toggling
+    // principal; the detail carries only the new boolean state — never a raw
+    // identifier (data minimisation, brief §8). Written off the hot loop into a
+    // control-plane store (inv #10).
+    state.audit_account(
+        &principal.key_id,
+        crate::account_audit::AccountAuditKind::RelayToggle,
         Some(serde_json::json!({ "enabled": req.enabled })),
     );
     Ok(Json(state.mesh.status()))
