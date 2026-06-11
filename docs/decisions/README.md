@@ -153,6 +153,7 @@ These ADRs capture the load-bearing decisions for the Multiview engine. 144 ADRs
 - [ADR-W018](ADR-W018.md) — Live source apply: `UpsertSource`/`RemoveSource` on the command bus, frame-boundary registration + off-thread producer hub, per-response `X-Multiview-Apply` live/restart per kind, placement pinned to the running island
 - [ADR-W019](ADR-W019.md) — Live apply of stored layouts: resolve+solve at the route (422 before 202), command carries the solved artifact, frame-boundary swap (Class-1; pinned-canvas mismatches refused)
 - [ADR-W020](ADR-W020.md) — Config-file watch: debounced/rename-aware 1 s poll of the boot config; valid file ⇒ per-section diff applied through the SAME command-bus machinery (synthetics/layout live, restart-only sections warned + stores reseeded); invalid file ⇒ `config-file-invalid` health warning, nothing changes; `expect_write()` self-write suppression; `GET /api/v1/config/watch-status`
+- [ADR-W022](ADR-W022.md) — Boot/Loaded/Running config model: `loaded.toml` snapshot at start + debounced atomic `active.toml` Running persistence (audit-recorder choke point), `[control] start = "boot"|"resume"`, `POST /config/revert-to-start` (Running := Loaded through the one apply machinery), `POST /config/promote` (server-side write to the boot file via `expect_write()` + versioning commit), `GET /config/boot-model` divergence surface
 - [ADR-W017](ADR-W017.md) — Action route style: bare verb path segments (codify shipped practice) *(Proposed)*
 
 ## Dev Container
