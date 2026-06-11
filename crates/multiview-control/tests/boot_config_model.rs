@@ -34,7 +34,8 @@ use multiview_control::boot_model::{
 };
 use multiview_control::config_watch::{spawn as spawn_watch, WatchOptions};
 use multiview_control::{
-    command_bus, AppState, Command, CommandReceiver, EngineStateSnapshot, InMemoryRepository,
+    command_bus, run_warning_ingest, AppState, Command, CommandReceiver, EngineStateSnapshot,
+    InMemoryRepository, InMemoryWarningStore, WarningFilter, WarningRepository,
 };
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
@@ -100,12 +101,18 @@ struct Rig {
     state: AppState,
     router: Router,
     commands: CommandReceiver,
+    warnings: Arc<dyn WarningRepository>,
 }
 
 /// Build the rig from `doc` written to a temp boot file, with the stores
 /// seeded from it and a [`BootModel`] whose Loaded snapshot is the parsed
 /// document (boot-mode start).
 fn rig(doc: &str) -> Rig {
+    rig_with(doc, 64)
+}
+
+/// [`rig`] with a chosen command-bus `capacity` (the shed tests run at 1).
+fn rig_with(doc: &str, capacity: usize) -> Rig {
     let dir = tempfile::tempdir().expect("temp dir");
     let boot_path = dir.path().join("multiview.toml");
     std::fs::write(&boot_path, doc).expect("write boot config");
@@ -113,7 +120,12 @@ fn rig(doc: &str) -> Rig {
     config.validate().expect("boot config validates");
 
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
-    let (sender, commands) = command_bus(64);
+    let (sender, commands) = command_bus(capacity);
+    let warnings: Arc<dyn WarningRepository> = Arc::new(InMemoryWarningStore::new());
+    tokio::spawn(run_warning_ingest(
+        publisher.subscribe(),
+        Arc::clone(&warnings),
+    ));
     let seeded = multiview_control::seed_resources(&config).expect("seed stores");
     let state = AppState::new(
         publisher,
@@ -138,7 +150,17 @@ fn rig(doc: &str) -> Rig {
         state,
         router,
         commands,
+        warnings,
     }
+}
+
+/// Whether the active warning list carries `code`.
+fn has_active_warning(warnings: &Arc<dyn WarningRepository>, code: &str) -> bool {
+    warnings
+        .list(&WarningFilter::active_only())
+        .expect("list warnings")
+        .iter()
+        .any(|w| w.code.as_str() == code)
 }
 
 /// Build a bodyless `POST` with a Bearer token and an `Idempotency-Key`.
@@ -880,4 +902,282 @@ async fn write_atomic_replaces_and_leaves_no_residue() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(entries, vec!["state.toml".to_owned()]);
+}
+
+/// The file mode of `path` (permission bits only).
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).expect("stat").permissions().mode() & 0o7777
+}
+
+/// Review M3: `write_atomic` must preserve the DESTINATION's mode — a
+/// `chmod 600` boot/state file must not silently widen to the umask default
+/// when it is atomically replaced.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_atomic_preserves_the_destination_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("state.toml");
+    write_atomic(&path, "first = 1\n").expect("first write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod 600");
+    write_atomic(&path, "second = 2\n").expect("replace write");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "second = 2\n"
+    );
+    assert_eq!(
+        mode_of(&path),
+        0o600,
+        "an atomic replace must preserve the destination's mode (chmod-600 stays 600)"
+    );
+}
+
+/// Review M3 at the route: a promote over a `chmod 600` boot file keeps the
+/// boot file at mode 600 (credentials in the config must not leak to the
+/// umask default through the temp-file + rename).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_preserves_the_boot_file_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let r = rig(BOOT_DOC);
+    std::fs::set_permissions(&r.boot_path, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod 600 the boot file");
+    recolor_in_a(&r, "#e8e8e8").await;
+
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = std::fs::read_to_string(&r.boot_path).expect("read promoted file");
+    assert!(
+        text.contains("#e8e8e8"),
+        "the promoted file carries the live edit"
+    );
+    assert_eq!(
+        mode_of(&r.boot_path),
+        0o600,
+        "promote must preserve the boot file's mode (chmod-600 stays 600)"
+    );
+}
+
+/// Review B1 interleaving (1) — the settle-window race: promote writes W and
+/// banks its expect token, but an external edit E lands BEFORE W settles, so
+/// the watcher's first settled observation is E. E is a REAL external change:
+/// it must be APPLIED through the one machinery, never adopted against the
+/// banked (W-content) token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_promote_racing_an_external_edit_applies_the_edit() {
+    let mut r = rig(BOOT_DOC);
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+
+    recolor_in_a(&r, "#c0c0c0").await;
+    let _ = r.commands.try_drain();
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The external edit lands immediately after the promote's write — well
+    // inside the watcher's two-poll settle window, so the first SETTLED
+    // observation is E, not the promote's W.
+    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#123456"))
+        .expect("external edit inside the settle window");
+
+    assert!(
+        wait_until(SETTLE, || {
+            r.state.config_watch.snapshot().applied_count >= 1
+        })
+        .await,
+        "the racing external edit must be APPLIED, not adopted against the promote token"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#123456"),
+        "the stores must follow the external edit"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| match c {
+            Command::UpsertSource { source, .. } => {
+                source.id == "in_a"
+                    && serde_json::to_value(source.as_ref())
+                        .ok()
+                        .and_then(|v| v.get("color").and_then(|c| c.as_str().map(str::to_owned)))
+                        .as_deref()
+                        == Some("#123456")
+            }
+            _ => false,
+        }),
+        "the edit must ride UpsertSource with E's colour, got {drained:?}"
+    );
+    watch.stop();
+}
+
+/// Review B1 interleaving (3) — the failed-write token leak: a promote that
+/// banks its expect token and then FAILS to write the boot file must release
+/// the token; a later REAL external edit that happens to carry the same
+/// content must be APPLIED, never silently adopted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_promote_write_releases_the_banked_expect_token() {
+    let mut r = rig(BOOT_DOC);
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    recolor_in_a(&r, "#e0e0e0").await;
+    let _ = r.commands.try_drain();
+
+    // The exact content the promote will render: the export TOML (the same
+    // `compose_running_config` + `to_toml` path the promote route uses).
+    let resp = send(&r.router, get("/api/v1/config/export", OPERATOR_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let running_toml =
+        String::from_utf8(support::body_bytes(resp).await).expect("export is UTF-8 TOML");
+
+    // Force the atomic write to fail: occupy write_atomic's deterministic
+    // temp name with a DIRECTORY (root-proof, unlike a permissions trick).
+    let tmp_blocker = r.boot_path.parent().expect("dir").join(".multiview.toml.tmp");
+    std::fs::create_dir(&tmp_blocker).expect("block the temp path");
+    let before = std::fs::read_to_string(&r.boot_path).expect("read boot file");
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert!(
+        resp.status().is_server_error(),
+        "the blocked write must fail the promote, got {}",
+        resp.status()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&r.boot_path).expect("read boot file"),
+        before,
+        "a failed promote must leave the boot file untouched"
+    );
+    std::fs::remove_dir(&tmp_blocker).expect("unblock the temp path");
+
+    // A REAL external edit now lands with exactly the content the failed
+    // promote announced. The promote never wrote it, so it must be APPLIED
+    // (UpsertSource for in_a's new colour) — a leaked token would eat it.
+    std::fs::write(&r.boot_path, &running_toml).expect("external edit matching the failed write");
+    assert!(
+        wait_until(SETTLE, || {
+            r.state.config_watch.snapshot().applied_count >= 1
+        })
+        .await,
+        "the external edit must be APPLIED — the failed promote's token must not eat it"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            Command::UpsertSource { source, .. } if source.id == "in_a"
+        )),
+        "the matching-content edit must still ride UpsertSource, got {drained:?}"
+    );
+    watch.stop();
+}
+
+/// Review M4 — revert 202 honesty under a full bus: when engine command(s)
+/// are SHED the response must NOT claim a full revert (`reverted: false`,
+/// `shed` count surfaced, partial summary) and the
+/// `config-file-apply-incomplete` warning path fires so the operator sees it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shed_revert_reports_partial_and_raises_the_warning() {
+    let r = rig_with(BOOT_DOC, 1);
+    // The live edit's own UpsertSource fills the capacity-1 bus; the revert's
+    // submission below is shed.
+    recolor_in_a(&r, "#f0f0f0").await;
+
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/revert-to-start", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["reverted"],
+        serde_json::json!(false),
+        "a shed revert must NOT claim reverted: true, got {body:?}"
+    );
+    assert!(
+        body["shed"].as_u64().is_some_and(|n| n >= 1),
+        "the shed count must be surfaced, got {body:?}"
+    );
+    let summary = body["summary"].as_array().expect("summary array").clone();
+    assert!(
+        !summary.is_empty(),
+        "the partial summary still names what was attempted"
+    );
+    // The stores resync to Loaded on the first pass either way…
+    assert_eq!(stored_color(&r.state).as_deref(), Some("#101418"));
+    // …and the operator is told the engine did not get every command.
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "a shed revert must raise the config-file-apply-incomplete warning"
+    );
+}
+
+/// Review m3 — reservation release on failed compose: a revert/promote whose
+/// Running composition FAILS (422) must release its `Idempotency-Key`
+/// reservation, so a retry with the same key actually runs (never answers as
+/// a replay of a request that did nothing).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_compose_releases_the_idempotency_reservation() {
+    // A state with a boot model but NO seeded resources: there is no working
+    // layout, so `compose_running_config` fails with 422.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let boot_path = dir.path().join("multiview.toml");
+    std::fs::write(&boot_path, BOOT_DOC).expect("write boot file");
+    let config = MultiviewConfig::load_from_toml(BOOT_DOC).expect("parse");
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let (sender, _commands) = command_bus(64);
+    let state = AppState::new(
+        publisher,
+        sender,
+        Arc::new(InMemoryRepository::new()),
+        Arc::new(support::seeded_keys()),
+    )
+    .with_boot_model(Arc::new(BootModel::new(
+        boot_path,
+        config,
+        StartMode::Boot,
+        false,
+        None,
+    )));
+    let router = multiview_control::router(state);
+
+    for (path, key) in [
+        ("/api/v1/config/revert-to-start", "revert-key-1"),
+        ("/api/v1/config/promote", "promote-key-1"),
+    ] {
+        for attempt in 1..=2_u8 {
+            let resp = send(&router, post_idem(path, OPERATOR_TOKEN, Some(key))).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{path} attempt {attempt} must fail compose with 422 — a replayed \
+                 reservation would answer 2xx instead"
+            );
+        }
+    }
 }

@@ -140,6 +140,43 @@ fn resume_falls_back_to_boot_when_active_is_missing() {
     assert_eq!(in_a_color(&start.running).as_deref(), Some("#101418"));
 }
 
+/// Review M1 — resume staleness: the storeless restart-only sections
+/// (`control`, `placement`, `salvos`, `tally_profiles`, `walls`, `routing`,
+/// `schema_version`) must be spliced from the BOOT file into the resumed
+/// Running document — a boot-file `[control] listen` edit must take effect on
+/// the restart the operator performed, while the live sections still resume
+/// from `active.toml`.
+#[test]
+fn resume_splices_storeless_sections_from_the_boot_file() {
+    // The previous run persisted active.toml under the OLD listen; the
+    // operator then edited the BOOT file's [control] listen and restarted.
+    let boot = boot_doc("start = \"resume\"").replace("[::1]:0", "[::1]:9099");
+    let active = boot_doc("start = \"resume\"").replace("#101418", "#f0f0f0");
+    let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
+
+    let start = resolve_start_config(boot_config, &boot_path);
+    assert!(start.resumed, "the valid active.toml must still resume");
+    assert_eq!(
+        start
+            .running
+            .control
+            .as_ref()
+            .map(|control| control.listen.clone())
+            .as_deref(),
+        Some("[::1]:9099"),
+        "the restart-only [control] section must come from the BOOT file, not the stale active.toml"
+    );
+    assert_eq!(
+        in_a_color(&start.running).as_deref(),
+        Some("#f0f0f0"),
+        "the live sections still resume from active.toml"
+    );
+    assert_eq!(
+        start.running.schema_version, start.loaded.schema_version,
+        "schema_version follows the boot document"
+    );
+}
+
 /// The default policy is `boot`: an existing `active.toml` is IGNORED unless
 /// the boot file opts into resume.
 #[test]
