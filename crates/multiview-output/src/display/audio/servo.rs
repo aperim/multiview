@@ -59,6 +59,17 @@ impl BufferServo {
             setpoint: 0.5,
             // Full-scale fill error (±0.5) maps to a strong but sub-band push;
             // ki accumulates the residual; k_skew nudges absolute alignment.
+            //
+            // Gain coupling: kp is dimensioned against the drain loop's
+            // quantum-per-iteration cadence — the per-iteration closed-loop
+            // fill gain is kp × 1e-6 × DRAIN_FRAMES / fifo_capacity ≈ 2.3e-4
+            // with the sink's 480-frame quantum and the pipeline's 8192-frame
+            // FIFO (heavily damped, ~40 s settling). Retune kp if the quantum
+            // or the FIFO capacity changes materially; pushing that product
+            // toward 1 makes the loop oscillate. The skew term is bounded by
+            // construction: its input is clamped to ±50 ms upstream
+            // (`SkewTracker`), so k_skew × 50 = 1000 ppm is the most the slow
+            // term can ever demand — it cannot peg the ±5000 ppm band alone.
             kp: 4_000.0,
             ki: 50.0,
             k_skew: 20.0,

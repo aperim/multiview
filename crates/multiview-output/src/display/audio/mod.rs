@@ -29,9 +29,11 @@
 //! ## Isolation (invariants #1 + #10)
 //!
 //! The sink is a pure **consumer**: the engine holds only a
-//! [`DisplayAudioPublisher`] (a wait-free push into the bounded FIFO). A
-//! wedged/silent device drops audio (bounded FIFO, never grows) and the engine
-//! never notices — the audio sink never paces the tick.
+//! [`DisplayAudioPublisher`] — a bounded, never-blocking-on-the-device push
+//! (one short mutex-guarded in-memory copy into the drop-oldest FIFO; the
+//! drain thread holds that lock only for in-memory copies, never across a PCM
+//! call). A wedged/silent device drops audio (bounded FIFO, never grows) and
+//! the engine never notices — the audio sink never paces the tick.
 //!
 //! ## Hardware isolation for CI
 //!
@@ -47,6 +49,7 @@
 pub mod discover;
 pub mod eld;
 pub mod fifo;
+pub mod pcm_format;
 pub mod servo;
 pub mod sink;
 pub mod tracker;
@@ -62,6 +65,9 @@ pub mod alsa;
 pub use discover::{pick_eld_entry, vc4_card_candidates};
 pub use eld::{parse_eld, parse_proc_eld_text, EldCapability};
 pub use fifo::AudioFifo;
+pub use pcm_format::{
+    f32_to_s16, f32_to_s24, f32_to_s32, negotiate_sample_format, PcmSampleFormat,
+};
 pub use servo::{drain_ratio, skew_ms, BufferServo};
 pub use sink::{
     AlsaSink, AudioStatsSnapshot, DisplayAudioConfig, DisplayAudioPublisher, DisplayAudioSink,

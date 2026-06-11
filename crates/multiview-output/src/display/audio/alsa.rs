@@ -20,9 +20,17 @@
 //!   `alsa` crate (libasound is dynamically linked, LGPL-2.1, never vendored).
 //!   It opens the **`hdmi:CARD=…,DEV=…`** PCM (the `hdmi:` config layer sets
 //!   the IEC958/AES channel-status bits and, on the Pi, applies the vc4-hdmi
-//!   alsa-lib card config that a raw `hw:` device does not); a raw-`hw:`
-//!   fallback covers cards without an `hdmi:` config entry. Writes go through
-//!   `snd_pcm_writei`; an underrun/suspend is mapped onto
+//!   alsa-lib card config that a raw `hw:` device does not) in **nonblocking
+//!   mode**, so no device call can wedge the drain thread indefinitely; a
+//!   raw-`hw:` fallback covers cards without an `hdmi:` config entry. The
+//!   sample format is **negotiated** (float → S32 → S24 → S16, via
+//!   `snd_pcm_hw_params_test_format` and the pure
+//!   [`negotiate_sample_format`](super::negotiate_sample_format)) because real
+//!   HDA/vc4 devices typically refuse float; integer formats get a
+//!   sample-accurate float→int conversion at the write boundary. Writes go
+//!   through the typed `snd_pcm_writei`, paced by bounded `snd_pcm_wait`
+//!   slices when the ring is full (`-EAGAIN`) and re-offering short-write
+//!   tails up to a hard per-call bound; an underrun/suspend is mapped onto
 //!   [`PcmOutcome`](super::PcmOutcome) for the recovery machine.
 //! - [`discover_for_connector`] applies the pure
 //!   [`discover`](super::discover) policy to the live system: vc4 card-per-port
@@ -35,6 +43,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use alsa::ctl::{Ctl, ElemId, ElemIface, ElemType, ElemValue};
 use alsa::pcm::{Access, Format, HwParams, State, PCM};
@@ -42,6 +51,9 @@ use alsa::{Direction, ValueOr};
 
 use super::discover::{pick_eld_entry, vc4_card_candidates};
 use super::eld::{parse_eld, parse_proc_eld_text, EldCapability};
+use super::pcm_format::{
+    f32_to_s16, f32_to_s24, f32_to_s32, negotiate_sample_format, PcmSampleFormat,
+};
 use super::sink::{AlsaSink, EldSource, PcmParams};
 use super::xrun::PcmOutcome;
 
@@ -238,13 +250,19 @@ fn discover_in(proc_asound: &Path, connector: &str) -> Option<DiscoveredDisplayA
 ///
 /// Prefers the `hdmi:CARD=…,DEV=…` ALSA PCM (the config layer that sets IEC958
 /// channel-status and the vc4-hdmi card setup); a raw `hw:CARD=…,DEV=…` is the
-/// fallback for cards without an `hdmi:` config entry.
+/// fallback for cards without an `hdmi:` config entry. The PCM is opened
+/// **nonblocking** with a negotiated sample format (float → S32 → S24 → S16);
+/// writes convert at the boundary and pace themselves with bounded
+/// `snd_pcm_wait` slices, so every call returns within [`WRITE_CALL_BOUND`].
 #[derive(Debug)]
 pub struct AlsaPcmSink {
     device: String,
     fallback_hw: Option<String>,
     pcm: Option<PCM>,
     channels: usize,
+    /// The sample format negotiated at open (the typed `writei` + conversion
+    /// the write path uses). `Float` until a successful open.
+    format: PcmSampleFormat,
 }
 
 impl AlsaPcmSink {
@@ -258,6 +276,7 @@ impl AlsaPcmSink {
             fallback_hw: Some(format!("hw:CARD={card_name},DEV={dev}")),
             pcm: None,
             channels: 2,
+            format: PcmSampleFormat::Float,
         }
     }
 
@@ -269,20 +288,31 @@ impl AlsaPcmSink {
             fallback_hw: None,
             pcm: None,
             channels: 2,
+            format: PcmSampleFormat::Float,
         }
     }
 
-    /// Try to open `name` and configure it for `params`. Returns the configured
-    /// PCM on success.
-    fn try_open(name: &str, params: PcmParams) -> Result<PCM, String> {
+    /// Try to open `name` **nonblocking** and configure it for `params`,
+    /// negotiating the sample format the device actually supports
+    /// (float → S32 → S24 → S16 — real HDA/vc4 devices typically refuse
+    /// float). Returns the configured PCM plus the negotiated format.
+    fn try_open(name: &str, params: PcmParams) -> Result<(PCM, PcmSampleFormat), String> {
+        // Nonblocking (MAJOR-2): a wedged driver can then never hold the drain
+        // thread inside `writei`; pacing happens via bounded `snd_pcm_wait`
+        // slices in `write`.
         let pcm =
-            PCM::new(name, Direction::Playback, false).map_err(|e| format!("open {name}: {e}"))?;
+            PCM::new(name, Direction::Playback, true).map_err(|e| format!("open {name}: {e}"))?;
+        let format;
         {
             let hwp = HwParams::any(&pcm).map_err(|e| format!("hw_params {name}: {e}"))?;
             hwp.set_access(Access::RWInterleaved)
                 .map_err(|e| format!("set_access: {e}"))?;
-            hwp.set_format(Format::float())
-                .map_err(|e| format!("set_format f32: {e}"))?;
+            format = negotiate_sample_format(|f| hwp.test_format(alsa_format(f)).is_ok())
+                .ok_or_else(|| {
+                    format!("no supported sample format on {name} (tried float/S32/S24/S16)")
+                })?;
+            hwp.set_format(alsa_format(format))
+                .map_err(|e| format!("set_format {format:?}: {e}"))?;
             hwp.set_channels(u32::from(params.channels))
                 .map_err(|e| format!("set_channels: {e}"))?;
             hwp.set_rate(params.sample_rate, ValueOr::Nearest)
@@ -298,13 +328,14 @@ impl AlsaPcmSink {
                 .map_err(|e| format!("commit hw_params {name}: {e}"))?;
         }
         pcm.prepare().map_err(|e| format!("prepare {name}: {e}"))?;
-        Ok(pcm)
+        Ok((pcm, format))
     }
 
     /// Map a libasound write error onto a [`PcmOutcome`] for the recovery
     /// machine. `EPIPE` is an underrun, `ESTRPIPE` a suspend; anything else is
     /// surfaced as an underrun so the loop attempts a prepare (the conservative
-    /// recover).
+    /// recover). `EAGAIN` (nonblocking ring-full) never reaches here — the
+    /// write loop handles it with a bounded wait.
     fn classify(err: &alsa::Error) -> PcmOutcome {
         let errno = err.errno();
         if errno == EPIPE {
@@ -315,14 +346,41 @@ impl AlsaPcmSink {
             PcmOutcome::Underrun
         }
     }
+
+    /// One typed `writei` of the (already-converted) tail starting at sample
+    /// index `from_sample`.
+    fn writei_at(
+        pcm: &PCM,
+        format: PcmSampleFormat,
+        interleaved: &[f32],
+        i16buf: &[i16],
+        i32buf: &[i32],
+        from_sample: usize,
+    ) -> Result<usize, alsa::Error> {
+        match format {
+            PcmSampleFormat::Float => pcm
+                .io_f32()
+                .and_then(|io| io.writei(interleaved.get(from_sample..).unwrap_or(&[]))),
+            PcmSampleFormat::S32 => pcm
+                .io_i32()
+                .and_then(|io| io.writei(i32buf.get(from_sample..).unwrap_or(&[]))),
+            PcmSampleFormat::S24 => pcm
+                .io_i32_s24()
+                .and_then(|io| io.writei(i32buf.get(from_sample..).unwrap_or(&[]))),
+            PcmSampleFormat::S16 => pcm
+                .io_i16()
+                .and_then(|io| io.writei(i16buf.get(from_sample..).unwrap_or(&[]))),
+        }
+    }
 }
 
 impl AlsaSink for AlsaPcmSink {
     fn open(&mut self, params: PcmParams) -> Result<(), String> {
         self.channels = usize::from(params.channels.max(1));
         match Self::try_open(&self.device, params) {
-            Ok(pcm) => {
+            Ok((pcm, format)) => {
                 self.pcm = Some(pcm);
+                self.format = format;
                 Ok(())
             }
             Err(primary) => {
@@ -330,13 +388,14 @@ impl AlsaSink for AlsaPcmSink {
                 // `hw:` device before giving up (the sink then stays silent).
                 if let Some(hw) = self.fallback_hw.clone() {
                     match Self::try_open(&hw, params) {
-                        Ok(pcm) => {
+                        Ok((pcm, format)) => {
                             tracing::warn!(
                                 device = %self.device,
                                 fallback = %hw,
                                 "hdmi: PCM unavailable; using raw hw: (no IEC958 config layer)"
                             );
                             self.pcm = Some(pcm);
+                            self.format = format;
                             return Ok(());
                         }
                         Err(secondary) => {
@@ -353,13 +412,59 @@ impl AlsaSink for AlsaPcmSink {
         let Some(pcm) = self.pcm.as_ref() else {
             return PcmOutcome::Underrun;
         };
-        let Ok(io) = pcm.io_f32() else {
-            return PcmOutcome::Underrun;
-        };
-        match io.writei(interleaved) {
-            Ok(frames) => PcmOutcome::Wrote(frames),
-            Err(e) => Self::classify(&e),
+        let channels = self.channels.max(1);
+        let total_frames = interleaved.len() / channels;
+        if total_frames == 0 {
+            return PcmOutcome::Wrote(0);
         }
+        // Convert once at the write boundary when the negotiated format is an
+        // integer one (MEDIUM-3): sample-accurate float→int, then the typed
+        // `writei`. A few KB per 10 ms quantum on the dedicated drain thread —
+        // never the engine hot path.
+        let (i16buf, i32buf): (Vec<i16>, Vec<i32>) = match self.format {
+            PcmSampleFormat::Float => (Vec::new(), Vec::new()),
+            PcmSampleFormat::S32 => (Vec::new(), f32_to_s32(interleaved)),
+            PcmSampleFormat::S24 => (Vec::new(), f32_to_s24(interleaved)),
+            PcmSampleFormat::S16 => (f32_to_s16(interleaved), Vec::new()),
+        };
+
+        // Nonblocking write loop, bounded by WRITE_CALL_BOUND: a full ring
+        // (`-EAGAIN` / a zero-frame write) waits in WAIT_SLICE_MS slices for
+        // space; a wedged device therefore stalls this call for at most the
+        // bound — teardown stays responsive — and a short write re-offers the
+        // tail so content is not dropped.
+        let deadline = Instant::now() + WRITE_CALL_BOUND;
+        let mut written_frames = 0usize;
+        while written_frames < total_frames {
+            let from_sample = written_frames.saturating_mul(channels);
+            match Self::writei_at(pcm, self.format, interleaved, &i16buf, &i32buf, from_sample) {
+                Ok(frames) => {
+                    written_frames = written_frames.saturating_add(frames).min(total_frames);
+                    if frames == 0 {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        let _ = pcm.wait(Some(WAIT_SLICE_MS));
+                    }
+                }
+                Err(e) if e.errno() == EAGAIN => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    let _ = pcm.wait(Some(WAIT_SLICE_MS));
+                }
+                Err(e) => {
+                    // Surface the fault only when nothing was delivered this
+                    // call; otherwise report the partial write (the fault
+                    // recurs on the next call and is classified there).
+                    if written_frames == 0 {
+                        return Self::classify(&e);
+                    }
+                    break;
+                }
+            }
+        }
+        PcmOutcome::Wrote(written_frames)
     }
 
     fn recover(&mut self) -> PcmOutcome {
@@ -394,8 +499,33 @@ impl AlsaSink for AlsaPcmSink {
     }
 }
 
+/// Map the pure negotiation format onto the alsa-crate `Format`. `S24` is the
+/// 24-bit-in-32-bit container (`S24_LE`), matching [`f32_to_s24`]'s
+/// LSB-justified output and the `io_i32_s24` typed writer.
+const fn alsa_format(format: PcmSampleFormat) -> Format {
+    match format {
+        PcmSampleFormat::Float => Format::float(),
+        PcmSampleFormat::S32 => Format::s32(),
+        PcmSampleFormat::S24 => Format::s24(),
+        PcmSampleFormat::S16 => Format::s16(),
+    }
+}
+
 /// `EPIPE` errno (an xrun/underrun on a playback PCM).
 const EPIPE: i32 = 32;
 
 /// `ESTRPIPE` errno (a suspended PCM stream awaiting resume).
 const ESTRPIPE: i32 = 86;
+
+/// `EAGAIN` errno (a nonblocking PCM whose ring is currently full).
+const EAGAIN: i32 = 11;
+
+/// The hard bound on one [`AlsaSink::write`] call: ample for a healthy device
+/// to drain a 10 ms quantum (the ring holds ~40 ms), but a wedged driver can
+/// hold the drain thread no longer than this — the stop flag is then seen and
+/// teardown stays bounded.
+const WRITE_CALL_BOUND: Duration = Duration::from_millis(250);
+
+/// One `snd_pcm_wait` slice while the ring is full (about two periods at the
+/// negotiated 480-frame period), so a stop request is honoured promptly.
+const WAIT_SLICE_MS: u32 = 20;

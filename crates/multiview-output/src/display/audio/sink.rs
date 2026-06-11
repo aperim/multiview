@@ -9,10 +9,12 @@
 //! mocks. The real `/proc/asound` ELD reader and the libasound PCM live in
 //! [`super::alsa`] behind the `display-kms` feature and run only on hardware.
 //!
-//! The engine side holds only a [`DisplayAudioPublisher`]: a wait-free push into
-//! a bounded FIFO. A wedged/silent ALSA device drops audio (bounded FIFO) and
-//! the engine never notices — exactly the display-sink isolation shape, applied
-//! to audio.
+//! The engine side holds only a [`DisplayAudioPublisher`]: a bounded push into
+//! a drop-oldest FIFO that **never blocks on the device** — the publisher and
+//! the drain thread share one mutex held only for short in-memory copies,
+//! never across a PCM call. A wedged/silent ALSA device drops audio (bounded
+//! FIFO) and the engine never notices — exactly the display-sink isolation
+//! shape, applied to audio.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -75,6 +77,12 @@ pub trait AlsaSink: Send {
     fn open(&mut self, params: PcmParams) -> Result<(), String>;
 
     /// Write interleaved float frames to the PCM, returning the outcome.
+    ///
+    /// May accept fewer frames than offered ([`PcmOutcome::Wrote`] carries the
+    /// count); the drain loop re-offers the unwritten tail. Implementations
+    /// must return within a **bounded** time — the real backend drives a
+    /// nonblocking PCM paced by bounded `snd_pcm_wait` slices — so teardown is
+    /// never held hostage inside a device call.
     fn write(&mut self, interleaved: &[f32], channels: usize) -> PcmOutcome;
 
     /// Recover the PCM after an underrun/suspend (prepare/resume).
@@ -136,9 +144,11 @@ pub struct AudioStatsSnapshot {
     pub recoveries: u64,
 }
 
-/// The engine-side handle: a wait-free push of program-audio blocks into the
-/// sink's bounded FIFO. Cloneable and `Send`/`Sync` — the engine pushes from the
-/// output-clock thread and never blocks (invariants #1 + #10).
+/// The engine-side handle: a bounded push of program-audio blocks into the
+/// sink's drop-oldest FIFO. Cloneable and `Send`/`Sync` — the engine pushes
+/// from the output-clock thread and **never blocks on the device**: the only
+/// contention is one mutex the drain thread holds for short in-memory copies
+/// (fill read + frame pop), never across a PCM call (invariants #1 + #10).
 #[derive(Debug, Clone)]
 pub struct DisplayAudioPublisher {
     fifo: Arc<Mutex<AudioFifo>>,
@@ -146,8 +156,10 @@ pub struct DisplayAudioPublisher {
 }
 
 impl DisplayAudioPublisher {
-    /// Push interleaved program audio for this tick. Wait-free and bounded: a
-    /// full FIFO drops its oldest frames rather than blocking the caller.
+    /// Push interleaved program audio for this tick. Bounded: a full FIFO
+    /// drops its oldest frames rather than blocking the caller, and the push
+    /// is one short mutex-guarded in-memory copy — the lock is never held
+    /// across a device call, so a wedged PCM cannot reach the engine.
     pub fn push_block(&self, interleaved: &[f32]) {
         if let Ok(mut fifo) = self.fifo.lock() {
             fifo.push(interleaved);
@@ -172,8 +184,11 @@ impl DisplayAudioPublisher {
     }
 }
 
-/// A running display-audio sink: owns the drain thread. Dropping the handle (or
-/// calling [`stop`](Self::stop)) stops and joins it within one `poll_interval`.
+/// A running display-audio sink: owns the drain thread. Dropping the handle
+/// (or calling [`stop`](Self::stop)) signals the thread and joins it — a
+/// healthy loop notices within about one `poll_interval`; a thread wedged
+/// inside a device call is **detached and logged** after the hard
+/// [`STOP_JOIN_BOUND`], so teardown can never hang on a hostile device.
 #[derive(Debug)]
 pub struct DisplayAudioSink {
     stats: Arc<AudioSinkStats>,
@@ -184,11 +199,11 @@ pub struct DisplayAudioSink {
 impl DisplayAudioSink {
     /// Start a display-audio sink over the given ELD source and ALSA device.
     ///
-    /// Returns the running handle plus the wait-free [`DisplayAudioPublisher`]
-    /// the engine pushes each tick's program audio into. The sink **never
-    /// fails to start**: a missing ELD or an un-openable device leaves it silent
-    /// but alive (the display picture is unaffected) — audio is best-effort by
-    /// construction (display-out §5).
+    /// Returns the running handle plus the bounded, never-blocking-on-the-
+    /// device [`DisplayAudioPublisher`] the engine pushes each tick's program
+    /// audio into. The sink **never fails to start**: a missing ELD or an
+    /// un-openable device leaves it silent but alive (the display picture is
+    /// unaffected) — audio is best-effort by construction (display-out §5).
     #[must_use]
     pub fn start<E, A>(config: DisplayAudioConfig, eld: E, alsa: A) -> (Self, DisplayAudioPublisher)
     where
@@ -268,20 +283,46 @@ impl DisplayAudioSink {
         }
     }
 
-    /// Stop the drain loop and join the thread.
+    /// Stop the drain loop and join the thread (bounded — see
+    /// [`STOP_JOIN_BOUND`]).
     pub fn stop(mut self) {
         self.stop_and_join();
     }
 
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // Bounded join: a healthy loop honours the stop flag within about one
+        // poll_interval, but a hostile/buggy driver can stall a device call
+        // arbitrarily — never let it hold the caller (possibly a runtime
+        // teardown path) hostage. Past the bound, detach-and-log: the thread
+        // exits on its own when the device call finally returns.
+        let deadline = Instant::now() + STOP_JOIN_BOUND;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if thread.is_finished() {
             if thread.join().is_err() {
                 tracing::error!("display-audio sink thread panicked during the run");
             }
+        } else {
+            tracing::error!(
+                "display-audio drain thread is wedged inside a device call at teardown; \
+                 detaching it so stop() stays bounded (it exits when the call returns)"
+            );
+            drop(thread);
         }
     }
 }
+
+/// The hard bound on joining the drain thread at teardown. A healthy loop
+/// exits well inside this (it polls the stop flag at least every
+/// `poll_interval`); only a device call wedged inside the driver can exceed
+/// it, and then the thread is detached and logged instead of blocking the
+/// caller.
+const STOP_JOIN_BOUND: Duration = Duration::from_millis(500);
 
 impl Drop for DisplayAudioSink {
     fn drop(&mut self) {
@@ -292,6 +333,14 @@ impl Drop for DisplayAudioSink {
 /// How many output frames the loop drains per iteration when audio is flowing
 /// (one 10 ms block at 48 kHz). Kept small so the servo reacts promptly and the
 /// device ring stays low-latency.
+///
+/// **Gain coupling:** the servo's per-iteration closed-loop fill gain is
+/// `kp × 1e-6 × DRAIN_FRAMES / fifo_capacity` (a ppm correction moves that
+/// fraction of fill per drained quantum) — ≈ 2.3 × 10⁻⁴ with [`BufferServo`]'s
+/// `kp = 4000` and the pipeline's 8192-frame FIFO, i.e. heavily damped with a
+/// ~40 s settling constant. Changing this quantum, the servo gains, or the
+/// FIFO capacity moves that loop gain together; pushing it toward 1 makes the
+/// servo oscillate.
 const DRAIN_FRAMES: usize = 480;
 
 /// How many steady-state iterations pass between ELD re-reads (hotplug watch).
@@ -341,10 +390,11 @@ fn drain_loop<E, A>(
             continue;
         };
 
-        // --- Negotiate a format the sink can take (clamp channels DOWN to the
-        // ELD ceiling). An ELD that cannot take our canonical rate keeps the
-        // sink silent but polling — a hotplugged 48 kHz-capable monitor lights
-        // it later.
+        // --- Negotiate a format the sink can take (channels clamp DOWN to the
+        // ELD ceiling, and a below-minimum ask is raised to the HDMI stereo
+        // minimum — the sink folds/upmixes to whatever was negotiated). An ELD
+        // that cannot take our canonical rate keeps the sink silent but
+        // polling — a hotplugged 48 kHz-capable monitor lights it later.
         let req_channels = u8::try_from(channels).unwrap_or(u8::MAX);
         let Some((rate, neg_channels)) =
             capability.negotiate(config.format.sample_rate(), req_channels)
@@ -423,9 +473,10 @@ fn drain_loop<E, A>(
 /// The steady-state drain: each iteration read the FIFO fill + measured skew,
 /// turn the servo's drain demand into the resampler ratio (the **reciprocal**
 /// — see [`drain_ratio`]), pull a fixed quantum, resample (reusing
-/// multiview-audio's [`AdaptiveResampler`]), fold channels to the negotiated
-/// count, and write to the PCM — recovering from any xrun. Runs until the stop
-/// flag or the ELD changes; never blocks the engine push.
+/// multiview-audio's [`AdaptiveResampler`]), fold/upmix channels to the
+/// negotiated count, and write to the PCM — carrying short-write tails and
+/// recovering from any xrun. Runs until the stop flag or the ELD changes;
+/// never blocks the engine push.
 #[allow(clippy::too_many_arguments)]
 // reason: the drain owns one each of the seams + the negotiated parameters; a
 // one-shot bundling struct would only rename the same ten things.
@@ -449,8 +500,9 @@ where
     let mut servo = BufferServo::new();
     let mut resampler = AdaptiveResampler::new(config.format);
     let mut scratch = vec![0.0f32; DRAIN_FRAMES.saturating_mul(channels)];
-    // Fold the program channels onto the negotiated (ELD-clamped) PCM layout
-    // when they differ; `None` means identity (the common stereo↔stereo case).
+    // Map the program channels onto the negotiated PCM layout when they differ
+    // — folding down to an ELD-clamped count or upmixing up to the HDMI stereo
+    // minimum; `None` means identity (the common stereo↔stereo case).
     let fold = match fold_matrix(channels, out_channels) {
         Ok(fold) => fold,
         Err(reason) => {
@@ -535,14 +587,17 @@ where
                 resampler.ratio(),
                 samples,
                 out_channels,
+                stop,
+                config.poll_interval,
             );
         }
 
         // Degraded: back off (and report inactive) rather than spinning on a
         // dead device. Healthy: a short wait keeps the device ring fed without
-        // busy-waiting (the blocking PCM write paces the loop on hardware).
-        // Either way the engine push is never blocked, and the stop flag is
-        // honoured within `poll_interval` even mid-backoff.
+        // busy-waiting (on hardware the nonblocking PCM write paces itself
+        // against the device ring via bounded `snd_pcm_wait` slices). Either
+        // way the engine push is never blocked, and the stop flag is honoured
+        // within `poll_interval` even mid-backoff.
         let wait = if session.recovery.state() == XrunState::Degraded {
             stats.audio_active.store(false, Ordering::Relaxed);
             session.recovery.backoff().max(config.poll_interval)
@@ -565,10 +620,24 @@ struct PcmSession {
     tracker: SkewTracker,
 }
 
+/// How many consecutive zero-progress writes (`Wrote(0)`, a full device ring
+/// taking nothing) are retried — each paced by one `poll_interval` sleep —
+/// before the remainder of a quantum is dropped. Bounds the time one quantum
+/// can occupy the loop while keeping a routinely-short-writing device fed.
+const MAX_STALLED_WRITES: u32 = 8;
+
 /// Write one prepared quantum to the PCM, advancing the recovery machine, the
-/// skew tracker, and the telemetry counters. An xrun triggers the recover
-/// action and drops the skew anchor; nothing here can fail the loop (every
-/// outcome is a state transition, never a panic).
+/// skew tracker, and the telemetry counters. A **short write re-offers the
+/// unwritten tail** (a nonblocking device routinely takes part of a quantum
+/// once its ring fills) so no popped content is silently discarded; the retry
+/// is bounded by the stop flag, by [`MAX_STALLED_WRITES`] zero-progress
+/// attempts, and by an xrun (which drops the remainder — the device position
+/// jumped anyway). An xrun triggers the recover action and drops the skew
+/// anchor; nothing here can fail the loop (every outcome is a state
+/// transition, never a panic).
+#[allow(clippy::too_many_arguments)]
+// reason: the quantum write owns the seams + per-session state the drain loop
+// already holds; a one-shot bundling struct would only rename the same things.
 fn write_quantum<A>(
     output_id: &str,
     alsa: &mut A,
@@ -577,40 +646,83 @@ fn write_quantum<A>(
     applied: multiview_audio::RatioPpm,
     samples: &[f32],
     out_channels: usize,
+    stop: &AtomicBool,
+    poll: Duration,
 ) where
     A: AlsaSink,
 {
-    let outcome = alsa.write(samples, out_channels);
-    let action = session.recovery.on_outcome(outcome);
-    match outcome {
-        PcmOutcome::Wrote(frames) => {
-            let frames = u64::try_from(frames).unwrap_or(0);
-            stats.frames_written.fetch_add(frames, Ordering::Relaxed);
-            session.tracker.on_written(frames, applied);
+    let channels = out_channels.max(1);
+    let mut offset = 0usize; // samples handed to the device so far
+    let mut stalled_writes = 0u32;
+    while offset < samples.len() && !stop.load(Ordering::Acquire) {
+        let outcome = alsa.write(samples.get(offset..).unwrap_or(&[]), out_channels);
+        let action = session.recovery.on_outcome(outcome);
+        let mut quantum_over = false;
+        match outcome {
+            PcmOutcome::Wrote(frames) => {
+                let written = u64::try_from(frames).unwrap_or(0);
+                stats.frames_written.fetch_add(written, Ordering::Relaxed);
+                session.tracker.on_written(written, applied);
+                offset = offset
+                    .saturating_add(frames.saturating_mul(channels))
+                    .min(samples.len());
+                if frames == 0 {
+                    stalled_writes = stalled_writes.saturating_add(1);
+                    if stalled_writes >= MAX_STALLED_WRITES {
+                        tracing::debug!(
+                            output = %output_id,
+                            "display-audio device accepting no frames; dropping the quantum tail"
+                        );
+                        quantum_over = true;
+                    } else {
+                        // Give the device ring time to drain before re-offering
+                        // the tail (stop-flag honoured throughout).
+                        sleep_with_stop(stop, poll, poll);
+                    }
+                } else {
+                    stalled_writes = 0;
+                }
+            }
+            PcmOutcome::Underrun | PcmOutcome::Suspended => {
+                tracing::debug!(output = %output_id, "display-audio xrun; recovering");
+                // The device position jumps across a recover: re-anchor. The
+                // remainder of this quantum is dropped (continuity is broken
+                // regardless); the next iteration pops fresh content.
+                session.tracker.on_xrun();
+                quantum_over = true;
+            }
+            PcmOutcome::Recovered | PcmOutcome::RecoverFailed => {
+                quantum_over = true;
+            }
         }
-        PcmOutcome::Underrun | PcmOutcome::Suspended => {
-            tracing::debug!(output = %output_id, "display-audio xrun; recovering");
-            // The device position jumps across a recover: re-anchor.
-            session.tracker.on_xrun();
-        }
-        PcmOutcome::Recovered | PcmOutcome::RecoverFailed => {}
-    }
 
-    if action.recover {
-        let rec = alsa.recover();
-        let _ = session.recovery.on_outcome(rec);
-        if rec == PcmOutcome::Recovered {
-            stats
-                .recoveries
-                .store(session.recovery.recoveries(), Ordering::Relaxed);
+        if action.recover {
+            let rec = alsa.recover();
+            let _ = session.recovery.on_outcome(rec);
+            if rec == PcmOutcome::Recovered {
+                stats
+                    .recoveries
+                    .store(session.recovery.recoveries(), Ordering::Relaxed);
+            }
+        }
+        if quantum_over {
+            return;
         }
     }
 }
 
-/// Build the program→PCM channel fold for a negotiated count below the program
-/// layout (ELD `negotiate` only ever clamps DOWN): every input channel routes
-/// to `min(i, out-1)` with equal-gain normalisation per output, so stereo→mono
-/// is the 0.5/0.5 average. `Ok(None)` when the counts already match (identity).
+/// Build the program→PCM channel map for a negotiated count that differs from
+/// the program layout, in either direction:
+///
+/// * **Fold down** (ELD ceiling below the program count): every input channel
+///   routes to `min(i, out-1)` with equal-gain normalisation per output, so
+///   stereo→mono is the 0.5/0.5 average.
+/// * **Upmix** (negotiation raised the ask to the HDMI stereo minimum): each
+///   output takes input `min(o, in-1)` at unity gain — mono is duplicated
+///   onto both subframes of the IEC 60958 pair. No normalisation: each output
+///   carries exactly one input.
+///
+/// `Ok(None)` when the counts already match (identity).
 ///
 /// # Errors
 ///
@@ -622,6 +734,14 @@ fn fold_matrix(
 ) -> Result<Option<ChannelMatrix>, &'static str> {
     if in_channels == out_channels || out_channels == 0 || in_channels == 0 {
         return Ok(None);
+    }
+    if in_channels < out_channels {
+        let routes: Vec<(usize, usize, f32)> = (0..out_channels)
+            .map(|o| (o.min(in_channels.saturating_sub(1)), o, 1.0))
+            .collect();
+        return ChannelMatrix::from_routes(in_channels, out_channels, &routes)
+            .map(Some)
+            .map_err(|_| "channel route out of range");
     }
     // Count how many inputs land on each output so the fold preserves level.
     let mut counts = vec![0usize; out_channels];

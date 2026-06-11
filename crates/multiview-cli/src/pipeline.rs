@@ -2713,16 +2713,17 @@ fn display_audio_format(
     multiview_audio::AudioFormat::new(cfg.sample_rate, layout)
 }
 
-/// The display-head audio feed (DEV-B4): the wait-free publishers of every
+/// The display-head audio feed (DEV-B4): the bounded FIFO publishers of every
 /// audio-enabled display output, plus — when the run carries no encode-side
 /// program audio — a dedicated tick-driven program bus so the heads still
 /// receive correctly-paced program audio (silence until sources are routed,
 /// exactly like the encode-side bus). Empty publishers ⇒ the consumer skips
-/// the display branch entirely; pushes are wait-free (bounded drop-oldest
-/// FIFO), so a wedged ALSA device can never reach back to the bake consumer,
-/// let alone the engine (invariants #1 + #10).
+/// the display branch entirely; each push is a bounded short critical section
+/// into the drop-oldest FIFO (the sink holds that lock only for in-memory
+/// copies, never across a PCM call), so a wedged ALSA device can never reach
+/// back to the bake consumer, let alone the engine (invariants #1 + #10).
 struct DisplayAudioFeed {
-    /// One wait-free FIFO publisher per audio-enabled display head.
+    /// One bounded drop-oldest FIFO publisher per audio-enabled display head.
     publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
     /// `Some` only when the run has no encode-side audio bus AND there are
     /// display publishers to feed.
@@ -2851,9 +2852,10 @@ fn consumer_main(
                 None => block,
             };
             // DEV-B4: the display heads hear the SAME post-loudnorm program
-            // block the stream encodes. Each push is wait-free (bounded
-            // drop-oldest FIFO) — a wedged HDMI audio device sheds frames and
-            // can never back-pressure this consumer, let alone the engine
+            // block the stream encodes. Each push is a bounded short critical
+            // section into the drop-oldest FIFO (never held across a PCM
+            // call) — a wedged HDMI audio device sheds frames and can never
+            // back-pressure this consumer, let alone the engine
             // (invariants #1 + #10).
             for publisher in &display_audio.publishers {
                 publisher.push_audio(&block);
@@ -4233,8 +4235,8 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
 }
 
 /// Everything [`start_display_sinks`] lit: the per-head video flip loops (and
-/// their mailbox publishers) plus the DEV-B4 audio sinks (and their wait-free
-/// FIFO publishers) of the heads whose plan enabled audio. The handle vectors
+/// their mailbox publishers) plus the DEV-B4 audio sinks (and their bounded
+/// drop-oldest FIFO publishers) of the heads whose plan enabled audio. The handle vectors
 /// own the threads — keep them alive for the run; dropping them stops + joins.
 #[cfg(feature = "display-kms")]
 struct StartedDisplaySinks {
@@ -4244,7 +4246,7 @@ struct StartedDisplaySinks {
     publishers: Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
     /// The running ELD-gated ALSA audio sinks (audio-enabled heads only).
     audio_handles: Vec<multiview_output::display::audio::DisplayAudioSink>,
-    /// The matching wait-free audio FIFO publishers.
+    /// The matching bounded drop-oldest audio FIFO publishers.
     audio_publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
 }
 

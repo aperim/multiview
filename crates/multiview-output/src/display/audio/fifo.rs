@@ -3,10 +3,13 @@
 //! The display-audio sink is a *consumer*. The engine's program-audio bus pushes
 //! blocks in; the sink thread drains them to the ALSA PCM. The two run on
 //! independent clocks, so this FIFO decouples them — and it is the structural
-//! guarantee that audio can never back-pressure the engine: [`AudioFifo::push`]
-//! is wait-free and bounded. When full it drops the **oldest** samples (so a
-//! late reader gets fresh audio, not stale backlog) and records the drop count
-//! as telemetry. It never grows and the writer never blocks.
+//! guarantee that audio can never back-pressure the engine:
+//! [`AudioFifo::push`] is a bounded in-memory copy that itself never waits,
+//! and the mutex the sink wraps it in is held only across such short copies —
+//! never across a PCM/device call — so the engine-side push is a bounded
+//! short critical section that cannot block on the device. When full it drops
+//! the **oldest** samples (so a late reader gets fresh audio, not stale
+//! backlog) and records the drop count as telemetry. It never grows.
 //!
 //! Interleaved 32-bit float, frame-major (matching multiview-audio's
 //! [`AudioBlock`](multiview_audio::AudioBlock)). Capacity and fill are measured
@@ -18,9 +21,11 @@ use std::collections::VecDeque;
 /// A bounded, drop-oldest, single-producer/single-consumer interleaved-float
 /// audio ring.
 ///
-/// Not internally synchronised — it lives behind the sink's own `Mutex`/channel;
-/// the *property* it provides is that a `push` is O(samples) and never waits,
-/// and a full ring sheds the oldest data instead of growing.
+/// Not internally synchronised — it lives behind the sink's own `Mutex`, which
+/// is held only for these O(samples) in-memory operations (never across a
+/// device call); the *property* the structure provides is that a `push` is a
+/// bounded copy that itself never waits, and a full ring sheds the oldest data
+/// instead of growing.
 #[derive(Debug)]
 pub struct AudioFifo {
     /// Interleaved samples; length is always a whole multiple of `channels`.
@@ -46,10 +51,11 @@ impl AudioFifo {
     }
 
     /// Push interleaved samples (length should be a multiple of the channel
-    /// count; a ragged tail is ignored). Wait-free; when the ring would exceed
-    /// capacity the **oldest** frames are dropped first, then the new samples
-    /// are appended — so after the call the ring holds the most recent
-    /// `capacity_frames` frames. The writer never blocks (invariants #1 + #10).
+    /// count; a ragged tail is ignored). A bounded in-memory copy with no
+    /// waiting of its own; when the ring would exceed capacity the **oldest**
+    /// frames are dropped first, then the new samples are appended — so after
+    /// the call the ring holds the most recent `capacity_frames` frames. The
+    /// writer is never blocked on the device (invariants #1 + #10).
     pub fn push(&mut self, interleaved: &[f32]) {
         let ch = self.channels;
         let cap_samples = self.capacity_frames.saturating_mul(ch);

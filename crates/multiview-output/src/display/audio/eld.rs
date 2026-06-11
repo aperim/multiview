@@ -97,16 +97,23 @@ impl EldCapability {
     }
 
     /// Negotiate a `(rate, channels)` the sink can take for a desired output
-    /// format: the rate must be advertised; the channel count clamps down to the
-    /// ELD ceiling (an over-ask never fails the whole audio path — it down-mixes
-    /// to what the sink supports). Returns [`None`] when the rate is unsupported
-    /// or the sink declares no LPCM path.
+    /// format: the rate must be advertised; the channel count clamps down to
+    /// the ELD ceiling (an over-ask never fails the whole audio path — it
+    /// down-mixes to what the sink supports) **and a below-minimum ask is
+    /// raised to the HDMI stereo minimum** (never past the ELD ceiling): HDMI/
+    /// DP LPCM rides IEC 60958 subframe pairs, so real devices refuse a
+    /// 1-channel PCM — the sink upmixes a mono program instead of running
+    /// silent. Returns [`None`] when the rate is unsupported or the sink
+    /// declares no LPCM path.
     #[must_use]
     pub fn negotiate(&self, rate: u32, channels: u8) -> Option<(u32, u8)> {
         if !self.lpcm || !self.supports_rate(rate) {
             return None;
         }
-        Some((rate, channels.min(self.max_channels).max(1)))
+        // `max_channels >= 1` by construction, so floor is 1..=2 and never
+        // exceeds the ceiling.
+        let floor = HDMI_MIN_CHANNELS.min(self.max_channels).max(1);
+        Some((rate, channels.clamp(floor, self.max_channels)))
     }
 }
 
@@ -188,6 +195,12 @@ pub fn parse_eld(bytes: &[u8]) -> Option<EldCapability> {
     }
     finish(max_channels, &rates, &monitor)
 }
+
+/// The HDMI/DP LPCM channel floor: IEC 60958 frames carry subframe **pairs**,
+/// so a sink's PCM never takes fewer than two channels and a 1-channel ask is
+/// refused by real devices. A (degenerate) mono-only ELD keeps its declared
+/// ceiling — we never ask a sink for more than it declared.
+const HDMI_MIN_CHANNELS: u8 = 2;
 
 /// Sample rates carried by the CEA SAD rate bitmap, bit 0..6.
 const RATE_BITS: [u32; 7] = [32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
