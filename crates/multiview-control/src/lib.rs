@@ -56,6 +56,7 @@ pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
+pub mod live_apply;
 pub mod nmos;
 pub mod notify;
 pub mod preview;
@@ -109,8 +110,8 @@ pub use command::{
 };
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use devices::{
-    DeviceBroadcaster, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent, OutputTarget,
-    SourceCandidate,
+    DeviceBroadcaster, DeviceDriverRegistry, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent,
+    ModeConvergence, OutputTarget, SourceCandidate, WorkMode, ZowietekDriver,
 };
 pub use error::{ControlError, ControlResult};
 pub use is07::{
@@ -118,6 +119,7 @@ pub use is07::{
     Is07EventType, Is07Message, Is07Payload, Is07Subscription, Is07Timing,
 };
 pub use jwt::{JwtError, JwtValidator, SignatureAlgorithm};
+pub use live_apply::{LiveApplyCaps, OverlayLiveCapability};
 pub use nmos::is04::{Device, MediaFormat, Node, Receiver, Registration, ResourceCore, Sender};
 pub use nmos::is05::{
     parse_sdp_transport, Activation, ActivationMode, ConnectionRequest, ConnectionState,
@@ -148,7 +150,9 @@ pub use router::{
 };
 pub use routing::{classify, DestinationProfile, RouteClass, RoutePlan, RouteRequest, RouteTarget};
 pub use salvo_store::{InMemorySalvoStore, SalvoRepository, VersionedSalvo, SALVO_KIND};
-pub use state::{seed_resources, AckClock, AppState, EngineStateSnapshot, SeededResources};
+pub use state::{
+    seed_resources, AckClock, AppState, EngineStateSnapshot, LiveSourceCapability, SeededResources,
+};
 pub use tally_ingest::{run_tally_ingest, tally_ingest_step, TallyIngestStep};
 pub use tally_state::{
     tally_observation, target_key, InMemoryProfileStore, OverrideRegistry, TallyEntry, TallyMirror,

@@ -180,6 +180,11 @@ pub struct SoftwareEngine {
     /// registers its flag here, and the live-source hub shares the same
     /// registry, so a live `RemoveSource` can tear down exactly one producer.
     stop_registry: crate::live_sources::StopRegistry,
+    /// The run's epoch **anchor** slot (DEV-C1 / ADR-M010): the forever run
+    /// publishes its tick-0 seed + monotonic source here when the runtime
+    /// seeds, so the timing-status task can derive the outbound presentation
+    /// epoch off the hot path (lock-free store/load — inv #1/#10).
+    epoch_anchor: crate::timing_status::EpochAnchorSlot,
 }
 
 /// An animated synthetic source recorded for a generator thread: its store, the
@@ -326,6 +331,7 @@ impl SoftwareEngine {
             publish_test_frames: true,
             program_preview: crate::preview::program_slot(),
             stop_registry: crate::live_sources::stop_registry(),
+            epoch_anchor: crate::timing_status::anchor_slot(),
         })
     }
 
@@ -349,6 +355,14 @@ impl SoftwareEngine {
     #[must_use]
     pub fn preview_stores(&self) -> HashMap<String, Arc<TileStore<Nv12Image>>> {
         self.stores.clone()
+    }
+
+    /// DEV-C1 (ADR-M010): the run's epoch **anchor** slot, filled by the
+    /// forever run when its runtime seeds tick 0; the timing-status task binds
+    /// to it lazily with a lock-free load (inv #1/#10).
+    #[must_use]
+    pub fn epoch_anchor_slot(&self) -> crate::timing_status::EpochAnchorSlot {
+        Arc::clone(&self.epoch_anchor)
     }
 
     /// The fixed output cadence (exact rational).
@@ -606,7 +620,14 @@ impl SoftwareEngine {
         let time = Arc::new(MonotonicTimeSource::new());
         let ts: Arc<dyn TimeSource> = time;
         self.prime_stores(ts.as_ref());
+        let ts_for_anchor = Arc::clone(&ts);
         let mut runtime = self.build_runtime(ts, RealtimePacer)?;
+        // DEV-C1 (ADR-M010): publish the run's epoch anchor (tick-0 seed + the
+        // run's monotonic source) for the off-hot-path timing-status task -- a
+        // single lock-free store that can never pace the clock (inv #1/#10).
+        self.epoch_anchor.store(Some(std::sync::Arc::new(
+            multiview_engine::epoch::EpochAnchor::new(ts_for_anchor, runtime.seed_nanos()),
+        )));
         // The caller owns the publisher so the control plane can share it
         // (read-only). State is the compact per-tick JSON snapshot; events are
         // left sparse for now (none emitted here — they arrive via change-driven

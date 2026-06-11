@@ -201,8 +201,9 @@ pub struct Device {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     /// The desired converged work mode (e.g. `"decoder"`). Valid values are
-    /// driver-specific; the driver re-converges the device onto this mode on
-    /// every reconnect. Absent ⇒ the device keeps its current mode.
+    /// driver-specific; the driver re-converges the device onto this mode
+    /// whenever an adopt or reconnect brings it `ONLINE`. Absent ⇒ the device
+    /// keeps its current mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desired_mode: Option<String>,
     /// The X.733 severity of the alarm raised when the device stays offline

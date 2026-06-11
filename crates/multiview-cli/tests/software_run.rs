@@ -229,7 +229,11 @@ async fn software_run_serves_the_control_api_while_running() {
         Arc::clone(&publisher),
         commands,
         multiview_control::no_preview(),
+        // No boot model: store-only fixture (ADR-W022).
         None,
+        // Default caps: synthetic-only sources, no overlay seam (honest for
+        // the software engine).
+        multiview_control::LiveApplyCaps::default(),
         async move {
             let _ = shutdown_rx.await;
         },

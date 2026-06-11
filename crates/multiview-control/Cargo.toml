@@ -88,7 +88,59 @@ lettre = { version = "0.11.20", default-features = false, features = [
 # broker on the trusted facility network (TLS is a deployment-side proxy
 # concern, mirroring the lettre/SMTP posture).
 rumqttc = { version = "0.25.1", default-features = false, optional = true }
+
+# mDNS/DNS-SD device discovery: OFF by default (`discovery`). The untrusted
+# inventory model, the driver-kind inference, and the injected-browser seam are
+# always compiled and tested socket-free (an injected `DiscoveryBrowser`); only
+# the real multicast browse needs `mdns-sd`. `mdns-sd` is `Apache-2.0 OR MIT`
+# and its whole dependency closure (`flume`, `if-addrs`, `socket2`, `mio`,
+# `socket-pktinfo`, `fastrand`) resolves to licenses already on the deny.toml
+# allowlist (MIT / Apache-2.0 / BSD-3-Clause); it is pure Rust with no native C
+# deps and ships its own runtime-agnostic background thread, so the feature
+# stays LGPL-clean and out of the CI-green default build. The `async` feature
+# gives the browse `Receiver` a `recv_async()` the scan's interleaved drain
+# (`drain_interleaved`, one task per browsed type on a scan-local runtime)
+# awaits concurrently across every browse channel, so no service type can
+# starve another and the daemon's bounded blocking send never wedges on an
+# undrained channel.
+mdns-sd = { version = "0.20.0", default-features = false, features = [
+    "async",
+], optional = true }
 serde_path_to_error = "0.1"
+
+# The live HTTP transport for the `zowietek` managed-device driver: OFF by
+# default (`zowietek` / `devices-net`). The typed JSON-RPC client + driver logic
+# and the scripted-transport tests are ALWAYS compiled and tested socket-free
+# (the transport seam is an async trait); only the real reqwest-backed transport
+# needs this client. `reqwest` is pinned to the `rustls-tls` backend (NEVER
+# OpenSSL/native-tls) so the dependency graph stays native-lib-free; the vendor
+# API is plain HTTP, but the rustls backend keeps an `https://` device address
+# working too. Because `deny.toml` has `[graph] all-features = false`, this
+# off-by-default dep is not in the scanned default graph (mirroring the
+# `ureq`/`ring` posture already documented there).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
+
+# The live CASTV2 wire layer for the `cast` managed-device driver: OFF by
+# default (`cast` / `devices-net`). The typed protocol payloads, the media-URL
+# rules, the session actor, and the registry wiring are ALWAYS compiled and
+# tested socket-free over the scripted channel seam; only the real TLS +
+# length-prefixed-protobuf framing needs these. The DEV-D2 spike rejected
+# `rust_cast` 0.21 on API fit (blocking reader with no settable read timeout;
+# its `thread_safe` mode serializes send/receive behind ONE mutex held through
+# a blocking `read_exact`, making the mandated 10 s/20 s/5 s heartbeat
+# unimplementable; library-code `unwrap`/`expect` panics) — see
+# `src/devices/cast/net.rs` for the verdict. `prost` (Apache-2.0, prost-derive
+# only — no protoc, no build step) carries the BSD-3-Clause Open Screen
+# `CastMessage` schema; `tokio-rustls` (rustls 0.23, aws-lc-rs — both already
+# in the lock via reqwest's rustls backend) carries the TLS channel with the
+# permissive device-certificate verifier ADR-M011 mandates. Because
+# `deny.toml` has `[graph] all-features = false`, these off-by-default deps
+# stay out of the scanned default graph (the `reqwest`/`ring` posture).
+prost = { version = "0.14", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = [
@@ -98,6 +150,9 @@ tokio = { workspace = true, features = [
     "time",
     "net",
     "io-util",
+    # `test-util` pauses the clock in the zowietek driver/client tests so the
+    # per-device backoff (00009/00010) is exercised without real sleeps.
+    "test-util",
 ] }
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
@@ -133,6 +188,34 @@ toml = "0.8"
 # Ember+ router. The protocol codecs are always compiled and tested; only the
 # socket seam needs this feature, so it stays out of the CI-green default build.
 "router" = []
+# Off-by-default mDNS/DNS-SD device discovery (ADR-M008 §6 / ADR-0041 doctrine):
+# the real multicast browse for `_googlecast._tcp` (Cast), `_ndi._tcp` (NDI
+# sources incl. ZowieBox), and any configured zowietek-control service type. The
+# untrusted-inventory model, the driver-kind inference, and the injected
+# `DiscoveryBrowser` seam are always compiled and tested socket-free; only the
+# live `mdns-sd` browser needs this feature, so it stays out of the CI-green
+# default build. Discovered services are an untrusted inventory requiring
+# explicit confirm-adopt — discovery never creates a device.
+"discovery" = ["dep:mdns-sd"]
+# Off-by-default live HTTP transport for the `zowietek` managed-device driver
+# (DEV-A4, ADR-M009). The typed JSON-RPC client + the driver actor + the three
+# facets + mode convergence are ALWAYS compiled and tested socket-free against a
+# scripted transport seam; only the real reqwest-backed transport
+# (`ReqwestTransport`) needs this feature, so the default build stays
+# pure-Rust/socket-free and CI-green.
+"zowietek" = ["dep:reqwest"]
+# Off-by-default live CASTV2 wire layer for the `cast` managed-device driver
+# (DEV-D2, ADR-M011). The protocol payloads + media-URL rules + session actor
+# + registry wiring are ALWAYS compiled and tested socket-free over the
+# scripted channel seam; only the real TLS + length-prefixed-protobuf framing
+# (`TlsCastConnector`/`TlsCastChannel`) needs this feature, so the default
+# build pulls no protobuf/TLS dependency and stays CI-green.
+"cast" = ["dep:prost", "dep:tokio-rustls"]
+# The umbrella feature for managed-device network I/O (so a deployment can turn
+# on every device driver's live transport + the mDNS discovery browse with one
+# flag): the `zowietek` HTTP transport, the `cast` CASTV2 wire layer, and the
+# `discovery` mDNS browse.
+"devices-net" = ["zowietek", "cast", "discovery"]
 
 [lints]
 workspace = true

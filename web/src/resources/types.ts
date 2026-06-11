@@ -10,7 +10,13 @@
 // `as`-casts.
 
 /** The resource collections the SPA manages (the REST path segment). */
-export type ResourceKind = 'sources' | 'outputs' | 'overlays' | 'probes';
+export type ResourceKind =
+  | 'sources'
+  | 'outputs'
+  | 'overlays'
+  | 'probes'
+  | 'devices'
+  | 'sync-groups';
 
 /**
  * A persisted resource record, exactly as the control plane returns it: a stable

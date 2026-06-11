@@ -147,7 +147,12 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         publisher,
         commands,
         multiview_control::no_preview(),
+        // No boot model: store-only fixture (ADR-W022).
         None,
+        // Conservative fixture capability (the default caps: synthetic-only
+        // sources, no overlay seam): this test asserts the HLS delivery
+        // surface, not apply semantics — never over-claim live-ness here.
+        multiview_control::LiveApplyCaps::default(),
         async move {
             let _ = shutdown_rx.await;
         },

@@ -30,10 +30,16 @@
 //!   declared stream-binding projections (ADR-M009): honestly empty until a
 //!   driver enumerates, never fabricated live telemetry.
 //!
-//! In this slice there is **no real device I/O** (the driver actors are
-//! DEV-A4/A5): the long-running actions mint an operation id and return `202`
-//! without reaching the engine — the outcome arrives on the realtime stream once
-//! the driver lands. Errors are RFC 9457 problem documents.
+//! Device I/O runs on the per-device **driver poller** (DEV-A4, ADR-M009): a
+//! `zowietek` device adopted here spawns a supervised control-plane poller that
+//! logs in, probes, enumerates the three facets (so `source-candidates` /
+//! `output-targets` return real data at runtime), polls status, and drives the
+//! device lifecycle — all isolated from the engine (invariant #10). `set-mode`
+//! dispatches its convergence to that poller; `reboot` mints an operation id and
+//! `202`s (its live transport lands with the management facet). When no live
+//! poller is running (the default build's no-op factory, or a non-`zowietek`
+//! device), the projection routes stay honestly empty and the long-running
+//! actions still `202`. Errors are RFC 9457 problem documents.
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -123,9 +129,12 @@ pub(crate) async fn get_device(
 /// `POST /api/v1/devices/{id}` — adopt/create a device (role: write).
 ///
 /// Validates the body against `multiview_config::Device` (`422` on an invalid
-/// document) and seeds the runtime status registry in `ADOPTING` so
-/// `GET /devices/{id}/status` answers immediately — the first probe lands with
-/// the driver actors (DEV-A4/A5).
+/// document), seeds the runtime status registry in `ADOPTING` so
+/// `GET /devices/{id}/status` answers immediately, and **starts the device's
+/// supervised driver poller** (DEV-A4) — which performs the first probe and
+/// drives the device to `ONLINE`/`AUTH_FAILED`/`UNREACHABLE`. The poller is a
+/// no-op for devices the factory does not manage (the default build / a
+/// non-`zowietek` driver).
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -154,11 +163,24 @@ pub(crate) async fn create_device(
         name: input.name,
         body: validated_body(TypedCollection::Devices, &id, &input.body)?,
     };
+    // A fresh create clears any delete tombstone for this id BEFORE the store
+    // insert (the ordering that keeps the registry's stop/start race-free: a
+    // delete that races THIS create tombstones only after observing the insert
+    // below, so this clear can never erase that delete's tombstone — see
+    // `DevicePollerRegistry::clear_tombstone`).
+    state.device_pollers.clear_tombstone(&id);
     let versioned = state.devices.create(&id, input)?;
     // Seed the runtime status in ADOPTING (idempotent), so the read-only status
     // snapshot answers before any driver probe — the conflated status lane's
     // backing store (invariant #10: control-plane-only, never the engine).
     state.device_status.ensure(&id);
+    // Spawn the device's supervised driver poller (DEV-A4): a `zowietek` device
+    // gets a live poller that logs in → probes → enumerates the three facets →
+    // polls status → drives the lifecycle, so the projection routes return real
+    // data and `set-mode` dispatches convergence. A no-op in the default build
+    // (the no-op factory spawns nothing — no live transport) and for non-driver
+    // devices; control-plane-only, off the engine hot loop (invariant #10).
+    start_device_poller(&state, &versioned);
     state.audit(
         &principal.key_id,
         AuditAction::Create,
@@ -209,6 +231,11 @@ pub(crate) async fn update_device(
         body: validated_body(TypedCollection::Devices, &id, &input.body)?,
     };
     let versioned = state.devices.update(&id, input)?;
+    // Restart the supervised poller on an edit (DEV-A4): the address/credential/
+    // desired-mode may have changed, so the registry replaces the running task
+    // (the old one is aborted) and the fresh poller re-adopts + re-converges. A
+    // no-op in the default build / for non-driver devices (invariant #10).
+    start_device_poller(&state, &versioned);
     state.audit(
         &principal.key_id,
         AuditAction::Update,
@@ -266,8 +293,16 @@ pub(crate) async fn delete_device(
         )));
     }
     state.devices.delete(&id)?;
-    // Drop the runtime status (the device is gone).
+    // Stop the supervised driver poller (DEV-A4): the device is gone, so its
+    // poller must not keep probing — the registry tombstones the id (a racing
+    // adopt's late `start` is rejected, never a ghost poller), aborts the task,
+    // and awaits its termination, so the forgets below cannot be raced by a
+    // final in-flight publish. Then drop the runtime status and any
+    // driver-enumerated facets — control-plane-only cleanup, off the engine hot
+    // loop (invariant #10).
+    state.device_pollers.stop(&id).await;
     state.device_status.forget(&id);
+    state.device_drivers.forget(&id);
     state.audit(
         &principal.key_id,
         AuditAction::Delete,
@@ -319,6 +354,30 @@ fn first_device_ref_binding(
     Ok(None)
 }
 
+/// Start (or restart) the supervised driver poller for a just-adopted/edited
+/// device (DEV-A4): parse the stored body back into a
+/// [`multiview_config::Device`] and hand it to the runtime
+/// [`DevicePollerRegistry`](crate::devices::DevicePollerRegistry), which spawns a
+/// poller iff its factory manages this device (a `zowietek` device with a live
+/// transport). A no-op otherwise — the default build's no-op factory spawns
+/// nothing, so the projection routes stay honestly empty exactly as before.
+///
+/// A body that does not parse back to a `Device` is logged and skipped (it was
+/// validated on create, so this is defensive); never a panic, never a `500`.
+/// Off the engine hot loop, control-plane-only (invariant #10).
+fn start_device_poller(state: &AppState, versioned: &VersionedResource) {
+    match serde_json::from_value::<multiview_config::Device>(versioned.resource.body.clone()) {
+        Ok(device) => {
+            let _spawned = state.device_pollers.start(&device, &state.poller_wiring());
+        }
+        Err(e) => tracing::warn!(
+            device = %versioned.resource.id,
+            error = %e,
+            "device body did not parse back to a Device; no poller spawned"
+        ),
+    }
+}
+
 /// `GET /api/v1/devices/{id}/status` — the read-only runtime status snapshot.
 ///
 /// Reads the latest-wins [`DeviceStatusRegistry`](crate::devices::DeviceStatusRegistry)
@@ -364,9 +423,11 @@ fn require_device(state: &AppState, id: &str) -> ControlResult<VersionedResource
 
 /// `POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).
 ///
-/// A synchronous management verb (ADR-W017): in this slice (no driver actor) it
-/// confirms the device exists and acknowledges the probe request (`200`). The
-/// real probe round-trip lands with the driver actors (DEV-A4/A5).
+/// A synchronous management verb (ADR-W017): it confirms the device exists and
+/// acknowledges the probe request (`200`). The device's supervised driver poller
+/// (DEV-A4) is already probing on its own ≤1 Hz cadence and re-probing on
+/// reconnect, so the latest status is read via `GET /devices/{id}/status`; this
+/// verb is the operator's explicit "I looked" acknowledgement.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -429,9 +490,16 @@ pub struct SetModeAccepted {
 ///
 /// The device-side impact is **declared in the body before apply** (ADR-M009):
 /// the device restarts its pipeline; bound sources ride the tile ladder to
-/// `NO_SIGNAL` during the switch; no Multiview output is interrupted. In this
-/// slice the operation id is minted and `202`'d; the `device.mode` outcome
-/// arrives on the realtime stream once the driver actor lands.
+/// `NO_SIGNAL` during the switch; no Multiview output is interrupted. The route
+/// mints the operation id, `202`s, and **dispatches** the convergence to the
+/// device's running driver poller (DEV-A4), which records the requested mode as
+/// its desired mode, runs `plan_mode_convergence` → `converge_mode`
+/// (close-before-open), and publishes the `device.mode` outcome on the realtime
+/// stream; a failed apply is re-converged on the poller's next adopt/reconnect
+/// pass. When no live poller is running (the default build / a device with no
+/// spawned driver), the `202` still declares the impact but nothing applies the
+/// change: the device's configured `desired_mode` is what a later-spawned
+/// poller converges onto when its adopt/reconnect reaches `ONLINE`.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -466,6 +534,35 @@ pub(crate) async fn set_mode(
         &id,
         Some(serde_json::json!({ "action": "set-mode", "mode": request.mode })),
     );
+    // Dispatch the convergence to the device's running driver/poller (DEV-A4):
+    // the actor records the requested mode as its desired mode, runs
+    // `plan_mode_convergence` → `converge_mode` (close-before-open), and
+    // publishes the DEV-class `device.mode` outcome on the realtime stream (a
+    // failed apply re-converges on its next adopt/reconnect pass).
+    // Non-blocking `try_send` — the route never awaits the actor (invariant #10).
+    // When no poller is running (the default build's no-op factory, a device
+    // whose driver was not spawned, or its control channel is momentarily full),
+    // the 202 still declares the impact but nothing applies this request; the
+    // configured `desired_mode` is what a later-spawned poller converges onto.
+    let dispatched = state.device_pollers.dispatch(
+        &id,
+        crate::devices::PollerControl::SetMode {
+            mode: request.mode.clone(),
+        },
+    );
+    if !dispatched {
+        tracing::debug!(
+            device = %id,
+            mode = %request.mode,
+            "set-mode: no running poller to dispatch to (no live driver on this build/device); \
+             the 202 declares the impact but nothing applies this request — the configured \
+             desired_mode converges when a poller next adopts"
+        );
+    }
+    // The declared DEV-class impact is the SAME statement the driver's
+    // `ModeConvergence::Switch` plan declares (both derive it from
+    // `mode_impact_detail`), so the API surfaces exactly what the driver will do
+    // — ADR-M009: the impact is declared BEFORE apply.
     let body = SetModeAccepted {
         operation_id: op.to_string(),
         impact: "dev".to_owned(),
@@ -594,21 +691,25 @@ fn fire_and_forget(
 /// Mint (or replay, by `Idempotency-Key`) an operation id for a long-running
 /// device action.
 ///
-/// The device driver actors are DEV-A4/A5, so there is no engine command bus
-/// variant to submit to yet: this slice mints the id and `202`s, and the
-/// `device.mode`/outcome event arrives on the realtime stream once the driver
-/// lands. A retried `Idempotency-Key` returns the original id.
-fn reserve_operation(state: &AppState, idem: &IdempotencyKey) -> OperationId {
+/// Device actions run on the control-plane driver poller (DEV-A4) or session
+/// actor (DEV-D2), not the engine command bus, so this only mints the
+/// operation id the `202` returns; the driver publishes the matching
+/// `device.mode`/outcome event on the realtime stream as the action runs. A
+/// retried `Idempotency-Key` returns the original id. Shared with the
+/// cast-session volume route.
+pub(crate) fn reserve_operation(state: &AppState, idem: &IdempotencyKey) -> OperationId {
     match state.idempotency.reserve(idem.0.as_deref()) {
         Reservation::Fresh(op) | Reservation::Replay(op) => op,
     }
 }
 
-/// `GET /api/v1/devices/{id}/source-candidates` — the declared source-binding
-/// projection (ADR-M009 facet (a)).
+/// `GET /api/v1/devices/{id}/source-candidates` — the source-binding projection
+/// (ADR-M009 facet (a)).
 ///
-/// Honestly empty until a driver enumerates streams (no live driver in this
-/// slice): never fabricated live telemetry.
+/// Returns the device's running driver's enumerated candidates (DEV-A4: a
+/// `zowietek` device's served RTSP mounts). Honestly empty until a driver has
+/// enumerated — and on a build/device with no live driver — never fabricated
+/// live telemetry.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -632,15 +733,19 @@ pub(crate) async fn source_candidates(
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &id)?;
     require_device(&state, &id)?;
-    // No live driver in this slice: the declared projection is honestly empty.
-    Ok(Json(Vec::new()))
+    // The driver registry holds whatever a live driver (DEV-A4 `zowietek`)
+    // enumerated for this device; it is honestly empty until a driver has
+    // enumerated, never fabricated live telemetry (ADR-M009).
+    Ok(Json(state.device_drivers.source_candidates(&id)))
 }
 
-/// `GET /api/v1/devices/{id}/output-targets` — the declared output-binding
-/// projection (ADR-M009 facet (b)).
+/// `GET /api/v1/devices/{id}/output-targets` — the output-binding projection
+/// (ADR-M009 facet (b)).
 ///
-/// Honestly empty until a driver enumerates decode slots (no live driver in this
-/// slice): never fabricated live telemetry.
+/// Returns the device's running driver's enumerated targets (DEV-A4: a
+/// decoder-mode `zowietek` box's decode-table slots). Honestly empty until a
+/// driver has enumerated — and on a build/device with no live driver — never
+/// fabricated live telemetry.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -664,6 +769,8 @@ pub(crate) async fn output_targets(
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &id)?;
     require_device(&state, &id)?;
-    // No live driver in this slice: the declared projection is honestly empty.
-    Ok(Json(Vec::new()))
+    // The driver registry holds whatever a live driver (DEV-A4 `zowietek`)
+    // enumerated for this device; it is honestly empty until a driver has
+    // enumerated, never fabricated live telemetry (ADR-M009).
+    Ok(Json(state.device_drivers.output_targets(&id)))
 }

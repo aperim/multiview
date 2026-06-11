@@ -19,7 +19,10 @@ use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
-use crate::devices::DeviceStatusRegistry;
+use crate::devices::cast::media::CastDelivery;
+use crate::devices::cast::store::CastSessionStore;
+use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
+use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
@@ -323,6 +326,62 @@ pub struct AppState {
     /// plane-only, latest-wins — it can never back-pressure the engine
     /// (invariant #10).
     pub device_status: Arc<DeviceStatusRegistry>,
+    /// The **untrusted** mDNS-discovery inventory (DEV-A5 / ADR-M008 §6 /
+    /// ADR-0041): a bounded, TTL-expiring, dedup-keyed list of services found on
+    /// the LAN. It is runtime state, never persisted/exported, and it is **never**
+    /// the device registry — its rows are hints requiring explicit confirm-adopt
+    /// (`POST /devices/{id}`). Bounded drop-oldest, control-plane-only — it can
+    /// never back-pressure the engine (invariant #10).
+    pub discovery: Arc<DiscoveryInventory>,
+    /// The mDNS browse seam (DEV-A5): the only socket-touching part of discovery.
+    /// The default ([`NullBrowser`]) finds nothing (the pure default build has no
+    /// mDNS socket); the binary swaps in the real `mdns-sd`-backed browser behind
+    /// the `discovery` feature, and tests inject a `StaticBrowser`. A scan runs
+    /// this on a bounded control-plane task and publishes `device.discovered`
+    /// (drop-oldest) — it never awaits a client (invariant #10).
+    pub discovery_browser: Arc<dyn DiscoveryBrowser>,
+    /// Single-flight admission for the discovery scan: **one in-flight mDNS
+    /// browse** (concurrent `mdns-sd` browses of the same type overwrite each
+    /// other's listeners, and either scan's `stop_browse` removes the other's
+    /// live querier). A concurrent scan request attaches to the running scan's
+    /// operation id. Also the scan rate limit (ADR-M008).
+    pub discovery_scan_gate: Arc<ScanGate>,
+    /// The `[discovery]` browse configuration (managed-devices brief §6): the
+    /// operator-configured zowietek-control service type (the vendor's type is
+    /// unverified — never fabricated) and any extra DNS-SD types to browse.
+    /// Defaults to the empty section (built-in Cast + NDI types only).
+    pub discovery_config: Arc<multiview_config::DiscoveryConfig>,
+    /// The latest-wins device **driver** registry (runtime state, never
+    /// persisted/exported): the source-candidate / output-target facets each
+    /// driver (DEV-A4 `zowietek`, …) enumerated for its device, read by the
+    /// `GET /devices/{id}/source-candidates` and `/output-targets` routes
+    /// (ADR-M009). Empty until a driver enumerates — the routes' honest-empty
+    /// fallback. Bounded, control-plane-only — it can never back-pressure the
+    /// engine (invariant #10).
+    pub device_drivers: Arc<DeviceDriverRegistry>,
+    /// The runtime registry of **spawned** device poller actors (DEV-A4): adopt
+    /// starts one for a `zowietek` device, delete stops it, and `set-mode`
+    /// dispatches a convergence to the running actor. The default build uses the
+    /// no-op factory (no live transport → no poller spawned, projection routes
+    /// stay honestly empty); the binary installs the reqwest-backed factory
+    /// behind the `zowietek` feature. Control-plane-only, `Mutex`-guarded handle
+    /// map — it can never back-pressure the engine (invariant #10).
+    pub device_pollers: Arc<DevicePollerRegistry>,
+    /// The Cast **delivery map** (DEV-D2, ADR-M011): output id → the
+    /// device-reachable HLS rendition URL + segment format, built by the
+    /// binary from the validated `control.cast_media_base` × the DEV-D1
+    /// `/hls/{output-id}` mounts. [`None`] (the default — no
+    /// `cast_media_base` configured) means no device-reachable URL can be
+    /// derived and the cast-session routes refuse with an honest `409`.
+    /// Read-only control-plane state (invariant #10).
+    pub cast_delivery: Option<Arc<CastDelivery>>,
+    /// The runtime store of **ephemeral** cast sessions (DEV-D2, ADR-M011):
+    /// runtime-only records that never enter the devices store, so a config
+    /// export can never emit them. "Save as device" promotes one into a
+    /// normal `Device{driver: cast}` registry entry and drops the record.
+    /// Bounded by the number of live sessions; control-plane-only
+    /// (invariant #10).
+    pub cast_sessions: Arc<CastSessionStore>,
     /// The audio-routing singleton store (the document-level `[audio]` block:
     /// program-bus membership/gains and discrete-track wiring), managed over
     /// `GET`/`PUT /api/v1/audio-routing` and overlaid into the config export.
@@ -410,6 +469,13 @@ pub struct AppState {
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
+    /// Which source kinds the **running engine** can apply live (ADR-W018):
+    /// the binary declares this per run path, so the `X-Multiview-Apply`
+    /// header never claims `live` for a kind the engine cannot ingest at
+    /// runtime. Defaults to [`LiveSourceCapability::synthetic_only`] (the
+    /// software-engine truth); the full-pipeline run upgrades to
+    /// [`LiveSourceCapability::synthetic_and_network`].
+    pub live_sources: LiveSourceCapability,
     /// The config-file watch status slot (ADR-W020): the CLI's watcher records
     /// applied/rejected loads + restart-pending sections here, and
     /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
@@ -433,6 +499,75 @@ pub struct AppState {
     /// [`crate::config_watch::expect_server_write`]). `None` until a watcher
     /// is spawned (store-only deployments never install one).
     watch_handle: Arc<std::sync::RwLock<Option<crate::config_watch::ConfigWatchHandle>>>,
+    /// What the **running** engine can take live, per stored collection
+    /// (ADR-W021): injected by the binary at wiring time so mutation routes
+    /// declare `X-Multiview-Apply` honestly per build + run path. The default
+    /// carries no capability (everything is `restart`).
+    pub live_apply: crate::live_apply::LiveApplyCaps,
+}
+
+/// The source kinds the running engine can apply **live** (ADR-W018,
+/// invariant #11) — the run-path capability signal the binary threads into the
+/// control plane so the apply header stays honest per build/run flavour.
+///
+/// * `synthetic` — `bars`/`solid`/`clock` spawn in-process generators through
+///   the live-source hub (both run paths wire this).
+/// * `network` — `rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file` spawn the supervised
+///   `ingest_loop` through the hub's ingest spawner (the full-pipeline /
+///   `ffmpeg` run path only; the software engine has no decoder).
+///
+/// Kinds outside both sets (`ndi`, `youtube`, `aes67`) are never live-applied
+/// in this slice and always answer `restart`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveSourceCapability {
+    /// Synthetic kinds (`bars`/`solid`/`clock`) are live-appliable.
+    pub synthetic: bool,
+    /// Network/file kinds (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`) are
+    /// live-appliable.
+    pub network: bool,
+}
+
+impl LiveSourceCapability {
+    /// The software-engine run path: only in-process synthetic producers can
+    /// be spawned live (no decoder in the build/run).
+    #[must_use]
+    pub const fn synthetic_only() -> Self {
+        Self {
+            synthetic: true,
+            network: false,
+        }
+    }
+
+    /// The full-pipeline (`ffmpeg`) run path: a real ingest spawner is wired
+    /// into the live-source hub, so network/file kinds apply live too.
+    #[must_use]
+    pub const fn synthetic_and_network() -> Self {
+        Self {
+            synthetic: true,
+            network: true,
+        }
+    }
+
+    /// Whether the running engine can apply a mutation of this `kind` live.
+    #[must_use]
+    pub const fn is_live(&self, kind: &multiview_config::SourceKind) -> bool {
+        if kind.is_synthetic() {
+            return self.synthetic;
+        }
+        if kind.is_network_media() {
+            return self.network;
+        }
+        // ndi / youtube / aes67 (and any future kind until explicitly wired):
+        // never live in this slice — restart, honestly.
+        false
+    }
+}
+
+impl Default for LiveSourceCapability {
+    /// Defaults to the conservative truth: synthetic-only (never over-claims).
+    fn default() -> Self {
+        Self::synthetic_only()
+    }
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -468,6 +603,14 @@ impl AppState {
             devices: Arc::new(InMemoryDeviceStore::new()),
             sync_groups: Arc::new(InMemorySyncGroupStore::new()),
             device_status: Arc::new(DeviceStatusRegistry::new()),
+            discovery: Arc::new(DiscoveryInventory::default()),
+            discovery_browser: Arc::new(NullBrowser),
+            discovery_scan_gate: Arc::new(ScanGate::new()),
+            discovery_config: Arc::new(multiview_config::DiscoveryConfig::default()),
+            device_drivers: Arc::new(DeviceDriverRegistry::new()),
+            device_pollers: Arc::new(DevicePollerRegistry::new()),
+            cast_delivery: None,
+            cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
             warnings: Arc::new(InMemoryWarningStore::new()),
@@ -494,6 +637,10 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // Conservative default (the software-engine truth): only synthetic
+            // kinds live-apply. The binary upgrades this per run path
+            // (`with_live_sources`) — the header never over-claims.
+            live_sources: LiveSourceCapability::synthetic_only(),
             // No watcher by default: the endpoint reports "not watched".
             config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
             // No boot model by default: store-only deployments report
@@ -501,6 +648,9 @@ impl AppState {
             boot_model: None,
             running_changed: Arc::new(tokio::sync::Notify::new()),
             watch_handle: Arc::new(std::sync::RwLock::new(None)),
+            // Honest default: nothing applies live until the binary declares
+            // what the running engine can take (ADR-W021).
+            live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
     }
 
@@ -536,6 +686,16 @@ impl AppState {
         slot.clone()
     }
 
+    /// Declare which source kinds the running engine can apply live
+    /// (ADR-W018): the binary sets this per run path so the
+    /// `X-Multiview-Apply` header answers from the engine's real runtime
+    /// capability, never from wishful classification.
+    #[must_use]
+    pub const fn with_live_sources(mut self, live_sources: LiveSourceCapability) -> Self {
+        self.live_sources = live_sources;
+        self
+    }
+
     /// Install a shared config-file watch status slot (ADR-W020). The binary
     /// shares one slot between the spawned watcher and this router; the
     /// default reports "not watched".
@@ -545,6 +705,15 @@ impl AppState {
         config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
     ) -> Self {
         self.config_watch = config_watch;
+        self
+    }
+
+    /// Declare what the **running** engine can take live (ADR-W021). The
+    /// binary calls this with the capabilities of the chosen run path + build;
+    /// the honest default (nothing live) stands otherwise.
+    #[must_use]
+    pub fn with_live_apply(mut self, live_apply: crate::live_apply::LiveApplyCaps) -> Self {
+        self.live_apply = live_apply;
         self
     }
 
@@ -712,6 +881,94 @@ impl AppState {
     #[must_use]
     pub fn with_device_status(mut self, device_status: Arc<DeviceStatusRegistry>) -> Self {
         self.device_status = device_status;
+        self
+    }
+
+    /// Replace the mDNS browse seam (DEV-A5). The binary installs the real
+    /// `mdns-sd`-backed browser (behind the `discovery` feature); tests inject a
+    /// `StaticBrowser`. The browser is the only socket-touching part of
+    /// discovery; the scan task runs it off the engine path (invariant #10).
+    #[must_use]
+    pub fn with_discovery_browser(mut self, browser: Arc<dyn DiscoveryBrowser>) -> Self {
+        self.discovery_browser = browser;
+        self
+    }
+
+    /// Replace the untrusted discovery inventory (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_discovery_inventory(mut self, discovery: Arc<DiscoveryInventory>) -> Self {
+        self.discovery = discovery;
+        self
+    }
+
+    /// Set the `[discovery]` browse configuration from the loaded config: the
+    /// operator-configured zowietek-control service type and any extra DNS-SD
+    /// types to browse. The binary threads `MultiviewConfig::discovery` here;
+    /// the default is the empty section (built-in Cast + NDI types only).
+    #[must_use]
+    pub fn with_discovery_config(mut self, config: multiview_config::DiscoveryConfig) -> Self {
+        self.discovery_config = Arc::new(config);
+        self
+    }
+
+    /// Replace the device **driver** registry (e.g. to share one with the
+    /// `zowietek` driver actors so their enumerated facets reach the
+    /// source-candidate / output-target routes — ADR-M009, DEV-A4).
+    #[must_use]
+    pub fn with_device_drivers(mut self, device_drivers: Arc<DeviceDriverRegistry>) -> Self {
+        self.device_drivers = device_drivers;
+        self
+    }
+
+    /// Replace the runtime device **poller** registry (DEV-A4): the binary
+    /// installs one carrying the reqwest-backed [`DevicePollerFactory`](crate::devices::DevicePollerFactory)
+    /// (feature `zowietek`) so adopting a `zowietek` device spawns a live
+    /// supervised poller; tests inject a scripted factory.
+    #[must_use]
+    pub fn with_device_pollers(mut self, device_pollers: Arc<DevicePollerRegistry>) -> Self {
+        self.device_pollers = device_pollers;
+        self
+    }
+
+    /// The control-plane wiring a spawned poller actor needs (the broadcaster it
+    /// publishes through and the driver registry it enumerates facets into),
+    /// assembled from this state. The broadcaster's status registry is this
+    /// state's [`device_status`](AppState::device_status), so a poller's
+    /// published status reaches `GET /devices/{id}/status`.
+    #[must_use]
+    pub fn poller_wiring(&self) -> crate::devices::PollerWiring {
+        crate::devices::PollerWiring {
+            broadcaster: crate::devices::DeviceBroadcaster::new(
+                Arc::clone(&self.engine),
+                Arc::clone(&self.device_status),
+            ),
+            drivers: Arc::clone(&self.device_drivers),
+        }
+    }
+
+    /// Boot-seed: start a supervised poller for every config-declared device
+    /// (DEV-A4), so a `multiview run` that loads a config with `[[devices]]`
+    /// brings each managed device online (login → probe → enumerate facets →
+    /// poll) without an operator re-adopt. A no-op for devices the poller
+    /// factory does not manage (the default build's no-op factory spawns
+    /// nothing). Called once at bind time, off the engine hot loop (invariant
+    /// #10). Returns the number of pollers spawned.
+    #[allow(clippy::must_use_candidate)] // count is informational at the call site.
+    pub fn seed_device_pollers(&self, devices: &[multiview_config::Device]) -> usize {
+        let wiring = self.poller_wiring();
+        devices
+            .iter()
+            .filter(|device| self.device_pollers.start(device, &wiring))
+            .count()
+    }
+
+    /// Install the Cast delivery map (DEV-D2): the binary builds it from the
+    /// validated `control.cast_media_base` × the DEV-D1 HLS mounts; tests
+    /// inject a fixed map. Without one (the default), the cast-session routes
+    /// refuse with an honest `409` — no device-reachable URL can be derived.
+    #[must_use]
+    pub fn with_cast_delivery(mut self, delivery: Arc<CastDelivery>) -> Self {
+        self.cast_delivery = Some(delivery);
         self
     }
 

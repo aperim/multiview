@@ -367,8 +367,13 @@ async fn live_source_churn_flood_never_falters_the_output_clock() {
     let preview = shared_stores(engine.preview_stores());
     let hub = LiveSourceHub::start(Arc::clone(&registry), Arc::clone(&preview));
 
-    // Background flooder: live-source churn at full speed for the whole run. A
-    // full bus just sheds the submit (inv #10).
+    // Background flooder: live-source churn at full speed for the whole run,
+    // alternating SYNTHETIC and NETWORK kinds (ADR-W018 levels 1 + 2) so both
+    // drain arms — the generator spawn and the decoded-ingest spawn request —
+    // ride the bounded seams under flood. On this software engine the hub has
+    // no ingest spawner, so every network spawn is the held/warned path (store
+    // registered, slate tile) — exactly the run-path truth; the clock must
+    // never notice either way. A full bus just sheds the submit (inv #10).
     let stop_flood = Arc::new(AtomicBool::new(false));
     let flooder = {
         let stop_flood = Arc::clone(&stop_flood);
@@ -376,12 +381,18 @@ async fn live_source_churn_flood_never_falters_the_output_clock() {
             let mut n: u64 = 0;
             while !stop_flood.load(Ordering::Relaxed) {
                 let id = format!("churn{}", n % 4);
+                let doc = if n % 2 == 0 {
+                    serde_json::json!({ "id": id, "kind": "bars" })
+                } else {
+                    serde_json::json!({
+                        "id": id,
+                        "kind": "rtsp",
+                        "url": "rtsp://[2001:db8::9]/churn"
+                    })
+                };
                 let _ = tx.try_submit(Command::UpsertSource {
                     op: OperationId::new(),
-                    source: Box::new(
-                        serde_json::from_value(serde_json::json!({ "id": id, "kind": "bars" }))
-                            .expect("valid churn source"),
-                    ),
+                    source: Box::new(serde_json::from_value(doc).expect("valid churn source")),
                 });
                 let _ = tx.try_submit(Command::SwapSource {
                     op: OperationId::new(),

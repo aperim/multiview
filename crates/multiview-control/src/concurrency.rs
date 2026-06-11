@@ -225,6 +225,30 @@ impl IdempotencyStore {
             guard.remove(key);
         }
     }
+
+    /// Re-point a [`Reservation::Fresh`] at the operation that actually
+    /// executed.
+    ///
+    /// Single-flight surfaces (the discovery scan) use this when a fresh
+    /// reservation `from` could not start its own operation because it
+    /// **attached** to an already-running one (`to`): the key must replay the
+    /// *running* op — replaying `from` would name an operation that never
+    /// executed. Like [`release`](Self::release), the `from`-match guard makes
+    /// this idempotent and concurrency-safe: if another request re-reserved
+    /// the key (minting a new op), this is a no-op so a live reservation is
+    /// never clobbered. A `None`/unknown key is a no-op.
+    pub fn rebind(&self, key: Option<&str>, from: &OperationId, to: OperationId) {
+        let Some(key) = key else {
+            return;
+        };
+        let mut guard = match self.seen.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.get(key) == Some(from) {
+            guard.insert(key.to_owned(), to);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +284,33 @@ mod tests {
             panic!("after release the key must reserve Fresh again");
         };
         assert_ne!(op, op2, "the re-reservation mints a new operation id");
+    }
+
+    #[test]
+    fn rebind_points_a_fresh_reservation_at_the_running_op() {
+        let store = IdempotencyStore::new();
+        let key = Some("k");
+
+        let Reservation::Fresh(fresh) = store.reserve(key) else {
+            panic!("first reserve is Fresh");
+        };
+        let running = super::OperationId::new();
+
+        // The fresh reservation attached to a running operation: rebinding
+        // makes a later replay answer with the RUNNING op.
+        store.rebind(key, &fresh, running.clone());
+        assert!(
+            matches!(store.reserve(key), Reservation::Replay(op) if op == running),
+            "the replay echoes the running op after rebind"
+        );
+
+        // A stale rebind (the key no longer maps to `from`) is a no-op.
+        let stale = super::OperationId::new();
+        store.rebind(key, &fresh, stale.clone());
+        assert!(
+            matches!(store.reserve(key), Reservation::Replay(op) if op == running),
+            "a stale rebind never clobbers the live mapping"
+        );
     }
 
     #[test]

@@ -154,6 +154,24 @@ cuda = ["multiview-hal/cuda"]
 # build can serve the full management UI: `run --features web,overlay`.
 web = ["multiview-control/embed-web"]
 
+# mDNS/DNS-SD managed-device discovery (DEV-A5 / ADR-M008 §6 / ADR-0041): install
+# the real `mdns-sd`-backed browser so `POST /api/v1/discovery/devices/scan`
+# browses the LAN for Cast / NDI / (configured) zowietek-control services. The
+# untrusted-inventory model + endpoints are always compiled; this feature only
+# adds the multicast socket. Pure Rust, LGPL-clean, GPU-free.
+discovery = ["multiview-control/discovery"]
+# Managed-device network I/O (DEV-A4/D2, ADR-M009/M011): the live transports
+# for every device driver — the `zowietek` HTTP poller and the `cast` CASTV2
+# wire layer. With this on, a `multiview run` whose config declares
+# `[[devices]]` with `driver = "zowietek"` spawns a supervised control-plane
+# poller per device (login → probe → enumerate facets → poll status → drive the
+# lifecycle), and a `driver = "cast"` device (or an ad-hoc
+# `POST /api/v1/cast/sessions`) gets a supervised CASTV2 session actor pointing
+# the device at a served HLS rendition (requires `control.cast_media_base`).
+# OFF by default so the baseline build stays pure-Rust/socket-free and
+# CI-green; forwards `multiview-control/devices-net` (= `zowietek` + `cast`).
+devices-net = ["multiview-control/devices-net"]
+
 # Overlay rasterization: bakes the configured overlays (clock/labels, dB
 # meters, safe-area graticules, tally borders, burned-in SRT/VTT subtitles) into
 # the composited program before encode, via multiview-compositor's pure-Rust
@@ -190,6 +208,13 @@ display-kms = ["multiview-output/display-kms"]
 # syscall). `multiview-cli` itself stays `forbid(unsafe_code)`. Linux-only effect;
 # elsewhere / on a denied read the badge honestly shows the assumed default.
 ntp = ["multiview-engine/ntp"]
+
+# Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline
+# the outbound presentation epoch's wall estimate (DEV-C1 / ADR-M010): PTP then
+# outranks the system clock while disciplined (ADR-T012). Off by default; pulls
+# the engine's `ptp` feature (safe `rustix` PHC reads -- no unsafe in this crate).
+# Compile-verified only in CI (no PTP NIC); PTP NEVER paces the tick loop.
+ptp = ["multiview-engine/ptp"]
 
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once
@@ -280,6 +305,11 @@ nvidia = [
     # SILENTLY keeps the CPU reference backend (the on-hardware "GPU never engages,
     # CPU pegged at 4K" bug). `gpu` pulls `multiview-compositor/wgpu` + `dep:wgpu`.
     "gpu",
+    # Measure the kernel NTP/chrony discipline (adjtimex) instead of assuming it:
+    # without `ntp` the deploy image's epoch path has NO kernel reading at all and
+    # the published `timing.status` quality honestly reports freerun (DEV-C1
+    # review finding 3) — a Linux deploy build must measure, not assume.
+    "ntp",
     "multiview-hal/cuda",
     "multiview-compositor/cuda",
     "multiview-compositor/wgpu",
@@ -320,6 +350,8 @@ linux-vaapi = [
     # `gpu` gates the run-path GPU-compositor SELECTION (see the `nvidia` note);
     # without it the wgpu compositor compiles but the run stays on the CPU backend.
     "gpu",
+    # Measured kernel NTP discipline for the epoch path (see the `nvidia` note).
+    "ntp",
     "multiview-hal/vaapi",
     "multiview-hal/qsv",
     "multiview-compositor/vaapi",
@@ -336,6 +368,10 @@ linux-vaapi = [
 full = [
     "nvidia",
     "linux-vaapi",
+    # `ntp` comes transitively via the Linux presets above; named explicitly so
+    # the everything-non-GPL build keeps the measured discipline path even if a
+    # preset is refactored.
+    "ntp",
     "multiview-hal/videotoolbox",
     "multiview-compositor/metal",
     # The cli `overlay` feature (the pure-Rust overlay/caption burn-in path) comes
@@ -351,6 +387,12 @@ full = [
     "multiview-control/embed-web",
     "multiview-control/openapi",
     "multiview-preview/webrtc",
+    # mDNS managed-device discovery (DEV-A5): pure-Rust, LGPL-clean, GPU-free.
+    "multiview-control/discovery",
+    # Managed-device live transport (DEV-A4): the `zowietek` driver poller's real
+    # HTTP backend. LGPL-clean (reqwest + rustls, no native lib), so it belongs
+    # in the non-GPL `full` build.
+    "devices-net",
 ]
 
 [lints]

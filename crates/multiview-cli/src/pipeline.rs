@@ -414,7 +414,47 @@ struct AdmissionPick {
     /// The chosen device's CUDA enumeration ordinal (e.g. `Some("1")`) for the
     /// NVDEC decode + NVENC encode pin, or `None` in lockstep with `wgpu_target`.
     cuda_ordinal: Option<String>,
+    /// The chosen device's stable identity — the **island device** every later
+    /// runtime decode placement is pinned to (ADR-W018 §7 / ADR-0018: a
+    /// runtime add never fragments or migrates the island). `None` in lockstep
+    /// with `wgpu_target`.
+    device: Option<multiview_hal::DeviceId>,
 }
+
+/// The running pipeline's pinned **island** (ADR-W018 §7): the device the
+/// decide-once admission pick placed the whole `decode → composite → encode`
+/// island on, its CUDA ordinal, and the tile count the startup demand modelled.
+/// Published by `drive_streaming` into a shared slot the
+/// [`LiveIngestSpawner`] reads, so every runtime decode placement consults the
+/// same admission scorer **pinned to this device** — never a different GPU,
+/// never a migration.
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone)]
+struct LiveIsland {
+    /// The island device's stable identity (the runtime-placement pin).
+    device: multiview_hal::DeviceId,
+    /// The island device's CUDA enumeration ordinal (stamped onto an admitted
+    /// runtime decode so NVDEC co-locates with the compositor). `None` when
+    /// the device resolved no ordinal — then an admit keeps the default CUDA
+    /// device, in lockstep with the startup plans.
+    cuda_ordinal: Option<String>,
+    /// The **startup** island's tile count (the layout's cells) — the base
+    /// demand a runtime add extends by one decode. STALENESS BOUND (ADR-W018
+    /// §7): a live layout apply (ADR-W019) can change the cell set after this
+    /// snapshot, and the consult keeps modelling THIS count — the canvas
+    /// cannot change live (a canvas mismatch is a held Class-2), so the drift
+    /// is bounded by the cell-count delta, and every live-applied cell's real
+    /// composite cost is already in the *measured* NVML snapshot the consult
+    /// re-polls at decision time (the measured headroom ceiling still gates an
+    /// actually-loaded island).
+    tile_count: usize,
+}
+
+/// The shared slot `drive_streaming` publishes the pinned [`LiveIsland`] into
+/// (empty until — and unless — admission names a device). Lock-free reads on
+/// the hub worker; never touched by the output clock.
+#[cfg(feature = "gpu")]
+type LiveIslandSlot = Arc<arc_swap::ArcSwapOption<LiveIsland>>;
 
 /// Choose the GPU to host the whole pipeline island at **admission** — the
 /// load-aware, decide-once pick (ADR-0035 Tier-1, ADR-0018; the GPU-placement
@@ -593,6 +633,136 @@ fn select_admission_pick(
     AdmissionPick {
         wgpu_target: Some(target),
         cuda_ordinal: info.cuda_ordinal,
+        device: Some(selection.device),
+    }
+}
+
+/// Place ONE runtime-added decode (ADR-W018 §7, level 2): consult the **same**
+/// [`multiview_hal::select_device`] scorer the startup admission uses, with two
+/// changes honouring the GPU-placement principle:
+///
+/// * the candidate set is **exactly the running island's device** — a runtime
+///   add may never fragment or migrate the island, and a single-candidate
+///   consult makes naming any other GPU impossible. (ADR-W018 §7 sketched
+///   `Pins::pin_pipeline`; a pin deliberately *bypasses* the headroom ceiling
+///   — operator-pins-always-win — which would defeat the §7 reject →
+///   software-decode ladder, so the implementation restricts the candidate set
+///   instead: identical never-fragment guarantee, headroom still gates.)
+/// * the demand is the island's current tile set **plus** the new decode
+///   (`TileLoad::new(Decode, …)`), re-polling NVML at decision time. The
+///   demand opens **no** new encode session (the island's NVENC session is
+///   already open and counted in the *measured* snapshot — modelling it again
+///   would double-count it against the session ceiling).
+///
+/// An **admit** returns [`DecodePlacement::Pinned`] with the island's CUDA
+/// ordinal (NVDEC co-located with the compositor — ADR-0035 affinity), or
+/// [`DecodePlacement::Default`] when the island resolved no ordinal (lockstep
+/// with the startup plans). A **reject** (budget / headroom / the island gone
+/// from the snapshot) returns [`DecodePlacement::SoftwareOnly`] — the decoder
+/// open for that one source is FORCED to software (the [`decoder_open_args`]
+/// gate; never NVDEC on the default device, which would overcommit a
+/// single-GPU island or fragment onto a different GPU), with a loud warning.
+/// The island is never overcommitted and the output never falters (inv #1).
+///
+/// Runs on the hub worker thread only (it polls NVML) — never on the clock.
+#[cfg(feature = "gpu")]
+fn select_live_decode_placement(
+    load_source: &dyn multiview_hal::LoadSource,
+    island: &LiveIsland,
+    canvas_w: u32,
+    canvas_h: u32,
+    cadence: Rational,
+) -> DecodePlacement {
+    use multiview_core::pixel::PixelFormat;
+    use multiview_core::traits::BackendKind;
+    use multiview_hal::{
+        select_device, Capability, CostBudget, GpuCandidate, Pins, PipelineDemand, PlacementPolicy,
+        Resolution, Stage, StageCaps, TileLoad,
+    };
+
+    // Fresh measured load at decision time (the ADR-W018 §7 re-poll): a
+    // removed source's NVDEC/VRAM consumption has already vanished from these
+    // counters when its decoder closed — the measured-load model needs no
+    // booking ledger to return budget.
+    let loads = load_source.poll();
+    let Some(island_load) = loads.iter().find(|l| l.device_id == island.device) else {
+        tracing::warn!(
+            island = island.device.stable_id(),
+            "live decode placement: the island device is absent from the load \
+             snapshot at decision time; FORCING software decode for this source \
+             (hardware on the default device could overcommit or fragment the island)"
+        );
+        return DecodePlacement::SoftwareOnly;
+    };
+
+    let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
+    // The same conservative per-engine budget the startup admission uses (the
+    // real per-GPU perf-class table is the documented Tier-2 refinement); the
+    // headroom ceiling + VRAM-dominant scoring do the actual gating.
+    let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
+    let cap = |stage: Stage| {
+        Capability::new(
+            BackendKind::Cuda,
+            stage,
+            canvas_res,
+            vec![PixelFormat::Nv12],
+        )
+    };
+    // ONE candidate: the island device. select_device physically cannot name
+    // another GPU — the affinity hard constraint by construction.
+    let candidates = vec![GpuCandidate {
+        device_id: island_load.device_id.clone(),
+        stage_caps: StageCaps::new(
+            cap(Stage::Decode),
+            cap(Stage::Composite),
+            cap(Stage::Encode),
+        ),
+        budget,
+    }];
+
+    // Demand: the island's current tile set PLUS the new decode. The +2 covers
+    // the island's composite + encode loads, exactly as the startup demand
+    // models them. `opens_encode_session = false`: no NEW session is opened by
+    // a decode-only add (the running session is in the measured snapshot).
+    let mut tile_loads: Vec<TileLoad> = Vec::with_capacity(island.tile_count.saturating_add(3));
+    for _ in 0..island.tile_count.max(1) {
+        tile_loads.push(TileLoad::new(Stage::Decode, canvas_res));
+    }
+    tile_loads.push(TileLoad::new(Stage::Decode, canvas_res)); // the new source
+    tile_loads.push(TileLoad::new(Stage::Composite, canvas_res));
+    tile_loads.push(TileLoad::new(Stage::Encode, canvas_res));
+    let demand = PipelineDemand::new(cadence, tile_loads, canvas_res, PixelFormat::Nv12, 0, false);
+
+    match select_device(
+        &candidates,
+        &demand,
+        &loads,
+        &Pins::none(),
+        PlacementPolicy::default(),
+    ) {
+        Ok(selection) => {
+            tracing::info!(
+                island = island.device.stable_id(),
+                cuda_ordinal = ?island.cuda_ordinal,
+                score = selection.score,
+                "live decode placement: admitted onto the running island device \
+                 (NVDEC co-located, ADR-W018 §7)"
+            );
+            island
+                .cuda_ordinal
+                .clone()
+                .map_or(DecodePlacement::Default, DecodePlacement::Pinned)
+        }
+        Err(reason) => {
+            tracing::warn!(
+                island = island.device.stable_id(),
+                ?reason,
+                "live decode placement REJECTED for this source: its decoder \
+                 open is FORCED to software (the island is never overcommitted \
+                 and never fragmented; the output never falters — ADR-W018 §7)"
+            );
+            DecodePlacement::SoftwareOnly
+        }
     }
 }
 
@@ -758,6 +928,211 @@ mod admission_target_tests {
         let target = gpu_target_from_info(&GpuTargetInfo::default());
         assert!(!target.is_some());
     }
+
+    // -----------------------------------------------------------------------
+    // ADR-W018 §7 — the LIVE decode placement consult (level 2): a runtime
+    // add consults the SAME select_device scorer, candidate-restricted to the
+    // running island's device (never fragments/migrates), and a reject
+    // degrades THAT source to software decode only.
+    // -----------------------------------------------------------------------
+
+    use super::{LiveIngestSpawner, LiveIsland};
+
+    fn island(uuid: &str, index: u32, ordinal: &str) -> LiveIsland {
+        LiveIsland {
+            device: DeviceId::new(Vendor::Nvidia, uuid, index),
+            cuda_ordinal: Some(ordinal.to_owned()),
+            tile_count: 4,
+        }
+    }
+
+    #[test]
+    fn live_decode_placement_admits_onto_the_idle_island_pinned_to_its_ordinal() {
+        // The island is the idle P2000: the consult (island tile set + the new
+        // decode, fresh load poll) admits as `Pinned` with the ISLAND's
+        // ordinal — NVDEC co-locates with the running compositor, never a
+        // different GPU (even though the fake topology has two) — and the
+        // decode-open gate keeps the hardware preference + threads the pin.
+        let placement = super::select_live_decode_placement(
+            &FakeTwoGpu,
+            &island(FakeTwoGpu::GPU1_UUID, 1, "1"),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(
+            placement,
+            super::DecodePlacement::Pinned("1".to_owned()),
+            "an admitted live decode must be pinned to the ISLAND device's ordinal"
+        );
+        let (want_hw, ordinal) = super::decoder_open_args(&placement, None);
+        assert_eq!(
+            want_hw,
+            multiview_ffmpeg::want_hw_decode(None),
+            "an admitted placement keeps the canonical hardware preference"
+        );
+        assert_eq!(
+            ordinal,
+            Some("1"),
+            "the island ordinal reaches the decoder open"
+        );
+    }
+
+    #[test]
+    fn live_decode_placement_rejects_an_over_headroom_island_to_forced_software() {
+        // The island is the 95%-VRAM 4060 (over the 0.85 headroom ceiling):
+        // the consult REJECTS — and because the candidate set is exactly the
+        // island device, the scorer cannot escape to the idle P2000 (that
+        // would fragment the pipeline). The reject is the EXPLICIT
+        // `SoftwareOnly` placement, and the decode-open gate turns it into a
+        // software open (want_hw = false, no ordinal) even though NVDEC is
+        // otherwise enabled — `None` ordinal alone would have opened NVDEC on
+        // the DEFAULT device, i.e. the over-headroom island itself.
+        let placement = super::select_live_decode_placement(
+            &FakeTwoGpu,
+            &island(FakeTwoGpu::GPU0_UUID, 0, "0"),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an over-headroom island must FORCE software decode — never \
+             overcommit the island or migrate to another GPU"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the rejected source's decoder open must not WANT hardware at all"
+        );
+    }
+
+    #[test]
+    fn live_decode_placement_forces_software_when_the_island_vanishes() {
+        // No load snapshot carries the island device (NVML gone, device lost):
+        // the consult cannot verify the pin — hardware on the default device
+        // could overcommit or fragment the (unverifiable) island, so the
+        // placement is the explicit forced-software outcome.
+        let placement = super::select_live_decode_placement(
+            &NullLoadPoller::new(),
+            &island(FakeTwoGpu::GPU1_UUID, 1, "1"),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(placement, super::DecodePlacement::SoftwareOnly);
+        assert_eq!(super::decoder_open_args(&placement, None), (false, None));
+    }
+
+    /// A spy [`LoadSource`]: counts polls (proof the spawn path re-polls the
+    /// admission inputs at decision time) and otherwise answers as the fake
+    /// two-GPU host.
+    struct CountingLoadSource {
+        polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LoadSource for CountingLoadSource {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FakeTwoGpu.poll()
+        }
+
+        fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+            FakeTwoGpu.device_target(device)
+        }
+    }
+
+    #[test]
+    fn live_spawner_consults_the_admission_path_on_every_decoded_spawn() {
+        // THE SEAM PIN (ADR-W018 §7): `LiveIngestSpawner::spawn` — the hub's
+        // decoded-producer path — must consult the admission scorer (observed
+        // via the injected load-source spy: exactly one fresh poll per spawn)
+        // when an island is pinned, and still spawn the SAME supervised
+        // ingest producer either way.
+        use crate::live_sources::{SourceSpawn, SpawnedProducer};
+        use multiview_compositor::pipeline::CanvasColor;
+
+        let doc = r##"schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/live-spawner-consult.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        let config =
+            multiview_config::MultiviewConfig::load_from_toml(doc).expect("test config parses");
+        let layout = config.solve_layout().expect("test layout solves");
+
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawner = LiveIngestSpawner {
+            layout: std::sync::Arc::new(layout),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            island: std::sync::Arc::new(arc_swap::ArcSwapOption::from_pointee(island(
+                FakeTwoGpu::GPU1_UUID,
+                1,
+                "1",
+            ))),
+            load_source: Box::new(CountingLoadSource {
+                polls: std::sync::Arc::clone(&polls),
+            }),
+        };
+
+        let source: multiview_config::Source = serde_json::from_value(serde_json::json!({
+            "id": "live1", "kind": "file", "path": "/nonexistent/clip.ts"
+        }))
+        .expect("test source parses");
+        let store = std::sync::Arc::new(
+            multiview_framestore::TileStore::<super::Nv12Image>::with_defaults("live1"),
+        );
+        let registry = crate::live_sources::stop_registry();
+        let produced = crate::live_sources::IngestSpawner::spawn(
+            &spawner,
+            SourceSpawn { source, store },
+            &registry,
+        );
+
+        assert_eq!(
+            polls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the decoded spawn path must consult the admission inputs exactly \
+             once (a fresh measured-load poll at decision time)"
+        );
+        let Some(SpawnedProducer { stop, handle }) = produced else {
+            panic!("the spawner must spawn the supervised ingest producer");
+        };
+        assert!(
+            registry.lock().is_ok_and(|map| map.contains_key("live1")),
+            "the spawned producer registers its per-source stop flag"
+        );
+        // The nonexistent file fails its open and the finite ingest thread
+        // ends on its own; raise the flag anyway and join (bounded by the
+        // thread's own prompt exit) so the test leaks nothing.
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        handle.join().expect("ingest thread joins");
+    }
 }
 
 #[cfg(test)]
@@ -903,11 +1278,20 @@ pub struct Pipeline {
     /// wins (config validation already rejects duplicate probe ids).
     #[cfg(feature = "overlay")]
     declared_probes: Vec<multiview_config::probe::Probe>,
-    /// An optional **analog** clock face requested by a `[[overlays]]` entry with
-    /// `kind = "clock"` + `face = "analog"`. `None` ⇒ only the default digital
-    /// clock label is drawn.
+    /// The **analog** clock faces requested by `[[overlays]]` entries with
+    /// `kind = "clock"` + `face = "analog"` — one face per entry, working-set
+    /// order (ADR-W021). Empty ⇒ only the default digital clock label is drawn.
     #[cfg(feature = "overlay")]
-    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    analog_clocks: Vec<crate::overlays::AnalogClockSpec>,
+    /// ADR-W021: the live overlay working-set slot, seeded with the boot
+    /// config's overlays (generation 0). The command drain publishes each
+    /// applied overlay change through it (via
+    /// [`overlay_apply_slot`](Self::overlay_apply_slot) → the binary's drain
+    /// wiring) and the bake consumer re-derives its overlay render state from
+    /// it at the next frame — a lock-free `ArcSwap`, so neither side can pace
+    /// the other (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    overlay_apply: crate::live_overlays::OverlayApplySlot,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
@@ -915,6 +1299,12 @@ pub struct Pipeline {
     /// thread registers its flag here, and the live-source hub shares the same
     /// registry, so a live `RemoveSource` can tear down exactly one producer.
     stop_registry: crate::live_sources::StopRegistry,
+    /// The pinned island slot (ADR-W018 §7): `drive_streaming` publishes the
+    /// admission pick's device here so the [`LiveIngestSpawner`] places every
+    /// runtime-added decode on the SAME island device (never a fragment/
+    /// migration). Empty until — and unless — admission names a device.
+    #[cfg(feature = "gpu")]
+    live_island: LiveIslandSlot,
     /// Per-source streaming ingest plans: how to open + decode each source, and
     /// the tile size its frames are scaled to. The drive starts one decode
     /// thread per plan; the threads publish into [`Self::stores`] as frames
@@ -951,6 +1341,16 @@ pub struct Pipeline {
     /// an empty map leaves the snapshot unchanged (inv #10 — never on the hot
     /// loop).
     inventories: std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
+    /// The shared outbound presentation epoch (DEV-C1 / ADR-M010): written at
+    /// ~1 Hz by the timing-status task, read by the HLS rolling playlist at
+    /// each segment close to stamp `EXT-X-PROGRAM-DATE-TIME` from the same
+    /// map the control WS publishes. Cloned into each HLS sink at build time.
+    epoch: multiview_output::SharedEpoch,
+    /// The run's epoch **anchor** slot (DEV-C1): `drive_streaming` stores the
+    /// tick-0 seed + the run's monotonic source here when the program clock
+    /// seeds; the timing-status task binds to it lazily (lock-free load —
+    /// publishing/reading can never block the engine, inv #1/#10).
+    epoch_anchor: crate::timing_status::EpochAnchorSlot,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -986,17 +1386,69 @@ struct IngestPlan {
     canvas_color: CanvasColor,
     /// The output cadence a synthetic generator paces its publishes to.
     cadence: Rational,
-    /// The CUDA enumeration **ordinal** (e.g. `Some("1")`) the NVDEC `*_cuvid`
-    /// decoder for this source is pinned to — the SAME GPU the load-aware
-    /// admission pick pinned the compositor to (ADR-0035 Tier-1 / the
-    /// GPU-placement principle: decode + composite + encode follow one chosen
-    /// device, never split across GPUs). Stamped from the admission selection in
-    /// [`Pipeline::drive_streaming`] before the ingest threads spawn; `None` when
-    /// admission named no specific device (no NVML / GPU-free / scorer rejection)
-    /// — in **lockstep** with the compositor's `None`, so neither stage pins a GPU
-    /// and decode opens libav's default CUDA device (today's behaviour). Consumed
-    /// by [`open_and_stream`] → [`StreamVideoDecoder::new_preferring_hw`].
-    cuda_ordinal: Option<String>,
+    /// Where this source's video decode opens ([`DecodePlacement`]):
+    /// [`DecodePlacement::Pinned`] to the admission-chosen island device
+    /// (ADR-0035 Tier-1 — stamped in [`Pipeline::drive_streaming`] before the
+    /// startup threads spawn, or by the live placement consult on an admitted
+    /// runtime add), [`DecodePlacement::Default`] when no placement decision
+    /// exists (GPU-free / no NVML — in lockstep with the compositor's default
+    /// adapter), or [`DecodePlacement::SoftwareOnly`] when the live consult
+    /// REJECTED this source (ADR-W018 §7 — hardware decode must not open at
+    /// all, lest it land back on the over-headroom island or fragment onto a
+    /// different GPU). Consumed by [`open_and_stream`] →
+    /// [`decoder_open_args`] → [`StreamVideoDecoder::new_preferring_hw`].
+    decode_placement: DecodePlacement,
+}
+
+/// Where a source's video decode is allowed to open — the explicit tri-state
+/// outcome of decode placement (ADR-W018 §7 / ADR-0018's never-fragment rule).
+///
+/// `Option<ordinal>` cannot express this: "no ordinal" must distinguish *no
+/// placement decision* (hardware on libav's default device is fine — today's
+/// GPU-free behaviour) from *placement rejected* (hardware must NOT open: on a
+/// single-GPU host the default device IS the over-headroom island — admitting
+/// would overcommit it — and on a multi-GPU host the default device may be a
+/// **different** GPU, silently fragmenting the pipeline island). The
+/// tri-state is closed by design (no `#[non_exhaustive]`): a placement
+/// outcome is exactly one of default / pinned / forced-software.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DecodePlacement {
+    /// No placement decision: hardware decode (when the build/runtime offers
+    /// it) on libav's default device — the GPU-free / no-admission path.
+    #[default]
+    Default,
+    /// Pinned to the admission-chosen island device's CUDA enumeration
+    /// ordinal: NVDEC opens co-located with the compositor (affinity).
+    Pinned(String),
+    /// Placement REJECTED this source: the decoder open is forced to
+    /// **software** regardless of the build's hardware capability, so the
+    /// island is never overcommitted and never fragmented.
+    SoftwareOnly,
+}
+
+/// The `(want_hw, cuda_device)` pair [`open_and_stream`] hands
+/// [`StreamVideoDecoder::new_preferring_hw`] for a plan's [`DecodePlacement`].
+///
+/// This is **the** decode-open gate for placement (ADR-W018 §7):
+/// [`DecodePlacement::SoftwareOnly`] forces `(false, None)` — the hardware
+/// path is never attempted, even when NVDEC is compiled, present, and not
+/// env-disabled. The other placements keep the canonical hardware preference
+/// ([`multiview_ffmpeg::want_hw_decode`] over the `MULTIVIEW_DISABLE_NVDEC`
+/// reading in `nvdec_disable_env` — the operator opt-out still wins over a
+/// pin) and thread the pinned ordinal through when one exists.
+#[must_use]
+pub fn decoder_open_args<'p>(
+    placement: &'p DecodePlacement,
+    nvdec_disable_env: Option<&str>,
+) -> (bool, Option<&'p str>) {
+    match placement {
+        DecodePlacement::SoftwareOnly => (false, None),
+        DecodePlacement::Pinned(ordinal) => (
+            multiview_ffmpeg::want_hw_decode(nvdec_disable_env),
+            Some(ordinal.as_str()),
+        ),
+        DecodePlacement::Default => (multiview_ffmpeg::want_hw_decode(nvdec_disable_env), None),
+    }
 }
 
 /// The in-container DVB-sub decode route stashed on an [`IngestPlan`]: which
@@ -1130,7 +1582,11 @@ impl Pipeline {
             cuda_ordinal: None,
         };
 
-        let built = build_outputs(&config.outputs)?;
+        // The shared outbound presentation epoch (DEV-C1 / ADR-M010): one cell
+        // per pipeline, written by the timing-status task and read by every
+        // HLS rolling playlist (PDT) — one anchor, every surface agrees.
+        let epoch = multiview_output::SharedEpoch::new();
+        let built = build_outputs(&config.outputs, &epoch)?;
         #[cfg(feature = "display-kms")]
         let has_display = !built.display.is_empty();
         #[cfg(not(feature = "display-kms"))]
@@ -1158,10 +1614,10 @@ impl Pipeline {
                 (s.id.clone(), label)
             })
             .collect();
-        // Read an optional analog clock face from a `[[overlays]]` clock entry.
+        // Read the analog clock faces from the `[[overlays]]` clock entries.
         #[cfg(feature = "overlay")]
-        let analog_clock =
-            analog_clock_from_config(&config.overlays, config.canvas.width, config.canvas.height);
+        let analog_clocks =
+            analog_clocks_from_config(&config.overlays, config.canvas.width, config.canvas.height);
 
         // The legacy `--subtitles` sidecar (if attached later) burns into the
         // first source-bound cell. Pre-resolve that target id once here.
@@ -1196,6 +1652,8 @@ impl Pipeline {
             program_spec,
             stores,
             stop_registry: crate::live_sources::stop_registry(),
+            #[cfg(feature = "gpu")]
+            live_island: Arc::new(arc_swap::ArcSwapOption::empty()),
             ingest_plans,
             inventories,
             #[cfg(feature = "overlay")]
@@ -1223,7 +1681,11 @@ impl Pipeline {
             #[cfg(feature = "overlay")]
             declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
-            analog_clock,
+            analog_clocks,
+            #[cfg(feature = "overlay")]
+            overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
+            epoch,
+            epoch_anchor: crate::timing_status::anchor_slot(),
         })
     }
 
@@ -1283,6 +1745,26 @@ impl Pipeline {
     #[must_use]
     pub fn stop_registry(&self) -> crate::live_sources::StopRegistry {
         Arc::clone(&self.stop_registry)
+    }
+
+    /// The run's decoded-ingest spawner for the live-source hub (ADR-W018
+    /// level 2): hand this to
+    /// [`LiveSourceHub::start_with_ingest`](crate::live_sources::LiveSourceHub::start_with_ingest)
+    /// so a runtime-added network/file source spawns the **same** supervised
+    /// [`ingest_loop`] the startup path runs (one uniform ingest path), with
+    /// its decode placement consulted against the **same** admission scorer —
+    /// pinned to the running island's device — that placed the startup island.
+    #[must_use]
+    pub fn live_ingest_spawner(&self) -> Arc<dyn crate::live_sources::IngestSpawner> {
+        Arc::new(LiveIngestSpawner {
+            layout: Arc::clone(&self.layout),
+            canvas_color: self.canvas_color,
+            cadence: self.cadence,
+            #[cfg(feature = "gpu")]
+            island: Arc::clone(&self.live_island),
+            #[cfg(feature = "gpu")]
+            load_source: crate::system_metrics::default_load_source(),
+        })
     }
 
     /// The resolved concrete encoder name.
@@ -1441,6 +1923,24 @@ impl Pipeline {
         self.stores.clone()
     }
 
+    /// DEV-C1 (ADR-M010): the shared outbound presentation-epoch cell this
+    /// pipeline's HLS sinks stamp `EXT-X-PROGRAM-DATE-TIME` from. The
+    /// timing-status task writes it (~1 Hz); reading/writing is a tiny
+    /// lock-guarded `Copy` access on off-hot-path threads only.
+    #[must_use]
+    pub fn shared_epoch(&self) -> multiview_output::SharedEpoch {
+        self.epoch.clone()
+    }
+
+    /// DEV-C1 (ADR-M010): the run's epoch **anchor** slot. `drive_streaming`
+    /// publishes the tick-0 seed + the run's monotonic source into it when the
+    /// program clock seeds; the timing-status task binds to it lazily with a
+    /// lock-free load (inv #1/#10 — neither side can block the engine).
+    #[must_use]
+    pub fn epoch_anchor_slot(&self) -> crate::timing_status::EpochAnchorSlot {
+        Arc::clone(&self.epoch_anchor)
+    }
+
     /// RT-10b: the live subtitle re-point handle for the running pipeline, or
     /// [`None`] before a `drive` has started (or on a run with no caption stores).
     ///
@@ -1472,6 +1972,19 @@ impl Pipeline {
         &self,
     ) -> Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>> {
         Arc::clone(&self.subtitle_route)
+    }
+
+    /// ADR-W021: the **shared** live overlay working-set slot. The binary
+    /// threads a clone into the command drain
+    /// ([`command_drain_with_seams`](crate::control::command_drain_with_seams))
+    /// so `UpsertOverlay`/`RemoveOverlay` publish through it at the frame
+    /// boundary; the bake consumer re-derives its overlay render state from it
+    /// at the next frame. Reading/writing is a lock-free `ArcSwap` load/store,
+    /// so neither side can pace or stall the output clock (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn overlay_apply_slot(&self) -> crate::live_overlays::OverlayApplySlot {
+        Arc::clone(&self.overlay_apply)
     }
 
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
@@ -1662,8 +2175,20 @@ impl Pipeline {
             // stage pins a GPU.
             if let Some(ordinal) = pick.cuda_ordinal.as_deref() {
                 for plan in &mut self.ingest_plans {
-                    plan.cuda_ordinal = Some(ordinal.to_owned());
+                    plan.decode_placement = DecodePlacement::Pinned(ordinal.to_owned());
                 }
+            }
+            // Publish the pinned island (ADR-W018 §7) so every RUNTIME-added
+            // decode consults the same admission scorer pinned to THIS device —
+            // a live add never fragments or migrates the island. Stays empty
+            // when admission named no device (the live spawner then skips the
+            // consult, in lockstep with the startup plans' `None`).
+            if let Some(device) = pick.device.clone() {
+                self.live_island.store(Some(Arc::new(LiveIsland {
+                    device,
+                    cuda_ordinal: pick.cuda_ordinal.clone(),
+                    tile_count: self.layout.cells.len(),
+                })));
             }
             // The pinned chosen device, or `GpuTarget::none()` (prefer the GPU at
             // the default adapter) when admission did not name a specific GPU — so
@@ -1730,6 +2255,54 @@ impl Pipeline {
         // streaming/web level (this output is a live streaming multiview).
         let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
+        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
+        // startup, before the output clock runs — and keep their handles alive
+        // for the whole run (drop = stop + join, off the hot path). Each sink
+        // owns its device on a dedicated thread; the engine side holds only
+        // wait-free mailbox publishers, fed in `state_of` exactly where the
+        // live-preview slot is filled. A startup failure (no such connector,
+        // no usable mode, modeset rejected) fails the run like any other
+        // misconfigured output; after startup the sinks can never fail the
+        // engine (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get
+        // an ELD-gated ALSA audio sink wired to their flip clock; the
+        // publishers feed from the bake consumer below.
+        #[cfg(feature = "display-kms")]
+        let started_displays = start_display_sinks(
+            std::mem::take(&mut self.display_plans),
+            self.cadence,
+            display_audio_format(self.encode_cfg.audio.as_ref()),
+        )?;
+        #[cfg(feature = "display-kms")]
+        let display_publishers = started_displays.publishers;
+        // Keep the video + audio sink threads alive for the whole run; dropping
+        // the handles at end of run stops + joins them (off the hot path).
+        #[cfg(feature = "display-kms")]
+        let _display_handles = started_displays.handles;
+        #[cfg(feature = "display-kms")]
+        let _display_audio_handles = started_displays.audio_handles;
+        #[cfg(feature = "display-kms")]
+        let display_audio_publishers = started_displays.audio_publishers;
+        #[cfg(not(feature = "display-kms"))]
+        let display_audio_publishers: Vec<
+            multiview_output::display::audio::DisplayAudioPublisher,
+        > = Vec::new();
+        // The display-audio feed (DEV-B4): heads receive the SAME post-loudnorm
+        // program block the stream encodes when this run carries program audio;
+        // a video-only run with audio-enabled heads gets a dedicated program
+        // bus (currently silence, correctly paced by tick index) so the audio
+        // path is real either way.
+        let display_audio = DisplayAudioFeed {
+            dedicated_bus: if audio_bus.is_none() && !display_audio_publishers.is_empty() {
+                Some(multiview_audio::program::ProgramBus::new(
+                    display_audio_format(self.encode_cfg.audio.as_ref()),
+                    self.cadence,
+                ))
+            } else {
+                None
+            },
+            publishers: display_audio_publishers,
+        };
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -1744,6 +2317,7 @@ impl Pipeline {
             encoder,
             audio_bus,
             audio_loudnorm,
+            display_audio,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -1756,12 +2330,25 @@ impl Pipeline {
         // caller's `stop` (Arc-backed) as its own handle, so the existing Ctrl-C /
         // control-plane stop still ends the run unchanged. A spec/cadence mismatch
         // is a build-assembly bug, surfaced as a typed error (never a panic).
+        // The timing-status task (DEV-C1 / ADR-M010) needs the run's monotonic
+        // source to bracket its wall reads on the SAME timeline tick 0 is
+        // seeded on; clone the handle before the program takes ownership.
+        let ts_for_anchor = Arc::clone(&ts);
         let mut program =
             MultiviewProgram::new(&self.program_spec, clock, drive, ts, pacer, stop.clone())
                 .map_err(|e| PipelineError::Program {
                     program: self.program_spec.id.clone(),
                     reason: e.to_string(),
                 })?;
+        // Publish the run's epoch anchor (tick-0 seed + monotonic source) into
+        // the shared slot — a single lock-free store the off-hot-path
+        // timing-status task reads to derive the outbound presentation epoch.
+        // Publishing a value can never pace the clock (inv #1/#10).
+        self.epoch_anchor
+            .store(Some(Arc::new(multiview_engine::epoch::EpochAnchor::new(
+                ts_for_anchor,
+                program.seed_nanos(),
+            ))));
 
         // The hot-loop drop counter (live drop-on-overload) and the queue
         // high-watermark probe. Both are wait-free atomics shared with the
@@ -1823,18 +2410,10 @@ impl Pipeline {
             publisher.publish_event(event);
         }
         let input_fragment = crate::control::input_inventories_fragment(&self.inventories);
-        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
-        // startup, before the output clock runs — and keep their handles alive
-        // for the whole run (drop = stop + join, off the hot path). Each sink
-        // owns its device on a dedicated thread; the engine side holds only
-        // wait-free mailbox publishers, fed in `state_of` exactly where the
-        // live-preview slot is filled. A startup failure (no such connector,
-        // no usable mode, modeset rejected) fails the run like any other
-        // misconfigured output; after startup the sinks can never fail the
-        // engine (invariants #1 + #10).
-        #[cfg(feature = "display-kms")]
-        let (_display_handles, display_publishers) =
-            start_display_sinks(std::mem::take(&mut self.display_plans), self.cadence)?;
+        // (The DRM/KMS display heads — and their DEV-B4 audio sinks — were
+        // started above, before the egress spawn, so the bake consumer received
+        // the audio publishers; `display_publishers` feeds the video mailboxes
+        // in `state_of` below.)
         // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
         // state (kept here on the hot loop — the bounded cue store holds only a
         // small live window, so it must be sampled now, not after the run), clones
@@ -2101,9 +2680,10 @@ impl Pipeline {
             meter_db_timelines: self.meter_db_timelines.clone(),
             subtitles: self.subtitles.clone(),
             sidecar_target: self.sidecar_target.clone(),
-            analog_clock: self.analog_clock,
+            analog_clocks: self.analog_clocks.clone(),
             canvas_color: self.canvas_color,
             cadence: self.cadence,
+            overlay_apply: Some(Arc::clone(&self.overlay_apply)),
         }
     }
 
@@ -2134,15 +2714,20 @@ struct BakeContext {
     /// The source id the sidecar burns into (the first source-bound cell).
     #[cfg(feature = "overlay")]
     sidecar_target: Option<String>,
-    /// An optional analog clock face placement.
+    /// The analog clock face placements (one per analog-face entry).
     #[cfg(feature = "overlay")]
-    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    analog_clocks: Vec<crate::overlays::AnalogClockSpec>,
     /// The fixed canvas color (for the overlay blend + output tag).
     #[cfg(feature = "overlay")]
     canvas_color: CanvasColor,
     /// The fixed output cadence (for the per-frame media time).
     #[cfg(feature = "overlay")]
     cadence: Rational,
+    /// ADR-W021: the live overlay working-set slot the consumer re-derives
+    /// from (one wait-free load + generation compare per frame). `None` ⇒ no
+    /// live seam (the boot-derived `analog_clock` stands for the whole run).
+    #[cfg(feature = "overlay")]
+    overlay_apply: Option<crate::live_overlays::OverlayApplySlot>,
 }
 
 impl BakeContext {
@@ -2186,6 +2771,10 @@ struct StreamBaker {
     canvas_color: CanvasColor,
     cadence: Rational,
     meter: BakeContext,
+    /// The last live overlay-set generation this baker derived its render
+    /// state from (ADR-W021). `None` until the first bake, so a wired slot's
+    /// seeded set drives the very first frame (one truth: the slot).
+    overlay_generation: Option<u64>,
 }
 
 #[cfg(not(feature = "overlay"))]
@@ -2207,15 +2796,37 @@ impl StreamBaker {
             crate::wallclock::WallClockSource::system(),
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
-        if let Some(spec) = ctx.analog_clock {
-            baker = baker.with_analog_clock(spec);
-        }
+        baker.set_analog_clocks(ctx.analog_clocks.clone());
         Ok(Self {
             baker,
             canvas_color: ctx.canvas_color,
             cadence: ctx.cadence,
             meter: ctx,
+            overlay_generation: None,
         })
+    }
+
+    /// Re-derive the overlay render state from the live working-set slot iff
+    /// its generation advanced (ADR-W021). The steady-state per-frame cost is
+    /// one wait-free `ArcSwap` load plus an integer compare; on a change the
+    /// re-derivation is O(overlays) pure math (no I/O, no rasterization), and
+    /// the frame baked next is drawn entirely from the new set — a clean
+    /// frame-boundary (Class-1) transition. Without a wired slot the
+    /// boot-derived state stands.
+    fn refresh_overlays(&mut self, canvas_w: u32, canvas_h: u32) {
+        let Some(slot) = self.meter.overlay_apply.as_ref() else {
+            return;
+        };
+        let set = slot.load();
+        if self.overlay_generation == Some(set.generation()) {
+            return;
+        }
+        self.baker.set_analog_clocks(analog_clocks_from_config(
+            set.overlays(),
+            canvas_w,
+            canvas_h,
+        ));
+        self.overlay_generation = Some(set.generation());
     }
 
     /// Bake one streamed tick's overlays into its canvas, returning the overlaid
@@ -2226,6 +2837,10 @@ impl StreamBaker {
     /// Returns [`PipelineError::Engine`] if the baker/sub-pass rejects the canvas.
     fn bake(&mut self, item: &StreamItem) -> Result<Arc<Nv12Image>, PipelineError> {
         use multiview_compositor::overlay::apply_overlays_to_nv12;
+
+        // ADR-W021: pick up a live overlay-set change before drawing, so this
+        // frame is baked entirely from one set (frame-boundary apply).
+        self.refresh_overlays(item.canvas.width(), item.canvas.height());
 
         let i = usize::try_from(item.tick_index).unwrap_or(usize::MAX);
         let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
@@ -2476,6 +3091,7 @@ impl StreamEgress {
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
         audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+        display_audio: DisplayAudioFeed,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -2533,6 +3149,7 @@ impl StreamEgress {
                     encoder,
                     audio_bus,
                     audio_loudnorm,
+                    display_audio,
                     &consumer_in_flight,
                 )
             })
@@ -2652,6 +3269,41 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// The audio format the display heads' audio sinks are fed in (DEV-B4): the
+/// run's program-audio format when this run encodes audio (so the heads hear
+/// exactly the stream program), else the canonical 48 kHz stereo a dedicated
+/// display bus mixes. Mirrors [`program_audio_bus`]'s layout mapping so pushed
+/// blocks always match the sink FIFO's channel count.
+fn display_audio_format(
+    cfg: Option<&multiview_output::AudioEncodeConfig>,
+) -> multiview_audio::AudioFormat {
+    let Some(cfg) = cfg else {
+        return multiview_audio::AudioFormat::new(48_000, multiview_audio::ChannelLayout::Stereo);
+    };
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    multiview_audio::AudioFormat::new(cfg.sample_rate, layout)
+}
+
+/// The display-head audio feed (DEV-B4): the bounded FIFO publishers of every
+/// audio-enabled display output, plus — when the run carries no encode-side
+/// program audio — a dedicated tick-driven program bus so the heads still
+/// receive correctly-paced program audio (silence until sources are routed,
+/// exactly like the encode-side bus). Empty publishers ⇒ the consumer skips
+/// the display branch entirely; each push is a bounded short critical section
+/// into the drop-oldest FIFO (the sink holds that lock only for in-memory
+/// copies, never across a PCM call), so a wedged ALSA device can never reach
+/// back to the bake consumer, let alone the engine (invariants #1 + #10).
+struct DisplayAudioFeed {
+    /// One bounded drop-oldest FIFO publisher per audio-enabled display head.
+    publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+    /// `Some` only when the run has no encode-side audio bus AND there are
+    /// display publishers to feed.
+    dedicated_bus: Option<multiview_audio::program::ProgramBus>,
+}
+
 /// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
 ///
 /// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
@@ -2716,6 +3368,10 @@ fn drive_audio_for_item(
 /// # Errors
 /// Returns [`PipelineError`] if building the baker, baking a frame, or the single
 /// encode fails.
+#[allow(clippy::too_many_arguments)]
+// reason: the consumer owns exactly one of each pipeline stage (baker, encoder,
+// audio bus, loudnorm, display feed); a one-shot bundling struct would only
+// rename the same eight things.
 fn consumer_main(
     ctx: BakeContext,
     hot_rx: &Receiver<StreamItem>,
@@ -2723,6 +3379,7 @@ fn consumer_main(
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
     mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+    mut display_audio: DisplayAudioFeed,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -2768,6 +3425,15 @@ fn consumer_main(
                 Some(norm) => norm.process(block),
                 None => block,
             };
+            // DEV-B4: the display heads hear the SAME post-loudnorm program
+            // block the stream encodes. Each push is a bounded short critical
+            // section into the drop-oldest FIFO (never held across a PCM
+            // call) — a wedged HDMI audio device sheds frames and can never
+            // back-pressure this consumer, let alone the engine
+            // (invariants #1 + #10).
+            for publisher in &display_audio.publishers {
+                publisher.push_audio(&block);
+            }
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {
@@ -2775,6 +3441,16 @@ fn consumer_main(
                     reason: e.to_string(),
                 })?;
             fan_packets(&sink_txs, &mut live, audio_packets);
+        } else if let Some(bus) = display_audio.dedicated_bus.as_mut() {
+            // A video-only run with audio-enabled display heads: drive the
+            // dedicated display bus by the same absolute tick index (RT-8b —
+            // catching up across shed ticks keeps the sample clock a pure
+            // function of the tick counter) and feed the heads. No encode, no
+            // packets — the stream stays byte-identical to a video-only run.
+            let block = drive_audio_for_item(bus, item.tick_index);
+            for publisher in &display_audio.publishers {
+                publisher.push_audio(&block);
+            }
         }
     }
     // End-of-program: flush the encoder and fan its trailing packets, then drop
@@ -3571,19 +4247,8 @@ impl IngestSupervisor {
     ) -> Self {
         let mut producers = Vec::with_capacity(plans.len().saturating_add(caption_plans.len()));
         for plan in plans {
-            let stop = Arc::new(AtomicBool::new(false));
-            let id = plan.id.clone();
-            crate::live_sources::register_stop(registry, &id, &stop);
-            let thread_stop = Arc::clone(&stop);
-            let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
-            match builder.spawn(move || ingest_loop(&plan, &thread_stop)) {
-                Ok(handle) => producers.push((stop, handle)),
-                Err(e) => {
-                    // A thread that cannot spawn is logged and skipped: its tile
-                    // simply rides NO_SIGNAL (slate) rather than failing the run
-                    // (invariant #1 — the output clock is independent of inputs).
-                    tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
-                }
+            if let Some((stop, handle)) = spawn_ingest_producer(plan, registry) {
+                producers.push((stop, handle));
             }
         }
         for plan in caption_plans {
@@ -3658,6 +4323,118 @@ impl Drop for IngestSupervisor {
         // thread blocks the caller. After `shutdown` the handle vec is already
         // drained, so this is a no-op on that path.
         self.join_all();
+    }
+}
+
+/// Spawn ONE supervised ingest producer thread for `plan`: create its
+/// per-source stop flag, register it under the source id in the run's shared
+/// stop registry (ADR-W018 — a live remove/edit raises exactly this flag), and
+/// run [`ingest_loop`] on a named thread.
+///
+/// This is **the** per-source producer construction — the startup
+/// [`IngestSupervisor::start`] and the live-source hub's
+/// [`LiveIngestSpawner`] both call it, so a runtime-added source runs exactly
+/// the supervised ingest the startup path builds (same reconnect bracket,
+/// jitter, PTS normalization, rw-timeout) — never a second-quality copy.
+///
+/// A thread that cannot spawn is logged and yields `None`: its tile simply
+/// rides `NO_SIGNAL` (slate) rather than failing the run (invariant #1 — the
+/// output clock is independent of inputs).
+fn spawn_ingest_producer(
+    plan: IngestPlan,
+    registry: &crate::live_sources::StopRegistry,
+) -> Option<(Arc<AtomicBool>, JoinHandle<()>)> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let id = plan.id.clone();
+    crate::live_sources::register_stop(registry, &id, &stop);
+    let thread_stop = Arc::clone(&stop);
+    let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
+    match builder.spawn(move || ingest_loop(&plan, &thread_stop)) {
+        Ok(handle) => Some((stop, handle)),
+        Err(e) => {
+            tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
+            None
+        }
+    }
+}
+
+/// The run's decoded-ingest spawner (ADR-W018 level 2), handed to the
+/// live-source hub by the binary: it turns a runtime
+/// [`SourceSpawn`](crate::live_sources::SourceSpawn) into a running producer
+/// through **exactly** the startup construction — [`ingest_plan_for`] builds
+/// the plan, [`select_live_decode_placement`] consults the same admission scorer
+/// (pinned to the running island's device), and [`spawn_ingest_producer`]
+/// spawns the same supervised [`ingest_loop`]. Runs on the hub worker thread
+/// only — heavy/blocking work never touches the output clock (inv #1).
+struct LiveIngestSpawner {
+    /// The solved startup layout: tile geometry for a bound cell, the canvas
+    /// fallback for an unbound one — the same sizing rule the startup build
+    /// applies (a freshly added source is typically unbound until the
+    /// follow-up route, so it decodes at canvas size, exactly like an unbound
+    /// startup source).
+    layout: Arc<Layout>,
+    /// The canvas colour the source's frames are tagged in.
+    canvas_color: CanvasColor,
+    /// The output cadence (generator pacing / plan metadata).
+    cadence: Rational,
+    /// The pinned island slot `drive_streaming` publishes (ADR-W018 §7).
+    #[cfg(feature = "gpu")]
+    island: LiveIslandSlot,
+    /// The GPU load source the placement consult re-polls at decision time
+    /// (NVML in production; injectable for the placement-consult tests).
+    #[cfg(feature = "gpu")]
+    load_source: Box<dyn multiview_hal::LoadSource + Send + Sync>,
+}
+
+impl crate::live_sources::IngestSpawner for LiveIngestSpawner {
+    fn spawn(
+        &self,
+        spawn: crate::live_sources::SourceSpawn,
+        registry: &crate::live_sources::StopRegistry,
+    ) -> Option<crate::live_sources::SpawnedProducer> {
+        let crate::live_sources::SourceSpawn { source, store } = spawn;
+        let (tile_w, tile_h) = cell_pixel_size(&self.layout, &source.id)
+            .unwrap_or((self.layout.canvas.width, self.layout.canvas.height));
+        #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
+        // reason: without `gpu` there is no placement consult, so the plan is
+        // never re-stamped after construction; the binding must still be `mut`
+        // for the gpu arm below.
+        let mut plan = match ingest_plan_for(
+            &source,
+            tile_w,
+            tile_h,
+            store,
+            self.canvas_color,
+            self.cadence,
+        ) {
+            Ok(plan) => plan,
+            Err(e) => {
+                tracing::warn!(
+                    source = %source.id,
+                    error = %e,
+                    "live ingest spawn refused: the source cannot be planned; \
+                     the tile rides the slate"
+                );
+                return None;
+            }
+        };
+        // Hardware re-assessment on every change (ADR-W018 §7): consult the
+        // same admission path startup decode placement uses, pinned to the
+        // running island's device. No pinned island (GPU-free / no NVML / a
+        // startup scorer rejection) ⇒ no consult — the decode opens on the
+        // default device, in lockstep with the startup plans' `None`.
+        #[cfg(feature = "gpu")]
+        if let Some(island) = self.island.load_full() {
+            plan.decode_placement = select_live_decode_placement(
+                self.load_source.as_ref(),
+                &island,
+                self.layout.canvas.width,
+                self.layout.canvas.height,
+                self.cadence,
+            );
+        }
+        spawn_ingest_producer(plan, registry)
+            .map(|(stop, handle)| crate::live_sources::SpawnedProducer { stop, handle })
     }
 }
 
@@ -3918,57 +4695,64 @@ fn u32_from_usize_audio(value: usize) -> u32 {
 }
 
 /// The codec token a config output names, if it carries one.
-/// Read an optional analog clock face from the config `[[overlays]]` list: the
-/// first entry whose `kind == "clock"` and whose `face` param is `"analog"`.
+/// Read the analog clock faces from the config `[[overlays]]` list: one face
+/// per entry whose `kind == "clock"` and whose `face` param is `"analog"`, in
+/// working-set order (ADR-W021 — EVERY analog entry renders; no first-wins).
 ///
-/// Placement comes from optional `x`/`y`/`radius` params (canvas pixels); a
-/// missing placement defaults the face to the bottom-right corner sized to the
-/// canvas. An optional `tz_minutes` param sets the timezone offset (default UTC).
-/// Returns `None` when no analog clock is requested (the digital label still
-/// renders). Without the `overlay` feature this is never called.
+/// Placement comes from each entry's optional `x`/`y`/`radius` params (canvas
+/// pixels); a missing placement defaults that face to the bottom-right corner
+/// sized to the canvas. An optional `tz_minutes` param sets the timezone
+/// offset (default UTC). Returns an empty set when no analog clock is
+/// requested (the digital label still renders). Without the `overlay` feature
+/// this is never called.
 #[cfg(feature = "overlay")]
-fn analog_clock_from_config(
+fn analog_clocks_from_config(
     overlays: &[multiview_config::Overlay],
     canvas_w: u32,
     canvas_h: u32,
-) -> Option<crate::overlays::AnalogClockSpec> {
+) -> Vec<crate::overlays::AnalogClockSpec> {
     use multiview_overlay::clock::TimeZoneOffset;
-
-    let entry = overlays.iter().find(|o| {
-        o.kind == "clock"
-            && o.params
-                .get("face")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
-    })?;
 
     let cw = u32_to_f32(canvas_w);
     let ch = u32_to_f32(canvas_h);
     // A face sized to ~22% of the shorter canvas side by default.
     let default_radius = cw.min(ch) * 0.11;
-    // Config placement is whole-pixel / whole-minute; round each param to an i32
-    // and widen it losslessly to f32 (no `as` cast), or fall back to the default.
-    let param_f32 = |key: &str| -> Option<f32> {
-        entry
-            .params
-            .get(key)
-            .and_then(serde_json::Value::as_f64)
-            .map(|v| i32_to_f32(round_f64_to_i32(v)))
-    };
-    let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
-    // Default placement: bottom-right corner, inset by the radius + a margin.
-    let margin = radius * 0.25;
-    let cx = param_f32("x").unwrap_or(cw - radius - margin);
-    let cy = param_f32("y").unwrap_or(ch - radius - margin);
-    let zone = entry
-        .params
-        .get("tz_minutes")
-        .and_then(serde_json::Value::as_f64)
-        .map_or(TimeZoneOffset::UTC, |m| {
-            TimeZoneOffset::from_minutes(round_f64_to_i32(m))
-        });
 
-    Some(crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius))
+    overlays
+        .iter()
+        .filter(|o| {
+            o.kind == "clock"
+                && o.params
+                    .get("face")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
+        })
+        .map(|entry| {
+            // Config placement is whole-pixel / whole-minute; round each param
+            // to an i32 and widen it losslessly to f32 (no `as` cast), or fall
+            // back to the default.
+            let param_f32 = |key: &str| -> Option<f32> {
+                entry
+                    .params
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| i32_to_f32(round_f64_to_i32(v)))
+            };
+            let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
+            // Default placement: bottom-right corner, inset by radius + margin.
+            let margin = radius * 0.25;
+            let cx = param_f32("x").unwrap_or(cw - radius - margin);
+            let cy = param_f32("y").unwrap_or(ch - radius - margin);
+            let zone = entry
+                .params
+                .get("tz_minutes")
+                .and_then(serde_json::Value::as_f64)
+                .map_or(TimeZoneOffset::UTC, |m| {
+                    TimeZoneOffset::from_minutes(round_f64_to_i32(m))
+                });
+            crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius)
+        })
+        .collect()
 }
 
 /// Exact small-`u32` → `f32` widening (canvas sizes are well under `2^24`), no
@@ -4059,6 +4843,10 @@ struct DisplayOutputPlan {
     mode: multiview_output::display::ModeRequest,
     /// The CVT-RB forced mode for an EDID-less chain, if configured.
     forced_mode: Option<multiview_output::display::ForcedMode>,
+    /// Whether HDMI/DP audio is enabled on this head (the config `audio` block
+    /// is present). The audio sink only runs when this is set AND the ELD is
+    /// valid (DEV-B4 / display-out §5); an EDID-less head has no audio path.
+    audio_enabled: bool,
 }
 
 /// Extract the display-head plan from one `Output::Display` (feature
@@ -4070,6 +4858,7 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
         connector,
         mode,
         forced_mode,
+        audio,
         ..
     } = output
     else {
@@ -4097,6 +4886,10 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
         connector: selector,
         mode: request,
         forced_mode: forced,
+        // The presence of the `audio` block enables HDMI/DP audio (ELD-gated at
+        // runtime); a display output never carries selectable discrete tracks
+        // (capability-validated upstream), so the mode is not inspected here.
+        audio_enabled: audio.is_some(),
     })
 }
 
@@ -4123,12 +4916,44 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
     }
 }
 
+/// Everything [`start_display_sinks`] lit: the per-head video flip loops (and
+/// their mailbox publishers) plus the DEV-B4 audio sinks (and their bounded
+/// drop-oldest FIFO publishers) of the heads whose plan enabled audio. The handle vectors
+/// own the threads — keep them alive for the run; dropping them stops + joins.
+#[cfg(feature = "display-kms")]
+struct StartedDisplaySinks {
+    /// One running flip loop per head.
+    handles: Vec<multiview_output::display::DisplaySinkHandle>,
+    /// The matching wait-free frame mailboxes (same order as `handles`).
+    publishers: Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
+    /// The running ELD-gated ALSA audio sinks (audio-enabled heads only).
+    audio_handles: Vec<multiview_output::display::audio::DisplayAudioSink>,
+    /// The matching bounded drop-oldest audio FIFO publishers.
+    audio_publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+}
+
+/// The display-audio FIFO depth in frames (per channel): ~170 ms @ 48 kHz.
+/// Bounds the worst-case added audio latency AND the drop point under a
+/// wedged/slow device (drop-oldest — the engine-side push never blocks).
+#[cfg(feature = "display-kms")]
+const DISPLAY_AUDIO_FIFO_FRAMES: usize = 8_192;
+
 /// Open and light every configured display head (feature `display-kms`):
 /// scan `/dev/dri` for the connector-owning card, probe + select the mode
 /// (EDID preferred / exact-rational `cadence` match / CVT-RB forced), run the
 /// `TEST_ONLY` validation and the one startup modeset, and spawn the
 /// dedicated flip-loop thread per head (ADR-0044 §1). Startup-only; runs
 /// before the output clock starts.
+///
+/// An audio-enabled head (DEV-B4) additionally gets an ELD-gated ALSA audio
+/// sink: the connector's ALSA endpoints are discovered (vc4 card-per-port or
+/// the HDA `eld#D.P` scan), the sink is wired to this head's flip clock for
+/// the scanout-skew servo term, and fed `audio_format` program blocks. Audio
+/// is **best-effort by construction** (display-out §5): an EDID-less head
+/// (forced mode — no ELD exists) and a connector with no discoverable ALSA
+/// endpoint run video-only with a log line, never an error — and a present
+/// ELD is still re-checked live by the sink itself (hotplug), so audio only
+/// flows while the pipe is lit AND the ELD is valid.
 ///
 /// # Errors
 ///
@@ -4139,17 +4964,16 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
 fn start_display_sinks(
     plans: Vec<DisplayOutputPlan>,
     cadence: Rational,
-) -> Result<
-    (
-        Vec<multiview_output::display::DisplaySinkHandle>,
-        Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
-    ),
-    PipelineError,
-> {
+    audio_format: multiview_audio::AudioFormat,
+) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
     use multiview_output::display::{DisplaySink, DisplaySinkConfig};
-    let mut handles = Vec::with_capacity(plans.len());
-    let mut publishers = Vec::with_capacity(plans.len());
+    let mut started = StartedDisplaySinks {
+        handles: Vec::with_capacity(plans.len()),
+        publishers: Vec::with_capacity(plans.len()),
+        audio_handles: Vec::new(),
+        audio_publishers: Vec::new(),
+    };
     for plan in plans {
         let device = KmsDisplayDevice::open_for_connector(&plan.connector).map_err(|e| {
             PipelineError::Output {
@@ -4175,10 +4999,75 @@ fn start_display_sinks(
             kind: "display",
             reason: format!("{}: {e}", plan.output_id),
         })?;
-        handles.push(handle);
-        publishers.push(publisher);
+        if plan.audio_enabled {
+            start_display_audio(&plan.output_id, &handle, audio_format, &mut started);
+        }
+        started.handles.push(handle);
+        started.publishers.push(publisher);
     }
-    Ok((handles, publishers))
+    Ok(started)
+}
+
+/// Start the DEV-B4 ALSA audio sink for one lit head, appending its handle +
+/// publisher to `started`. Best-effort: every miss (EDID-less head, no ALSA
+/// endpoint) logs and returns — the head runs video-only, never an error.
+#[cfg(feature = "display-kms")]
+fn start_display_audio(
+    output_id: &str,
+    handle: &multiview_output::display::DisplaySinkHandle,
+    audio_format: multiview_audio::AudioFormat,
+    started: &mut StartedDisplaySinks,
+) {
+    use multiview_output::display::audio::alsa::discover_for_connector;
+    use multiview_output::display::audio::{DisplayAudioConfig, DisplayAudioSink, FlipClock};
+
+    let head = handle.head();
+    if !head.from_edid {
+        // The documented field condition (display-out §5/§6): a forced-mode
+        // (EDID-less) head publishes no ELD, so it has NO audio path — video
+        // only, stated rather than a surprise.
+        tracing::info!(
+            output = %output_id,
+            connector = %head.connector,
+            "display head runs a forced (EDID-less) mode: no ELD, so no audio path; video only"
+        );
+        return;
+    }
+    let Some(found) = discover_for_connector(&head.connector) else {
+        tracing::warn!(
+            output = %output_id,
+            connector = %head.connector,
+            "display audio enabled but no ALSA endpoint was discovered for the connector; \
+             head runs video-only"
+        );
+        return;
+    };
+    tracing::info!(
+        output = %output_id,
+        connector = %head.connector,
+        card = %found.card_id,
+        "display audio: ALSA endpoints discovered (ELD-gated sink starting)"
+    );
+    // The head's flip telemetry is the scanout clock the audio servo's skew
+    // term anchors against (display-out §5: the three-clock problem).
+    let stats = handle.stats();
+    let flip: FlipClock = Box::new(move || stats.snapshot().last_flip_ns);
+    let (audio_handle, audio_publisher) = DisplayAudioSink::start_with_flip_clock(
+        DisplayAudioConfig {
+            output_id: output_id.to_owned(),
+            format: audio_format,
+            fifo_capacity_frames: DISPLAY_AUDIO_FIFO_FRAMES,
+            // Matches the video sink's poll: bounds stop latency and how fast
+            // an idle/ELD-waiting sink reacts, without busy-waiting (the
+            // blocking PCM write paces the steady state on hardware).
+            poll_interval: Duration::from_millis(4),
+        },
+        found.eld,
+        found.pcm,
+        Some(flip),
+    );
+    started.audio_handles.push(audio_handle);
+    started.audio_publishers.push(audio_publisher);
 }
 
 /// Build the runnable sinks from the config outputs.
@@ -4193,7 +5082,10 @@ fn start_display_sinks(
 /// proprietary runtime-loaded SDK), so they are honestly skipped with a log
 /// line rather than pretended-runnable — a config mixing one with a supported
 /// output still produces that supported output.
-fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
+fn build_outputs(
+    outputs: &[Output],
+    epoch: &multiview_output::SharedEpoch,
+) -> Result<BuiltOutputs, PipelineError> {
     // A display output in a non-display-kms build is a configuration the
     // binary cannot honour: fail the build clearly, never skip (DEV-B1).
     crate::outputs::ensure_display_outputs_supported(outputs).map_err(|reason| {
@@ -4228,11 +5120,15 @@ fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
                 // and disk bounded, instead of 404ing until a finalize that never
                 // comes. A 6-segment window is the rolling DVR depth.
                 runnable.push(RunnableOutput::Hls {
+                    // The sink shares the pipeline's epoch cell so each closed
+                    // segment is PDT-stamped from the SAME outbound epoch the
+                    // control WS publishes (DEV-C1 / ADR-M010).
                     sink: PacketMuxSink::segment_live(
                         dir,
                         prefix,
                         playlist_path.clone(),
                         HLS_LIVE_WINDOW,
+                        epoch.clone(),
                     ),
                     playlist_path,
                 });
@@ -4611,11 +5507,12 @@ fn ingest_plan_for(
         dvbsub: None,
         canvas_color,
         cadence,
-        // No GPU pinned yet: the load-aware admission pick (decide-once, in
-        // `drive_streaming`) stamps the chosen device's CUDA ordinal onto every
-        // plan before the ingest threads spawn. `None` is the default-device /
-        // GPU-free path, in lockstep with the compositor's `None`.
-        cuda_ordinal: None,
+        // No placement decision yet: the load-aware admission pick (decide-
+        // once, in `drive_streaming`) stamps `Pinned(ordinal)` onto every plan
+        // before the startup threads spawn; the live consult stamps a runtime
+        // add's outcome. `Default` is the default-device / GPU-free path, in
+        // lockstep with the compositor's default adapter.
+        decode_placement: DecodePlacement::Default,
     })
 }
 
@@ -5424,17 +6321,15 @@ fn open_and_stream(
     // the tile keeps running (invariants #1/#2). Decoded CUDA surfaces are
     // downloaded to host NV12 inside the decoder (the budgeted CPU↔GPU copy), so
     // the rest of the pipeline is unchanged (invariant #5).
-    let want_hw = multiview_ffmpeg::want_hw_decode(
-        std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV)
-            .ok()
-            .as_deref(),
-    );
-    // Pin NVDEC to the load-aware admission pick's CUDA ordinal so decode opens on
-    // the SAME physical GPU the compositor was pinned to — the whole pipeline
-    // follows one chosen device (affinity; ADR-0035 Tier-1 / the GPU-placement
-    // principle). `None` (no admission pick / GPU-free) selects libav's default
-    // CUDA device, in lockstep with the compositor's `None`.
-    let cuda_ordinal = plan.cuda_ordinal.as_deref();
+    // The placement-aware decode-open gate (ADR-W018 §7): a `Pinned` plan
+    // opens NVDEC on the admission-chosen island device (affinity; ADR-0035
+    // Tier-1); a `Default` plan keeps the env-gated hardware preference on
+    // libav's default device (the GPU-free / no-admission path); a
+    // `SoftwareOnly` plan (a live placement REJECT) never attempts hardware —
+    // NVDEC on the default device would overcommit a single-GPU island or
+    // fragment onto a different GPU (ADR-0018 never-fragment).
+    let nvdec_env = std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV).ok();
+    let (want_hw, cuda_ordinal) = decoder_open_args(&plan.decode_placement, nvdec_env.as_deref());
     let (decoder, used_hw) =
         StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw, cuda_ordinal)
             .map_err(|e| e.to_string())?;
@@ -5824,18 +6719,21 @@ mod overlay_clock_tests {
     }
 
     #[test]
-    fn no_clock_overlay_yields_none() {
-        assert!(analog_clock_from_config(&[], 1280, 720).is_none());
-        // A digital clock overlay does NOT request the analog face.
+    fn no_clock_overlay_yields_an_empty_set() {
+        assert!(analog_clocks_from_config(&[], 1280, 720).is_empty());
+        // A digital clock overlay does NOT request an analog face.
         let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
-        assert!(analog_clock_from_config(&[digital], 1280, 720).is_none());
+        assert!(analog_clocks_from_config(&[digital], 1280, 720).is_empty());
     }
 
     #[test]
     fn analog_face_param_requests_the_face() {
         let analog = clock_overlay(serde_json::json!({ "face": "analog" }));
-        let spec = analog_clock_from_config(&[analog], 1280, 720)
+        let specs = analog_clocks_from_config(&[analog], 1280, 720);
+        let spec = *specs
+            .first()
             .expect("an analog clock overlay yields a spec");
+        assert_eq!(specs.len(), 1);
         // Default placement is the bottom-right quadrant of the canvas.
         assert!(
             spec.cx() > 640.0 && spec.cy() > 360.0,
@@ -5849,13 +6747,39 @@ mod overlay_clock_tests {
         let analog = clock_overlay(
             serde_json::json!({ "face": "analog", "x": 200, "y": 150, "radius": 64 }),
         );
-        let spec = analog_clock_from_config(&[analog], 1280, 720).unwrap();
+        let specs = analog_clocks_from_config(&[analog], 1280, 720);
+        let spec = *specs.first().expect("spec");
         assert!((spec.cx() - 200.0).abs() < 0.5, "explicit x honoured");
         assert!((spec.cy() - 150.0).abs() < 0.5, "explicit y honoured");
         assert!(
             (spec.radius() - 64.0).abs() < 0.5,
             "explicit radius honoured"
         );
+    }
+
+    #[test]
+    fn every_analog_entry_yields_a_face_in_set_order() {
+        // MAJOR-1: ALL analog-face entries render — no first-wins. The specs
+        // come back in working-set order, each honouring its own placement,
+        // with the interleaved digital entry contributing nothing.
+        let a = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 100, "y": 100, "radius": 32 }),
+        );
+        let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
+        let b = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 900, "y": 500, "radius": 48 }),
+        );
+        let specs = analog_clocks_from_config(&[a, digital, b], 1280, 720);
+        assert_eq!(specs.len(), 2, "both analog entries yield faces");
+        assert!(
+            (specs[0].cx() - 100.0).abs() < 0.5,
+            "first face keeps its x"
+        );
+        assert!(
+            (specs[1].cx() - 900.0).abs() < 0.5,
+            "second face keeps its x"
+        );
+        assert!((specs[1].radius() - 48.0).abs() < 0.5);
     }
 }
 
@@ -7151,5 +8075,218 @@ segment_ms = 1000
             .expect("the caption reader registers under {id}/captions");
         flag.store(true, Ordering::Release);
         supervisor.shutdown();
+    }
+}
+
+#[cfg(all(test, feature = "overlay"))]
+mod live_overlay_bake_tests {
+    //! ADR-W021: the bake consumer re-derives its overlay render state from the
+    //! live [`OverlayApplySlot`](crate::live_overlays::OverlayApplySlot) on a
+    //! generation change — proven at the pixel level on the baked NV12 frame.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+    use multiview_core::time::Rational;
+
+    use super::{BakeContext, StreamBaker, StreamItem};
+
+    /// A pixel region (x, y, w, h) the tests assert over — placed well clear
+    /// of the top-left digital-clock chrome (whose readout changes with the
+    /// wall clock and would otherwise alias the diff).
+    type Region = (u32, u32, u32, u32);
+
+    /// The single-face region: a box around a face at (200, 120) radius 40 on
+    /// a 320x180 canvas.
+    const FACE: Region = (150, 70, 100, 100);
+    /// Region around face A at (80, 120) radius 30 (the two-clock test).
+    const FACE_A: Region = (45, 85, 70, 70);
+    /// Region around face B at (240, 120) radius 30 (the two-clock test).
+    const FACE_B: Region = (205, 85, 70, 70);
+
+    /// Count samples inside `region` whose full (y, u, v) tuple differs
+    /// between frames — chroma included, so a restore is proven on every
+    /// plane, not luma alone.
+    fn region_diff(a: &Nv12Image, b: &Nv12Image, region: Region) -> usize {
+        let (x0, y0, w, h) = region;
+        let mut differ = 0_usize;
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let pa = a.sample(x, y).expect("in bounds");
+                let pb = b.sample(x, y).expect("in bounds");
+                if pa != pb {
+                    differ += 1;
+                }
+            }
+        }
+        differ
+    }
+
+    /// A bake context with no tiles and no boot analog clock, wired to `slot`.
+    fn bake_context(slot: &crate::live_overlays::OverlayApplySlot) -> BakeContext {
+        BakeContext {
+            tile_specs: Vec::new(),
+            meter_db_timelines: HashMap::new(),
+            subtitles: None,
+            sidecar_target: None,
+            analog_clocks: Vec::new(),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            overlay_apply: Some(Arc::clone(slot)),
+        }
+    }
+
+    /// One streamed tick over a uniform dark canvas.
+    fn item(tick_index: u64) -> StreamItem {
+        let tag = CanvasColor::default().output_tag();
+        StreamItem {
+            canvas: Arc::new(Nv12Image::solid(320, 180, 16, 128, 128, tag).expect("solid")),
+            tick_index,
+            source_states: HashMap::new(),
+            captions: HashMap::new(),
+            caption_bitmaps: HashMap::new(),
+            faults: HashMap::new(),
+        }
+    }
+
+    /// An analog wall-clock overlay document at the given placement.
+    fn analog_clock_at(id: &str, x: i64, y: i64, radius: i64) -> multiview_config::Overlay {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "kind": "clock", "target": "canvas",
+            "face": "analog", "x": x, "y": y, "radius": radius
+        }))
+        .expect("valid overlay document")
+    }
+
+    /// An analog wall-clock overlay document centred in [`FACE`].
+    fn analog_clock_doc() -> multiview_config::Overlay {
+        analog_clock_at("clk", 200, 120, 40)
+    }
+
+    /// A frame baked from an EMPTY overlay set (the bare-canvas reference).
+    fn blank_frame() -> Arc<Nv12Image> {
+        let empty = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut bare = StreamBaker::new(bake_context(&empty)).expect("bare baker");
+        bare.bake(&item(0)).expect("bare bake")
+    }
+
+    #[test]
+    fn stream_baker_rederives_the_analog_clock_from_the_live_slot() {
+        // Generation 0: an empty boot set ⇒ no analog face anywhere.
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let before = baker.bake(&item(0)).expect("bake gen 0");
+
+        // LIVE APPLY: publish a set carrying the analog clock. The next baked
+        // frame must ink the face (the bezel ring + hands) into the region.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let with_face = baker.bake(&item(1)).expect("bake gen 1");
+        let inked = region_diff(&before, &with_face, FACE);
+        assert!(
+            inked > 50,
+            "the live-applied analog face must visibly ink the region \
+             (differing samples: {inked})"
+        );
+
+        // LIVE REMOVE: publish the empty set again — the face disappears and
+        // the region returns to the bare-canvas pixels (every plane).
+        let _gen = crate::live_overlays::publish_set(&slot, Vec::new());
+        let removed = baker.bake(&item(2)).expect("bake gen 2");
+        assert_eq!(
+            region_diff(&before, &removed, FACE),
+            0,
+            "removing the overlay must restore the bare-canvas face region"
+        );
+    }
+
+    #[test]
+    fn two_analog_clocks_both_ink_and_removing_one_keeps_the_other() {
+        // MAJOR-1: EVERY analog-face clock entry renders its own face — there
+        // is no first-wins. Two clocks at distinct placements both ink, and
+        // removing one keeps the other while restoring the removed region.
+        let blank = blank_frame();
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let _gen = crate::live_overlays::publish_set(
+            &slot,
+            vec![
+                analog_clock_at("clk_a", 80, 120, 30),
+                analog_clock_at("clk_b", 240, 120, 30),
+            ],
+        );
+        let both = baker.bake(&item(0)).expect("bake both");
+        let a_ink = region_diff(&blank, &both, FACE_A);
+        let b_ink = region_diff(&blank, &both, FACE_B);
+        assert!(
+            a_ink > 50,
+            "the FIRST analog face must ink its region (got {a_ink})"
+        );
+        assert!(
+            b_ink > 50,
+            "the SECOND analog face must ink its region too — no first-wins \
+             (got {b_ink})"
+        );
+
+        // Remove clk_b: clk_a keeps drawing, clk_b's region restores exactly.
+        let _gen =
+            crate::live_overlays::publish_set(&slot, vec![analog_clock_at("clk_a", 80, 120, 30)]);
+        let only_a = baker.bake(&item(1)).expect("bake only_a");
+        assert!(
+            region_diff(&blank, &only_a, FACE_A) > 50,
+            "removing the OTHER clock must not disturb the kept face"
+        );
+        assert_eq!(
+            region_diff(&blank, &only_a, FACE_B),
+            0,
+            "the removed clock's region must restore to the bare canvas"
+        );
+    }
+
+    #[test]
+    fn seeded_slot_drives_the_first_bake() {
+        // The context carries no boot analog clock, but the slot's
+        // generation-0 set does: the FIRST bake must already honour the slot
+        // (the seeded set is the boot truth — one source of truth).
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+        let first = baker.bake(&item(0)).expect("bake");
+        assert!(
+            region_diff(&blank_frame(), &first, FACE) > 50,
+            "the seeded slot set must drive the very first bake"
+        );
+    }
+
+    #[test]
+    fn same_generation_bake_skips_rederivation() {
+        // The generation gate genuinely skips: perturb the baker's derived
+        // face state BEHIND the gate and prove a same-generation bake does
+        // NOT restore it (no re-derive happened), while a new generation does.
+        let blank = blank_frame();
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let first = baker.bake(&item(0)).expect("bake gen 0");
+        assert!(region_diff(&blank, &first, FACE) > 50, "gen-0 face inks");
+
+        // PERTURB: clear the derived faces directly. If the gate works, the
+        // next bake (same generation) must NOT re-derive them from the slot.
+        baker.baker.set_analog_clocks(Vec::new());
+        let second = baker.bake(&item(1)).expect("bake same gen");
+        assert_eq!(
+            region_diff(&blank, &second, FACE),
+            0,
+            "a same-generation bake must skip re-derivation (gate holds)"
+        );
+
+        // A NEW generation re-derives from the slot: the face returns.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let third = baker.bake(&item(2)).expect("bake new gen");
+        assert!(
+            region_diff(&blank, &third, FACE) > 50,
+            "a new generation must re-derive (the face returns)"
+        );
     }
 }

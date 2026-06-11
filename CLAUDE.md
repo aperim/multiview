@@ -232,6 +232,11 @@ npm --prefix web run lint
 ```
 
 Notes:
+- **Worktree builds: `CARGO_TARGET_DIR=<worktree>/target` — NEVER `/tmp`.** The devcontainer's
+ global target dir is shared across worktrees (cross-worktree rlib contamination), and per-lane
+ `/tmp/*-target` dirs filled the disk with TiB of artifacts (operator directive 2026-06-10).
+ Worktree-local `target/` is gitignored, isolated, and removed with `git worktree remove` —
+ remove merged lanes' worktrees promptly; reviewers reuse the lane's target dir.
 - **Default `cargo check` must stay green without GPUs.** Never make a hardware feature default-on.
 - Run a single crate's tests with `cargo test -p multiview-<area>`.
 - GPU decode/composite/encode + SSIM/PSNR run only on GPU-tagged self-hosted runners; the software
