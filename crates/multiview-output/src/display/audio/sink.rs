@@ -23,7 +23,8 @@ use multiview_audio::{AdaptiveResampler, AudioBlock, AudioFormat, ChannelMatrix}
 
 use super::eld::EldCapability;
 use super::fifo::AudioFifo;
-use super::servo::{drain_ratio, skew_ms, BufferServo};
+use super::servo::{drain_ratio, BufferServo};
+use super::tracker::SkewTracker;
 use super::xrun::{PcmOutcome, XrunRecovery, XrunState};
 
 /// A reader of the display's most recent kernel flip timestamp in nanoseconds
@@ -466,8 +467,7 @@ where
     };
     let mut session = PcmSession {
         recovery: XrunRecovery::new(),
-        anchor: None,
-        delivered: 0,
+        tracker: SkewTracker::new(),
     };
     let mut recheck = 0u32;
 
@@ -486,8 +486,14 @@ where
         }
 
         // Servo: fill + measured skew → drain demand → reciprocal → resampler
-        // ratio (see `drain_ratio` for the sign physics).
-        let skew = measured_skew(alsa, flip_clock, &session, rate);
+        // ratio (see `drain_ratio` for the sign physics). The skew tracker
+        // observes the latest flip-clock value (0 = no flip clock / not lit)
+        // plus the PCM's current delay once per iteration.
+        let flip_ns = flip_clock.map_or(0, |flip| flip());
+        let skew =
+            session
+                .tracker
+                .skew_input(flip_ns, alsa.delay_frames(), resampler.ratio(), rate);
         let dropped = match fifo.lock() {
             Ok(mut f) => {
                 let fill = f.fill_fraction();
@@ -526,7 +532,7 @@ where
                 alsa,
                 stats,
                 &mut session,
-                flip_clock,
+                resampler.ratio(),
                 samples,
                 out_channels,
             );
@@ -550,57 +556,25 @@ where
 }
 
 /// The per-PCM-session mutable drain state: the xrun-recovery machine plus the
-/// skew-anchor bookkeeping (re-anchored after any xrun, because the device
-/// position jumps across a recover).
+/// skew tracker (re-anchored after any xrun, because the device position jumps
+/// across a recover).
 struct PcmSession {
     /// The xrun-recovery state machine for this PCM.
     recovery: XrunRecovery,
-    /// `(flip ns, frames delivered)` captured after a clean write while the
-    /// flip clock was live; [`None`] until anchored / after an xrun.
-    anchor: Option<(u64, u64)>,
-    /// Total frames delivered to the PCM this session.
-    delivered: u64,
-}
-
-/// The measured sample-vs-scanout skew (ms; positive = audio ahead) for the
-/// servo's slow alignment term. Zero without a flip clock or anchor (the FIFO
-/// fill term then holds sync alone — the CI / pre-first-flip state).
-fn measured_skew<A>(
-    alsa: &mut A,
-    flip_clock: Option<&FlipClock>,
-    session: &PcmSession,
-    rate: u32,
-) -> f64
-where
-    A: AlsaSink,
-{
-    match (flip_clock, session.anchor) {
-        (Some(flip), Some((flip0, delivered0))) => {
-            let now = flip();
-            if now > flip0 {
-                let played = session
-                    .delivered
-                    .saturating_sub(delivered0)
-                    .saturating_sub(alsa.delay_frames().map_or(0, |d| d.max(0).unsigned_abs()));
-                skew_ms(played, rate, now - flip0)
-            } else {
-                0.0
-            }
-        }
-        _ => 0.0,
-    }
+    /// The sample-vs-scanout skew bookkeeping for the servo's slow term.
+    tracker: SkewTracker,
 }
 
 /// Write one prepared quantum to the PCM, advancing the recovery machine, the
-/// delivered/anchor bookkeeping, and the telemetry counters. An xrun triggers
-/// the recover action and drops the skew anchor; nothing here can fail the
-/// loop (every outcome is a state transition, never a panic).
+/// skew tracker, and the telemetry counters. An xrun triggers the recover
+/// action and drops the skew anchor; nothing here can fail the loop (every
+/// outcome is a state transition, never a panic).
 fn write_quantum<A>(
     output_id: &str,
     alsa: &mut A,
     stats: &AudioSinkStats,
     session: &mut PcmSession,
-    flip_clock: Option<&FlipClock>,
+    applied: multiview_audio::RatioPpm,
     samples: &[f32],
     out_channels: usize,
 ) where
@@ -612,21 +586,12 @@ fn write_quantum<A>(
         PcmOutcome::Wrote(frames) => {
             let frames = u64::try_from(frames).unwrap_or(0);
             stats.frames_written.fetch_add(frames, Ordering::Relaxed);
-            session.delivered = session.delivered.saturating_add(frames);
-            // Anchor the skew measurement once the flip clock is live.
-            if session.anchor.is_none() {
-                if let Some(flip) = flip_clock {
-                    let now = flip();
-                    if now > 0 {
-                        session.anchor = Some((now, session.delivered));
-                    }
-                }
-            }
+            session.tracker.on_written(frames, applied);
         }
         PcmOutcome::Underrun | PcmOutcome::Suspended => {
             tracing::debug!(output = %output_id, "display-audio xrun; recovering");
             // The device position jumps across a recover: re-anchor.
-            session.anchor = None;
+            session.tracker.on_xrun();
         }
         PcmOutcome::Recovered | PcmOutcome::RecoverFailed => {}
     }

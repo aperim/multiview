@@ -49,6 +49,7 @@ pub mod eld;
 pub mod fifo;
 pub mod servo;
 pub mod sink;
+pub mod tracker;
 pub mod xrun;
 
 /// The real libasound PCM + `/proc/asound`/ELD-control reader (feature
@@ -66,4 +67,5 @@ pub use sink::{
     AlsaSink, AudioStatsSnapshot, DisplayAudioConfig, DisplayAudioPublisher, DisplayAudioSink,
     EldSource, FlipClock, PcmParams,
 };
+pub use tracker::SkewTracker;
 pub use xrun::{PcmOutcome, RecoverAction, XrunRecovery, XrunState};
