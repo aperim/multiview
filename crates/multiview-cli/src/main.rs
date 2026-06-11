@@ -214,6 +214,16 @@ struct ControlPlaneWiring {
     registry: multiview_cli::live_sources::StopRegistry,
     /// What the running engine can take live (per-collection header honesty).
     live_apply: multiview_control::LiveApplyCaps,
+    /// The Conspect local entitlement plane (ADR-0050): the verified-lease store
+    /// the licence resource renders + the optional pinned issuer key the install
+    /// path verifies against. `None` ⇒ the unlicensed-data default. Control-plane
+    /// only (invariant #1/#10).
+    licence: Option<multiview_control::LicenceState>,
+    /// The Conspect local-mesh state (ADR-0051): the shared `MeshState` the
+    /// always-on announce/browse loop maintains, so `/api/v1/mesh/*` serves live
+    /// discovery. `None` ⇒ an empty, relay-declined default. Control-plane only
+    /// (invariant #10).
+    mesh: Option<Arc<multiview_mesh::MeshState>>,
 }
 
 /// Bring up the management control plane for a run (one wiring for BOTH run
@@ -237,8 +247,6 @@ async fn serve_control_plane(
     config_path: &Path,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     wiring: ControlPlaneWiring,
-    licence: Option<multiview_control::LicenceState>,
-    mesh: Option<Arc<multiview_mesh::MeshState>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<(
     tokio::task::JoinHandle<std::io::Result<()>>,
@@ -251,6 +259,8 @@ async fn serve_control_plane(
         stores,
         registry,
         live_apply,
+        licence,
+        mesh,
     } = wiring;
     let (commands, command_rx) = command_bus(64);
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
@@ -300,6 +310,16 @@ async fn serve_control_plane(
 /// slot, and submits to the non-blocking command bus the pipeline drains at each
 /// frame boundary; none of it can back-pressure the output clock (inv #1 + #10).
 #[cfg(feature = "ffmpeg")]
+// This is the full-pipeline run-path orchestration entry point: it brings up
+// the control plane (with the feature-gated overlay/seam drain selection), the
+// off-hot-loop pollers (metrics/retention/timing) + the GPU capability probe,
+// drives the program through the engine `ProgramSet`, then tears every tenant
+// down. The cohesive sub-units (`spawn_metrics_retention`, `shutdown_run_tenants`)
+// are already extracted; what remains is straight-line wiring whose value is in
+// reading it top-to-bottom in one place. Splitting the remaining body would only
+// scatter the run lifecycle across helpers without improving clarity, so the
+// line-count lint is allowed here with justification (matching `bind_and_serve`).
+#[allow(clippy::too_many_lines)]
 async fn run_pipeline_until_ctrl_c(
     pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
@@ -345,12 +365,12 @@ async fn run_pipeline_until_ctrl_c(
                     stores: pipeline.preview_stores(),
                     registry: pipeline.stop_registry(),
                     live_apply,
+                    licence: Some(multiview_control::LicenceState::new(
+                        Arc::clone(&plane.store),
+                        plane.pinned.clone(),
+                    )),
+                    mesh: Some(Arc::clone(&plane.mesh)),
                 },
-                Some(multiview_control::LicenceState::new(
-                    Arc::clone(&plane.store),
-                    plane.pinned.clone(),
-                )),
-                Some(Arc::clone(&plane.mesh)),
                 shutdown_rx,
             )
             .await?;
@@ -409,17 +429,8 @@ async fn run_pipeline_until_ctrl_c(
     );
 
     // CONSPECT engine-seam S5 (ADR-0052 §3): the consent-independent local-metrics
-    // retention feed for the real libav pipeline. A read-only subscriber to the
-    // SAME outbound broadcast mirrors live utilisation / per-input reconnect /
-    // incident events into the bounded, drop-oldest on-box [`RetentionStore`] for
-    // the §7.2 support bundle — independent of telemetry consent, never able to
-    // back-pressure the engine (read-only + lagged-skip, invariant #10). The feed
-    // task self-terminates when the engine's publish handles drop at shutdown.
-    let retention_store = Arc::new(multiview_telemetry::retention::RetentionStore::new());
-    let retention_task = tokio::spawn(multiview_cli::metrics_retention::run_metrics_retention(
-        publisher.subscribe(),
-        Arc::clone(&retention_store),
-    ));
+    // retention feed for the real libav pipeline.
+    let (retention_store, retention_task) = spawn_metrics_retention(&publisher);
 
     // DEV-C1 (ADR-M010): the ~1 Hz outbound presentation-epoch publisher — one
     // `WallClockRef` per program as conflated `timing.status` on the control WS
@@ -470,30 +481,19 @@ async fn run_pipeline_until_ctrl_c(
         drive_main_program_in_set(pipeline, cadence, &stop, &publisher, &preview_slot, drain)
             .await?;
 
-    // The pipeline loop returned; stop the metrics + timing pollers (both also
-    // self-stop on the StopSignal within one sample period), the retention feed,
-    // the config-file watcher, and tear down the live-source hub (it stops +
-    // joins every runtime producer).
-    metrics_task.abort();
-    timing_task.abort();
-    retention_task.abort();
-    log_retention_summary(&retention_store);
-    if let Some(watch) = config_watch {
-        watch.stop();
-    }
-    if let Some(hub) = live_hub {
-        hub.shutdown();
-    }
-
-    let _ = shutdown_tx.send(());
-    if let Some(handle) = server {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "control server I/O error at shutdown"),
-            Err(e) => tracing::warn!(error = %e, "control server task join error"),
-        }
-    }
-    signal.abort();
+    // The pipeline loop returned; tear down every run tenant in one call.
+    shutdown_run_tenants(RunTenants {
+        metrics_task,
+        timing_task,
+        retention_task,
+        retention_store,
+        config_watch,
+        live_hub,
+        server,
+        shutdown_tx,
+        signal,
+    })
+    .await;
     Ok(report)
 }
 
@@ -665,12 +665,12 @@ async fn run_software_until_ctrl_c(
                     // document renders on this path, so the honest default
                     // (everything `restart`) is the truth (ADR-W022).
                     live_apply: multiview_control::LiveApplyCaps::default(),
+                    licence: Some(multiview_control::LicenceState::new(
+                        Arc::clone(&plane.store),
+                        plane.pinned.clone(),
+                    )),
+                    mesh: Some(Arc::clone(&plane.mesh)),
                 },
-                Some(multiview_control::LicenceState::new(
-                    Arc::clone(&plane.store),
-                    plane.pinned.clone(),
-                )),
-                Some(Arc::clone(&plane.mesh)),
                 shutdown_rx,
             )
             .await?;
@@ -715,18 +715,8 @@ async fn run_software_until_ctrl_c(
     );
 
     // CONSPECT engine-seam S5 (ADR-0052 §3): the consent-independent local-metrics
-    // retention feed. A read-only subscriber to the SAME outbound broadcast mirrors
-    // live utilisation / per-input reconnect / incident events into the bounded,
-    // drop-oldest on-box [`RetentionStore`] for the §7.2 support bundle. It is
-    // independent of telemetry consent and can never back-pressure the engine
-    // (read-only + lagged-skip, invariant #10). Held in the run scope so the store
-    // lives for the whole run; the feed task self-terminates when the engine's
-    // publish handles drop at shutdown.
-    let retention_store = Arc::new(multiview_telemetry::retention::RetentionStore::new());
-    let retention_task = tokio::spawn(multiview_cli::metrics_retention::run_metrics_retention(
-        publisher.subscribe(),
-        Arc::clone(&retention_store),
-    ));
+    // retention feed for the software run.
+    let (retention_store, retention_task) = spawn_metrics_retention(&publisher);
 
     // DEV-C1 (ADR-M010): the outbound presentation epoch publishes on the
     // software path too — `timing.status` per program on the same drop-oldest
@@ -751,29 +741,19 @@ async fn run_software_until_ctrl_c(
         .await
         .context("headless run until Ctrl-C")?;
 
-    // The engine loop returned; stop the metrics + timing pollers (both also
-    // self-stop on the StopSignal within one sample period), the config-file
-    // watcher, tear down the live-source hub (it stops + joins every runtime
-    // producer), and bring the control server down.
-    metrics_task.abort();
-    timing_task.abort();
-    retention_task.abort();
-    log_retention_summary(&retention_store);
-    if let Some(watch) = config_watch {
-        watch.stop();
-    }
-    if let Some(hub) = live_hub {
-        hub.shutdown();
-    }
-    let _ = shutdown_tx.send(());
-    if let Some(handle) = server {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "control server I/O error at shutdown"),
-            Err(e) => tracing::warn!(error = %e, "control server task join error"),
-        }
-    }
-    signal.abort();
+    // The engine loop returned; tear down every run tenant in one call.
+    shutdown_run_tenants(RunTenants {
+        metrics_task,
+        timing_task,
+        retention_task,
+        retention_store,
+        config_watch,
+        live_hub,
+        server,
+        shutdown_tx,
+        signal,
+    })
+    .await;
     Ok(report)
 }
 
@@ -813,6 +793,95 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
         tracing::warn!(advisory = %warning, "config advisory");
     }
     Ok(config)
+}
+
+/// The control-plane + off-hot-loop tenants a run brings up alongside the
+/// engine, gathered so a run path can tear them ALL down in one call
+/// ([`shutdown_run_tenants`]) — identical for the software and full-pipeline
+/// paths. None of these can back-pressure the engine (invariant #1/#10); this
+/// is purely orderly shutdown after the drive loop has already returned.
+struct RunTenants {
+    /// The ~1.3 Hz system-metrics poller (self-stops on the `StopSignal` too).
+    metrics_task: tokio::task::JoinHandle<()>,
+    /// The ~1 Hz presentation-epoch / `timing.status` publisher.
+    timing_task: tokio::task::JoinHandle<()>,
+    /// The CONSPECT S5 consent-independent local-metrics retention feed.
+    retention_task: tokio::task::JoinHandle<()>,
+    /// The retention store the feed wrote (summarised at shutdown).
+    retention_store: Arc<multiview_telemetry::retention::RetentionStore>,
+    /// The ADR-W020 config-file watcher, when the control plane is up.
+    config_watch: Option<multiview_cli::config_watch::ConfigWatchHandle>,
+    /// The ADR-W018 live-source hub (stops + joins every runtime producer).
+    live_hub: Option<multiview_cli::live_sources::LiveSourceHub>,
+    /// The control server task, when the control plane is up.
+    server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    /// Signals the control server to begin its graceful shutdown.
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// The Ctrl-C watcher task.
+    signal: tokio::task::JoinHandle<()>,
+}
+
+/// Tear down every run tenant after the engine drive loop has returned: abort
+/// the off-hot-loop pollers + the retention feed (each also self-stops on the
+/// `StopSignal`), log the retained-metrics summary, stop the config-file
+/// watcher, shut the live-source hub down, then signal + join the control
+/// server. Order matters only for the graceful server join (signal → await).
+async fn shutdown_run_tenants(tenants: RunTenants) {
+    let RunTenants {
+        metrics_task,
+        timing_task,
+        retention_task,
+        retention_store,
+        config_watch,
+        live_hub,
+        server,
+        shutdown_tx,
+        signal,
+    } = tenants;
+    metrics_task.abort();
+    timing_task.abort();
+    retention_task.abort();
+    log_retention_summary(&retention_store);
+    if let Some(watch) = config_watch {
+        watch.stop();
+    }
+    if let Some(hub) = live_hub {
+        hub.shutdown();
+    }
+    let _ = shutdown_tx.send(());
+    if let Some(handle) = server {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "control server I/O error at shutdown"),
+            Err(e) => tracing::warn!(error = %e, "control server task join error"),
+        }
+    }
+    signal.abort();
+}
+
+/// Spawn the CONSPECT engine-seam S5 (ADR-0052 §3) consent-independent
+/// local-metrics retention feed and return its store + task handle.
+///
+/// A read-only subscriber to the SAME outbound broadcast mirrors live
+/// utilisation / per-input reconnect / incident events into the bounded,
+/// drop-oldest on-box [`RetentionStore`] the §7.2 support bundle draws from —
+/// independent of telemetry consent, never able to back-pressure the engine
+/// (read-only + lagged-skip, invariant #10). The caller holds the returned
+/// store in run scope (so it lives for the whole run, logged at shutdown via
+/// [`log_retention_summary`]); the feed task self-terminates when the engine's
+/// publish handles drop at shutdown.
+fn spawn_metrics_retention(
+    publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+) -> (
+    Arc<multiview_telemetry::retention::RetentionStore>,
+    tokio::task::JoinHandle<()>,
+) {
+    let retention_store = Arc::new(multiview_telemetry::retention::RetentionStore::new());
+    let retention_task = tokio::spawn(multiview_cli::metrics_retention::run_metrics_retention(
+        publisher.subscribe(),
+        Arc::clone(&retention_store),
+    ));
+    (retention_store, retention_task)
 }
 
 /// Log a one-line summary of what the consent-independent local-metrics retention
