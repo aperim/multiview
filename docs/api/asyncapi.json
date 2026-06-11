@@ -1787,7 +1787,8 @@
         "enum": [
           "gpu-present-no-vulkan-adapter",
           "config-file-invalid",
-          "config-file-requires-restart"
+          "config-file-requires-restart",
+          "config-file-apply-incomplete"
         ],
         "type": "string"
       },

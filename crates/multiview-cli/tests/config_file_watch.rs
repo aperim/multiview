@@ -626,9 +626,7 @@ async fn a_shed_apply_is_retried_and_never_claims_applied() {
     // Drain the bus (the dummy goes away): the watcher's retry now lands.
     let first = r.commands.try_drain();
     assert!(
-        first
-            .iter()
-            .any(|c| matches!(c, Command::Start { .. })),
+        first.iter().any(|c| matches!(c, Command::Start { .. })),
         "the dummy filled the bus, got {first:?}"
     );
     assert!(
@@ -696,7 +694,7 @@ async fn stopping_the_watcher_marks_the_status_inactive() {
     );
 }
 
-/// REVIEW m3: an expect_write token is paired with the CONTENT the server
+/// REVIEW m3: an `expect_write` token is paired with the CONTENT the server
 /// will write — a banked token must not eat a REAL external edit that lands
 /// first; the expected content is still suppressed when it arrives later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

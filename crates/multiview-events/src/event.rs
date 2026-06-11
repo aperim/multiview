@@ -333,6 +333,11 @@ pub enum WarningCode {
     /// process differs from the file until a restart (ADR-W020). **Latched**
     /// until restart; the message names the pending sections.
     ConfigFileRequiresRestart,
+    /// A valid config-file change was only PARTIALLY applied: one or more
+    /// engine commands were shed on a full command bus (ADR-W020 review M1).
+    /// The watcher retries the whole (idempotent) apply on its next poll and
+    /// clears this warning when the apply completes.
+    ConfigFileApplyIncomplete,
 }
 
 /// An actionable health warning — a richer *sibling* of [`Alert`].
@@ -384,6 +389,7 @@ impl WarningCode {
             Self::GpuPresentNoVulkanAdapter => "gpu-present-no-vulkan-adapter",
             Self::ConfigFileInvalid => "config-file-invalid",
             Self::ConfigFileRequiresRestart => "config-file-requires-restart",
+            Self::ConfigFileApplyIncomplete => "config-file-apply-incomplete",
         }
     }
 }

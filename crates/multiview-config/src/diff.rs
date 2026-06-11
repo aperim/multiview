@@ -78,40 +78,83 @@ impl ConfigDiff {
     /// Compute the structural diff from the `running` document to `next`.
     #[must_use]
     pub fn between(running: &MultiviewConfig, next: &MultiviewConfig) -> Self {
+        // EXHAUSTIVE destructure (no `..`): adding a field to `MultiviewConfig`
+        // is a compile error HERE until this diff accounts for it — a new
+        // section can never silently fall through the watcher (review m1).
+        // `#[non_exhaustive]` does not apply within the defining crate.
+        let MultiviewConfig {
+            schema_version: running_schema_version,
+            canvas: running_canvas,
+            layout: running_layout,
+            sources: _,
+            cells: running_cells,
+            overlays: running_overlays,
+            outputs: running_outputs,
+            probes: running_probes,
+            tally_profiles: running_tally_profiles,
+            salvos: running_salvos,
+            walls: running_walls,
+            devices: running_devices,
+            sync_groups: running_sync_groups,
+            control: running_control,
+            placement: running_placement,
+            audio: running_audio,
+            routing: running_routing,
+        } = running;
+        let MultiviewConfig {
+            schema_version: next_schema_version,
+            canvas: next_canvas,
+            layout: next_layout,
+            sources: _,
+            cells: next_cells,
+            overlays: next_overlays,
+            outputs: next_outputs,
+            probes: next_probes,
+            tally_profiles: next_tally_profiles,
+            salvos: next_salvos,
+            walls: next_walls,
+            devices: next_devices,
+            sync_groups: next_sync_groups,
+            control: next_control,
+            placement: next_placement,
+            audio: next_audio,
+            routing: next_routing,
+        } = next;
+
         // Canvas: the pinned signal is geometry + cadence BY VALUE (the
         // LayoutCanvas PartialEq cross-multiplies Fps), exactly the ADR-W019
         // Class-1 gate's comparison. Everything else on the canvas is
         // cosmetic (and still restart-only).
         let running_signal = LayoutCanvas::new(
-            running.canvas.width,
-            running.canvas.height,
-            running.canvas.fps,
+            running_canvas.width,
+            running_canvas.height,
+            running_canvas.fps,
         );
-        let next_signal = LayoutCanvas::new(next.canvas.width, next.canvas.height, next.canvas.fps);
+        let next_signal = LayoutCanvas::new(next_canvas.width, next_canvas.height, next_canvas.fps);
         let canvas_signal_changed = running_signal != next_signal;
-        let canvas_cosmetic_changed = !canvas_signal_changed && running.canvas != next.canvas;
+        let canvas_cosmetic_changed = !canvas_signal_changed && running_canvas != next_canvas;
 
         let mut changed_sections = BTreeSet::new();
         let sectioned: [(&'static str, bool); 13] = [
             (
                 "schema_version",
-                running.schema_version != next.schema_version,
+                running_schema_version != next_schema_version,
             ),
-            ("outputs", running.outputs != next.outputs),
-            ("overlays", running.overlays != next.overlays),
-            ("probes", running.probes != next.probes),
-            ("audio", running.audio != next.audio),
-            ("control", running.control != next.control),
-            ("placement", running.placement != next.placement),
-            ("salvos", running.salvos != next.salvos),
+            ("outputs", running_outputs != next_outputs),
+            ("overlays", running_overlays != next_overlays),
+            ("probes", running_probes != next_probes),
+            ("audio", running_audio != next_audio),
+            ("control", running_control != next_control),
+            ("placement", running_placement != next_placement),
+            ("salvos", running_salvos != next_salvos),
             (
                 "tally_profiles",
-                running.tally_profiles != next.tally_profiles,
+                running_tally_profiles != next_tally_profiles,
             ),
-            ("walls", running.walls != next.walls),
-            ("devices", running.devices != next.devices),
-            ("sync_groups", running.sync_groups != next.sync_groups),
-            ("routing", running.routing != next.routing),
+            ("walls", running_walls != next_walls),
+            ("devices", running_devices != next_devices),
+            ("sync_groups", running_sync_groups != next_sync_groups),
+            ("routing", running_routing != next_routing),
         ];
         for (name, changed) in sectioned {
             if changed {
@@ -119,13 +162,16 @@ impl ConfigDiff {
             }
         }
 
-        Self {
+        let mut diff = Self {
             sources: diff_sources(running, next),
             canvas_signal_changed,
             canvas_cosmetic_changed,
-            layout_changed: running.layout != next.layout || running.cells != next.cells,
+            layout_changed: running_layout != next_layout || running_cells != next_cells,
             changed_sections,
-        }
+        };
+        // Defence in depth behind the compile-time destructure guard above.
+        backstop_unrecognized(&mut diff, running == next);
+        diff
     }
 
     /// Whether the two documents were structurally identical.
@@ -136,6 +182,18 @@ impl ConfigDiff {
             && !self.canvas_cosmetic_changed
             && !self.layout_changed
             && self.changed_sections.is_empty()
+    }
+}
+
+/// The review-m1 backstop: if the per-section comparison produced an EMPTY
+/// diff for two documents that are NOT equal (`documents_equal == false`),
+/// surface a named `"unrecognized"` restart section instead of letting the
+/// change vanish silently. Normally unreachable — [`ConfigDiff::between`]
+/// destructures `MultiviewConfig` exhaustively, so a new field is a compile
+/// error there — this guards a future partial-compare regression at runtime.
+fn backstop_unrecognized(diff: &mut ConfigDiff, documents_equal: bool) {
+    if diff.is_empty() && !documents_equal {
+        diff.changed_sections.insert("unrecognized");
     }
 }
 
