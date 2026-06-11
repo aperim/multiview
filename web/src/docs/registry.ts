@@ -307,6 +307,50 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
     related: ["/help/devices", "/help/display-nodes"],
   },
   {
+    path: "/help/casting",
+    title: msg`Casting`,
+    summary: msg`Server-initiated Google Cast playback of a served HLS rendition: ad-hoc sessions, honest Tier-D latency, cross-VLAN manual addresses, save-as-device.`,
+    keywords: [
+      "cast",
+      "casting",
+      "google cast",
+      "castv2",
+      "tv",
+      "session",
+      "8009",
+      "latency",
+      "vlan",
+    ],
+    sections: [
+      {
+        id: "what-casting-is",
+        title: msg`What casting is here`,
+        keywords: ["server-initiated", "default media receiver", "hls", "ephemeral", "encode-once"],
+      },
+      {
+        id: "casting-latency",
+        title: msg`Latency: honest expectations`,
+        keywords: ["tier d", "seconds", "6-30", "segment", "ll-hls", "glass-to-glass"],
+      },
+      {
+        id: "casting-network",
+        title: msg`Networks, VLANs, and the manual address`,
+        keywords: ["mdns", "vlan", "manual address", "8009", "ipv6", "cast_media_base"],
+      },
+      {
+        id: "casting-save-device",
+        title: msg`Saving a session as a device`,
+        keywords: ["save as device", "promote", "export", "restart", "managed"],
+      },
+      {
+        id: "casting-failures",
+        title: msg`Failure modes`,
+        keywords: ["preempted", "sender", "sleep", "ip change", "uuid", "idle", "unreachable"],
+      },
+    ],
+    related: ["/help/devices", "/help/devices/adopt", "/help/concepts/latency"],
+  },
+  {
     path: "/help/display-nodes",
     title: msg`Display nodes`,
     summary: msg`Multiview's own playout endpoints: enrolled, frame-accurate wall heads on small computers.`,
