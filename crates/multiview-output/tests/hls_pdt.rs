@@ -159,6 +159,91 @@ fn live_playlist_stamps_every_segment_from_the_shared_epoch() {
 }
 
 #[test]
+fn an_epoch_step_marks_the_next_closed_segment_discontinuous() {
+    // wall-clock-sync §3: an epoch re-anchor STEP follows the same Class-2
+    // discontinuity rules as a `D` change — the playlist must carry
+    // `EXT-X-DISCONTINUITY` on the first segment closed under the new map.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let playlist_path = dir.path().join("multiview.m3u8");
+    let epoch = SharedEpoch::new();
+    epoch.set(WallClockRef::new(1_781_049_600_000_000_000, 0, rate_ns()));
+
+    let mut live = LivePlaylist::new(playlist_path.clone(), 6);
+    live.set_epoch_source(epoch.clone());
+
+    let p0 = dir.path().join("seg0.ts");
+    std::fs::write(&p0, b"x").expect("segment file");
+    live.push_closed_segment("seg0.ts", p0, 2.0, 0)
+        .expect("publish");
+
+    // The sampler observed a gross discontinuity (>250 ms): a Class-2-like
+    // re-anchor, published as a STEPPED epoch (new generation).
+    epoch.set_stepped(WallClockRef::new(1_781_049_601_000_000_000, 0, rate_ns()));
+    let p1 = dir.path().join("seg1.ts");
+    std::fs::write(&p1, b"x").expect("segment file");
+    live.push_closed_segment("seg1.ts", p1, 2.0, 2_000_000_000)
+        .expect("publish");
+
+    // A subsequent hold/slew republish (same generation) marks nothing more.
+    epoch.set(WallClockRef::new(1_781_049_601_000_001_000, 0, rate_ns()));
+    let p2 = dir.path().join("seg2.ts");
+    std::fs::write(&p2, b"x").expect("segment file");
+    live.push_closed_segment("seg2.ts", p2, 2.0, 4_000_000_000)
+        .expect("publish");
+
+    let manifest = std::fs::read_to_string(&playlist_path).expect("manifest");
+    assert!(
+        manifest.contains("#EXT-X-DISCONTINUITY\n"),
+        "an epoch step must emit EXT-X-DISCONTINUITY, got:\n{manifest}"
+    );
+    assert_eq!(
+        manifest.matches("#EXT-X-DISCONTINUITY\n").count(),
+        1,
+        "exactly the stepped boundary is discontinuous, got:\n{manifest}"
+    );
+    let disc_at = manifest
+        .find("#EXT-X-DISCONTINUITY\n")
+        .expect("tag present");
+    let seg1_at = manifest.find("seg1.ts").expect("seg1 listed");
+    let seg0_at = manifest.find("seg0.ts").expect("seg0 listed");
+    assert!(
+        seg0_at < disc_at && disc_at < seg1_at,
+        "the tag precedes the first segment closed under the stepped map, got:\n{manifest}"
+    );
+}
+
+#[test]
+fn held_and_slewed_epoch_updates_mark_no_discontinuity() {
+    // Hold/slew keep one continuous map (bounded movement, same generation):
+    // no EXT-X-DISCONTINUITY may appear.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let playlist_path = dir.path().join("multiview.m3u8");
+    let epoch = SharedEpoch::new();
+    epoch.set(WallClockRef::new(1_781_049_600_000_000_000, 0, rate_ns()));
+
+    let mut live = LivePlaylist::new(playlist_path.clone(), 6);
+    live.set_epoch_source(epoch.clone());
+
+    let p0 = dir.path().join("seg0.ts");
+    std::fs::write(&p0, b"x").expect("segment file");
+    live.push_closed_segment("seg0.ts", p0, 2.0, 0)
+        .expect("publish");
+
+    // A slewed re-anchor (≤ slew bound) republishes through `set`.
+    epoch.set(WallClockRef::new(1_781_049_600_000_005_000, 0, rate_ns()));
+    let p1 = dir.path().join("seg1.ts");
+    std::fs::write(&p1, b"x").expect("segment file");
+    live.push_closed_segment("seg1.ts", p1, 2.0, 2_000_000_000)
+        .expect("publish");
+
+    let manifest = std::fs::read_to_string(&playlist_path).expect("manifest");
+    assert!(
+        !manifest.contains("DISCONTINUITY"),
+        "hold/slew must not mark a discontinuity, got:\n{manifest}"
+    );
+}
+
+#[test]
 fn live_playlist_without_an_epoch_emits_no_pdt() {
     let dir = tempfile::tempdir().expect("tempdir");
     let playlist_path = dir.path().join("multiview.m3u8");

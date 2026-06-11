@@ -311,6 +311,141 @@ fn sampler_reports_freerun_honestly() {
     assert_eq!(status.epoch.media_at_anchor, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Timescale: the PTP leg publishes UTC, never TAI (review finding 1)
+// ---------------------------------------------------------------------------
+
+/// The current TAI−UTC offset in nanoseconds (37 s since 2017-01-01; sourced
+/// from ptp4l's `currentUtcOffset` in a real ST 2059-2 deployment).
+const TAI_UTC_NS: i64 = 37_000_000_000;
+
+#[test]
+fn sampler_converts_a_tai_phc_to_a_utc_epoch_by_default() {
+    // Standard linuxptp deployment (ADR-T012): the PHC carries PTP time = TAI,
+    // so the servo's steady-state `local − master` offset is ≈ −37 s (UTC −
+    // TAI) plus a small residual. The published epoch is defined as UTC
+    // ("ns past the Unix epoch", stamped into HLS PDT and the RTCP SR NTP
+    // word), so the default config must convert TAI → UTC — never publish TAI.
+    let wall = FakeWall {
+        mono_mid_ns: 5_000_000_000,
+        wall_ns: 1_700_000_000_000_000_000,
+    };
+    let handle: LatestState<ReferenceStatus> = LatestState::new();
+    // local(UTC) − master(TAI) = −37 s + 250 ns servo residual.
+    handle.publish(ptp_status(LockState::Locked, -TAI_UTC_NS + 250));
+    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), EpochSamplerConfig::default())
+        .with_ptp(handle);
+    let status = s.sample_once();
+    assert_eq!(status.source, ClockSource::Ptp);
+    assert_eq!(status.quality, ClockQuality::Locked);
+    assert_eq!(
+        status.epoch.wall_at(0),
+        (1_700_000_000_000_000_000 - 250) - 3_000_000_000,
+        "the published epoch must be UTC (within the servo residual), not TAI: \
+         wall@tick0 = (UTC wall − residual) − (mono_mid − seed)"
+    );
+}
+
+#[test]
+fn a_ptp_to_system_reference_transition_does_not_step_the_epoch() {
+    // With a TAI PHC correctly converted to UTC, the PTP-leg estimate and the
+    // system-leg estimate agree to within the servo residual — so losing PTP
+    // (Freerun → selection falls to the system clock) must NOT step the
+    // published epoch by 37 s. It holds (or slews within the bound).
+    let wall = FakeWall {
+        mono_mid_ns: 5_000_000_000,
+        wall_ns: 1_700_000_000_000_000_000,
+    };
+    let handle: LatestState<ReferenceStatus> = LatestState::new();
+    handle.publish(ptp_status(LockState::Locked, -TAI_UTC_NS));
+    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), EpochSamplerConfig::default())
+        .with_ptp(handle.clone());
+    let first = s.sample_once();
+    assert_eq!(first.source, ClockSource::Ptp);
+
+    // The PTP reference drops out of discipline: selection falls to SYS.
+    handle.publish(ptp_status(LockState::Freerun, 0));
+    let second = s.sample_once();
+    assert_eq!(second.source, ClockSource::System);
+    assert!(
+        !matches!(second.update, EpochUpdate::Stepped { .. }),
+        "a ptp→system transition must not step the epoch (got {:?})",
+        second.update
+    );
+    assert_eq!(
+        second.update,
+        EpochUpdate::Held,
+        "the two legs agree exactly here, so the epoch holds"
+    );
+    let moved = second
+        .epoch
+        .wall_at(0)
+        .saturating_sub(first.epoch.wall_at(0));
+    assert!(
+        moved.abs() <= policy().slew_max_ns,
+        "any movement across the transition stays within the slew bound, got {moved} ns"
+    );
+}
+
+#[test]
+fn a_misconfigured_utc_offset_degrades_and_never_publishes_the_bogus_epoch() {
+    // The PHC actually carries UTC (offset ≈ 0) but the config still assumes
+    // the standard TAI PHC (37 s): the converted estimate lands 37 s off the
+    // system clock. The ≥30 s residual sanity guard must refuse to publish
+    // that bogus epoch — it degrades to the system leg with a non-locked
+    // quality (and warns) instead.
+    let wall = FakeWall {
+        mono_mid_ns: 5_000_000_000,
+        wall_ns: 1_700_000_000_000_000_000,
+    };
+    let handle: LatestState<ReferenceStatus> = LatestState::new();
+    handle.publish(ptp_status(LockState::Locked, 250));
+    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), EpochSamplerConfig::default())
+        .with_ptp(handle);
+    let status = s.sample_once();
+    assert_eq!(
+        status.source,
+        ClockSource::System,
+        "the suspect PTP leg must not be published as the epoch source"
+    );
+    assert_ne!(
+        status.quality,
+        ClockQuality::Locked,
+        "a deployment with a demonstrably-wrong timescale config must not claim locked"
+    );
+    assert_eq!(
+        status.epoch.wall_at(0),
+        1_700_000_000_000_000_000 - 3_000_000_000,
+        "the published epoch rides the system clock, never the 37 s-off estimate"
+    );
+}
+
+#[test]
+fn an_explicitly_zero_utc_offset_trusts_a_utc_phc() {
+    // A deployment whose PHC genuinely carries UTC (nonstandard, e.g.
+    // phc2sys keeping the PHC on UTC) sets `ptp_utc_offset_s = 0`: the PTP
+    // estimate is then published as-is and stays locked — no guard trip.
+    let wall = FakeWall {
+        mono_mid_ns: 5_000_000_000,
+        wall_ns: 1_700_000_000_000_000_000,
+    };
+    let handle: LatestState<ReferenceStatus> = LatestState::new();
+    handle.publish(ptp_status(LockState::Locked, 250));
+    let config = EpochSamplerConfig {
+        ptp_utc_offset_ns: 0,
+        ..EpochSamplerConfig::default()
+    };
+    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), config).with_ptp(handle);
+    let status = s.sample_once();
+    assert_eq!(status.source, ClockSource::Ptp);
+    assert_eq!(status.quality, ClockQuality::Locked);
+    assert_eq!(
+        status.epoch.wall_at(0),
+        (1_700_000_000_000_000_000 - 250) - 3_000_000_000,
+        "a zero offset publishes the UTC PHC estimate directly"
+    );
+}
+
 #[test]
 fn sampler_holds_the_epoch_across_wall_jitter() {
     // Two samples 1 ms apart in wall terms (inside the deadband): the SECOND

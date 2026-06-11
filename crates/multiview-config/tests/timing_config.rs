@@ -106,3 +106,57 @@ fn the_boundary_link_offset_is_accepted() {
     let cfg = MultiviewConfig::load_from_toml(&doc).unwrap();
     cfg.validate().expect("exactly 10 s is the inclusive bound");
 }
+
+#[test]
+fn the_ptp_utc_offset_defaults_to_the_current_tai_utc_offset() {
+    // The PHC under standard linuxptp (ptp4l ST 2059-2 + phc2sys) carries
+    // PTP time = TAI; the published epoch is UTC. The default conversion
+    // offset is the current TAI−UTC = 37 s (sourced from ptp4l's
+    // currentUtcOffset in a real deployment).
+    let d = TimingConfig::default();
+    assert_eq!(d.ptp_utc_offset_s, 37);
+    assert_eq!(d.ptp_utc_offset_ns(), 37_000_000_000, "exact integer s→ns");
+}
+
+#[test]
+fn the_ptp_utc_offset_parses_and_validates() {
+    let doc = format!("{BASE}\n[timing]\nptp_phc = \"/dev/ptp0\"\nptp_utc_offset_s = 0\n");
+    let cfg = MultiviewConfig::load_from_toml(&doc).unwrap();
+    cfg.validate()
+        .expect("a UTC PHC deployment may set the offset to 0");
+    let timing = cfg.timing.expect("timing block present");
+    assert_eq!(timing.ptp_utc_offset_s, 0);
+    assert_eq!(timing.ptp_utc_offset_ns(), 0);
+}
+
+#[test]
+fn an_absurd_or_negative_ptp_utc_offset_is_rejected() {
+    // TAI−UTC has never been negative and is nowhere near 1000 s: out-of-band
+    // values are typos/sign errors, not timescale policy.
+    for bad in ["1001", "-1"] {
+        let doc = format!("{BASE}\n[timing]\nptp_utc_offset_s = {bad}\n");
+        let cfg = MultiviewConfig::load_from_toml(&doc).unwrap();
+        let err = cfg
+            .validate()
+            .expect_err("an out-of-band ptp_utc_offset_s must fail validation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ptp_utc_offset"),
+            "the error must name the offending knob, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_timing_key_is_rejected_at_parse() {
+    // Every sibling block denies unknown fields so a typo'd key fails at parse
+    // instead of silently applying the default; [timing] must too.
+    let doc = format!("{BASE}\n[timing]\nlink_offset_msec = 200\n");
+    let err = MultiviewConfig::load_from_toml(&doc)
+        .expect_err("a typo'd [timing] key must fail at parse, never be silently dropped");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("link_offset_msec"),
+        "the parse error must name the unknown key, got: {msg}"
+    );
+}

@@ -100,6 +100,46 @@ fn publish_once_emits_a_correct_timing_status_and_mirrors_the_hls_epoch() {
 }
 
 #[test]
+fn a_build_without_an_ntp_reading_publishes_a_non_locked_quality_by_default() {
+    // Review finding 3: a non-`ntp` build has no kernel discipline read at
+    // all (`SysNtpQuery` yields `None`), so the EPOCH path's default config
+    // must publish a conservative quality — never an ASSUMED "locked" on a
+    // possibly-undisciplined host. (The overlay badge keeps its own
+    // deployment-assumption default; only the machine-readable timing.status
+    // feed is conservative.)
+    let publisher: EnginePublisher<EngineStateSnapshot, Event> = EnginePublisher::new(8);
+    let mut sub = publisher.subscribe();
+    let hls_epoch = SharedEpoch::new();
+    let mut s = EpochSampler::new(
+        0,
+        FakeWall {
+            mono_mid_ns: 0,
+            wall_ns: 1_781_049_600_000_000_000,
+        },
+        NoNtp,
+        EpochSamplerConfig::default(),
+    );
+
+    let _ = timing_status::publish_once(&mut s, &publisher, &hls_epoch, "main", 0);
+
+    let evt = sub.try_recv().expect("one published event");
+    let Event::TimingStatus(ts) = &*evt.event else {
+        panic!("expected timing.status, got {:?}", evt.event);
+    };
+    assert_ne!(
+        ts.clock_quality,
+        ClockQuality::Locked,
+        "no measurement available must never publish an assumed LOCKED quality"
+    );
+    assert_eq!(
+        ts.clock_quality,
+        ClockQuality::Freerun,
+        "the honest no-measurement state is freerun"
+    );
+    assert_eq!(ts.clock_source, ClockSource::System);
+}
+
+#[test]
 fn a_stalled_subscriber_lags_and_never_blocks_the_publisher() {
     // Ring depth 2; publish 10 epochs while the subscriber never reads. The
     // publisher must complete every publish (drop-oldest), and the subscriber
@@ -119,6 +159,66 @@ fn a_stalled_subscriber_lags_and_never_blocks_the_publisher() {
     }
     // After the lag the subscriber resumes at the oldest retained event.
     assert!(sub.try_recv().is_ok());
+}
+
+#[test]
+fn a_stepped_epoch_bumps_the_hls_generation_for_the_discontinuity_seam() {
+    // Review finding 4: an epoch STEP is a Class-2-like re-anchor
+    // (wall-clock-sync §3) — `publish_once` must publish it through the
+    // stepped seam (a new SharedEpoch generation) so the HLS driver marks the
+    // next closed segment `EXT-X-DISCONTINUITY`; hold/slew keeps the
+    // generation.
+    struct SteppingWall {
+        calls: u32,
+    }
+    impl WallClockSampler for SteppingWall {
+        fn sample(&mut self) -> WallSample {
+            self.calls += 1;
+            // First sample anchors; the second jumps 1 s (gross step); the
+            // third holds at the stepped instant.
+            let wall = if self.calls == 1 {
+                1_781_049_600_000_000_000
+            } else {
+                1_781_049_601_000_000_000
+            };
+            WallSample {
+                mono_before_ns: 0,
+                wall_ns: wall,
+                mono_after_ns: 0,
+            }
+        }
+    }
+    let publisher: EnginePublisher<EngineStateSnapshot, Event> = EnginePublisher::new(8);
+    let hls_epoch = SharedEpoch::new();
+    let mut s = EpochSampler::new(
+        0,
+        SteppingWall { calls: 0 },
+        NoNtp,
+        EpochSamplerConfig::default(),
+    );
+
+    let _ = timing_status::publish_once(&mut s, &publisher, &hls_epoch, "main", 0);
+    let (_, gen_anchored) = hls_epoch
+        .get_with_generation()
+        .expect("anchored epoch published");
+
+    let _ = timing_status::publish_once(&mut s, &publisher, &hls_epoch, "main", 0);
+    let (_, gen_stepped) = hls_epoch
+        .get_with_generation()
+        .expect("stepped epoch published");
+    assert_ne!(
+        gen_anchored, gen_stepped,
+        "a STEP must bump the epoch generation (the HLS discontinuity seam)"
+    );
+
+    let _ = timing_status::publish_once(&mut s, &publisher, &hls_epoch, "main", 0);
+    let (_, gen_held) = hls_epoch
+        .get_with_generation()
+        .expect("held epoch published");
+    assert_eq!(
+        gen_stepped, gen_held,
+        "hold/slew must keep the generation (no discontinuity)"
+    );
 }
 
 #[tokio::test]
