@@ -54,7 +54,7 @@ describe('devices help copy doctrine', () => {
         </MemoryRouter>
       </TestProviders>,
     );
-    const text = document.body.textContent ?? '';
+    const text = document.body.textContent;
     expect(text).toMatch(/supports zowiebox/i);
     expect(text).not.toMatch(/official/i);
     // Program continuity is stated in the help, not only in the app.
@@ -72,7 +72,7 @@ describe('devices help copy doctrine', () => {
         </MemoryRouter>
       </TestProviders>,
     );
-    const text = document.body.textContent ?? '';
+    const text = document.body.textContent;
     expect(text).toMatch(/untrusted/i);
     expect(text).toMatch(/never adopt/i);
     expect(text).toMatch(/explicit/i);
@@ -87,7 +87,7 @@ describe('devices help copy doctrine', () => {
         </MemoryRouter>
       </TestProviders>,
     );
-    const text = document.body.textContent ?? '';
+    const text = document.body.textContent;
     expect(text).toMatch(/frame-accurate/i);
     expect(text).toMatch(/±100–500\s*ms/);
     expect(text).toMatch(/cast/i);
@@ -105,7 +105,7 @@ describe('devices help copy doctrine', () => {
         </MemoryRouter>
       </TestProviders>,
     );
-    const text = document.body.textContent ?? '';
+    const text = document.body.textContent;
     expect(text).toMatch(/enrol/i);
     expect(text).toMatch(/frame-accurate/i);
   });

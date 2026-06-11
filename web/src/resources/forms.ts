@@ -61,13 +61,15 @@ export type FormErrorCode =
   | 'duplicate-input'
   | 'reserved-track'
   | 'program-bus-muted'
-  | 'rational-fps';
+  | 'rational-fps'
+  | 'members-required'
+  | 'duplicate-member';
 
 /** Per-field validation errors keyed by form-state field name. */
 export type FieldErrors<Field extends string> = Partial<Record<Field, FormErrorCode>>;
 
 /** Parse a strict integer string, or `undefined` when not a whole number. */
-function parseIntStrict(value: string): number | undefined {
+export function parseIntStrict(value: string): number | undefined {
   const trimmed = value.trim();
   if (!INT_RE.test(trimmed)) {
     return undefined;
@@ -104,7 +106,7 @@ export function isValidUrl(value: string, schemes?: readonly string[]): boolean 
  * Validate a URL field: `required` when blank, `url-invalid` when unparseable
  * or host-less, `schemeCode` when parseable but on the wrong scheme.
  */
-function urlErrorCode(
+export function urlErrorCode(
   value: string,
   schemes: readonly string[] | undefined,
   schemeCode: FormErrorCode,
@@ -168,7 +170,7 @@ function asPinVendor(value: unknown): PinVendor {
  * body spreads (`{ ...form.extra }`) copy it back as an own data property too
  * (spread uses CreateDataProperty, never the inherited setter).
  */
-function extraOf(
+export function extraOf(
   body: Record<string, unknown>,
   managedKeys: readonly string[],
 ): Readonly<Record<string, unknown>> {

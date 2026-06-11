@@ -185,9 +185,10 @@ describe('DevicesPage adopt flow', () => {
     const dialog = await screen.findByRole('dialog');
     await userEvent.type(within(dialog).getByLabelText('Identifier'), 'dev-new');
     await userEvent.type(within(dialog).getByLabelText('Name'), 'New box');
+    // userEvent keyboard syntax: `[[` escapes a literal `[`; `]` is literal.
     await userEvent.type(
       within(dialog).getByLabelText(/management address/i),
-      'http://[[fd00::9]]',
+      'http://[[fd00::9]',
     );
     await userEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
     expect(posted).toEqual({
