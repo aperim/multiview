@@ -85,6 +85,103 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/cast/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/cast/sessions` — list the live ephemeral sessions (role: read). */
+        get: operations["list_cast_sessions"];
+        put?: never;
+        /**
+         * `POST /api/v1/cast/sessions` — start an ad-hoc cast session (role: write).
+         * @description Resolves the rendition, spawns the supervised session actor through the
+         *     shared poller registry, and records the ephemeral session. The actor
+         *     CONNECTs → `LAUNCH`es the Default Media Receiver (`CC1AD845`) → `LOAD`s the
+         *     device-reachable HLS URL, then supervises the session (ADR-M011).
+         */
+        post: operations["start_cast_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cast/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/cast/sessions/{id}` — fetch one session (role: read). */
+        get: operations["get_cast_session"];
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/cast/sessions/{id}` — stop a session (role: write; `204`).
+         * @description Dispatches the voluntary [`PollerControl::StopCast`] teardown (the actor
+         *     `STOP`s the receiver app — what actually clears the TV — then exits), joins
+         *     it gracefully (abort after the grace window), drops the runtime
+         *     status/record, and **clears the registry tombstone**: session ids are
+         *     UUID-fresh and never reused, so clearing after the deterministic stop keeps
+         *     the tombstone set bounded under churning sessions.
+         */
+        delete: operations["stop_cast_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cast/sessions/{id}/save": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/cast/sessions/{id}/save` — promote an ephemeral session to a
+         *     normal `Device{driver: cast}` registry entry (role: write; `201`).
+         * @description The promoted device carries the session's address and rendition assignment
+         *     and **does** export (desired state). One actor remains, keyed by the device
+         *     id: the ephemeral actor is stopped (a plain abort — **no** receiver `STOP`,
+         *     so the TV keeps playing across the promotion) and the device's supervised
+         *     actor takes over through the same registry.
+         */
+        post: operations["save_cast_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cast/sessions/{id}/volume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/cast/sessions/{id}/volume` — set the receiver volume
+         *     (role: write; `202` + operation id).
+         * @description Dispatches a receiver-namespace `SET_VOLUME` to the running session actor
+         *     — non-blocking `try_send`, never awaited (invariant #10).
+         */
+        post: operations["set_cast_volume"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/commands/apply-layout": {
         parameters: {
             query?: never;
@@ -1454,6 +1551,37 @@ export interface components {
             path: string;
         };
         /**
+         * @description One ephemeral cast session as the API serves it: the descriptive record
+         *     plus the live lifecycle state.
+         */
+        CastSessionDoc: {
+            /** @description The device authority dialled (`host[:port]`, IPv6 bracketed). */
+            address: string;
+            /** @description The runtime session id (`cast-session-…`, UUID-fresh per start). */
+            id: string;
+            /** @description The resolved device-reachable media URL the session LOADs. */
+            media_url: string;
+            /** @description The operator-facing name, if given. */
+            name?: string | null;
+            /** @description The output id whose rendition the session casts. */
+            output: string;
+            /**
+             * @description The session's live lifecycle state (the DEV-A3 wire vocabulary, e.g.
+             *     `ADOPTING`/`ONLINE`/`DEGRADED`), read from the latest-wins status
+             *     registry.
+             */
+            state: string;
+        };
+        /** @description The `POST /api/v1/cast/sessions/{id}/volume` request body. */
+        CastVolumeRequest: {
+            /**
+             * Format: int32
+             * @description The desired receiver volume as an integer percent (0–100); the actor
+             *     maps it to the protocol's unit `level`.
+             */
+            level_percent: number;
+        };
+        /**
          * @description An IS-08 **map**: each named output channel → its [`ChannelSource`].
          *
          *     A `BTreeMap` so the serialised map and any listing is deterministically
@@ -2444,6 +2572,13 @@ export interface components {
             /** @description UMD label changes. */
             umd?: components["schemas"]["UmdRecallDoc"][];
         };
+        /** @description The `POST /api/v1/cast/sessions/{id}/save` request body. */
+        SaveCastSessionRequest: {
+            /** @description The device id to register the promoted device under. */
+            device_id: string;
+            /** @description The promoted device's display name (defaults to the session's name). */
+            display_name?: string | null;
+        };
         /**
          * @description The `202 Accepted` body for a scan: the operation id correlating the scan and
          *     the human-readable scope of what is browsed.
@@ -2669,6 +2804,24 @@ export interface components {
             kind_scope: string;
             /** @description How stable the key is. */
             tier: components["schemas"]["StabilityTierDoc"];
+        };
+        /** @description The `POST /api/v1/cast/sessions` request body. */
+        StartCastSessionRequest: {
+            /**
+             * @description The device authority to dial: `host[:port]`, IPv6 bracketed
+             *     (`[2001:db8::20]:8009`); the CASTV2 port 8009 is the default when
+             *     omitted (Cast **groups** advertise non-default ports — give the
+             *     advertised one).
+             */
+            address: string;
+            /** @description An operator-facing name for the session (e.g. the room/TV name). */
+            name?: string | null;
+            /**
+             * @description The output id whose HLS rendition to cast. Omitted: the **first
+             *     declared** rendition is cast (every HLS output is a rendition of the
+             *     program canvas).
+             */
+            output?: string | null;
         };
         /**
          * @description `OpenAPI` mirror of [`multiview_core::stream::StreamDescriptor`].
@@ -3261,6 +3414,337 @@ export interface operations {
             };
             /** @description Authenticated but not authorized to read. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_cast_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All live ephemeral sessions, id-sorted, each with its live lifecycle state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CastSessionDoc"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    start_cast_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartCastSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description The started ephemeral session (runtime-only; never exported). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CastSessionDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to start a session. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No castable rendition (control.cast_media_base unset / no HLS output) or no live cast driver in this build. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is not a valid host[:port], or the named output is not a served HLS rendition. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_cast_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cast session id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The session, with its live lifecycle state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CastSessionDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read this session. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No live session with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    stop_cast_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cast session id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The session was stopped and forgotten. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to stop this session. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No live session with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    save_cast_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cast session id to promote. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveCastSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description The promoted device (ETag in the response header). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Resource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write devices. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No live session with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A device with that id already exists. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The promoted device document does not validate. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    set_cast_volume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Cast session id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CastVolumeRequest"];
+            };
+        };
+        responses: {
+            /** @description Volume change accepted; applied by the session actor. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to control this session. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No live session with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description level_percent is out of range (0–100). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

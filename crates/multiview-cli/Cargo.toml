@@ -159,14 +159,17 @@ web = ["multiview-control/embed-web"]
 # untrusted-inventory model + endpoints are always compiled; this feature only
 # adds the multicast socket. Pure Rust, LGPL-clean, GPU-free.
 discovery = ["multiview-control/discovery"]
-# Managed-device network I/O (DEV-A4, ADR-M009): the live HTTP transport for the
-# `zowietek` driver poller. With this on, a `multiview run` whose config declares
+# Managed-device network I/O (DEV-A4/D2, ADR-M009/M011): the live transports
+# for every device driver — the `zowietek` HTTP poller and the `cast` CASTV2
+# wire layer. With this on, a `multiview run` whose config declares
 # `[[devices]]` with `driver = "zowietek"` spawns a supervised control-plane
 # poller per device (login → probe → enumerate facets → poll status → drive the
-# lifecycle), so the projection routes return real candidates/targets and
-# `set-mode` dispatches convergence. OFF by default so the baseline build stays
-# pure-Rust/socket-free and CI-green; forwards `multiview-control/zowietek`.
-devices-net = ["multiview-control/zowietek"]
+# lifecycle), and a `driver = "cast"` device (or an ad-hoc
+# `POST /api/v1/cast/sessions`) gets a supervised CASTV2 session actor pointing
+# the device at a served HLS rendition (requires `control.cast_media_base`).
+# OFF by default so the baseline build stays pure-Rust/socket-free and
+# CI-green; forwards `multiview-control/devices-net` (= `zowietek` + `cast`).
+devices-net = ["multiview-control/devices-net"]
 
 # Overlay rasterization: bakes the configured overlays (clock/labels, dB
 # meters, safe-area graticules, tally borders, burned-in SRT/VTT subtitles) into

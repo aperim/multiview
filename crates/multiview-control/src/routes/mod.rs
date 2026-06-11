@@ -26,6 +26,7 @@ use crate::state::AppState;
 pub mod alarms;
 pub mod audio;
 pub mod audit;
+pub mod cast_sessions;
 pub mod config;
 pub mod devices;
 pub mod discovery;
@@ -667,9 +668,18 @@ fn resource_router() -> Router<AppState> {
                 .put(probes::update_probe)
                 .delete(probes::delete_probe),
         )
-        // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
-        // plus the read-only runtime status snapshot, the bare-verb actions
-        // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+        .merge(device_router())
+}
+
+/// Build the managed-devices surface (ADR-M008/M009/M011/W017): the device
+/// registry CRUD + status + bare-verb actions + stream-binding projections,
+/// ephemeral Cast sessions, mDNS discovery, and presentation-sync groups.
+/// Split from [`resource_router`] so each stays a readable size.
+fn device_router() -> Router<AppState> {
+    // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
+    // plus the read-only runtime status snapshot, the bare-verb actions
+    // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+    Router::new()
         .route("/devices", get(devices::list_devices))
         .route(
             "/devices/{id}",
@@ -695,6 +705,26 @@ fn resource_router() -> Router<AppState> {
             "/devices/{id}/output-targets",
             get(devices::output_targets),
         )
+        // Ephemeral Cast sessions (DEV-D2, ADR-M011): start/list/stop an
+        // ad-hoc cast of a served HLS rendition, save-as-device promotion,
+        // and the receiver-namespace volume verb. Runtime-only — never part
+        // of the devices store, never exported.
+        .route(
+            "/cast/sessions",
+            get(cast_sessions::list_cast_sessions).post(cast_sessions::start_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}",
+            get(cast_sessions::get_cast_session).delete(cast_sessions::stop_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/save",
+            post(cast_sessions::save_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/volume",
+            post(cast_sessions::set_cast_volume),
+        )
         // mDNS device discovery (ADR-M008 §6 / ADR-0041): kick a time-bounded
         // browse (202 + device.discovered events) and read the untrusted
         // inventory. Discovery never creates a device — confirm-adopt is the
@@ -718,7 +748,6 @@ fn resource_router() -> Router<AppState> {
             post(sync_groups::measure_sync_group),
         )
 }
-
 /// Build the `/api/v1` resource + command routes (without the realtime or docs
 /// routes, which are wired by [`crate::router()`]).
 pub fn api_router() -> Router<AppState> {
