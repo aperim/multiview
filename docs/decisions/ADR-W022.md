@@ -100,10 +100,15 @@ own command submissions).
   `tokio::fs` for the same reason). At startup the starting Running state is persisted once
   (so a stale `active.toml` from a previous run can never outlive the run that supersedes
   it), and at graceful teardown — reached on Ctrl-C **and SIGTERM** (review m2: `docker
-  stop`/systemd) — `finish_running_persist` aborts the task, **awaits its termination**
-  (review M2: the deterministic `.tmp` is single-writer only if the final persist can never
-  overlap a write the dying task is still finishing on a blocking thread), then runs one
-  final best-effort persist capturing changes younger than the debounce.
+  stop`/systemd) — `finish_running_persist` aborts the task, awaits it, then runs one
+  final best-effort persist capturing changes younger than the debounce. Awaiting the task
+  is **not** by itself a single-writer guarantee (review M2, delta round: a `spawn_blocking`
+  write the aborted task started keeps running detached on the blocking pool); the
+  guarantee comes from `write_active_serialized` — every boot-model file write holds the
+  model's write lock (no interleaving on the deterministic temp names; the promote's
+  boot-file write takes the same lock), and `active.toml` writes carry a compose-time
+  **ticket** so a detached stale write is skipped once newer content landed (content is
+  monotonic, never regressing).
 * **Audit-trigger over-approximation, accepted:** some audit entries (e.g. a config-revision
   commit, an alarm ack) do not change the composed document; the debounced persister then
   rewrites an identical `active.toml`. That costs one small atomic file write per ~2 s worst
@@ -151,10 +156,15 @@ response is `202` with the per-section summary. An empty diff returns `202` with
 `reverted: true` with the full summary only when every engine command landed on the
 bounded bus; a shed apply answers `202` with `reverted: false`, the `shed` count, the
 partial summary, and raises the `config-file-apply-incomplete` warning with
-revert-specific remediation — unlike the watcher nothing retries a revert, so the operator
-is told to retry once the bus drains (the stores already hold the start values). A
-composition failure (`422`) releases the `Idempotency-Key` reservation so a corrected
-retry with the same key actually runs. The ADR-W020 watcher's *file* baseline is
+revert-specific remediation. A shed revert applies **nothing durable** (review M4, delta
+round): the stores are rolled back to the pre-revert Running document, so the retry's
+`diff(running, loaded)` is non-empty again and re-runs the whole (idempotent) revert —
+without the rollback the first pass's store resync would leave the retry an empty-diff
+no-op while the engine still ran the un-reverted state. A revert that completes (or an
+honest empty-diff no-op) clears the revert-raised warning instance via a latch on the
+boot model — never the watcher's own instance of the same code. A composition failure
+(`422`) releases the `Idempotency-Key` reservation so a corrected retry with the same key
+actually runs. The ADR-W020 watcher's *file* baseline is
 deliberately untouched — its baseline tracks the last applied **file** content (W020
 semantics; API edits already moved Running without moving it), and the latched
 `config-file-requires-restart` warning stays honest because the file still differs from
@@ -166,16 +176,24 @@ Write the current Running document to the **boot file path**, server-side: compo
 deserialize → `validate()` → `to_toml()` → `expect_write()` on the installed watch handle
 (ADR-W020 §7 — this is the seam's first and intended caller; the token is
 **content-paired**, so an unrelated external edit landing inside the settle window is
-still applied, never adopted) → atomic write to the boot path → a config-versioning commit
-(target **`boot`**, the promoted JSON document, the principal, message `promote running
-configuration to boot`) → audit. Returns `200` with the written path, byte count, and the
-committed revision id. With no watcher installed (store-only deployments) the suppression
-step is skipped — there is nothing to suppress. A **failed write releases the banked
-token** (review B1: a leaked token would silently adopt a later real edit carrying the
-same content) and releases the idempotency reservation. The atomic write **preserves the
-destination's mode** (review M3: a chmod-600 boot file stays 600 across the temp-file +
-rename), and the boot path is canonicalized at startup so a symlinked config is promoted
-at its real file — the rename replaces the file, never the symlink.
+still applied, never adopted) → atomic write to the boot path (on the blocking pool,
+under the boot model's write lock — reviews m1/M2) → `confirm_server_write()` →
+a config-versioning commit (target **`boot`**, the promoted JSON document, the principal,
+message `promote running configuration to boot`) → audit. Returns `200` with the written
+path, byte count, and the committed revision id. With no watcher installed (store-only
+deployments) the suppression step is skipped — there is nothing to suppress. A **failed
+write releases the banked token** (review B1 (3): a leaked token would silently adopt a
+later real edit carrying the same content) and releases the idempotency reservation; a
+**successful write is confirmed as landed** (review B1 (2), delta round): once a landed
+write is superseded by a different settled content it can never be the next settled
+observation, so the watcher drains its token — a stale token must never eat a much later
+real edit restoring the same bytes (`git checkout`, editor undo); an announcement never
+confirmed keeps the in-flight semantics (ADR-W020 review m3, pinned) and still suppresses
+exactly its content when it finally settles. The atomic write **preserves the
+destination's mode**, applied before the content lands (review M3: a chmod-600 boot
+file stays 600 and its secrets never sit at the umask default even transiently), and the
+boot path is canonicalized at startup so a symlinked config is promoted at its real file —
+the rename replaces the file, never the symlink.
 
 ### 7. Observability: `GET /api/v1/config/boot-model` (role: read)
 

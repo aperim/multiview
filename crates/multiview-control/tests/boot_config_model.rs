@@ -31,7 +31,7 @@ use axum::Router;
 use multiview_config::{MultiviewConfig, StartMode};
 use multiview_control::boot_model::{
     finish_running_persist, load_resume_config, persist_running_now, spawn_running_persist,
-    write_atomic, BootModel,
+    write_active_serialized, write_atomic, BootModel,
 };
 use multiview_control::config_watch::{spawn as spawn_watch, WatchOptions};
 use multiview_control::{
@@ -930,6 +930,32 @@ async fn the_running_persister_writes_active_toml_on_audited_changes() {
     task.abort();
 }
 
+/// Review M2 (delta round) — write serialization is ticket-ordered: a STALE
+/// composition (an older ticket, e.g. a persist write left running detached
+/// on the blocking pool by an aborted task) is skipped once newer content
+/// landed — `active.toml` content is monotonic, never regressing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_persist_write_never_overwrites_newer_content() {
+    let r = rig(BOOT_DOC);
+    let model = r.state.boot_model.as_ref().expect("boot model");
+    let early = model.next_write_ticket();
+    let late = model.next_write_ticket();
+
+    assert!(
+        write_active_serialized(model, late, "newer = 2\n").expect("newer write"),
+        "the newer ticket writes"
+    );
+    assert!(
+        !write_active_serialized(model, early, "stale = 1\n").expect("stale write call"),
+        "the stale ticket must be SKIPPED once newer content landed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(model.active_path()).expect("read active.toml"),
+        "newer = 2\n",
+        "active.toml keeps the newer content"
+    );
+}
+
 /// Review M2 — the teardown ordering: `finish_running_persist` aborts the
 /// persister, AWAITS its termination, and only then runs the final persist,
 /// capturing changes younger than the debounce even when the task is parked
@@ -1304,7 +1330,7 @@ async fn a_superseded_promote_token_does_not_eat_a_later_real_edit() {
 /// Review M4 follow-on — the retry after a shed revert must actually re-send
 /// the shed engine commands and complete: a shed revert applies nothing
 /// durable (the stores stay at the running state), so a retry once the bus
-/// drains re-runs the whole revert — UpsertSource rides, the stores resync
+/// drains re-runs the whole revert — `UpsertSource` rides, the stores resync
 /// to Loaded, the response claims the revert, and the
 /// `config-file-apply-incomplete` warning clears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1410,9 +1436,11 @@ async fn a_shed_revert_reports_partial_and_raises_the_warning() {
         !summary.is_empty(),
         "the partial summary still names what was attempted"
     );
-    // The stores resync to Loaded on the first pass either way…
-    assert_eq!(stored_color(&r.state).as_deref(), Some("#101418"));
-    // …and the operator is told the engine did not get every command.
+    // A shed revert applies nothing durable: the stores are rolled back to
+    // the pre-revert Running state, so a retry's diff re-runs the whole
+    // revert (the M4 follow-on contract).
+    assert_eq!(stored_color(&r.state).as_deref(), Some("#f0f0f0"));
+    // The operator is told the engine did not get every command.
     assert!(
         wait_until(SETTLE, || has_active_warning(
             &r.warnings,

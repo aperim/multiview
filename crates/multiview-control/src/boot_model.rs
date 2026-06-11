@@ -24,7 +24,8 @@
 //! grow, or block. The render thread never sees any of it.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use multiview_config::{MultiviewConfig, StartMode};
@@ -57,6 +58,21 @@ pub struct BootModel {
     /// Unix milliseconds of the last successful `active.toml` write
     /// (`0` = never written this run).
     active_written_ms: AtomicI64,
+    /// Whether a shed (partial) revert-to-start raised the
+    /// `config-file-apply-incomplete` warning (ADR-W022 §5): a revert that
+    /// later completes clears exactly the instance this run's revert raised
+    /// — never the watcher's own latched instance.
+    revert_incomplete: AtomicBool,
+    /// The ticket of the last `active.toml` content actually written, under
+    /// the lock that serializes EVERY boot-model file write (review M2): an
+    /// aborted persist task's `spawn_blocking` write keeps running detached,
+    /// so the next writer must both wait for it (single-writer on the
+    /// deterministic temp names) and out-order it (a stale composition must
+    /// never overwrite newer content).
+    write_serial: std::sync::Mutex<u64>,
+    /// The monotonically increasing write-ticket source (taken at compose
+    /// time, compared in [`write_active_serialized`]).
+    write_tickets: AtomicU64,
 }
 
 impl BootModel {
@@ -78,6 +94,9 @@ impl BootModel {
             resumed,
             resume_fallback,
             active_written_ms: AtomicI64::new(0),
+            revert_incomplete: AtomicBool::new(false),
+            write_serial: std::sync::Mutex::new(0),
+            write_tickets: AtomicU64::new(0),
         }
     }
 
@@ -142,6 +161,35 @@ impl BootModel {
     /// Record a successful `active.toml` write at `now_ms`.
     fn record_active_written(&self, now_ms: i64) {
         self.active_written_ms.store(now_ms, Ordering::Release);
+    }
+
+    /// Latch that a shed (partial) revert raised the
+    /// `config-file-apply-incomplete` warning (ADR-W022 §5).
+    pub fn note_revert_incomplete(&self) {
+        self.revert_incomplete.store(true, Ordering::Release);
+    }
+
+    /// Take (and clear) the shed-revert latch: `true` when a previous revert
+    /// raised the incomplete warning that a now-completed revert may clear.
+    #[must_use]
+    pub fn take_revert_incomplete(&self) -> bool {
+        self.revert_incomplete.swap(false, Ordering::AcqRel)
+    }
+
+    /// Take the next monotonically increasing write ticket (call at compose
+    /// time; pass to [`write_active_serialized`]).
+    #[must_use]
+    pub fn next_write_ticket(&self) -> u64 {
+        self.write_tickets.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Lock the boot-model write serial, recovering from poisoning (a
+    /// panicked writer must never wedge persistence).
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, u64> {
+        match self.write_serial.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -221,10 +269,13 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
     {
         let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(content.as_bytes())?;
+        // Tighten the mode BEFORE the content lands (review M3 residual): a
+        // chmod-600 destination's secrets must never sit world-readable in
+        // the temp file even for the write's duration.
         if let Some(permissions) = dest_permissions {
             file.set_permissions(permissions)?;
         }
+        file.write_all(content.as_bytes())?;
         // Durability before visibility: the rename must never expose a file
         // whose bytes are still only in the page cache.
         file.sync_all()?;
@@ -263,16 +314,63 @@ pub fn persist_loaded(model: &BootModel) -> Result<(), String> {
         .map_err(|e| format!("writing {}: {e}", model.loaded_path().display()))
 }
 
+/// Write `toml` to `active.toml` under the model's write lock, skipping the
+/// write when a NEWER ticket already landed (review M2). Every boot-model
+/// file write serializes on this lock: an aborted persist task's
+/// `spawn_blocking` write keeps running detached on the blocking pool, so
+/// the lock makes concurrent writers single-file on the deterministic temp
+/// name, and the ticket check makes content monotonic — a stale composition
+/// can never overwrite newer state. Returns whether this content was
+/// actually written.
+///
+/// # Errors
+///
+/// Any I/O error from `create_dir_all` or the atomic write. Blocking I/O —
+/// call from `spawn_blocking` on async paths.
+pub fn write_active_serialized(
+    model: &BootModel,
+    ticket: u64,
+    toml: &str,
+) -> std::io::Result<bool> {
+    let mut last = model.lock_writes();
+    if *last > ticket {
+        // A newer composition already landed; this one is stale.
+        return Ok(false);
+    }
+    std::fs::create_dir_all(model.state_dir())?;
+    write_atomic(&model.active_path(), toml)?;
+    *last = ticket;
+    Ok(true)
+}
+
+/// Write `toml` to the BOOT file under the model's write lock, on the
+/// blocking pool (reviews m1 + M2): the promote route's write never parks
+/// the control-plane reactor and never interleaves with another boot-model
+/// file write on a deterministic temp name.
+///
+/// # Errors
+///
+/// Any I/O error from the atomic write (or a failed blocking task).
+pub async fn write_boot_file(model: Arc<BootModel>, toml: String) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let _serial = model.lock_writes();
+        write_atomic(model.boot_path(), &toml)
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("the boot-file write task failed: {e}")))?
+}
+
 /// Persist the CURRENT Running state to `active.toml`, now: compose the
 /// running document via the SAME composition the export route uses,
 /// deserialize + validate it (so an `active.toml` that exists always
 /// round-trips `MultiviewConfig::validate` — pin (d)), render canonical TOML,
 /// and write it atomically. A run without a boot model persists nothing.
 ///
-/// The composition reads read-mostly stores in place; the file I/O
-/// (`create_dir_all` + the fsync'd atomic write) rides
-/// [`tokio::task::spawn_blocking`] so it never parks the control-plane
-/// reactor (review m1).
+/// The composition reads read-mostly stores in place; the file I/O rides
+/// [`tokio::task::spawn_blocking`] (review m1) through
+/// [`write_active_serialized`] (review M2: locked + ticket-ordered, so a
+/// detached stale write can neither interleave with nor overwrite a newer
+/// one).
 ///
 /// # Errors
 ///
@@ -287,32 +385,35 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
     let toml = config
         .to_toml()
         .map_err(|e| ControlError::Repository(format!("TOML render failed: {e}")))?;
-    let dir = model.state_dir();
-    let active = model.active_path();
-    let write_target = active.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        write_atomic(&write_target, &toml)
-    })
-    .await
-    .map_err(|e| ControlError::Repository(format!("the persist write task failed: {e}")))?
-    .map_err(|e| ControlError::Repository(format!("writing {}: {e}", active.display())))?;
-    model.record_active_written(state.ack_now().as_nanos().div_euclid(1_000_000));
+    // The ticket is taken AFTER composing, so ticket order tracks content
+    // freshness: a slower, older composition loses to a newer one.
+    let ticket = model.next_write_ticket();
+    let task_model = Arc::clone(model);
+    let written =
+        tokio::task::spawn_blocking(move || write_active_serialized(&task_model, ticket, &toml))
+            .await
+            .map_err(|e| ControlError::Repository(format!("the persist write task failed: {e}")))?
+            .map_err(|e| {
+                ControlError::Repository(format!("writing {}: {e}", model.active_path().display()))
+            })?;
+    if written {
+        model.record_active_written(state.ack_now().as_nanos().div_euclid(1_000_000));
+    }
     Ok(())
 }
 
 /// Stop the debounced Running persister at run teardown (review M2): abort
-/// the task, **await its termination**, and only then run one final
-/// best-effort [`persist_running_now`] to capture changes younger than the
-/// debounce.
+/// the task, await it, and run one final best-effort [`persist_running_now`]
+/// to capture changes younger than the debounce.
 ///
-/// The ordering is the point: [`write_atomic`] uses a deterministic
-/// same-name `.tmp`, which is single-writer only if the final persist can
-/// never overlap a write the just-aborted task is still finishing (its file
-/// I/O runs on a blocking thread that an `abort()` does not interrupt —
-/// the abort lands at the task's next await point, and `task.await` returns
-/// only once the task has fully terminated). A persist failure is warned
-/// and teardown continues (fail-soft).
+/// `task.await` returns once the TASK is terminated — but a `spawn_blocking`
+/// write the task started keeps running detached on the blocking pool, so
+/// awaiting the task alone is NOT a single-writer guarantee. The guarantee
+/// comes from [`write_active_serialized`]: every active-file write holds the
+/// model's write lock (no interleaving on the deterministic temp name) and
+/// carries a compose-time ticket (the final persist's newer content can
+/// never be overwritten by the detached stale write). A persist failure is
+/// warned and teardown continues (fail-soft).
 pub async fn finish_running_persist(task: tokio::task::JoinHandle<()>, state: &AppState) {
     task.abort();
     let _ = task.await;

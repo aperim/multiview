@@ -1304,11 +1304,14 @@ fn apply_incomplete_warning(path: &Path, shed: u32, since: i64, active: bool) ->
 }
 
 /// Re-converge every store-backed section (and the working layout) to
-/// `config`. Used when a partial (shed) apply is abandoned by a revert: the
-/// stores follow the FILE on the first attempt (ADR-W020 §5), so they may
-/// hold content the engine never adopted; this brings them back in line with
-/// the document that IS the running truth. Idempotent.
-fn resync_all_stores(state: &AppState, actor: &str, config: &MultiviewConfig) {
+/// `config`. Two callers: the watcher, when a partial (shed) apply is
+/// abandoned by a file revert (the stores followed the FILE on the first
+/// attempt — ADR-W020 §5 — and must come back in line with the document that
+/// IS the running truth); and the revert-to-start route, which rolls the
+/// stores back to the pre-revert Running document when its engine commands
+/// shed (a shed revert applies nothing durable, so the retry re-runs the
+/// whole revert — ADR-W022 §5). Idempotent.
+pub(crate) fn resync_all_stores(state: &AppState, actor: &str, config: &MultiviewConfig) {
     resync_store(state, actor, &state.sources, &desired_sources(config));
     resync_store(state, actor, &state.outputs, &desired_outputs(config));
     resync_store(state, actor, &state.overlays, &desired_overlays(config));

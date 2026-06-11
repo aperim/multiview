@@ -13,6 +13,8 @@
 //!   (role: write).
 //!
 //! Every successful commit/rollback is recorded in the change audit log.
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -624,6 +626,10 @@ pub(crate) async fn revert_to_start(
     };
     let diff = multiview_config::ConfigDiff::between(&running, model.loaded());
     if diff.is_empty() {
+        // Running already equals Loaded. A previously shed revert's warning
+        // clears too: any interim edits that re-converged the stores rode the
+        // bus themselves, so the engine converged with them.
+        clear_revert_incomplete_if_latched(&state, &model);
         return Ok((
             StatusCode::ACCEPTED,
             Json(RevertToStartBody {
@@ -641,31 +647,23 @@ pub(crate) async fn revert_to_start(
         crate::config_watch::apply_document_diff(&state, &principal.key_id, &diff, model.loaded());
     let restart_only: Vec<String> = outcome.restart.iter().cloned().collect();
     // Review M4: never claim a full revert while engine command(s) were shed
-    // on a full bus — the stores were reverted but the engine may not reflect
-    // every change, and (unlike the file watcher) nothing retries a revert.
-    // Surface it on the same `config-file-apply-incomplete` warning path the
-    // watcher uses, with revert-specific remediation.
+    // on a full bus — and (unlike the file watcher) nothing retries a revert,
+    // so a shed revert must apply NOTHING durable: roll the stores back to
+    // the pre-revert Running document so a retry's diff(running, loaded) is
+    // non-empty again and re-runs the whole (idempotent) revert. Surface it
+    // on the same `config-file-apply-incomplete` warning path the watcher
+    // uses, with revert-specific remediation; the latch on the boot model
+    // lets a later completed revert clear exactly this instance.
     if outcome.shed > 0 {
+        crate::config_watch::resync_all_stores(&state, &principal.key_id, &running);
+        model.note_revert_incomplete();
         state
             .engine
             .publish_event(multiview_events::Event::HealthWarningRaised(
-                multiview_events::HealthWarning {
-                    code: multiview_events::WarningCode::ConfigFileApplyIncomplete,
-                    severity: multiview_events::WarningSeverity::Warning,
-                    subsystem: "config".to_owned(),
-                    message: format!(
-                        "revert-to-start applied only PARTIALLY: {} engine command(s) were shed \
-                     on a full command bus; the control stores were reverted but the engine \
-                     may not reflect every reverted change.",
-                        outcome.shed
-                    ),
-                    remediation: "Retry the revert once the command bus drains; the stores \
-                              already hold the start values."
-                        .to_owned(),
-                    since: state.ack_now().as_nanos(),
-                    active: true,
-                },
+                revert_incomplete_warning(outcome.shed, state.ack_now().as_nanos(), true),
             ));
+    } else {
+        clear_revert_incomplete_if_latched(&state, &model);
     }
     state.audit(
         &principal.key_id,
@@ -689,6 +687,44 @@ pub(crate) async fn revert_to_start(
             restart_only,
         }),
     ))
+}
+
+/// Build the revert-specific `config-file-apply-incomplete` warning (raise
+/// and clear share the shape; the warning store coalesces on the code).
+fn revert_incomplete_warning(
+    shed: u32,
+    since: i64,
+    active: bool,
+) -> multiview_events::HealthWarning {
+    multiview_events::HealthWarning {
+        code: multiview_events::WarningCode::ConfigFileApplyIncomplete,
+        severity: multiview_events::WarningSeverity::Warning,
+        subsystem: "config".to_owned(),
+        message: format!(
+            "revert-to-start applied only PARTIALLY: {shed} engine command(s) were shed on a \
+             full command bus; nothing durable was applied (the stores keep the running \
+             state)."
+        ),
+        remediation: "Retry the revert once the command bus drains — a shed revert leaves the \
+                      running state untouched, so the retry re-runs the whole revert."
+            .to_owned(),
+        since,
+        active,
+    }
+}
+
+/// Clear the revert-raised `config-file-apply-incomplete` warning when a
+/// revert COMPLETES and a previous shed revert had latched it on the boot
+/// model. The latch is revert-scoped: the watcher's own instance of the
+/// same warning code is never touched from here.
+fn clear_revert_incomplete_if_latched(state: &AppState, model: &crate::boot_model::BootModel) {
+    if model.take_revert_incomplete() {
+        state
+            .engine
+            .publish_event(multiview_events::Event::HealthWarningCleared(
+                revert_incomplete_warning(0, state.ack_now().as_nanos(), false),
+            ));
+    }
 }
 
 /// The `POST /api/v1/config/promote` response (ADR-W022 §6).
@@ -779,7 +815,10 @@ pub(crate) async fn promote_to_boot(
     if let Some(handle) = watch_handle.as_ref() {
         crate::config_watch::expect_server_write(handle, &toml);
     }
-    if let Err(error) = crate::boot_model::write_atomic(model.boot_path(), &toml) {
+    // The write rides the blocking pool under the model's write lock
+    // (reviews m1 + M2): it never parks the reactor and never interleaves
+    // with another boot-model file write on a deterministic temp name.
+    if let Err(error) = crate::boot_model::write_boot_file(Arc::clone(&model), toml.clone()).await {
         // Review B1 (3): the announced content never landed — release the
         // banked token so it cannot eat a later REAL external edit that
         // happens to carry the same content.
