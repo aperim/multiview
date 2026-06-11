@@ -115,13 +115,59 @@ impl DeviceBroadcaster {
     /// device-side (DEV-class) impact was declared before apply (ADR-M009).
     #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn mode_started(&self, device_id: &str, mode: &str) -> u64 {
+        self.publish_mode(device_id, mode, ModePhase::Started)
+    }
+
+    /// Publish `device.mode` with phase `Finished` once a convergence completed
+    /// (the device reached the requested mode; ADR-M009).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn mode_finished(&self, device_id: &str, mode: &str) -> u64 {
+        self.publish_mode(device_id, mode, ModePhase::Finished)
+    }
+
+    /// Publish `device.mode` with phase `Failed` when a convergence could not
+    /// complete (the driver re-converges per its supervision policy; ADR-M009).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn mode_failed(&self, device_id: &str, mode: &str) -> u64 {
+        self.publish_mode(device_id, mode, ModePhase::Failed)
+    }
+
+    /// Publish a `device.mode` event in `phase`, carrying the DEV-class impact
+    /// and the declared-impact statement (ADR-M009).
+    fn publish_mode(&self, device_id: &str, mode: &str, phase: ModePhase) -> u64 {
         self.engine.publish_event(Event::DeviceMode(DeviceMode {
             device_id: device_id.to_owned(),
             mode: mode.to_owned(),
-            phase: ModePhase::Started,
+            phase,
             impact: ImpactClass::Device,
             detail: Some(mode_impact_detail(device_id, mode)),
         }))
+    }
+
+    /// Publish `device.discovered` (lossless lifecycle): one **untrusted**
+    /// discovery-inventory row found by an mDNS scan (DEV-A5 / ADR-0041).
+    ///
+    /// This is **not** an adoption: it does not touch the status registry and
+    /// carries no registry id — a discovered service is a hint requiring explicit
+    /// confirm-adopt (`POST /devices/{id}`). The `driver` string is the discovered
+    /// driver-kind wire token (e.g. `ndi-source`); `address` is the IPv6-first
+    /// management address and `family` labels IPv4 as legacy (ADR-0042).
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn discovered(
+        &self,
+        driver: &str,
+        address: &str,
+        family: multiview_events::AddressFamily,
+        name: Option<String>,
+    ) -> u64 {
+        self.engine.publish_event(Event::DeviceDiscovered(
+            multiview_events::DeviceDiscovered {
+                driver: driver.to_owned(),
+                address: address.to_owned(),
+                family,
+                name,
+            },
+        ))
     }
 
     /// Publish `device.error` (lossless lifecycle).

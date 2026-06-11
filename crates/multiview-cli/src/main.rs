@@ -183,6 +183,22 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     })
 }
 
+/// The per-run-path inputs the control plane is wired from: the live preview
+/// taps (the program slot the run loop fills + the per-source store map), the
+/// producer stop registry the live-source hub shares with the run's startup
+/// supervisors, and what this run path can take live (ADR-W021 — the binary
+/// is the only place that knows both the compiled features and the path).
+struct ControlPlaneWiring {
+    /// The shared program-frame slot the run loop fills for previews.
+    program_slot: multiview_cli::preview::ProgramSlot,
+    /// The per-source last-good stores (the preview provider's initial map).
+    stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
+    /// The per-source producer stop registry (shared with the live-source hub).
+    registry: multiview_cli::live_sources::StopRegistry,
+    /// What the running engine can take live (per-collection header honesty).
+    live_apply: multiview_control::LiveApplyCaps,
+}
+
 /// Bring up the management control plane for a run (one wiring for BOTH run
 /// paths — ADR-W013/ADR-W018): the live-source hub over the run's per-source
 /// stop registry + the shared (live-updatable) preview store map, the preview
@@ -191,21 +207,25 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// Returns the server task handle, the engine-side [`multiview_control::CommandReceiver`]
 /// (the caller builds its path-specific frame-boundary drain from it), and the
 /// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
-/// returns). The hub shares `registry`, so a live remove can tear down a
-/// startup producer (generator or ingest thread) too.
+/// returns). The hub shares the wiring's stop registry, so a live remove can
+/// tear down a startup producer (generator or ingest thread) too.
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
-    program_slot: multiview_cli::preview::ProgramSlot,
-    stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
-    registry: multiview_cli::live_sources::StopRegistry,
+    wiring: ControlPlaneWiring,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<(
     tokio::task::JoinHandle<std::io::Result<()>>,
     multiview_control::CommandReceiver,
     multiview_cli::live_sources::LiveSourceHub,
 )> {
+    let ControlPlaneWiring {
+        program_slot,
+        stores,
+        registry,
+        live_apply,
+    } = wiring;
     let (commands, command_rx) = command_bus(64);
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
     // the SHARED, live-updatable preview store map, off the clock thread.
@@ -223,6 +243,7 @@ async fn serve_control_plane(
         Arc::clone(publisher),
         commands,
         provider,
+        live_apply,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -255,13 +276,30 @@ async fn run_pipeline_until_ctrl_c(
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
+            // What THIS build + run path can take live (ADR-W021): with the
+            // `overlay` feature the bake consumer renders the overlay working
+            // set, so overlay documents the renderer draws (analog-face
+            // clocks — `live_overlays::renders_live`, the same predicate the
+            // drain warns by) apply live; without it nothing overlay-side
+            // renders and the honest default (everything `restart`) stands.
+            #[cfg(feature = "overlay")]
+            let live_apply = multiview_control::LiveApplyCaps::default().with_overlays(
+                multiview_control::OverlayLiveCapability::new(
+                    multiview_cli::live_overlays::renders_live,
+                ),
+            );
+            #[cfg(not(feature = "overlay"))]
+            let live_apply = multiview_control::LiveApplyCaps::default();
             let (handle, command_rx, hub) = serve_control_plane(
                 &cfg.listen,
                 config,
                 &publisher,
-                Arc::clone(&preview_slot),
-                pipeline.preview_stores(),
-                pipeline.stop_registry(),
+                ControlPlaneWiring {
+                    program_slot: Arc::clone(&preview_slot),
+                    stores: pipeline.preview_stores(),
+                    registry: pipeline.stop_registry(),
+                    live_apply,
+                },
                 shutdown_rx,
             )
             .await?;
@@ -270,13 +308,15 @@ async fn run_pipeline_until_ctrl_c(
             // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
             // drive start, and the drain reads it wait-free (inv #1/#10). Only under
             // `overlay` (without it the run renders no subtitles, so there is no layer).
-            // The live-source seam (ADR-W018) rides both variants.
+            // The live overlay seam (ADR-W021) rides the same variant; the
+            // live-source seam (ADR-W018) rides both.
             #[cfg(feature = "overlay")]
             let drain: ControlDrain = Box::new(control::command_drain_with_seams(
                 command_rx,
                 config.clone(),
                 Arc::clone(&publisher),
                 pipeline.subtitle_route_slot(),
+                pipeline.overlay_apply_slot(),
                 hub.handle(),
             ));
             #[cfg(not(feature = "overlay"))]
@@ -535,9 +575,15 @@ async fn run_software_until_ctrl_c(
                 &cfg.listen,
                 config,
                 &publisher,
-                engine.program_preview(),
-                engine.preview_stores(),
-                engine.stop_registry(),
+                ControlPlaneWiring {
+                    program_slot: engine.program_preview(),
+                    stores: engine.preview_stores(),
+                    registry: engine.stop_registry(),
+                    // The software engine has no bake stage: no overlay
+                    // document renders on this path, so the honest default
+                    // (everything `restart`) is the truth (ADR-W021).
+                    live_apply: multiview_control::LiveApplyCaps::default(),
+                },
                 shutdown_rx,
             )
             .await?;

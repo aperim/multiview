@@ -903,11 +903,20 @@ pub struct Pipeline {
     /// wins (config validation already rejects duplicate probe ids).
     #[cfg(feature = "overlay")]
     declared_probes: Vec<multiview_config::probe::Probe>,
-    /// An optional **analog** clock face requested by a `[[overlays]]` entry with
-    /// `kind = "clock"` + `face = "analog"`. `None` ⇒ only the default digital
-    /// clock label is drawn.
+    /// The **analog** clock faces requested by `[[overlays]]` entries with
+    /// `kind = "clock"` + `face = "analog"` — one face per entry, working-set
+    /// order (ADR-W021). Empty ⇒ only the default digital clock label is drawn.
     #[cfg(feature = "overlay")]
-    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    analog_clocks: Vec<crate::overlays::AnalogClockSpec>,
+    /// ADR-W021: the live overlay working-set slot, seeded with the boot
+    /// config's overlays (generation 0). The command drain publishes each
+    /// applied overlay change through it (via
+    /// [`overlay_apply_slot`](Self::overlay_apply_slot) → the binary's drain
+    /// wiring) and the bake consumer re-derives its overlay render state from
+    /// it at the next frame — a lock-free `ArcSwap`, so neither side can pace
+    /// the other (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    overlay_apply: crate::live_overlays::OverlayApplySlot,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
     stores: HashMapStores,
@@ -1172,10 +1181,10 @@ impl Pipeline {
                 (s.id.clone(), label)
             })
             .collect();
-        // Read an optional analog clock face from a `[[overlays]]` clock entry.
+        // Read the analog clock faces from the `[[overlays]]` clock entries.
         #[cfg(feature = "overlay")]
-        let analog_clock =
-            analog_clock_from_config(&config.overlays, config.canvas.width, config.canvas.height);
+        let analog_clocks =
+            analog_clocks_from_config(&config.overlays, config.canvas.width, config.canvas.height);
 
         // The legacy `--subtitles` sidecar (if attached later) burns into the
         // first source-bound cell. Pre-resolve that target id once here.
@@ -1237,7 +1246,9 @@ impl Pipeline {
             #[cfg(feature = "overlay")]
             declared_probes: config.probes.clone(),
             #[cfg(feature = "overlay")]
-            analog_clock,
+            analog_clocks,
+            #[cfg(feature = "overlay")]
+            overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
             epoch,
             epoch_anchor: crate::timing_status::anchor_slot(),
         })
@@ -1508,6 +1519,19 @@ impl Pipeline {
         Arc::clone(&self.subtitle_route)
     }
 
+    /// ADR-W021: the **shared** live overlay working-set slot. The binary
+    /// threads a clone into the command drain
+    /// ([`command_drain_with_seams`](crate::control::command_drain_with_seams))
+    /// so `UpsertOverlay`/`RemoveOverlay` publish through it at the frame
+    /// boundary; the bake consumer re-derives its overlay render state from it
+    /// at the next frame. Reading/writing is a lock-free `ArcSwap` load/store,
+    /// so neither side can pace or stall the output clock (inv #1/#10).
+    #[cfg(feature = "overlay")]
+    #[must_use]
+    pub fn overlay_apply_slot(&self) -> crate::live_overlays::OverlayApplySlot {
+        Arc::clone(&self.overlay_apply)
+    }
+
     /// Build one [`SinkRunner`] per configured runnable output. Each runner
     /// drives the **existing, tested** `multiview_output` `PacketMuxSink::run`
     /// over a [`StreamingPacketSource`] that pulls coded packets off that sink's
@@ -1764,6 +1788,54 @@ impl Pipeline {
         // streaming/web level (this output is a live streaming multiview).
         let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
+        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
+        // startup, before the output clock runs — and keep their handles alive
+        // for the whole run (drop = stop + join, off the hot path). Each sink
+        // owns its device on a dedicated thread; the engine side holds only
+        // wait-free mailbox publishers, fed in `state_of` exactly where the
+        // live-preview slot is filled. A startup failure (no such connector,
+        // no usable mode, modeset rejected) fails the run like any other
+        // misconfigured output; after startup the sinks can never fail the
+        // engine (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get
+        // an ELD-gated ALSA audio sink wired to their flip clock; the
+        // publishers feed from the bake consumer below.
+        #[cfg(feature = "display-kms")]
+        let started_displays = start_display_sinks(
+            std::mem::take(&mut self.display_plans),
+            self.cadence,
+            display_audio_format(self.encode_cfg.audio.as_ref()),
+        )?;
+        #[cfg(feature = "display-kms")]
+        let display_publishers = started_displays.publishers;
+        // Keep the video + audio sink threads alive for the whole run; dropping
+        // the handles at end of run stops + joins them (off the hot path).
+        #[cfg(feature = "display-kms")]
+        let _display_handles = started_displays.handles;
+        #[cfg(feature = "display-kms")]
+        let _display_audio_handles = started_displays.audio_handles;
+        #[cfg(feature = "display-kms")]
+        let display_audio_publishers = started_displays.audio_publishers;
+        #[cfg(not(feature = "display-kms"))]
+        let display_audio_publishers: Vec<
+            multiview_output::display::audio::DisplayAudioPublisher,
+        > = Vec::new();
+        // The display-audio feed (DEV-B4): heads receive the SAME post-loudnorm
+        // program block the stream encodes when this run carries program audio;
+        // a video-only run with audio-enabled heads gets a dedicated program
+        // bus (currently silence, correctly paced by tick index) so the audio
+        // path is real either way.
+        let display_audio = DisplayAudioFeed {
+            dedicated_bus: if audio_bus.is_none() && !display_audio_publishers.is_empty() {
+                Some(multiview_audio::program::ProgramBus::new(
+                    display_audio_format(self.encode_cfg.audio.as_ref()),
+                    self.cadence,
+                ))
+            } else {
+                None
+            },
+            publishers: display_audio_publishers,
+        };
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -1778,6 +1850,7 @@ impl Pipeline {
             encoder,
             audio_bus,
             audio_loudnorm,
+            display_audio,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -1870,18 +1943,10 @@ impl Pipeline {
             publisher.publish_event(event);
         }
         let input_fragment = crate::control::input_inventories_fragment(&self.inventories);
-        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
-        // startup, before the output clock runs — and keep their handles alive
-        // for the whole run (drop = stop + join, off the hot path). Each sink
-        // owns its device on a dedicated thread; the engine side holds only
-        // wait-free mailbox publishers, fed in `state_of` exactly where the
-        // live-preview slot is filled. A startup failure (no such connector,
-        // no usable mode, modeset rejected) fails the run like any other
-        // misconfigured output; after startup the sinks can never fail the
-        // engine (invariants #1 + #10).
-        #[cfg(feature = "display-kms")]
-        let (_display_handles, display_publishers) =
-            start_display_sinks(std::mem::take(&mut self.display_plans), self.cadence)?;
+        // (The DRM/KMS display heads — and their DEV-B4 audio sinks — were
+        // started above, before the egress spawn, so the bake consumer received
+        // the audio publishers; `display_publishers` feeds the video mailboxes
+        // in `state_of` below.)
         // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
         // state (kept here on the hot loop — the bounded cue store holds only a
         // small live window, so it must be sampled now, not after the run), clones
@@ -2148,9 +2213,10 @@ impl Pipeline {
             meter_db_timelines: self.meter_db_timelines.clone(),
             subtitles: self.subtitles.clone(),
             sidecar_target: self.sidecar_target.clone(),
-            analog_clock: self.analog_clock,
+            analog_clocks: self.analog_clocks.clone(),
             canvas_color: self.canvas_color,
             cadence: self.cadence,
+            overlay_apply: Some(Arc::clone(&self.overlay_apply)),
         }
     }
 
@@ -2181,15 +2247,20 @@ struct BakeContext {
     /// The source id the sidecar burns into (the first source-bound cell).
     #[cfg(feature = "overlay")]
     sidecar_target: Option<String>,
-    /// An optional analog clock face placement.
+    /// The analog clock face placements (one per analog-face entry).
     #[cfg(feature = "overlay")]
-    analog_clock: Option<crate::overlays::AnalogClockSpec>,
+    analog_clocks: Vec<crate::overlays::AnalogClockSpec>,
     /// The fixed canvas color (for the overlay blend + output tag).
     #[cfg(feature = "overlay")]
     canvas_color: CanvasColor,
     /// The fixed output cadence (for the per-frame media time).
     #[cfg(feature = "overlay")]
     cadence: Rational,
+    /// ADR-W021: the live overlay working-set slot the consumer re-derives
+    /// from (one wait-free load + generation compare per frame). `None` ⇒ no
+    /// live seam (the boot-derived `analog_clock` stands for the whole run).
+    #[cfg(feature = "overlay")]
+    overlay_apply: Option<crate::live_overlays::OverlayApplySlot>,
 }
 
 impl BakeContext {
@@ -2233,6 +2304,10 @@ struct StreamBaker {
     canvas_color: CanvasColor,
     cadence: Rational,
     meter: BakeContext,
+    /// The last live overlay-set generation this baker derived its render
+    /// state from (ADR-W021). `None` until the first bake, so a wired slot's
+    /// seeded set drives the very first frame (one truth: the slot).
+    overlay_generation: Option<u64>,
 }
 
 #[cfg(not(feature = "overlay"))]
@@ -2254,15 +2329,37 @@ impl StreamBaker {
             crate::wallclock::WallClockSource::system(),
         )
         .map_err(|e| PipelineError::Engine(format!("overlay baker: {e}")))?;
-        if let Some(spec) = ctx.analog_clock {
-            baker = baker.with_analog_clock(spec);
-        }
+        baker.set_analog_clocks(ctx.analog_clocks.clone());
         Ok(Self {
             baker,
             canvas_color: ctx.canvas_color,
             cadence: ctx.cadence,
             meter: ctx,
+            overlay_generation: None,
         })
+    }
+
+    /// Re-derive the overlay render state from the live working-set slot iff
+    /// its generation advanced (ADR-W021). The steady-state per-frame cost is
+    /// one wait-free `ArcSwap` load plus an integer compare; on a change the
+    /// re-derivation is O(overlays) pure math (no I/O, no rasterization), and
+    /// the frame baked next is drawn entirely from the new set — a clean
+    /// frame-boundary (Class-1) transition. Without a wired slot the
+    /// boot-derived state stands.
+    fn refresh_overlays(&mut self, canvas_w: u32, canvas_h: u32) {
+        let Some(slot) = self.meter.overlay_apply.as_ref() else {
+            return;
+        };
+        let set = slot.load();
+        if self.overlay_generation == Some(set.generation()) {
+            return;
+        }
+        self.baker.set_analog_clocks(analog_clocks_from_config(
+            set.overlays(),
+            canvas_w,
+            canvas_h,
+        ));
+        self.overlay_generation = Some(set.generation());
     }
 
     /// Bake one streamed tick's overlays into its canvas, returning the overlaid
@@ -2273,6 +2370,10 @@ impl StreamBaker {
     /// Returns [`PipelineError::Engine`] if the baker/sub-pass rejects the canvas.
     fn bake(&mut self, item: &StreamItem) -> Result<Arc<Nv12Image>, PipelineError> {
         use multiview_compositor::overlay::apply_overlays_to_nv12;
+
+        // ADR-W021: pick up a live overlay-set change before drawing, so this
+        // frame is baked entirely from one set (frame-boundary apply).
+        self.refresh_overlays(item.canvas.width(), item.canvas.height());
 
         let i = usize::try_from(item.tick_index).unwrap_or(usize::MAX);
         let pts = MediaTime::from_tick(i64::try_from(i).unwrap_or(i64::MAX), self.cadence);
@@ -2523,6 +2624,7 @@ impl StreamEgress {
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
         audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+        display_audio: DisplayAudioFeed,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -2580,6 +2682,7 @@ impl StreamEgress {
                     encoder,
                     audio_bus,
                     audio_loudnorm,
+                    display_audio,
                     &consumer_in_flight,
                 )
             })
@@ -2699,6 +2802,41 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// The audio format the display heads' audio sinks are fed in (DEV-B4): the
+/// run's program-audio format when this run encodes audio (so the heads hear
+/// exactly the stream program), else the canonical 48 kHz stereo a dedicated
+/// display bus mixes. Mirrors [`program_audio_bus`]'s layout mapping so pushed
+/// blocks always match the sink FIFO's channel count.
+fn display_audio_format(
+    cfg: Option<&multiview_output::AudioEncodeConfig>,
+) -> multiview_audio::AudioFormat {
+    let Some(cfg) = cfg else {
+        return multiview_audio::AudioFormat::new(48_000, multiview_audio::ChannelLayout::Stereo);
+    };
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    multiview_audio::AudioFormat::new(cfg.sample_rate, layout)
+}
+
+/// The display-head audio feed (DEV-B4): the bounded FIFO publishers of every
+/// audio-enabled display output, plus — when the run carries no encode-side
+/// program audio — a dedicated tick-driven program bus so the heads still
+/// receive correctly-paced program audio (silence until sources are routed,
+/// exactly like the encode-side bus). Empty publishers ⇒ the consumer skips
+/// the display branch entirely; each push is a bounded short critical section
+/// into the drop-oldest FIFO (the sink holds that lock only for in-memory
+/// copies, never across a PCM call), so a wedged ALSA device can never reach
+/// back to the bake consumer, let alone the engine (invariants #1 + #10).
+struct DisplayAudioFeed {
+    /// One bounded drop-oldest FIFO publisher per audio-enabled display head.
+    publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+    /// `Some` only when the run has no encode-side audio bus AND there are
+    /// display publishers to feed.
+    dedicated_bus: Option<multiview_audio::program::ProgramBus>,
+}
+
 /// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
 ///
 /// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
@@ -2763,6 +2901,10 @@ fn drive_audio_for_item(
 /// # Errors
 /// Returns [`PipelineError`] if building the baker, baking a frame, or the single
 /// encode fails.
+#[allow(clippy::too_many_arguments)]
+// reason: the consumer owns exactly one of each pipeline stage (baker, encoder,
+// audio bus, loudnorm, display feed); a one-shot bundling struct would only
+// rename the same eight things.
 fn consumer_main(
     ctx: BakeContext,
     hot_rx: &Receiver<StreamItem>,
@@ -2770,6 +2912,7 @@ fn consumer_main(
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
     mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+    mut display_audio: DisplayAudioFeed,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -2815,6 +2958,15 @@ fn consumer_main(
                 Some(norm) => norm.process(block),
                 None => block,
             };
+            // DEV-B4: the display heads hear the SAME post-loudnorm program
+            // block the stream encodes. Each push is a bounded short critical
+            // section into the drop-oldest FIFO (never held across a PCM
+            // call) — a wedged HDMI audio device sheds frames and can never
+            // back-pressure this consumer, let alone the engine
+            // (invariants #1 + #10).
+            for publisher in &display_audio.publishers {
+                publisher.push_audio(&block);
+            }
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {
@@ -2822,6 +2974,16 @@ fn consumer_main(
                     reason: e.to_string(),
                 })?;
             fan_packets(&sink_txs, &mut live, audio_packets);
+        } else if let Some(bus) = display_audio.dedicated_bus.as_mut() {
+            // A video-only run with audio-enabled display heads: drive the
+            // dedicated display bus by the same absolute tick index (RT-8b —
+            // catching up across shed ticks keeps the sample clock a pure
+            // function of the tick counter) and feed the heads. No encode, no
+            // packets — the stream stays byte-identical to a video-only run.
+            let block = drive_audio_for_item(bus, item.tick_index);
+            for publisher in &display_audio.publishers {
+                publisher.push_audio(&block);
+            }
         }
     }
     // End-of-program: flush the encoder and fan its trailing packets, then drop
@@ -3965,57 +4127,64 @@ fn u32_from_usize_audio(value: usize) -> u32 {
 }
 
 /// The codec token a config output names, if it carries one.
-/// Read an optional analog clock face from the config `[[overlays]]` list: the
-/// first entry whose `kind == "clock"` and whose `face` param is `"analog"`.
+/// Read the analog clock faces from the config `[[overlays]]` list: one face
+/// per entry whose `kind == "clock"` and whose `face` param is `"analog"`, in
+/// working-set order (ADR-W021 — EVERY analog entry renders; no first-wins).
 ///
-/// Placement comes from optional `x`/`y`/`radius` params (canvas pixels); a
-/// missing placement defaults the face to the bottom-right corner sized to the
-/// canvas. An optional `tz_minutes` param sets the timezone offset (default UTC).
-/// Returns `None` when no analog clock is requested (the digital label still
-/// renders). Without the `overlay` feature this is never called.
+/// Placement comes from each entry's optional `x`/`y`/`radius` params (canvas
+/// pixels); a missing placement defaults that face to the bottom-right corner
+/// sized to the canvas. An optional `tz_minutes` param sets the timezone
+/// offset (default UTC). Returns an empty set when no analog clock is
+/// requested (the digital label still renders). Without the `overlay` feature
+/// this is never called.
 #[cfg(feature = "overlay")]
-fn analog_clock_from_config(
+fn analog_clocks_from_config(
     overlays: &[multiview_config::Overlay],
     canvas_w: u32,
     canvas_h: u32,
-) -> Option<crate::overlays::AnalogClockSpec> {
+) -> Vec<crate::overlays::AnalogClockSpec> {
     use multiview_overlay::clock::TimeZoneOffset;
-
-    let entry = overlays.iter().find(|o| {
-        o.kind == "clock"
-            && o.params
-                .get("face")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
-    })?;
 
     let cw = u32_to_f32(canvas_w);
     let ch = u32_to_f32(canvas_h);
     // A face sized to ~22% of the shorter canvas side by default.
     let default_radius = cw.min(ch) * 0.11;
-    // Config placement is whole-pixel / whole-minute; round each param to an i32
-    // and widen it losslessly to f32 (no `as` cast), or fall back to the default.
-    let param_f32 = |key: &str| -> Option<f32> {
-        entry
-            .params
-            .get(key)
-            .and_then(serde_json::Value::as_f64)
-            .map(|v| i32_to_f32(round_f64_to_i32(v)))
-    };
-    let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
-    // Default placement: bottom-right corner, inset by the radius + a margin.
-    let margin = radius * 0.25;
-    let cx = param_f32("x").unwrap_or(cw - radius - margin);
-    let cy = param_f32("y").unwrap_or(ch - radius - margin);
-    let zone = entry
-        .params
-        .get("tz_minutes")
-        .and_then(serde_json::Value::as_f64)
-        .map_or(TimeZoneOffset::UTC, |m| {
-            TimeZoneOffset::from_minutes(round_f64_to_i32(m))
-        });
 
-    Some(crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius))
+    overlays
+        .iter()
+        .filter(|o| {
+            o.kind == "clock"
+                && o.params
+                    .get("face")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|f| f.eq_ignore_ascii_case("analog"))
+        })
+        .map(|entry| {
+            // Config placement is whole-pixel / whole-minute; round each param
+            // to an i32 and widen it losslessly to f32 (no `as` cast), or fall
+            // back to the default.
+            let param_f32 = |key: &str| -> Option<f32> {
+                entry
+                    .params
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| i32_to_f32(round_f64_to_i32(v)))
+            };
+            let radius = param_f32("radius").unwrap_or(default_radius).max(8.0);
+            // Default placement: bottom-right corner, inset by radius + margin.
+            let margin = radius * 0.25;
+            let cx = param_f32("x").unwrap_or(cw - radius - margin);
+            let cy = param_f32("y").unwrap_or(ch - radius - margin);
+            let zone = entry
+                .params
+                .get("tz_minutes")
+                .and_then(serde_json::Value::as_f64)
+                .map_or(TimeZoneOffset::UTC, |m| {
+                    TimeZoneOffset::from_minutes(round_f64_to_i32(m))
+                });
+            crate::overlays::AnalogClockSpec::new(zone, cx, cy, radius)
+        })
+        .collect()
 }
 
 /// Exact small-`u32` → `f32` widening (canvas sizes are well under `2^24`), no
@@ -4106,6 +4275,10 @@ struct DisplayOutputPlan {
     mode: multiview_output::display::ModeRequest,
     /// The CVT-RB forced mode for an EDID-less chain, if configured.
     forced_mode: Option<multiview_output::display::ForcedMode>,
+    /// Whether HDMI/DP audio is enabled on this head (the config `audio` block
+    /// is present). The audio sink only runs when this is set AND the ELD is
+    /// valid (DEV-B4 / display-out §5); an EDID-less head has no audio path.
+    audio_enabled: bool,
 }
 
 /// Extract the display-head plan from one `Output::Display` (feature
@@ -4117,6 +4290,7 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
         connector,
         mode,
         forced_mode,
+        audio,
         ..
     } = output
     else {
@@ -4144,6 +4318,10 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
         connector: selector,
         mode: request,
         forced_mode: forced,
+        // The presence of the `audio` block enables HDMI/DP audio (ELD-gated at
+        // runtime); a display output never carries selectable discrete tracks
+        // (capability-validated upstream), so the mode is not inspected here.
+        audio_enabled: audio.is_some(),
     })
 }
 
@@ -4170,12 +4348,44 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
     }
 }
 
+/// Everything [`start_display_sinks`] lit: the per-head video flip loops (and
+/// their mailbox publishers) plus the DEV-B4 audio sinks (and their bounded
+/// drop-oldest FIFO publishers) of the heads whose plan enabled audio. The handle vectors
+/// own the threads — keep them alive for the run; dropping them stops + joins.
+#[cfg(feature = "display-kms")]
+struct StartedDisplaySinks {
+    /// One running flip loop per head.
+    handles: Vec<multiview_output::display::DisplaySinkHandle>,
+    /// The matching wait-free frame mailboxes (same order as `handles`).
+    publishers: Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
+    /// The running ELD-gated ALSA audio sinks (audio-enabled heads only).
+    audio_handles: Vec<multiview_output::display::audio::DisplayAudioSink>,
+    /// The matching bounded drop-oldest audio FIFO publishers.
+    audio_publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+}
+
+/// The display-audio FIFO depth in frames (per channel): ~170 ms @ 48 kHz.
+/// Bounds the worst-case added audio latency AND the drop point under a
+/// wedged/slow device (drop-oldest — the engine-side push never blocks).
+#[cfg(feature = "display-kms")]
+const DISPLAY_AUDIO_FIFO_FRAMES: usize = 8_192;
+
 /// Open and light every configured display head (feature `display-kms`):
 /// scan `/dev/dri` for the connector-owning card, probe + select the mode
 /// (EDID preferred / exact-rational `cadence` match / CVT-RB forced), run the
 /// `TEST_ONLY` validation and the one startup modeset, and spawn the
 /// dedicated flip-loop thread per head (ADR-0044 §1). Startup-only; runs
 /// before the output clock starts.
+///
+/// An audio-enabled head (DEV-B4) additionally gets an ELD-gated ALSA audio
+/// sink: the connector's ALSA endpoints are discovered (vc4 card-per-port or
+/// the HDA `eld#D.P` scan), the sink is wired to this head's flip clock for
+/// the scanout-skew servo term, and fed `audio_format` program blocks. Audio
+/// is **best-effort by construction** (display-out §5): an EDID-less head
+/// (forced mode — no ELD exists) and a connector with no discoverable ALSA
+/// endpoint run video-only with a log line, never an error — and a present
+/// ELD is still re-checked live by the sink itself (hotplug), so audio only
+/// flows while the pipe is lit AND the ELD is valid.
 ///
 /// # Errors
 ///
@@ -4186,17 +4396,16 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
 fn start_display_sinks(
     plans: Vec<DisplayOutputPlan>,
     cadence: Rational,
-) -> Result<
-    (
-        Vec<multiview_output::display::DisplaySinkHandle>,
-        Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
-    ),
-    PipelineError,
-> {
+    audio_format: multiview_audio::AudioFormat,
+) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
     use multiview_output::display::{DisplaySink, DisplaySinkConfig};
-    let mut handles = Vec::with_capacity(plans.len());
-    let mut publishers = Vec::with_capacity(plans.len());
+    let mut started = StartedDisplaySinks {
+        handles: Vec::with_capacity(plans.len()),
+        publishers: Vec::with_capacity(plans.len()),
+        audio_handles: Vec::new(),
+        audio_publishers: Vec::new(),
+    };
     for plan in plans {
         let device = KmsDisplayDevice::open_for_connector(&plan.connector).map_err(|e| {
             PipelineError::Output {
@@ -4222,10 +4431,75 @@ fn start_display_sinks(
             kind: "display",
             reason: format!("{}: {e}", plan.output_id),
         })?;
-        handles.push(handle);
-        publishers.push(publisher);
+        if plan.audio_enabled {
+            start_display_audio(&plan.output_id, &handle, audio_format, &mut started);
+        }
+        started.handles.push(handle);
+        started.publishers.push(publisher);
     }
-    Ok((handles, publishers))
+    Ok(started)
+}
+
+/// Start the DEV-B4 ALSA audio sink for one lit head, appending its handle +
+/// publisher to `started`. Best-effort: every miss (EDID-less head, no ALSA
+/// endpoint) logs and returns — the head runs video-only, never an error.
+#[cfg(feature = "display-kms")]
+fn start_display_audio(
+    output_id: &str,
+    handle: &multiview_output::display::DisplaySinkHandle,
+    audio_format: multiview_audio::AudioFormat,
+    started: &mut StartedDisplaySinks,
+) {
+    use multiview_output::display::audio::alsa::discover_for_connector;
+    use multiview_output::display::audio::{DisplayAudioConfig, DisplayAudioSink, FlipClock};
+
+    let head = handle.head();
+    if !head.from_edid {
+        // The documented field condition (display-out §5/§6): a forced-mode
+        // (EDID-less) head publishes no ELD, so it has NO audio path — video
+        // only, stated rather than a surprise.
+        tracing::info!(
+            output = %output_id,
+            connector = %head.connector,
+            "display head runs a forced (EDID-less) mode: no ELD, so no audio path; video only"
+        );
+        return;
+    }
+    let Some(found) = discover_for_connector(&head.connector) else {
+        tracing::warn!(
+            output = %output_id,
+            connector = %head.connector,
+            "display audio enabled but no ALSA endpoint was discovered for the connector; \
+             head runs video-only"
+        );
+        return;
+    };
+    tracing::info!(
+        output = %output_id,
+        connector = %head.connector,
+        card = %found.card_id,
+        "display audio: ALSA endpoints discovered (ELD-gated sink starting)"
+    );
+    // The head's flip telemetry is the scanout clock the audio servo's skew
+    // term anchors against (display-out §5: the three-clock problem).
+    let stats = handle.stats();
+    let flip: FlipClock = Box::new(move || stats.snapshot().last_flip_ns);
+    let (audio_handle, audio_publisher) = DisplayAudioSink::start_with_flip_clock(
+        DisplayAudioConfig {
+            output_id: output_id.to_owned(),
+            format: audio_format,
+            fifo_capacity_frames: DISPLAY_AUDIO_FIFO_FRAMES,
+            // Matches the video sink's poll: bounds stop latency and how fast
+            // an idle/ELD-waiting sink reacts, without busy-waiting (the
+            // blocking PCM write paces the steady state on hardware).
+            poll_interval: Duration::from_millis(4),
+        },
+        found.eld,
+        found.pcm,
+        Some(flip),
+    );
+    started.audio_handles.push(audio_handle);
+    started.audio_publishers.push(audio_publisher);
 }
 
 /// Build the runnable sinks from the config outputs.
@@ -5878,18 +6152,21 @@ mod overlay_clock_tests {
     }
 
     #[test]
-    fn no_clock_overlay_yields_none() {
-        assert!(analog_clock_from_config(&[], 1280, 720).is_none());
-        // A digital clock overlay does NOT request the analog face.
+    fn no_clock_overlay_yields_an_empty_set() {
+        assert!(analog_clocks_from_config(&[], 1280, 720).is_empty());
+        // A digital clock overlay does NOT request an analog face.
         let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
-        assert!(analog_clock_from_config(&[digital], 1280, 720).is_none());
+        assert!(analog_clocks_from_config(&[digital], 1280, 720).is_empty());
     }
 
     #[test]
     fn analog_face_param_requests_the_face() {
         let analog = clock_overlay(serde_json::json!({ "face": "analog" }));
-        let spec = analog_clock_from_config(&[analog], 1280, 720)
+        let specs = analog_clocks_from_config(&[analog], 1280, 720);
+        let spec = *specs
+            .first()
             .expect("an analog clock overlay yields a spec");
+        assert_eq!(specs.len(), 1);
         // Default placement is the bottom-right quadrant of the canvas.
         assert!(
             spec.cx() > 640.0 && spec.cy() > 360.0,
@@ -5903,13 +6180,39 @@ mod overlay_clock_tests {
         let analog = clock_overlay(
             serde_json::json!({ "face": "analog", "x": 200, "y": 150, "radius": 64 }),
         );
-        let spec = analog_clock_from_config(&[analog], 1280, 720).unwrap();
+        let specs = analog_clocks_from_config(&[analog], 1280, 720);
+        let spec = *specs.first().expect("spec");
         assert!((spec.cx() - 200.0).abs() < 0.5, "explicit x honoured");
         assert!((spec.cy() - 150.0).abs() < 0.5, "explicit y honoured");
         assert!(
             (spec.radius() - 64.0).abs() < 0.5,
             "explicit radius honoured"
         );
+    }
+
+    #[test]
+    fn every_analog_entry_yields_a_face_in_set_order() {
+        // MAJOR-1: ALL analog-face entries render — no first-wins. The specs
+        // come back in working-set order, each honouring its own placement,
+        // with the interleaved digital entry contributing nothing.
+        let a = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 100, "y": 100, "radius": 32 }),
+        );
+        let digital = clock_overlay(serde_json::json!({ "face": "digital" }));
+        let b = clock_overlay(
+            serde_json::json!({ "face": "analog", "x": 900, "y": 500, "radius": 48 }),
+        );
+        let specs = analog_clocks_from_config(&[a, digital, b], 1280, 720);
+        assert_eq!(specs.len(), 2, "both analog entries yield faces");
+        assert!(
+            (specs[0].cx() - 100.0).abs() < 0.5,
+            "first face keeps its x"
+        );
+        assert!(
+            (specs[1].cx() - 900.0).abs() < 0.5,
+            "second face keeps its x"
+        );
+        assert!((specs[1].radius() - 48.0).abs() < 0.5);
     }
 }
 
@@ -7205,5 +7508,218 @@ segment_ms = 1000
             .expect("the caption reader registers under {id}/captions");
         flag.store(true, Ordering::Release);
         supervisor.shutdown();
+    }
+}
+
+#[cfg(all(test, feature = "overlay"))]
+mod live_overlay_bake_tests {
+    //! ADR-W021: the bake consumer re-derives its overlay render state from the
+    //! live [`OverlayApplySlot`](crate::live_overlays::OverlayApplySlot) on a
+    //! generation change — proven at the pixel level on the baked NV12 frame.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+    use multiview_core::time::Rational;
+
+    use super::{BakeContext, StreamBaker, StreamItem};
+
+    /// A pixel region (x, y, w, h) the tests assert over — placed well clear
+    /// of the top-left digital-clock chrome (whose readout changes with the
+    /// wall clock and would otherwise alias the diff).
+    type Region = (u32, u32, u32, u32);
+
+    /// The single-face region: a box around a face at (200, 120) radius 40 on
+    /// a 320x180 canvas.
+    const FACE: Region = (150, 70, 100, 100);
+    /// Region around face A at (80, 120) radius 30 (the two-clock test).
+    const FACE_A: Region = (45, 85, 70, 70);
+    /// Region around face B at (240, 120) radius 30 (the two-clock test).
+    const FACE_B: Region = (205, 85, 70, 70);
+
+    /// Count samples inside `region` whose full (y, u, v) tuple differs
+    /// between frames — chroma included, so a restore is proven on every
+    /// plane, not luma alone.
+    fn region_diff(a: &Nv12Image, b: &Nv12Image, region: Region) -> usize {
+        let (x0, y0, w, h) = region;
+        let mut differ = 0_usize;
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let pa = a.sample(x, y).expect("in bounds");
+                let pb = b.sample(x, y).expect("in bounds");
+                if pa != pb {
+                    differ += 1;
+                }
+            }
+        }
+        differ
+    }
+
+    /// A bake context with no tiles and no boot analog clock, wired to `slot`.
+    fn bake_context(slot: &crate::live_overlays::OverlayApplySlot) -> BakeContext {
+        BakeContext {
+            tile_specs: Vec::new(),
+            meter_db_timelines: HashMap::new(),
+            subtitles: None,
+            sidecar_target: None,
+            analog_clocks: Vec::new(),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            overlay_apply: Some(Arc::clone(slot)),
+        }
+    }
+
+    /// One streamed tick over a uniform dark canvas.
+    fn item(tick_index: u64) -> StreamItem {
+        let tag = CanvasColor::default().output_tag();
+        StreamItem {
+            canvas: Arc::new(Nv12Image::solid(320, 180, 16, 128, 128, tag).expect("solid")),
+            tick_index,
+            source_states: HashMap::new(),
+            captions: HashMap::new(),
+            caption_bitmaps: HashMap::new(),
+            faults: HashMap::new(),
+        }
+    }
+
+    /// An analog wall-clock overlay document at the given placement.
+    fn analog_clock_at(id: &str, x: i64, y: i64, radius: i64) -> multiview_config::Overlay {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "kind": "clock", "target": "canvas",
+            "face": "analog", "x": x, "y": y, "radius": radius
+        }))
+        .expect("valid overlay document")
+    }
+
+    /// An analog wall-clock overlay document centred in [`FACE`].
+    fn analog_clock_doc() -> multiview_config::Overlay {
+        analog_clock_at("clk", 200, 120, 40)
+    }
+
+    /// A frame baked from an EMPTY overlay set (the bare-canvas reference).
+    fn blank_frame() -> Arc<Nv12Image> {
+        let empty = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut bare = StreamBaker::new(bake_context(&empty)).expect("bare baker");
+        bare.bake(&item(0)).expect("bare bake")
+    }
+
+    #[test]
+    fn stream_baker_rederives_the_analog_clock_from_the_live_slot() {
+        // Generation 0: an empty boot set ⇒ no analog face anywhere.
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let before = baker.bake(&item(0)).expect("bake gen 0");
+
+        // LIVE APPLY: publish a set carrying the analog clock. The next baked
+        // frame must ink the face (the bezel ring + hands) into the region.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let with_face = baker.bake(&item(1)).expect("bake gen 1");
+        let inked = region_diff(&before, &with_face, FACE);
+        assert!(
+            inked > 50,
+            "the live-applied analog face must visibly ink the region \
+             (differing samples: {inked})"
+        );
+
+        // LIVE REMOVE: publish the empty set again — the face disappears and
+        // the region returns to the bare-canvas pixels (every plane).
+        let _gen = crate::live_overlays::publish_set(&slot, Vec::new());
+        let removed = baker.bake(&item(2)).expect("bake gen 2");
+        assert_eq!(
+            region_diff(&before, &removed, FACE),
+            0,
+            "removing the overlay must restore the bare-canvas face region"
+        );
+    }
+
+    #[test]
+    fn two_analog_clocks_both_ink_and_removing_one_keeps_the_other() {
+        // MAJOR-1: EVERY analog-face clock entry renders its own face — there
+        // is no first-wins. Two clocks at distinct placements both ink, and
+        // removing one keeps the other while restoring the removed region.
+        let blank = blank_frame();
+        let slot = crate::live_overlays::overlay_apply_slot(Vec::new());
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let _gen = crate::live_overlays::publish_set(
+            &slot,
+            vec![
+                analog_clock_at("clk_a", 80, 120, 30),
+                analog_clock_at("clk_b", 240, 120, 30),
+            ],
+        );
+        let both = baker.bake(&item(0)).expect("bake both");
+        let a_ink = region_diff(&blank, &both, FACE_A);
+        let b_ink = region_diff(&blank, &both, FACE_B);
+        assert!(
+            a_ink > 50,
+            "the FIRST analog face must ink its region (got {a_ink})"
+        );
+        assert!(
+            b_ink > 50,
+            "the SECOND analog face must ink its region too — no first-wins \
+             (got {b_ink})"
+        );
+
+        // Remove clk_b: clk_a keeps drawing, clk_b's region restores exactly.
+        let _gen =
+            crate::live_overlays::publish_set(&slot, vec![analog_clock_at("clk_a", 80, 120, 30)]);
+        let only_a = baker.bake(&item(1)).expect("bake only_a");
+        assert!(
+            region_diff(&blank, &only_a, FACE_A) > 50,
+            "removing the OTHER clock must not disturb the kept face"
+        );
+        assert_eq!(
+            region_diff(&blank, &only_a, FACE_B),
+            0,
+            "the removed clock's region must restore to the bare canvas"
+        );
+    }
+
+    #[test]
+    fn seeded_slot_drives_the_first_bake() {
+        // The context carries no boot analog clock, but the slot's
+        // generation-0 set does: the FIRST bake must already honour the slot
+        // (the seeded set is the boot truth — one source of truth).
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+        let first = baker.bake(&item(0)).expect("bake");
+        assert!(
+            region_diff(&blank_frame(), &first, FACE) > 50,
+            "the seeded slot set must drive the very first bake"
+        );
+    }
+
+    #[test]
+    fn same_generation_bake_skips_rederivation() {
+        // The generation gate genuinely skips: perturb the baker's derived
+        // face state BEHIND the gate and prove a same-generation bake does
+        // NOT restore it (no re-derive happened), while a new generation does.
+        let blank = blank_frame();
+        let slot = crate::live_overlays::overlay_apply_slot(vec![analog_clock_doc()]);
+        let mut baker = StreamBaker::new(bake_context(&slot)).expect("baker");
+
+        let first = baker.bake(&item(0)).expect("bake gen 0");
+        assert!(region_diff(&blank, &first, FACE) > 50, "gen-0 face inks");
+
+        // PERTURB: clear the derived faces directly. If the gate works, the
+        // next bake (same generation) must NOT re-derive them from the slot.
+        baker.baker.set_analog_clocks(Vec::new());
+        let second = baker.bake(&item(1)).expect("bake same gen");
+        assert_eq!(
+            region_diff(&blank, &second, FACE),
+            0,
+            "a same-generation bake must skip re-derivation (gate holds)"
+        );
+
+        // A NEW generation re-derives from the slot: the face returns.
+        let _gen = crate::live_overlays::publish_set(&slot, vec![analog_clock_doc()]);
+        let third = baker.bake(&item(2)).expect("bake new gen");
+        assert!(
+            region_diff(&blank, &third, FACE) > 50,
+            "a new generation must re-derive (the face returns)"
+        );
     }
 }

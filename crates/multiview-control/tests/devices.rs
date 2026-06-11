@@ -15,12 +15,15 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
+use multiview_engine::EnginePublisher;
 use serde_json::json;
 use support::{
-    body_json, delete_if_match, get, harness, post_if_match, post_json, put_json, send,
-    ADMIN_TOKEN, OPERATOR_TOKEN, VIEWER_TOKEN,
+    body_json, delete_if_match, get, harness, harness_with, post_if_match, post_json, put_json,
+    send, ADMIN_TOKEN, OPERATOR_TOKEN, VIEWER_TOKEN,
 };
 
 /// A valid `zowietek` device body (the canonical `multiview_config::Device`
@@ -477,6 +480,120 @@ async fn viewer_cannot_create_a_device() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// After a live `zowietek` driver enumerates a device's facets into the shared
+/// driver registry (what the spawned poller does on adopt), the projection
+/// routes return the REAL candidates/targets — not the honest-empty placeholder.
+#[tokio::test]
+async fn projection_routes_serve_real_facets_a_live_driver_enumerated() {
+    use multiview_control::devices::zowietek::client::{ScriptedReply, ScriptedTransport};
+    use multiview_control::devices::zowietek::ZowietekDriver;
+    use multiview_control::devices::{
+        DeviceBroadcaster, DeviceDriverRegistry, DeviceStatusRegistry,
+    };
+
+    // Share ONE driver registry between the router (via AppState) and a live
+    // driver, exactly as the spawned poller shares the AppState registry.
+    let drivers = Arc::new(DeviceDriverRegistry::new());
+    let drivers_for_state = Arc::clone(&drivers);
+    let h = harness_with(move |state| state.with_device_drivers(drivers_for_state));
+    seed_device(&h, "dev-foyer").await;
+
+    // The projection routes are honestly empty BEFORE the driver enumerates.
+    let resp = send(
+        &h.router,
+        get(
+            "/api/v1/devices/dev-foyer/source-candidates",
+            OPERATOR_TOKEN,
+        ),
+    )
+    .await;
+    let body = body_json(resp).await;
+    assert_eq!(
+        body.as_array().map(Vec::len),
+        Some(0),
+        "no candidates before a driver enumerates: {body}"
+    );
+
+    // A live driver (the poller's adopt path) probes the device and enumerates
+    // the three facets into the shared registry — encoder serves source mounts;
+    // a decode table serves output targets.
+    let transport = ScriptedTransport::new();
+    transport.push(
+        "system",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "uuid": "u" } }),
+        ),
+    );
+    transport.push(
+        "venc",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "decoder" } }),
+        ),
+    );
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({
+            "rsp": "succeed", "status": "00000",
+            "data": { "entries": [ { "index": 0, "proto": "rtsp" } ] }
+        })),
+    );
+    let engine = Arc::new(EnginePublisher::new(64));
+    let status = Arc::new(DeviceStatusRegistry::new());
+    let broadcaster = DeviceBroadcaster::new(engine, status);
+    let driver = ZowietekDriver::new(
+        "dev-foyer",
+        Arc::new(transport),
+        broadcaster,
+        Arc::clone(&drivers),
+        "admin",
+        "admin",
+    );
+    driver
+        .probe_and_adopt()
+        .await
+        .expect("driver adopts device");
+    driver
+        .enumerate_source_candidates("[fd00:db8::42]")
+        .expect("source facet enumerates");
+    driver
+        .enumerate_output_targets()
+        .await
+        .expect("output facet enumerates");
+
+    // The source-candidates route now returns the REAL enumerated candidates.
+    let resp = send(
+        &h.router,
+        get(
+            "/api/v1/devices/dev-foyer/source-candidates",
+            OPERATOR_TOKEN,
+        ),
+    )
+    .await;
+    let body = body_json(resp).await;
+    let urls: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["url"].as_str())
+        .collect();
+    assert!(
+        urls.iter().any(|u| u.contains("/main/av")),
+        "the route serves the driver-enumerated source candidates: {body}"
+    );
+
+    // The output-targets route now returns the REAL decode-slot targets.
+    let resp = send(
+        &h.router,
+        get("/api/v1/devices/dev-foyer/output-targets", OPERATOR_TOKEN),
+    )
+    .await;
+    let body = body_json(resp).await;
+    assert!(
+        !body.as_array().unwrap().is_empty(),
+        "the route serves the driver-enumerated output targets: {body}"
+    );
 }
 
 /// Seed a `zowietek` device over HTTP so an action/projection test has a
