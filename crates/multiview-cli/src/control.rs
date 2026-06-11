@@ -146,7 +146,32 @@ where
     .with_preview(preview)
     .with_warning_store(warnings)
     .with_device_pollers(device_poller_registry())
-    .with_auth_disabled(auth_disabled);
+    .with_auth_disabled(auth_disabled)
+    // The `[discovery]` browse configuration: the operator-configured
+    // zowietek-control service type (the vendor's type is unverified — only a
+    // configured string is ever recognised) plus any extra DNS-SD types.
+    .with_discovery_config(config.discovery.clone().unwrap_or_default());
+
+    // Install the real mDNS browser when the `discovery` feature is built, so
+    // `POST /api/v1/discovery/devices/scan` browses the LAN for Cast / NDI /
+    // (configured) zowietek-control services. Discovery is untrusted inventory
+    // requiring explicit confirm-adopt (ADR-0041) and the browse runs on a
+    // bounded control-plane task — it can never back-pressure the engine
+    // (invariant #10). Without the feature the default `NullBrowser` finds
+    // nothing, so the endpoints answer with an empty inventory rather than
+    // failing.
+    #[cfg(feature = "discovery")]
+    let state = match multiview_control::devices::discovery::MdnsBrowser::new() {
+        Ok(browser) => state.with_discovery_browser(Arc::new(browser)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "mDNS discovery daemon failed to start; device discovery is disabled \
+                 for this run (scans return an empty inventory)"
+            );
+            state
+        }
+    };
 
     // Boot-seed: spawn a supervised driver poller for every config-declared
     // managed device (DEV-A4, ADR-M009). With the `zowietek` feature on, a

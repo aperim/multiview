@@ -1319,6 +1319,93 @@
         }
       }
     },
+    "/api/v1/discovery/devices": {
+      "get": {
+        "tags": [
+          "discovery"
+        ],
+        "summary": "`GET /api/v1/discovery/devices` — the current untrusted inventory snapshot\n(role: read).",
+        "description": "Returns the discovered services found by the most recent scans, AAAA-first\nwith IPv4 labelled legacy, stale (TTL-expired) rows purged on read. These are\n**hints**, not devices: adopting one is the separate `POST /devices/{id}`\nconfirm-adopt referencing a discovered address (ADR-0041).",
+        "operationId": "list_discovered",
+        "responses": {
+          "200": {
+            "description": "The untrusted discovery inventory (hints requiring explicit confirm-adopt; never devices).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DiscoveredService"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read discovery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/discovery/devices/scan": {
+      "post": {
+        "tags": [
+          "discovery"
+        ],
+        "summary": "`POST /api/v1/discovery/devices/scan` — kick a time-bounded mDNS browse\n(role: write; `202` + operation id).",
+        "description": "The browse runs on a bounded control-plane task: it asks the injected browser\nfor services within a time budget, classifies each into the **untrusted\ninventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`\nevent per service, correlated to this operation id via the envelope `corr`\n(ADR-RT007). It never creates a device (ADR-0041).\n\nScans are **single-flight** (one in-flight browse — concurrent `mdns-sd`\nbrowses corrupt each other's listeners/queriers, and one browse at a time is\nthe ADR-M008 rate limit): a request that arrives while a scan runs\n**attaches** to it and is answered with the *running* scan's operation id.\nA retried `Idempotency-Key` returns the original operation id without\nre-executing the browse (the canonical replay semantics).",
+        "operationId": "scan_devices",
+        "responses": {
+          "202": {
+            "description": "Scan accepted (or attached to the single-flight running scan, or replayed by Idempotency-Key — the operation id names the scan that actually runs); discovered rows stream as device.discovered events correlated via corr and land in the untrusted inventory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to scan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
@@ -6100,6 +6187,102 @@
           }
         }
       },
+      "DiscoveredEndpoint": {
+        "type": "object",
+        "description": "One resolved management endpoint of a discovered service: a presentation-\nready address and its family. IPv6 is the lead family (ADR-0042); IPv4 is\nlabelled [`AddressFamily::Ipv4Legacy`]. IPv6 literals are bracketed so the\n`host:port` form is URL-safe.",
+        "required": [
+          "address",
+          "family"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The `host:port` management address (IPv6 literals bracketed)."
+          },
+          "family": {
+            "type": "string",
+            "description": "The address family — `ipv6` (lead) or `ipv4-legacy`. The shared\n[`AddressFamily`] enum carries no `ToSchema`, so the schema models the\nwire string directly (the same `ipv6` / `ipv4-legacy` tokens serde emits).",
+            "example": "ipv6"
+          }
+        }
+      },
+      "DiscoveredService": {
+        "type": "object",
+        "description": "One **untrusted** discovery-inventory row: a classified, AAAA-first service\nrequiring explicit confirm-adopt (ADR-0041). It carries **no registry id** —\nit is not a device.",
+        "required": [
+          "key",
+          "driver_kind",
+          "service_type",
+          "name",
+          "host",
+          "port",
+          "endpoints",
+          "primary_address",
+          "txt",
+          "last_seen_unix_ns"
+        ],
+        "properties": {
+          "driver_kind": {
+            "$ref": "#/components/schemas/DiscoveryDriverKind",
+            "description": "The inferred driver family."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveredEndpoint"
+            },
+            "description": "The management endpoints, **AAAA-first** (IPv6 lead, IPv4 legacy)."
+          },
+          "host": {
+            "type": "string",
+            "description": "The advertised host (`*.local.`), informational."
+          },
+          "key": {
+            "type": "string",
+            "description": "The dedup key (driver kind + instance name + service type). Two sightings\nof the same service share a key and the newer replaces the older."
+          },
+          "last_seen_unix_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When this row was last seen (Unix nanoseconds), informational for the UI."
+          },
+          "name": {
+            "type": "string",
+            "description": "The advertised instance/service name."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The mDNS-advertised port.",
+            "minimum": 0
+          },
+          "primary_address": {
+            "type": "string",
+            "description": "The primary management address — the first (IPv6, if any) endpoint's\n`host:port`. This is the address an operator references when confirming\nadoption via `POST /devices/{id}`."
+          },
+          "service_type": {
+            "type": "string",
+            "description": "The DNS-SD service type browsed."
+          },
+          "txt": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TxtRecord"
+            },
+            "description": "The decoded TXT records (advertised metadata), key-sorted."
+          }
+        }
+      },
+      "DiscoveryDriverKind": {
+        "type": "string",
+        "description": "The inferred driver family of a discovered service, from its service type\n(and the operator-configured zowietek-control type, if any).\n\nA **closed** `#[non_exhaustive]` enum: a new discoverable family is a new\nvariant plus a wired browse type, never an open registry. `Unknown` is the\nhonest catch-all — a service we browsed but cannot classify is reported as\nsuch, never guessed into a family.",
+        "enum": [
+          "cast",
+          "ndi-source",
+          "zowietek-control",
+          "unknown"
+        ]
+      },
       "DocumentDiff": {
         "type": "object",
         "description": "The added / removed / changed top-level keys between two documents.\n\nA pragmatic, UI-facing structural diff over JSON objects: it reports which\ntop-level keys were added, removed, or whose value changed. Non-object\ndocuments (or a type change at the root) are reported as a single synthetic\n`<root>` change so the diff is always total.",
@@ -7646,6 +7829,39 @@
           }
         }
       },
+      "ScanAccepted": {
+        "type": "object",
+        "description": "The `202 Accepted` body for a scan: the operation id correlating the scan and\nthe human-readable scope of what is browsed.",
+        "required": [
+          "operation_id",
+          "service_types",
+          "budget_ms",
+          "note"
+        ],
+        "properties": {
+          "budget_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The scan time budget in milliseconds (the browse is always time-bounded).",
+            "minimum": 0
+          },
+          "note": {
+            "type": "string",
+            "description": "A reminder that discovery is **untrusted**: rows require explicit\nconfirm-adopt and discovery never creates a device (ADR-0041)."
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id of the scan that actually runs — freshly started,\nattached-to (single-flight), or replayed (`Idempotency-Key`). The\n`device.discovered` rows it produces stream on the realtime `devices`\ntopic while it runs, each echoing this id as the envelope `corr`."
+          },
+          "service_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The service types being browsed (Cast + NDI, plus any configured\nzowietek-control type)."
+          }
+        }
+      },
       "Sender": {
         "allOf": [
           {
@@ -8928,6 +9144,24 @@
           }
         }
       },
+      "TxtRecord": {
+        "type": "object",
+        "description": "One advertised TXT key/value record (serializable, sortable).",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The TXT key."
+          },
+          "value": {
+            "type": "string",
+            "description": "The TXT value (decoded as UTF-8 by the browser)."
+          }
+        }
+      },
       "UmdRecallDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::UmdRecall`].",
@@ -9000,6 +9234,10 @@
     {
       "name": "devices",
       "description": "Managed-device registry CRUD + status + bare-verb actions + stream-binding projections (ADR-M008/M009/W017)"
+    },
+    {
+      "name": "discovery",
+      "description": "mDNS device discovery: scan + the untrusted inventory requiring explicit confirm-adopt (ADR-M008 §6 / ADR-0041)"
     },
     {
       "name": "sync-groups",

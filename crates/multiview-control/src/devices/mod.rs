@@ -28,9 +28,13 @@
 //! facets into the [`DeviceDriverRegistry`] the projection endpoints read. With
 //! a driver adopted, `GET /devices/{id}/source-candidates` and `/output-targets`
 //! return the driver's real enumerated candidates; without one they stay
-//! honestly empty. The discovery driver actor is DEV-A5.
+//! honestly empty. mDNS/DNS-SD **discovery** ([`discovery`], DEV-A5) is real and
+//! complete too: a bounded, TTL-expiring, **untrusted** inventory of services
+//! found on the LAN, requiring explicit confirm-adopt (ADR-0041) — discovery
+//! never creates a device.
 
 pub mod broadcaster;
+pub mod discovery;
 pub mod driver_registry;
 pub mod projection;
 pub mod registry;
@@ -38,6 +42,10 @@ pub mod state_machine;
 pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;
+pub use discovery::{
+    DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
+    DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,
+};
 pub use driver_registry::DeviceDriverRegistry;
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;

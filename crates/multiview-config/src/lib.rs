@@ -31,6 +31,7 @@
 
 pub mod audio;
 pub mod device;
+pub mod discovery;
 pub mod error;
 pub mod failover;
 pub mod grid;
@@ -58,6 +59,7 @@ pub use audio::{
     TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
+pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
 pub use layout_doc::{LayoutCanvas, LayoutDocument};
@@ -149,6 +151,12 @@ pub struct MultiviewConfig {
     /// alarm beyond `target_skew_ms`.
     #[serde(default)]
     pub sync_groups: Vec<SyncGroup>,
+    /// mDNS/DNS-SD discovery browse configuration (ADR-M008 §6): the
+    /// operator-configured zowietek-control service type (the vendor's type is
+    /// unverified — never fabricated) and any extra DNS-SD types to browse.
+    /// Absent ⇒ only the built-in Cast + NDI types are browsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryConfig>,
     /// The management control-plane listener. When present, `multiview run`
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -270,7 +278,9 @@ impl MultiviewConfig {
     ///   declared output / wall head;
     /// - sync-group ids are unique, every member references a declared
     ///   device, no device belongs to two groups, and skew/offset bounds are
-    ///   sane.
+    ///   sane;
+    /// - every `[discovery]` service type is a well-formed DNS-SD type
+    ///   (`_name._tcp` / `_name._udp`, optionally `.local.`-suffixed).
     ///
     /// # Errors
     ///
@@ -294,6 +304,7 @@ impl MultiviewConfig {
         self.validate_walls()?;
         self.validate_devices()?;
         self.validate_sync_groups()?;
+        self.validate_discovery()?;
         self.validate_control()?;
         self.validate_placement()?;
         self.validate_routing()?;
@@ -317,6 +328,16 @@ impl MultiviewConfig {
             source.validate()?;
         }
         Ok(())
+    }
+
+    /// Validate the `[discovery]` browse configuration (ADR-M008 §6): every
+    /// configured DNS-SD service type is well-formed
+    /// ([`DiscoveryConfig::validate`]).
+    fn validate_discovery(&self) -> Result<(), ConfigError> {
+        match &self.discovery {
+            Some(discovery) => discovery.validate(),
+            None => Ok(()),
+        }
     }
 
     /// Validate managed devices (ADR-M008): each is internally consistent

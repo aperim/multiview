@@ -82,6 +82,15 @@ pub enum CorrKey {
         /// The lifecycle phase the salvo transitions into.
         phase: SalvoPhase,
     },
+    /// The running discovery scan's `device.discovered` rows (ADR-RT007):
+    /// a **windowed**, multi-event correlation — every row one scan publishes
+    /// echoes that scan's operation id. Recorded via
+    /// [`CorrRegistry::record_window`] (never the consume-once
+    /// [`record`](CorrRegistry::record)); the scan single-flight gate
+    /// guarantees at most one running scan, so the unit key is unambiguous,
+    /// and the window's seq fence keeps an earlier scan's stragglers from ever
+    /// being stamped with a newer scan's id.
+    Discovery,
 }
 
 impl CorrKey {
@@ -149,9 +158,10 @@ impl CorrKey {
     /// The correlation key an outcome event carries, or [`None`] when the event
     /// is not a command outcome (so it is never stamped with a stale `corr`).
     ///
-    /// Mirrors [`CorrKey::for_command`]: only `OutputStatus` and the named
-    /// salvo arm/take/cancel events map to a key; every other event — tile
-    /// state, alerts, audio meters, the control frames — yields [`None`].
+    /// Mirrors [`CorrKey::for_command`]: only `OutputStatus`, the named salvo
+    /// arm/take/cancel events, and the windowed `device.discovered` rows map
+    /// to a key; every other event — tile state, alerts, audio meters, the
+    /// control frames — yields [`None`].
     #[must_use]
     pub fn for_event(event: &Event) -> Option<Self> {
         match event {
@@ -168,6 +178,9 @@ impl CorrKey {
                 salvo: e.salvo.clone(),
                 phase: SalvoPhase::Cancelled,
             }),
+            // The running scan's rows correlate via the windowed Discovery key
+            // (recorded at scan start, seq-fenced).
+            Event::DeviceDiscovered(_) => Some(Self::Discovery),
             _ => None,
         }
     }
@@ -180,7 +193,10 @@ impl CorrKey {
 /// the realtime projection resolves it when the matching outcome event is
 /// delivered ([`CorrRegistry::resolve`]), memoized **once per engine sequence
 /// number** so every fanned-out subscriber stamps the same corr while a
-/// re-emitted outcome (a different seq) carries no stale corr.
+/// re-emitted outcome (a different seq) carries no stale corr. Multi-event
+/// operations (the discovery scan's `device.discovered` rows) use the
+/// **windowed** lane instead ([`CorrRegistry::record_window`]): every matching
+/// event after the window's seq fence echoes the op, non-consuming.
 ///
 /// **Isolation (invariant #10).** This is ordinary control-plane state behind a
 /// short-held `Mutex` that the engine never touches: `record` runs on the HTTP
@@ -206,16 +222,52 @@ struct CorrInner {
     /// Drop-oldest insertion order across all keys, so the global bound evicts
     /// the oldest pending correlation regardless of key.
     order: VecDeque<CorrKey>,
+    /// **Windowed** (multi-event) correlations: every outcome event matching
+    /// the key whose engine seq is **after** the window's fence echoes the
+    /// window's op — until a newer window for the same key replaces it.
+    /// Bounded by construction: windows are keyed by code-defined [`CorrKey`]
+    /// variants (today only [`CorrKey::Discovery`]) and re-recording a key
+    /// overwrites its entry, so this map can never grow with traffic.
+    windows: HashMap<CorrKey, CorrWindow>,
     /// Op ids already resolved for a specific outcome **engine seq**. The first
-    /// client to project an outcome pops the pending op and memoizes it here, so
-    /// every other client projecting the SAME engine event (the realtime stream
-    /// fans one engine event out to all subscribers) stamps the SAME `corr`
-    /// rather than only the first reader seeing it. Bounded the same way as
-    /// `order` (one resolved entry per consumed correlation).
+    /// client to project an outcome pops the pending op (or reads the window)
+    /// and memoizes it here, so every other client projecting the SAME engine
+    /// event (the realtime stream fans one engine event out to all subscribers)
+    /// stamps the SAME `corr` rather than only the first reader seeing it.
+    /// Bounded the same way as `order` (one resolved entry per consumed
+    /// correlation).
     resolved: HashMap<u64, OperationId>,
     /// Insertion order of `resolved` engine seqs, so the global bound evicts the
     /// oldest resolved correlation alongside the pending ones.
     resolved_order: VecDeque<u64>,
+}
+
+/// One windowed (multi-event) correlation: the op id stamped on every matching
+/// outcome event published **after** `from_seq`.
+#[derive(Debug)]
+struct CorrWindow {
+    /// The operation id the window's events echo as `corr`.
+    op: OperationId,
+    /// The engine sequence number at the moment the window opened: only events
+    /// with `seq > from_seq` belong to it. An earlier window's stragglers
+    /// therefore resolve to nothing (honest "uncorrelated"), never to a newer
+    /// operation's id.
+    from_seq: u64,
+}
+
+impl CorrInner {
+    /// Memoize a resolved `(engine_seq → op)` pair so every subscriber stamps
+    /// the same `corr` for one outcome event, evicting the oldest memo beyond
+    /// `capacity` (drop-oldest, invariant #10).
+    fn memoize_resolved(&mut self, engine_seq: u64, op: OperationId, capacity: usize) {
+        self.resolved.insert(engine_seq, op);
+        self.resolved_order.push_back(engine_seq);
+        while self.resolved_order.len() > capacity {
+            if let Some(evicted) = self.resolved_order.pop_front() {
+                self.resolved.remove(&evicted);
+            }
+        }
+    }
 }
 
 impl CorrRegistry {
@@ -256,6 +308,27 @@ impl CorrRegistry {
         }
     }
 
+    /// Open (or replace) a **windowed** correlation: every outcome event
+    /// matching `key` published with an engine sequence **after** `from_seq`
+    /// echoes `op` as `corr`, until a newer window for the same key replaces
+    /// this one. Multi-event-per-operation surfaces use this — the discovery
+    /// scan's `device.discovered` rows ([`CorrKey::Discovery`]) — where
+    /// [`record`](Self::record)'s consume-once pairing cannot.
+    ///
+    /// `from_seq` is the publisher's sequence at the moment the operation
+    /// started, so an *earlier* operation's stragglers (seq ≤ `from_seq`)
+    /// resolve to [`None`] — honest "uncorrelated", never a wrong id. Bounded
+    /// by construction (one window per code-defined key, overwritten on
+    /// re-record; invariant #10). A poisoned lock skips the record — the
+    /// operation's outcomes ride uncorrelated rather than the 202 path
+    /// panicking.
+    pub fn record_window(&self, key: CorrKey, op: OperationId, from_seq: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.windows.insert(key, CorrWindow { op, from_seq });
+    }
+
     /// Resolve the op id to stamp as `corr` on the outcome event with engine
     /// sequence `engine_seq` and correlation `key`, or [`None`] when nothing
     /// correlates (then the outcome rides uncorrelated).
@@ -268,6 +341,11 @@ impl CorrRegistry {
     /// of the same outcome carries a different `engine_seq`, so it does not reuse
     /// a consumed correlation: it pops the next pending op (or [`None`]).
     ///
+    /// A **windowed** key ([`record_window`](Self::record_window)) resolves
+    /// without consuming: every event inside the window (seq after its fence)
+    /// stamps the window's op; an event from before the window opened stays
+    /// uncorrelated.
+    ///
     /// A poisoned lock yields [`None`] (uncorrelated) rather than panicking on the
     /// realtime projection path.
     #[must_use]
@@ -279,6 +357,18 @@ impl CorrRegistry {
         // every subscriber stamps a consistent `corr`.
         if let Some(op) = inner.resolved.get(&engine_seq) {
             return Some(op.clone());
+        }
+        // A windowed (multi-event) key: stamp every matching outcome inside
+        // the window without consuming it. An event published before the
+        // window opened (an earlier operation's straggler) stays uncorrelated
+        // — never a wrong id. Windowed keys never use the pending FIFO.
+        if let Some(window) = inner.windows.get(key) {
+            if engine_seq <= window.from_seq {
+                return None;
+            }
+            let op = window.op.clone();
+            inner.memoize_resolved(engine_seq, op.clone(), self.capacity);
+            return Some(op);
         }
         // First resolver for this engine seq: pop the oldest pending op for the
         // key and memoize it against the seq.
@@ -295,14 +385,7 @@ impl CorrRegistry {
         if let Some(pos) = inner.order.iter().position(|k| k == key) {
             inner.order.remove(pos);
         }
-        inner.resolved.insert(engine_seq, op.clone());
-        inner.resolved_order.push_back(engine_seq);
-        // Bound the resolved memo the same way as pending correlations.
-        while inner.resolved_order.len() > self.capacity {
-            if let Some(evicted) = inner.resolved_order.pop_front() {
-                inner.resolved.remove(&evicted);
-            }
-        }
+        inner.memoize_resolved(engine_seq, op.clone(), self.capacity);
         Some(op)
     }
 }
