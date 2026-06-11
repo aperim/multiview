@@ -102,6 +102,12 @@ Kernel cmdline cosmetics (optional, for a clean boot-to-frame):
   `WATCHDOG=1` at half the budget **only while the output clock advances**.
   A stalled clock withholds pings → systemd restarts the node. The watchdog
   enforces the output-never-falters invariant, not mere process existence.
+  **Scope, today:** the gate observes the output-clock tick counter only.
+  The per-head flip threads are isolated behind wait-free mailboxes (they
+  can never stall the clock — by design), so a wedged flip thread under a
+  healthy clock keeps pinging: the head goes dark while the unit stays
+  "healthy". Per-head scanout liveness is **not** watchdog-gated; it
+  surfaces in the logs instead.
 - **Crash recovery.** fbcon does not hold DRM master; on a crash the
   kernel's fbdev-client restore brings the console back and `Restart=always`
   relights the head. `STOPPING=1` is sent on clean SIGTERM stops.
