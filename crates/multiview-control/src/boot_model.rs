@@ -189,7 +189,9 @@ pub fn load_resume_config(boot_path: &Path) -> Result<MultiviewConfig, String> {
 /// Write `content` to `path` atomically: same-directory temp file →
 /// `fsync(2)` the file → `rename(2)` over the destination → `fsync` the
 /// directory. Readers always observe either the old or the new content, and a
-/// successful write leaves no temp residue.
+/// successful write leaves no temp residue. An existing destination's
+/// permission mode is preserved across the replace (review M3: a `chmod 600`
+/// boot/state file must never silently widen to the umask default).
 ///
 /// Single-writer by design (the one persister task / startup path): the temp
 /// name is deterministic (`.<name>.tmp`), so a crash mid-write leaves at most
@@ -197,8 +199,8 @@ pub fn load_resume_config(boot_path: &Path) -> Result<MultiviewConfig, String> {
 ///
 /// # Errors
 ///
-/// Any I/O error from create/write/sync/rename (a destination with no parent
-/// directory or file name is [`std::io::ErrorKind::InvalidInput`]).
+/// Any I/O error from create/write/chmod/sync/rename (a destination with no
+/// parent directory or file name is [`std::io::ErrorKind::InvalidInput`]).
 pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
@@ -212,10 +214,17 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
             format!("atomic write target {} has no file name", path.display()),
         )
     })?;
+    // Stat the DESTINATION first: when it exists, the temp file inherits its
+    // mode before the rename, so the replace preserves a tightened mode
+    // (chmod-600 stays 600). A missing destination keeps the process default.
+    let dest_permissions = std::fs::metadata(path).ok().map(|meta| meta.permissions());
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
     {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(content.as_bytes())?;
+        if let Some(permissions) = dest_permissions {
+            file.set_permissions(permissions)?;
+        }
         // Durability before visibility: the rename must never expose a file
         // whose bytes are still only in the page cache.
         file.sync_all()?;

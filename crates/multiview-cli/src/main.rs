@@ -96,6 +96,15 @@ fn run_validate(args: &ValidateArgs) -> anyhow::Result<ExitCode> {
 /// software engine (`--software`), the full libav\* pipeline (default, `ffmpeg`
 /// feature), or — with neither available — report readiness.
 async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
+    // Review M3: canonicalize the boot path up front so a symlinked config is
+    // watched, promoted, and state-dir-anchored at its REAL file — a promote's
+    // atomic rename must replace the file, never the symlink pointing at it.
+    // A canonicalization failure keeps the given path (the load below reports
+    // any real problem with it).
+    let mut args = args;
+    if let Ok(canonical) = args.config.canonicalize() {
+        args.config = canonical;
+    }
     let boot = load_validated(&args.config)?;
     // Boot/Loaded/Running (ADR-W022 §4): resolve the starting Running state —
     // under `[control] start = "resume"` a valid persisted `active.toml`
