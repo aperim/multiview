@@ -44,6 +44,7 @@ pub mod salvo;
 pub mod schema;
 pub mod sync_group;
 pub mod tally;
+pub mod timing;
 pub mod wall;
 
 use std::collections::{HashMap, HashSet};
@@ -78,6 +79,7 @@ pub use schema::{
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
+pub use timing::{TimingConfig, MAX_LINK_OFFSET_MS, MAX_PTP_UTC_OFFSET_S};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
 /// The management control-plane listener.
@@ -180,6 +182,13 @@ pub struct MultiviewConfig {
     /// its desugared v3 form route identically. Schema v3 introduces this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingTable>,
+    /// Outbound presentation-timing knobs (ADR-M010 / DEV-C1): the per-
+    /// deployment link offset every epoch consumer adds before presenting, and
+    /// the optional PHC device the `ptp` build disciplines the epoch from.
+    /// Absent ⇒ [`TimingConfig::default`] (a uniform 150 ms link offset,
+    /// system-clock wall source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TimingConfig>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -308,6 +317,9 @@ impl MultiviewConfig {
         self.validate_control()?;
         self.validate_placement()?;
         self.validate_routing()?;
+        if let Some(timing) = &self.timing {
+            timing.validate()?;
+        }
 
         // Solving + the core structural check covers geometry (rects in 0..1,
         // positive extent, valid cadence) and grid wiring (areas resolve).
