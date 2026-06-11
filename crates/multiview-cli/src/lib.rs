@@ -47,6 +47,7 @@ pub mod control;
 /// the startup gate (S1) consults. Always compiled — the entitlement *state model*
 /// renders consistently regardless of features (ADR-0050 §7).
 pub mod licence;
+pub mod live_overlays;
 pub mod live_sources;
 /// The CONSPECT local-metrics retention feed (engine-seam S5; ADR-0052 §3): an
 /// off-hot-loop, read-only subscriber that mirrors live engine events

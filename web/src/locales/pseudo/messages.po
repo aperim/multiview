@@ -311,7 +311,7 @@ msgstr ""
 msgid "A video stream does not just carry pixel values — it carries an agreement about what those values <0>mean</0>. Three standards cover almost everything: <1>BT.601</1> (standard definition), <2>BT.709</2> (high definition — the default assumption for most content today), and <3>BT.2020</3> (ultra-HD and HDR, with a much wider color gamut). Each defines its own recipe for turning the YUV numbers in the stream back into red, green, and blue."
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:311
+#: src/pages/docs/ConfigPage.tsx:321
 #: src/pages/OutputsPage.tsx:383
 msgid "About codecs and transcoding"
 msgstr ""
@@ -325,7 +325,7 @@ msgstr ""
 msgid "About layouts"
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:315
+#: src/pages/docs/ConfigPage.tsx:325
 msgid "About output transports"
 msgstr ""
 
@@ -469,7 +469,7 @@ msgstr ""
 msgid "Advanced"
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:289
+#: src/pages/docs/ConfigPage.tsx:299
 msgid "Advertise the canvas as an NDI source by <0>name</0>."
 msgstr ""
 
@@ -556,6 +556,10 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:219
 msgid "Analog (hands on a dial)"
+msgstr ""
+
+#: src/pages/OverlaysPage.tsx:236
+msgid "Analog clock overlays apply to the running engine immediately when saved or deleted — the face appears, moves, or disappears at the next frame. Other overlay kinds are stored losslessly and go live via config export + restart (this build draws no renderer for them). Each save response declares which applied (X-Multiview-Apply: live or restart)."
 msgstr ""
 
 #: src/resources/FormControls.tsx:76
@@ -889,7 +893,7 @@ msgstr ""
 msgid "Canvas height in pixels."
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:285
+#: src/pages/OverlaysPage.tsx:301
 msgid "canvas or a cell id"
 msgstr ""
 
@@ -1686,7 +1690,7 @@ msgstr ""
 msgid "e.g. Sydney"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:256
+#: src/pages/OverlaysPage.tsx:272
 msgid "e.g. wall-clock"
 msgstr ""
 
@@ -1694,7 +1698,7 @@ msgstr ""
 msgid "Each <0>[[cells]]</0> entry is one tile. It is placed by a grid <1>area</1> or an absolute <2>rect</2>, and binds a source through <3>[cells.source]</3> — usually a reference to a managed source by <4>input_id</4>."
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:250
+#: src/pages/docs/ConfigPage.tsx:260
 msgid "Each <0>[[outputs]]</0> entry is one sink, tagged by <1>kind</1>. The canvas is composited and encoded once, then fanned out to every output. Today, file-based HLS output works; the live network output servers are on the roadmap (see the feature guide)."
 msgstr ""
 
@@ -2253,6 +2257,7 @@ msgstr ""
 
 #: src/pages/AudioPage.tsx:351
 #: src/pages/OutputsPage.tsx:590
+#: src/pages/OverlaysPage.tsx:234
 #: src/pages/ProbesPage.tsx:496
 #: src/pages/SourcesPage.tsx:825
 msgid "How configuration applies"
@@ -2284,7 +2289,7 @@ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:70
 #: src/pages/OutputsPage.tsx:614
-#: src/pages/OverlaysPage.tsx:252
+#: src/pages/OverlaysPage.tsx:268
 #: src/pages/ProbesPage.tsx:520
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
@@ -2386,7 +2391,7 @@ msgstr ""
 
 #: src/pages/AlarmsPage.tsx:218
 #: src/pages/OverlaysPage.tsx:173
-#: src/pages/OverlaysPage.tsx:273
+#: src/pages/OverlaysPage.tsx:289
 #: src/pages/ProbesPage.tsx:419
 #: src/pages/ProbesPage.tsx:542
 #: src/pages/SourcesPage.tsx:754
@@ -2691,7 +2696,7 @@ msgstr ""
 msgid "Low (~0.2–1 s)"
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:266
+#: src/pages/docs/ConfigPage.tsx:276
 msgid "Low-latency HLS, adding <0>part_target_ms</0> and <1>gop_ms</1> tuning."
 msgstr ""
 
@@ -2885,7 +2890,7 @@ msgstr ""
 #: src/pages/OutputsPage.tsx:504
 #: src/pages/OutputsPage.tsx:626
 #: src/pages/OverlaysPage.tsx:168
-#: src/pages/OverlaysPage.tsx:264
+#: src/pages/OverlaysPage.tsx:280
 #: src/pages/ProbesPage.tsx:414
 #: src/pages/ProbesPage.tsx:532
 #: src/pages/SalvosPage.tsx:210
@@ -3239,7 +3244,7 @@ msgstr ""
 #: src/app/navigation.tsx:39
 #: src/docs/registry.ts:153
 #: src/docs/registry.ts:211
-#: src/pages/docs/ConfigPage.tsx:248
+#: src/pages/docs/ConfigPage.tsx:258
 #: src/pages/docs/FeaturesPage.tsx:65
 #: src/pages/OutputsPage.tsx:568
 msgid "Outputs"
@@ -3419,7 +3424,7 @@ msgstr ""
 msgid "PTS (Presentation Timestamp)"
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:284
+#: src/pages/docs/ConfigPage.tsx:294
 msgid "Push the encoded stream to a destination <0>url</0>."
 msgstr ""
 
@@ -3519,9 +3524,12 @@ msgid "Remove row"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:594
-#: src/pages/OverlaysPage.tsx:232
 #: src/pages/ProbesPage.tsx:500
 msgid "Removed from the store. The running engine is unchanged until a config export + restart."
+msgstr ""
+
+#: src/pages/OverlaysPage.tsx:248
+msgid "Removed. An analog clock overlay disappears from the running engine immediately (the response header confirms); other kinds change nothing until a config export + restart."
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:839
@@ -3718,6 +3726,10 @@ msgstr ""
 msgid "Saved as {0}. Restart Multiview with this file to apply stored changes."
 msgstr ""
 
+#: src/pages/docs/ConfigPage.tsx:237
+msgid "Saving an overlay through the API or this UI applies it to the running engine at the next frame where the build renders that kind — today an analog-face <0>clock</0> appears, moves, or disappears live. Kinds without a renderer are stored losslessly and take effect via config export + restart; every save response declares which happened in its X-Multiview-Apply header."
+msgstr ""
+
 #: src/layout/components/GridLayoutEditor.tsx:268
 #: src/layout/components/LayoutEditor.tsx:189
 msgid "Saving…"
@@ -3727,7 +3739,7 @@ msgstr ""
 msgid "Scaler"
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:292
+#: src/pages/docs/ConfigPage.tsx:302
 msgid "Scan the canvas out to a local HDMI/DisplayPort screen by KMS <0>connector</0> (a <1>display-kms</1> build), with an optional exact <2>mode</2> override or a <3>forced_mode</3> for screens that report no EDID. The refresh is an exact rational like <4>\"60000/1001\"</4>, never a decimal."
 msgstr ""
 
@@ -3795,7 +3807,7 @@ msgstr ""
 msgid "Send backward"
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:272
+#: src/pages/docs/ConfigPage.tsx:282
 msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr ""
 
@@ -3914,7 +3926,7 @@ msgstr ""
 msgid "Stacking"
 msgstr ""
 
-#: src/pages/OverlaysPage.tsx:293
+#: src/pages/OverlaysPage.tsx:309
 msgid "Stacking order"
 msgstr ""
 
@@ -3946,9 +3958,12 @@ msgstr ""
 msgid "Stereo"
 msgstr ""
 
+#: src/pages/OverlaysPage.tsx:247
+msgid "Stored. Analog clock overlays apply to the running engine immediately; other kinds go live via config export + restart."
+msgstr ""
+
 #: src/pages/AudioPage.tsx:492
 #: src/pages/OutputsPage.tsx:593
-#: src/pages/OverlaysPage.tsx:231
 #: src/pages/ProbesPage.tsx:499
 msgid "Stored. It goes live via config export + restart; the running engine is unchanged until then."
 msgstr ""
@@ -4049,7 +4064,7 @@ msgid "Tally shows which sources are on-air. A tally profile maps the bits of an
 msgstr ""
 
 #: src/pages/OverlaysPage.tsx:178
-#: src/pages/OverlaysPage.tsx:282
+#: src/pages/OverlaysPage.tsx:298
 #: src/pages/SourcesPage.tsx:396
 #: src/pages/TallyPage.tsx:205
 #: src/pages/TallyPage.tsx:318
@@ -4148,7 +4163,7 @@ msgstr ""
 msgid "The default image encodes <0>mpeg2video</0>, which plays in VLC and ffplay. For browser playback, switch to the GPL image and an H.264 codec (see the config section)."
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:321
+#: src/pages/docs/ConfigPage.tsx:331
 msgid "The document is validated as a whole: source and cell ids must be unique, every <0>input_id</0> must resolve to a declared source, every grid cell must reference an existing area, and the cadence must be a usable rational. Because TOML and JSON encode the same model, a config can be authored by hand and exported as JSON over the API, or vice versa."
 msgstr ""
 
@@ -4602,7 +4617,7 @@ msgid "Used"
 msgstr ""
 
 #: src/docs/registry.ts:158
-#: src/pages/docs/ConfigPage.tsx:319
+#: src/pages/docs/ConfigPage.tsx:329
 msgid "Validation and import / export"
 msgstr ""
 
@@ -4761,7 +4776,7 @@ msgstr ""
 msgid "Working pixel format: <0>nv12</0> (8-bit) or <1>p010</1> (10-bit)."
 msgstr ""
 
-#: src/pages/docs/ConfigPage.tsx:260
+#: src/pages/docs/ConfigPage.tsx:270
 msgid "Writes an HLS playlist and segments to <0>path</0> with a <1>codec</1> and a <2>segment_ms</2> duration."
 msgstr ""
 

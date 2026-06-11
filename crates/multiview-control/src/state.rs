@@ -577,6 +577,11 @@ pub struct AppState {
     /// feeds; the default is empty. Control-plane only; cannot back-pressure the
     /// engine (inv #10).
     pub retention: Arc<RetentionStore>,
+    /// What the **running** engine can take live, per stored collection
+    /// (ADR-W022): injected by the binary at wiring time so mutation routes
+    /// declare `X-Multiview-Apply` honestly per build + run path. The default
+    /// carries no capability (everything is `restart`).
+    pub live_apply: crate::live_apply::LiveApplyCaps,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -662,6 +667,9 @@ impl AppState {
             data_requests: Arc::new(InMemoryDataRequests::new()),
             support_bundles: Arc::new(InMemoryBundles::new()),
             retention: Arc::new(RetentionStore::new()),
+            // Honest default: nothing applies live until the binary declares
+            // what the running engine can take (ADR-W022).
+            live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
     }
 
@@ -684,6 +692,15 @@ impl AppState {
     #[must_use]
     pub fn with_mesh(mut self, mesh: Arc<MeshState>) -> Self {
         self.mesh = mesh;
+        self
+    }
+
+    /// Declare what the **running** engine can take live (ADR-W022). The
+    /// binary calls this with the capabilities of the chosen run path + build;
+    /// the honest default (nothing live) stands otherwise.
+    #[must_use]
+    pub fn with_live_apply(mut self, live_apply: crate::live_apply::LiveApplyCaps) -> Self {
+        self.live_apply = live_apply;
         self
     }
 

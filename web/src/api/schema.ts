@@ -4,6 +4,75 @@
  */
 
 export interface paths {
+    "/api/v1/account/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/account/audit` — the append-only account audit log, paginated
+         *     (role: read).
+         * @description Returns `{entries, next_cursor}`: entries oldest-first within the page,
+         *     resumable via `?cursor=next_cursor`, optionally `?filter=<kind>`. There is no
+         *     mutating verb on this resource — the log is append-only by construction.
+         */
+        get: operations["list_account_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/actions/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/actions/pending` — the pending remote-actions strip (role: read).
+         * @description Returns the actions awaiting local execution or cancellation, oldest-first.
+         *     An action that has executed or been cancelled drops out of this list.
+         */
+        get: operations["list_pending_actions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/actions/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/actions/{id}/cancel` — cancel a pending action locally (role:
+         *     write).
+         * @description **Local always wins:** a pending action the operator cancels here is
+         *     cancelled, and any later (portal-fed) execution attempt is refused. An action
+         *     that has **already executed** answers `410 Gone` `already_executed` — the
+         *     truthful "too late", never a fake success. An unknown id is `404`. The cancel
+         *     is recorded in the append-only account audit store.
+         */
+        post: operations["cancel_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/alarms": {
         parameters: {
             query?: never;
@@ -618,6 +687,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mesh/peers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/mesh/peers` — the untrusted discovered-peer inventory (role:
+         *     read).
+         * @description Each peer is a salted-digest id, an optional name (only once adopted), a
+         *     `claimed` flag, `last_seen` (seconds), and `relaying_for_us`. A peer is
+         *     **never** auto-trusted; relaying is an explicit operator confirm-adopt
+         *     (ADR-0041 doctrine). The ids are pure hex — never a raw identifier (brief §8).
+         */
+        get: operations["list_peers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mesh/relay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /api/v1/mesh/relay` — opt this machine in/out of relaying neighbours
+         *     (role: write).
+         * @description A real, persisted toggle: the new state is written to the shared mesh state
+         *     and the updated status is returned. Discovery is unaffected (always-on) — this
+         *     toggles only the **relay** opt-in (brief §9.2). Every successful toggle is
+         *     recorded in **both** trails: the change-audit log and — as an
+         *     actor-attributed [`AccountAuditKind::RelayToggle`](crate::account_audit::AccountAuditKind::RelayToggle)
+         *     entry — the append-only account-audit store (the spec's relay opt-in/out row,
+         *     brief §10/§11).
+         */
+        put: operations["set_relay"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mesh/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/mesh/status` — the always-on discovery + relay summary (role:
+         *     read).
+         * @description Always `200`: discovery is always-on, so this is a pure data report —
+         *     `{discovery, relay_enabled, role, via?, peers_count}`.
+         */
+        get: operations["get_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs": {
         parameters: {
             query?: never;
@@ -963,6 +1105,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/salvos/{id}/fire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/salvos/{id}/fire` — fire a named salvo through the command bus
+         *     (role: write) → `202 {action_id, queued_at}`.
+         * @description The named salvo must exist (else `404 salvo_unknown`). On success a `Salvo`
+         *     pending action is queued, the engine `TakeSalvo` command is submitted to the
+         *     bounded bus (a full bus sheds to `503`, never blocking the engine), the action
+         *     is marked executed, and the fire is recorded in the account audit store. The
+         *     action id is the pending-action id (the operator can correlate it on the
+         *     strip + the audit trail).
+         */
+        post: operations["fire_salvo"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/salvos/{id}/take": {
         parameters: {
             query?: never;
@@ -1012,6 +1180,204 @@ export interface paths {
         post: operations["create_source"];
         /** `DELETE /api/v1/sources/{id}` — delete a source (role: administer; If-Match). */
         delete: operations["delete_source"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/support/bundle` — compose a previewable, redacted, media-free
+         *     context-pack (role: write; entitled tiers only). Composing performs **no
+         *     consent check** (§7.2): consent governs the daily outbound pipe, not a
+         *     deliberate operator attachment. Every compose lands a `bundle-compose`
+         *     account-audit entry. → `202 {bundle_id}`; read the preview at
+         *     `GET /support/bundle/{bundle_id}`.
+         */
+        post: operations["compose"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/bundle/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/support/bundle/{id}` — read a composed bundle's preview (role:
+         *     read; entitled tiers only). Unknown/evicted id → `404`. The preview lists
+         *     every redaction and carries no media.
+         */
+        get: operations["get_bundle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/data-request/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/support/data-request/{id}/approve` — approve an inbound egress
+         *     request **locally** (role: write). **Nothing leaves without this yes:** the
+         *     request transitions to `approved` and egress is gated on that state. An
+         *     already-expired request is `410 request_expired` (and stays expired). Unknown
+         *     id → `404`. Lands a `data-request-approve` account-audit entry.
+         */
+        post: operations["approve_data_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/data-request/{id}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/support/data-request/{id}/deny` — deny an inbound egress request
+         *     locally (role: write). Nothing leaves. Symmetric to approve.
+         */
+        post: operations["deny_data_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/entitlement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/support/entitlement` — the tier-derived support routing (role:
+         *     read). Always `200`: the free tier gets `eligible:false` + the community
+         *     route + the one quiet line, an eligible tier gets its support queue + SLA.
+         */
+        get: operations["get_entitlement"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/tickets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/support/tickets` — list local ticket summaries newest-first
+         *     (role: read; entitled tiers only).
+         */
+        get: operations["list_tickets"];
+        put?: never;
+        /**
+         * `POST /api/v1/support/tickets` — raise a local ticket (role: write; entitled
+         *     tiers only → else `403 not_entitled`). The store mints the `CS-xxxx` id, seeds
+         *     the thread with the opening body, and auto-attaches the machine context
+         *     (§7.1). Every raise lands a `ticket` account-audit entry. → `201 Created`.
+         */
+        post: operations["raise_ticket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/tickets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/support/tickets/{id}` — fetch one ticket (full thread) (role:
+         *     read; entitled tiers only). Unknown id → `404`.
+         */
+        get: operations["get_ticket"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/tickets/{id}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/support/tickets/{id}/close` — close a ticket locally (role:
+         *     write; entitled tiers only). Idempotent (re-closing an already-closed ticket
+         *     is still `200`). Unknown id → `404`. → `200`.
+         */
+        post: operations["close_ticket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/support/tickets/{id}/reply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/support/tickets/{id}/reply` — append a reply to a ticket's
+         *     thread (role: write; entitled tiers only). A reply to a **closed** ticket is
+         *     `409 ticket_closed` (pinned). Unknown id → `404`. Each reply lands a `ticket`
+         *     account-audit entry. → `200` with the updated thread.
+         */
+        post: operations["reply_ticket"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1277,6 +1643,61 @@ export interface components {
             operation_id: string;
         };
         /**
+         * @description One immutable account-audit entry: who did what, and when.
+         *
+         *     The four spec fields (brief §11: `{at, actor, kind, detail}`) plus a
+         *     monotonic `seq` cursor the store assigns on append so pagination is stable
+         *     and resumable even when two entries share an `at` timestamp.
+         */
+        AccountAuditEntry: {
+            /**
+             * @description The authenticated principal that performed the action (its key id), or a
+             *     well-known system actor for machine-originated events — the **actor**.
+             */
+            actor: string;
+            /**
+             * Format: int64
+             * @description The media-timeline timestamp (nanoseconds) the action was recorded — the
+             *     **when** (`at`).
+             */
+            at_nanos: number;
+            /**
+             * @description An optional structured detail (e.g. the lease serial, the salvo name, the
+             *     action id). Never contains secrets or raw identifiers (brief §8).
+             */
+            detail?: unknown;
+            /** @description The kind of account action — the **kind**. */
+            kind: components["schemas"]["AccountAuditKind"];
+            /**
+             * Format: int64
+             * @description The monotonic sequence number the store assigned on append — the stable
+             *     pagination cursor. Strictly increasing; never reused.
+             */
+            seq: number;
+        };
+        /**
+         * @description The kind of account-side action an [`AccountAuditEntry`] records.
+         *
+         *     Each variant names a distinct auditable account action from ADR-0053 §4 +
+         *     the brief §10. Serialised `kebab-case` so the slug is stable across the
+         *     machine and the portal. `#[non_exhaustive]` so a future account action adds a
+         *     variant without breaking the wire contract.
+         * @enum {string}
+         */
+        AccountAuditKind: "claim" | "transfer" | "lease-grant" | "lease-install" | "enforcement-change" | "consent-change" | "relay-toggle" | "context-pack-export" | "ticket" | "bundle-compose" | "data-request-approve" | "data-request-deny" | "action-requested" | "action-cancelled" | "action-executed";
+        /** @description A page of account-audit entries plus the cursor to resume from. */
+        AccountAuditPage: {
+            /** @description The entries in this page, oldest-first within the page (ascending `seq`). */
+            entries: components["schemas"]["AccountAuditEntry"][];
+            /**
+             * Format: int64
+             * @description The cursor to pass as `?cursor=` to fetch the next page, or `None` when
+             *     this page reached the end of the log. Opaque to clients (the `seq` of the
+             *     last returned entry).
+             */
+            next_cursor?: number | null;
+        };
+        /**
          * @description `OpenAPI` mirror of [`multiview_core::alarm::AckState`].
          *
          *     Serde-equivalent: internally tagged on `state`, `PascalCase` variant tags; the
@@ -1495,6 +1916,68 @@ export interface components {
             color: components["schemas"]["TallyColorDoc"];
         };
         /**
+         * @description One composed support bundle: the echoed request, the redacted/diagnostic
+         *     sections, and the list of every redaction the config pass made. **Carries no
+         *     media** by construction — there is no field that could hold a frame/picture.
+         */
+        Bundle: {
+            /** @description The bundle id (the read-back key). */
+            bundle_id: string;
+            /**
+             * Format: int64
+             * @description The media-timeline instant (nanoseconds) the bundle was composed.
+             */
+            composed_at_nanos: number;
+            /**
+             * @description The redacted config sections, present iff `config` was requested. A JSON
+             *     object keyed by resource collection (`sources`/`outputs`/…); every secret
+             *     has been removed and every URL masked.
+             */
+            config?: unknown;
+            diagnostics?: null | components["schemas"]["Diagnostics"];
+            /**
+             * @description The incident markers in the window, present iff `incidents` (or
+             *     `diagnostics`) was requested.
+             */
+            incidents?: components["schemas"]["Incident"][] | null;
+            /**
+             * @description Every redaction the config pass made (the masking the operator sees).
+             *     Empty when nothing was masked; never omitted (the surface is uniform).
+             */
+            redactions: components["schemas"]["Redaction"][];
+            /** @description The reporting window token the bundle was composed over. */
+            window: string;
+        };
+        /** @description The `202` body of a successful compose: the id to read the preview back under. */
+        BundleAccepted: {
+            /** @description The composed bundle's id (read the preview at `GET .../bundle/{bundle_id}`). */
+            bundle_id: string;
+        };
+        /**
+         * @description Which diagnostic section a bundle includes. Serialised `lowercase` so the slug
+         *     is stable across the machine and the (later) portal sync. `#[non_exhaustive]`
+         *     so a future section is additive.
+         * @enum {string}
+         */
+        BundleInclude: "diagnostics" | "metrics" | "config" | "incidents";
+        /**
+         * @description The `POST /api/v1/support/bundle` request body: the reporting `window` and the
+         *     sections to `include`.
+         */
+        BundleRequest: {
+            /** @description The sections to include (deduplicated by the composer). */
+            include: components["schemas"]["BundleInclude"][];
+            /** @description The reporting window (`1h` / `24h` / `7d`). */
+            window: components["schemas"]["BundleWindow"];
+        };
+        /**
+         * @description The time window a bundle reports over (spec §7.2). Serialised as the operator-
+         *     facing token (`1h` / `24h` / `7d`). `#[non_exhaustive]` so a future window is
+         *     additive.
+         * @enum {string}
+         */
+        BundleWindow: "1h" | "24h" | "7d";
+        /**
          * @description `OpenAPI` mirror of [`multiview_core::tally::BusSource`].
          *
          *     Serde-equivalent: internally tagged on `kind`, `snake_case` variant tags.
@@ -1521,6 +2004,11 @@ export interface components {
             index: number;
             /** @enum {string} */
             kind: "iso";
+        };
+        /** @description The `200` body of a successful cancel. */
+        CancelledBody: {
+            /** @description Always `true` on the `200` path — the action is cancelled. */
+            cancelled: boolean;
         };
         /** @description `OpenAPI` mirror of `multiview_config::CaptionSelector` (tagged by `mode`). */
         CaptionSelectorDoc: {
@@ -1658,6 +2146,46 @@ export interface components {
          */
         DataKindDoc: "scte35" | "klv";
         /**
+         * @description One inbound data request awaiting **local approval**: support (or the licence
+         *     server, over the later transport) asks for additional data; nothing leaves
+         *     until the operator approves it here (ADR-0053 §3).
+         */
+        DataRequest: {
+            /**
+             * @description An optional structured detail (e.g. the ticket the request relates to).
+             *     Never the requested data.
+             */
+            detail?: unknown;
+            /** @description The request id (the `DR-xxxx` / portal correlation key when synced). */
+            request_id: string;
+            /**
+             * Format: int64
+             * @description The media-timeline timestamp (nanoseconds) the request was recorded.
+             */
+            requested_at_nanos: number;
+            /** @description The lifecycle state. */
+            state: components["schemas"]["DataRequestState"];
+            /**
+             * @description A human-readable description of what is being requested (never the data
+             *     itself — this is the *ask*, not the payload).
+             */
+            what: string;
+        };
+        /**
+         * @description The `200` body of a data-request approve/deny: the request's new terminal
+         *     state.
+         */
+        DataRequestActioned: {
+            /** @description The new state slug (`approved` / `denied`). */
+            state: components["schemas"]["DataRequestState"];
+        };
+        /**
+         * @description The lifecycle state of an inbound data request. Approve/deny are one-way; an
+         *     elapsed (un-actioned) request is `Expired` (`410 request_expired`).
+         * @enum {string}
+         */
+        DataRequestState: "pending" | "approved" | "denied" | "expired";
+        /**
          * @description `OpenAPI` mirror of `multiview_config::DetectionZone` (normalized
          *     sub-rectangle of a tile, `0.0..=1.0` on both axes).
          */
@@ -1779,6 +2307,38 @@ export interface components {
              */
             temperature_c?: number | null;
         };
+        /** @description The utilisation/diagnostics summary a bundle carries over its window. */
+        Diagnostics: {
+            /**
+             * Format: double
+             * @description CPU busy-fraction floor (p0) over the window.
+             */
+            cpu_p0: number;
+            /**
+             * Format: double
+             * @description CPU busy-fraction ceiling (p100) over the window.
+             */
+            cpu_p100: number;
+            /**
+             * Format: double
+             * @description CPU busy-fraction median (p50) over the window.
+             */
+            cpu_p50: number;
+            /**
+             * Format: double
+             * @description CPU busy-fraction 95th percentile over the window.
+             */
+            cpu_p95: number;
+            /** @description The number of per-input reconnects recorded in the window. */
+            reconnects: number;
+            /**
+             * Format: int64
+             * @description Total utilisation samples folded across the window.
+             */
+            samples: number;
+            /** @description The number of shed-load events recorded in the window. */
+            shed_events: number;
+        };
         /**
          * @description One resolved management endpoint of a discovered service: a presentation-
          *     ready address and its family. IPv6 is the lead family (ADR-0042); IPv4 is
@@ -1848,6 +2408,15 @@ export interface components {
          */
         DiscoveryDriverKind: "cast" | "ndi-source" | "zowietek-control" | "unknown";
         /**
+         * @description `OpenAPI` mirror of [`multiview_mesh::DiscoveryMode`] (Conspect, ADR-0051 §2).
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case`. There is exactly **one**
+         *     value — `always_on` — and no way to set any other: discovery runs whenever the
+         *     account plane runs (the spec's *locked* row, no off switch exists).
+         * @enum {string}
+         */
+        DiscoveryModeDoc: "always_on";
+        /**
          * @description The added / removed / changed top-level keys between two documents.
          *
          *     A pragmatic, UI-facing structural diff over JSON objects: it reports which
@@ -1888,6 +2457,23 @@ export interface components {
          * @enum {string}
          */
         EnforcementLevelDoc: "active" | "warning" | "config-locked" | "watermark" | "block-new-instance" | "unlicensed-build";
+        /** @description The `202` body of a successful salvo fire. */
+        FiredBody: {
+            /** @description The queued action id (also the pending-action + audit correlation id). */
+            action_id: string;
+            /**
+             * Format: int64
+             * @description The media-timeline timestamp (nanoseconds, from the ack-clock) the fire
+             *     was queued — the audit entry and the pending action share this instant.
+             */
+            queued_at_nanos: number;
+        };
+        /**
+         * @description The first-line support route a tier maps to (spec §11): a real support queue
+         *     for eligible tiers, or the community channel for the free tier.
+         * @enum {string}
+         */
+        FirstLine: "partner" | "conspect" | "community";
         /**
          * @description `OpenAPI` mirror of [`multiview_licence::GpuLimit`].
          *
@@ -1982,6 +2568,21 @@ export interface components {
              *     `"none"` when no lease is installed.
              */
             transport: string;
+        };
+        /** @description One incident marker in a bundle (a diagnostic event — never media). */
+        Incident: {
+            /**
+             * Format: int64
+             * @description The Unix second the incident was recorded.
+             */
+            at_unix_seconds: number;
+            /**
+             * @description The incident class label (`input_flap` / `encoder_saturation` /
+             *     `clock_holdover`).
+             */
+            kind: string;
+            /** @description What the incident applied to (input id, `program`, `system`, …). */
+            subject: string;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::IndexCell`]. */
         IndexCellDoc: {
@@ -2198,6 +2799,81 @@ export interface components {
          */
         MediaFormat: "video" | "audio" | "data";
         /**
+         * @description `OpenAPI` mirror of [`multiview_mesh::Peer`] — a single entry in the untrusted
+         *     discovered-peer inventory `GET /api/v1/mesh/peers` returns.
+         *
+         *     Serde-equivalent to the real peer. The `key` is the salted-digest **hex** id
+         *     (64 chars, never a raw identifier — brief §8); `name` is present only once the
+         *     operator has confirm-adopted + named the peer; `last_seen` is whole seconds;
+         *     `relaying_for_us` is an operator-set adoption flag, never auto (the peer is
+         *     **untrusted** until explicitly confirm-adopted — ADR-0041 doctrine).
+         */
+        MeshPeerDoc: {
+            /** @description Whether the peer advertised itself as claimed (observed from the announce). */
+            claimed: boolean;
+            /** @description The peer's salted-digest id (64-char lowercase hex; never a raw identifier). */
+            key: string;
+            /**
+             * Format: int64
+             * @description The whole-seconds monotonic instant the peer was last seen.
+             */
+            last_seen: number;
+            /** @description An operator-assigned name, present only once the peer is adopted + named. */
+            name?: string | null;
+            /**
+             * @description Whether THIS machine relays for the peer — set only by explicit operator
+             *     confirm-adopt, never by observation (untrusted inventory).
+             */
+            relaying_for_us: boolean;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_mesh::MeshRole`] (Conspect, ADR-0051 §4).
+         *
+         *     Serde-equivalent: **internally tagged** on `kind` (`direct`/`relay`/`leaf`,
+         *     kebab) — never untagged (conventions §5). The `leaf` variant carries the `via`
+         *     peer (a salted-digest hex id) it leafs its heartbeat through.
+         */
+        MeshRoleDoc: {
+            /** @enum {string} */
+            kind: "direct";
+        } | {
+            /** @enum {string} */
+            kind: "relay";
+        } | {
+            /** @enum {string} */
+            kind: "leaf";
+            /**
+             * @description The peer this machine relays its heartbeat through (salted-digest hex
+             *     id — never a raw identifier).
+             */
+            via: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_mesh::MeshStatus`] — the always-on mesh
+         *     discovery + relay summary `GET /api/v1/mesh/status` (and the `PUT
+         *     /api/v1/mesh/relay` reply) renders.
+         *
+         *     Serde-equivalent to the real status (pinned byte-for-byte by a round-trip test
+         *     in `tests/mesh.rs`). The mesh crate carries no `utoipa` dependency, so this
+         *     module owns the `OpenAPI` contract. Discovery is always-on (no off switch);
+         *     `via` is present only when the role is `leaf`.
+         */
+        MeshStatusDoc: {
+            /** @description Discovery is always-on (the only value; no off switch exists). */
+            discovery: components["schemas"]["DiscoveryModeDoc"];
+            /** @description How many peers are in the untrusted discovered-peer inventory. */
+            peers_count: number;
+            /** @description Whether this machine relays neighbours' heartbeats (the opt-in toggle). */
+            relay_enabled: boolean;
+            /** @description The computed mesh role (`direct`/`relay`/`leaf`). */
+            role: components["schemas"]["MeshRoleDoc"];
+            /**
+             * @description The peer this machine leafs through, present only when the role is `leaf`
+             *     (a salted-digest hex id).
+             */
+            via?: string | null;
+        };
+        /**
          * @description The NMOS access level granted for one API (the `x-nmos-api` value vocabulary).
          * @enum {string}
          */
@@ -2407,6 +3083,47 @@ export interface components {
             /** @description The tally target the override applies to. */
             target: components["schemas"]["TallyTargetDoc"];
         };
+        /** @description One queued remote action. */
+        PendingAction: {
+            /** @description The opaque, unique action id (a UUID) the cancel/execute paths address. */
+            action_id: string;
+            /**
+             * @description An optional structured detail (e.g. the salvo name a `salvo` action
+             *     fires). Never contains secrets.
+             */
+            detail?: unknown;
+            /** @description The kind of action. */
+            kind: components["schemas"]["PendingActionKind"];
+            /**
+             * Format: int64
+             * @description The media-timeline timestamp (nanoseconds) the action was queued.
+             */
+            requested_at_nanos: number;
+            /** @description The principal (or portal/system actor) that requested the action. */
+            requested_by: string;
+            /** @description The action's lifecycle state. */
+            state: components["schemas"]["PendingActionState"];
+        };
+        /**
+         * @description The kind of remote action queued for local approval/execution.
+         *
+         *     Serialised `kebab-case` so the slug is stable across the machine and the
+         *     portal. `#[non_exhaustive]` so a future action kind adds a variant without
+         *     breaking the wire contract.
+         * @enum {string}
+         */
+        PendingActionKind: "restart" | "reboot" | "salvo";
+        /**
+         * @description The lifecycle state of a queued action.
+         *
+         *     An action is `Pending` until it is either `Executed` (it ran) or `Cancelled`
+         *     (the operator cancelled it locally first). Both terminal states are immutable
+         *     once reached — the local cancel cannot be undone by a later execution, and an
+         *     executed action cannot be retroactively cancelled (local-always-wins applies
+         *     only *before* execution).
+         * @enum {string}
+         */
+        PendingActionState: "pending" | "executed" | "cancelled";
         /**
          * @description `OpenAPI` mirror of [`multiview_core::alarm::PerceivedSeverity`] (X.733).
          *
@@ -2506,6 +3223,20 @@ export interface components {
             /** @description A URI reference identifying the problem type (here a `/problems/<slug>`). */
             type: string;
         };
+        /** @description The `POST /api/v1/support/tickets` request body. */
+        RaiseTicketRequest: {
+            /**
+             * @description Attachment ids the operator references (recorded on the opening update's
+             *     context; the deliberate-attachment path is the bundle composer). Optional.
+             */
+            attachments?: string[];
+            /** @description The opening body (seeds the append-only thread). */
+            body: string;
+            /** @description The declared severity. */
+            severity: components["schemas"]["TicketSeverity"];
+            /** @description The operator-supplied subject line. */
+            subject: string;
+        };
         /** @description An IS-04 **Receiver**: an ingress flow (a Multiview input). */
         Receiver: components["schemas"]["ResourceCore"] & {
             /** @description The id of the device this receiver belongs to. */
@@ -2534,6 +3265,27 @@ export interface components {
             max_ms: number;
         };
         /**
+         * @description What a single redaction removed/masked, surfaced in the preview so the
+         *     operator sees exactly what was taken out (never the value itself).
+         */
+        Redaction: {
+            /**
+             * @description The dotted path of the redacted field (e.g. `cam-1.auth.secret_ref`). A
+             *     location, never the value.
+             */
+            path: string;
+            /**
+             * @description Why it was redacted: `secret` (a reference-only secret, removed) or `url`
+             *     (a transport URL, masked).
+             */
+            reason: components["schemas"]["RedactionReason"];
+        };
+        /**
+         * @description Why a field was redacted from a bundle.
+         * @enum {string}
+         */
+        RedactionReason: "secret" | "url";
+        /**
          * @description An IS-04 **registration request**: the `{type, data}` body posted to a
          *     Registry's `POST /x-nmos/registration/v1.3/resource`.
          *
@@ -2546,6 +3298,16 @@ export interface components {
             data: Record<string, never>;
             /** @description The kind of resource being registered. */
             type: components["schemas"]["ResourceType"];
+        };
+        /** @description The `PUT /api/v1/mesh/relay` request body: the relay opt-in state. */
+        RelaySetRequest: {
+            /** @description Whether this machine should relay neighbours' heartbeats (brief §9.2). */
+            enabled: boolean;
+        };
+        /** @description The `POST /api/v1/support/tickets/{id}/reply` request body. */
+        ReplyRequest: {
+            /** @description The reply text to append to the thread. */
+            body: string;
         };
         /**
          * @description A persisted management resource: a stable `id`, a display `name`, and the
@@ -2589,8 +3351,13 @@ export interface components {
         ResourceInput: {
             /** @description The opaque resource document. */
             body: unknown;
-            /** @description Human-friendly name. */
-            name: string;
+            /**
+             * @description Human-friendly name. Optional on the wire: a create/update that omits it
+             *     (e.g. a programmatic seed that only carries the typed `body`) defaults to
+             *     an empty name rather than failing deserialization — the display name is a
+             *     label, never load-bearing, and callers that care always supply one.
+             */
+            name?: string;
         };
         /**
          * @description The IS-04 resource type discriminator used by the registration protocol.
@@ -3146,6 +3913,35 @@ export interface components {
             /** @description The stable stream id string (e.g. `v/pid:256`). */
             id: string;
         };
+        /**
+         * @description The full entitlement-routing answer the `GET /support/entitlement` endpoint
+         *     returns: whether the machine is eligible for entitled support, the route, and
+         *     the SLA token (a quiet line for the free tier).
+         */
+        SupportEntitlement: {
+            /**
+             * @description Whether the machine is eligible for an entitled support queue (false →
+             *     community only).
+             */
+            eligible: boolean;
+            /** @description The tier-derived route. */
+            route: components["schemas"]["SupportRoute"];
+            /**
+             * @description The SLA token (e.g. `standard`, or the free tier's `community-best-effort`
+             *     one-line note). Always present so the surface is uniform.
+             */
+            sla: string;
+        };
+        /**
+         * @description The tier-derived support route the entitlement endpoint renders + a ticket is
+         *     raised against.
+         */
+        SupportRoute: {
+            /** @description The first-line owner. */
+            first_line: components["schemas"]["FirstLine"];
+            /** @description The destination queue label (a stable slug the portal shares). */
+            to: string;
+        };
         /** @description The body of a `POST /commands/swap` request. */
         SwapRequest: {
             /** @description The new source/input id to bind. */
@@ -3270,6 +4066,117 @@ export interface components {
          */
         TcSourceKindDoc: "ltc" | "vitc" | "atc_rp188" | "generated";
         /**
+         * @description A ticket: a `CS-xxxx` id, the subject + severity, the auto-attached machine
+         *     context, an append-only update thread (opening body first), and the route +
+         *     state. The portal sync mirrors this local resource over the later transport.
+         */
+        Ticket: {
+            /** @description The auto-attached machine context (§7.1). */
+            context: components["schemas"]["TicketContext"];
+            /** @description The tier-derived support route this ticket was raised against. */
+            route: components["schemas"]["SupportRoute"];
+            /** @description The declared severity. */
+            severity: components["schemas"]["TicketSeverity"];
+            /** @description The lifecycle state (`open` → `closed`). */
+            state: components["schemas"]["TicketState"];
+            /** @description The operator-supplied subject line. */
+            subject: string;
+            /** @description The `CS-xxxx` ticket id (the portal correlation key). */
+            ticket_id: string;
+            /** @description The append-only thread: the opening body, then every reply. */
+            updates: components["schemas"]["TicketUpdate"][];
+        };
+        /**
+         * @description The auto-attached machine context every ticket carries (§7.1): identity,
+         *     version, entitlement, ladder state, and the fingerprint score. **Reported,
+         *     never raw** — it carries the opaque tier + the salted fingerprint **score**
+         *     (a number), never raw serials/MACs (brief §8).
+         */
+        TicketContext: {
+            /** @description The application version (the build identity), always reported. */
+            app_version: string;
+            /** @description The enforcement-ladder summary (the computed level), reported as data. */
+            enforcement: components["schemas"]["TicketEnforcement"];
+            /** @description The entitlement summary (the opaque tier + whether a lease is licensed). */
+            entitlement: components["schemas"]["TicketEntitlement"];
+            /**
+             * Format: int32
+             * @description The salted hardware-fingerprint **score** (0–100, brief §2.3/§8) of the
+             *     active lease, or `None` when no lease is installed. A number, never raw.
+             */
+            fingerprint_score?: number | null;
+        };
+        /**
+         * @description The enforcement summary auto-attached to a ticket — the computed ladder level
+         *     (data, never control flow; brief §6).
+         */
+        TicketEnforcement: {
+            /** @description The canonical enforcement level slug (e.g. `active`, `unlicensed`). */
+            level: string;
+        };
+        /**
+         * @description The entitlement summary auto-attached to a ticket — the opaque tier + the
+         *     licensed flag (rendered, never computed; brief §1, O7).
+         */
+        TicketEntitlement: {
+            /** @description Whether a verified lease is installed. */
+            licensed: boolean;
+            /** @description The opaque commercial tier (rendered), or `none` when unlicensed. */
+            tier: string;
+        };
+        /**
+         * @description The operator-declared severity of a ticket (spec §11): `question`,
+         *     `degraded`, `blocking`. Serialised `lowercase` so the slug is stable across
+         *     the machine and the portal.
+         *
+         *     This is a **closed** set the spec pins to exactly these three levels (§11) —
+         *     deliberately **not** `#[non_exhaustive]` so a consumer (and the contract test)
+         *     can match it exhaustively. A new severity would be a contract change, not an
+         *     additive one.
+         * @enum {string}
+         */
+        TicketSeverity: "question" | "degraded" | "blocking";
+        /**
+         * @description The lifecycle state of a ticket. Local lifecycle is fully functional: an
+         *     operator can `close` a ticket they opened; a closed ticket refuses replies.
+         * @enum {string}
+         */
+        TicketState: "open" | "closed";
+        /**
+         * @description A ticket summary for the list surface (the thread is omitted to keep the
+         *     listing light; fetch a single ticket for the full thread).
+         */
+        TicketSummary: {
+            /** @description The declared severity. */
+            severity: components["schemas"]["TicketSeverity"];
+            /** @description The lifecycle state. */
+            state: components["schemas"]["TicketState"];
+            /** @description The subject line. */
+            subject: string;
+            /** @description The `CS-xxxx` ticket id. */
+            ticket_id: string;
+            /** @description The number of updates on the thread. */
+            updates: number;
+        };
+        /**
+         * @description One immutable update on a ticket's append-only thread (the opening body or a
+         *     reply): who wrote it, when, and the text.
+         */
+        TicketUpdate: {
+            /**
+             * Format: int64
+             * @description The media-timeline timestamp (nanoseconds) the update was recorded.
+             */
+            at_nanos: number;
+            /**
+             * @description The authenticated principal that wrote this update (its key id), or a
+             *     well-known support actor when the portal-fed sync lands later.
+             */
+            author: string;
+            /** @description The update text. */
+            body: string;
+        };
+        /**
          * @description `OpenAPI` mirror of `multiview_config::timer::TimerDirection`.
          * @enum {string}
          */
@@ -3374,6 +4281,154 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_account_audit: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Resume strictly after this `seq` cursor (from a previous `next_cursor`).
+                 *     Absent fetches from the beginning of the log.
+                 */
+                cursor?: number | null;
+                /** @description Restrict the listing to a single action kind (`kebab-case` slug). */
+                filter?: null | components["schemas"]["AccountAuditKind"];
+                /**
+                 * @description The maximum number of entries to return (clamped to
+                 *     [`MAX_AUDIT_PAGE_LIMIT`]; defaults to [`DEFAULT_AUDIT_PAGE_LIMIT`]).
+                 */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of account-audit entries (oldest-first) + the resume cursor. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountAuditPage"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_pending_actions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending remote actions (oldest-first). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PendingAction"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancel_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The action id to cancel. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The action was pending and is now cancelled (local wins). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelledBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to cancel. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No action with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The action has already executed — too late to cancel. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_alarms: {
         parameters: {
             query?: {
@@ -5027,6 +6082,124 @@ export interface operations {
             };
         };
     };
+    list_peers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The untrusted discovered-peer inventory. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeshPeerDoc"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    set_relay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RelaySetRequest"];
+            };
+        };
+        responses: {
+            /** @description Relay opt-in updated; the new mesh status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeshStatusDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to toggle relay. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The always-on mesh discovery + relay status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeshStatusDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_outputs: {
         parameters: {
             query?: never;
@@ -5393,7 +6566,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The replaced overlay (new ETag in the response header). */
+            /** @description The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the edit was applied at a frame boundary and the running picture visibly follows it — the renderer draws the new document, or it drew the previous one (editing a rendered face away makes it vanish, itself a live change); `restart` otherwise (ADR-W022). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5456,7 +6629,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The created overlay (ETag in the response header). */
+            /** @description The created overlay (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine's renderer draws the document (e.g. an analog-face clock on an overlay-rendering build) and it was applied at a frame boundary; `restart` otherwise — non-rendering kinds are stored losslessly and mirrored to the engine with a warning, never lied about (ADR-W022). */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -5506,7 +6679,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The overlay was deleted. */
+            /** @description The overlay was deleted. X-Multiview-Apply: `live` when the running renderer drew the document (its face disappears at the next frame boundary), `restart` otherwise (ADR-W022). */
             204: {
                 headers: {
                     [name: string]: unknown;
@@ -6534,6 +7707,65 @@ export interface operations {
             };
         };
     };
+    fire_salvo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The named salvo to fire. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Fire queued + submitted; outcome on the realtime stream. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FiredBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to fire. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No salvo with that name. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Engine command bus at capacity; shed. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     take_salvo: {
         parameters: {
             query?: {
@@ -6858,6 +8090,497 @@ export interface operations {
             };
             /** @description If-Match precondition failed. */
             412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    compose: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BundleRequest"];
+            };
+        };
+        responses: {
+            /** @description The bundle was composed; read the preview by id. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleAccepted"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_bundle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The composed bundle id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The composed bundle preview (redacted, media-free). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Bundle"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No bundle with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    approve_data_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The DR-xxxx data-request id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The request was approved locally. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataRequestActioned"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to approve. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No request with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request window elapsed — too late to approve. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    deny_data_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The DR-xxxx data-request id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The request was denied locally. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataRequestActioned"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to deny. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No request with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request window elapsed — too late to deny. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_entitlement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tier-derived support entitlement + route (always 200). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SupportEntitlement"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_tickets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Local ticket summaries (newest-first). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TicketSummary"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    raise_ticket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RaiseTicketRequest"];
+            };
+        };
+        responses: {
+            /** @description The ticket was raised; the full thread is returned. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ticket"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_ticket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The CS-xxxx ticket id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ticket with its full thread + machine context. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ticket"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No ticket with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    close_ticket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The CS-xxxx ticket id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ticket is closed (idempotent). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ticket"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No ticket with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    reply_ticket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The CS-xxxx ticket id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplyRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply appended; the updated thread is returned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ticket"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized, or the free tier is not entitled. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No ticket with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The ticket is closed — replies are refused. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

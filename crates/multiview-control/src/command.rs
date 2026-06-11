@@ -252,6 +252,31 @@ pub enum Command {
         /// The source id to remove.
         id: String,
     },
+    /// Create **or replace** a managed overlay document on the **running**
+    /// engine (ADR-W022 live apply, invariant #11). Carries the full,
+    /// already-validated (ADR-W015) config document; the engine drain upserts
+    /// it by id into the working overlay set at a frame boundary and publishes
+    /// the set through a lock-free slot the bake consumer re-derives from —
+    /// pure data mutation, no rasterization, no I/O. Kinds the running build
+    /// does not render are mirrored + warned (never lied about); the route's
+    /// `X-Multiview-Apply` header already declared `restart` for them.
+    UpsertOverlay {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The validated overlay document to apply (boxed: the document's
+        /// verbatim params map is larger than the other command variants).
+        overlay: Box<multiview_config::Overlay>,
+    },
+    /// Remove a managed overlay document from the **running** engine
+    /// (ADR-W022): the drain drops it from the working overlay set at a frame
+    /// boundary and republishes the set; a rendered face disappears on the
+    /// next baked frame. Removing an unknown id is a logged no-op.
+    RemoveOverlay {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The overlay id to remove.
+        id: String,
+    },
     /// Force (or clear) a manual tally override on a tile/element, taking
     /// precedence over the arbitrated bus state until released. A `color` of
     /// [`None`] clears the override and returns the element to arbitration.
@@ -282,6 +307,8 @@ impl Command {
             | Self::CancelSalvo { op, .. }
             | Self::UpsertSource { op, .. }
             | Self::RemoveSource { op, .. }
+            | Self::UpsertOverlay { op, .. }
+            | Self::RemoveOverlay { op, .. }
             | Self::SetTallyOverride { op, .. } => op,
         }
     }
@@ -302,6 +329,8 @@ impl Command {
             Self::CancelSalvo { .. } => "cancel_salvo",
             Self::UpsertSource { .. } => "upsert_source",
             Self::RemoveSource { .. } => "remove_source",
+            Self::UpsertOverlay { .. } => "upsert_overlay",
+            Self::RemoveOverlay { .. } => "remove_overlay",
             Self::SetTallyOverride { .. } => "set_tally_override",
         }
     }
