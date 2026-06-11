@@ -158,7 +158,7 @@ handler bodies and let SW-F wire the router/spec.
 - [x] **AUD-5** `M` — `bars` synthetic-source 1 kHz tone companion  ·  _deps: AUD-2, AUD-3_  · _SHIPPED (TDD red→green, clippy default+ffmpeg, fmt; me-verified). `multiview-audio::tone::ToneGenerator` — phase-continuous 1 kHz sine at the EBU −18 dBFS line-up level (`LINE_UP_TONE_PEAK_DBFS == VU_REFERENCE_DBFS`), carrying integer absolute-frame phase reduced mod the sample rate (no float drift — inv #3/#6), `f64→f32` only through the clamped helper (no raw `as`); unit tests assert non-silence, the −18 dBFS peak, phase continuity across a block seam, no drift over a long odd-length run, momentary loudness ≈ −18 LUFS (±0.5), and `seek_to_frame` lands on the analytic sine. cli `audio::tone_publish_loop` keeps the bars source's `AudioStore` filled to a bounded lead ahead of the bus read cursor (seeks forward over a never-read `DropOnOverload` span rather than back-filling — bounded burst), off any hot path (inv #1/#10). pipeline.rs touch is MINIMAL + additive (a bars source gets a store in the SAME `audio_stores` map AUD-2's bus routing iterates + a tone plan; `IngestSupervisor` spawns one tone thread/plan, gated on program-audio). Integration test decodes the on-disk `program.ts`: a bars-only run's program audio is non-silent AND its dominant zero-crossing frequency is ~1 kHz (measured 1002 Hz). `solid`/`clock` stay silent._
 - [x] **AUD-6** `L` — EBU R128 loudness normalisation on the program bus  ·  _deps: AUD-3_  · _shipped #33 (test `27e130e` → green `4bd19cd`, perf-fix red `50c17e1` → green `bbd971b`): new `multiview-audio::loudnorm` — `LoudnormProcessor` drives a one-pole-smoothed makeup gain off the running short-term `LoudnessMeter` toward `LoudnessTarget` (Broadcast −23 / Streaming −16 / Custom), gated at −70 LUFS (a silenced/lost input is never amplified) with a feedforward oversampled true-peak limiter holding the emitted true-peak ≤ −1.5 dBTP; block shape preserved exactly, discrete tracks bypass byte-identical. Bounded + off the hot path (inv #1/#10): runs on the bake-consumer thread, O(block)/tick with O(1) scalar gain state (`LoudnessMeter::retain_recent` bounds history so memory never grows with run length — the `50c17e1`→`bbd971b` perf fix kept rt8b lip-synced). CLI wiring: `program_loudnorm` applies it between `drive_audio_for_item` and the AAC encode (program-bus only). `crates/multiview-audio/src/loudnorm.rs` + `tests/loudnorm.rs` green: converge ±1 LU, true-peak ceiling never exceeded, gated silence not amplified, discrete byte-identical + monotonic-gain property test._
 - [x] **AUD-7** `M` — Audio routing config schema + capability validation  ·  _deps: AUD-3, AUD-4_  · _red `8b30b5e` → green `4357c68` + fix `fefddf1` (schema + audio-crate matrix), then **config-time capability cross-check completed**: `multiview-config::audio` — `AudioRouting`/`AudioRoute` (program-bus membership + per-input `gain_db` + `mute`, discrete `target_track`/`language`, exact-integer `sample_rate_hz`), `AudioChannels`/`OutputAudio`/`OutputAudioMode` (internally tagged, snake_case). The previously-missing piece is now in `multiview-config` itself (NO audio dep): a first-class machine-readable per-output matrix `OutputAudioCapability {delivery: TrackDelivery, discrete_capacity: TrackCapacity, max_channels}` derived by `Output::audio_capability()` from the transport (RTSP/SRT = N simultaneous; HLS/LL-HLS = N select-one; NDI = none/channel-map; legacy RTMP = 1, gated to N by a new `multitrack` endpoint flag). `OutputAudio::validate_against_capability()` is wired into `MultiviewConfig::validate()` and rejects over-capacity selections with the new typed `ConfigError::AudioCapability {output, reason}` (honest "degrade to the mixed bus" message). TDD: `tests/audio_capability.rs` pins the designed-in asymmetry (N tracks pass on SRT/RTSP, rejected on NDI + legacy RTMP, accepted on multitrack-RTMP, select-one on HLS) + the matrix is exported for AUD-8. Reuses the WebUI matrix structure the brief mandates._
-- [ ] **AUD-8** `L` — WebUI audio routing matrix + loudness meters  ·  _deps: AUD-6, AUD-7_
+- [~] **AUD-8** `L` — WebUI audio routing matrix + loudness meters  ·  _deps: AUD-6, AUD-7_  · _routing-matrix half SHIPPED (PR #55): `AudioPage.tsx` — per-source gain/mute/program-bus routing form, capability-aware output track selectors; loudness-meter slice NOT YET wired (no live LUFS/dBTP over WS yet)_
 
 ### OUT — Output servers (RTSP, NDI)
 
@@ -298,15 +298,15 @@ handler bodies and let SW-F wire the router/spec.
 > those validation legs are unblocked. Still gated: the Raspberry Pi legs (a Pi 4 is being
 > provisioned; no Pi 5 exists). The build itself was never blocked.
 
-- [ ] **DEV-A1** `M` — `multiview-config`: `Device` + `SyncGroup` types, validation, export semantics (ADR-M008 lands with it)  ·  _deps: —_
-- [ ] **DEV-A2** `S` — `multiview-events`: `Topic::Devices` + device/timing event types (ADR-RT007)  ·  _deps: —_
-- [ ] **DEV-A3** `L` — `multiview-control`: devices + sync-groups stores, CRUD routes, OpenAPI, audit, bare-verb actions (ADR-W017)  ·  _deps: DEV-A1, DEV-A2_
-- [ ] **DEV-A4** `XL` — `zowietek` driver: typed HTTP client + poller actor + three facets + device state machine (feature-gated; socket-free tests) (ADR-M009)  ·  _deps: DEV-A3_
-- [ ] **DEV-A5** `M` — Discovery infra: mDNS browse (new — none exists in-repo) + `/discovery/devices` endpoints + untrusted-inventory confirm-adopt flow  ·  _deps: DEV-A3_
-- [x] **DEV-A6** `L` — SPA: DevicesPage, adopt flow, detail tabs, "From device" pickers, help pages  ·  _deps: DEV-A3, DEV-A4_
+- [x] **DEV-A1** `M` — `multiview-config`: `Device` + `SyncGroup` types, validation, export semantics (ADR-M008 lands with it)  ·  _deps: —_ · _SHIPPED (PR #67): `multiview-config::device` — `Device` + `SyncGroup` config-as-code with validation + export (ADR-M008)_
+- [x] **DEV-A2** `S` — `multiview-events`: `Topic::Devices` + device/timing event types (ADR-RT007)  ·  _deps: —_ · _SHIPPED (PR #68): `multiview-events` — `Topic::Devices` + `DeviceEvent`/`TimingEvent` types (ADR-RT007)_
+- [x] **DEV-A3** `L` — `multiview-control`: devices + sync-groups stores, CRUD routes, OpenAPI, audit, bare-verb actions (ADR-W017)  ·  _deps: DEV-A1, DEV-A2_ · _SHIPPED (PR #77): devices + sync-groups CRUD routes, stores, state machine, conflating broadcaster (ADR-W017)_
+- [x] **DEV-A4** `XL` — `zowietek` driver: typed HTTP client + poller actor + three facets + device state machine (feature-gated; socket-free tests) (ADR-M009)  ·  _deps: DEV-A3_ · _SHIPPED (PR #87): zowietek typed client + spawned poller actor + three facets + device state machine (ADR-M009)_
+- [x] **DEV-A5** `M` — Discovery infra: mDNS browse (new — none exists in-repo) + `/discovery/devices` endpoints + untrusted-inventory confirm-adopt flow  ·  _deps: DEV-A3_ · _SHIPPED (PR #93): `routes/discovery.rs` — mDNS device-discovery, untrusted inventory, confirm-adopt flow_
+- [x] **DEV-A6** `L` — SPA: DevicesPage, adopt flow, detail tabs, "From device" pickers, help pages  ·  _deps: DEV-A3, DEV-A4_ · _SHIPPED (PR #121): SPA devices — DevicesPage, sync groups, discovery adopt flow, detail tabs, "From device" pickers, help_
 - [x] **DEV-B1** `XL` — `multiview-output/src/display/` behind `display-kms`: drm-rs sink + mailbox/atomic-flip loop + TEST_ONLY probe + EDID/forced-mode policy; `Output::Display` wired through the five config matches + cli `build_outputs` + SPA form (ADR-0044)  ·  _deps: — (1-day fence spike first)_
-- [ ] **DEV-B2** `L` — HAL/placement scanout affinity: KMS connector discovery in probe, sink-locality constraint in select, placement migration gate  ·  _deps: DEV-B1_
-- [ ] **DEV-B3** `L` — Render path: wgpu NV12→XRGB into a GBM/dmabuf scanout buffer (AMD/fallback) + NV12 direct scanout (Intel/Pi) + the wgpu version-pin decision  ·  _deps: DEV-B1_
+- [x] **DEV-B2** `L` — HAL/placement scanout affinity: KMS connector discovery in probe, sink-locality constraint in select, placement migration gate  ·  _deps: DEV-B1_ · _SHIPPED (PR #81): HAL scanout affinity — KMS connector discovery + sink-locality constraint + placement migration gate_
+- [x] **DEV-B3** `L` — Render path: wgpu NV12→XRGB into a GBM/dmabuf scanout buffer (AMD/fallback) + NV12 direct scanout (Intel/Pi) + the wgpu version-pin decision  ·  _deps: DEV-B1_ · _SHIPPED (PR #82): display render path — buffer-strategy selector + NV12-direct scanout + DmabufImage seam; wgpu-version verdict recorded_
 - [ ] **DEV-B4** `L` — ALSA HDMI audio sink: ELD gating, hdmi:/vc4 card config, buffer-level servo + adaptive resampler  ·  _deps: DEV-B1_
 - [ ] **DEV-B5** `L` — `multiview node` subcommand: single-ingest display-node mode + systemd unit + bare-metal/container deploy (kernel-uevent listener; rootless polling fallback) (ADR-0045)  ·  _deps: DEV-B1, DEV-B2, DEV-B3, DEV-B4_
 - [ ] **DEV-B6** `M` — Node enrollment/pairing + `displaynode` driver + Display-tab assignment + wall-head binding  ·  _deps: DEV-A3, DEV-B5_
@@ -323,13 +323,13 @@ handler bodies and let SW-F wire the router/spec.
 
 > Pure-Rust, default-build (no `ffmpeg`/GPL); the clock/timer **render** is `overlay`-gated like the as-built clock (`synth.rs:150`). All time is integer/`chrono` (inv #3/#6), wall-clock is **sampled** not pacing (inv #1), the disciplined reference is display-only (ADR-T012). Builds on the as-built `clock_face` SDF primitives + `TextEngine` runs + NV12/linear bake — **no new renderer**.
 
-- [ ] **SYN-CLOCK-1** `M` — Pure tz resolver + dual-face/metadata model: `chrono`+`chrono-tz` dep (deny-clean), `resolve_offset(Tz, WallTime) -> TimeZoneOffset` (DST-correct per displayed instant), `UTC±HH:MM` badge formatter; golden tests at DST boundaries  ·  _deps: —_
-- [ ] **SYN-CLOCK-2** `S` — Config: `ClockFaceConfig::Dual` + `Clock` fields (`timezone`, `label`, `show_offset`, `show_reference`, `numerals`); validation (unknown IANA id → typed `ConfigError`; `timezone` wins over `tz_offset_minutes` + warn); round-trip TOML/JSON  ·  _deps: SYN-CLOCK-1_
-- [ ] **SYN-CLOCK-3** `M` — Renderer: `dual` placement (`clock_face` upper + centred readout lower) + metadata strip (label + offset/reference badges) in `render_clock`; per-render tz resolution wired into `SyntheticKind::Clock` + `render_key` field index; content-aware goldens  ·  _deps: SYN-CLOCK-2_
-- [ ] **SYN-TIMER-1** `M` — Pure timer math: `TimerTarget` next-occurrence resolution (time-of-day across midnight/DST; absolute datetime), `displayed_seconds` (down/up), at-target clamp (`hold`/`continue`/`zero_then_up`/`recur`), duration decompose + `TimerFormat` (incl. frames from the cadence `Rational`, drop-leading-zero `auto`); property + golden tests  ·  _deps: SYN-CLOCK-1_
-- [ ] **SYN-TIMER-2** `S` — Config: `SourceKind::Timer` + `TimerTarget`/`TimerDirection`/`TimerOnTarget`/`TimerFormat` enums (`#[serde(flatten)]` target tagged on `target`, distinct from `kind`); validation + round-trip TOML/JSON  ·  _deps: SYN-TIMER-1, SYN-CLOCK-2_
-- [ ] **SYN-TIMER-3** `M` — Renderer + generator: timer render (centred mono run + overrun prefix/badge) + `SyntheticKind::Timer` resolved descriptor wired into `generator_loop` (field-index `render_key`; `_ff` bakes at cadence); content-aware goldens (count, at-zero, overrun)  ·  _deps: SYN-TIMER-2, SYN-CLOCK-3_
-- [ ] **SYN-CLOCK-UI** `L` — SPA + spec: source-kind picker entries for the extended clock + new timer; IANA zone dropdown from `chrono_tz::TZ_VARIANTS`; clock/timer forms; OpenAPI/JSON-schema regen; `examples/clock-timer.toml`; in-app docs  ·  _deps: SYN-CLOCK-3, SYN-TIMER-3_
+- [x] **SYN-CLOCK-1** `M` — Pure tz resolver + dual-face/metadata model: `chrono`+`chrono-tz` dep (deny-clean), `resolve_offset(Tz, WallTime) -> TimeZoneOffset` (DST-correct per displayed instant), `UTC±HH:MM` badge formatter; golden tests at DST boundaries  ·  _deps: —_ · _SHIPPED (PR #76): `resolve_offset` + `UTC±HH:MM` formatter in config/overlay; DST-correct per-render tz resolution_
+- [x] **SYN-CLOCK-2** `S` — Config: `ClockFaceConfig::Dual` + `Clock` fields (`timezone`, `label`, `show_offset`, `show_reference`, `numerals`); validation (unknown IANA id → typed `ConfigError`; `timezone` wins over `tz_offset_minutes` + warn); round-trip TOML/JSON  ·  _deps: SYN-CLOCK-1_ · _SHIPPED (PR #76): `ClockFaceConfig::Dual` + `timezone`/`label`/`show_offset`/`show_reference`/`numerals` in config schema_
+- [x] **SYN-CLOCK-3** `M` — Renderer: `dual` placement (`clock_face` upper + centred readout lower) + metadata strip (label + offset/reference badges) in `render_clock`; per-render tz resolution wired into `SyntheticKind::Clock` + `render_key` field index; content-aware goldens  ·  _deps: SYN-CLOCK-2_ · _SHIPPED (PR #76): dual analogue+digital face + metadata strip renderer; per-render IANA tz in `synth.rs`_
+- [x] **SYN-TIMER-1** `M` — Pure timer math: `TimerTarget` next-occurrence resolution (time-of-day across midnight/DST; absolute datetime), `displayed_seconds` (down/up), at-target clamp (`hold`/`continue`/`zero_then_up`/`recur`), duration decompose + `TimerFormat` (incl. frames from the cadence `Rational`, drop-leading-zero `auto`); property + golden tests  ·  _deps: SYN-CLOCK-1_ · _SHIPPED (PR #79): pure timer math — `TimerTarget` resolution, `displayed_seconds`, `TimerFormat`, property+golden tests_
+- [x] **SYN-TIMER-2** `S` — Config: `SourceKind::Timer` + `TimerTarget`/`TimerDirection`/`TimerOnTarget`/`TimerFormat` enums (`#[serde(flatten)]` target tagged on `target`, distinct from `kind`); validation + round-trip TOML/JSON  ·  _deps: SYN-TIMER-1, SYN-CLOCK-2_ · _SHIPPED (PR #79): `SourceKind::Timer` + `TimerTarget`/`TimerDirection`/`TimerOnTarget`/`TimerFormat` in config schema_
+- [x] **SYN-TIMER-3** `M` — Renderer + generator: timer render (centred mono run + overrun prefix/badge) + `SyntheticKind::Timer` resolved descriptor wired into `generator_loop` (field-index `render_key`; `_ff` bakes at cadence); content-aware goldens (count, at-zero, overrun)  ·  _deps: SYN-TIMER-2, SYN-CLOCK-3_ · _SHIPPED (PR #79): timer renderer (centred mono run + overrun badge) + `SyntheticKind::Timer` wired into `generator_loop`_
+- [x] **SYN-CLOCK-UI** `L` — SPA + spec: source-kind picker entries for the extended clock + new timer; IANA zone dropdown from `chrono_tz::TZ_VARIANTS`; clock/timer forms; OpenAPI/JSON-schema regen; `examples/clock-timer.toml`; in-app docs  ·  _deps: SYN-CLOCK-3, SYN-TIMER-3_ · _SHIPPED (PR #91): SPA Clock+Timer forms — IANA zone picker, timer target/direction/format; OpenAPI regen; `examples/clock-timer.toml`_
 
 ### SW — Production switcher (briefs: [production-switcher](../research/production-switcher.md) · [media-playout](../research/media-playout.md); ADR-0054..0059, ADR-M012, ADR-RT008, ADR-W021, ADR-P007, ADR-T015, ADR-C007, ADR-MV006, ADR-R011)
 
@@ -477,7 +477,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Keep the capability matrix machine-readable for reuse by the WebUI (AUD-8). Don't over-build NDI/RTMP multitrack now (those sinks aren't runnable yet, pipeline.rs:2719) — validate + degrade honestly.
 - **Read first:** ADR-R005 (capability matrix, routing data model §4.1-4.2); resilience-and-av §10 data-model anchors (`AudioRoute`, `OutputCapability`).
 
-### `[ ]` AUD-8 — WebUI audio routing matrix + loudness meters · effort: L · deps: AUD-7, AUD-6
+### `[~]` AUD-8 — WebUI audio routing matrix + loudness meters · effort: L · deps: AUD-7, AUD-6
 - **Goal:** Expose the routing matrix (program bus + discrete tracks, per-input gain/mute/include) and live program-bus loudness compliance in the SPA, with the capability-aware validator greying out impossible selections per output.
 - **Touches:** `web/src/pages/` (new `AudioPage.tsx` peer of `MonitoringPage.tsx`); `web/src/resources/api.ts` (extend the Outputs bindings api.ts:295 with audio routes/codec); `web/src/realtime/` (loudness over the existing engine WebSocket, useEngineEvents.ts) reusing `multiview_audio::meterdata`/`Conflator` (loudness/meterdata, ~30 Hz) per ADR-R006.
 - **Approach:**
@@ -501,7 +501,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 ## SYN — Clock & timer synthetic sources (extends ADR-0027; brief [clock-timer-sources](../research/clock-timer-sources.md); [ADR-0047](../decisions/ADR-0047.md))
 
 
-### `[ ]` SYN-CLOCK-1 — Pure tz resolver + dual-face/metadata model · effort: M · deps: none
+### `[x]` SYN-CLOCK-1 — Pure tz resolver + dual-face/metadata model · effort: M · deps: none
 - **Goal:** Add the missing **upstream offset resolver** the clock model already anticipates (`clock.rs:57` "DST resolved upstream to a concrete offset") so an IANA `timezone` renders a DST-correct offset for the *displayed* instant, plus the formatters the dual-face + metadata need — all pure, deterministic, injected-time.
 - **Touches:** workspace `Cargo.toml` + `crates/multiview-cli/Cargo.toml` (add `chrono` + `chrono-tz`, `default-features = false`); a new pure helper (in `multiview-config` or a `multiview-overlay::tz` module) `resolve_offset(tz: chrono_tz::Tz, at: WallTime) -> TimeZoneOffset`; a `format_utc_offset(TimeZoneOffset) -> String` (`UTC±HH:MM`). Reuses `multiview_overlay::clock::{WallTime, TimeZoneOffset}` (clock.rs:30/:57).
 - **Approach:**
@@ -512,7 +512,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Bound binary size with `chrono-tz` `default-features=false` (+ `filter-by-regex` if needed). Keep the resolver pure so the control plane can reuse it for the form preview. The bundled tz db means a tz-rule change needs a dep bump (documented in the brief §9 / ADR-0047).
 - **Read first:** brief [clock-timer-sources](../research/clock-timer-sources.md) §5; [ADR-0047](../decisions/ADR-0047.md); `multiview-overlay/src/clock.rs` header + `:57`.
 
-### `[ ]` SYN-CLOCK-2 — Config: `Dual` face + clock metadata fields · effort: S · deps: SYN-CLOCK-1
+### `[x]` SYN-CLOCK-2 — Config: `Dual` face + clock metadata fields · effort: S · deps: SYN-CLOCK-1
 - **Goal:** Extend `SourceKind::Clock` additively (`schema_version` unchanged) with `ClockFaceConfig::Dual`, `timezone` (IANA), `label`, `show_offset`, `show_reference`, `numerals`, validated and serde-round-tripping across TOML+JSON.
 - **Touches:** `crates/multiview-config/src/schema.rs:197` (`ClockFaceConfig::Dual`) + `:225` (the `Clock` variant fields per brief §6.1); `crates/multiview-config/src/error.rs` (unknown-IANA-id `ConfigError`); the example-validation test.
 - **Approach:**
@@ -522,7 +522,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Keep `tz_offset_minutes` working (legacy fixed offset). `Dual` must default-skip nothing existing.
 - **Read first:** brief §6.1; conventions §5 (serde policy); `schema.rs:189-239`.
 
-### `[ ]` SYN-CLOCK-3 — Renderer: dual placement + metadata strip + per-render tz · effort: M · deps: SYN-CLOCK-2
+### `[x]` SYN-CLOCK-3 — Renderer: dual placement + metadata strip + per-render tz · effort: M · deps: SYN-CLOCK-2
 - **Goal:** Render `dual` (analogue face + digital readout) and the metadata strip (label + `UTC±HH:MM` + optional reference badge) onto the slate, resolving the IANA offset **per render** so a long-running clock follows DST.
 - **Touches:** `crates/multiview-cli/src/synth.rs:150` (`render_clock` `dual` branch + strip), `:45/:72` (`SyntheticKind::Clock` carries `mode`, `tz: Option<Tz>`, `label`, `show_offset`, `show_reference`, `numerals`), `:138` (`render_key` → field index). Reuses `clock_face`/`ClockFaceStyle::at` (subpass.rs:328/:342) + `TextEngine::rasterize_run` (text.rs).
 - **Approach:**
@@ -533,7 +533,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Keep the bake NV12/linear (inv #5/#8) — only text placement is new. Cost stays one bake/visible-field change (inv #9). Reference badge is display-only (ADR-T012, inv #1).
 - **Read first:** brief §2, §4, §5.2-5.3; `synth.rs:150-261` + `:464-556`; `subpass.rs:283-417`.
 
-### `[ ]` SYN-TIMER-1 — Pure timer math: target resolution, direction, at-target, format · effort: M · deps: SYN-CLOCK-1
+### `[x]` SYN-TIMER-1 — Pure timer math: target resolution, direction, at-target, format · effort: M · deps: SYN-CLOCK-1
 - **Goal:** All countdown/countup math, pure and deterministic (injected now + target + cadence): next-occurrence resolution, `displayed_seconds`, the at-target clamp policies, and the duration→string formats including frames from the cadence rational.
 - **Touches:** a new pure module (in `multiview-overlay` or `multiview-config`): `resolve_target(TimerTarget, now: WallTime) -> i64` (target Unix), `displayed_seconds(direction, target, now, on_target) -> i64`, `format_duration(seconds: i64, sub_ns: i64, cadence: Rational, fmt: TimerFormat, overrun: …) -> String`.
 - **Approach:**
@@ -544,7 +544,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Midnight/DST edge cases are the footguns — test them explicitly. Frames only meaningful for `_ff`; keep it integer division against the `Rational`.
 - **Read first:** brief §3, §5.4; [ADR-0047](../decisions/ADR-0047.md) (Decision 4, alt F); `multiview-core::time::Rational`.
 
-### `[ ]` SYN-TIMER-2 — Config: `SourceKind::Timer` + target/direction/policy/format enums · effort: S · deps: SYN-TIMER-1, SYN-CLOCK-2
+### `[x]` SYN-TIMER-2 — Config: `SourceKind::Timer` + target/direction/policy/format enums · effort: S · deps: SYN-TIMER-1, SYN-CLOCK-2
 - **Goal:** Add the `Timer` source variant + its enums per brief §6.2, internally tagged (target on `target`, flattened under `kind = "timer"`), validated and round-tripping.
 - **Touches:** `crates/multiview-config/src/schema.rs` (new `SourceKind::Timer`, `TimerTarget`, `TimerDirection`, `TimerOnTarget`, `TimerFormat`); `error.rs` (bad `at` string / unknown zone / `recur` without `recur_daily` → typed errors).
 - **Approach:**
@@ -554,7 +554,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** Double-tag (`kind` + `target`) is intentional — assert it in a test so a future refactor can't collapse them.
 - **Read first:** brief §6.2 (incl. the tag-collision note); conventions §5.
 
-### `[ ]` SYN-TIMER-3 — Renderer + generator: timer render + overrun + generator wiring · effort: M · deps: SYN-TIMER-2, SYN-CLOCK-3
+### `[x]` SYN-TIMER-3 — Renderer + generator: timer render + overrun + generator wiring · effort: M · deps: SYN-TIMER-2, SYN-CLOCK-3
 - **Goal:** Render the timer (centred mono duration run + optional overrun prefix/badge) and wire `SyntheticKind::Timer` into the per-tick `generator_loop`, re-rendering once per displayed field.
 - **Touches:** `crates/multiview-cli/src/synth.rs` (`render` arm for `Timer`, `SyntheticKind::Timer` resolved descriptor, `from_source_kind` mapping, `render_key` field index incl. `_ff` per-frame, `animated()==true`).
 - **Approach:**
@@ -564,7 +564,7 @@ _Each item: Goal · Touches · Approach · Acceptance · Risks · Read‑first. 
 - **Risks/notes:** `_ff` is the one cadence-rate baker — keep it opt-in and cheap (one text run). Never read wall clock outside the generator (tests inject `now`).
 - **Read first:** brief §3.3, §4.2, §4.4; `synth.rs:107-344`.
 
-### `[ ]` SYN-CLOCK-UI — SPA + spec surface for the extended clock + timer · effort: L · deps: SYN-CLOCK-3, SYN-TIMER-3
+### `[x]` SYN-CLOCK-UI — SPA + spec surface for the extended clock + timer · effort: L · deps: SYN-CLOCK-3, SYN-TIMER-3
 - **Goal:** Surface the new clock fields + the `timer` source in the WebUI source-kind picker/forms with an IANA zone dropdown, regenerate the OpenAPI/JSON-schema, ship an example, and document it in-app.
 - **Touches:** `web/src/` source-kind picker + forms (clock `face`/`timezone`/`label`/`show_offset`/`numerals`; timer target/direction/on_target/format/label); zone dropdown from `chrono_tz::TZ_VARIANTS` (exposed via a `/capabilities/timezones` endpoint or a generated list); `cargo xtask gen-openapi`; `examples/clock-timer.toml`; in-app docs/concepts page.
 - **Approach:**
@@ -1242,27 +1242,27 @@ no Pi 5 exists).
 
 ---
 
-### `[ ]` DEV-A1 — `multiview-config`: `Device` + `SyncGroup` types, validation, export · effort: M · deps: none
+### `[x]` DEV-A1 — `multiview-config`: `Device` + `SyncGroup` types, validation, export · effort: M · deps: none
 - **Goal:** Config-as-code is the durable source for devices: typed `Device` (driver, address, auth `secret_ref`, `desired_mode`, reconnect, display assignment) + `SyncGroup` (mode, `target_skew_ms`, members with per-member `offset_ms`).
 - **Touches:** `crates/multiview-config/src/` (new `device.rs`, `sync_group.rs`, registered beside `schema.rs`/`wall.rs`).
 - **Acceptance (done when):** serde round-trip (TOML + JSON; tagged unions only — `display.assign` is externally tagged single-key to match the brief §7.3 authored shape, everything else internally tagged, never `untagged`; exact integers, no float; unknown keys rejected at parse) for all three driver variants; validation rejects duplicate ids, unknown drivers, dangling sync-group members, cast sync-group members (Tier D, ADR-M011); export emits desired state only (no runtime status, no discovered-unadopted devices, no ad-hoc Cast sessions; secrets as `ref|redact`). ADR-M008 commits in the same push.
 
-### `[ ]` DEV-A2 — `multiview-events`: `Topic::Devices` + device/timing event types (ADR-RT007) · effort: S · deps: none
+### `[x]` DEV-A2 — `multiview-events`: `Topic::Devices` + device/timing event types (ADR-RT007) · effort: S · deps: none
 - **Goal:** One coarse ids-filtered `Topic::Devices` carrying `device.status` (conflated latest-wins: state/mode/streams/temperature), `device.adopted/.removed/.mode/.error/.sync` (lossless low-rate), `device.discovered` (during scans), plus `TimingStatus` for F3.
 - **Touches:** `crates/multiview-events/src/` (topic + event types + envelope registration).
 - **Acceptance (done when):** versioned-envelope serde round-trip tests for every new event type; topic ids-filtering tested; no new engine→outside channel (drivers publish from the control plane — inv #10 untouched).
 
-### `[ ]` DEV-A3 — `multiview-control`: devices + sync-groups stores, CRUD, OpenAPI, actions · effort: L · deps: DEV-A1, DEV-A2
+### `[x]` DEV-A3 — `multiview-control`: devices + sync-groups stores, CRUD, OpenAPI, actions · effort: L · deps: DEV-A1, DEV-A2
 - **Goal:** The Devices domain REST surface: registry stores + CRUD + bare-verb actions, OpenAPI-first.
 - **Touches:** `crates/multiview-control/src/resource_store.rs` (add `DeviceKind`/`SyncGroupKind` markers), new `crates/multiview-control/src/devices/mod.rs` (registry + state machine), new routes + `openapi.rs` registration.
 - **Acceptance (done when):** `/devices` + `/sync-groups` CRUD with ETag/If-Match→412 + Idempotency-Key; `DELETE /devices/{id}` 409s while sources/outputs are bound; bare-verb actions (`probe`, `set-mode` → 202+operation id with declared impact, `reboot` → 202, `identify`/`test-pattern` → 204) per ADR-W017; the DISCOVERED→ADOPTING→ONLINE/DEGRADED/AUTH_FAILED/UNREACHABLE state machine unit-tested; the **conflating broadcaster + session-pump ring rule** (`topic.is_high_rate() || event.is_conflated()`, ADR-RT007) implemented and explicitly tested — resume-after-gap replays lifecycle events losslessly while `device.status` arrives as a fresh snapshot; event `driver` strings constructed only from `multiview_config::DeviceDriver`'s serde wire form, never hand-typed; handlers tested socket-free via `tower::oneshot`; `cargo xtask gen-openapi` regenerated; audit entries on every mutation; IPv6-first examples (bracketed literals).
 
-### `[ ]` DEV-A4 — `zowietek` driver: typed client + poller + three facets (ADR-M009) · effort: XL · deps: DEV-A3
+### `[x]` DEV-A4 — `zowietek` driver: typed client + poller + three facets (ADR-M009) · effort: XL · deps: DEV-A3
 - **Goal:** First vendor driver, clean-room over the vendor-published HTTP API; devices stay a control-plane concern (no engine/`multiview-input` feature).
 - **Touches:** new `crates/multiview-control/src/devices/{driver,zowietek}.rs`; per-driver off-by-default feature (`zowietek` / `devices-net` umbrella).
 - **Acceptance (done when):** typed JSON-RPC client survives the verified doc hazards (per-device request serialization; backoff on busy codes; `"00000"` vs `"000000"` + `rsp` text drift tolerated; no-HTTP-response on LAN/mDNS/port sets handled as expected reboot); poll-only status ≤1 Hz per status group; the three facets produce **ordinary** managed Sources/Outputs carrying a `device_ref`; `desired_mode` convergence declares device-side (DEV-class) impact before apply (close-before-open semantics); default `cargo check` stays pure-Rust/socket-free with the model compiled + fake-transport tests; bitrate-unit ambiguity recorded as a hardware-verification item, never guessed into the schema. (Hardware leg: typed client validated on a real ZowieBox — **gated on purchase**.)
 
-### `[ ]` DEV-A5 — Discovery infra: mDNS browse + `/discovery/devices` + confirm-adopt · effort: M · deps: DEV-A3
+### `[x]` DEV-A5 — Discovery infra: mDNS browse + `/discovery/devices` + confirm-adopt · effort: M · deps: DEV-A3
 - **Goal:** New shared discovery infrastructure (verified: no working mDNS code exists in-repo) for zowietek/cast/displaynode browsing.
 - **Touches:** new mDNS module in `multiview-control` (an `mdns-sd`-class crate behind the net feature), `/discovery/devices` routes.
 - **Acceptance (done when):** `POST /discovery/devices/scan` → 202 + results as events; `GET /discovery/devices` returns an **untrusted inventory** requiring explicit confirm-adopt (ADR-0041 doctrine — never auto-ingest); results AAAA-first with IPv4 entries labelled *legacy*; browse task bounded + off the engine path; socket-free tests via an injected browser seam.
@@ -1279,12 +1279,12 @@ no Pi 5 exists).
 - **Touches:** new `crates/multiview-output/src/display/` behind a new off-by-default `display-kms` feature (drm + gbm crates; `cargo deny` green); `crates/multiview-config/src/schema.rs` `Output::Display` threaded through the five exhaustive same-crate matches (`explicit_id`/`gpu_pin`/`audio`/`label`/`validate_outputs`); `crates/multiview-cli/src/pipeline.rs` `build_outputs` (pipeline.rs:3724); the SPA output form (a schema-only edit would be a parseable-but-skipped output — ships fully wired).
 - **Acceptance (done when):** a dedicated sink thread owns the DRM fd; flip loop = page-flip-complete → take latest mailbox frame → `atomic_commit(NONBLOCK | PAGE_FLIP_EVENT)`, at most one in-flight commit per CRTC, no-new-frame → do nothing (KMS repeats); a wedged display provably cannot stall the canvas publish (mailbox conflation test — inv #1/#10); `ALLOW_MODESET` never on the frame path; `TEST_ONLY` probes validate plane formats/modifiers at startup; EDID preferred mode chosen by **exact-rational** refresh match (never float fps) + CVT-RB forced-mode fallback for EDID-less heads (per-connector config override); `Output::Display` parses, round-trips, and is built (not skipped) by `build_outputs`; KMS-less CI green via a fake-DRM seam.
 
-### `[ ]` DEV-B2 — HAL/placement scanout affinity · effort: L · deps: DEV-B1
+### `[x]` DEV-B2 — HAL/placement scanout affinity · effort: L · deps: DEV-B1
 - **Goal:** The display sink is the first GPU-resident raw-frame consumer; the framebuffer must live on the connector-owning GPU.
 - **Touches:** `crates/multiview-hal/src/probe.rs` (KMS card-node/connector discovery), `crates/multiview-hal/src/select.rs` (sink-locality constraint), `crates/multiview-engine/src/placement.rs` (migration/split awareness).
 - **Acceptance (done when):** probe reports connector-owning card nodes; selection pins composite to the display GPU when a Display sink exists; the placement controller never proposes migrating composite off the scanout GPU (which would force the per-frame GPU→host→GPU copy ADR-0018 forbids) — unit-tested on multi-GPU fixtures; trivially satisfied single-GPU. (Hardware leg: multi-GPU affinity gate exercised on the GPU test server.)
 
-### `[ ]` DEV-B3 — Render path: NV12 direct scanout + wgpu NV12→XRGB fallback · effort: L · deps: DEV-B1
+### `[x]` DEV-B3 — Render path: NV12 direct scanout + wgpu NV12→XRGB fallback · effort: L · deps: DEV-B1
 - **Status:** CODE SHIPPED (branch `ship/dev-b3-render-path`), hardware-validation legs pending. The per-hardware buffer-strategy decision is a pure, always-compiled, GPU-free module (`display/strategy.rs`): `select_buffer_strategy` resolves a probed head to **NV12-direct** (Intel Gen9+/vc4, incl. SAND128), the **wgpu XRGB pass**, or the **CPU NV12→XRGB** default; `plane_supports_nv12` gates on format AND the `IN_FORMATS` modifier (the #5727 mis-tile hazard); `parse_in_formats_blob` reads the kernel modifier blob (bounds-checked, `None` not panic on garbage). 14 strategy + 4 canvas-seam unit tests, all GPU-free. The **NV12-direct ADDFB2 path is fully built in `display/kms.rs`** (drm/gbm only — `prime_fd_to_buffer` per plane → `PlanarBuffer` adapter → `add_planar_framebuffer` with the modifier → flip; 0 copies/0 passes; retired-fb teardown; CPU fallback on import failure) and **compiles on the current pin** (drm 0.15 + gbm 0.18). `DisplayCanvas` gained `delivery()` + `dmabuf_image()` (borrowed fds) so a dmabuf canvas opts into the zero-copy path; the shipped CLI `CanvasFrame` is CPU-planes, so the CPU convert runs today. **wgpu-version verdict (RECORDED):** workspace pin is **wgpu 29.0.3**; `SurfaceTargetUnsafe::Drm` + `create_texture_from_hal` + `wgpu_hal::vulkan::texture_from_raw(external_memory…)` all exist, but there is **no safe `texture_from_dmabuf_fd` in v29** (lands later) — dmabuf import on this pin needs `wgpu-hal`+`ash` as new direct deps + raw-Vulkan `unsafe` in this `forbid(unsafe_code)` crate. **Decision: defer the wgpu pass, ship the CPU NV12→XRGB path as the AMD/fallback default** (correct + modest ~0.7 GB/s budget); a whole-workspace wgpu bump to get safe import is the unilateral bump this task says not to make. The `WgpuXrgbPass` variant + `gpu_pass_available` seam compile + are unit-tested; flipping it on is a localized follow-up when the pin advances. Default `cargo check`/`test`/`clippy`/`fmt`/`deny` green with **zero new deps**; `display-kms` build + clippy + tests green. Hardware legs remain: Pi golden NV12-scanout (gated on Pi acquisition); t630 RGB/CPU-path validation; a real dmabuf-canvas to exercise NV12-direct end-to-end on glass.
 - **Goal:** Per-hardware buffer strategy, verified per display block.
 - **Touches:** `crates/multiview-output/src/display/` (+ wgpu interop, GBM allocation path).
@@ -1574,7 +1574,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
 `12` (live wire + hardware, behind operator confirmations). Critical path:
 `0 → 1 → {2,3} → 7 → 9 → 11 → 12`.
 
-### `[ ]` CONSPECT-0 — `multiview-licence` shell: EXACT constants + `LicenceStatus` types · effort: M · deps: none
+### `[x]` CONSPECT-0 — `multiview-licence` shell: EXACT constants + `LicenceStatus` types · effort: M · deps: none · _SHIPPED (PR #86): `multiview-licence` crate — entitlement/lease/ladder/fingerprint/verify, §2 EXACT constants, CONSPECT-0 data model_
 - **Goal:** Stand up the greenfield leaf crate with the §2 constants as named items, the
   `LicenceStatus`/`Enforcement{level,reasons,since,lease}` published types, and the
   `enforcement.level` enum — the *data* every surface renders. Pure-Rust shell; no network.
@@ -1592,7 +1592,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   default build network-free so CI stays pure.
 - **Read first:** brief §2, §6.1; [conventions §3](../architecture/conventions.md); [ADR-0050](../decisions/ADR-0050.md) §1–§4.
 
-### `[ ]` CONSPECT-1 — entitlement/lease/claim/transfer/fingerprint state machines (data, not control flow) · effort: L · deps: CONSPECT-0
+### `[x]` CONSPECT-1 — entitlement/lease/claim/transfer/fingerprint state machines (data, not control flow) · effort: L · deps: CONSPECT-0 · _SHIPPED (PR #86/90): state machines in `crates/multiview-licence/src/{lease,ladder,verify,fingerprint,challenge,watcher}.rs` + lease-lifecycle routes_
 - **Goal:** Implement the pure state machines that *compute* `enforcement.level` off the hot loop, plus
   the salted-digest fingerprint **score**, all as data — tested with `proptest-state-machine`.
 - **Touches:** `crates/multiview-licence/src/{lease,claim,transfer,fingerprint,ladder}.rs`.
@@ -1609,7 +1609,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   provenance is operator-confirm O6 — take it as a constructor parameter for now.
 - **Read first:** brief §6, §12; [ADR-0050](../decisions/ADR-0050.md) §2, §4, §6, §8.
 
-### `[ ]` CONSPECT-2 — engine seams S1/S2/S3 + the never-off-air chaos test · effort: M · deps: CONSPECT-1
+### `[x]` CONSPECT-2 — engine seams S1/S2/S3 + the never-off-air chaos test · effort: M · deps: CONSPECT-1 · _SHIPPED (PR #94): S1 startup gate + S3 tile-watermark signal in `crates/multiview-cli/src/licence.rs` + `run.rs`; enforcement hooks wired_
 - **Goal:** Wire the three engine seams as **two pre-derived atomics + a startup gate**, and prove
   never-off-air with an executable chaos test (the §6.3 proof made real).
 - **Touches:** `crates/multiview-cli/src/run.rs` (S1 at `SoftwareEngine::build()` before
@@ -1630,7 +1630,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   (no full-canvas colour round-trip).
 - **Read first:** brief §5, §6.3, §16; [ADR-0050](../decisions/ADR-0050.md) §3, §5; [ADR-I001](../decisions/ADR-I001.md); [ADR-T001](../decisions/ADR-T001.md).
 
-### `[ ]` CONSPECT-3 — heartbeat client (feature-gated) + S4 status surface + lease renew · effort: L · deps: CONSPECT-1
+### `[ ]` CONSPECT-3 — heartbeat client (feature-gated) + S4 status surface + lease renew · effort: L · deps: CONSPECT-1 · _O1-blocked on external Licensing Architecture wire protocol (no `heartbeat.rs` on main yet)_
 - **Goal:** The `heartbeat`-feature network client that contacts the licence server (monthly minimum),
   renews the lease on success, and publishes `LicenceStatus` wait-free (seam S4). State model stays
   always-compiled; a build with the feature **off** reports `unlicensed-build` honestly.
@@ -1647,7 +1647,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   The client is off in default/CI, on in shipped presets.
 - **Read first:** brief §4, §7, §8; [ADR-0050](../decisions/ADR-0050.md) §3, §7; [ADR-0052](../decisions/ADR-0052.md) §1.
 
-### `[ ]` CONSPECT-4 — `multiview-mesh` discovery: always-on mDNS + signed summaries + untrusted confirm-adopt · effort: M · deps: CONSPECT-1
+### `[x]` CONSPECT-4 — `multiview-mesh` discovery: always-on mDNS + signed summaries + untrusted confirm-adopt · effort: M · deps: CONSPECT-1 · _SHIPPED (PR #104): `crates/multiview-mesh/` — always-on mDNS announce, untrusted peer inventory, signed summaries, confirm-adopt_
 - **Goal:** The greenfield mesh crate's discovery half — IPv6-first mDNS announce/browse of
   Ed25519-signed salted-digest summaries into a bounded **untrusted** inventory with explicit
   confirm-adopt (the ADR-0041 doctrine).
@@ -1666,7 +1666,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
 - **Risks/notes:** auto-adopt is the classic mDNS footgun — forbidden; confirm-adopt only.
 - **Read first:** brief §9.1, §8; [ADR-0051](../decisions/ADR-0051.md) §2, §3; [ADR-0041](../decisions/ADR-0041.md); [ADR-0042](../decisions/ADR-0042.md).
 
-### `[ ]` CONSPECT-5 — mesh relay (end-to-end signed, bounded, dumb carrier) · effort: L · deps: CONSPECT-3, CONSPECT-4
+### `[x]` CONSPECT-5 — mesh relay (end-to-end signed, bounded, dumb carrier) · effort: L · deps: CONSPECT-3, CONSPECT-4 · _SHIPPED (PR #104): mesh relay carrier in `crates/multiview-mesh/`; CONSPECT-3a mesh plane wired into daemon_
 - **Goal:** Relay an adopted offline neighbour's heartbeat to the licence server and carry the signed
   response back — the relayer a **dumb carrier** that cannot read/forge/alter the assertion.
 - **Touches:** `crates/multiview-mesh/src/relay.rs`; the bounded drop-oldest relay queue; the cli
@@ -1682,7 +1682,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   O1/O2) — code against the same `LicenceServer`/fake.
 - **Read first:** brief §9.2; [ADR-0051](../decisions/ADR-0051.md) §4, §5.
 
-### `[ ]` CONSPECT-6 — telemetry two-pipe + consent (LWW) + S5 consent-independent retention · effort: M · deps: CONSPECT-0
+### `[x]` CONSPECT-6 — telemetry two-pipe + consent (LWW) + S5 consent-independent retention · effort: M · deps: CONSPECT-0 · _SHIPPED (PR #92/120): `multiview-telemetry::retention` (S5 consent-independent store) + telemetry consent/diagnostics routes_
 - **Goal:** Add the **opt-in daily telemetry** pipe (distinct from the heartbeat), the LWW consent
   document, and the **consent-independent** bounded local metrics buffer (seam S5) — all additive in
   `multiview-telemetry`, never co-mingled with the heartbeat.
@@ -1698,7 +1698,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   UI/API copy must never present the two pipes as one switch.
 - **Read first:** brief §7, §8; [ADR-0052](../decisions/ADR-0052.md) §1–§5.
 
-### `[ ]` CONSPECT-7 — control routes batch A: licence/claim/transfer/fingerprint/enforcement + OpenAPI · effort: L · deps: CONSPECT-1, CONSPECT-3
+### `[x]` CONSPECT-7 — control routes batch A: licence/claim/transfer/fingerprint/enforcement + OpenAPI · effort: L · deps: CONSPECT-1, CONSPECT-3 · _SHIPPED (PR #90/106/109): `routes/licence.rs` (GET/POST/challenge) + `routes/account.rs` (audit+actions) + relay-toggle audit_
 - **Goal:** The §11 routes 1–15 in **new** `routes/account/*.rs`, registered + documented by the
   **single** route/OpenAPI owner (§15 coordination) so the WebUI session codes against named routes.
 - **Touches:** new `crates/multiview-control/src/routes/account/{licence,claim,transfer,fingerprint}.rs`;
@@ -1715,7 +1715,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   `routes/mod.rs` churn (§15); the WebUI session is told the route/schema names up front.
 - **Read first:** brief §11, §15; [ADR-0050](../decisions/ADR-0050.md) §8; control-api scout patterns.
 
-### `[ ]` CONSPECT-8 — control routes batch B: telemetry/consent/metrics/mesh · effort: M · deps: CONSPECT-6, CONSPECT-4
+### `[x]` CONSPECT-8 — control routes batch B: telemetry/consent/metrics/mesh · effort: M · deps: CONSPECT-6, CONSPECT-4 · _SHIPPED (PR #92/104): `routes/telemetry.rs` (consent/diagnostics/metrics) + `routes/mesh.rs` (status/relay/peers)_
 - **Goal:** The §11 routes 16–25 — telemetry/consent/local-metrics + mesh peers/adopt/relay.
 - **Touches:** new `routes/account/telemetry.rs` + `routes/mesh.rs`; `routes/mod.rs`/`openapi.rs`
   (single owner); `state.rs` (mesh + telemetry stores).
@@ -1727,7 +1727,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
 - **Risks/notes:** same single-owner registration discipline (§15).
 - **Read first:** brief §7, §9, §11; [ADR-0052](../decisions/ADR-0052.md); [ADR-0051](../decisions/ADR-0051.md).
 
-### `[ ]` CONSPECT-9 — support: ticketing + context-pack + data-request approval + append-only audit · effort: L · deps: CONSPECT-7, CONSPECT-6
+### `[x]` CONSPECT-9 — support: ticketing + context-pack + data-request approval + append-only audit · effort: L · deps: CONSPECT-7, CONSPECT-6 · _SHIPPED (PR #111): `routes/support.rs` — LOCAL support/ticketing, context-pack, append-only audit; 8 endpoints_
 - **Goal:** The §11 routes 26–34 — tickets, the **redacted** context-pack, **data-request local
   approval**, and the **append-only** account audit.
 - **Touches:** new `routes/account/{support,audit}.rs`; the support/audit stores (in-memory default,
@@ -1743,7 +1743,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
 - **Risks/notes:** reuse the existing audit-log rotation; keep secrets reference-only (ADR-M006).
 - **Read first:** brief §10, §11; [ADR-0053](../decisions/ADR-0053.md); [ADR-M006](../decisions/ADR-M006.md); [ADR-W015](../decisions/ADR-W015.md); [ADR-I003](../decisions/ADR-I003.md).
 
-### `[ ]` CONSPECT-10 — cli wiring: spawn the plane tasks + thread the two atomics · effort: M · deps: CONSPECT-2, CONSPECT-3, CONSPECT-4, CONSPECT-6
+### `[x]` CONSPECT-10 — cli wiring: spawn the plane tasks + thread the two atomics · effort: M · deps: CONSPECT-2, CONSPECT-3, CONSPECT-4, CONSPECT-6 · _SHIPPED (PR #94/92): `cli/licence.rs` (S1/S3 atomics + LeaseStore) + `cli/metrics_retention.rs` (S5); mesh plane wired in CONSPECT-3a_
 - **Goal:** Wire the planes into `multiview run`: spawn the heartbeat (S4), local-metrics (S5), and
   mesh announce/relay tasks; derive the two engine atomics (config-lock/watermark) from
   `LicenceStatus`; gate S1 at `SoftwareEngine::build()`. Additive, behind the `account` aggregation.
@@ -1758,7 +1758,7 @@ used by the external portals — never round): `CLAIM_CODE_TTL`=15m · `CLAIM_RE
   data-plane integrator; keep the additions strictly additive + off-hot-loop.
 - **Read first:** brief §5, §13.6; [ADR-0050](../decisions/ADR-0050.md) §5, §9.
 
-### `[ ]` CONSPECT-11 — web/: 7 screens + chrome + generated-client regen · effort: XL · deps: CONSPECT-7, CONSPECT-8, CONSPECT-9
+### `[x]` CONSPECT-11 — web/: 7 screens + chrome + generated-client regen · effort: XL · deps: CONSPECT-7, CONSPECT-8, CONSPECT-9 · _SHIPPED (PR #122): AccountPage/LicencePage/MeshPage/DataPage + global chrome (header chip, ladder banner, pending-action strip)_
 - **Goal:** The 7 account screens (`/welcome`, `/settings/account`, `/licence`, `/data`, `/mesh`,
   `/system/actions`, account-side `/help` nested under DocsLayout) + global chrome (header chip,
   ladder banner, pending-action strip, config-lock interceptor), behind the WebUI-owner coordination.
