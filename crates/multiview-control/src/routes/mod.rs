@@ -40,6 +40,7 @@ pub mod probes;
 pub mod routing;
 pub mod salvos;
 pub mod sources;
+pub mod support;
 pub mod sync_groups;
 pub mod tally;
 
@@ -846,6 +847,31 @@ pub fn api_router() -> Router<AppState> {
         // Pending remote-actions strip + local cancel (local always wins).
         .route("/actions/pending", get(account::list_pending_actions))
         .route("/actions/{id}/cancel", post(account::cancel_action))
+        // Local support surface (Conspect §10/§11): tier-derived entitlement
+        // routing, the local ticket store (CS-xxxx, machine-context auto-attach,
+        // reply/close), the previewable redacted media-free context-pack
+        // composer, and local approve/deny of inbound egress data requests.
+        .route("/support/entitlement", get(support::get_entitlement))
+        .route(
+            "/support/tickets",
+            get(support::list_tickets).post(support::raise_ticket),
+        )
+        .route("/support/tickets/{id}", get(support::get_ticket))
+        .route("/support/tickets/{id}/reply", post(support::reply_ticket))
+        .route("/support/tickets/{id}/close", post(support::close_ticket))
+        .route(
+            "/support/bundle",
+            post(support::compose),
+        )
+        .route("/support/bundle/{id}", get(support::get_bundle))
+        .route(
+            "/support/data-request/{id}/approve",
+            post(support::approve_data_request),
+        )
+        .route(
+            "/support/data-request/{id}/deny",
+            post(support::deny_data_request),
+        )
         // Config-as-code export: the live stores rendered as multiview.toml.
         .route("/config/export", get(config::export_config))
         // Config versioning: history + commit, single revision, diff, rollback.

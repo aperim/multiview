@@ -37,7 +37,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use multiview_control::account_audit::AccountAuditKind;
 use multiview_control::support_store::{DataRequest, DataRequestState, TicketSeverity};
 use multiview_control::{AppState, DataRequestRepository, InMemoryDataRequests, LicenceState};
-use multiview_licence::entitlement::{Entitlement, EntitlementFlags, GpuLimit, HardwareClass, Tier};
+use multiview_licence::entitlement::{
+    Entitlement, EntitlementFlags, GpuLimit, HardwareClass, Tier,
+};
 use multiview_licence::lease::{Lease, LeaseSource};
 use multiview_licence::store::{LeaseBinding, LeaseStore};
 use multiview_licence::verify::{PinnedKey, SignedLease};
@@ -113,9 +115,7 @@ fn harness_at_tier(tier: &str) -> (Harness, Arc<dyn DataRequestRepository>) {
 
 /// An unlicensed harness (no lease installed) — the "free / community" tier.
 fn harness_free() -> Harness {
-    harness_with(|state| {
-        state.with_retention(Arc::new(RetentionStore::new()))
-    })
+    harness_with(|state| state.with_retention(Arc::new(RetentionStore::new())))
 }
 
 // ── 1. Entitlement routing ────────────────────────────────────────────────
@@ -133,7 +133,11 @@ async fn entitlement_free_tier_routes_to_community_and_is_not_eligible() {
 #[tokio::test]
 async fn entitlement_studio_tier_is_eligible_and_routes_to_a_support_queue() {
     let (h, _dr) = harness_at_tier("studio");
-    let resp = send(&h.router, get("/api/v1/support/entitlement", OPERATOR_TOKEN)).await;
+    let resp = send(
+        &h.router,
+        get("/api/v1/support/entitlement", OPERATOR_TOKEN),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["eligible"], serde_json::json!(true));
@@ -142,7 +146,10 @@ async fn entitlement_studio_tier_is_eligible_and_routes_to_a_support_queue() {
         first_line == "conspect" || first_line == "partner",
         "an eligible tier routes to a real support queue, got {first_line:?}"
     );
-    assert!(body["sla"].is_string(), "an eligible tier carries an SLA token");
+    assert!(
+        body["sla"].is_string(),
+        "an eligible tier carries an SLA token"
+    );
 }
 
 // ── 2. Tickets (local store) ──────────────────────────────────────────────
@@ -196,7 +203,10 @@ async fn raise_ticket_auto_attaches_machine_identity_and_uses_cs_id() {
     // ladder-state/fingerprint-score per §7.1 — pinned by reading it back.
     let read = send(
         &h.router,
-        get(&format!("/api/v1/support/tickets/{ticket_id}"), OPERATOR_TOKEN),
+        get(
+            &format!("/api/v1/support/tickets/{ticket_id}"),
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     assert_eq!(read.status(), StatusCode::OK);
@@ -233,7 +243,10 @@ async fn reply_to_a_closed_ticket_is_409_ticket_closed() {
         ),
     )
     .await;
-    let ticket_id = body_json(raise).await["ticket_id"].as_str().unwrap().to_owned();
+    let ticket_id = body_json(raise).await["ticket_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Close it (the local lifecycle is fully functional — an operator can close).
     let close = send(
@@ -279,7 +292,10 @@ async fn reply_to_an_open_ticket_appends_to_the_thread() {
         ),
     )
     .await;
-    let ticket_id = body_json(raise).await["ticket_id"].as_str().unwrap().to_owned();
+    let ticket_id = body_json(raise).await["ticket_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let reply = send(
         &h.router,
@@ -330,12 +346,18 @@ async fn bundle_redacts_secrets_and_source_urls_and_lists_the_removals() {
     )
     .await;
     assert_eq!(compose.status(), StatusCode::ACCEPTED);
-    let bundle_id = body_json(compose).await["bundle_id"].as_str().unwrap().to_owned();
+    let bundle_id = body_json(compose).await["bundle_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Read the preview.
     let preview = send(
         &h.router,
-        get(&format!("/api/v1/support/bundle/{bundle_id}"), OPERATOR_TOKEN),
+        get(
+            &format!("/api/v1/support/bundle/{bundle_id}"),
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     assert_eq!(preview.status(), StatusCode::OK);
@@ -378,15 +400,29 @@ async fn bundle_never_contains_media() {
     )
     .await;
     assert_eq!(compose.status(), StatusCode::ACCEPTED);
-    let bundle_id = body_json(compose).await["bundle_id"].as_str().unwrap().to_owned();
+    let bundle_id = body_json(compose).await["bundle_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let preview = send(
         &h.router,
-        get(&format!("/api/v1/support/bundle/{bundle_id}"), OPERATOR_TOKEN),
+        get(
+            &format!("/api/v1/support/bundle/{bundle_id}"),
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     let body = body_json(preview).await;
     let serialized = serde_json::to_string(&body).unwrap().to_lowercase();
-    for forbidden in ["frame", "thumbnail", "jpeg", "snapshot", "nv12", "rgba", "media"] {
+    for forbidden in [
+        "frame",
+        "thumbnail",
+        "jpeg",
+        "snapshot",
+        "nv12",
+        "rgba",
+        "media",
+    ] {
         assert!(
             !serialized.contains(forbidden),
             "the bundle must never carry media; found {forbidden:?} in {serialized}"
@@ -414,10 +450,16 @@ async fn bundle_composes_with_telemetry_consent_off() {
         StatusCode::ACCEPTED,
         "the bundle composes with consent OFF — no consent check in this path"
     );
-    let bundle_id = body_json(compose).await["bundle_id"].as_str().unwrap().to_owned();
+    let bundle_id = body_json(compose).await["bundle_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let preview = send(
         &h.router,
-        get(&format!("/api/v1/support/bundle/{bundle_id}"), OPERATOR_TOKEN),
+        get(
+            &format!("/api/v1/support/bundle/{bundle_id}"),
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     assert_eq!(preview.status(), StatusCode::OK);
@@ -521,7 +563,10 @@ async fn approving_an_expired_data_request_is_410_request_expired() {
     assert_eq!(resp.status(), StatusCode::GONE);
     let problem = body_json(resp).await;
     assert!(
-        problem["type"].as_str().unwrap().contains("request_expired"),
+        problem["type"]
+            .as_str()
+            .unwrap()
+            .contains("request_expired"),
         "an expired data request answers request_expired, got {problem:?}"
     );
     // The expired request was NOT approved — nothing leaves.
@@ -546,7 +591,10 @@ async fn ticket_raise_reply_bundle_and_data_request_each_write_audit_entries() {
         ),
     )
     .await;
-    let ticket_id = body_json(raise).await["ticket_id"].as_str().unwrap().to_owned();
+    let ticket_id = body_json(raise).await["ticket_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     send(
         &h.router,
         post_json(
@@ -586,7 +634,11 @@ async fn ticket_raise_reply_bundle_and_data_request_each_write_audit_entries() {
     .await;
 
     // Read the account audit trail and assert each kind landed.
-    let audit = send(&h.router, get("/api/v1/account/audit?limit=1000", ADMIN_TOKEN)).await;
+    let audit = send(
+        &h.router,
+        get("/api/v1/account/audit?limit=1000", ADMIN_TOKEN),
+    )
+    .await;
     assert_eq!(audit.status(), StatusCode::OK);
     let entries = body_json(audit).await["entries"]
         .as_array()

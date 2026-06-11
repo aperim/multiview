@@ -2302,7 +2302,7 @@
           "mesh"
         ],
         "summary": "`PUT /api/v1/mesh/relay` — opt this machine in/out of relaying neighbours\n(role: write).",
-        "description": "A real, persisted toggle: the new state is written to the shared mesh state\nand the updated status is returned. Discovery is unaffected (always-on) — this\ntoggles only the **relay** opt-in (brief §9.2). The change is recorded in the\naudit log (an auditable account-side action, brief §10/§11).",
+        "description": "A real, persisted toggle: the new state is written to the shared mesh state\nand the updated status is returned. Discovery is unaffected (always-on) — this\ntoggles only the **relay** opt-in (brief §9.2). Every successful toggle is\nrecorded in **both** trails: the change-audit log and — as an\nactor-attributed [`AccountAuditKind::RelayToggle`](crate::account_audit::AccountAuditKind::RelayToggle)\nentry — the append-only account-audit store (the spec's relay opt-in/out row,\nbrief §10/§11).",
         "operationId": "set_relay",
         "requestBody": {
           "content": {
@@ -4730,6 +4730,603 @@
         }
       }
     },
+    "/api/v1/support/bundle": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/bundle` — compose a previewable, redacted, media-free\ncontext-pack (role: write; entitled tiers only). Composing performs **no\nconsent check** (§7.2): consent governs the daily outbound pipe, not a\ndeliberate operator attachment. Every compose lands a `bundle-compose`\naccount-audit entry. → `202 {bundle_id}`; read the preview at\n`GET /support/bundle/{bundle_id}`.",
+        "operationId": "compose",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The bundle was composed; read the preview by id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BundleAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/bundle/{id}": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/bundle/{id}` — read a composed bundle's preview (role:\nread; entitled tiers only). Unknown/evicted id → `404`. The preview lists\nevery redaction and carries no media.",
+        "operationId": "get_bundle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The composed bundle id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The composed bundle preview (redacted, media-free).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bundle"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No bundle with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/data-request/{id}/approve": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/data-request/{id}/approve` — approve an inbound egress\nrequest **locally** (role: write). **Nothing leaves without this yes:** the\nrequest transitions to `approved` and egress is gated on that state. An\nalready-expired request is `410 request_expired` (and stays expired). Unknown\nid → `404`. Lands a `data-request-approve` account-audit entry.",
+        "operationId": "approve_data_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The DR-xxxx data-request id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request was approved locally.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataRequestActioned"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to approve.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The request window elapsed — too late to approve.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/data-request/{id}/deny": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/data-request/{id}/deny` — deny an inbound egress request\nlocally (role: write). Nothing leaves. Symmetric to approve.",
+        "operationId": "deny_data_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The DR-xxxx data-request id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request was denied locally.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataRequestActioned"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to deny.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The request window elapsed — too late to deny.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/entitlement": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/entitlement` — the tier-derived support routing (role:\nread). Always `200`: the free tier gets `eligible:false` + the community\nroute + the one quiet line, an eligible tier gets its support queue + SLA.",
+        "operationId": "get_entitlement",
+        "responses": {
+          "200": {
+            "description": "The tier-derived support entitlement + route (always 200).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportEntitlement"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/tickets` — list local ticket summaries newest-first\n(role: read; entitled tiers only).",
+        "operationId": "list_tickets",
+        "responses": {
+          "200": {
+            "description": "Local ticket summaries (newest-first).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TicketSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/tickets` — raise a local ticket (role: write; entitled\ntiers only → else `403 not_entitled`). The store mints the `CS-xxxx` id, seeds\nthe thread with the opening body, and auto-attaches the machine context\n(§7.1). Every raise lands a `ticket` account-audit entry. → `201 Created`.",
+        "operationId": "raise_ticket",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RaiseTicketRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The ticket was raised; the full thread is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets/{id}": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/tickets/{id}` — fetch one ticket (full thread) (role:\nread; entitled tiers only). Unknown id → `404`.",
+        "operationId": "get_ticket",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The CS-xxxx ticket id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ticket with its full thread + machine context.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ticket with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets/{id}/close": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/tickets/{id}/close` — close a ticket locally (role:\nwrite; entitled tiers only). Idempotent (re-closing an already-closed ticket\nis still `200`). Unknown id → `404`. → `200`.",
+        "operationId": "close_ticket",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The CS-xxxx ticket id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ticket is closed (idempotent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ticket with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets/{id}/reply": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/tickets/{id}/reply` — append a reply to a ticket's\nthread (role: write; entitled tiers only). A reply to a **closed** ticket is\n`409 ticket_closed` (pinned). Unknown id → `404`. Each reply lands a `ticket`\naccount-audit entry. → `200` with the updated thread.",
+        "operationId": "reply_ticket",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The CS-xxxx ticket id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The reply appended; the updated thread is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ticket with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The ticket is closed — replies are refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sync-groups": {
       "get": {
         "tags": [
@@ -5727,6 +6324,8 @@
           "consent-change",
           "relay-toggle",
           "context-pack-export",
+          "ticket",
+          "bundle-compose",
           "data-request-approve",
           "data-request-deny",
           "action-requested",
@@ -6222,6 +6821,115 @@
           }
         }
       },
+      "Bundle": {
+        "type": "object",
+        "description": "One composed support bundle: the echoed request, the redacted/diagnostic\nsections, and the list of every redaction the config pass made. **Carries no\nmedia** by construction — there is no field that could hold a frame/picture.",
+        "required": [
+          "bundle_id",
+          "window",
+          "composed_at_nanos",
+          "redactions"
+        ],
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "description": "The bundle id (the read-back key)."
+          },
+          "composed_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline instant (nanoseconds) the bundle was composed."
+          },
+          "config": {
+            "description": "The redacted config sections, present iff `config` was requested. A JSON\nobject keyed by resource collection (`sources`/`outputs`/…); every secret\nhas been removed and every URL masked."
+          },
+          "diagnostics": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Diagnostics",
+                "description": "The utilisation/metrics summary, present iff `metrics` or `diagnostics`\nwas requested."
+              }
+            ]
+          },
+          "incidents": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            },
+            "description": "The incident markers in the window, present iff `incidents` (or\n`diagnostics`) was requested."
+          },
+          "redactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Redaction"
+            },
+            "description": "Every redaction the config pass made (the masking the operator sees).\nEmpty when nothing was masked; never omitted (the surface is uniform)."
+          },
+          "window": {
+            "type": "string",
+            "description": "The reporting window token the bundle was composed over."
+          }
+        }
+      },
+      "BundleAccepted": {
+        "type": "object",
+        "description": "The `202` body of a successful compose: the id to read the preview back under.",
+        "required": [
+          "bundle_id"
+        ],
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "description": "The composed bundle's id (read the preview at `GET .../bundle/{bundle_id}`)."
+          }
+        }
+      },
+      "BundleInclude": {
+        "type": "string",
+        "description": "Which diagnostic section a bundle includes. Serialised `lowercase` so the slug\nis stable across the machine and the (later) portal sync. `#[non_exhaustive]`\nso a future section is additive.",
+        "enum": [
+          "diagnostics",
+          "metrics",
+          "config",
+          "incidents"
+        ]
+      },
+      "BundleRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/support/bundle` request body: the reporting `window` and the\nsections to `include`.",
+        "required": [
+          "window",
+          "include"
+        ],
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BundleInclude"
+            },
+            "description": "The sections to include (deduplicated by the composer)."
+          },
+          "window": {
+            "$ref": "#/components/schemas/BundleWindow",
+            "description": "The reporting window (`1h` / `24h` / `7d`)."
+          }
+        }
+      },
+      "BundleWindow": {
+        "type": "string",
+        "description": "The time window a bundle reports over (spec §7.2). Serialised as the operator-\nfacing token (`1h` / `24h` / `7d`). `#[non_exhaustive]` so a future window is\nadditive.",
+        "enum": [
+          "1h",
+          "24h",
+          "7d"
+        ]
+      },
       "BusSourceDoc": {
         "oneOf": [
           {
@@ -6664,6 +7372,61 @@
           "klv"
         ]
       },
+      "DataRequest": {
+        "type": "object",
+        "description": "One inbound data request awaiting **local approval**: support (or the licence\nserver, over the later transport) asks for additional data; nothing leaves\nuntil the operator approves it here (ADR-0053 §3).",
+        "required": [
+          "request_id",
+          "what",
+          "requested_at_nanos",
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "description": "An optional structured detail (e.g. the ticket the request relates to).\nNever the requested data."
+          },
+          "request_id": {
+            "type": "string",
+            "description": "The request id (the `DR-xxxx` / portal correlation key when synced)."
+          },
+          "requested_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the request was recorded."
+          },
+          "state": {
+            "$ref": "#/components/schemas/DataRequestState",
+            "description": "The lifecycle state."
+          },
+          "what": {
+            "type": "string",
+            "description": "A human-readable description of what is being requested (never the data\nitself — this is the *ask*, not the payload)."
+          }
+        }
+      },
+      "DataRequestActioned": {
+        "type": "object",
+        "description": "The `200` body of a data-request approve/deny: the request's new terminal\nstate.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/DataRequestState",
+            "description": "The new state slug (`approved` / `denied`)."
+          }
+        }
+      },
+      "DataRequestState": {
+        "type": "string",
+        "description": "The lifecycle state of an inbound data request. Approve/deny are one-way; an\nelapsed (un-actioned) request is `Expired` (`410 request_expired`).",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "expired"
+        ]
+      },
       "DetectionZoneDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of `multiview_config::DetectionZone` (normalized\nsub-rectangle of a tile, `0.0..=1.0` on both axes).",
@@ -6906,6 +7669,57 @@
           }
         }
       },
+      "Diagnostics": {
+        "type": "object",
+        "description": "The utilisation/diagnostics summary a bundle carries over its window.",
+        "required": [
+          "samples",
+          "cpu_p0",
+          "cpu_p50",
+          "cpu_p95",
+          "cpu_p100",
+          "shed_events",
+          "reconnects"
+        ],
+        "properties": {
+          "cpu_p0": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction floor (p0) over the window."
+          },
+          "cpu_p100": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction ceiling (p100) over the window."
+          },
+          "cpu_p50": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction median (p50) over the window."
+          },
+          "cpu_p95": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction 95th percentile over the window."
+          },
+          "reconnects": {
+            "type": "integer",
+            "description": "The number of per-input reconnects recorded in the window.",
+            "minimum": 0
+          },
+          "samples": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total utilisation samples folded across the window.",
+            "minimum": 0
+          },
+          "shed_events": {
+            "type": "integer",
+            "description": "The number of shed-load events recorded in the window.",
+            "minimum": 0
+          }
+        }
+      },
       "DiscoveredEndpoint": {
         "type": "object",
         "description": "One resolved management endpoint of a discovered service: a presentation-\nready address and its family. IPv6 is the lead family (ADR-0042); IPv4 is\nlabelled [`AddressFamily::Ipv4Legacy`]. IPv6 literals are bracketed so the\n`host:port` form is URL-safe.",
@@ -7095,6 +7909,15 @@
           }
         }
       },
+      "FirstLine": {
+        "type": "string",
+        "description": "The first-line support route a tier maps to (spec §11): a real support queue\nfor eligible tiers, or the community channel for the free tier.",
+        "enum": [
+          "partner",
+          "conspect",
+          "community"
+        ]
+      },
       "GpuLimitDoc": {
         "oneOf": [
           {
@@ -7241,6 +8064,31 @@
           "transport": {
             "type": "string",
             "description": "The transport the active lease arrived over: `\"direct\"` (online server\ncontact), `\"relay\"` (mesh relay), or `\"file\"` (a dropped offline lease).\n`\"none\"` when no lease is installed."
+          }
+        }
+      },
+      "Incident": {
+        "type": "object",
+        "description": "One incident marker in a bundle (a diagnostic event — never media).",
+        "required": [
+          "at_unix_seconds",
+          "kind",
+          "subject"
+        ],
+        "properties": {
+          "at_unix_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The Unix second the incident was recorded.",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "The incident class label (`input_flap` / `encoder_saturation` /\n`clock_holdover`)."
+          },
+          "subject": {
+            "type": "string",
+            "description": "What the incident applied to (input id, `program`, `system`, …)."
           }
         }
       },
@@ -8660,6 +9508,36 @@
           }
         }
       },
+      "RaiseTicketRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/support/tickets` request body.",
+        "required": [
+          "subject",
+          "body",
+          "severity"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Attachment ids the operator references (recorded on the opening update's\ncontext; the deliberate-attachment path is the bundle composer). Optional."
+          },
+          "body": {
+            "type": "string",
+            "description": "The opening body (seeds the append-only thread)."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/TicketSeverity",
+            "description": "The declared severity."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The operator-supplied subject line."
+          }
+        }
+      },
       "Receiver": {
         "allOf": [
           {
@@ -8720,6 +9598,32 @@
           }
         }
       },
+      "Redaction": {
+        "type": "object",
+        "description": "What a single redaction removed/masked, surfaced in the preview so the\noperator sees exactly what was taken out (never the value itself).",
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The dotted path of the redacted field (e.g. `cam-1.auth.secret_ref`). A\nlocation, never the value."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/RedactionReason",
+            "description": "Why it was redacted: `secret` (a reference-only secret, removed) or `url`\n(a transport URL, masked)."
+          }
+        }
+      },
+      "RedactionReason": {
+        "type": "string",
+        "description": "Why a field was redacted from a bundle.",
+        "enum": [
+          "secret",
+          "url"
+        ]
+      },
       "Registration": {
         "type": "object",
         "description": "An IS-04 **registration request**: the `{type, data}` body posted to a\nRegistry's `POST /x-nmos/registration/v1.3/resource`.\n\nThe `data` is the resource JSON for the declared `type`. Modelled internally\ntagged on `type` (never `untagged`) so it round-trips robustly. The payload\nis the raw resource JSON value so this one type carries any resource kind.",
@@ -8751,6 +9655,19 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReplyRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/support/tickets/{id}/reply` request body.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The reply text to append to the thread."
+          }
+        }
       },
       "Resource": {
         "type": "object",
@@ -8818,7 +9735,6 @@
         "type": "object",
         "description": "The fields a create/update accepts (the id is supplied separately on create\nand immutable on update).",
         "required": [
-          "name",
           "body"
         ],
         "properties": {
@@ -8827,7 +9743,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Human-friendly name."
+            "description": "Human-friendly name. Optional on the wire: a create/update that omits it\n(e.g. a programmatic seed that only carries the typed `body`) defaults to\nan empty name rather than failing deserialization — the display name is a\nlabel, never load-bearing, and callers that care always supply one."
           }
         }
       },
@@ -10182,6 +11098,47 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_config::routing::StreamSelector`] (RT-4).\n\nSerde-equivalent: internally tagged on `by`, `snake_case` tags — never\n`untagged` (ADR-0010). Picks **which** elementary stream of a kind a\n[`StreamRefDoc`] addresses."
       },
+      "SupportEntitlement": {
+        "type": "object",
+        "description": "The full entitlement-routing answer the `GET /support/entitlement` endpoint\nreturns: whether the machine is eligible for entitled support, the route, and\nthe SLA token (a quiet line for the free tier).",
+        "required": [
+          "eligible",
+          "route",
+          "sla"
+        ],
+        "properties": {
+          "eligible": {
+            "type": "boolean",
+            "description": "Whether the machine is eligible for an entitled support queue (false →\ncommunity only)."
+          },
+          "route": {
+            "$ref": "#/components/schemas/SupportRoute",
+            "description": "The tier-derived route."
+          },
+          "sla": {
+            "type": "string",
+            "description": "The SLA token (e.g. `standard`, or the free tier's `community-best-effort`\none-line note). Always present so the surface is uniform."
+          }
+        }
+      },
+      "SupportRoute": {
+        "type": "object",
+        "description": "The tier-derived support route the entitlement endpoint renders + a ticket is\nraised against.",
+        "required": [
+          "to",
+          "first_line"
+        ],
+        "properties": {
+          "first_line": {
+            "$ref": "#/components/schemas/FirstLine",
+            "description": "The first-line owner."
+          },
+          "to": {
+            "type": "string",
+            "description": "The destination queue label (a stable slug the portal shares)."
+          }
+        }
+      },
       "SwapRequest": {
         "type": "object",
         "description": "The body of a `POST /commands/swap` request.",
@@ -10455,6 +11412,190 @@
           "atc_rp188",
           "generated"
         ]
+      },
+      "Ticket": {
+        "type": "object",
+        "description": "A ticket: a `CS-xxxx` id, the subject + severity, the auto-attached machine\ncontext, an append-only update thread (opening body first), and the route +\nstate. The portal sync mirrors this local resource over the later transport.",
+        "required": [
+          "ticket_id",
+          "subject",
+          "severity",
+          "state",
+          "route",
+          "context",
+          "updates"
+        ],
+        "properties": {
+          "context": {
+            "$ref": "#/components/schemas/TicketContext",
+            "description": "The auto-attached machine context (§7.1)."
+          },
+          "route": {
+            "$ref": "#/components/schemas/SupportRoute",
+            "description": "The tier-derived support route this ticket was raised against."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/TicketSeverity",
+            "description": "The declared severity."
+          },
+          "state": {
+            "$ref": "#/components/schemas/TicketState",
+            "description": "The lifecycle state (`open` → `closed`)."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The operator-supplied subject line."
+          },
+          "ticket_id": {
+            "type": "string",
+            "description": "The `CS-xxxx` ticket id (the portal correlation key)."
+          },
+          "updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TicketUpdate"
+            },
+            "description": "The append-only thread: the opening body, then every reply."
+          }
+        }
+      },
+      "TicketContext": {
+        "type": "object",
+        "description": "The auto-attached machine context every ticket carries (§7.1): identity,\nversion, entitlement, ladder state, and the fingerprint score. **Reported,\nnever raw** — it carries the opaque tier + the salted fingerprint **score**\n(a number), never raw serials/MACs (brief §8).",
+        "required": [
+          "app_version",
+          "entitlement",
+          "enforcement"
+        ],
+        "properties": {
+          "app_version": {
+            "type": "string",
+            "description": "The application version (the build identity), always reported."
+          },
+          "enforcement": {
+            "$ref": "#/components/schemas/TicketEnforcement",
+            "description": "The enforcement-ladder summary (the computed level), reported as data."
+          },
+          "entitlement": {
+            "$ref": "#/components/schemas/TicketEntitlement",
+            "description": "The entitlement summary (the opaque tier + whether a lease is licensed)."
+          },
+          "fingerprint_score": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The salted hardware-fingerprint **score** (0–100, brief §2.3/§8) of the\nactive lease, or `None` when no lease is installed. A number, never raw.",
+            "minimum": 0
+          }
+        }
+      },
+      "TicketEnforcement": {
+        "type": "object",
+        "description": "The enforcement summary auto-attached to a ticket — the computed ladder level\n(data, never control flow; brief §6).",
+        "required": [
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "type": "string",
+            "description": "The canonical enforcement level slug (e.g. `active`, `unlicensed`)."
+          }
+        }
+      },
+      "TicketEntitlement": {
+        "type": "object",
+        "description": "The entitlement summary auto-attached to a ticket — the opaque tier + the\nlicensed flag (rendered, never computed; brief §1, O7).",
+        "required": [
+          "licensed",
+          "tier"
+        ],
+        "properties": {
+          "licensed": {
+            "type": "boolean",
+            "description": "Whether a verified lease is installed."
+          },
+          "tier": {
+            "type": "string",
+            "description": "The opaque commercial tier (rendered), or `none` when unlicensed."
+          }
+        }
+      },
+      "TicketSeverity": {
+        "type": "string",
+        "description": "The operator-declared severity of a ticket (spec §11): `question`,\n`degraded`, `blocking`. Serialised `lowercase` so the slug is stable across\nthe machine and the portal.\n\nThis is a **closed** set the spec pins to exactly these three levels (§11) —\ndeliberately **not** `#[non_exhaustive]` so a consumer (and the contract test)\ncan match it exhaustively. A new severity would be a contract change, not an\nadditive one.",
+        "enum": [
+          "question",
+          "degraded",
+          "blocking"
+        ]
+      },
+      "TicketState": {
+        "type": "string",
+        "description": "The lifecycle state of a ticket. Local lifecycle is fully functional: an\noperator can `close` a ticket they opened; a closed ticket refuses replies.",
+        "enum": [
+          "open",
+          "closed"
+        ]
+      },
+      "TicketSummary": {
+        "type": "object",
+        "description": "A ticket summary for the list surface (the thread is omitted to keep the\nlisting light; fetch a single ticket for the full thread).",
+        "required": [
+          "ticket_id",
+          "subject",
+          "severity",
+          "state",
+          "updates"
+        ],
+        "properties": {
+          "severity": {
+            "$ref": "#/components/schemas/TicketSeverity",
+            "description": "The declared severity."
+          },
+          "state": {
+            "$ref": "#/components/schemas/TicketState",
+            "description": "The lifecycle state."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The subject line."
+          },
+          "ticket_id": {
+            "type": "string",
+            "description": "The `CS-xxxx` ticket id."
+          },
+          "updates": {
+            "type": "integer",
+            "description": "The number of updates on the thread.",
+            "minimum": 0
+          }
+        }
+      },
+      "TicketUpdate": {
+        "type": "object",
+        "description": "One immutable update on a ticket's append-only thread (the opening body or a\nreply): who wrote it, when, and the text.",
+        "required": [
+          "author",
+          "at_nanos",
+          "body"
+        ],
+        "properties": {
+          "at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the update was recorded."
+          },
+          "author": {
+            "type": "string",
+            "description": "The authenticated principal that wrote this update (its key id), or a\nwell-known support actor when the portal-fed sync lands later."
+          },
+          "body": {
+            "type": "string",
+            "description": "The update text."
+          }
+        }
       },
       "TimerDirectionDoc": {
         "type": "string",
@@ -10736,6 +11877,10 @@
     {
       "name": "account",
       "description": "Account-side (Conspect): append-only audit (cursor-paginated), pending remote-actions strip + local-wins cancel, and named-salvo fire. Locally drivable now; portal-fed over the heartbeat/relay transport later."
+    },
+    {
+      "name": "support",
+      "description": "Local support (Conspect): tier-derived entitlement routing (free → community), the local CS-xxxx ticket store with auto-attached machine context (§7.1), the previewable redacted media-free context-pack composer (consent-independent, §7.2), and local approve/deny of inbound egress data requests (nothing leaves without a local yes). Local lifecycle fully functional; portal sync rides the later transport."
     },
     {
       "name": "preview",

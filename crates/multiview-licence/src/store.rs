@@ -208,6 +208,14 @@ pub struct LeaseStore {
     /// `granted_at` (the server-side grant instant). `RwLock` for the same reason
     /// as `active`; read off the hot loop only.
     installed_at: RwLock<Option<DateTime<Utc>>>,
+    /// The salted hardware-fingerprint **score** (0–100) of the currently-active
+    /// lease — the `binding.fingerprint_score` that cleared the match threshold at
+    /// install. `None` until the first install. **A score, never a raw identifier**
+    /// (brief §8): the support/ticket context auto-attaches this number so an
+    /// operator + support see fingerprint *continuity* without ever handling raw
+    /// serials/MACs. `RwLock` for the same read-mostly, off-hot-loop reason as
+    /// `active` (invariant #10).
+    fingerprint_score: RwLock<Option<u8>>,
     /// The injected clock; the store never reads a system clock directly.
     clock: Clock,
 }
@@ -237,8 +245,20 @@ impl LeaseStore {
             active: RwLock::new(None),
             gpus_in_use: RwLock::new(0),
             installed_at: RwLock::new(None),
+            fingerprint_score: RwLock::new(None),
             clock,
         }
+    }
+
+    /// The salted hardware-fingerprint **score** (0–100) of the currently-active
+    /// lease — the score that cleared the match threshold at install — or `None`
+    /// when no lease is installed. A poisoned lock fails toward "unknown" (`None`),
+    /// never a panic. **A score, never a raw identifier** (brief §8): callers
+    /// auto-attach this number (e.g. the support-ticket context) without ever
+    /// handling raw serials/MACs.
+    #[must_use]
+    pub fn fingerprint_score(&self) -> Option<u8> {
+        self.fingerprint_score.read().ok().and_then(|g| *g)
     }
 
     /// When the currently-active lease was installed (the `now` passed to the
@@ -339,6 +359,14 @@ impl LeaseStore {
         match self.installed_at.write() {
             Ok(mut guard) => *guard = Some(now),
             Err(poisoned) => *poisoned.into_inner() = Some(now),
+        }
+        // Retain the verified fingerprint score (the number that cleared the
+        // threshold) so the support-ticket context can auto-attach it as fingerprint
+        // *continuity* — a score, never a raw identifier (brief §8). Same poisoned-
+        // lock recovery as above.
+        match self.fingerprint_score.write() {
+            Ok(mut guard) => *guard = Some(binding.fingerprint_score),
+            Err(poisoned) => *poisoned.into_inner() = Some(binding.fingerprint_score),
         }
         Ok(lease)
     }
