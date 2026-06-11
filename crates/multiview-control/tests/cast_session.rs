@@ -317,6 +317,9 @@ async fn heartbeat_pings_and_expiry_reconnects() {
         ScriptedInbound::Hang,
     ]);
     let (ch2, sent2) = ScriptedChannel::new(vec![
+        // The reconnect asks GET_STATUS first; the receiver idled our app
+        // out during the outage (nothing running), so it re-establishes.
+        ScriptedInbound::Frame(receiver_status_without_app()),
         ScriptedInbound::Frame(receiver_status_with_app()),
         ScriptedInbound::Frame(media_status("PLAYING", None)),
         ScriptedInbound::Hang,
@@ -409,8 +412,9 @@ async fn preemption_is_surfaced_and_never_fought() {
         ScriptedInbound::Frame(receiver_status_with_app()),
         ScriptedInbound::Frame(media_status("PLAYING", None)),
         ScriptedInbound::Wait(Duration::from_secs(2)),
-        // Another sender took the device: our app is gone from the status.
-        ScriptedInbound::Frame(receiver_status_without_app()),
+        // Another sender took the device: a foreign app replaced ours in
+        // the status (our session id is gone, theirs is running).
+        ScriptedInbound::Frame(receiver_status_with("DEADBEEF", "s-9", "t-9")),
         ScriptedInbound::Hang,
     ]);
     // The post-preemption reconnect (after the heartbeat dies on the silent

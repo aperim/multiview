@@ -200,6 +200,12 @@ pub struct ReceiverApplication {
     /// The transport id media-namespace messages address.
     #[serde(rename = "transportId")]
     pub transport_id: String,
+    /// Whether this row is the receiver's own idle screen (the backdrop real
+    /// hardware launches when no sender app runs) rather than a sender's app
+    /// — absent on the wire means `false`. The session actor's "nothing else
+    /// running" checks skip idle-screen rows.
+    #[serde(rename = "isIdleScreen", default)]
+    pub is_idle_screen: bool,
 }
 
 /// The decoded application set of a `RECEIVER_STATUS`.
@@ -273,6 +279,19 @@ pub enum InboundMessage {
         /// The receiver's reason token, if it gave one.
         reason: Option<String>,
     },
+    /// The receiver rejected or tore down a media LOAD (`LOAD_FAILED`,
+    /// `LOAD_CANCELLED`, or a media-namespace `INVALID_REQUEST`). Typed so
+    /// the session actor can degrade and schedule the bounded re-LOAD — as
+    /// `Unknown` it would be ignored and a receiver that answers PINGs but
+    /// rejects every LOAD would sit "loading" forever.
+    LoadError {
+        /// The wire error type token (`LOAD_FAILED` / `LOAD_CANCELLED` /
+        /// `INVALID_REQUEST`).
+        kind: String,
+        /// The receiver's reason token, when it gave one (`INVALID_REQUEST`
+        /// carries e.g. `INVALID_COMMAND`).
+        reason: Option<String>,
+    },
     /// Anything this driver does not model — tolerated and ignored.
     Unknown,
 }
@@ -300,6 +319,15 @@ pub fn decode(frame: &CastFrame) -> InboundMessage {
         },
         (NS_MEDIA, Some("MEDIA_STATUS")) => {
             InboundMessage::MediaStatus(decode_media_status(&payload))
+        }
+        (NS_MEDIA, Some(kind @ ("LOAD_FAILED" | "LOAD_CANCELLED" | "INVALID_REQUEST"))) => {
+            InboundMessage::LoadError {
+                kind: kind.to_owned(),
+                reason: payload
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            }
         }
         _ => InboundMessage::Unknown,
     }

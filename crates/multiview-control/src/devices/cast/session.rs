@@ -11,10 +11,15 @@
 //! `hlsVideoSegmentFormat`). Established, it heartbeats: **PING every 10 s,
 //! the session is dead after 20 s without inbound traffic** (a PONG is the
 //! guaranteed generator; any inbound frame proves channel liveness), then
-//! **reconnects on a 5 s cadence** — re-`LAUNCH` + re-`LOAD`, since the
-//! Default Media Receiver may have idled out meanwhile. A media `IDLE`
-//! status **re-`LOAD`s after the reload delay** (keyed on `idleReason`;
-//! delayed so an instantly-IDLE rendition cannot drive a LOAD storm).
+//! **reconnects on a 5 s cadence**. A reconnect with a previously
+//! established session **asks first** (`GET_STATUS`): when our receiver
+//! session survived the blip the actor re-`CONNECT`s to its transport and
+//! resumes supervising — playback is untouched; only when the session is
+//! gone with nothing else running does it re-`LAUNCH` + re-`LOAD`. A media
+//! `IDLE` status, a rejected `LOAD` (`LOAD_FAILED` / `LOAD_CANCELLED` /
+//! media-namespace `INVALID_REQUEST`), or a **vanished media session** (an
+//! empty post-LOAD `MEDIA_STATUS`) **re-`LOAD`s after the reload delay**
+//! (delayed so an instantly-failing rendition cannot drive a LOAD storm).
 //!
 //! Reconnects are **address-based**: the actor re-dials the authority it was
 //! built with. Re-resolving a moved device by its mDNS UUID is the DEV-A5
@@ -25,12 +30,19 @@
 //! ## Preemption is surfaced, never fought
 //!
 //! The CASTV2 protocol has no sender authentication: any LAN client can take
-//! the device. When a `RECEIVER_STATUS` shows our app gone, the actor
+//! the device. Preemption is keyed on **session identity**, never the app
+//! id: our receiver `sessionId` gone while another sender's app runs (a
+//! foreign app, or a *new session of the same* Default Media Receiver — the
+//! pychromecast/Home-Assistant pattern), or our `mediaSessionId` replaced by
+//! an active foreign media session, marks the session preempted. The actor
 //! publishes `device.error` ("preempted…"), drives `DEGRADED`, and stops
 //! supervising the media — it never re-`LAUNCH`es over the other sender
-//! (ADR-M011). A later reconnect re-establishes the management channel only.
-//! The operator resolves a preemption by stopping/restarting the session (or
-//! re-adopting the device).
+//! (ADR-M011); later reconnects re-establish the management channel only.
+//! Our app gone with **nothing** else running (at most the receiver's idle
+//! screen) is *not* a preemption — the app idled out or crashed, and the
+//! actor re-establishes (re-`LAUNCH` + re-`LOAD`). The operator resolves a
+//! real preemption by stopping/restarting the session (or re-adopting the
+//! device).
 //!
 //! ## Isolation (invariant #10)
 //!
@@ -53,7 +65,7 @@ use tokio::time::Instant;
 
 use super::media::CastMediaTarget;
 use super::protocol::{
-    self, CastFrame, InboundMessage, PlayerState, DEFAULT_MEDIA_RECEIVER_APP_ID,
+    self, CastFrame, InboundMessage, MediaStatusEntry, PlayerState, DEFAULT_MEDIA_RECEIVER_APP_ID,
     PLATFORM_RECEIVER_ID,
 };
 use crate::devices::broadcaster::DeviceBroadcaster;
@@ -139,11 +151,12 @@ pub struct CastSessionConfig {
     pub pong_timeout: Duration,
     /// The supervised-reconnect cadence after a dead/refused channel (5 s).
     pub reconnect_delay: Duration,
-    /// How long after a media IDLE the supervisor re-LOADs (bounds an
-    /// instantly-IDLE rendition to one LOAD per delay — never a storm).
+    /// How long after a media IDLE / rejected LOAD / vanished media session
+    /// the supervisor re-LOADs (bounds an instantly-failing rendition to one
+    /// LOAD per delay — never a storm).
     pub reload_delay: Duration,
-    /// How long the establishment waits for the LAUNCH to answer before the
-    /// attempt is declared unreachable.
+    /// How long the establishment waits for the LAUNCH (and a reconnect for
+    /// its `GET_STATUS` answer) before the attempt is declared unreachable.
     pub launch_timeout: Duration,
 }
 
@@ -200,6 +213,18 @@ struct LaunchedApp {
     transport_id: String,
 }
 
+/// The outcome of the reconnect's GET_STATUS-first triage
+/// ([`CastSessionActor::reconnect_triage`]).
+enum ReconnectTriage<Ch> {
+    /// The attempt resolved in the triage: our session survived (ONLINE),
+    /// another sender took the device (preempted, DEGRADED), or the channel
+    /// died (UNREACHABLE).
+    Resolved(PollerStep),
+    /// Our session is gone with nothing else running: the caller
+    /// re-establishes (LAUNCH + LOAD) on the still-open channel.
+    ReEstablish(Ch),
+}
+
 /// The supervised session actor for one Cast device / ad-hoc session.
 ///
 /// Construct with [`CastSessionActor::new`]; drive it step-by-step (the unit
@@ -220,14 +245,22 @@ pub struct CastSessionActor<C: CastConnector> {
     config: CastSessionConfig,
     /// The open channel, when up.
     channel: Option<C::Channel>,
-    /// The launched receiver app, when established.
+    /// The receiver app session we established and believe is ours. Kept
+    /// across channel death: the reconnect's `GET_STATUS` check compares its
+    /// `session_id` against what actually runs to decide survived / gone /
+    /// preempted.
     app: Option<LaunchedApp>,
+    /// Our media session within the app, once adopted from the first active
+    /// `MEDIA_STATUS` after a LOAD (`None` = a LOAD answer is awaited).
+    /// Statuses for other media sessions are never attributed to us.
+    media_session_id: Option<i64>,
     /// Monotonic request-id counter (CASTV2 request correlation).
     request_id: u32,
     /// The last inbound traffic (heartbeat liveness; PONGs and every other
     /// inbound frame refresh it).
     last_inbound: Instant,
-    /// A pending IDLE-triggered re-LOAD deadline, when scheduled.
+    /// A pending re-LOAD deadline (IDLE / rejected LOAD / vanished media
+    /// session), when scheduled.
     reload_due: Option<Instant>,
     /// Another sender took the device: supervise the channel only, never the
     /// media (no re-LAUNCH/re-LOAD), until the operator restarts the session.
@@ -258,6 +291,7 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
             config,
             channel: None,
             app: None,
+            media_session_id: None,
             request_id: 0,
             last_inbound: Instant::now(),
             reload_due: None,
@@ -310,12 +344,29 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
     }
 
     /// Tear the channel down and ride the lifecycle to UNREACHABLE (the
-    /// supervised-reconnect path).
+    /// supervised-reconnect path). The session identity (`app`,
+    /// `media_session_id`) is kept: the reconnect's `GET_STATUS` check
+    /// decides whether the receiver session survived the blip.
     fn channel_died(&mut self) -> PollerStep {
         self.channel = None;
-        self.app = None;
         self.reload_due = None;
         self.drive(LifecycleEvent::Unreachable)
+    }
+
+    /// Mark the session preempted: another sender's app or media session
+    /// replaced ours. Surfaces the `device.error`, drops our claimed
+    /// identity, and cancels any pending re-LOAD — from here the actor
+    /// supervises the management channel only (ADR-M011: never fight).
+    fn note_preempted(&mut self) {
+        self.preempted = true;
+        self.app = None;
+        self.media_session_id = None;
+        self.reload_due = None;
+        self.mode = "preempted";
+        let _seq = self.broadcaster.error(
+            &self.device_id,
+            "cast session preempted by another sender; restart the session to reclaim the device",
+        );
     }
 
     /// One full establishment attempt: connect → CONNECT → LAUNCH `CC1AD845`
@@ -324,6 +375,12 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
     /// [`PollerStep::Online`] on success, [`PollerStep::Unreachable`] when
     /// the device cannot be reached (or the LAUNCH timed out), and
     /// [`PollerStep::Degraded`] on a LAUNCH refusal (a device fault).
+    ///
+    /// A **reconnect** (a previously-established session is remembered) asks
+    /// first: `GET_STATUS` → our session still running ⇒ re-CONNECT to its
+    /// transport only (no re-LAUNCH/re-LOAD — playback untouched); nothing
+    /// (or only the idle screen) running ⇒ re-establish; another sender's
+    /// app/session running ⇒ preempted (hands-off, DEGRADED).
     ///
     /// While **preempted**, the attempt re-establishes the management
     /// channel only (CONNECT, heartbeat) and stays DEGRADED — it never
@@ -355,6 +412,17 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
             self.channel = Some(channel);
             let _ = self.drive(LifecycleEvent::Reconnect);
             return self.drive(LifecycleEvent::DeviceFault);
+        }
+
+        // Reconnecting with a previously-established receiver session: ask
+        // the receiver what actually runs before touching anything. A 20 s
+        // blip on a healthy receiver must not restart playback, and a
+        // preemption that happened during the blip must not be stomped.
+        if let Some(prior) = self.app.clone() {
+            match self.reconnect_triage(channel, &prior).await {
+                ReconnectTriage::Resolved(step) => return step,
+                ReconnectTriage::ReEstablish(open) => channel = open,
+            }
         }
 
         let launch_id = self.next_request_id();
@@ -399,6 +467,9 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
         self.app = Some(app);
         self.channel = Some(channel);
         self.reload_due = None;
+        // The LOAD's media session is adopted from its first active
+        // MEDIA_STATUS; until then no media is attributed to us.
+        self.media_session_id = None;
         self.mode = "loading";
         // ProbeOk converges every reachable source state onto ONLINE
         // (ADOPTING/DEGRADED directly; UNREACHABLE via its ProbeOk edge).
@@ -466,10 +537,109 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
                 InboundMessage::CloseConnection => {
                     return Err(self.channel_died());
                 }
-                // Pong / MediaStatus / Unknown (and anything a future decoder
-                // adds — `InboundMessage` is `#[non_exhaustive]`) refresh the
-                // liveness stamp above and are otherwise irrelevant while
-                // launching.
+                // Pong / MediaStatus / LoadError / Unknown (and anything a
+                // future decoder adds — `InboundMessage` is
+                // `#[non_exhaustive]`) refresh the liveness stamp above and
+                // are otherwise irrelevant while launching (no LOAD of ours
+                // is outstanding yet).
+                _ => {}
+            }
+        }
+    }
+
+    /// The reconnect's GET_STATUS-first triage on a freshly-opened
+    /// `channel`, given the `prior` session we remembered across the blip:
+    /// our session still running ⇒ re-CONNECT to its transport and resume
+    /// (no re-LAUNCH/re-LOAD); another sender's app running ⇒ preempted
+    /// (channel kept, hands-off, DEGRADED); nothing but the idle screen ⇒
+    /// the caller re-establishes on the returned channel.
+    async fn reconnect_triage(
+        &mut self,
+        mut channel: C::Channel,
+        prior: &LaunchedApp,
+    ) -> ReconnectTriage<C::Channel> {
+        let status_id = self.next_request_id();
+        if let Err(err) = channel.send(protocol::get_status_frame(status_id)).await {
+            tracing::debug!(device = %self.device_id, error = %err, "cast GET_STATUS send failed");
+            return ReconnectTriage::Resolved(self.channel_died());
+        }
+        let status = match self.pump_for_receiver_status(&mut channel).await {
+            Ok(status) => status,
+            Err(step) => return ReconnectTriage::Resolved(step),
+        };
+        if let Some(ours) = status
+            .applications
+            .iter()
+            .find(|a| a.session_id == prior.session_id)
+        {
+            // Our receiver session survived the blip: re-CONNECT to its
+            // transport and resume supervising — no re-LAUNCH, no re-LOAD,
+            // playback untouched.
+            if channel
+                .send(protocol::connect_frame(&ours.transport_id))
+                .await
+                .is_err()
+            {
+                return ReconnectTriage::Resolved(self.channel_died());
+            }
+            self.app = Some(LaunchedApp {
+                session_id: ours.session_id.clone(),
+                transport_id: ours.transport_id.clone(),
+            });
+            self.channel = Some(channel);
+            self.reload_due = None;
+            return ReconnectTriage::Resolved(self.drive(LifecycleEvent::ProbeOk));
+        }
+        if status.applications.iter().any(|a| !a.is_idle_screen) {
+            // Our session is gone and another sender's app runs (the idle
+            // screen does not count): preempted during the blip — keep the
+            // management channel, stay hands-off.
+            self.channel = Some(channel);
+            self.note_preempted();
+            let _ = self.drive(LifecycleEvent::Reconnect);
+            return ReconnectTriage::Resolved(self.drive(LifecycleEvent::DeviceFault));
+        }
+        // Our session is gone and nothing (or only the idle screen) runs:
+        // the app idled out or crashed — the caller re-establishes.
+        self.app = None;
+        self.media_session_id = None;
+        ReconnectTriage::ReEstablish(channel)
+    }
+
+    /// The reconnect `GET_STATUS` pump: receive frames (answering
+    /// heartbeats) until the first `RECEIVER_STATUS` arrives, bounded by the
+    /// same window as a LAUNCH answer. `Err` carries the driven step the
+    /// failed attempt resolves to (the channel/lifecycle are already torn
+    /// down/driven for the supervised reconnect).
+    async fn pump_for_receiver_status(
+        &mut self,
+        channel: &mut C::Channel,
+    ) -> Result<protocol::ReceiverStatusInfo, PollerStep> {
+        let deadline = Instant::now() + self.config.launch_timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let frame = match tokio::time::timeout(remaining, channel.recv()).await {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(err)) => {
+                    tracing::debug!(device = %self.device_id, error = %err, "cast channel dropped during GET_STATUS");
+                    return Err(self.channel_died());
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(device = %self.device_id, "cast GET_STATUS timed out");
+                    return Err(self.channel_died());
+                }
+            };
+            self.last_inbound = Instant::now();
+            match protocol::decode(&frame) {
+                InboundMessage::Ping => {
+                    if channel.send(protocol::pong_frame()).await.is_err() {
+                        return Err(self.channel_died());
+                    }
+                }
+                InboundMessage::ReceiverStatus(status) => return Ok(status),
+                InboundMessage::CloseConnection => return Err(self.channel_died()),
+                // Anything else just refreshes the liveness stamp above
+                // while we wait for the status answer.
                 _ => {}
             }
         }
@@ -504,28 +674,63 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
             }
             InboundMessage::CloseConnection => return self.channel_died(),
             InboundMessage::ReceiverStatus(status) => {
+                let Some(app) = self.app.as_ref() else {
+                    // No claimed session (pre-establishment or preempted):
+                    // a platform status broadcast carries nothing for us.
+                    return step_for(self.lifecycle.state());
+                };
                 let ours_running = status
                     .applications
                     .iter()
-                    .any(|a| a.app_id == DEFAULT_MEDIA_RECEIVER_APP_ID);
-                if self.app.is_some() && !ours_running && !self.preempted {
-                    // Another sender stopped/replaced our app: surface it,
-                    // degrade, and go hands-off (ADR-M011 — never fight).
-                    self.preempted = true;
-                    self.reload_due = None;
-                    self.mode = "preempted";
-                    let _seq = self.broadcaster.error(
-                        &self.device_id,
-                        "cast session preempted by another sender; restart the session to \
-                         reclaim the device",
-                    );
+                    .any(|a| a.session_id == app.session_id);
+                if ours_running {
+                    return step_for(self.lifecycle.state());
+                }
+                if status.applications.iter().any(|a| !a.is_idle_screen) {
+                    // Our session was replaced by another sender's app — a
+                    // foreign app, or a NEW session of the same Default
+                    // Media Receiver: surface it, degrade, go hands-off
+                    // (ADR-M011 — never fight).
+                    self.note_preempted();
                     return self.drive(LifecycleEvent::DeviceFault);
                 }
+                // Our app died (idle-kill / crash) and nothing replaced it
+                // (at most the idle screen): not a preemption. Drop the dead
+                // identity and the channel; the supervised reconnect
+                // re-establishes (re-LAUNCH + re-LOAD).
+                self.app = None;
+                self.media_session_id = None;
+                self.reload_due = None;
+                self.mode = "relaunching";
+                self.channel = None;
+                return self.drive(LifecycleEvent::DeviceFault);
             }
             InboundMessage::MediaStatus(entries) => {
-                if let Some(entry) = entries.first() {
-                    return self
-                        .handle_player_state(entry.player_state, entry.idle_reason.as_deref());
+                if self.preempted {
+                    // The media on the device is another sender's: never
+                    // attribute it to this session (a foreign PLAYING must
+                    // not un-degrade a preempted session).
+                } else if self.app.is_some() {
+                    return self.handle_media_status(&entries);
+                }
+            }
+            InboundMessage::LoadError { kind, reason } => {
+                if !self.preempted && self.app.is_some() {
+                    // The receiver answered our LOAD with a rejection: the
+                    // TV is blank even though the channel heartbeats.
+                    // Degrade honestly and schedule the bounded re-LOAD.
+                    tracing::warn!(
+                        device = %self.device_id,
+                        kind = %kind,
+                        reason = reason.as_deref().unwrap_or("unspecified"),
+                        "cast LOAD rejected; re-LOAD scheduled"
+                    );
+                    self.media_session_id = None;
+                    self.mode = "load-failed";
+                    if self.reload_due.is_none() {
+                        self.reload_due = Some(Instant::now() + self.config.reload_delay);
+                    }
+                    return self.drive(LifecycleEvent::DeviceFault);
                 }
             }
             InboundMessage::LaunchError { reason } => {
@@ -541,6 +746,57 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
             // liveness stamp above (a PONG is heartbeat traffic, an unknown
             // message is tolerated per the ADR-M011 drift posture).
             _ => {}
+        }
+        step_for(self.lifecycle.state())
+    }
+
+    /// Attribute a `MEDIA_STATUS` to our media session and drive the
+    /// lifecycle from it. Only called established and not preempted.
+    fn handle_media_status(&mut self, entries: &[MediaStatusEntry]) -> PollerStep {
+        if entries.is_empty() {
+            // Post-LOAD, an empty status array means the media session was
+            // torn down receiver-side without a final IDLE: degrade and
+            // schedule the bounded re-LOAD.
+            if self.reload_due.is_none() {
+                tracing::info!(
+                    device = %self.device_id,
+                    "cast media session vanished; re-LOAD scheduled"
+                );
+                self.reload_due = Some(Instant::now() + self.config.reload_delay);
+            }
+            self.media_session_id = None;
+            self.mode = "no-media";
+            return self.drive(LifecycleEvent::DeviceFault);
+        }
+        if let Some(ours) = self.media_session_id {
+            if let Some(entry) = entries.iter().find(|e| e.media_session_id == Some(ours)) {
+                return self.handle_player_state(entry.player_state, entry.idle_reason.as_deref());
+            }
+            if entries.iter().any(|e| e.player_state != PlayerState::Idle) {
+                // Our media session is gone and another sender's media is
+                // ACTIVE on the same app (the join-style takeover — no
+                // receiver-status change at all): preempted.
+                self.note_preempted();
+                return self.drive(LifecycleEvent::DeviceFault);
+            }
+            // Only foreign IDLE rows: a dead session's tail — ignored
+            // (never a preemption signal, never attributed to us).
+            return step_for(self.lifecycle.state());
+        }
+        // A LOAD answer is awaited: adopt the first ACTIVE row as our media
+        // session (a dying session's IDLE tail is never adopted). A raced
+        // foreign LOAD can be mis-adopted here; the session-identity keys
+        // above re-detect that as a preemption on the next status that
+        // excludes it.
+        if let Some(entry) = entries.iter().find(|e| e.player_state != PlayerState::Idle) {
+            self.media_session_id = entry.media_session_id;
+            return self.handle_player_state(entry.player_state, entry.idle_reason.as_deref());
+        }
+        if let Some(entry) = entries.first() {
+            // Every row IDLE while our LOAD is unanswered: ride the IDLE
+            // handling (degrade + bounded re-LOAD) without adopting the
+            // dead session.
+            return self.handle_player_state(entry.player_state, entry.idle_reason.as_deref());
         }
         step_for(self.lifecycle.state())
     }
@@ -575,12 +831,16 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
         }
     }
 
-    /// Re-LOAD the rendition after an IDLE (the supervisor's recovery).
+    /// Re-LOAD the rendition (the supervisor's recovery after an IDLE, a
+    /// rejected LOAD, or a vanished media session).
     async fn reload(&mut self) {
         self.reload_due = None;
         let Some(app) = self.app.clone() else {
             return;
         };
+        // The re-LOAD creates a new receiver media session; ours is adopted
+        // from its first active MEDIA_STATUS.
+        self.media_session_id = None;
         let load_id = self.next_request_id();
         let frame = protocol::load_frame(load_id, &app.transport_id, &self.media);
         if let Some(channel) = self.channel.as_mut() {

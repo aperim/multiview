@@ -238,18 +238,21 @@ fn load_failures_decode_as_typed_errors_not_unknown() {
         NS_MEDIA,
         serde_json::json!({ "type": "LOAD_FAILED", "requestId": 2 }),
     );
-    assert!(
-        !matches!(protocol::decode(&failed), InboundMessage::Unknown),
-        "LOAD_FAILED decodes as a typed load error"
-    );
+    let InboundMessage::LoadError { kind, reason } = protocol::decode(&failed) else {
+        panic!("LOAD_FAILED decodes as a typed load error");
+    };
+    assert_eq!(kind, "LOAD_FAILED");
+    assert_eq!(reason, None);
+
     let cancelled = inbound(
         NS_MEDIA,
         serde_json::json!({ "type": "LOAD_CANCELLED", "requestId": 2 }),
     );
-    assert!(
-        !matches!(protocol::decode(&cancelled), InboundMessage::Unknown),
-        "LOAD_CANCELLED decodes as a typed load error"
-    );
+    let InboundMessage::LoadError { kind, .. } = protocol::decode(&cancelled) else {
+        panic!("LOAD_CANCELLED decodes as a typed load error");
+    };
+    assert_eq!(kind, "LOAD_CANCELLED");
+
     let invalid = inbound(
         NS_MEDIA,
         serde_json::json!({
@@ -258,10 +261,46 @@ fn load_failures_decode_as_typed_errors_not_unknown() {
             "reason": "INVALID_COMMAND"
         }),
     );
-    assert!(
-        !matches!(protocol::decode(&invalid), InboundMessage::Unknown),
-        "a media-namespace INVALID_REQUEST decodes as a typed load error"
+    let InboundMessage::LoadError { kind, reason } = protocol::decode(&invalid) else {
+        panic!("a media-namespace INVALID_REQUEST decodes as a typed load error");
+    };
+    assert_eq!(kind, "INVALID_REQUEST");
+    assert_eq!(reason.as_deref(), Some("INVALID_COMMAND"));
+}
+
+#[test]
+fn receiver_status_decodes_the_idle_screen_flag() {
+    // The backdrop (the receiver's own idle screen) reports
+    // `isIdleScreen: true`; a sender app omits the flag (= false). The
+    // session actor's "nothing else running" checks rely on the distinction.
+    let frame = inbound(
+        NS_RECEIVER,
+        serde_json::json!({
+            "type": "RECEIVER_STATUS",
+            "requestId": 0,
+            "status": { "applications": [
+                {
+                    "appId": "E8C28D3C",
+                    "sessionId": "s-idle",
+                    "transportId": "t-idle",
+                    "displayName": "Backdrop",
+                    "isIdleScreen": true
+                },
+                {
+                    "appId": "CC1AD845",
+                    "sessionId": "s-1",
+                    "transportId": "t-1",
+                    "displayName": "Default Media Receiver"
+                }
+            ] }
+        }),
     );
+    let InboundMessage::ReceiverStatus(status) = protocol::decode(&frame) else {
+        panic!("expected a receiver status");
+    };
+    assert_eq!(status.applications.len(), 2);
+    assert!(status.applications[0].is_idle_screen);
+    assert!(!status.applications[1].is_idle_screen);
 }
 
 #[test]
