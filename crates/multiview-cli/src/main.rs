@@ -132,7 +132,7 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("software bounded run")?
     } else {
         tracing::info!("software run: until Ctrl-C");
-        run_software_until_ctrl_c(&mut engine, config, &plane).await?
+        run_software_until_ctrl_c(&mut engine, config, &plane, &args.config).await?
     };
 
     println!("{}", report.render());
@@ -189,7 +189,7 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         // MP-1 (ADR-0030 §2.2): the daemon run path builds an engine `ProgramSet`
         // and drives this single program (id "main") through it — move the owned
         // pipeline in (the set spawns it on its own supervised task).
-        run_pipeline_until_ctrl_c(pipeline, config, &plane).await?
+        run_pipeline_until_ctrl_c(pipeline, config, &plane, &args.config).await?
     };
 
     println!("{}", report.render());
@@ -219,16 +219,22 @@ struct ControlPlaneWiring {
 /// Bring up the management control plane for a run (one wiring for BOTH run
 /// paths — ADR-W013/ADR-W018): the live-source hub over the run's per-source
 /// stop registry + the shared (live-updatable) preview store map, the preview
-/// provider, the bounded command bus, and the bound server.
+/// provider, the bounded command bus, the bound server, and the ADR-W020
+/// config-file watcher over `config_path` (external file edits hot-reload the
+/// impacted parts through the same command bus; an invalid file changes
+/// nothing).
 ///
 /// Returns the server task handle, the engine-side [`multiview_control::CommandReceiver`]
-/// (the caller builds its path-specific frame-boundary drain from it), and the
+/// (the caller builds its path-specific frame-boundary drain from it), the
 /// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
-/// returns). The hub shares the wiring's stop registry, so a live remove can
-/// tear down a startup producer (generator or ingest thread) too.
+/// returns), and the config-watch handle (stop it at teardown; its
+/// `expect_write` seam suppresses server-side writes). The hub shares the
+/// wiring's stop registry, so a live remove can tear down a startup producer
+/// (generator or ingest thread) too.
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
+    config_path: &Path,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     wiring: ControlPlaneWiring,
     licence: Option<multiview_control::LicenceState>,
@@ -238,6 +244,7 @@ async fn serve_control_plane(
     tokio::task::JoinHandle<std::io::Result<()>>,
     multiview_control::CommandReceiver,
     multiview_cli::live_sources::LiveSourceHub,
+    multiview_cli::config_watch::ConfigWatchHandle,
 )> {
     let ControlPlaneWiring {
         program_slot,
@@ -256,7 +263,7 @@ async fn serve_control_plane(
     let provider: multiview_control::SharedPreview = Arc::new(
         multiview_cli::preview::CliPreviewProvider::new(program_slot, shared_stores),
     );
-    let (addr, handle) = control::bind_and_serve(
+    let (addr, handle, state) = control::bind_and_serve(
         listen,
         config,
         Arc::clone(publisher),
@@ -272,7 +279,17 @@ async fn serve_control_plane(
     .await
     .with_context(|| format!("binding the control plane on {listen}"))?;
     tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
-    Ok((handle, command_rx, hub))
+    // Watch the boot config file for external edits (ADR-W020): a valid write
+    // hot-reloads the impacted parts through the SAME router state + command
+    // bus; an invalid write warns and changes nothing. A control-plane tokio
+    // tenant — it can never pace or stall the engine (inv #1/#10).
+    let watch = multiview_cli::config_watch::spawn(
+        config_path.to_path_buf(),
+        config.clone(),
+        state,
+        multiview_cli::config_watch::WatchOptions::default(),
+    );
+    Ok((handle, command_rx, hub, watch))
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
@@ -287,6 +304,7 @@ async fn run_pipeline_until_ctrl_c(
     pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
+    config_path: &Path,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
@@ -301,7 +319,7 @@ async fn run_pipeline_until_ctrl_c(
     // reflects live neighbours. The shared `MeshState` is wired into the control
     // plane below regardless of the `mesh-mdns` feature.
     plane.spawn_mesh_discovery();
-    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
+    let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
             // What THIS build + run path can take live (ADR-W022): with the
             // `overlay` feature the bake consumer renders the overlay working
@@ -317,9 +335,10 @@ async fn run_pipeline_until_ctrl_c(
             );
             #[cfg(not(feature = "overlay"))]
             let live_apply = multiview_control::LiveApplyCaps::default();
-            let (handle, command_rx, hub) = serve_control_plane(
+            let (handle, command_rx, hub, watch) = serve_control_plane(
                 &cfg.listen,
                 config,
+                config_path,
                 &publisher,
                 ControlPlaneWiring {
                     program_slot: Arc::clone(&preview_slot),
@@ -358,12 +377,13 @@ async fn run_pipeline_until_ctrl_c(
                 Arc::clone(&publisher),
                 hub.handle(),
             ));
-            (Some(handle), drain, Some(hub))
+            (Some(handle), drain, Some(hub), Some(watch))
         } else {
             drop(shutdown_rx);
             (
                 None,
                 Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+                None,
                 None,
             )
         };
@@ -452,11 +472,15 @@ async fn run_pipeline_until_ctrl_c(
 
     // The pipeline loop returned; stop the metrics + timing pollers (both also
     // self-stop on the StopSignal within one sample period), the retention feed,
-    // and tear down the live-source hub (it stops + joins every runtime producer).
+    // the config-file watcher, and tear down the live-source hub (it stops +
+    // joins every runtime producer).
     metrics_task.abort();
     timing_task.abort();
     retention_task.abort();
     log_retention_summary(&retention_store);
+    if let Some(watch) = config_watch {
+        watch.stop();
+    }
     if let Some(hub) = live_hub {
         hub.shutdown();
     }
@@ -606,6 +630,7 @@ async fn run_software_until_ctrl_c(
     engine: &mut SoftwareEngine,
     config: &MultiviewConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
+    config_path: &Path,
 ) -> anyhow::Result<RunReport> {
     let stop = StopSignal::new();
 
@@ -625,11 +650,12 @@ async fn run_software_until_ctrl_c(
     // (best-effort, never blocks — inv #10) before serving. The shared `MeshState`
     // is wired into the control plane below regardless of the `mesh-mdns` feature.
     plane.spawn_mesh_discovery();
-    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
+    let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
-            let (handle, command_rx, hub) = serve_control_plane(
+            let (handle, command_rx, hub, watch) = serve_control_plane(
                 &cfg.listen,
                 config,
+                config_path,
                 &publisher,
                 ControlPlaneWiring {
                     program_slot: engine.program_preview(),
@@ -654,12 +680,13 @@ async fn run_software_until_ctrl_c(
                 Arc::clone(&publisher),
                 hub.handle(),
             ));
-            (Some(handle), drain, Some(hub))
+            (Some(handle), drain, Some(hub), Some(watch))
         } else {
             drop(shutdown_rx);
             (
                 None,
                 Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+                None,
                 None,
             )
         };
@@ -725,13 +752,16 @@ async fn run_software_until_ctrl_c(
         .context("headless run until Ctrl-C")?;
 
     // The engine loop returned; stop the metrics + timing pollers (both also
-    // self-stop on the StopSignal within one sample period), tear down the
-    // live-source hub (it stops + joins every runtime producer), and bring the
-    // control server down.
+    // self-stop on the StopSignal within one sample period), the config-file
+    // watcher, tear down the live-source hub (it stops + joins every runtime
+    // producer), and bring the control server down.
     metrics_task.abort();
     timing_task.abort();
     retention_task.abort();
     log_retention_summary(&retention_store);
+    if let Some(watch) = config_watch {
+        watch.stop();
+    }
     if let Some(hub) = live_hub {
         hub.shutdown();
     }

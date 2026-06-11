@@ -40,6 +40,10 @@
 /// publisher. A thin seam over the pure hal cross-check + the control emit helper.
 pub mod capability_warn;
 pub mod cli;
+/// Config-file watch (ADR-W020): hot-reload the impacted parts of the boot
+/// config when the file changes externally — through the SAME apply machinery
+/// the Web/API uses; an invalid file changes nothing (warn + health event).
+pub mod config_watch;
 pub mod control;
 /// The Conspect entitlement-plane wiring for the cli (CONSPECT-2b/10, ADR-0050):
 /// the shared lease store, the published [`licence::WatermarkSignal`] the engine

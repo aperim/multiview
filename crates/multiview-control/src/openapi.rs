@@ -83,6 +83,12 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::devices::test_pattern,
         crate::routes::devices::source_candidates,
         crate::routes::devices::output_targets,
+        crate::routes::cast_sessions::start_cast_session,
+        crate::routes::cast_sessions::list_cast_sessions,
+        crate::routes::cast_sessions::get_cast_session,
+        crate::routes::cast_sessions::stop_cast_session,
+        crate::routes::cast_sessions::save_cast_session,
+        crate::routes::cast_sessions::set_cast_volume,
         crate::routes::discovery::scan_devices,
         crate::routes::discovery::list_discovered,
         crate::routes::sync_groups::list_sync_groups,
@@ -137,6 +143,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::tally::clear_override,
         crate::routes::audit::list_audit,
         crate::routes::config::export_config,
+        crate::routes::config::watch_status,
         crate::routes::preview::program_whep_open,
         crate::routes::preview::program_whep_close,
         crate::routes::preview::input_whep_open,
@@ -205,6 +212,8 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::versioning::DocumentDiff,
         crate::routes::config::CommitRequest,
         crate::routes::config::RollbackRequest,
+        crate::watch_status::WatchStatusBody,
+        crate::watch_status::WatchStamp,
         crate::openapi_schemas::AlarmRecordDoc,
         crate::openapi_schemas::SourceBodyDoc,
         crate::openapi_schemas::SourceKindDoc,
@@ -249,6 +258,10 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::openapi_schemas::DeviceStatusDoc,
         crate::routes::devices::SetModeRequest,
         crate::routes::devices::SetModeAccepted,
+        crate::routes::cast_sessions::StartCastSessionRequest,
+        crate::routes::cast_sessions::CastSessionDoc,
+        crate::routes::cast_sessions::SaveCastSessionRequest,
+        crate::routes::cast_sessions::CastVolumeRequest,
         crate::devices::projection::SourceCandidate,
         crate::devices::projection::OutputTarget,
         crate::devices::discovery::DiscoveredService,
@@ -357,6 +370,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         (name = "overlays", description = "Overlay (managed overlay layer) resource CRUD"),
         (name = "probes", description = "Probe (per-cell fail-state detection: black/freeze/silence/loudness) resource CRUD"),
         (name = "devices", description = "Managed-device registry CRUD + status + bare-verb actions + stream-binding projections (ADR-M008/M009/W017)"),
+        (name = "cast", description = "Ephemeral Google Cast sessions of a served HLS rendition + save-as-device promotion (ADR-M011). Google Cast and Chromecast are trademarks of Google LLC."),
         (name = "discovery", description = "mDNS device discovery: scan + the untrusted inventory requiring explicit confirm-adopt (ADR-M008 §6 / ADR-0041)"),
         (name = "sync-groups", description = "Presentation-sync-group CRUD + skew measurement (ADR-M008/M010)"),
         (name = "audio", description = "Audio routing: the document-level program-bus membership + discrete-track wiring per-output selections resolve against"),
@@ -409,14 +423,12 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/sources/{id}"),
     ("PUT", "/api/v1/sources/{id}"),
     ("DELETE", "/api/v1/sources/{id}"),
-    // Read-only input elementary-stream inventory (RT-3).
     ("GET", "/api/v1/inputs/{id}/streams"),
     ("GET", "/api/v1/outputs"),
     ("GET", "/api/v1/outputs/{id}"),
     ("POST", "/api/v1/outputs/{id}"),
     ("PUT", "/api/v1/outputs/{id}"),
     ("DELETE", "/api/v1/outputs/{id}"),
-    // The audio-routing singleton document (GET is 404-free).
     ("GET", "/api/v1/audio-routing"),
     ("PUT", "/api/v1/audio-routing"),
     ("GET", "/api/v1/overlays"),
@@ -429,7 +441,6 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/probes/{id}"),
     ("PUT", "/api/v1/probes/{id}"),
     ("DELETE", "/api/v1/probes/{id}"),
-    // Managed-devices registry CRUD + status + actions + projections.
     ("GET", "/api/v1/devices"),
     ("GET", "/api/v1/devices/{id}"),
     ("POST", "/api/v1/devices/{id}"),
@@ -443,10 +454,12 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/devices/{id}/test-pattern"),
     ("GET", "/api/v1/devices/{id}/source-candidates"),
     ("GET", "/api/v1/devices/{id}/output-targets"),
-    // mDNS device discovery (ADR-M008 §6 / ADR-0041 untrusted inventory).
-    ("POST", "/api/v1/discovery/devices/scan"),
-    ("GET", "/api/v1/discovery/devices"),
-    // Presentation-sync-groups CRUD + measure.
+    ("POST", "/api/v1/cast/sessions"),
+    ("GET", "/api/v1/cast/sessions"),
+    ("GET", "/api/v1/cast/sessions/{id}"),
+    ("DELETE", "/api/v1/cast/sessions/{id}"),
+    ("POST", "/api/v1/cast/sessions/{id}/save"),
+    ("POST", "/api/v1/cast/sessions/{id}/volume"),
     ("GET", "/api/v1/sync-groups"),
     ("GET", "/api/v1/sync-groups/{id}"),
     ("POST", "/api/v1/sync-groups/{id}"),
@@ -459,7 +472,6 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/commands/apply-layout"),
     ("GET", "/api/v1/alarms"),
     ("POST", "/api/v1/alarms/{id}/ack"),
-    // Read-only health warnings (SA-0 / ADR-0035).
     ("GET", "/api/v1/health"),
     ("GET", "/api/v1/licence"),
     ("POST", "/api/v1/licence/lease"),
@@ -501,14 +513,12 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/v1/tally/profiles/{id}"),
     ("PUT", "/api/v1/tally/profiles/{id}"),
     ("DELETE", "/api/v1/tally/profiles/{id}"),
-    // WHEP focus sessions (sub-second WebRTC preview) per scope.
     ("POST", "/api/v1/preview/program/whep"),
     ("DELETE", "/api/v1/preview/program/whep/{session_id}"),
     ("POST", "/api/v1/preview/inputs/{id}/whep"),
     ("DELETE", "/api/v1/preview/inputs/{id}/whep/{session_id}"),
     ("POST", "/api/v1/preview/outputs/{id}/whep"),
     ("DELETE", "/api/v1/preview/outputs/{id}/whep/{session_id}"),
-    // Read-only change audit log.
     ("GET", "/api/v1/audit"),
     // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
     ("GET", "/api/v1/account/audit"),
@@ -534,9 +544,7 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/v1/config/{target}/rev/{revision}"),
     ("GET", "/api/v1/config/{target}/diff"),
     ("POST", "/api/v1/config/{target}/rollback"),
-    // AsyncAPI 3.0 document (realtime/WebSocket spec, generated by xtask).
     ("GET", "/asyncapi.json"),
-    // AMWA NMOS Node API (under the standardised /x-nmos base).
     ("GET", "/x-nmos/node/v1.3/self"),
     ("GET", "/x-nmos/node/v1.3/devices"),
     ("GET", "/x-nmos/node/v1.3/senders"),
@@ -551,6 +559,8 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ),
     ("GET", "/api/v1/ws"),
     ("GET", "/api/v1/events"),
+    ("POST", "/api/v1/discovery/devices/scan"),
+    ("GET", "/api/v1/discovery/devices"),
 ];
 
 /// Serve the raw `OpenAPI` document as JSON.
