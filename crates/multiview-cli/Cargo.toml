@@ -72,6 +72,7 @@ tempfile = { version = "3", optional = true }
 # pipeline (reading kind-specific `[[overlays]]` params out of
 # `multiview_config::Overlay::params`, a `serde_json::Map`). Pure Rust
 # (MIT/Apache-2.0); stays in the default build.
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

@@ -469,6 +469,11 @@ pub struct AppState {
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
+    /// The config-file watch status slot (ADR-W020): the CLI's watcher records
+    /// applied/rejected loads + restart-pending sections here, and
+    /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
+    /// "not watched" state. Control-plane-only (invariant #10).
+    pub config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
     /// What the **running** engine can take live, per stored collection
     /// (ADR-W021): injected by the binary at wiring time so mutation routes
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
@@ -543,10 +548,24 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // No watcher by default: the endpoint reports "not watched".
+            config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W021).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
+    }
+
+    /// Install a shared config-file watch status slot (ADR-W020). The binary
+    /// shares one slot between the spawned watcher and this router; the
+    /// default reports "not watched".
+    #[must_use]
+    pub fn with_config_watch(
+        mut self,
+        config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
+    ) -> Self {
+        self.config_watch = config_watch;
+        self
     }
 
     /// Declare what the **running** engine can take live (ADR-W021). The

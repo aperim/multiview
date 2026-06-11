@@ -31,6 +31,7 @@
 
 pub mod audio;
 pub mod device;
+pub mod diff;
 pub mod discovery;
 pub mod error;
 pub mod failover;
@@ -60,6 +61,7 @@ pub use audio::{
     TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
+pub use diff::{ConfigDiff, SourceChange};
 pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};

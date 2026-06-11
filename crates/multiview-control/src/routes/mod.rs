@@ -491,27 +491,18 @@ pub(crate) async fn cmd_apply_layout(
                 )),
                 other => other,
             })?;
-        let document = multiview_config::LayoutDocument::from_body(&versioned.layout.body)
-            .map_err(|e| {
-                ControlError::Validation(format!(
-                    "stored layout {:?} does not parse as a {{canvas, layout, cells}} \
-                     document: {e}",
-                    req.layout
-                ))
-            })?;
-        let solved = document.solve_named(&req.layout).map_err(|e| {
-            ControlError::Validation(format!(
-                "stored layout {:?} does not solve: {e}",
-                req.layout
-            ))
-        })?;
-        require_class1_canvas(&state, &req.layout, &document)?;
+        // The ONE resolve machinery (parse + solve + Class-1 pinned-canvas
+        // gate), shared with the config-file watcher (ADR-W019/W020). A `None`
+        // running canvas fails closed there.
+        let resolved = crate::command::resolve_layout_document(
+            &req.layout,
+            &versioned.layout.body,
+            state.running_canvas.as_ref(),
+        )?;
         Ok(Command::ApplyLayout {
             op,
             layout: req.layout,
-            document: Some(Box::new(crate::command::ResolvedLayout::new(
-                solved, document,
-            ))),
+            document: Some(Box::new(resolved)),
         })
     })?;
     // State honestly which per-cell property classes land on screen at the
@@ -537,44 +528,6 @@ pub(crate) async fn cmd_apply_layout(
         Some(serde_json::json!({ "command": "apply_layout" })),
     );
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
-}
-
-/// ADR-R004 / ADR-W019 Class-1 gate: output geometry + cadence are **pinned**
-/// for the life of the session, so a stored layout authored for a different
-/// canvas cannot apply live (it is a Class-2 parallel-output migration, not
-/// built yet) — refuse it with `422` here, before any `202`.
-///
-/// The comparison is against [`AppState::running_canvas`] — the **immutable**
-/// snapshot captured from the loaded config at seed time — never the mutable
-/// layouts repository (whose working-layout body any operator `PUT` can
-/// rewrite). When no snapshot was seeded the gate **fails closed** (422): a
-/// document-carrying apply must never ride a 202 into a silent drain hold.
-/// Cadence equality is by value (`Fps`/`Rational` cross-multiply in `i128`),
-/// so a non-reduced `50/2` matches a running `25/1`. The engine's
-/// frame-boundary drain keeps its own backstop against the live drive's
-/// canvas.
-fn require_class1_canvas(
-    state: &AppState,
-    id: &str,
-    document: &multiview_config::LayoutDocument,
-) -> ControlResult<()> {
-    let Some(running) = state.running_canvas.as_ref() else {
-        return Err(ControlError::Validation(format!(
-            "layout {id:?} cannot be applied live: the running canvas is unknown to the \
-             control plane (no pinned-canvas snapshot was seeded), so the Class-1 gate \
-             fails closed (ADR-W019)"
-        )));
-    };
-    let new = &document.canvas;
-    if running != new {
-        return Err(ControlError::Validation(format!(
-            "layout {id:?} was authored for canvas {}x{}@{} but the running session's canvas \
-             is pinned at {}x{}@{} — a Class-2 change (output geometry/cadence cannot change \
-             live; ADR-R004)",
-            new.width, new.height, new.fps, running.width, running.height, running.fps
-        )));
-    }
-    Ok(())
 }
 
 impl axum::extract::FromRequestParts<AppState> for Principal {
@@ -814,6 +767,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/audit", get(audit::list_audit))
         // Config-as-code export: the live stores rendered as multiview.toml.
         .route("/config/export", get(config::export_config))
+        // The config-file watch status (ADR-W020): read-only, honest
+        // "not watched" default. A static segment, so it never collides with
+        // the `{target}` capture below (axum prefers static matches).
+        .route("/config/watch-status", get(config::watch_status))
         // Config versioning: history + commit, single revision, diff, rollback.
         .route(
             "/config/{target}",

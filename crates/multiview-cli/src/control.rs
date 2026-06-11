@@ -62,6 +62,11 @@ use tokio::task::JoinHandle;
 /// Cache-Control tiers, Range/206, and Origin-reflecting CORS, so Cast
 /// receivers and browser players fetch cross-origin without a fronting proxy.
 ///
+/// Also returns a clone of the served [`AppState`] so a sibling control-plane
+/// tenant — the ADR-W020 config-file watcher — reaches the SAME stores,
+/// command bus, audit log, and watch-status slot the router serves (one set
+/// of stores, never a parallel copy).
+///
 /// `live_apply` declares what the **running** engine can take live (ADR-W021):
 /// the caller — the binary, the only place that knows both the compiled
 /// features and the chosen run path — injects it so every mutation route's
@@ -81,7 +86,7 @@ pub async fn bind_and_serve<F>(
     preview: SharedPreview,
     live_apply: multiview_control::LiveApplyCaps,
     shutdown: F,
-) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)>
+) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -212,7 +217,7 @@ where
     // unauthenticated like `/docs` (media devices cannot send Bearer tokens).
     // Isolation-safe (inv #10): the handlers only read files the segmenter
     // already published to disk — never an engine channel or lock.
-    let mut app = multiview_control::router(state);
+    let mut app = multiview_control::router(state.clone());
     for mount in hls_mounts(config) {
         app = app.nest(
             &mount.route,
@@ -220,7 +225,7 @@ where
         );
     }
     let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
-    Ok((addr, handle))
+    Ok((addr, handle, state))
 }
 
 /// Build the runtime device-poller registry for the control plane (DEV-A4/D2).
@@ -2544,7 +2549,7 @@ input_id = "in_b"
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         // IPv6-first: the CLI serve path must bind the IPv6 loopback `[::1]`.
-        let (addr, handle) = bind_and_serve(
+        let (addr, handle, _state) = bind_and_serve(
             "[::1]:0",
             &test_config(),
             publisher,

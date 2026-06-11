@@ -2862,6 +2862,7 @@ dependencies = [
  "multiview-overlay",
  "multiview-preview",
  "multiview-telemetry",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
