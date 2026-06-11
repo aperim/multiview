@@ -174,14 +174,16 @@ operator re-routes that cell — held, never a panic, never a falter.
   the planner would be a fabricated no-op; we state that instead of pretending.
 - **Network add (level 2 — SHIPPED):** the hub consults the **same** scorer the startup
   admission uses (`multiview_hal::select_device`, the exact `select_admission_pick` path in
-  `pipeline.rs` — implemented as `select_live_decode_pick`), with two changes honouring the
+  `pipeline.rs` — implemented as `select_live_decode_placement`), with two changes honouring the
   placement principle: the **candidate set is exactly the running island's device** — a runtime
   add may never fragment or migrate the island — and the demand is the island's current tile set
-  **plus** the new decode (`TileLoad::new(Decode, …)`), re-polling NVML at decision time. An
-  admit stamps the island's `cuda_ordinal` on the new `IngestPlan` (NVDEC co-located, ADR-0035
-  Tier-1/Tier-2 affinity + perf-class budget); a reject (budget/headroom/island absent from the
-  snapshot) degrades **that source only** to software decode (`cuda_ordinal: None`) with a loud
-  warning — the island is never overcommitted and the output never falters.
+  **plus** the new decode (`TileLoad::new(Decode, …)`), re-polling NVML at decision time. The
+  outcome is an explicit tri-state on the `IngestPlan` (`DecodePlacement`): an admit stamps
+  `Pinned(cuda_ordinal)` (NVDEC co-located, ADR-0035 Tier-1/Tier-2 affinity + perf-class
+  budget); a reject (budget/headroom/island absent from the snapshot) stamps `SoftwareOnly`,
+  which the single decoder-open gate (`decoder_open_args`) turns into a **forced software
+  open** for that source only, with a loud warning — the island is never overcommitted and the
+  output never falters.
 
   *Amendments where reality diverged from the sketch above:*
   - The sketch named `Pins::pin_pipeline(island_device)`. As built, the consult **restricts the
@@ -195,15 +197,33 @@ operator re-routes that cell — held, never a panic, never a falter.
     it again would double-count it against the session ceiling. (The demand still carries the
     island's composite + encode tile loads, as startup models them; the budget gate sees the
     same shape.)
+  - A reject is the explicit `DecodePlacement::SoftwareOnly`, **not** "no ordinal". The first
+    build encoded a reject as `cuda_ordinal: None` on the plan — but the decoder open computed
+    its hardware preference independently, and *hardware-wanted with no ordinal* opens NVDEC on
+    libav's **default** CUDA device: on a single-GPU host that is the over-headroom island
+    itself (the reject would overcommit it anyway), and on a multi-GPU host it may be a
+    *different* GPU (silent island fragmentation, forbidden by ADR-0018). `Option<ordinal>`
+    cannot distinguish *no placement decision* from *placement rejected*, so the plan carries
+    the tri-state `DecodePlacement::{Default, Pinned(ordinal), SoftwareOnly}` and one gate
+    (`decoder_open_args`) maps it to the decoder open — `SoftwareOnly` forces a software open
+    even when NVDEC is compiled, present, and not env-disabled (the operator's
+    `MULTIVIEW_DISABLE_NVDEC` opt-out still wins over a pin). The island-vanished consult
+    (device absent from the load snapshot) is `SoftwareOnly` for the same reason.
   - The island identity (`LiveIsland`: device id + CUDA ordinal + startup tile count) is
     published by `drive_streaming` into a lock-free slot (`ArcSwapOption`) after the decide-once
     admission pick; the spawner reads it per spawn. No pinned island (GPU-free host, no NVML, a
-    startup scorer rejection) ⇒ no consult and `cuda_ordinal: None` — in lockstep with the
+    startup scorer rejection) ⇒ no consult and `DecodePlacement::Default` — in lockstep with the
     startup plans, exactly the degrade ladder above.
   - The demand's "current tile set" is the **startup** tile count + the one new decode.
     Previously live-added decodes are not re-modelled in the demand: they are already in the
     *measured* NVML load the scorer reads (re-modelling them would double-count). This is the
-    same measured-load stance as removal, below.
+    same measured-load stance as removal, below. **Staleness bound:** a live layout apply
+    (ADR-W019) can grow/shrink the cell set after the island is published, and the consult's
+    modelled demand keeps the *startup* tile count — the canvas itself cannot change live
+    (a canvas mismatch is a held Class-2), so the drift is bounded by the cell-count delta,
+    and every live-applied cell's real composite cost is already in the *measured* NVML
+    snapshot the same consult re-polls. The modelled tile set only skews the budget estimate
+    by that delta; the measured headroom ceiling still gates an actually-loaded island.
 - **Removal returns its budget implicitly:** the startup path books nothing — placement decisions
   read *measured* NVML load per decision, so a removed source's NVDEC/VRAM consumption disappears
   from the next decision's inputs when its decoder closes. There is **no allocation ledger** to

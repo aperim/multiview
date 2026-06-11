@@ -85,10 +85,9 @@ fn software_only_placement_opens_the_software_decoder() {
     let dir = tempfile::tempdir().expect("tempdir");
     let clip = generate_mpeg2_clip(dir.path());
     let (params, time_base) = video_params(&clip);
-    let (decoder, used_hw) = StreamVideoDecoder::new_preferring_hw(
-        params, time_base, want_hw, ordinal,
-    )
-    .expect("the software decoder must always open");
+    let (decoder, used_hw) =
+        StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw, ordinal)
+            .expect("the software decoder must always open");
     assert!(
         !used_hw,
         "a placement-rejected source must open the SOFTWARE decoder"
@@ -109,7 +108,8 @@ fn pinned_and_default_placements_keep_the_hardware_preference() {
     // Pinned: hardware stays wanted (subject only to the operator env
     // opt-out, the same canonical reading the run uses) and the island's
     // ordinal threads through to the open.
-    let (want_hw, ordinal) = decoder_open_args(&DecodePlacement::Pinned("1".to_owned()), None);
+    let pinned = DecodePlacement::Pinned("1".to_owned());
+    let (want_hw, ordinal) = decoder_open_args(&pinned, None);
     assert_eq!(
         want_hw,
         multiview_ffmpeg::want_hw_decode(None),
@@ -124,7 +124,7 @@ fn pinned_and_default_placements_keep_the_hardware_preference() {
     assert!(ordinal.is_none());
 
     // The operator opt-out still wins over a pin (env says software).
-    let (want_hw, _) = decoder_open_args(&DecodePlacement::Pinned("1".to_owned()), Some("1"));
+    let (want_hw, _) = decoder_open_args(&pinned, Some("1"));
     assert!(
         !want_hw,
         "MULTIVIEW_DISABLE_NVDEC must still force software over a pin"
