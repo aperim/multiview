@@ -177,9 +177,12 @@ export interface paths {
         /**
          * `POST /api/v1/devices/{id}` — adopt/create a device (role: write).
          * @description Validates the body against `multiview_config::Device` (`422` on an invalid
-         *     document) and seeds the runtime status registry in `ADOPTING` so
-         *     `GET /devices/{id}/status` answers immediately — the first probe lands with
-         *     the driver actors (DEV-A4/A5).
+         *     document), seeds the runtime status registry in `ADOPTING` so
+         *     `GET /devices/{id}/status` answers immediately, and **starts the device's
+         *     supervised driver poller** (DEV-A4) — which performs the first probe and
+         *     drives the device to `ONLINE`/`AUTH_FAILED`/`UNREACHABLE`. The poller is a
+         *     no-op for devices the factory does not manage (the default build / a
+         *     non-`zowietek` driver).
          */
         post: operations["create_device"];
         /**
@@ -223,10 +226,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/devices/{id}/output-targets` — the declared output-binding
-         *     projection (ADR-M009 facet (b)).
-         * @description Honestly empty until a driver enumerates decode slots (no live driver in this
-         *     slice): never fabricated live telemetry.
+         * `GET /api/v1/devices/{id}/output-targets` — the output-binding projection
+         *     (ADR-M009 facet (b)).
+         * @description Returns the device's running driver's enumerated targets (DEV-A4: a
+         *     decoder-mode `zowietek` box's decode-table slots). Honestly empty until a
+         *     driver has enumerated — and on a build/device with no live driver — never
+         *     fabricated live telemetry.
          */
         get: operations["output_targets"];
         put?: never;
@@ -248,9 +253,11 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).
-         * @description A synchronous management verb (ADR-W017): in this slice (no driver actor) it
-         *     confirms the device exists and acknowledges the probe request (`200`). The
-         *     real probe round-trip lands with the driver actors (DEV-A4/A5).
+         * @description A synchronous management verb (ADR-W017): it confirms the device exists and
+         *     acknowledges the probe request (`200`). The device's supervised driver poller
+         *     (DEV-A4) is already probing on its own ≤1 Hz cadence and re-probing on
+         *     reconnect, so the latest status is read via `GET /devices/{id}/status`; this
+         *     verb is the operator's explicit "I looked" acknowledgement.
          */
         post: operations["probe_device"];
         delete?: never;
@@ -294,9 +301,16 @@ export interface paths {
          *     (role: write; `202` + operation id + declared DEV-class impact).
          * @description The device-side impact is **declared in the body before apply** (ADR-M009):
          *     the device restarts its pipeline; bound sources ride the tile ladder to
-         *     `NO_SIGNAL` during the switch; no Multiview output is interrupted. In this
-         *     slice the operation id is minted and `202`'d; the `device.mode` outcome
-         *     arrives on the realtime stream once the driver actor lands.
+         *     `NO_SIGNAL` during the switch; no Multiview output is interrupted. The route
+         *     mints the operation id, `202`s, and **dispatches** the convergence to the
+         *     device's running driver poller (DEV-A4), which records the requested mode as
+         *     its desired mode, runs `plan_mode_convergence` → `converge_mode`
+         *     (close-before-open), and publishes the `device.mode` outcome on the realtime
+         *     stream; a failed apply is re-converged on the poller's next adopt/reconnect
+         *     pass. When no live poller is running (the default build / a device with no
+         *     spawned driver), the `202` still declares the impact but nothing applies the
+         *     change: the device's configured `desired_mode` is what a later-spawned
+         *     poller converges onto when its adopt/reconnect reaches `ONLINE`.
          */
         post: operations["set_mode"];
         delete?: never;
@@ -313,10 +327,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/devices/{id}/source-candidates` — the declared source-binding
-         *     projection (ADR-M009 facet (a)).
-         * @description Honestly empty until a driver enumerates streams (no live driver in this
-         *     slice): never fabricated live telemetry.
+         * `GET /api/v1/devices/{id}/source-candidates` — the source-binding projection
+         *     (ADR-M009 facet (a)).
+         * @description Returns the device's running driver's enumerated candidates (DEV-A4: a
+         *     `zowietek` device's served RTSP mounts). Honestly empty until a driver has
+         *     enumerated — and on a build/device with no live driver — never fabricated
+         *     live telemetry.
          */
         get: operations["source_candidates"];
         put?: never;
@@ -363,6 +379,62 @@ export interface paths {
          *     device (role: write; fire-and-forget `204`).
          */
         post: operations["test_pattern"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/discovery/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/discovery/devices` — the current untrusted inventory snapshot
+         *     (role: read).
+         * @description Returns the discovered services found by the most recent scans, AAAA-first
+         *     with IPv4 labelled legacy, stale (TTL-expired) rows purged on read. These are
+         *     **hints**, not devices: adopting one is the separate `POST /devices/{id}`
+         *     confirm-adopt referencing a discovered address (ADR-0041).
+         */
+        get: operations["list_discovered"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/discovery/devices/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/discovery/devices/scan` — kick a time-bounded mDNS browse
+         *     (role: write; `202` + operation id).
+         * @description The browse runs on a bounded control-plane task: it asks the injected browser
+         *     for services within a time budget, classifies each into the **untrusted
+         *     inventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`
+         *     event per service, correlated to this operation id via the envelope `corr`
+         *     (ADR-RT007). It never creates a device (ADR-0041).
+         *
+         *     Scans are **single-flight** (one in-flight browse — concurrent `mdns-sd`
+         *     browses corrupt each other's listeners/queriers, and one browse at a time is
+         *     the ADR-M008 rate limit): a request that arrives while a scan runs
+         *     **attaches** to it and is answered with the *running* scan's operation id.
+         *     A retried `Idempotency-Key` returns the original operation id without
+         *     re-executing the browse (the canonical replay semantics).
+         */
+        post: operations["scan_devices"];
         delete?: never;
         options?: never;
         head?: never;
@@ -441,6 +513,106 @@ export interface paths {
         post: operations["create_layout"];
         /** `DELETE /api/v1/layouts/{id}` — delete a layout (role: administer; If-Match). */
         delete: operations["delete_layout"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/licence` — the computed licence resource (role: read).
+         * @description Always `200` (enforcement is **data**, never an error path): a `licensed:true`
+         *     resource with the computed ladder `state`/`enforcement` when a lease is
+         *     installed, a `licensed:false` resource otherwise.
+         */
+        get: operations["get_licence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licence/challenge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/licence/challenge` — the `<host>.challenge` export as an
+         *     `application/cbor` attachment (role: read).
+         * @description The challenge carries **only** salted digests + monotonic counters — never a
+         *     raw serial, MAC, or hostname (data minimisation, brief §3/§8). The digests +
+         *     counters are sourced from the entitlement plane; CONSPECT-1 renders the
+         *     machine's current installed-lease count and an empty salted-digest set when
+         *     the cli has not yet supplied a salted machine fingerprint (the cli wiring is
+         *     CONSPECT-10). The body is canonical CBOR a portal consumes byte-for-byte.
+         */
+        get: operations["get_challenge"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licence/lease": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/licence/lease` — verify + install a presented signed lease
+         *     binding (CBOR body; role: write).
+         * @description Returns `200 {lease, valid_to}` on success, or an RFC 9457 problem on
+         *     rejection: `signature_invalid` (422), `fingerprint_mismatch` (409),
+         *     `lease_stale` (409). A binding that is not well-formed CBOR is a `422`
+         *     `malformed_binding` (bad-inputs-are-the-purpose). When no issuer key has been
+         *     pinned, the install is refused with a `409` `no_pinned_key`. A rejection never
+         *     degrades the machine — the previously-installed (or empty) state stays put
+         *     (fail toward leniency).
+         */
+        post: operations["install_lease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licensing/heartbeat-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/licensing/heartbeat-status` — the read-only heartbeat status
+         *     (role: read).
+         * @description Always `200` (it is a data report, never an error path): the honest local
+         *     heartbeat status (transport + last/next contact + payload fields). With no
+         *     lease installed it reports `transport: "none"` and null contact instants. The
+         *     spec mandates **no** mutating endpoint exists for the heartbeat — this is
+         *     read-only, and the router wires only `GET`.
+         */
+        get: operations["get_heartbeat_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1608,6 +1780,74 @@ export interface components {
             temperature_c?: number | null;
         };
         /**
+         * @description One resolved management endpoint of a discovered service: a presentation-
+         *     ready address and its family. IPv6 is the lead family (ADR-0042); IPv4 is
+         *     labelled [`AddressFamily::Ipv4Legacy`]. IPv6 literals are bracketed so the
+         *     `host:port` form is URL-safe.
+         */
+        DiscoveredEndpoint: {
+            /** @description The `host:port` management address (IPv6 literals bracketed). */
+            address: string;
+            /**
+             * @description The address family — `ipv6` (lead) or `ipv4-legacy`. The shared
+             *     [`AddressFamily`] enum carries no `ToSchema`, so the schema models the
+             *     wire string directly (the same `ipv6` / `ipv4-legacy` tokens serde emits).
+             * @example ipv6
+             */
+            family: string;
+        };
+        /**
+         * @description One **untrusted** discovery-inventory row: a classified, AAAA-first service
+         *     requiring explicit confirm-adopt (ADR-0041). It carries **no registry id** —
+         *     it is not a device.
+         */
+        DiscoveredService: {
+            /** @description The inferred driver family. */
+            driver_kind: components["schemas"]["DiscoveryDriverKind"];
+            /** @description The management endpoints, **AAAA-first** (IPv6 lead, IPv4 legacy). */
+            endpoints: components["schemas"]["DiscoveredEndpoint"][];
+            /** @description The advertised host (`*.local.`), informational. */
+            host: string;
+            /**
+             * @description The dedup key (driver kind + instance name + service type). Two sightings
+             *     of the same service share a key and the newer replaces the older.
+             */
+            key: string;
+            /**
+             * Format: int64
+             * @description When this row was last seen (Unix nanoseconds), informational for the UI.
+             */
+            last_seen_unix_ns: number;
+            /** @description The advertised instance/service name. */
+            name: string;
+            /**
+             * Format: int32
+             * @description The mDNS-advertised port.
+             */
+            port: number;
+            /**
+             * @description The primary management address — the first (IPv6, if any) endpoint's
+             *     `host:port`. This is the address an operator references when confirming
+             *     adoption via `POST /devices/{id}`.
+             */
+            primary_address: string;
+            /** @description The DNS-SD service type browsed. */
+            service_type: string;
+            /** @description The decoded TXT records (advertised metadata), key-sorted. */
+            txt: components["schemas"]["TxtRecord"][];
+        };
+        /**
+         * @description The inferred driver family of a discovered service, from its service type
+         *     (and the operator-configured zowietek-control type, if any).
+         *
+         *     A **closed** `#[non_exhaustive]` enum: a new discoverable family is a new
+         *     variant plus a wired browse type, never an open registry. `Unknown` is the
+         *     honest catch-all — a service we browsed but cannot classify is reported as
+         *     such, never guessed into a family.
+         * @enum {string}
+         */
+        DiscoveryDriverKind: "cast" | "ndi-source" | "zowietek-control" | "unknown";
+        /**
          * @description The added / removed / changed top-level keys between two documents.
          *
          *     A pragmatic, UI-facing structural diff over JSON objects: it reports which
@@ -1640,6 +1880,50 @@ export interface components {
             up_ms: number;
         };
         /**
+         * @description `OpenAPI` mirror of [`multiview_licence::EnforcementLevel`].
+         *
+         *     Serde-equivalent: a unit enum rendered `kebab-case`. Every level keeps a
+         *     running program **on air** (ADR-0050 §6.3, invariant #1) — enforcement is
+         *     data the surface renders, never a control-flow decision.
+         * @enum {string}
+         */
+        EnforcementLevelDoc: "active" | "warning" | "config-locked" | "watermark" | "block-new-instance" | "unlicensed-build";
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::GpuLimit`].
+         *
+         *     Serde-equivalent: adjacently tagged on `kind`, value under `value`,
+         *     `snake_case` tags (`{"kind":"unlimited"}` / `{"kind":"limited","value":2}`).
+         */
+        GpuLimitDoc: {
+            /** @enum {string} */
+            kind: "unlimited";
+        } | {
+            /** @enum {string} */
+            kind: "limited";
+            /**
+             * Format: int32
+             * @description At most this many GPUs may be in use before the `over_gpu` reason fires.
+             */
+            value: number;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::HardwareClass`].
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case`.
+         * @enum {string}
+         */
+        HardwareClassDoc: "standard" | "datacenter" | "edge";
+        /**
+         * @description `OpenAPI` mirror of `multiview_licence::HardwareClassView` (the
+         *     licensed-vs-detected class pair).
+         */
+        HardwareClassViewDoc: {
+            /** @description The class detected on the machine (a mismatch is a ladder reason). */
+            detected: components["schemas"]["HardwareClassDoc"];
+            /** @description The class the entitlement is licensed for. */
+            licensed: components["schemas"]["HardwareClassDoc"];
+        };
+        /**
          * @description `OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).
          *
          *     The body of `GET /api/v1/health`: an actionable health warning carrying a
@@ -1664,6 +1948,40 @@ export interface components {
             since: number;
             /** @description The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`). */
             subsystem: string;
+        };
+        /**
+         * @description The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).
+         *
+         *     With no licence-server client yet (blocked on the external wire-protocol doc,
+         *     brief §14 O1), this reports **honestly from local state**: the transport the
+         *     active lease arrived over, the lease install instant as `last_at`, the lease's
+         *     `next_contact_due` as `next_due`, and the exhaustive payload-field list. There
+         *     is **no** mutating endpoint for the heartbeat (the spec mandates none) — the
+         *     `POST /api/v1/account/licence/heartbeat` force-now action is a later,
+         *     feature-gated item (brief §11 #4), not this read surface.
+         */
+        HeartbeatStatus: {
+            /**
+             * @description The instant this machine last accepted a lease (the install instant), RFC
+             *     3339; `None` when no lease is installed (no heartbeat yet — honest).
+             */
+            last_at?: string | null;
+            /**
+             * @description When the next licensing contact is due (the active lease's
+             *     `next_contact_due`), RFC 3339; `None` when no lease is installed.
+             */
+            next_due?: string | null;
+            /**
+             * @description The exhaustive list of fields a heartbeat payload carries
+             *     ([`HEARTBEAT_PAYLOAD_FIELDS`]) — reported, never raw identifiers (§8).
+             */
+            payload_fields: string[];
+            /**
+             * @description The transport the active lease arrived over: `"direct"` (online server
+             *     contact), `"relay"` (mesh relay), or `"file"` (a dropped offline lease).
+             *     `"none"` when no lease is installed.
+             */
+            transport: string;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::IndexCell`]. */
         IndexCellDoc: {
@@ -1707,6 +2025,13 @@ export interface components {
             "x-nmos-api"?: components["schemas"]["NmosApiClaim"];
         };
         /**
+         * @description `OpenAPI` mirror of [`multiview_licence::LadderState`] (the seven conditions).
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case`.
+         * @enum {string}
+         */
+        LadderStateDoc: "compliant" | "grace" | "lapsed_soft" | "lapsed_hard" | "evaluation" | "class_mismatch" | "over_gpu";
+        /**
          * @description A persisted layout resource.
          *
          *     The `body` is the opaque, validated layout document the editor produces; the
@@ -1731,6 +2056,110 @@ export interface components {
             body: unknown;
             /** @description Human-friendly name. */
             name: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::Lease`] (the dated entitlement
+         *     bounds, ADR-0050 §4).
+         *
+         *     Serde-equivalent: the dated fields are RFC 3339 date-time strings (how
+         *     `chrono`'s `DateTime<Utc>` serialises), the day counts are integers.
+         */
+        LeaseDoc: {
+            /** @description When the lease term expires (RFC 3339). */
+            expires_at: string;
+            /**
+             * Format: int64
+             * @description The number of grace days that follow expiry.
+             */
+            grace_days: number;
+            /** @description The end of the grace window (RFC 3339). */
+            grace_until: string;
+            /** @description When the lease was granted (RFC 3339). */
+            granted_at: string;
+            /** @description The absolute hard bound from grant (RFC 3339). */
+            hard_at: string;
+            /** @description When the next heartbeat is due (RFC 3339). */
+            next_contact_due: string;
+            /** @description The opaque lease serial (server-issued; not a hardware identifier). */
+            serial: string;
+            /** @description Where this grant came from (drives the term). */
+            source: components["schemas"]["LeaseSourceDoc"];
+        };
+        /**
+         * @description The `200` body of a successful `POST /api/v1/licence/lease` install: the
+         *     installed lease's serial and its `valid_to` (the lease term expiry, RFC 3339).
+         */
+        LeaseInstalled: {
+            /** @description The serial of the lease that was verified + installed. */
+            serial: string;
+            /** @description The instant the installed lease term expires (RFC 3339). */
+            valid_to: string;
+        };
+        /**
+         * @description `OpenAPI` body of a successful `POST /api/v1/licence/lease` install: the
+         *     installed lease's serial + its `valid_to` (the lease's `expires_at`, RFC
+         *     3339). Mirrors the [`crate::routes::licence::LeaseInstalled`] handler shape.
+         */
+        LeaseInstalledDoc: {
+            /** @description The serial of the lease that was verified + installed. */
+            serial: string;
+            /** @description The instant the installed lease term expires (RFC 3339). */
+            valid_to: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::LeaseSource`].
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case` (`online`/`relay`/`file`).
+         * @enum {string}
+         */
+        LeaseSourceDoc: "online" | "relay" | "file";
+        /**
+         * @description The computed licence resource rendered at `GET /api/v1/licence`.
+         *
+         *     A single shape that always serialises (never `5xx`): `licensed` is `true` with
+         *     the full computed `status` when a verified lease is installed, and `false`
+         *     with `status: null` when none is — an honest "unlicensed" data report rather
+         *     than an error. The control plane, the chrome banner, and the portals all read
+         *     the same computed `status.enforcement` level; there is no second opinion.
+         */
+        LicenceResource: {
+            /** @description Whether a verified lease is currently installed. */
+            licensed: boolean;
+            status?: null | components["schemas"]["LicenceStatusDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::LicenceStatusView`] — the computed
+         *     licence resource `GET /api/v1/licence` renders.
+         *
+         *     Serde-equivalent to the real view. The `state`/`enforcement` are **computed**
+         *     (the ladder, off the hot loop); every value keeps a running program on air.
+         */
+        LicenceStatusDoc: {
+            /** @description Whether the startup gate should refuse a new engine instance (S1). */
+            blocks_new_instances: boolean;
+            /** @description Whether the engine should deny hot-reconfiguration (derived, S2). */
+            config_locked: boolean;
+            /** @description The canonical enforcement level derived from the state. */
+            enforcement: components["schemas"]["EnforcementLevelDoc"];
+            /** @description The GPU allowance carried by the entitlement. */
+            gpu_limit: components["schemas"]["GpuLimitDoc"];
+            /**
+             * Format: int32
+             * @description The number of GPUs currently in use (informs the `over_gpu` reason only).
+             */
+            gpus_in_use: number;
+            /** @description The licensed-vs-detected hardware class. */
+            hardware_class: components["schemas"]["HardwareClassViewDoc"];
+            /** @description The dated lease this status reflects. */
+            lease: components["schemas"]["LeaseDoc"];
+            /** @description Machine-readable reason codes the UI renders. */
+            reasons: string[];
+            /** @description The computed ladder state (the seven conditions). */
+            state: components["schemas"]["LadderStateDoc"];
+            /** @description The opaque commercial tier (rendered, never computed). */
+            tier: string;
+            /** @description Whether the engine should stamp a corner watermark (derived, S3). */
+            watermark: boolean;
         };
         /**
          * @description `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
@@ -2304,6 +2733,34 @@ export interface components {
             /** @description UMD label changes. */
             umd?: components["schemas"]["UmdRecallDoc"][];
         };
+        /**
+         * @description The `202 Accepted` body for a scan: the operation id correlating the scan and
+         *     the human-readable scope of what is browsed.
+         */
+        ScanAccepted: {
+            /**
+             * Format: int64
+             * @description The scan time budget in milliseconds (the browse is always time-bounded).
+             */
+            budget_ms: number;
+            /**
+             * @description A reminder that discovery is **untrusted**: rows require explicit
+             *     confirm-adopt and discovery never creates a device (ADR-0041).
+             */
+            note: string;
+            /**
+             * @description The operation id of the scan that actually runs — freshly started,
+             *     attached-to (single-flight), or replayed (`Idempotency-Key`). The
+             *     `device.discovered` rows it produces stream on the realtime `devices`
+             *     topic while it runs, each echoing this id as the envelope `corr`.
+             */
+            operation_id: string;
+            /**
+             * @description The service types being browsed (Cast + NDI, plus any configured
+             *     zowietek-control type).
+             */
+            service_types: string[];
+        };
         /** @description An IS-04 **Sender**: an egress flow (a Multiview program/preview output). */
         Sender: components["schemas"]["ResourceCore"] & {
             /** @description The id of the device this sender belongs to. */
@@ -2874,6 +3331,13 @@ export interface components {
             rtp_enabled?: boolean | null;
             /** @description The source IP for an `IGMPv3` source-specific-multicast filter. */
             source_ip?: string | null;
+        };
+        /** @description One advertised TXT key/value record (serializable, sortable). */
+        TxtRecord: {
+            /** @description The TXT key. */
+            key: string;
+            /** @description The TXT value (decoded as UTF-8 by the browser). */
+            value: string;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::UmdRecall`]. */
         UmdRecallDoc: {
@@ -3956,6 +4420,82 @@ export interface operations {
             };
         };
     };
+    list_discovered: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The untrusted discovery inventory (hints requiring explicit confirm-adopt; never devices). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveredService"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read discovery. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    scan_devices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scan accepted (or attached to the single-flight running scan, or replayed by Idempotency-Key — the operation id names the scan that actually runs); discovered rows stream as device.discovered events correlated via corr and land in the untrusted inventory. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScanAccepted"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to scan. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_health: {
         parameters: {
             query?: {
@@ -4294,6 +4834,190 @@ export interface operations {
             };
             /** @description If-Match precondition failed. */
             412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_licence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The computed licence resource (enforcement is data; always 200). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenceResource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_challenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The salted challenge export (CBOR attachment). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/cbor": unknown;
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    install_lease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The signed lease binding, canonical CBOR. */
+        requestBody: {
+            content: {
+                "application/cbor": number[];
+            };
+        };
+        responses: {
+            /** @description Lease verified + installed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LeaseInstalled"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to install. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Fingerprint mismatch, stale grant, or no pinned key. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The binding body exceeds the size cap. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Malformed CBOR or an invalid signature. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_heartbeat_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The honest local heartbeat status (read-only; no mutating endpoint exists). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeartbeatStatus"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

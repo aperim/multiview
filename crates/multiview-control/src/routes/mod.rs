@@ -27,6 +27,7 @@ pub mod audio;
 pub mod audit;
 pub mod config;
 pub mod devices;
+pub mod discovery;
 pub mod health;
 pub mod inputs;
 pub mod licence;
@@ -726,6 +727,15 @@ fn resource_router() -> Router<AppState> {
             "/devices/{id}/output-targets",
             get(devices::output_targets),
         )
+        // mDNS device discovery (ADR-M008 §6 / ADR-0041): kick a time-bounded
+        // browse (202 + device.discovered events) and read the untrusted
+        // inventory. Discovery never creates a device — confirm-adopt is the
+        // separate POST /devices/{id} referencing a discovered address.
+        .route(
+            "/discovery/devices/scan",
+            post(discovery::scan_devices),
+        )
+        .route("/discovery/devices", get(discovery::list_discovered))
         // Presentation-sync-groups CRUD (ADR-M008/M010) + the measure action.
         .route("/sync-groups", get(sync_groups::list_sync_groups))
         .route(
