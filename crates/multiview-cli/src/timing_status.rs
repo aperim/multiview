@@ -69,8 +69,31 @@ pub struct TimingStatusOptions {
     /// smallness).
     pub link_offset_ns: i64,
     /// The optional PHC device path from `[timing] ptp_phc`, sampled only by
-    /// a `ptp`-feature build (warned about and ignored otherwise).
+    /// a `ptp`-feature build. The binary's startup gate
+    /// ([`crate::timing_gate`]) rejects a configured PHC in a non-`ptp` build
+    /// before any run starts; the non-`ptp` task body additionally warns and
+    /// rides the system clock as defence-in-depth for library callers.
     pub ptp_phc: Option<String>,
+    /// The PTP-leg TAI−UTC timescale conversion in integer nanoseconds, from
+    /// `[timing] ptp_utc_offset_s` (`TimingConfig::ptp_utc_offset_ns()`):
+    /// subtracted from the PHC-derived estimate so the published epoch is
+    /// always UTC (the PHC under standard linuxptp carries TAI). See the
+    /// *Timescale* section of [`multiview_engine::epoch`].
+    pub ptp_utc_offset_ns: i64,
+}
+
+impl TimingStatusOptions {
+    /// The sampler tuning the spawned task publishes with: the epoch-path
+    /// defaults (the conservative never-assume-locked system classifier, the
+    /// standard re-anchor policy) with this deployment's configured PTP
+    /// timescale conversion applied.
+    #[must_use]
+    pub fn epoch_sampler_config(&self) -> EpochSamplerConfig {
+        EpochSamplerConfig {
+            ptp_utc_offset_ns: self.ptp_utc_offset_ns,
+            ..EpochSamplerConfig::new_default()
+        }
+    }
 }
 
 /// Derive one epoch sample, publish it as `timing.status`, and mirror the
@@ -87,8 +110,17 @@ pub fn publish_once<W: WallClockSampler, Q: NtpQuery>(
 ) -> EpochStatus {
     let status = sampler.sample_once();
     // One anchor, every surface: the HLS segmenter reads this cell at each
-    // segment close (off the hot path), so PDT and the WS epoch agree.
-    hls_epoch.set(status.epoch);
+    // segment close (off the hot path), so PDT and the WS epoch agree. A
+    // STEPPED re-anchor (the sampler's gross-discontinuity case) goes through
+    // the stepped seam — it bumps the cell's generation so the HLS driver
+    // marks the next closed segment `EXT-X-DISCONTINUITY` (wall-clock-sync
+    // §3); anchor/hold/slew keep the generation (one continuous map).
+    match status.update {
+        multiview_engine::epoch::EpochUpdate::Stepped { .. } => {
+            hls_epoch.set_stepped(status.epoch);
+        }
+        _ => hls_epoch.set(status.epoch),
+    }
     // Non-blocking drop-oldest publish (invariant #10): a slow/absent WS
     // client lags; the publish itself can never wait.
     let _seq = publisher.publish_event(Event::TimingStatus(TimingStatus {
@@ -148,7 +180,7 @@ async fn run(
                     a.seed_nanos(),
                     SystemWallSampler::new(a.time()),
                     SysNtpQuery::new(),
-                    EpochSamplerConfig::default(),
+                    options.epoch_sampler_config(),
                 );
                 if let Some(handle) = ptp.status_handle() {
                     s = s.with_ptp(handle);
@@ -247,8 +279,10 @@ impl PtpLeg {
     }
 }
 
-/// Without the `ptp` feature no PHC can be sampled: a configured `ptp_phc` is
-/// warned about once and ignored (the epoch rides the system clock).
+/// Without the `ptp` feature no PHC can be sampled. The `multiview` binary
+/// never reaches this with a configured `ptp_phc` — the startup gate
+/// ([`crate::timing_gate`]) fails the run first — so the warn-and-ride-the-
+/// system-clock path below is defence-in-depth for library callers only.
 #[cfg(not(feature = "ptp"))]
 struct PtpLeg;
 

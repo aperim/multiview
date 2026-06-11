@@ -77,7 +77,7 @@ pub use schema::{
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
-pub use timing::{TimingConfig, MAX_LINK_OFFSET_MS};
+pub use timing::{TimingConfig, MAX_LINK_OFFSET_MS, MAX_PTP_UTC_OFFSET_S};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
 /// The management control-plane listener.

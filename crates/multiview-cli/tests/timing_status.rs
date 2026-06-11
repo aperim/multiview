@@ -271,6 +271,7 @@ async fn the_spawned_task_publishes_from_the_anchor_slot() {
             stream_id: "main".to_owned(),
             link_offset_ns: 150_000_000,
             ptp_phc: None,
+            ptp_utc_offset_ns: multiview_engine::epoch::DEFAULT_PTP_UTC_OFFSET_NS,
         },
         stop.clone(),
     );

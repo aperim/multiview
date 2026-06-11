@@ -48,11 +48,32 @@
 //!
 //! The wall estimate follows the pinned reference ladder: **PTP while
 //! disciplined** (Locked or Holdover — the servo's `local − master` offset is
-//! subtracted from the system reading), else the **system clock** (read
-//! directly: chrony/NTP already disciplines `CLOCK_REALTIME`; the kernel
-//! discipline state is classified honestly via [`sysref`](crate::sysref)).
-//! The published [`ClockSource`]/[`ClockQuality`] labels say which leg is
-//! live — never an over-claim.
+//! subtracted from the system reading, then the timescale conversion below),
+//! else the **system clock** (read directly: chrony/NTP already disciplines
+//! `CLOCK_REALTIME`; the kernel discipline state is classified honestly via
+//! [`sysref`](crate::sysref)). The published [`ClockSource`]/[`ClockQuality`]
+//! labels say which leg is live — never an over-claim.
+//!
+//! ## Timescale: the published epoch is **UTC**, the PHC carries **TAI**
+//!
+//! The epoch's wall leg is defined as **UTC nanoseconds past the Unix
+//! epoch** — it is stamped into HLS `EXT-X-PROGRAM-DATE-TIME` (RFC 8216:
+//! UTC, `Z`) and the RTCP SR NTP word (the UTC-aligned NTP era). Under the
+//! standard linuxptp deployment ADR-T012 names (ptp4l on the ST 2059-2
+//! profile + phc2sys) the PHC carries **PTP time = TAI**, so the servo's
+//! steady-state `local − master` offset is ≈ **−37 s** (UTC − TAI) plus the
+//! servo residual. Subtracting the raw offset alone would publish TAI into
+//! UTC-defined surfaces; the PTP leg therefore additionally subtracts the
+//! configured TAI−UTC offset ([`EpochSamplerConfig::ptp_utc_offset_ns`],
+//! default 37 s — `[timing] ptp_utc_offset_s`, sourced from ptp4l's
+//! `currentUtcOffset` in deployment) so the published epoch is **always
+//! UTC**, and a ptp↔system reference transition does not step the epoch by
+//! the TAI−UTC difference. A post-conversion residual of
+//! [`UTC_RESIDUAL_GUARD_NS`] or more (a misconfigured offset, or a PHC on an
+//! unexpected timescale) trips a sanity guard: the bogus PTP estimate is
+//! **never published** — the sampler degrades to the system leg with a
+//! non-locked quality and warns. All conversion math is exact integer
+//! (invariant #3).
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +95,18 @@ use crate::runtime::EngineRuntime;
 /// this rate `wall_at`/`media_at` round-trip exactly, and any container
 /// timebase rescales into it exactly.
 pub const EPOCH_RATE: Rational = Rational::new(1_000_000_000, 1);
+
+/// The default PTP-leg timescale conversion: the current TAI−UTC offset
+/// (37 s since 2017-01-01) in integer nanoseconds. In deployment this is
+/// `[timing] ptp_utc_offset_s`, confirmed against ptp4l's `currentUtcOffset`.
+pub const DEFAULT_PTP_UTC_OFFSET_NS: i64 = 37_000_000_000;
+
+/// The post-conversion residual sanity bound (30 s, integer ns): if the
+/// UTC-converted PTP estimate still disagrees with the system clock by this
+/// much, the timescale configuration is wrong (e.g. the 37 s default applied
+/// to a PHC that carries UTC, or `0` applied to a TAI PHC) — the estimate is
+/// never published; the sampler degrades to the system leg and warns.
+pub const UTC_RESIDUAL_GUARD_NS: i64 = 30_000_000_000;
 
 /// Tuning for the [`EpochTracker`] re-anchor policy. All thresholds are
 /// integer nanoseconds (invariant #3).
@@ -328,16 +361,44 @@ impl std::fmt::Debug for EpochAnchor {
     }
 }
 
-/// Tuning for the [`EpochSampler`]: the re-anchor policy plus the system
-/// discipline classifier configuration. The derived `Default` composes each
-/// field's own default (`EpochPolicy::new_default` / `SystemRefConfig::new_default`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Tuning for the [`EpochSampler`]: the re-anchor policy, the system
+/// discipline classifier configuration, and the PTP timescale conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochSamplerConfig {
     /// The hold/slew/step re-anchor policy.
     pub policy: EpochPolicy,
-    /// The system NTP/chrony discipline classifier tuning (incl. the honest
-    /// assumed-when-unavailable state).
+    /// The system NTP/chrony discipline classifier tuning (incl. the
+    /// assumed-when-unavailable state). The epoch default is the
+    /// **conservative** [`SystemRefConfig::new_conservative`]: with no kernel
+    /// reading available the machine-readable feed reports `freerun`, never
+    /// an assumed lock (the on-screen badge keeps its own deployment-
+    /// assumption default — this field affects only the epoch path).
     pub sys: SystemRefConfig,
+    /// The PTP-leg timescale conversion (TAI−UTC, integer ns), subtracted
+    /// from the PHC-derived estimate so the published epoch is always UTC —
+    /// see the module-level *Timescale* section. Default
+    /// [`DEFAULT_PTP_UTC_OFFSET_NS`] (37 s); `0` for a PHC that carries UTC.
+    pub ptp_utc_offset_ns: i64,
+}
+
+impl EpochSamplerConfig {
+    /// The epoch-path defaults: the standard re-anchor policy, the
+    /// conservative (never-assume-locked) system classifier, and the current
+    /// TAI−UTC timescale conversion.
+    #[must_use]
+    pub const fn new_default() -> Self {
+        Self {
+            policy: EpochPolicy::new_default(),
+            sys: SystemRefConfig::new_conservative(),
+            ptp_utc_offset_ns: DEFAULT_PTP_UTC_OFFSET_NS,
+        }
+    }
+}
+
+impl Default for EpochSamplerConfig {
+    fn default() -> Self {
+        Self::new_default()
+    }
 }
 
 /// One published epoch snapshot: the map plus the honest source/quality
@@ -393,6 +454,12 @@ pub struct EpochSampler<W: WallClockSampler, Q: NtpQuery> {
     ptp: Option<LatestState<ReferenceStatus>>,
     selector: ReferenceSelector,
     tracker: EpochTracker,
+    /// The PTP-leg TAI−UTC timescale conversion (integer ns) — see the
+    /// module-level *Timescale* section.
+    ptp_utc_offset_ns: i64,
+    /// Whether the UTC-residual sanity guard is currently tripped (latched so
+    /// the warning fires once per excursion, not once per ~1 Hz sample).
+    utc_guard_tripped: bool,
 }
 
 impl<W: WallClockSampler, Q: NtpQuery> EpochSampler<W, Q> {
@@ -408,6 +475,8 @@ impl<W: WallClockSampler, Q: NtpQuery> EpochSampler<W, Q> {
             ptp: None,
             selector: ReferenceSelector,
             tracker: EpochTracker::new(config.policy),
+            ptp_utc_offset_ns: config.ptp_utc_offset_ns,
+            utc_guard_tripped: false,
         }
     }
 
@@ -448,12 +517,54 @@ impl<W: WallClockSampler, Q: NtpQuery> EpochSampler<W, Q> {
 
         // The disciplined wall estimate at the sample instant: the PTP leg
         // subtracts the servo's `local − master` offset (master = local −
-        // offset); the system leg reads CLOCK_REALTIME directly — chrony/NTP
-        // already disciplines it, and the kernel residual is what the
-        // discipline loop is converging, not a correction to re-apply.
-        let wall_disciplined_ns = match selected.source {
-            RefSource::Ptp => sample.wall_ns.saturating_sub(selected.offset_ns),
-            _ => sample.wall_ns,
+        // offset, the PHC timescale = TAI) and then the configured TAI−UTC
+        // offset so the published epoch is UTC (module *Timescale* section);
+        // the system leg reads CLOCK_REALTIME directly — chrony/NTP already
+        // disciplines it, and the kernel residual is what the discipline loop
+        // is converging, not a correction to re-apply.
+        let (wall_disciplined_ns, source, state) = match selected.source {
+            RefSource::Ptp => {
+                let utc_estimate_ns = sample
+                    .wall_ns
+                    .saturating_sub(selected.offset_ns)
+                    .saturating_sub(self.ptp_utc_offset_ns);
+                // Post-conversion sanity guard: a healthy conversion leaves
+                // the PTP estimate within servo-residual distance of the
+                // (UTC) system clock; ≥30 s means the timescale config is
+                // wrong — never publish that estimate.
+                let residual_ns = utc_estimate_ns.saturating_sub(sample.wall_ns);
+                if residual_ns.saturating_abs() >= UTC_RESIDUAL_GUARD_NS {
+                    if !self.utc_guard_tripped {
+                        self.utc_guard_tripped = true;
+                        tracing::warn!(
+                            residual_ns,
+                            ptp_utc_offset_ns = self.ptp_utc_offset_ns,
+                            "epoch: the UTC-converted PTP estimate disagrees with the system \
+                             clock by >=30 s — [timing] ptp_utc_offset_s is misconfigured for \
+                             this PHC's timescale (check ptp4l currentUtcOffset); publishing \
+                             the system-clock epoch with a degraded quality instead"
+                        );
+                    }
+                    // Degrade to the system leg; never claim Locked while the
+                    // deployment's timescale configuration is demonstrably
+                    // wrong (cap at Holdover; weaker states stay as they are).
+                    let capped = match sys_state {
+                        LockState::Locked => LockState::Holdover,
+                        other => other,
+                    };
+                    (sample.wall_ns, RefSource::System, capped)
+                } else {
+                    if self.utc_guard_tripped {
+                        self.utc_guard_tripped = false;
+                        tracing::info!(
+                            "epoch: the PTP timescale residual is back in bounds; \
+                             the PTP leg resumes disciplining the published epoch"
+                        );
+                    }
+                    (utc_estimate_ns, RefSource::Ptp, selected.state)
+                }
+            }
+            other => (sample.wall_ns, other, selected.state),
         };
         // wall@tick0 = wall_now − (mono_mid − seed); media anchor 0 = pts 0.
         let elapsed_since_seed = sample.mono_mid_ns().saturating_sub(self.seed_nanos);
@@ -467,8 +578,8 @@ impl<W: WallClockSampler, Q: NtpQuery> EpochSampler<W, Q> {
         let epoch = self.tracker.current().unwrap_or(candidate);
         EpochStatus {
             epoch,
-            source: clock_source_of(selected.source),
-            quality: clock_quality_of(selected.state),
+            source: clock_source_of(source),
+            quality: clock_quality_of(state),
             update,
         }
     }

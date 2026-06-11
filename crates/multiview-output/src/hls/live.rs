@@ -56,6 +56,13 @@ pub struct LivePlaylist {
     /// map the control WS publishes and RTCP SR stamps. `None` (or an empty
     /// cell) ⇒ no PDT tags (behaviour identical to before this field).
     epoch: Option<SharedEpoch>,
+    /// The epoch generation of the last segment close that saw an epoch
+    /// (`None` before the first). A **changed** generation means the sampler
+    /// stepped the map (a Class-2-like re-anchor, wall-clock-sync §3): the
+    /// first segment closed under the new map is marked
+    /// `EXT-X-DISCONTINUITY`. Hold/slew updates keep the generation, so they
+    /// mark nothing.
+    epoch_generation: Option<u64>,
 }
 
 impl LivePlaylist {
@@ -72,6 +79,7 @@ impl LivePlaylist {
             playlist,
             seg_paths: VecDeque::new(),
             epoch: None,
+            epoch_generation: None,
         }
     }
 
@@ -102,7 +110,13 @@ impl LivePlaylist {
     /// When an epoch source is attached ([`set_epoch_source`]) and carries an
     /// epoch, the segment is stamped `EXT-X-PROGRAM-DATE-TIME:
     /// epoch.wall_at(start_pts_ns)` — exact integer affine math, the same
-    /// anchor every other ADR-M010 surface uses.
+    /// anchor every other ADR-M010 surface uses. When the epoch **generation**
+    /// changed since the previous close (the sampler published a *stepped*
+    /// re-anchor via [`SharedEpoch::set_stepped`]), this first segment under
+    /// the new map is additionally marked `EXT-X-DISCONTINUITY`
+    /// (wall-clock-sync §3: a step follows the same Class-2 discontinuity
+    /// rules as a `D` change); hold/slew updates keep the generation and mark
+    /// nothing.
     ///
     /// The published manifest carries **no** `#EXT-X-ENDLIST` (the run is live);
     /// [`finalize`](Self::finalize) adds it once at end-of-run.
@@ -125,8 +139,23 @@ impl LivePlaylist {
         // PDT from the shared epoch (ADR-M010): segment first-sample wall time
         // = wall_at(first PTS). An unset source or a still-empty cell stamps
         // nothing — never a fabricated wall time.
-        if let Some(epoch) = self.epoch.as_ref().and_then(SharedEpoch::get) {
+        if let Some((epoch, generation)) = self
+            .epoch
+            .as_ref()
+            .and_then(SharedEpoch::get_with_generation)
+        {
             segment = segment.with_program_date_time_ns(epoch.wall_at(start_pts_ns));
+            // The step seam (wall-clock-sync §3): a generation bump since the
+            // last close means the sampler STEPPED the map — mark exactly this
+            // first segment closed under the new map discontinuous. The first
+            // epoch ever seen (anchor) is not a step.
+            if self
+                .epoch_generation
+                .is_some_and(|previous| previous != generation)
+            {
+                segment.discontinuity = true;
+            }
+            self.epoch_generation = Some(generation);
         }
         // Append to the windowed playlist; `push_segment` auto-evicts the oldest
         // beyond the window and advances EXT-X-MEDIA-SEQUENCE / -DISCONTINUITY-

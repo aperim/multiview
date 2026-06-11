@@ -354,8 +354,13 @@ fn sampler_converts_a_tai_phc_to_a_utc_epoch_by_default() {
     let handle: LatestState<ReferenceStatus> = LatestState::new();
     // local(UTC) − master(TAI) = −37 s + 250 ns servo residual.
     handle.publish(ptp_status(LockState::Locked, -TAI_UTC_NS + 250));
-    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), EpochSamplerConfig::default())
-        .with_ptp(handle);
+    let mut s = EpochSampler::new(
+        2_000_000_000,
+        wall,
+        FakeNtp(None),
+        EpochSamplerConfig::default(),
+    )
+    .with_ptp(handle);
     let status = s.sample_once();
     assert_eq!(status.source, ClockSource::Ptp);
     assert_eq!(status.quality, ClockQuality::Locked);
@@ -379,8 +384,13 @@ fn a_ptp_to_system_reference_transition_does_not_step_the_epoch() {
     };
     let handle: LatestState<ReferenceStatus> = LatestState::new();
     handle.publish(ptp_status(LockState::Locked, -TAI_UTC_NS));
-    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), EpochSamplerConfig::default())
-        .with_ptp(handle.clone());
+    let mut s = EpochSampler::new(
+        2_000_000_000,
+        wall,
+        FakeNtp(None),
+        EpochSamplerConfig::default(),
+    )
+    .with_ptp(handle.clone());
     let first = s.sample_once();
     assert_eq!(first.source, ClockSource::Ptp);
 
@@ -421,8 +431,13 @@ fn a_misconfigured_utc_offset_degrades_and_never_publishes_the_bogus_epoch() {
     };
     let handle: LatestState<ReferenceStatus> = LatestState::new();
     handle.publish(ptp_status(LockState::Locked, 250));
-    let mut s = EpochSampler::new(2_000_000_000, wall, FakeNtp(None), EpochSamplerConfig::default())
-        .with_ptp(handle);
+    let mut s = EpochSampler::new(
+        2_000_000_000,
+        wall,
+        FakeNtp(None),
+        EpochSamplerConfig::default(),
+    )
+    .with_ptp(handle);
     let status = s.sample_once();
     assert_eq!(
         status.source,
@@ -701,21 +716,23 @@ fn epoch_churn_cannot_stall_or_skew_a_paced_engine_runtime() {
             EpochSamplerConfig::default(),
         )
         .with_ptp(handle.clone());
-        let mut samples: u64 = 0;
+        let mut iterations: u64 = 0;
         while !churn_stop.load(Ordering::Acquire) {
-            let state = match samples % 4 {
+            let state = match iterations % 4 {
                 0 => LockState::Locked,
                 1 => LockState::Holdover,
                 2 => LockState::Freerun,
                 _ => LockState::Acquiring,
             };
-            let off = i64::try_from(samples).unwrap_or(0).saturating_mul(1_000_003);
+            let off = i64::try_from(iterations)
+                .unwrap_or(0)
+                .saturating_mul(1_000_003);
             handle.publish(ptp_status(state, off));
             let _ = sampler.sample_once();
-            samples = samples.saturating_add(1);
+            iterations = iterations.saturating_add(1);
             std::thread::yield_now();
         }
-        samples
+        iterations
     });
 
     // ---- Drive the runtime in the background; pace it tick-by-tick here.
@@ -741,9 +758,8 @@ fn epoch_churn_cannot_stall_or_skew_a_paced_engine_runtime() {
             .await
     });
 
-    let pts_at = |i: u64| -> i64 {
-        seed + oracle_pts_ns(i64::try_from(i).expect("tick fits"), cadence)
-    };
+    let pts_at =
+        |i: u64| -> i64 { seed + oracle_pts_ns(i64::try_from(i).expect("tick fits"), cadence) };
     for i in 0..TICKS {
         // Before tick i's deadline the runtime must be parked at exactly i
         // emitted ticks — it paces to the clock, never runs ahead, no matter
@@ -784,9 +800,9 @@ fn epoch_churn_cannot_stall_or_skew_a_paced_engine_runtime() {
     assert_eq!(outcome.stop, multiview_engine::RunStop::Completed);
 
     stop_churn.store(true, Ordering::Release);
-    let samples = churn.join().expect("churn thread");
+    let iterations = churn.join().expect("churn thread");
     assert!(
-        samples > 0,
+        iterations > 0,
         "the churn thread must actually have sampled (the chaos is real)"
     );
 }

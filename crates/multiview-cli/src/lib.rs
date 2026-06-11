@@ -51,6 +51,12 @@ pub mod preview;
 pub mod run;
 pub mod system_metrics;
 
+/// Build-capability gating for `[timing].ptp_phc` (DEV-C1 / ADR-M010): a
+/// configured PHC device must FAIL a non-`ptp` build at startup with a clear
+/// error — never be silently downgraded to the system clock (the DEV-B1
+/// fail-fast precedent). Always compiled, so the default build tests the
+/// rejection path and a `ptp` build tests the acceptance path.
+pub mod timing_gate;
 /// The ~1 Hz outbound presentation-epoch publisher (DEV-C1 / ADR-M010): one
 /// `WallClockRef` per program on the control WS (`timing.status`, conflated)
 /// plus the shared HLS-PDT cell, derived off the hot path from the run's

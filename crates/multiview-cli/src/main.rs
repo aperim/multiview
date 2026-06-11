@@ -98,6 +98,13 @@ fn run_validate(args: &ValidateArgs) -> anyhow::Result<ExitCode> {
 async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let config = load_validated(&args.config)?;
 
+    // A configured `[timing].ptp_phc` in a build without the `ptp` feature is
+    // a capability this binary cannot provide: fail the run at startup with a
+    // clear error (the DEV-B1 display-output fail-fast precedent) — never
+    // silently ride the system clock while the config asks for a PHC.
+    multiview_cli::timing_gate::ensure_ptp_phc_supported(config.timing.as_ref())
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+
     if args.software {
         return run_software(&config, &args).await;
     }
@@ -323,6 +330,7 @@ async fn run_pipeline_until_ctrl_c(
             stream_id: multiview_config::ProgramId::MAIN.to_owned(),
             link_offset_ns: timing_cfg.link_offset_ns(),
             ptp_phc: timing_cfg.ptp_phc.clone(),
+            ptp_utc_offset_ns: timing_cfg.ptp_utc_offset_ns(),
         },
         stop.clone(),
     );
@@ -585,6 +593,7 @@ async fn run_software_until_ctrl_c(
             stream_id: multiview_config::ProgramId::MAIN.to_owned(),
             link_offset_ns: timing_cfg.link_offset_ns(),
             ptp_phc: timing_cfg.ptp_phc.clone(),
+            ptp_utc_offset_ns: timing_cfg.ptp_utc_offset_ns(),
         },
         stop.clone(),
     );

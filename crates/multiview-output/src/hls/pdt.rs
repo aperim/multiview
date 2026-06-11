@@ -8,6 +8,17 @@
 //! days-to-`{y,m,d}` algorithm over the proleptic Gregorian calendar
 //! (era/year-of-era/day-of-year integer arithmetic), exact for the whole i64
 //! nanosecond range (1677–2262).
+//!
+//! ## Leap seconds
+//!
+//! The input is **Unix time**, which is leap-second-naive by definition
+//! (every day is exactly 86 400 s; a positive leap second is absorbed by the
+//! clock discipline smearing or stepping, never rendered as `:60`). This
+//! formatter inherits that naivety: it can never emit `23:59:60`, and around
+//! a leap event the rendered instants are only as accurate as the host's
+//! handling of it (chrony's slew/smear, or the kernel step). That matches
+//! what HLS consumers expect — `EXT-X-PROGRAM-DATE-TIME` carriers in the wild
+//! are POSIX-clock-derived — and no leap-second table is maintained here.
 
 /// Nanoseconds per civil day.
 const NS_PER_DAY: i64 = 86_400_000_000_000;
