@@ -19,6 +19,12 @@ import {
   ScrollText,
   Settings,
   Volume2,
+  KeyRound,
+  Database,
+  Network,
+  UserCircle,
+  ListChecks,
+  LifeBuoy,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -48,7 +54,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { path: "/probes", label: <Trans>Probes</Trans>, Icon: ShieldAlert },
   { path: "/alarms", label: <Trans>Alarms</Trans>, Icon: Bell },
   { path: "/system", label: <Trans>System</Trans>, Icon: Activity },
+  { path: "/system/actions", label: <Trans>System actions</Trans>, Icon: ListChecks },
   { path: "/audit", label: <Trans>Audit</Trans>, Icon: ScrollText },
   { path: "/help", label: <Trans>Docs</Trans>, Icon: BookOpen },
   { path: "/settings", label: <Trans>Settings</Trans>, Icon: Settings },
+  // Account-side (Conspect) screens.
+  { path: "/settings/licence", label: <Trans>Licence</Trans>, Icon: KeyRound },
+  { path: "/settings/account", label: <Trans>Account</Trans>, Icon: UserCircle },
+  { path: "/settings/data", label: <Trans>Data</Trans>, Icon: Database },
+  { path: "/settings/mesh", label: <Trans>Mesh</Trans>, Icon: Network },
+  { path: "/help/support", label: <Trans>Support</Trans>, Icon: LifeBuoy },
 ];

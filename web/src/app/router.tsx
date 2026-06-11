@@ -20,6 +20,13 @@ import { SyncGroupsPage } from "../pages/SyncGroupsPage";
 import { AuditPage } from "../pages/AuditPage";
 import { SystemPage } from "../pages/SystemPage";
 import { SettingsPage } from "../pages/SettingsPage";
+import { WelcomePage } from "../pages/WelcomePage";
+import { LicencePage } from "../pages/LicencePage";
+import { DataPage } from "../pages/DataPage";
+import { MeshPage } from "../pages/MeshPage";
+import { AccountPage } from "../pages/AccountPage";
+import { SystemActionsPage } from "../pages/SystemActionsPage";
+import { SupportPage } from "../pages/SupportPage";
 import {
   OutputsPage,
   OverlaysPage,
@@ -60,8 +67,22 @@ export const router = createBrowserRouter([
       { path: "salvos", element: <SalvosPage /> },
       { path: "alarms", element: <AlarmsPage /> },
       { path: "system", element: <SystemPage /> },
+      { path: "system/actions", element: <SystemActionsPage /> },
       { path: "audit", element: <AuditPage /> },
       { path: "settings", element: <SettingsPage /> },
+      // Account-side (Conspect) settings screens.
+      { path: "welcome", element: <WelcomePage /> },
+      { path: "settings/licence", element: <LicencePage /> },
+      { path: "settings/data", element: <DataPage /> },
+      { path: "settings/mesh", element: <MeshPage /> },
+      { path: "settings/account", element: <AccountPage /> },
+      // The account-side support surface. It lives at /help/support but is a
+      // SIBLING of the /help docs layout — it renders in the plain app chrome
+      // (its own PageHeader), not the docs ToC/search/breadcrumb shell, and it
+      // is deliberately NOT a docs-registry page (the registry indexes concept
+      // articles only). Keeping it out of the /help layout's children also
+      // preserves the docs registry ↔ router contract (registry.test.ts).
+      { path: "help/support", element: <SupportPage /> },
       // In-app documentation under /help. (/docs is the backend Scalar API
       // playground, so the SPA guide deliberately avoids that path.)
       //
