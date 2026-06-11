@@ -470,3 +470,23 @@ fn lowering_every_ingest_kind_maps_to_the_matching_source_kind() {
         lowered.validate().expect("lowered config validates");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The shipped example stays honest
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_shipped_display_node_example_loads_validates_and_lowers() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("display-node.toml");
+    let text = std::fs::read_to_string(&path).expect("examples/display-node.toml exists");
+    let cfg = NodeConfig::load_from_toml(&text).expect("the shipped example parses");
+    cfg.validate().expect("the shipped example validates");
+    let lowered = cfg
+        .to_multiview_config()
+        .expect("the shipped example lowers");
+    lowered.validate().expect("the lowered example validates");
+}

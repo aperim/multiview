@@ -1,0 +1,54 @@
+# Multiview display node (DEV-B5 / ADR-0045) — `multiview node` configuration.
+#
+# A display node is a normal Multiview run with one supervised ingest and
+# local DRM/KMS display output(s): point it at a program output of a central
+# Multiview and it behaves like a hardware decoder built from commodity
+# hardware — the unchanged ingest pacer/jitter/reconnect stack and the
+# framestore Live→Stale→Reconnecting→NoSignal ladder mean a broken feed rides
+# last-good and then the local slate, never garbage, never black-on-power.
+#
+#   multiview node examples/display-node.toml
+#
+# Needs a binary built with `--features display-kms,ffmpeg` (add a hardware
+# decode preset, e.g. `linux-vaapi` or `nvidia`, for deployment).
+
+# One supervised ingest: rtsp | srt | hls | ts. RTSP/SRT preferred (lowest
+# latency); HLS accepted (seconds-class latency). IPv6 literals bracketed.
+[ingest]
+kind = "rtsp"
+url = "rtsp://[2001:db8::10]:8554/program"
+
+# One or more display heads. `connector = "auto"` (first connected) is only
+# accepted on a single-head node; name connectors explicitly otherwise.
+[[displays]]
+connector = "HDMI-A-1"
+# Pin an EDID-advertised timing (refresh is an exact rational, never a float):
+# mode = { width = 1920, height = 1080, refresh = "60000/1001" }
+# EDID-less chain (forced CVT-RB timing; such heads have no ELD → no audio):
+# forced_mode = { width = 1920, height = 1080, refresh = "60/1" }
+audio = true
+
+# What the head shows once the tile ladder bottoms out: last-good first, then
+# this slate. "bars" (default) | "no_signal" | "black".
+[on_loss]
+slate = "no_signal"
+
+# Optional explicit composite canvas. Omitted ⇒ derived from the first head's
+# mode/forced_mode, else 1920x1080 @ 60/1.
+# [canvas]
+# width = 1920
+# height = 1080
+# fps = "50/1"
+
+[timing]
+# Fixed per-deployment receiver-side delay (ms) for the DEV-C2 epoch frame
+# chooser — uniformity across nodes is what matters, not smallness. Recorded
+# and validated today; until DEV-C2 lands, presentation rides the display
+# sink's repeat/drop reconciliation and this value does not alter it.
+link_offset_ms = 0
+
+[hotplug]
+# force_probe polling cadence (seconds) used ONLY where kernel netlink
+# uevents are unavailable (rootless containers). Bare metal and rootful
+# containers are event-driven and ignore this.
+poll_secs = 5
