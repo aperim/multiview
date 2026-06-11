@@ -202,6 +202,56 @@ async fn run_pipeline(
 /// `active.toml` write per window (control-plane file I/O only; inv #10).
 const RUNNING_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Raise `stop` when the process receives Ctrl-C (SIGINT) or — on Unix —
+/// SIGTERM (review m2: `docker stop` and systemd send SIGTERM, and the
+/// graceful teardown — the final `active.toml` persist included — must run
+/// for both). The watcher task cannot back-pressure the engine (inv #10);
+/// the run loop observes `stop` once per tick and finishes the current frame
+/// cleanly.
+fn spawn_stop_on_signal(stop: StopSignal) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    tokio::select! {
+                        result = tokio::signal::ctrl_c() => {
+                            if result.is_ok() {
+                                tracing::info!("Ctrl-C received; stopping after the current frame");
+                                stop.stop();
+                            }
+                        }
+                        _ = term.recv() => {
+                            tracing::info!("SIGTERM received; stopping after the current frame");
+                            stop.stop();
+                        }
+                    }
+                }
+                Err(error) => {
+                    // SIGTERM registration failing is exotic (resource limits);
+                    // degrade to Ctrl-C-only rather than dying silent.
+                    tracing::warn!(
+                        error = %error,
+                        "SIGTERM handler unavailable; stopping on Ctrl-C only"
+                    );
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        tracing::info!("Ctrl-C received; stopping after the current frame");
+                        stop.stop();
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::info!("Ctrl-C received; stopping after the current frame");
+                stop.stop();
+            }
+        }
+    })
+}
+
 /// The run's handle on the debounced ADR-W022 Running persister: the spawned
 /// task plus the served [`multiview_control::AppState`] it persists from.
 struct RunningPersist {
@@ -411,13 +461,9 @@ async fn run_pipeline_until_ctrl_c(
         )
     };
 
-    let stop_for_signal = stop.clone();
-    let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop_for_signal.stop();
-        }
-    });
+    // Review m2: Ctrl-C AND (on Unix) SIGTERM both run the graceful teardown,
+    // so `docker stop`/systemd shutdowns capture the final `active.toml` too.
+    let signal = spawn_stop_on_signal(stop.clone());
 
     // Sample CPU/host-memory/per-GPU load at ~1.3 Hz and PUSH `Event::SystemMetrics`
     // onto the SAME outbound publisher the control plane forwards to the WebUI
@@ -678,13 +724,9 @@ async fn run_software_until_ctrl_c(
         )
     };
 
-    let stop_for_signal = stop.clone();
-    let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop_for_signal.stop();
-        }
-    });
+    // Review m2: Ctrl-C AND (on Unix) SIGTERM both run the graceful teardown,
+    // so `docker stop`/systemd shutdowns capture the final `active.toml` too.
+    let signal = spawn_stop_on_signal(stop.clone());
 
     // The off-hot-path system-metrics poller: samples whole-system CPU + host
     // memory + per-GPU load at ~1.3 Hz and PUSHES `Event::SystemMetrics` onto the
