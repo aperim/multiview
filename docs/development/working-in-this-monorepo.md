@@ -95,6 +95,23 @@ Context is the fundamental constraint in a 16-crate workspace. Treat it as a bud
   adherence stays high. The per-crate files are intentionally a few dozen lines each.
   ([why](https://code.claude.com/docs/en/memory#write-effective-instructions))
 
+## Build-dir hygiene — never fill /tmp
+
+Per-lane build artifacts have filled `/tmp` with terabytes. The rules, for every agent and
+every parallel lane:
+
+- **Do not set `CARGO_TARGET_DIR` to a `/tmp` path.** Use the worktree-local default `target/`
+  (i.e. don't override it at all). Each worktree's `target/` is already isolated from every
+  other lane — the same isolation a `/tmp` dir gave — and it is deleted automatically with the
+  worktree.
+- **Remove your worktree when the lane is done** (the PR is pushed; the branch lives on the
+  remote): `git -C /workspaces/mosaic worktree remove --force <path>`. Orphaned worktrees and
+  their `target/` dirs are the debt.
+- If a `/tmp` scratch dir is genuinely unavoidable (non-cargo tooling), `rm -rf` it before
+  finishing.
+- Sweep rule: any `/tmp/*-target*` directory not written to in the last ~3 hours is orphaned —
+  delete it (check mtimes first; never delete a dir an active lane is writing).
+
 ### Use subagents for fan-out
 
 The biggest context win in this repo. Spawn a subagent when a side task would flood your main
