@@ -269,12 +269,17 @@ pub fn persist_loaded(model: &BootModel) -> Result<(), String> {
 /// round-trips `MultiviewConfig::validate` — pin (d)), render canonical TOML,
 /// and write it atomically. A run without a boot model persists nothing.
 ///
+/// The composition reads read-mostly stores in place; the file I/O
+/// (`create_dir_all` + the fsync'd atomic write) rides
+/// [`tokio::task::spawn_blocking`] so it never parks the control-plane
+/// reactor (review m1).
+///
 /// # Errors
 ///
 /// Any composition/validation/render fault as the export route would surface
 /// it, or [`ControlError::Repository`] for an I/O failure. Callers on the
 /// persist task treat every error as fail-soft (warn + skip).
-pub fn persist_running_now(state: &AppState) -> ControlResult<()> {
+pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
     let Some(model) = state.boot_model.as_ref() else {
         return Ok(());
     };
@@ -283,12 +288,15 @@ pub fn persist_running_now(state: &AppState) -> ControlResult<()> {
         .to_toml()
         .map_err(|e| ControlError::Repository(format!("TOML render failed: {e}")))?;
     let dir = model.state_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        ControlError::Repository(format!("creating the state dir {}: {e}", dir.display()))
-    })?;
     let active = model.active_path();
-    write_atomic(&active, &toml)
-        .map_err(|e| ControlError::Repository(format!("writing {}: {e}", active.display())))?;
+    let write_target = active.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        write_atomic(&write_target, &toml)
+    })
+    .await
+    .map_err(|e| ControlError::Repository(format!("the persist write task failed: {e}")))?
+    .map_err(|e| ControlError::Repository(format!("writing {}: {e}", active.display())))?;
     model.record_active_written(state.ack_now().as_nanos().div_euclid(1_000_000));
     Ok(())
 }
@@ -307,7 +315,7 @@ pub fn persist_running_now(state: &AppState) -> ControlResult<()> {
 #[must_use]
 pub fn spawn_running_persist(state: AppState, debounce: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = persist_running_now(&state) {
+        if let Err(error) = persist_running_now(&state).await {
             tracing::warn!(
                 error = %error,
                 "running-state persist: the startup write was skipped (fail-soft)"
@@ -316,7 +324,7 @@ pub fn spawn_running_persist(state: AppState, debounce: Duration) -> tokio::task
         loop {
             state.running_changed.notified().await;
             tokio::time::sleep(debounce).await;
-            if let Err(error) = persist_running_now(&state) {
+            if let Err(error) = persist_running_now(&state).await {
                 tracing::warn!(
                     error = %error,
                     "running-state persist: this write was skipped (fail-soft)"

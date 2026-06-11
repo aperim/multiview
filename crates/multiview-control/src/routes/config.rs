@@ -490,7 +490,7 @@ pub(crate) async fn boot_model_status(
     // The boot FILE may have been hand-edited (or broken) since start; an
     // unreadable/invalid file is reported, never an error — the indicator
     // stays available.
-    let (file_divergence, boot_file_error) = match read_validated_config(model.boot_path()) {
+    let (file_divergence, boot_file_error) = match read_validated_config(model.boot_path()).await {
         Ok(boot_file) => {
             let diff = multiview_config::ConfigDiff::between(&running, &boot_file);
             (Some(diverged_sections(&diff)), None)
@@ -512,12 +512,15 @@ pub(crate) async fn boot_model_status(
 }
 
 /// Read + parse + validate a config file, with a human-readable reason on any
-/// failure (the boot-model status comparison path).
-fn read_validated_config(
+/// failure (the boot-model status comparison path). The read rides
+/// `tokio::fs` so the route handler never parks the control-plane reactor on
+/// file I/O (review m1); parse + validate are CPU-cheap and run in place.
+async fn read_validated_config(
     path: &std::path::Path,
 ) -> Result<multiview_config::MultiviewConfig, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("the file cannot be read: {e}"))?;
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("the file cannot be read: {e}"))?;
     let config = multiview_config::MultiviewConfig::load_from_toml(&text)
         .map_err(|e| format!("the document does not parse: {e}"))?;
     config

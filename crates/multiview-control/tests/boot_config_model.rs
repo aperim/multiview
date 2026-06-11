@@ -718,7 +718,7 @@ async fn active_toml_round_trips_validate() {
     let r = rig(BOOT_DOC);
     recolor_in_a(&r, "#b0b0b0").await;
 
-    persist_running_now(&r.state).expect("persist Running");
+    persist_running_now(&r.state).await.expect("persist Running");
 
     let active_path = r
         .state

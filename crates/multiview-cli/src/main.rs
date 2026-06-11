@@ -265,9 +265,9 @@ impl RunningPersist {
     /// Stop the debounced persister at teardown and capture changes younger
     /// than the debounce with one final best-effort persist (fail-soft: a
     /// failure is warned and the shutdown continues).
-    fn finish(self) {
+    async fn finish(self) {
         self.task.abort();
-        if let Err(error) = multiview_control::boot_model::persist_running_now(&self.state) {
+        if let Err(error) = multiview_control::boot_model::persist_running_now(&self.state).await {
             tracing::warn!(
                 error = %error,
                 "the final running-state persist at shutdown was skipped (fail-soft)"
@@ -517,7 +517,7 @@ async fn run_pipeline_until_ctrl_c(
         watch.stop();
     }
     if let Some(persist) = running_persist {
-        persist.finish();
+        persist.finish().await;
     }
     if let Some(hub) = live_hub {
         hub.shutdown();
@@ -758,7 +758,7 @@ async fn run_software_until_ctrl_c(
         watch.stop();
     }
     if let Some(persist) = running_persist {
-        persist.finish();
+        persist.finish().await;
     }
     if let Some(hub) = live_hub {
         hub.shutdown();
