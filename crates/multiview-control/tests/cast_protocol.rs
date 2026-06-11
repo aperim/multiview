@@ -229,6 +229,42 @@ fn player_state_mode_tokens_are_lowercase() {
 }
 
 #[test]
+fn load_failures_decode_as_typed_errors_not_unknown() {
+    // Adversarial-review finding (DEV-D2): a receiver that answers PINGs but
+    // rejects the LOAD must be visible — LOAD_FAILED / LOAD_CANCELLED /
+    // INVALID_REQUEST on the media namespace are typed messages, never
+    // `Unknown` (which the session actor ignores by design).
+    let failed = inbound(
+        NS_MEDIA,
+        serde_json::json!({ "type": "LOAD_FAILED", "requestId": 2 }),
+    );
+    assert!(
+        !matches!(protocol::decode(&failed), InboundMessage::Unknown),
+        "LOAD_FAILED decodes as a typed load error"
+    );
+    let cancelled = inbound(
+        NS_MEDIA,
+        serde_json::json!({ "type": "LOAD_CANCELLED", "requestId": 2 }),
+    );
+    assert!(
+        !matches!(protocol::decode(&cancelled), InboundMessage::Unknown),
+        "LOAD_CANCELLED decodes as a typed load error"
+    );
+    let invalid = inbound(
+        NS_MEDIA,
+        serde_json::json!({
+            "type": "INVALID_REQUEST",
+            "requestId": 2,
+            "reason": "INVALID_COMMAND"
+        }),
+    );
+    assert!(
+        !matches!(protocol::decode(&invalid), InboundMessage::Unknown),
+        "a media-namespace INVALID_REQUEST decodes as a typed load error"
+    );
+}
+
+#[test]
 fn decodes_launch_error_and_unknown_types() {
     let frame = inbound(
         NS_RECEIVER,

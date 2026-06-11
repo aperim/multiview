@@ -82,12 +82,49 @@ fn receiver_status_with_app() -> CastFrame {
     )
 }
 
-/// A RECEIVER_STATUS with **no** applications: another sender stopped or
-/// replaced our app (the preemption signal).
+/// A RECEIVER_STATUS with **no** applications: our app is gone and nothing
+/// else is running (app idle-kill/crash — NOT a preemption).
 fn receiver_status_without_app() -> CastFrame {
     from_device(
         NS_RECEIVER,
         serde_json::json!({ "type": "RECEIVER_STATUS", "requestId": 0, "status": {} }),
+    )
+}
+
+/// A RECEIVER_STATUS carrying `app_id` running as `session_id` on
+/// `transport_id` (another sender's app, or another session of ours).
+fn receiver_status_with(app_id: &str, session_id: &str, transport_id: &str) -> CastFrame {
+    from_device(
+        NS_RECEIVER,
+        serde_json::json!({
+            "type": "RECEIVER_STATUS",
+            "requestId": 0,
+            "status": { "applications": [{
+                "appId": app_id,
+                "sessionId": session_id,
+                "transportId": transport_id,
+                "displayName": "Some App"
+            }] }
+        }),
+    )
+}
+
+/// A RECEIVER_STATUS carrying only the receiver's idle screen (the backdrop
+/// real hardware launches when an app dies): "nothing else running".
+fn receiver_status_idle_screen_only() -> CastFrame {
+    from_device(
+        NS_RECEIVER,
+        serde_json::json!({
+            "type": "RECEIVER_STATUS",
+            "requestId": 0,
+            "status": { "applications": [{
+                "appId": "E8C28D3C",
+                "sessionId": "s-idle",
+                "transportId": "t-idle",
+                "displayName": "Backdrop",
+                "isIdleScreen": true
+            }] }
+        }),
     )
 }
 
@@ -101,6 +138,58 @@ fn media_status(player_state: &str, idle_reason: Option<&str>) -> CastFrame {
         NS_MEDIA,
         serde_json::json!({ "type": "MEDIA_STATUS", "requestId": 0, "status": [entry] }),
     )
+}
+
+/// A MEDIA_STATUS for an explicit `media_session_id` (foreign-session tests
+/// use ids other than the `1` the establishment adopts).
+fn media_status_for(media_session_id: i64, player_state: &str) -> CastFrame {
+    from_device(
+        NS_MEDIA,
+        serde_json::json!({
+            "type": "MEDIA_STATUS",
+            "requestId": 0,
+            "status": [{ "mediaSessionId": media_session_id, "playerState": player_state }]
+        }),
+    )
+}
+
+/// A MEDIA_STATUS with an **empty** status array: the media session vanished
+/// receiver-side without a final IDLE.
+fn empty_media_status() -> CastFrame {
+    from_device(
+        NS_MEDIA,
+        serde_json::json!({ "type": "MEDIA_STATUS", "requestId": 0, "status": [] }),
+    )
+}
+
+/// A media-namespace LOAD_FAILED (the receiver rejected our LOAD).
+fn load_failed() -> CastFrame {
+    from_device(
+        NS_MEDIA,
+        serde_json::json!({ "type": "LOAD_FAILED", "requestId": 2 }),
+    )
+}
+
+/// The connection-namespace CLOSE (the app transport went away).
+fn close_connection() -> CastFrame {
+    from_device(NS_CONNECTION, serde_json::json!({ "type": "CLOSE" }))
+}
+
+/// Drain `events` and report whether a `device.error` naming a preemption
+/// rode the lossless lane for `device_id`.
+fn saw_preempted_error(
+    events: &mut multiview_engine::EventSubscription<Event>,
+    device_id: &str,
+) -> bool {
+    let mut saw = false;
+    while let Ok(envelope) = events.try_recv() {
+        if let Event::DeviceError(e) = &*envelope.event {
+            if e.device_id == device_id && e.message.contains("preempted") {
+                saw = true;
+            }
+        }
+    }
+    saw
 }
 
 /// The payload `type` tokens of the frames sent on a channel, in order.
@@ -450,6 +539,501 @@ async fn volume_control_rides_the_receiver_namespace() {
     let body: serde_json::Value = serde_json::from_str(&set.payload).expect("SET_VOLUME body");
     let level = body["volume"]["level"].as_f64().expect("a unit level");
     assert!((level - 0.42).abs() < 1e-9, "42% = level 0.42, got {level}");
+    drop(handle);
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial-review findings (DEV-D2): failed LOADs must be visible (F1),
+// preemption identity keys on session ids — never the app id (F2), and a
+// reconnect asks GET_STATUS before touching the receiver (F3).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn load_failed_degrades_and_schedules_a_bounded_reload() {
+    let (_engine, b) = broadcaster();
+    let (ch1, sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        // The receiver answers PINGs but rejects the LOAD: without a typed
+        // decode the session would sit ONLINE/"loading" with a blank TV.
+        ScriptedInbound::Frame(load_failed()),
+        // The re-LOAD's answer arrives well after the (5 s) reload delay.
+        ScriptedInbound::Wait(Duration::from_secs(8)),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1]);
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    // Shortly after the rejection: DEGRADED with an honest mode, and only
+    // the original LOAD so far (the supervisor waits the reload delay —
+    // an instantly-failing rendition must not drive a LOAD storm).
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(
+        snapshot.state,
+        DeviceState::Degraded,
+        "LOAD_FAILED degrades"
+    );
+    assert_eq!(snapshot.mode.as_deref(), Some("load-failed"));
+    assert_eq!(count_sent(&sent1, "LOAD"), 1);
+
+    // After the reload delay the supervisor re-LOADs; the next PLAYING
+    // recovers the session to ONLINE.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(count_sent(&sent1, "LOAD"), 2, "re-LOAD on LOAD_FAILED");
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(snapshot.state, DeviceState::Online);
+    assert_eq!(snapshot.mode.as_deref(), Some("playing"));
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn vanished_media_session_schedules_a_reload() {
+    let (_engine, b) = broadcaster();
+    let (ch1, sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        // The media session is torn down receiver-side without a final
+        // IDLE: the post-LOAD MEDIA_STATUS carries an empty status array.
+        ScriptedInbound::Frame(empty_media_status()),
+        ScriptedInbound::Wait(Duration::from_secs(8)),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1]);
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(
+        snapshot.state,
+        DeviceState::Degraded,
+        "a vanished media session degrades"
+    );
+    assert_eq!(snapshot.mode.as_deref(), Some("no-media"));
+    assert_eq!(count_sent(&sent1, "LOAD"), 1);
+
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        count_sent(&sent1, "LOAD"),
+        2,
+        "re-LOAD on a vanished media session"
+    );
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(snapshot.state, DeviceState::Online);
+    assert_eq!(snapshot.mode.as_deref(), Some("playing"));
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn app_death_with_nothing_running_relaunches() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    let (ch1, _sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        // Our app died (idle-kill/crash) and NOTHING replaced it: that is
+        // not a preemption — the spec mandates re-LAUNCH + re-LOAD.
+        ScriptedInbound::Frame(receiver_status_without_app()),
+        ScriptedInbound::Hang,
+    ]);
+    let (ch2, sent2) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1, ch2]);
+    let connects = connector.connect_count();
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        connects.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the dead app drives a re-establishment"
+    );
+    assert_eq!(count_sent(&sent2, "LAUNCH"), 1, "re-LAUNCH after app death");
+    assert_eq!(count_sent(&sent2, "LOAD"), 1, "re-LOAD after app death");
+    assert_eq!(
+        status.state("cast-1"),
+        Some(DeviceState::Online),
+        "the re-established session is ONLINE again"
+    );
+    assert!(
+        !saw_preempted_error(&mut events, "cast-1"),
+        "app death with nothing running is NOT a preemption"
+    );
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn app_death_leaving_the_idle_screen_relaunches() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    let (ch1, _sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        // Real hardware launches the backdrop when an app dies: only the
+        // idle screen running still means "nothing else running".
+        ScriptedInbound::Frame(receiver_status_idle_screen_only()),
+        ScriptedInbound::Hang,
+    ]);
+    let (ch2, sent2) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1, ch2]);
+    let connects = connector.connect_count();
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        count_sent(&sent2, "LAUNCH"),
+        1,
+        "the backdrop does not count as another sender"
+    );
+    assert_eq!(count_sent(&sent2, "LOAD"), 1);
+    assert_eq!(status.state("cast-1"), Some(DeviceState::Online));
+    assert!(
+        !saw_preempted_error(&mut events, "cast-1"),
+        "the idle screen must never read as a preemption"
+    );
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn app_death_close_first_relaunches_via_get_status() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    // The other ordering of the same app death: the transport CLOSE lands
+    // before any RECEIVER_STATUS shows the app gone.
+    let (ch1, _sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        ScriptedInbound::Frame(close_connection()),
+        ScriptedInbound::Hang,
+    ]);
+    let (ch2, sent2) = ScriptedChannel::new(vec![
+        // The reconnect asks first: GET_STATUS answers "nothing running",
+        // so the actor re-establishes (re-LAUNCH + re-LOAD).
+        ScriptedInbound::Frame(receiver_status_without_app()),
+        ScriptedInbound::Frame(receiver_status_with("CC1AD845", "s-2", "t-2")),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1, ch2]);
+    let connects = connector.connect_count();
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The exact reconnect sequence: CONNECT → GET_STATUS (ask first) →
+    // LAUNCH (our session is gone, nothing else runs) → CONNECT to the new
+    // transport → LOAD.
+    assert_eq!(
+        sent_types(&sent2),
+        vec![
+            (NS_CONNECTION.to_owned(), "CONNECT".to_owned()),
+            (NS_RECEIVER.to_owned(), "GET_STATUS".to_owned()),
+            (NS_RECEIVER.to_owned(), "LAUNCH".to_owned()),
+            (NS_CONNECTION.to_owned(), "CONNECT".to_owned()),
+            (NS_MEDIA.to_owned(), "LOAD".to_owned()),
+        ]
+    );
+    assert_eq!(status.state("cast-1"), Some(DeviceState::Online));
+    assert!(
+        !saw_preempted_error(&mut events, "cast-1"),
+        "an app death is never surfaced as a preemption"
+    );
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_app_new_session_is_preemption_not_ours() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    let (ch1, sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        // Another sender re-LAUNCHed the SAME Default Media Receiver: the
+        // app id matches ours but the session is theirs (the
+        // pychromecast/Home-Assistant ecosystem does exactly this).
+        ScriptedInbound::Frame(receiver_status_with("CC1AD845", "s-2", "t-2")),
+        ScriptedInbound::Hang,
+    ]);
+    let (ch2, sent2) = ScriptedChannel::new(vec![ScriptedInbound::Hang]);
+    let connector = ScriptedConnector::new(vec![ch1, ch2]);
+    let connects = connector.connect_count();
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        status.state("cast-1"),
+        Some(DeviceState::Degraded),
+        "a replaced session of our own app id is a preemption"
+    );
+    assert!(
+        saw_preempted_error(&mut events, "cast-1"),
+        "device.error surfaces the same-app preemption"
+    );
+    // Exactly the original LAUNCH/LOAD — we never re-LAUNCH over them.
+    assert_eq!(count_sent(&sent1, "LAUNCH"), 1);
+    assert_eq!(count_sent(&sent1, "LOAD"), 1);
+
+    // Past the heartbeat expiry the reconnect stays hands-off.
+    tokio::time::sleep(Duration::from_secs(35)).await;
+    assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(count_sent(&sent2, "GET_STATUS"), 0);
+    assert_eq!(count_sent(&sent2, "LAUNCH"), 0);
+    assert_eq!(count_sent(&sent2, "LOAD"), 0);
+    assert_eq!(status.state("cast-1"), Some(DeviceState::Degraded));
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaced_media_session_is_preemption() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    let (ch1, sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        // Another sender JOINED our running app session and LOADed their
+        // own media: no receiver-status change at all — the only signal is
+        // an active media session that is not ours.
+        ScriptedInbound::Frame(media_status_for(99, "PLAYING")),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1]);
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(
+        snapshot.state,
+        DeviceState::Degraded,
+        "a foreign active media session on our app is a preemption"
+    );
+    assert_eq!(
+        snapshot.mode.as_deref(),
+        Some("preempted"),
+        "the foreign PLAYING is never read as ours"
+    );
+    assert!(saw_preempted_error(&mut events, "cast-1"));
+    // No re-LOAD over the other sender's media.
+    assert_eq!(count_sent(&sent1, "LOAD"), 1);
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn foreign_playing_does_not_recover_a_preempted_session() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    let (ch1, sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        // A foreign app takes the device…
+        ScriptedInbound::Frame(receiver_status_with("DEADBEEF", "s-9", "t-9")),
+        // …and ITS media starts playing: the stray PLAYING must not
+        // un-degrade the preempted session via Recover.
+        ScriptedInbound::Frame(media_status_for(99, "PLAYING")),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1]);
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(
+        snapshot.state,
+        DeviceState::Degraded,
+        "preempted stays DEGRADED through foreign media traffic"
+    );
+    assert_eq!(
+        snapshot.mode.as_deref(),
+        Some("preempted"),
+        "the foreign PLAYING never becomes our mode"
+    );
+    assert!(saw_preempted_error(&mut events, "cast-1"));
+    assert_eq!(count_sent(&sent1, "LOAD"), 1, "still no fight");
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconnect_with_a_surviving_session_skips_launch_and_load() {
+    let (_engine, b) = broadcaster();
+    let (ch1, _sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        // A network blip drops the channel; the receiver keeps playing.
+        ScriptedInbound::Drop,
+    ]);
+    let (ch2, sent2) = ScriptedChannel::new(vec![
+        // GET_STATUS answers that OUR session (s-1) is still running: the
+        // reconnect must not restart playback.
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1, ch2]);
+    let connects = connector.connect_count();
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The whole reconnect conversation: CONNECT → GET_STATUS → CONNECT to
+    // the surviving app transport. NO LAUNCH, NO LOAD — playback untouched.
+    assert_eq!(
+        sent_types(&sent2),
+        vec![
+            (NS_CONNECTION.to_owned(), "CONNECT".to_owned()),
+            (NS_RECEIVER.to_owned(), "GET_STATUS".to_owned()),
+            (NS_CONNECTION.to_owned(), "CONNECT".to_owned()),
+        ]
+    );
+    let frames = sent2.lock().expect("sent log lock").clone();
+    assert_eq!(
+        frames[2].destination, "t-1",
+        "the re-CONNECT addresses the surviving app transport"
+    );
+    assert_eq!(status.state("cast-1"), Some(DeviceState::Online));
+    let snapshot = status.snapshot("cast-1").expect("a status row");
+    assert_eq!(snapshot.mode.as_deref(), Some("playing"));
+    drop(handle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn preemption_during_a_blip_is_not_stomped_on_reconnect() {
+    let (engine, b) = broadcaster();
+    let mut events = engine.subscribe();
+    let (ch1, _sent1) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Wait(Duration::from_secs(2)),
+        ScriptedInbound::Drop,
+    ]);
+    let (ch2, sent2) = ScriptedChannel::new(vec![
+        // During the blip another sender took the device (a new session of
+        // the same app): GET_STATUS reveals it — re-LAUNCHing over them is
+        // exactly the fight ADR-M011 forbids.
+        ScriptedInbound::Frame(receiver_status_with("CC1AD845", "s-2", "t-2")),
+        ScriptedInbound::Hang,
+    ]);
+    let connector = ScriptedConnector::new(vec![ch1, ch2]);
+    let connects = connector.connect_count();
+    let status = Arc::clone(b.registry());
+    let actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "192.0.2.20:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    );
+    let handle = actor.spawn();
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        count_sent(&sent2, "LAUNCH"),
+        0,
+        "never re-LAUNCH over the sender that took the device mid-blip"
+    );
+    assert_eq!(count_sent(&sent2, "LOAD"), 0);
+    assert_eq!(status.state("cast-1"), Some(DeviceState::Degraded));
+    assert!(
+        saw_preempted_error(&mut events, "cast-1"),
+        "the blip-time preemption is surfaced"
+    );
     drop(handle);
 }
 
