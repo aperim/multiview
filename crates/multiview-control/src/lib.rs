@@ -49,6 +49,7 @@ pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
+pub mod live_apply;
 pub mod nmos;
 pub mod notify;
 pub mod preview;
@@ -109,6 +110,7 @@ pub use is07::{
     Is07EventType, Is07Message, Is07Payload, Is07Subscription, Is07Timing,
 };
 pub use jwt::{JwtError, JwtValidator, SignatureAlgorithm};
+pub use live_apply::{LiveApplyCaps, OverlayLiveCapability};
 pub use nmos::is04::{Device, MediaFormat, Node, Receiver, Registration, ResourceCore, Sender};
 pub use nmos::is05::{
     parse_sdp_transport, Activation, ActivationMode, ConnectionRequest, ConnectionState,

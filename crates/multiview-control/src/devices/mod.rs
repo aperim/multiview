@@ -35,9 +35,15 @@
 //! device at an HLS rendition the engine already serves — pure control plane,
 //! the media graph untouched. Multiple driver factories compose through the
 //! [`CompositePollerFactory`] (first managing member wins).
+//!
+//! mDNS/DNS-SD **discovery** ([`discovery`], DEV-A5) is real and complete too:
+//! a bounded, TTL-expiring, **untrusted** inventory of services found on the
+//! LAN, requiring explicit confirm-adopt (ADR-0041) — discovery never creates
+//! a device.
 
 pub mod broadcaster;
 pub mod cast;
+pub mod discovery;
 pub mod driver_registry;
 pub mod projection;
 pub mod registry;
@@ -45,6 +51,10 @@ pub mod state_machine;
 pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;
+pub use discovery::{
+    DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
+    DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,
+};
 pub use driver_registry::DeviceDriverRegistry;
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;

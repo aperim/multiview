@@ -29,6 +29,7 @@ pub mod audit;
 pub mod cast_sessions;
 pub mod config;
 pub mod devices;
+pub mod discovery;
 pub mod health;
 pub mod inputs;
 pub mod outputs;
@@ -667,9 +668,18 @@ fn resource_router() -> Router<AppState> {
                 .put(probes::update_probe)
                 .delete(probes::delete_probe),
         )
-        // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
-        // plus the read-only runtime status snapshot, the bare-verb actions
-        // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+        .merge(device_router())
+}
+
+/// Build the managed-devices surface (ADR-M008/M009/M011/W017): the device
+/// registry CRUD + status + bare-verb actions + stream-binding projections,
+/// ephemeral Cast sessions, mDNS discovery, and presentation-sync groups.
+/// Split from [`resource_router`] so each stays a readable size.
+fn device_router() -> Router<AppState> {
+    // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
+    // plus the read-only runtime status snapshot, the bare-verb actions
+    // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+    Router::new()
         .route("/devices", get(devices::list_devices))
         .route(
             "/devices/{id}",
@@ -715,6 +725,15 @@ fn resource_router() -> Router<AppState> {
             "/cast/sessions/{id}/volume",
             post(cast_sessions::set_cast_volume),
         )
+        // mDNS device discovery (ADR-M008 §6 / ADR-0041): kick a time-bounded
+        // browse (202 + device.discovered events) and read the untrusted
+        // inventory. Discovery never creates a device — confirm-adopt is the
+        // separate POST /devices/{id} referencing a discovered address.
+        .route(
+            "/discovery/devices/scan",
+            post(discovery::scan_devices),
+        )
+        .route("/discovery/devices", get(discovery::list_discovered))
         // Presentation-sync-groups CRUD (ADR-M008/M010) + the measure action.
         .route("/sync-groups", get(sync_groups::list_sync_groups))
         .route(
@@ -729,7 +748,6 @@ fn resource_router() -> Router<AppState> {
             post(sync_groups::measure_sync_group),
         )
 }
-
 /// Build the `/api/v1` resource + command routes (without the realtime or docs
 /// routes, which are wired by [`crate::router()`]).
 pub fn api_router() -> Router<AppState> {

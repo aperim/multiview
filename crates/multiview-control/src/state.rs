@@ -21,6 +21,7 @@ use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
 use crate::devices::cast::media::CastDelivery;
 use crate::devices::cast::store::CastSessionStore;
+use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
@@ -325,6 +326,31 @@ pub struct AppState {
     /// plane-only, latest-wins — it can never back-pressure the engine
     /// (invariant #10).
     pub device_status: Arc<DeviceStatusRegistry>,
+    /// The **untrusted** mDNS-discovery inventory (DEV-A5 / ADR-M008 §6 /
+    /// ADR-0041): a bounded, TTL-expiring, dedup-keyed list of services found on
+    /// the LAN. It is runtime state, never persisted/exported, and it is **never**
+    /// the device registry — its rows are hints requiring explicit confirm-adopt
+    /// (`POST /devices/{id}`). Bounded drop-oldest, control-plane-only — it can
+    /// never back-pressure the engine (invariant #10).
+    pub discovery: Arc<DiscoveryInventory>,
+    /// The mDNS browse seam (DEV-A5): the only socket-touching part of discovery.
+    /// The default ([`NullBrowser`]) finds nothing (the pure default build has no
+    /// mDNS socket); the binary swaps in the real `mdns-sd`-backed browser behind
+    /// the `discovery` feature, and tests inject a `StaticBrowser`. A scan runs
+    /// this on a bounded control-plane task and publishes `device.discovered`
+    /// (drop-oldest) — it never awaits a client (invariant #10).
+    pub discovery_browser: Arc<dyn DiscoveryBrowser>,
+    /// Single-flight admission for the discovery scan: **one in-flight mDNS
+    /// browse** (concurrent `mdns-sd` browses of the same type overwrite each
+    /// other's listeners, and either scan's `stop_browse` removes the other's
+    /// live querier). A concurrent scan request attaches to the running scan's
+    /// operation id. Also the scan rate limit (ADR-M008).
+    pub discovery_scan_gate: Arc<ScanGate>,
+    /// The `[discovery]` browse configuration (managed-devices brief §6): the
+    /// operator-configured zowietek-control service type (the vendor's type is
+    /// unverified — never fabricated) and any extra DNS-SD types to browse.
+    /// Defaults to the empty section (built-in Cast + NDI types only).
+    pub discovery_config: Arc<multiview_config::DiscoveryConfig>,
     /// The latest-wins device **driver** registry (runtime state, never
     /// persisted/exported): the source-candidate / output-target facets each
     /// driver (DEV-A4 `zowietek`, …) enumerated for its device, read by the
@@ -443,6 +469,11 @@ pub struct AppState {
     /// gate compares stored layouts against this; when [`None`] (no seeded
     /// snapshot) the gate **fails closed** for document-carrying applies.
     pub running_canvas: Option<multiview_config::LayoutCanvas>,
+    /// What the **running** engine can take live, per stored collection
+    /// (ADR-W021): injected by the binary at wiring time so mutation routes
+    /// declare `X-Multiview-Apply` honestly per build + run path. The default
+    /// carries no capability (everything is `restart`).
+    pub live_apply: crate::live_apply::LiveApplyCaps,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -478,6 +509,10 @@ impl AppState {
             devices: Arc::new(InMemoryDeviceStore::new()),
             sync_groups: Arc::new(InMemorySyncGroupStore::new()),
             device_status: Arc::new(DeviceStatusRegistry::new()),
+            discovery: Arc::new(DiscoveryInventory::default()),
+            discovery_browser: Arc::new(NullBrowser),
+            discovery_scan_gate: Arc::new(ScanGate::new()),
+            discovery_config: Arc::new(multiview_config::DiscoveryConfig::default()),
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
             cast_delivery: None,
@@ -508,7 +543,19 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // Honest default: nothing applies live until the binary declares
+            // what the running engine can take (ADR-W021).
+            live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
+    }
+
+    /// Declare what the **running** engine can take live (ADR-W021). The
+    /// binary calls this with the capabilities of the chosen run path + build;
+    /// the honest default (nothing live) stands otherwise.
+    #[must_use]
+    pub fn with_live_apply(mut self, live_apply: crate::live_apply::LiveApplyCaps) -> Self {
+        self.live_apply = live_apply;
+        self
     }
 
     /// Replace the live-preview provider (the binary wires an engine-backed one;
@@ -666,6 +713,33 @@ impl AppState {
     #[must_use]
     pub fn with_device_status(mut self, device_status: Arc<DeviceStatusRegistry>) -> Self {
         self.device_status = device_status;
+        self
+    }
+
+    /// Replace the mDNS browse seam (DEV-A5). The binary installs the real
+    /// `mdns-sd`-backed browser (behind the `discovery` feature); tests inject a
+    /// `StaticBrowser`. The browser is the only socket-touching part of
+    /// discovery; the scan task runs it off the engine path (invariant #10).
+    #[must_use]
+    pub fn with_discovery_browser(mut self, browser: Arc<dyn DiscoveryBrowser>) -> Self {
+        self.discovery_browser = browser;
+        self
+    }
+
+    /// Replace the untrusted discovery inventory (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_discovery_inventory(mut self, discovery: Arc<DiscoveryInventory>) -> Self {
+        self.discovery = discovery;
+        self
+    }
+
+    /// Set the `[discovery]` browse configuration from the loaded config: the
+    /// operator-configured zowietek-control service type and any extra DNS-SD
+    /// types to browse. The binary threads `MultiviewConfig::discovery` here;
+    /// the default is the empty section (built-in Cast + NDI types only).
+    #[must_use]
+    pub fn with_discovery_config(mut self, config: multiview_config::DiscoveryConfig) -> Self {
+        self.discovery_config = Arc::new(config);
         self
     }
 

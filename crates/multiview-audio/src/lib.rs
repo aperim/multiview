@@ -39,6 +39,11 @@
 //!   store** (the audio peer of the video tile store) plus the per-source audio
 //!   decode loop: a decode thread publishes blocks, the output clock samples
 //!   exactly the frames it needs per tick (never pacing, never blocking — #1/#10).
+//! - [`adaptive`] — a ratio-driven (varying ±ppm) linear-interpolating
+//!   resampler the HDMI display-audio servo drives to track the scanout clock
+//!   (the mpv/Kodi "display-resample" technique); pure Rust, the runtime half of
+//!   the resample machinery whose fixed-ratio decode-time half lives in
+//!   [`decode`].
 //! - [`filter`] / [`truepeak`] — the supporting DSP primitives.
 //!
 //! Decode and resample (turning coded packets into the in-memory
@@ -53,6 +58,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod adaptive;
 pub mod ballistics;
 pub mod cadence;
 pub mod capability;
@@ -72,6 +78,7 @@ pub mod program;
 pub mod store;
 pub mod truepeak;
 
+pub use adaptive::{AdaptiveResampler, RatioPpm};
 pub use ballistics::{Ballistics, MeterScale, PeakMode, PpmKind, SampleScale};
 pub use capability::{DiscreteTracks, OutputCapability, OutputTransport, TrackSupport};
 pub use chanmap::{ChannelMatrix, Route};
