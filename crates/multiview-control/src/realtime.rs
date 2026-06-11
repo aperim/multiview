@@ -691,12 +691,17 @@ pub fn topic_for_event(event: &Event) -> Topic {
         // `system` lane the footer subscribes to — NOT the control firehose.
         Event::SystemMetrics(_) => Topic::System,
         Event::OutputStatus(_) => Topic::Outputs,
-        // Operator alerts AND health warnings (SA-0) ride the existing `alerts`
-        // lane — a health warning is a richer sibling of an alert (ADR-0035).
+        // Operator alerts AND health warnings (SA-0) AND shed-load decisions ride
+        // the existing `alerts` lane — a health warning is a richer sibling of an
+        // alert (ADR-0035), and a shed-load is a discrete, lossless
+        // degradation-signal event (invariant #9) in the same operator-signal
+        // family, so it stays in the lossless replay ring (NOT the conflated
+        // `system` lane).
         Event::AlertRaised(_)
         | Event::AlertCleared(_)
         | Event::HealthWarningRaised(_)
-        | Event::HealthWarningCleared(_) => Topic::Alerts,
+        | Event::HealthWarningCleared(_)
+        | Event::ShedLoad(_) => Topic::Alerts,
         // Both input connection state AND elementary-stream inventory deltas ride
         // the existing `inputs` lane (RT-3: `input.streams` is a delta on
         // re-probe / PMT-version bump, not a new topic).
@@ -1045,6 +1050,29 @@ mod topic_routing_tests {
         assert_eq!(topic_for_event(&event), Topic::System);
         // And `system` is a high-rate conflated lane (pushed, never polled).
         assert!(Topic::System.is_high_rate());
+    }
+
+    /// A shed-load decision is a discrete, lossless degradation-signal event:
+    /// it MUST route to the `alerts` lane (sibling to health warnings), NOT the
+    /// conflated `system` lane — so every shed stays in the lossless replay ring
+    /// and the §7.2 retention store records it (it is `!is_conflated`).
+    #[test]
+    fn shed_load_routes_to_the_alerts_topic_and_is_lossless() {
+        let event = Event::ShedLoad(multiview_events::ShedLoad {
+            reason: multiview_events::ShedReason::EncoderOverload,
+            scope: multiview_events::ShedScope::Program,
+            level: 1,
+            dropped: 3,
+        });
+        assert_eq!(topic_for_event(&event), Topic::Alerts);
+        assert!(
+            !Topic::Alerts.is_high_rate(),
+            "shed events must stay in the lossless replay ring"
+        );
+        assert!(
+            !event.is_conflated(),
+            "a shed is a discrete lossless event, never conflated"
+        );
     }
 
     /// Every Devices-domain event (ADR-RT007) MUST route to the one coarse

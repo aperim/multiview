@@ -114,6 +114,53 @@ fn messages_block_contains_key_event_types() {
 }
 
 #[test]
+fn shed_load_message_and_schema_are_present() {
+    let doc = generated_doc();
+    // The shed-load message must be a reusable message under components.messages.
+    let messages = doc
+        .pointer("/components/messages")
+        .unwrap()
+        .as_object()
+        .unwrap();
+    assert!(
+        messages.contains_key("ShedLoad"),
+        "components.messages must contain a ShedLoad message (shed.load wire event)"
+    );
+    let payload_ref = doc
+        .pointer("/components/messages/ShedLoad/payload/$ref")
+        .and_then(Value::as_str)
+        .expect("ShedLoad message must $ref its payload schema");
+    assert_eq!(payload_ref, "#/components/schemas/ShedLoad");
+
+    // The payload schema + its enum/union dependencies must be registered.
+    for schema in &["ShedLoad", "ShedReason", "ShedScope"] {
+        assert!(
+            doc.pointer(&format!("/components/schemas/{schema}"))
+                .is_some(),
+            "components.schemas must contain `{schema}`"
+        );
+    }
+    // The reason enum carries the stable snake_case labels (incl. the live
+    // encoder-overload shed) so the wire contract is pinned.
+    let reason = doc
+        .pointer("/components/schemas/ShedReason/enum")
+        .and_then(Value::as_array)
+        .expect("ShedReason must be a string enum");
+    for label in &[
+        "pinned",
+        "display_bound",
+        "no_better_home",
+        "anti_storm",
+        "encoder_overload",
+    ] {
+        assert!(
+            reason.iter().any(|v| v.as_str() == Some(*label)),
+            "ShedReason enum must include `{label}`"
+        );
+    }
+}
+
+#[test]
 fn envelope_schema_has_required_fields() {
     let doc = generated_doc();
     let envelope_payload = doc

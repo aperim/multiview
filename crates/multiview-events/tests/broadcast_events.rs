@@ -366,3 +366,74 @@ fn tally_topic_ordering_error_names_the_wire_topic() {
         other => panic!("wrong error: {other:?}"),
     }
 }
+
+#[test]
+fn shed_load_event_roundtrips_and_is_a_data_event() {
+    use multiview_events::{ShedLoad, ShedReason, ShedScope};
+    // A shed-load decision is a discrete, lossless degradation occurrence: it
+    // must NOT be a control frame and must NOT be conflated (the retention store
+    // + replay ring need every shed).
+    let event = Event::ShedLoad(ShedLoad {
+        reason: ShedReason::NoBetterHome,
+        scope: ShedScope::Program,
+        level: 2,
+        dropped: 17,
+    });
+    assert_eq!(event.type_tag(), "shed.load");
+    assert!(
+        !event.is_control(),
+        "shed.load is a data event, not control"
+    );
+    assert!(
+        !event.is_conflated(),
+        "a shed is a discrete lossless event, never conflated"
+    );
+
+    // Internally-tagged (`t`/`data`, never untagged); the reason + scope are
+    // tagged/snake_case enums on the wire.
+    let v = serde_json::to_value(&event).unwrap();
+    let obj = v.as_object().unwrap();
+    assert_eq!(obj.get("t").unwrap(), &json!("shed.load"));
+    assert!(
+        !obj.contains_key("payload"),
+        "Rust field name must not leak"
+    );
+    let data = obj.get("data").unwrap().as_object().unwrap();
+    assert_eq!(data.get("reason").unwrap(), &json!("no_better_home"));
+    let scope = data.get("scope").unwrap().as_object().unwrap();
+    assert_eq!(scope.get("kind").unwrap(), &json!("program"));
+    assert_eq!(data.get("level").unwrap(), &json!(2));
+    assert_eq!(data.get("dropped").unwrap(), &json!(17));
+
+    let back: Event = serde_json::from_value(v).unwrap();
+    assert_eq!(back, event, "shed.load must survive a JSON round-trip");
+}
+
+#[test]
+fn shed_load_input_scope_carries_the_input_id() {
+    use multiview_events::{ShedLoad, ShedReason, ShedScope};
+    let event = Event::ShedLoad(ShedLoad {
+        reason: ShedReason::Pinned,
+        scope: ShedScope::Input {
+            id: "cam-3".to_owned(),
+        },
+        level: 1,
+        dropped: 0,
+    });
+    let v = serde_json::to_value(&event).unwrap();
+    let scope = v.pointer("/data/scope").unwrap().as_object().unwrap();
+    assert_eq!(scope.get("kind").unwrap(), &json!("input"));
+    assert_eq!(scope.get("id").unwrap(), &json!("cam-3"));
+    let back: Event = serde_json::from_value(v).unwrap();
+    assert_eq!(back, event, "input-scoped shed must round-trip");
+}
+
+#[test]
+fn shed_load_reason_labels_are_stable() {
+    use multiview_events::ShedReason;
+    assert_eq!(ShedReason::Pinned.label(), "pinned");
+    assert_eq!(ShedReason::DisplayBound.label(), "display_bound");
+    assert_eq!(ShedReason::NoBetterHome.label(), "no_better_home");
+    assert_eq!(ShedReason::AntiStorm.label(), "anti_storm");
+    assert_eq!(ShedReason::EncoderOverload.label(), "encoder_overload");
+}

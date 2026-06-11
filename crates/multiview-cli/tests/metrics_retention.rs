@@ -23,9 +23,12 @@ use multiview_core::time::MediaTime;
 use multiview_engine::EnginePublisher;
 use multiview_events::{
     AlarmTransition, Alert, AlertSeverity, Event, GpuMetrics, GpuVendor, HealthWarning,
-    LifecycleState, SystemMetrics, TileState, WarningCode, WarningSeverity,
+    LifecycleState, ShedLoad, ShedReason as WireShedReason, ShedScope, SystemMetrics, TileState,
+    WarningCode, WarningSeverity,
 };
-use multiview_telemetry::retention::{IncidentKind, RetentionStore, RetentionWindow};
+use multiview_telemetry::retention::{
+    IncidentKind, RetentionStore, RetentionWindow, ShedReason as StoreShedReason,
+};
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
 
@@ -171,6 +174,80 @@ fn classifies_health_warning_as_incident() {
     });
     let update = classify(&event).expect("an active health warning is an incident marker");
     assert!(matches!(update, RetentionUpdate::Incident { .. }));
+}
+
+#[test]
+fn classifies_shed_load_as_a_shed_update() {
+    // The §7.2 shed-load category now has a live producer: a `shed.load` event
+    // classifies into the store's Shed arm, mapping the wire reason onto the
+    // store's reason faithfully.
+    let event = Event::ShedLoad(ShedLoad {
+        reason: WireShedReason::EncoderOverload,
+        scope: ShedScope::Program,
+        level: 1,
+        dropped: 5,
+    });
+    let update = classify(&event).expect("a shed.load is a shed retention update");
+    match update {
+        RetentionUpdate::Shed { reason } => {
+            assert_eq!(reason, StoreShedReason::EncoderOverload);
+        }
+        other => panic!("expected Shed, got {other:?}"),
+    }
+}
+
+#[test]
+fn shed_reason_maps_every_wire_reason() {
+    // Every wire reason must map onto a store reason (no fabrication, no panic):
+    // the classifier is the seam that lands a real shed in the store's category.
+    for (wire, store) in [
+        (WireShedReason::Pinned, StoreShedReason::Pinned),
+        (WireShedReason::DisplayBound, StoreShedReason::DisplayBound),
+        (WireShedReason::NoBetterHome, StoreShedReason::NoBetterHome),
+        (WireShedReason::AntiStorm, StoreShedReason::AntiStorm),
+        (
+            WireShedReason::EncoderOverload,
+            StoreShedReason::EncoderOverload,
+        ),
+    ] {
+        let event = Event::ShedLoad(ShedLoad {
+            reason: wire,
+            scope: ShedScope::Shared,
+            level: 0,
+            dropped: 0,
+        });
+        match classify(&event).expect("shed.load classifies") {
+            RetentionUpdate::Shed { reason } => assert_eq!(reason, store),
+            other => panic!("expected Shed for {wire:?}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn end_to_end_a_published_shed_lands_in_the_store() {
+    // The shed seam, exercised end-to-end: publish a `shed.load` on the engine's
+    // outbound broadcast and pump one ingest step; the shed must appear in the
+    // consent-independent store's shed category. This closes the §7.2 gap.
+    let publisher: Arc<Publisher> = Arc::new(EnginePublisher::new(16));
+    let store = Arc::new(RetentionStore::new());
+    let mut sub = publisher.subscribe();
+
+    let now = 77_000_000_u64;
+    publisher.publish_event(Event::ShedLoad(ShedLoad {
+        reason: WireShedReason::NoBetterHome,
+        scope: ShedScope::Input {
+            id: "cam-9".to_owned(),
+        },
+        level: 2,
+        dropped: 11,
+    }));
+
+    let step = ingest_step(&mut sub, store.as_ref(), now).await;
+    assert_eq!(step, IngestStep::Applied);
+
+    let window = store.shed_window(now, RetentionWindow::LastHour);
+    assert_eq!(window.len(), 1, "the published shed landed in the store");
+    assert_eq!(window[0].reason, StoreShedReason::NoBetterHome);
 }
 
 #[test]
