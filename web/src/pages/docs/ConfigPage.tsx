@@ -233,6 +233,16 @@ input_id = "in_live"`}
               alongside the common fields and round-trip losslessly.
             </Trans>
           </Prose>
+          <Prose>
+            <Trans>
+              Saving an overlay through the API or this UI applies it to the
+              running engine at the next frame where the build renders that
+              kind — today an analog-face <Code>clock</Code> appears, moves, or
+              disappears live. Kinds without a renderer are stored losslessly
+              and take effect via config export + restart; every save response
+              declares which happened in its X-Multiview-Apply header.
+            </Trans>
+          </Prose>
           <CodeBlock label="Example overlay">
             {`[[overlays]]
 id = "ov_clock"

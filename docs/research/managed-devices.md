@@ -362,11 +362,19 @@ discovery is **new** infrastructure built once and shared:
 - One mDNS/DNS-SD browse layer (an `mdns-sd`-class crate, MIT/Apache) behind the discovery
   feature gate, serving `zowietek` browse (service type undocumented by the vendor — empirical
   verification item; hostname `.local` resolution at minimum), `_googlecast._tcp` for Cast, and
-  `_multiview-ctl._tcp` for display-node → controller resolution.
+  `_multiview-ctl._tcp` for display-node → controller resolution. The zowietek type is an
+  **operator-configured knob** (as built: the config document's `[discovery]` section —
+  `zowietek_service_type`, plus `extra_service_types` for additional browse types); it is never
+  fabricated from a built-in constant, and an unconfigured deployment reports such services
+  `unknown`.
 - Results are an **untrusted inventory requiring explicit confirm-adopt** — the
   [ADR-0041](../decisions/ADR-0041.md) doctrine (operator confirm-binds; never auto-ingest)
   applied to devices.
 - IPv6-first presentation: AAAA addresses lead, IPv4 entries are explicitly labelled *legacy*.
+- Scans are **bounded and rate-limited** (ADR-M008): single-flight (one in-flight browse —
+  concurrent `mdns-sd` browses of one type corrupt each other's listeners/queriers; a concurrent
+  scan request attaches to the running scan's operation id), time-budgeted, capped in collected
+  events, and every responder-controlled string/list is truncated before retention.
 
 ---
 

@@ -67,6 +67,13 @@ use tokio::task::JoinHandle;
 /// command bus, audit log, and watch-status slot the router serves (one set
 /// of stores, never a parallel copy).
 ///
+/// `live_apply` declares what the **running** engine can take live (ADR-W021):
+/// the caller — the binary, the only place that knows both the compiled
+/// features and the chosen run path — injects it so every mutation route's
+/// `X-Multiview-Apply` header tells the truth per build. Pass
+/// [`multiview_control::LiveApplyCaps::default()`] for a run path with no live
+/// seams (everything honestly declares `restart`).
+///
 /// # Errors
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
 /// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
@@ -77,6 +84,7 @@ pub async fn bind_and_serve<F>(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    live_apply: multiview_control::LiveApplyCaps,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
 where
@@ -150,7 +158,46 @@ where
     )
     .with_preview(preview)
     .with_warning_store(warnings)
-    .with_auth_disabled(auth_disabled);
+    .with_device_pollers(device_poller_registry())
+    .with_auth_disabled(auth_disabled)
+    .with_live_apply(live_apply)
+    // The `[discovery]` browse configuration: the operator-configured
+    // zowietek-control service type (the vendor's type is unverified — only a
+    // configured string is ever recognised) plus any extra DNS-SD types.
+    .with_discovery_config(config.discovery.clone().unwrap_or_default());
+
+    // Install the real mDNS browser when the `discovery` feature is built, so
+    // `POST /api/v1/discovery/devices/scan` browses the LAN for Cast / NDI /
+    // (configured) zowietek-control services. Discovery is untrusted inventory
+    // requiring explicit confirm-adopt (ADR-0041) and the browse runs on a
+    // bounded control-plane task — it can never back-pressure the engine
+    // (invariant #10). Without the feature the default `NullBrowser` finds
+    // nothing, so the endpoints answer with an empty inventory rather than
+    // failing.
+    #[cfg(feature = "discovery")]
+    let state = match multiview_control::devices::discovery::MdnsBrowser::new() {
+        Ok(browser) => state.with_discovery_browser(Arc::new(browser)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "mDNS discovery daemon failed to start; device discovery is disabled \
+                 for this run (scans return an empty inventory)"
+            );
+            state
+        }
+    };
+
+    // Boot-seed: spawn a supervised driver poller for every config-declared
+    // managed device (DEV-A4, ADR-M009). With the `zowietek` feature on, a
+    // `zowietek` device logs in → probes → enumerates its three facets → polls
+    // status → drives the lifecycle, so the projection routes return real data
+    // and `set-mode` dispatches convergence — all on its own control-plane task
+    // (invariant #10). Without the feature this is a no-op (the default no-op
+    // factory spawns nothing). Off the engine hot loop.
+    let spawned = state.seed_device_pollers(&config.devices);
+    if spawned > 0 {
+        tracing::info!(spawned, "DEV-A4: spawned supervised device poller(s)");
+    }
 
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
@@ -170,6 +217,58 @@ where
     }
     let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
     Ok((addr, handle, state))
+}
+
+/// Build the runtime device-poller registry for the control plane (DEV-A4).
+///
+/// With the `devices-net` feature on (which forwards `multiview-control/zowietek`),
+/// the registry carries the reqwest-backed
+/// [`ReqwestPollerFactory`](multiview_control::devices::ReqwestPollerFactory) so
+/// boot-seed/adopt spawn a **live** supervised poller per `zowietek` device,
+/// resolving each device's credentials from its `auth.secret_ref` via
+/// [`resolve_device_credentials`]. Without the feature it is the default no-op
+/// registry (no live transport → no poller spawned; the projection routes stay
+/// honestly empty), so the default build pulls no socket.
+#[cfg(feature = "devices-net")]
+fn device_poller_registry() -> Arc<multiview_control::devices::DevicePollerRegistry> {
+    use multiview_control::devices::{DevicePollerRegistry, ReqwestPollerFactory};
+    // A 5s per-request timeout: generous for a LAN appliance, bounded so a hung
+    // device times out into the supervised-reconnect path rather than wedging
+    // the poller task.
+    let factory = ReqwestPollerFactory::new(
+        std::time::Duration::from_secs(5),
+        resolve_device_credentials,
+    );
+    Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)))
+}
+
+/// The default no-op poller registry (no `zowietek` feature): no live device
+/// transport, so no poller is spawned and the projection routes stay honestly
+/// empty — exactly the pre-DEV-A4 behaviour.
+#[cfg(not(feature = "devices-net"))]
+fn device_poller_registry() -> Arc<multiview_control::devices::DevicePollerRegistry> {
+    Arc::new(multiview_control::devices::DevicePollerRegistry::new())
+}
+
+/// Resolve a managed device's `(username, password)` from its
+/// `auth.secret_ref` (DEV-A4). The secret reference is read from the secret
+/// store the deployment configures (1Password `op://…`, an environment
+/// variable, etc.) — credentials never live in the config model.
+///
+/// This build resolves a `secret_ref` of the form `env:VAR_USER:VAR_PASS` from
+/// the environment (no extra dependency, works in every deployment); an
+/// `op://…` ref or any other scheme returns `None` (the device is then not
+/// polled — it cannot be logged into — and rides ADOPTING until a resolvable
+/// credential is configured). A device with no `auth` block returns `None`.
+#[cfg(feature = "devices-net")]
+fn resolve_device_credentials(device: &multiview_config::Device) -> Option<(String, String)> {
+    let secret_ref = device.auth.as_ref().map(|a| a.secret_ref.as_str())?;
+    // `env:USER_VAR:PASS_VAR` — read the username/password from two env vars.
+    let rest = secret_ref.strip_prefix("env:")?;
+    let (user_var, pass_var) = rest.split_once(':')?;
+    let username = std::env::var(user_var).ok()?;
+    let password = std::env::var(pass_var).ok()?;
+    Some((username, password))
 }
 
 /// One HLS delivery mount derived from a configured HLS/LL-HLS output: the
@@ -545,6 +644,25 @@ pub fn command_drain_with_live_sources(
     }
 }
 
+/// Build the per-tick control hook **with the live overlay seam** (ADR-W021)
+/// threaded in, so `UpsertOverlay`/`RemoveOverlay` apply to the running
+/// engine: the drain mirrors the document into the working overlay set and
+/// publishes the set (generation-bumped) through the lock-free
+/// [`OverlayApplySlot`](crate::live_overlays::OverlayApplySlot) the bake
+/// consumer re-derives from at its next frame — pure data mutation at the
+/// frame boundary, no rasterization, no I/O (invariants #1 + #10).
+pub fn command_drain_with_live_overlays(
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    overlays: crate::live_overlays::OverlayApplySlot,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    let mut drain = CommandDrain::new(commands, config, publisher).with_live_overlays(overlays);
+    move |drive: &mut CompositorDrive<Nv12Image>| {
+        let _applied = drain.apply(drive);
+    }
+}
+
 /// Build the per-tick control hook **with the live run-side routing seams**
 /// threaded in, so per-stream routing commands reach their live crosspoints in the
 /// real run (RT-11 / ADR-0034).
@@ -561,6 +679,10 @@ pub fn command_drain_with_live_sources(
 /// bounded drop-oldest, so neither can pace or stall the output clock
 /// (invariants #1/#10).
 ///
+/// It also threads in the pipeline's **live overlay slot**
+/// ([`Pipeline::overlay_apply_slot`](crate::pipeline::Pipeline::overlay_apply_slot),
+/// ADR-W021) so `UpsertOverlay`/`RemoveOverlay` re-derive the running bake.
+///
 /// The binary wires this on the full libav\* path (`run_pipeline_until_ctrl_c`),
 /// where the pipeline has a subtitle router; the software-engine path (no subtitle
 /// rendering) wires the plain [`command_drain`].
@@ -570,10 +692,12 @@ pub fn command_drain_with_seams(
     config: MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
+    overlays: crate::live_overlays::OverlayApplySlot,
     live: crate::live_sources::LiveSourceHandle,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
     let mut drain = CommandDrain::new(commands, config, publisher)
         .with_subtitle_route(subtitle_route)
+        .with_live_overlays(overlays)
         .with_live_sources(live);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
@@ -642,6 +766,12 @@ pub struct CommandDrain {
     /// spawn/teardown + the preview registry. `None` ⇒ `UpsertSource`/
     /// `RemoveSource` are surfaced held actions (never a silent drop).
     live_sources: Option<crate::live_sources::LiveSourceHandle>,
+    /// The live overlay working-set seam (ADR-W021), when wired
+    /// ([`command_drain_with_live_overlays`] / [`command_drain_with_seams`]):
+    /// the lock-free slot the bake consumer re-derives its overlay render
+    /// state from. `None` ⇒ `UpsertOverlay`/`RemoveOverlay` are surfaced held
+    /// actions (never a silent drop).
+    live_overlays: Option<crate::live_overlays::OverlayApplySlot>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
     cell_ids_set: bool,
     /// Test-only spy counting how many times this drain calls `solve_layout`.
@@ -668,6 +798,7 @@ impl CommandDrain {
             #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
             subtitle_route: None,
             live_sources: None,
+            live_overlays: None,
             cell_ids_set: false,
             #[cfg(test)]
             resolve_spy: None,
@@ -680,6 +811,15 @@ impl CommandDrain {
     #[must_use]
     fn with_live_sources(mut self, live: crate::live_sources::LiveSourceHandle) -> Self {
         self.live_sources = Some(live);
+        self
+    }
+
+    /// Thread in the live overlay working-set seam (ADR-W021) so
+    /// `UpsertOverlay`/`RemoveOverlay` reach the running bake. See
+    /// [`command_drain_with_live_overlays`].
+    #[must_use]
+    fn with_live_overlays(mut self, overlays: crate::live_overlays::OverlayApplySlot) -> Self {
+        self.live_overlays = Some(overlays);
         self
     }
 
@@ -1016,23 +1156,14 @@ impl CommandDrain {
             Command::RemoveSource { ref id, .. } => {
                 self.remove_source(id, drive);
             }
+            Command::UpsertOverlay { ref overlay, .. } => {
+                self.upsert_overlay(overlay);
+            }
+            Command::RemoveOverlay { ref id, .. } => {
+                self.remove_overlay(id);
+            }
             Command::SetTallyOverride { target, color, .. } => {
-                // No tally arbiter is wired into the software engine yet, so this
-                // emits a TallyState echo rather than silently no-op'ing: a forced
-                // colour maps to a program-bus lamp of that colour at the default
-                // brightness; a cleared override (`None`) maps to the unlit default.
-                // FOLLOW-UP: route through the real arbiter once it exists.
-                let tally_state = match color {
-                    Some(color) => multiview_core::tally::TallyState {
-                        color,
-                        ..multiview_core::tally::TallyState::default()
-                    },
-                    None => multiview_core::tally::TallyState::default(),
-                };
-                self.publisher.publish_event(Event::TallyState(TallyEvent {
-                    target,
-                    state: tally_state,
-                }));
+                self.set_tally_override(target, color);
             }
             // `Command` is `#[non_exhaustive]`: a future variant this build does not
             // know about is logged and skipped, never panicked on.
@@ -1040,6 +1171,29 @@ impl CommandDrain {
                 tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
             }
         }
+    }
+
+    /// Apply a `SetTallyOverride`. No tally arbiter is wired into the software
+    /// engine yet, so this emits a `TallyState` echo rather than silently
+    /// no-op'ing: a forced colour maps to a program-bus lamp of that colour at
+    /// the default brightness; a cleared override (`None`) maps to the unlit
+    /// default. FOLLOW-UP: route through the real arbiter once it exists.
+    fn set_tally_override(
+        &self,
+        target: multiview_events::TallyTarget,
+        color: Option<multiview_core::tally::TallyColor>,
+    ) {
+        let tally_state = match color {
+            Some(color) => multiview_core::tally::TallyState {
+                color,
+                ..multiview_core::tally::TallyState::default()
+            },
+            None => multiview_core::tally::TallyState::default(),
+        };
+        self.publisher.publish_event(Event::TallyState(TallyEvent {
+            target,
+            state: tally_state,
+        }));
     }
 }
 
@@ -1246,6 +1400,126 @@ impl CommandDrain {
             tracing::info!(source = %id, "remove_source: no registered store under that id");
         }
         self.config.sources.retain(|s| s.id != id);
+    }
+
+    /// Apply an `UpsertOverlay` (ADR-W021) at the frame boundary: upsert the
+    /// document by id into the working overlay set (the config mirror — the
+    /// same discipline as live sources) and publish the set, generation-
+    /// bumped, through the lock-free slot the bake consumer re-derives from
+    /// at its next frame. Pure data mutation — no rasterization, no I/O, no
+    /// `.await` (invariants #1/#10).
+    ///
+    /// A document the running build does not visibly render
+    /// ([`renders_live`](crate::live_overlays::renders_live) is `false`) is
+    /// still mirrored + published (the working set stays coherent) but warned
+    /// loudly: the route already declared `restart` for it (ADR-W021 §4) and
+    /// the operator should know why nothing changed on screen. Without a
+    /// wired seam the command is a surfaced held action — warned and made
+    /// observable as a `job.progress` `apply_overlay_held` outcome.
+    fn upsert_overlay(&mut self, overlay: &multiview_config::Overlay) {
+        let Some(slot) = self.live_overlays.as_ref() else {
+            tracing::warn!(
+                overlay = %overlay.id,
+                "upsert_overlay held: no live overlay seam on this run path \
+                 (the stored document applies on restart)"
+            );
+            self.publish_overlay_held(&overlay.id, "no live overlay seam on this run path");
+            return;
+        };
+        // Mirror: replace-or-append by id (a live edit replaces, never
+        // duplicates), then publish the WHOLE set — the consumer derives from
+        // the set, so one publish per applied change keeps one truth.
+        match self.config.overlays.iter_mut().find(|o| o.id == overlay.id) {
+            Some(existing) => *existing = overlay.clone(),
+            None => self.config.overlays.push(overlay.clone()),
+        }
+        let generation = crate::live_overlays::publish_set(slot, self.config.overlays.clone());
+        let renders = crate::live_overlays::renders_live(overlay);
+        if renders {
+            tracing::info!(
+                overlay = %overlay.id,
+                generation,
+                "apply_overlay: overlay applied live at the frame boundary"
+            );
+        } else {
+            tracing::warn!(
+                overlay = %overlay.id,
+                kind = %overlay.kind,
+                generation,
+                "apply_overlay: stored + mirrored into the working set, but this \
+                 kind has no live renderer in this build — no visual change (ADR-W021)"
+            );
+        }
+        let message = if renders {
+            format!("overlay {} applied live at the frame boundary", overlay.id)
+        } else {
+            format!(
+                "overlay {} mirrored (kind {} has no live renderer in this build)",
+                overlay.id, overlay.kind
+            )
+        };
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay".to_owned(),
+                pct: 100,
+                message: Some(message),
+            }));
+    }
+
+    /// Apply a `RemoveOverlay` (ADR-W021) at the frame boundary: drop the
+    /// document from the working overlay set and republish — a rendered face
+    /// disappears on the next baked frame. Removing an unknown id publishes
+    /// no new set (the consumer never re-derives spuriously) but is still
+    /// surfaced — warned and observable as a `job.progress`
+    /// `apply_overlay_held` outcome, symmetric with a held upsert, never a
+    /// silent drop. Without a wired seam it is likewise a surfaced held
+    /// action.
+    fn remove_overlay(&mut self, id: &str) {
+        let Some(slot) = self.live_overlays.as_ref() else {
+            tracing::warn!(
+                overlay = %id,
+                "remove_overlay held: no live overlay seam on this run path \
+                 (the stored removal applies on restart)"
+            );
+            self.publish_overlay_held(id, "no live overlay seam on this run path");
+            return;
+        };
+        let before = self.config.overlays.len();
+        self.config.overlays.retain(|o| o.id != id);
+        if self.config.overlays.len() == before {
+            tracing::warn!(
+                overlay = %id,
+                "remove_overlay held: unknown overlay id (nothing to remove); \
+                 no set published"
+            );
+            self.publish_overlay_held(id, "unknown overlay id (nothing to remove)");
+            return;
+        }
+        let generation = crate::live_overlays::publish_set(slot, self.config.overlays.clone());
+        tracing::info!(
+            overlay = %id,
+            generation,
+            "remove_overlay: overlay removed live at the frame boundary"
+        );
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay".to_owned(),
+                pct: 100,
+                message: Some(format!("overlay {id} removed at the frame boundary")),
+            }));
+    }
+
+    /// Make a HELD overlay apply observable on the realtime stream (the
+    /// ADR-W019 pattern): a `job.progress` outcome with the held phase and
+    /// the reason — drop-oldest, never awaits a client (inv #10) — alongside
+    /// the `tracing::warn!`.
+    fn publish_overlay_held(&self, id: &str, reason: &str) {
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay_held".to_owned(),
+                pct: 0,
+                message: Some(format!("overlay {id} not applied: {reason}")),
+            }));
     }
 
     /// Apply a `RouteSubtitle` by driving the run's live subtitle re-point seam
@@ -2164,6 +2438,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            multiview_control::LiveApplyCaps::default(),
             async move {
                 let _ = shutdown_rx.await;
             },

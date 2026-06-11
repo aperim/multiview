@@ -201,9 +201,12 @@ export interface paths {
         /**
          * `POST /api/v1/devices/{id}` — adopt/create a device (role: write).
          * @description Validates the body against `multiview_config::Device` (`422` on an invalid
-         *     document) and seeds the runtime status registry in `ADOPTING` so
-         *     `GET /devices/{id}/status` answers immediately — the first probe lands with
-         *     the driver actors (DEV-A4/A5).
+         *     document), seeds the runtime status registry in `ADOPTING` so
+         *     `GET /devices/{id}/status` answers immediately, and **starts the device's
+         *     supervised driver poller** (DEV-A4) — which performs the first probe and
+         *     drives the device to `ONLINE`/`AUTH_FAILED`/`UNREACHABLE`. The poller is a
+         *     no-op for devices the factory does not manage (the default build / a
+         *     non-`zowietek` driver).
          */
         post: operations["create_device"];
         /**
@@ -247,10 +250,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/devices/{id}/output-targets` — the declared output-binding
-         *     projection (ADR-M009 facet (b)).
-         * @description Honestly empty until a driver enumerates decode slots (no live driver in this
-         *     slice): never fabricated live telemetry.
+         * `GET /api/v1/devices/{id}/output-targets` — the output-binding projection
+         *     (ADR-M009 facet (b)).
+         * @description Returns the device's running driver's enumerated targets (DEV-A4: a
+         *     decoder-mode `zowietek` box's decode-table slots). Honestly empty until a
+         *     driver has enumerated — and on a build/device with no live driver — never
+         *     fabricated live telemetry.
          */
         get: operations["output_targets"];
         put?: never;
@@ -272,9 +277,11 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).
-         * @description A synchronous management verb (ADR-W017): in this slice (no driver actor) it
-         *     confirms the device exists and acknowledges the probe request (`200`). The
-         *     real probe round-trip lands with the driver actors (DEV-A4/A5).
+         * @description A synchronous management verb (ADR-W017): it confirms the device exists and
+         *     acknowledges the probe request (`200`). The device's supervised driver poller
+         *     (DEV-A4) is already probing on its own ≤1 Hz cadence and re-probing on
+         *     reconnect, so the latest status is read via `GET /devices/{id}/status`; this
+         *     verb is the operator's explicit "I looked" acknowledgement.
          */
         post: operations["probe_device"];
         delete?: never;
@@ -318,9 +325,16 @@ export interface paths {
          *     (role: write; `202` + operation id + declared DEV-class impact).
          * @description The device-side impact is **declared in the body before apply** (ADR-M009):
          *     the device restarts its pipeline; bound sources ride the tile ladder to
-         *     `NO_SIGNAL` during the switch; no Multiview output is interrupted. In this
-         *     slice the operation id is minted and `202`'d; the `device.mode` outcome
-         *     arrives on the realtime stream once the driver actor lands.
+         *     `NO_SIGNAL` during the switch; no Multiview output is interrupted. The route
+         *     mints the operation id, `202`s, and **dispatches** the convergence to the
+         *     device's running driver poller (DEV-A4), which records the requested mode as
+         *     its desired mode, runs `plan_mode_convergence` → `converge_mode`
+         *     (close-before-open), and publishes the `device.mode` outcome on the realtime
+         *     stream; a failed apply is re-converged on the poller's next adopt/reconnect
+         *     pass. When no live poller is running (the default build / a device with no
+         *     spawned driver), the `202` still declares the impact but nothing applies the
+         *     change: the device's configured `desired_mode` is what a later-spawned
+         *     poller converges onto when its adopt/reconnect reaches `ONLINE`.
          */
         post: operations["set_mode"];
         delete?: never;
@@ -337,10 +351,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/devices/{id}/source-candidates` — the declared source-binding
-         *     projection (ADR-M009 facet (a)).
-         * @description Honestly empty until a driver enumerates streams (no live driver in this
-         *     slice): never fabricated live telemetry.
+         * `GET /api/v1/devices/{id}/source-candidates` — the source-binding projection
+         *     (ADR-M009 facet (a)).
+         * @description Returns the device's running driver's enumerated candidates (DEV-A4: a
+         *     `zowietek` device's served RTSP mounts). Honestly empty until a driver has
+         *     enumerated — and on a build/device with no live driver — never fabricated
+         *     live telemetry.
          */
         get: operations["source_candidates"];
         put?: never;
@@ -387,6 +403,62 @@ export interface paths {
          *     device (role: write; fire-and-forget `204`).
          */
         post: operations["test_pattern"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/discovery/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/discovery/devices` — the current untrusted inventory snapshot
+         *     (role: read).
+         * @description Returns the discovered services found by the most recent scans, AAAA-first
+         *     with IPv4 labelled legacy, stale (TTL-expired) rows purged on read. These are
+         *     **hints**, not devices: adopting one is the separate `POST /devices/{id}`
+         *     confirm-adopt referencing a discovered address (ADR-0041).
+         */
+        get: operations["list_discovered"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/discovery/devices/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/discovery/devices/scan` — kick a time-bounded mDNS browse
+         *     (role: write; `202` + operation id).
+         * @description The browse runs on a bounded control-plane task: it asks the injected browser
+         *     for services within a time budget, classifies each into the **untrusted
+         *     inventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`
+         *     event per service, correlated to this operation id via the envelope `corr`
+         *     (ADR-RT007). It never creates a device (ADR-0041).
+         *
+         *     Scans are **single-flight** (one in-flight browse — concurrent `mdns-sd`
+         *     browses corrupt each other's listeners/queriers, and one browse at a time is
+         *     the ADR-M008 rate limit): a request that arrives while a scan runs
+         *     **attaches** to it and is answered with the *running* scan's operation id.
+         *     A retried `Idempotency-Key` returns the original operation id without
+         *     re-executing the browse (the canonical replay semantics).
+         */
+        post: operations["scan_devices"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1632,6 +1704,74 @@ export interface components {
             temperature_c?: number | null;
         };
         /**
+         * @description One resolved management endpoint of a discovered service: a presentation-
+         *     ready address and its family. IPv6 is the lead family (ADR-0042); IPv4 is
+         *     labelled [`AddressFamily::Ipv4Legacy`]. IPv6 literals are bracketed so the
+         *     `host:port` form is URL-safe.
+         */
+        DiscoveredEndpoint: {
+            /** @description The `host:port` management address (IPv6 literals bracketed). */
+            address: string;
+            /**
+             * @description The address family — `ipv6` (lead) or `ipv4-legacy`. The shared
+             *     [`AddressFamily`] enum carries no `ToSchema`, so the schema models the
+             *     wire string directly (the same `ipv6` / `ipv4-legacy` tokens serde emits).
+             * @example ipv6
+             */
+            family: string;
+        };
+        /**
+         * @description One **untrusted** discovery-inventory row: a classified, AAAA-first service
+         *     requiring explicit confirm-adopt (ADR-0041). It carries **no registry id** —
+         *     it is not a device.
+         */
+        DiscoveredService: {
+            /** @description The inferred driver family. */
+            driver_kind: components["schemas"]["DiscoveryDriverKind"];
+            /** @description The management endpoints, **AAAA-first** (IPv6 lead, IPv4 legacy). */
+            endpoints: components["schemas"]["DiscoveredEndpoint"][];
+            /** @description The advertised host (`*.local.`), informational. */
+            host: string;
+            /**
+             * @description The dedup key (driver kind + instance name + service type). Two sightings
+             *     of the same service share a key and the newer replaces the older.
+             */
+            key: string;
+            /**
+             * Format: int64
+             * @description When this row was last seen (Unix nanoseconds), informational for the UI.
+             */
+            last_seen_unix_ns: number;
+            /** @description The advertised instance/service name. */
+            name: string;
+            /**
+             * Format: int32
+             * @description The mDNS-advertised port.
+             */
+            port: number;
+            /**
+             * @description The primary management address — the first (IPv6, if any) endpoint's
+             *     `host:port`. This is the address an operator references when confirming
+             *     adoption via `POST /devices/{id}`.
+             */
+            primary_address: string;
+            /** @description The DNS-SD service type browsed. */
+            service_type: string;
+            /** @description The decoded TXT records (advertised metadata), key-sorted. */
+            txt: components["schemas"]["TxtRecord"][];
+        };
+        /**
+         * @description The inferred driver family of a discovered service, from its service type
+         *     (and the operator-configured zowietek-control type, if any).
+         *
+         *     A **closed** `#[non_exhaustive]` enum: a new discoverable family is a new
+         *     variant plus a wired browse type, never an open registry. `Unknown` is the
+         *     honest catch-all — a service we browsed but cannot classify is reported as
+         *     such, never guessed into a family.
+         * @enum {string}
+         */
+        DiscoveryDriverKind: "cast" | "ndi-source" | "zowietek-control" | "unknown";
+        /**
          * @description The added / removed / changed top-level keys between two documents.
          *
          *     A pragmatic, UI-facing structural diff over JSON objects: it reports which
@@ -2328,6 +2468,34 @@ export interface components {
             /** @description UMD label changes. */
             umd?: components["schemas"]["UmdRecallDoc"][];
         };
+        /**
+         * @description The `202 Accepted` body for a scan: the operation id correlating the scan and
+         *     the human-readable scope of what is browsed.
+         */
+        ScanAccepted: {
+            /**
+             * Format: int64
+             * @description The scan time budget in milliseconds (the browse is always time-bounded).
+             */
+            budget_ms: number;
+            /**
+             * @description A reminder that discovery is **untrusted**: rows require explicit
+             *     confirm-adopt and discovery never creates a device (ADR-0041).
+             */
+            note: string;
+            /**
+             * @description The operation id of the scan that actually runs — freshly started,
+             *     attached-to (single-flight), or replayed (`Idempotency-Key`). The
+             *     `device.discovered` rows it produces stream on the realtime `devices`
+             *     topic while it runs, each echoing this id as the envelope `corr`.
+             */
+            operation_id: string;
+            /**
+             * @description The service types being browsed (Cast + NDI, plus any configured
+             *     zowietek-control type).
+             */
+            service_types: string[];
+        };
         /** @description An IS-04 **Sender**: an egress flow (a Multiview program/preview output). */
         Sender: components["schemas"]["ResourceCore"] & {
             /** @description The id of the device this sender belongs to. */
@@ -2822,6 +2990,13 @@ export interface components {
             rtp_enabled?: boolean | null;
             /** @description The source IP for an `IGMPv3` source-specific-multicast filter. */
             source_ip?: string | null;
+        };
+        /** @description One advertised TXT key/value record (serializable, sortable). */
+        TxtRecord: {
+            /** @description The TXT key. */
+            key: string;
+            /** @description The TXT value (decoded as UTF-8 by the browser). */
+            value: string;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::UmdRecall`]. */
         UmdRecallDoc: {
@@ -3971,6 +4146,82 @@ export interface operations {
             };
         };
     };
+    list_discovered: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The untrusted discovery inventory (hints requiring explicit confirm-adopt; never devices). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveredService"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read discovery. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    scan_devices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scan accepted (or attached to the single-flight running scan, or replayed by Idempotency-Key — the operation id names the scan that actually runs); discovered rows stream as device.discovered events correlated via corr and land in the untrusted inventory. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScanAccepted"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to scan. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_health: {
         parameters: {
             query?: {
@@ -4684,7 +4935,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The replaced overlay (new ETag in the response header). */
+            /** @description The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the edit was applied at a frame boundary and the running picture visibly follows it — the renderer draws the new document, or it drew the previous one (editing a rendered face away makes it vanish, itself a live change); `restart` otherwise (ADR-W021). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4747,7 +4998,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The created overlay (ETag in the response header). */
+            /** @description The created overlay (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine's renderer draws the document (e.g. an analog-face clock on an overlay-rendering build) and it was applied at a frame boundary; `restart` otherwise — non-rendering kinds are stored losslessly and mirrored to the engine with a warning, never lied about (ADR-W021). */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -4797,7 +5048,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The overlay was deleted. */
+            /** @description The overlay was deleted. X-Multiview-Apply: `live` when the running renderer drew the document (its face disappears at the next frame boundary), `restart` otherwise (ADR-W021). */
             204: {
                 headers: {
                     [name: string]: unknown;

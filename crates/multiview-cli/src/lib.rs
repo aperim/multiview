@@ -45,6 +45,7 @@ pub mod cli;
 /// the Web/API uses; an invalid file changes nothing (warn + health event).
 pub mod config_watch;
 pub mod control;
+pub mod live_overlays;
 pub mod live_sources;
 /// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
 /// `display` output must FAIL a non-`display-kms` build with a clear error —
