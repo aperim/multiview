@@ -72,10 +72,9 @@ fn cast_media_base_is_optional_and_round_trips() {
     );
 
     // Present: parses, validates, and round-trips through TOML + JSON.
-    let cfg = MultiviewConfig::load_from_toml(&base(
-        "cast_media_base = \"http://192.0.2.7:8080\"\n",
-    ))
-    .unwrap();
+    let cfg =
+        MultiviewConfig::load_from_toml(&base("cast_media_base = \"http://192.0.2.7:8080\"\n"))
+            .unwrap();
     cfg.validate().expect("an IPv4-literal base validates");
     assert_eq!(
         cfg.control
@@ -92,31 +91,25 @@ fn cast_media_base_is_optional_and_round_trips() {
 fn cast_media_base_accepts_a_bracketed_ipv6_literal() {
     // IPv6-first examples lead (ADR-0042); Cast's IPv4-in-practice reality is
     // a legacy-interop note for hardware validation, never a config rule.
-    let cfg = MultiviewConfig::load_from_toml(&base(
-        "cast_media_base = \"http://[2001:db8::7]:8080\"\n",
-    ))
-    .unwrap();
+    let cfg =
+        MultiviewConfig::load_from_toml(&base("cast_media_base = \"http://[2001:db8::7]:8080\"\n"))
+            .unwrap();
     cfg.validate().expect("an IPv6-literal base validates");
 }
 
 #[test]
 fn cast_media_base_must_be_http_or_https() {
-    let cfg = MultiviewConfig::load_from_toml(&base(
-        "cast_media_base = \"rtsp://192.0.2.7:8554\"\n",
-    ))
-    .unwrap();
+    let cfg =
+        MultiviewConfig::load_from_toml(&base("cast_media_base = \"rtsp://192.0.2.7:8554\"\n"))
+            .unwrap();
     let err = cfg.validate().expect_err("non-HTTP scheme is rejected");
     let msg = err.to_string();
-    assert!(
-        msg.contains("cast_media_base"),
-        "names the field: {msg}"
-    );
+    assert!(msg.contains("cast_media_base"), "names the field: {msg}");
 }
 
 #[test]
 fn cast_media_base_must_not_be_empty() {
-    let cfg =
-        MultiviewConfig::load_from_toml(&base("cast_media_base = \"\"\n")).unwrap();
+    let cfg = MultiviewConfig::load_from_toml(&base("cast_media_base = \"\"\n")).unwrap();
     let err = cfg.validate().expect_err("an empty base is rejected");
     assert!(
         err.to_string().contains("cast_media_base"),

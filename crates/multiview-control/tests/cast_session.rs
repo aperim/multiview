@@ -12,7 +12,9 @@
     clippy::indexing_slicing,
     // Test prose names lifecycle states in plain caps (ONLINE/DEGRADED) and
     // protocol verbs (LOAD/PING) for readability.
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    // Test helpers take owned `serde_json::Value`s for terse call sites.
+    clippy::needless_pass_by_value
 )]
 
 use std::sync::Arc;
@@ -364,8 +366,16 @@ async fn preemption_is_surfaced_and_never_fought() {
     // channel but stays hands-off (no LAUNCH/LOAD) and remains DEGRADED.
     tokio::time::sleep(Duration::from_secs(40)).await;
     assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert_eq!(count_sent(&sent2, "LAUNCH"), 0, "never re-LAUNCH after preemption");
-    assert_eq!(count_sent(&sent2, "LOAD"), 0, "never re-LOAD after preemption");
+    assert_eq!(
+        count_sent(&sent2, "LAUNCH"),
+        0,
+        "never re-LAUNCH after preemption"
+    );
+    assert_eq!(
+        count_sent(&sent2, "LOAD"),
+        0,
+        "never re-LOAD after preemption"
+    );
     assert_eq!(status.state("cast-1"), Some(DeviceState::Degraded));
     drop(handle);
 }
@@ -448,7 +458,10 @@ async fn inbound_device_ping_is_answered_with_pong() {
     let (_engine, b) = broadcaster();
     let (channel, sent) = ScriptedChannel::new(vec![
         ScriptedInbound::Frame(receiver_status_with_app()),
-        ScriptedInbound::Frame(from_device(NS_HEARTBEAT, serde_json::json!({"type": "PING"}))),
+        ScriptedInbound::Frame(from_device(
+            NS_HEARTBEAT,
+            serde_json::json!({"type": "PING"}),
+        )),
     ]);
     let connector = ScriptedConnector::new(vec![channel]);
     let mut actor = CastSessionActor::new(

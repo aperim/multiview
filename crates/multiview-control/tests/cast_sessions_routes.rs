@@ -18,9 +18,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use multiview_control::devices::cast::media::{CastDelivery, CastMediaTarget, HlsSegmentFormat};
 use multiview_control::devices::cast::runtime::CastSessionFactory;
-use multiview_control::devices::cast::session::{
-    CastSessionConfig, ScriptedChannel, ScriptedConnector, ScriptedInbound,
-};
+use multiview_control::devices::cast::session::{CastSessionConfig, ScriptedConnector};
 use multiview_control::devices::DevicePollerRegistry;
 use support::{
     body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN, OPERATOR_TOKEN,
@@ -87,7 +85,11 @@ async fn start_list_get_stop_round_trips() {
     // Start an ad-hoc session.
     let resp = send(
         &h.router,
-        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(Some("out-b"))),
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &start_body(Some("out-b")),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -111,7 +113,10 @@ async fn start_list_get_stop_round_trips() {
     let list = body_json(resp).await;
     assert_eq!(list.as_array().expect("an array").len(), 1);
     assert_eq!(list[0]["id"], id.as_str());
-    assert!(list[0]["state"].is_string(), "a lifecycle state rides along");
+    assert!(
+        list[0]["state"].is_string(),
+        "a lifecycle state rides along"
+    );
 
     let resp = send(
         &h.router,
@@ -149,7 +154,10 @@ async fn start_without_an_output_casts_the_first_rendition() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let created = body_json(resp).await;
     assert_eq!(created["output"], "out-a", "the first declared rendition");
-    assert_eq!(created["media_url"], "http://192.0.2.7:8080/hls/out-a/a.m3u8");
+    assert_eq!(
+        created["media_url"],
+        "http://192.0.2.7:8080/hls/out-a/a.m3u8"
+    );
 }
 
 #[tokio::test]
@@ -422,12 +430,10 @@ async fn stop_clears_the_tombstone_so_session_ids_stay_bounded() {
         "display": { "assign": { "output": "out-a" } }
     }))
     .expect("a valid device");
-    let engine = Arc::new(
-        multiview_engine::EnginePublisher::<
-            multiview_control::EngineStateSnapshot,
-            multiview_events::Event,
-        >::new(8),
-    );
+    let engine = Arc::new(multiview_engine::EnginePublisher::<
+        multiview_control::EngineStateSnapshot,
+        multiview_events::Event,
+    >::new(8));
     let wiring = PollerWiring {
         broadcaster: DeviceBroadcaster::new(engine, Arc::new(DeviceStatusRegistry::new())),
         drivers: Arc::new(DeviceDriverRegistry::new()),

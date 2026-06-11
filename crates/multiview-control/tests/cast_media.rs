@@ -12,8 +12,7 @@
 
 use multiview_config::DisplayAssign;
 use multiview_control::devices::cast::media::{
-    split_authority, CastDelivery, CastMediaBase, CastMediaError, CastMediaTarget,
-    HlsSegmentFormat,
+    split_authority, CastDelivery, CastMediaBase, CastMediaError, CastMediaTarget, HlsSegmentFormat,
 };
 
 #[test]
@@ -132,7 +131,9 @@ fn delivery_resolves_outputs_and_the_program_default() {
     assert!(delivery
         .resolve_assign(&DisplayAssign::Output("out-a".to_owned()))
         .is_some());
-    assert!(delivery.resolve_assign(&DisplayAssign::Program(true)).is_some());
+    assert!(delivery
+        .resolve_assign(&DisplayAssign::Program(true))
+        .is_some());
     assert!(delivery
         .resolve_assign(&DisplayAssign::WallHead("head-l".to_owned()))
         .is_none());
@@ -142,7 +143,9 @@ fn delivery_resolves_outputs_and_the_program_default() {
 fn empty_delivery_resolves_nothing() {
     let delivery = CastDelivery::new();
     assert!(delivery.first().is_none());
-    assert!(delivery.resolve_assign(&DisplayAssign::Program(true)).is_none());
+    assert!(delivery
+        .resolve_assign(&DisplayAssign::Program(true))
+        .is_none());
 }
 
 #[test]

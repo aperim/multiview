@@ -101,7 +101,10 @@ fn factory_spawns_for_a_cast_device_with_an_output_assignment() {
         })),
         &wiring,
     );
-    assert!(handle.is_some(), "a cast device with a rendition gets a session actor");
+    assert!(
+        handle.is_some(),
+        "a cast device with a rendition gets a session actor"
+    );
 }
 
 #[test]
@@ -117,7 +120,10 @@ fn factory_resolves_the_program_assignment_to_the_first_rendition() {
         })),
         &wiring,
     );
-    assert!(handle.is_some(), "program assign casts the first HLS rendition");
+    assert!(
+        handle.is_some(),
+        "program assign casts the first HLS rendition"
+    );
 }
 
 #[test]
@@ -166,10 +172,7 @@ fn composite_factory_dispatches_to_the_first_managing_member() {
         }
     }
     let (wiring, _status) = wiring();
-    let composite = CompositePollerFactory::new(vec![
-        Arc::new(Never),
-        Arc::new(refused_factory()),
-    ]);
+    let composite = CompositePollerFactory::new(vec![Arc::new(Never), Arc::new(refused_factory())]);
     let handle = composite.spawn(
         &device(serde_json::json!({
             "id": "dev-c", "driver": "cast", "address": "192.0.2.20",

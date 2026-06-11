@@ -7,7 +7,11 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // The heartbeat pair IS ping/pong — the protocol's own names.
+    clippy::similar_names,
+    // Test helpers take owned `serde_json::Value`s for terse call sites.
+    clippy::needless_pass_by_value
 )]
 
 use multiview_control::devices::cast::media::{CastMediaTarget, HlsSegmentFormat};
@@ -138,7 +142,10 @@ fn decodes_pong_ping_and_close() {
         InboundMessage::Ping
     ));
     assert!(matches!(
-        protocol::decode(&inbound(NS_CONNECTION, serde_json::json!({"type": "CLOSE"}))),
+        protocol::decode(&inbound(
+            NS_CONNECTION,
+            serde_json::json!({"type": "CLOSE"})
+        )),
         InboundMessage::CloseConnection
     ));
 }
@@ -246,5 +253,8 @@ fn decodes_launch_error_and_unknown_types() {
         destination: SENDER_ID.to_owned(),
         payload: "not json".to_owned(),
     };
-    assert!(matches!(protocol::decode(&garbage), InboundMessage::Unknown));
+    assert!(matches!(
+        protocol::decode(&garbage),
+        InboundMessage::Unknown
+    ));
 }

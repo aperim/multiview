@@ -42,7 +42,9 @@ async fn oversized_frames_are_rejected_not_buffered() {
     let (mut read_half, _w) = tokio::io::split(server);
     let (_r, mut write_half) = tokio::io::split(client);
 
-    let huge = u32::try_from(MAX_FRAME_LEN).expect("fits u32").saturating_add(1);
+    let huge = u32::try_from(MAX_FRAME_LEN)
+        .expect("fits u32")
+        .saturating_add(1);
     write_half
         .write_all(&huge.to_be_bytes())
         .await
