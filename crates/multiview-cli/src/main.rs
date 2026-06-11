@@ -262,17 +262,12 @@ struct RunningPersist {
 }
 
 impl RunningPersist {
-    /// Stop the debounced persister at teardown and capture changes younger
-    /// than the debounce with one final best-effort persist (fail-soft: a
-    /// failure is warned and the shutdown continues).
+    /// Stop the debounced persister at teardown: abort → **await the task's
+    /// termination** → one final best-effort persist capturing changes
+    /// younger than the debounce (review M2: the ordering restores the
+    /// deterministic `.tmp` single-writer guarantee; fail-soft on error).
     async fn finish(self) {
-        self.task.abort();
-        if let Err(error) = multiview_control::boot_model::persist_running_now(&self.state).await {
-            tracing::warn!(
-                error = %error,
-                "the final running-state persist at shutdown was skipped (fail-soft)"
-            );
-        }
+        multiview_control::boot_model::finish_running_persist(self.task, &self.state).await;
     }
 }
 

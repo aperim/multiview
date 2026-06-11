@@ -30,7 +30,8 @@ use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use multiview_config::{MultiviewConfig, StartMode};
 use multiview_control::boot_model::{
-    load_resume_config, persist_running_now, spawn_running_persist, write_atomic, BootModel,
+    finish_running_persist, load_resume_config, persist_running_now, spawn_running_persist,
+    write_atomic, BootModel,
 };
 use multiview_control::config_watch::{spawn as spawn_watch, WatchOptions};
 use multiview_control::{
@@ -835,6 +836,52 @@ async fn the_running_persister_writes_active_toml_on_audited_changes() {
         "atomic writes must leave no temp residue, got {residue:?}"
     );
     task.abort();
+}
+
+/// Review M2 — the teardown ordering: `finish_running_persist` aborts the
+/// persister, AWAITS its termination, and only then runs the final persist,
+/// capturing changes younger than the debounce even when the task is parked
+/// deep inside a long debounce window — with no temp residue (the
+/// deterministic `.tmp` stays single-writer through the teardown).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_running_persist_captures_changes_younger_than_the_debounce() {
+    let r = rig(BOOT_DOC);
+    let active_path = r
+        .state
+        .boot_model
+        .as_ref()
+        .expect("boot model")
+        .active_path();
+    // A debounce far longer than the test: the change below stays younger
+    // than the debounce throughout, so ONLY the ordered teardown persist can
+    // capture it.
+    let task = spawn_running_persist(r.state.clone(), Duration::from_secs(600));
+    assert!(
+        wait_until(SETTLE, || active_path.exists()).await,
+        "the startup persist writes the starting Running state"
+    );
+
+    // The audited change fires the notify; the task then sleeps its 600 s
+    // debounce — parked, with the change unpersisted.
+    recolor_in_a(&r, "#717171").await;
+
+    finish_running_persist(task, &r.state).await;
+
+    let text = std::fs::read_to_string(&active_path).expect("read active.toml");
+    assert!(
+        text.contains("#717171"),
+        "the final persist must capture the change younger than the debounce"
+    );
+    let residue: Vec<String> = std::fs::read_dir(active_path.parent().expect("state dir"))
+        .expect("read state dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "active.toml" && n != "loaded.toml")
+        .collect();
+    assert!(
+        residue.is_empty(),
+        "the ordered teardown leaves no temp residue, got {residue:?}"
+    );
 }
 
 /// Fail-soft: a state whose stores do not compose (no working layout) warns

@@ -312,6 +312,29 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
 /// The caller aborts the returned handle at teardown and runs one final
 /// best-effort [`persist_running_now`] to capture changes younger than the
 /// debounce.
+/// Stop the debounced Running persister at run teardown (review M2): abort
+/// the task, **await its termination**, and only then run one final
+/// best-effort [`persist_running_now`] to capture changes younger than the
+/// debounce.
+///
+/// The ordering is the point: [`write_atomic`] uses a deterministic
+/// same-name `.tmp`, which is single-writer only if the final persist can
+/// never overlap a write the just-aborted task is still finishing (its file
+/// I/O runs on a blocking thread that an `abort()` does not interrupt —
+/// the abort lands at the task's next await point, and `task.await` returns
+/// only once the task has fully terminated). A persist failure is warned
+/// and teardown continues (fail-soft).
+pub async fn finish_running_persist(task: tokio::task::JoinHandle<()>, state: &AppState) {
+    task.abort();
+    let _ = task.await;
+    if let Err(error) = persist_running_now(state).await {
+        tracing::warn!(
+            error = %error,
+            "the final running-state persist at shutdown was skipped (fail-soft)"
+        );
+    }
+}
+
 #[must_use]
 pub fn spawn_running_persist(state: AppState, debounce: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
