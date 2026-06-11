@@ -110,6 +110,9 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::audit::list_audit,
         crate::routes::config::export_config,
         crate::routes::config::watch_status,
+        crate::routes::config::boot_model_status,
+        crate::routes::config::revert_to_start,
+        crate::routes::config::promote_to_boot,
         crate::routes::preview::program_whep_open,
         crate::routes::preview::program_whep_close,
         crate::routes::preview::input_whep_open,
@@ -142,6 +145,9 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::config::RollbackRequest,
         crate::watch_status::WatchStatusBody,
         crate::watch_status::WatchStamp,
+        crate::routes::config::BootModelBody,
+        crate::routes::config::RevertToStartBody,
+        crate::routes::config::PromoteBody,
         crate::openapi_schemas::AlarmRecordDoc,
         crate::openapi_schemas::SourceBodyDoc,
         crate::openapi_schemas::SourceKindDoc,
@@ -270,6 +276,10 @@ impl ApiDoc {
     /// registered. Used by tests to assert the surface is complete without
     /// depending on utoipa's `#[utoipa::path]` macro wiring for every handler.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
+    // reason: a flat, data-only route table (one tuple per route, no logic);
+    // splitting it would obscure the single ordered list the surface tests
+    // assert against. It crossed the line-count lint by growing three routes.
     pub fn rest_routes() -> &'static [(&'static str, &'static str)] {
         &[
             ("GET", "/api/v1/layouts"),
@@ -357,6 +367,10 @@ impl ApiDoc {
             ("DELETE", "/api/v1/preview/outputs/{id}/whep/{session_id}"),
             // Read-only change audit log.
             ("GET", "/api/v1/audit"),
+            // The Boot/Loaded/Running model (ADR-W022): status + actions.
+            ("GET", "/api/v1/config/boot-model"),
+            ("POST", "/api/v1/config/revert-to-start"),
+            ("POST", "/api/v1/config/promote"),
             // Config versioning: history + commit, single revision, diff, rollback.
             ("GET", "/api/v1/config/{target}"),
             ("PUT", "/api/v1/config/{target}"),

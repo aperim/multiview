@@ -33,6 +33,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Cold-start resolution for the Boot/Loaded/Running model (ADR-W022 §4):
+/// `[control] start = "boot" | "resume"` decides whether the run starts from
+/// the boot file or from the persisted `active.toml` Running state (falling
+/// back to boot, loudly, when the persisted state is unusable).
+pub mod boot;
 /// Build-time GPU-capability cross-check + health-warning emit (SA-0 / ADR-0035):
 /// detect when a real GPU is present but the wgpu compositor resolved a
 /// software/CPU adapter (the silent CPU fallback) and emit a latched, actionable
@@ -43,6 +48,8 @@ pub mod cli;
 /// Config-file watch (ADR-W020): hot-reload the impacted parts of the boot
 /// config when the file changes externally — through the SAME apply machinery
 /// the Web/API uses; an invalid file changes nothing (warn + health event).
+/// Re-exported from `multiview_control::config_watch` (ADR-W022 §2 moved the
+/// one diff→apply implementation there so the revert route can reach it).
 pub mod config_watch;
 pub mod control;
 pub mod live_sources;

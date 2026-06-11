@@ -31,6 +31,11 @@ areas = ["a"]
 [control]
 listen = "[::1]:0"
 {start_line}
+[[outputs]]
+kind = "hls"
+path = "/tmp/start-mode.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
 "##
     )
 }

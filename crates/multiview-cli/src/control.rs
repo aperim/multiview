@@ -67,16 +67,27 @@ use tokio::task::JoinHandle;
 /// command bus, audit log, and watch-status slot the router serves (one set
 /// of stores, never a parallel copy).
 ///
+/// `boot_model` is the run's Boot/Loaded/Running model (ADR-W022) when the
+/// run was started from a config file: it backs `GET /api/v1/config/boot-model`
+/// and the revert-to-start/promote actions. `None` (store-only/test servers)
+/// honestly reports `modeled: false` and refuses the actions.
+///
 /// # Errors
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
 /// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
 /// from `config` (not expected for a validated config).
+#[allow(clippy::too_many_arguments)]
+// reason: the one control-plane bring-up: each parameter is a distinct
+// run-owned handle (listener address, the booted config, the engine publisher,
+// the command bus, the preview provider, the ADR-W022 boot model, shutdown).
+// Bundling them into a struct would only move the arity for the two callers.
 pub async fn bind_and_serve<F>(
     listen: &str,
     config: &MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    boot_model: Option<Arc<multiview_control::boot_model::BootModel>>,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
 where
@@ -137,7 +148,7 @@ where
     let warning_sub = publisher.subscribe();
     tokio::spawn(run_warning_ingest(warning_sub, Arc::clone(&warnings)));
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         publisher,
         commands,
         Arc::new(InMemoryRepository::new()),
@@ -151,6 +162,11 @@ where
     .with_preview(preview)
     .with_warning_store(warnings)
     .with_auth_disabled(auth_disabled);
+    if let Some(model) = boot_model {
+        // The Boot/Loaded/Running model (ADR-W022): backs the boot-model
+        // status endpoint and the revert-to-start/promote actions.
+        state = state.with_boot_model(model);
+    }
 
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
@@ -2164,6 +2180,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            None,
             async move {
                 let _ = shutdown_rx.await;
             },

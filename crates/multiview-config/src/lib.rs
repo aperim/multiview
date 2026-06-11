@@ -80,6 +80,25 @@ pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
+/// The cold-start policy (ADR-W022): where `multiview run` takes its starting
+/// **Running** state from.
+///
+/// The token is serde-typed, so an unknown value fails parse (validated by
+/// construction) and the absent default is [`StartMode::Boot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartMode {
+    /// Start from the boot config file itself (the deliberate cold-start
+    /// baseline). Any persisted `active.toml` from a previous run is ignored.
+    #[default]
+    Boot,
+    /// Resume from `<config-dir>/.multiview/active.toml` (the last persisted
+    /// Running state) when it exists, parses, AND validates; otherwise fall
+    /// back to the boot document with a warning. The boot file stays the
+    /// Loaded snapshot and the watch target in both modes.
+    Resume,
+}
+
 /// The management control-plane listener.
 ///
 /// When present, `multiview run` serves the REST + WebSocket + SSE API, the
@@ -99,6 +118,12 @@ pub struct ControlConfig {
     /// default. Validated as a parseable [`std::net::SocketAddr`] by
     /// [`MultiviewConfig::validate`].
     pub listen: String,
+    /// The cold-start policy (ADR-W022): `"boot"` (default) starts from this
+    /// config file; `"resume"` starts from the persisted Running state
+    /// (`<config-dir>/.multiview/active.toml`) when it is valid, falling back
+    /// to boot with a warning otherwise.
+    #[serde(default)]
+    pub start: StartMode,
 }
 
 /// A complete Multiview configuration document (config-as-code).

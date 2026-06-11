@@ -44,6 +44,11 @@ id = "cell_a"
 area = "a"
 [cells.source]
 input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/boot-resume.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
 "##
     )
 }
@@ -66,11 +71,15 @@ fn stage(boot: &str, active: Option<&str>) -> (tempfile::TempDir, PathBuf, Multi
 
 /// The colour of `in_a` in a config, via its serialized body.
 fn in_a_color(config: &MultiviewConfig) -> Option<String> {
-    config.sources.iter().find(|s| s.id == "in_a").and_then(|s| {
-        serde_json::to_value(s)
-            .ok()
-            .and_then(|v| v.get("color").and_then(|c| c.as_str().map(str::to_owned)))
-    })
+    config
+        .sources
+        .iter()
+        .find(|s| s.id == "in_a")
+        .and_then(|s| {
+            serde_json::to_value(s)
+                .ok()
+                .and_then(|v| v.get("color").and_then(|c| c.as_str().map(str::to_owned)))
+        })
 }
 
 /// Pin (e): `start = "resume"` with a valid `active.toml` starts Running from
@@ -141,7 +150,10 @@ fn the_default_boot_policy_ignores_an_existing_active() {
 
     let start = resolve_start_config(boot_config, &boot_path);
     assert!(!start.resumed, "start = boot must never resume");
-    assert!(start.resume_fallback.is_none(), "no fallback warning either");
+    assert!(
+        start.resume_fallback.is_none(),
+        "no fallback warning either"
+    );
     assert_eq!(
         in_a_color(&start.running).as_deref(),
         Some("#101418"),

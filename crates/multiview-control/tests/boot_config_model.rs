@@ -35,7 +35,6 @@ use multiview_control::boot_model::{
 use multiview_control::config_watch::{spawn as spawn_watch, WatchOptions};
 use multiview_control::{
     command_bus, AppState, Command, CommandReceiver, EngineStateSnapshot, InMemoryRepository,
-    ResourceInput,
 };
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
@@ -166,7 +165,7 @@ async fn wait_until(deadline: Duration, mut predicate: impl FnMut() -> bool) -> 
     predicate()
 }
 
-/// Re-colour `in_a` through the REAL sources route (GET → ETag → PUT with
+/// Re-colour `in_a` through the REAL sources route (GET → `ETag` → PUT with
 /// `If-Match`), exactly as the UI mutates Running.
 async fn recolor_in_a(r: &Rig, color: &str) {
     let resp = send(&r.router, get("/api/v1/sources/in_a", OPERATOR_TOKEN)).await;
