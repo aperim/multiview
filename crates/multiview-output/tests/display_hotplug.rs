@@ -448,3 +448,54 @@ fn a_kernel_uevent_drives_a_sink_reprobe_through_the_monitor() {
     monitor.stop();
     drop(sink.publisher);
 }
+
+// ---------------------------------------------------------------------------
+// The real kernel netlink source (feature `display-kms`)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "display-kms")]
+mod kms_netlink {
+    use std::time::Duration;
+
+    use multiview_output::display::hotplug::UeventSource as _;
+    use multiview_output::display::kms::{is_initial_user_namespace, KernelUeventSocket};
+
+    #[test]
+    fn the_initial_user_namespace_map_is_recognized() {
+        // The initial user namespace's identity mapping (also what a normal
+        // ROOTFUL container sees — it shares the initial userns, so kernel
+        // uevents reach it).
+        assert!(is_initial_user_namespace(
+            "         0          0 4294967295\n"
+        ));
+    }
+
+    #[test]
+    fn rootless_user_namespace_maps_are_not_initial() {
+        // A rootless container's subuid mapping: kernel uevents are NOT
+        // delivered to its netns → the polling fallback is required.
+        assert!(!is_initial_user_namespace(
+            "         0       1000          1\n         1     100000      65536\n"
+        ));
+        assert!(!is_initial_user_namespace(""));
+        assert!(!is_initial_user_namespace("garbage\n"));
+    }
+
+    #[test]
+    fn kernel_uevent_socket_open_never_panics() {
+        // Both outcomes are legal in CI: a usable kernel uevent socket
+        // (bare metal / rootful), or a clear reason (rootless / sandbox).
+        // Real uevent DELIVERY is hardware/deployment-validated (t630 leg),
+        // not CI-assertable.
+        match KernelUeventSocket::open() {
+            Ok(mut source) => {
+                // A bounded idle read must not error out.
+                let outcome = source.recv_timeout(Duration::from_millis(1));
+                assert!(outcome.is_ok(), "idle read errored: {outcome:?}");
+            }
+            Err(reason) => {
+                assert!(!reason.is_empty(), "the fallback reason must say why");
+            }
+        }
+    }
+}
