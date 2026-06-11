@@ -153,6 +153,21 @@ cuda = ["multiview-hal/cuda"]
 # build can serve the full management UI: `run --features web,overlay`.
 web = ["multiview-control/embed-web"]
 
+# mDNS/DNS-SD managed-device discovery (DEV-A5 / ADR-M008 §6 / ADR-0041): install
+# the real `mdns-sd`-backed browser so `POST /api/v1/discovery/devices/scan`
+# browses the LAN for Cast / NDI / (configured) zowietek-control services. The
+# untrusted-inventory model + endpoints are always compiled; this feature only
+# adds the multicast socket. Pure Rust, LGPL-clean, GPU-free.
+discovery = ["multiview-control/discovery"]
+# Managed-device network I/O (DEV-A4, ADR-M009): the live HTTP transport for the
+# `zowietek` driver poller. With this on, a `multiview run` whose config declares
+# `[[devices]]` with `driver = "zowietek"` spawns a supervised control-plane
+# poller per device (login → probe → enumerate facets → poll status → drive the
+# lifecycle), so the projection routes return real candidates/targets and
+# `set-mode` dispatches convergence. OFF by default so the baseline build stays
+# pure-Rust/socket-free and CI-green; forwards `multiview-control/zowietek`.
+devices-net = ["multiview-control/zowietek"]
+
 # Overlay rasterization: bakes the configured overlays (clock/labels, dB
 # meters, safe-area graticules, tally borders, burned-in SRT/VTT subtitles) into
 # the composited program before encode, via multiview-compositor's pure-Rust
@@ -350,6 +365,12 @@ full = [
     "multiview-control/embed-web",
     "multiview-control/openapi",
     "multiview-preview/webrtc",
+    # mDNS managed-device discovery (DEV-A5): pure-Rust, LGPL-clean, GPU-free.
+    "multiview-control/discovery",
+    # Managed-device live transport (DEV-A4): the `zowietek` driver poller's real
+    # HTTP backend. LGPL-clean (reqwest + rustls, no native lib), so it belongs
+    # in the non-GPL `full` build.
+    "devices-net",
 ]
 
 [lints]

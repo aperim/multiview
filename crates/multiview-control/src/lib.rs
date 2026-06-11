@@ -101,8 +101,8 @@ pub use command::{
 };
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use devices::{
-    DeviceBroadcaster, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent, OutputTarget,
-    SourceCandidate,
+    DeviceBroadcaster, DeviceDriverRegistry, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent,
+    ModeConvergence, OutputTarget, SourceCandidate, WorkMode, ZowietekDriver,
 };
 pub use error::{ControlError, ControlResult};
 pub use is07::{
