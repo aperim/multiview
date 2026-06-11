@@ -139,6 +139,33 @@ url = "rtsp://[::1]:8554/x"
     );
 }
 
+/// DEV-B5 F2: the **top-level** node document rejects unknown tables/keys —
+/// a typo'd section (`[cnavas]` for `[canvas]`) must be a loud parse error
+/// naming the offender, never a silent fall-back to the defaults. The
+/// sub-tables already `deny_unknown_fields`; the document root must too.
+#[test]
+fn rejects_a_misspelled_top_level_table() {
+    let err = NodeConfig::load_from_toml(
+        r#"
+[ingest]
+kind = "rtsp"
+url = "rtsp://[::1]:8554/x"
+
+[[displays]]
+
+[cnavas]
+width = 1280
+height = 720
+"#,
+    )
+    .expect_err("a typo'd top-level [cnavas] table must fail to parse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cnavas"),
+        "the parse error names the unknown table: {msg}"
+    );
+}
+
 #[test]
 fn rejects_mode_and_forced_mode_together() {
     let err = parse_err(
