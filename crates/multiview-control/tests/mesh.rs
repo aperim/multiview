@@ -16,6 +16,10 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
+    // The locked-row test deliberately `panic!`s inside an `if` over the route
+    // table (a clearer per-route message than a single `assert!`) — the test
+    // intent, not a weakened assertion.
+    clippy::manual_assert,
     clippy::indexing_slicing
 )]
 
@@ -51,7 +55,10 @@ async fn status_reports_always_on_discovery_relay_off_and_direct_role() {
     assert_eq!(body["relay_enabled"], false, "relay is opt-out by default");
     assert_eq!(body["role"]["kind"], "direct", "online, no opt-in → direct");
     assert_eq!(body["peers_count"], 0, "no peers discovered yet");
-    assert!(body.get("via").is_none() || body["via"].is_null(), "no via when direct");
+    assert!(
+        body.get("via").is_none() || body["via"].is_null(),
+        "no via when direct"
+    );
 }
 
 #[tokio::test]
@@ -65,23 +72,37 @@ async fn relay_toggle_round_trips_and_persists() {
     // Toggle relay ON.
     let resp = send(
         &h.router,
-        put_json("/api/v1/mesh/relay", ADMIN_TOKEN, &serde_json::json!({"enabled": true})),
+        put_json(
+            "/api/v1/mesh/relay",
+            ADMIN_TOKEN,
+            &serde_json::json!({"enabled": true}),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
-    assert_eq!(body["relay_enabled"], true, "the PUT returns the new status");
+    assert_eq!(
+        body["relay_enabled"], true,
+        "the PUT returns the new status"
+    );
     assert_eq!(body["role"]["kind"], "relay", "online + opted-in → relay");
 
     // The toggle PERSISTED: a fresh GET reflects it (and the shared store too).
     let resp = send(&h.router, get("/api/v1/mesh/status", VIEWER_TOKEN)).await;
     assert_eq!(body_json(resp).await["relay_enabled"], true);
-    assert!(mesh.relay_enabled(), "the toggle persisted in the shared store");
+    assert!(
+        mesh.relay_enabled(),
+        "the toggle persisted in the shared store"
+    );
 
     // Toggle back OFF.
     let resp = send(
         &h.router,
-        put_json("/api/v1/mesh/relay", ADMIN_TOKEN, &serde_json::json!({"enabled": false})),
+        put_json(
+            "/api/v1/mesh/relay",
+            ADMIN_TOKEN,
+            &serde_json::json!({"enabled": false}),
+        ),
     )
     .await;
     assert_eq!(body_json(resp).await["relay_enabled"], false);
@@ -115,10 +136,16 @@ async fn peers_lists_the_untrusted_inventory() {
     assert_eq!(peers.len(), 2);
     // Each peer is UNTRUSTED: relaying_for_us is false; the id is pure hex.
     for peer in peers {
-        assert_eq!(peer["relaying_for_us"], false, "discovered peers are untrusted");
+        assert_eq!(
+            peer["relaying_for_us"], false,
+            "discovered peers are untrusted"
+        );
         let id = peer["key"].as_str().expect("hex key");
         assert_eq!(id.len(), 64);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "the id is pure hex, never a raw identifier");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "the id is pure hex, never a raw identifier"
+        );
     }
     // The status peer count matches.
     let status = body_json(send(&h.router, get("/api/v1/mesh/status", VIEWER_TOKEN)).await).await;
@@ -135,7 +162,11 @@ async fn status_and_peers_require_authentication() {
             .body(Body::empty())
             .expect("request");
         let resp = send(&h.router, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path} requires auth");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} requires auth"
+        );
     }
 }
 
@@ -145,10 +176,18 @@ async fn the_relay_toggle_requires_write_role() {
     // A read-only Viewer may not toggle relay.
     let resp = send(
         &h.router,
-        put_json("/api/v1/mesh/relay", VIEWER_TOKEN, &serde_json::json!({"enabled": true})),
+        put_json(
+            "/api/v1/mesh/relay",
+            VIEWER_TOKEN,
+            &serde_json::json!({"enabled": true}),
+        ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "toggling relay is a write action");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "toggling relay is a write action"
+    );
 }
 
 #[test]
@@ -171,7 +210,10 @@ fn there_is_no_route_to_disable_discovery() {
             panic!("no /mesh/discovery route may exist — discovery has no off switch ({method} {path})");
         }
         if *path == "/api/v1/mesh/status" {
-            assert_eq!(*method, "GET", "/mesh/status is read-only; no mutation of discovery");
+            assert_eq!(
+                *method, "GET",
+                "/mesh/status is read-only; no mutation of discovery"
+            );
         }
     }
 }

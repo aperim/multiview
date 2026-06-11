@@ -61,7 +61,12 @@ impl FakeTransport {
     fn with_inbox(received: Vec<Vec<u8>>) -> Self {
         Self {
             announced: Mutex::new(Vec::new()),
-            inbox: Mutex::new(received.into_iter().map(ReceivedAnnouncement::new).collect()),
+            inbox: Mutex::new(
+                received
+                    .into_iter()
+                    .map(ReceivedAnnouncement::new)
+                    .collect(),
+            ),
         }
     }
 
@@ -91,7 +96,10 @@ fn a_round_announces_and_folds_received_peers_untrusted() {
     let now = Duration::from_secs(10);
 
     let folded = announce_browse_step(&transport, &state, b"my-announce", now);
-    assert_eq!(folded, 2, "both received announcements fold into the inventory");
+    assert_eq!(
+        folded, 2,
+        "both received announcements fold into the inventory"
+    );
     assert_eq!(transport.announced_count(), 1, "the round announced once");
 
     let peers = state.peers();
@@ -104,7 +112,10 @@ fn a_round_announces_and_folds_received_peers_untrusted() {
         );
     }
     // The claimed neighbour surfaces claimed=true.
-    let claimed = state.peers().into_iter().find(|p| p.key == PeerKey::from_digest([0xA1; 32]));
+    let claimed = state
+        .peers()
+        .into_iter()
+        .find(|p| p.key == PeerKey::from_digest([0xA1; 32]));
     assert!(claimed.expect("0xA1 present").claimed);
 }
 
@@ -116,7 +127,10 @@ fn a_garbage_announcement_is_skipped_never_panics() {
     ]);
     let state = MeshState::new();
     let folded = announce_browse_step(&transport, &state, b"x", Duration::from_secs(1));
-    assert_eq!(folded, 1, "the garbage announcement is skipped; the valid one folds");
+    assert_eq!(
+        folded, 1,
+        "the garbage announcement is skipped; the valid one folds"
+    );
     assert_eq!(state.peers().len(), 1);
 }
 
@@ -182,5 +196,8 @@ fn adopting_an_unknown_peer_is_refused_but_a_discovered_one_is_adopted() {
         .into_iter()
         .find(|p| p.key == discovered)
         .expect("present");
-    assert!(peer.relaying_for_us, "the adopted peer is marked relaying_for_us");
+    assert!(
+        peer.relaying_for_us,
+        "the adopted peer is marked relaying_for_us"
+    );
 }

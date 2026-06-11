@@ -2881,6 +2881,7 @@ dependencies = [
  "multiview-hal",
  "multiview-input",
  "multiview-licence",
+ "multiview-mesh",
  "multiview-output",
  "multiview-overlay",
  "multiview-preview",

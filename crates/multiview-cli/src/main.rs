@@ -217,6 +217,7 @@ async fn serve_control_plane(
     stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
     registry: multiview_cli::live_sources::StopRegistry,
     licence: Option<multiview_control::LicenceState>,
+    mesh: Option<Arc<multiview_mesh::MeshState>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<(
     tokio::task::JoinHandle<std::io::Result<()>>,
@@ -241,6 +242,7 @@ async fn serve_control_plane(
         commands,
         provider,
         licence,
+        mesh,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -272,6 +274,11 @@ async fn run_pipeline_until_ctrl_c(
     let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // Conspect local-mesh (ADR-0051 §2/§5): start the always-on discovery loop
+    // (best-effort, never blocks — inv #10) before serving, so `/api/v1/mesh/peers`
+    // reflects live neighbours. The shared `MeshState` is wired into the control
+    // plane below regardless of the `mesh-mdns` feature.
+    plane.spawn_mesh_discovery();
     let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
             let (handle, command_rx, hub) = serve_control_plane(
@@ -285,6 +292,7 @@ async fn run_pipeline_until_ctrl_c(
                     Arc::clone(&plane.store),
                     plane.pinned.clone(),
                 )),
+                Some(Arc::clone(&plane.mesh)),
                 shutdown_rx,
             )
             .await?;
@@ -552,6 +560,10 @@ async fn run_software_until_ctrl_c(
     // control plane is up, a no-op otherwise. The server serves until
     // `shutdown_rx` resolves (once the engine loop returns).
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // Conspect local-mesh (ADR-0051 §2/§5): start the always-on discovery loop
+    // (best-effort, never blocks — inv #10) before serving. The shared `MeshState`
+    // is wired into the control plane below regardless of the `mesh-mdns` feature.
+    plane.spawn_mesh_discovery();
     let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
             let (handle, command_rx, hub) = serve_control_plane(
@@ -565,6 +577,7 @@ async fn run_software_until_ctrl_c(
                     Arc::clone(&plane.store),
                     plane.pinned.clone(),
                 )),
+                Some(Arc::clone(&plane.mesh)),
                 shutdown_rx,
             )
             .await?;

@@ -144,8 +144,7 @@ impl AnnouncePayload {
         entitlement: EntitlementSummary,
         key: &SigningKey,
     ) -> Self {
-        let message =
-            Self::signing_bytes(protocol_version, &digests, claim_state, &entitlement);
+        let message = Self::signing_bytes(protocol_version, &digests, claim_state, &entitlement);
         let signature = key.sign(&message);
         Self {
             protocol_version,

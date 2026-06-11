@@ -122,7 +122,10 @@ impl MdnsService {
     /// `None` if the chunking is absent/inconsistent (a foreign or malformed
     /// announcement is ignored, never panicked on).
     fn reassemble(resolved: &mdns_sd::ResolvedService) -> Option<Vec<u8>> {
-        let count: usize = resolved.get_property_val_str(CHUNK_COUNT_KEY)?.parse().ok()?;
+        let count: usize = resolved
+            .get_property_val_str(CHUNK_COUNT_KEY)?
+            .parse()
+            .ok()?;
         let mut wire = Vec::with_capacity(count * CHUNK_BYTES);
         for i in 0..count {
             let key = format!("p{i}");

@@ -230,6 +230,7 @@ async fn software_run_serves_the_control_api_while_running() {
         commands,
         multiview_control::no_preview(),
         None,
+        None,
         async move {
             let _ = shutdown_rx.await;
         },

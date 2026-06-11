@@ -32,6 +32,14 @@ multiview-events = { workspace = true }
 # build; enforcement is DATA the cli samples, never a path that touches a running
 # program (invariant #1/#10).
 multiview-licence = { workspace = true }
+# The local-mesh discovery/relay plane (Conspect, ADR-0051): the cli owns the
+# single shared `MeshState` the always-on announce/browse loop maintains and the
+# control plane (`/api/v1/mesh/*`) renders, so the API serves live discovery
+# state. Pure-Rust leaf crate by default (the live mDNS socket lives behind the
+# mesh crate's own off-by-default `mdns` feature, pulled by the `mesh-mdns`
+# preset); it stays in the CI-green default build, control-plane-only, never able
+# to back-pressure the engine (invariant #10).
+multiview-mesh = { workspace = true }
 arc-swap = "1.9.1"
 multiview-telemetry = { workspace = true }
 multiview-compositor = { workspace = true }
@@ -210,6 +218,17 @@ display-kms = ["multiview-output/display-kms"]
 # elsewhere / on a denied read the badge honestly shows the assumed default.
 ntp = ["multiview-engine/ntp"]
 
+# Live local-mesh discovery (Conspect, ADR-0051 §6): turn on the mesh crate's
+# off-by-default `mdns` feature so the always-on announce/browse loop uses the
+# real link-local-multicast mDNS socket (IPv6-first `ff02::fb`, IPv4 legacy
+# interop) instead of staying a pure shell. OFF by default so the baseline build
+# is socket-free and `cargo deny`-clean; the shipped deploy presets turn it on.
+# The discovered-peer inventory is served read-only over `/api/v1/mesh/peers`
+# regardless of this feature (the shared `MeshState` is always wired); this only
+# gates whether the live socket loop runs. Control-plane only; the loop is
+# best-effort and can never back-pressure the engine (invariant #10).
+mesh-mdns = ["multiview-mesh/mdns"]
+
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once
 # (LGPL `mpeg2video` by default) -> fan out to the file + HLS output sinks. Wires
@@ -310,6 +329,9 @@ nvidia = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
+    # Live local-mesh discovery (Conspect, ADR-0051 §6): the shipped deploy image
+    # runs the real mDNS announce/browse loop.
+    "mesh-mdns",
 ]
 
 # Apple Silicon / Intel macOS: VideoToolbox codecs + Metal compositor + FFmpeg.
@@ -326,6 +348,8 @@ apple = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
+    # Live local-mesh discovery (Conspect, ADR-0051 §6).
+    "mesh-mdns",
 ]
 
 # Linux VAAPI/QSV: VAAPI + QuickSync codecs + wgpu compositor + FFmpeg.
@@ -347,6 +371,8 @@ linux-vaapi = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
+    # Live local-mesh discovery (Conspect, ADR-0051 §6).
+    "mesh-mdns",
 ]
 
 # Everything non-GPL: all codec backends, every compositor backend, FFmpeg,

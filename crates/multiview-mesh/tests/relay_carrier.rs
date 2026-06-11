@@ -13,13 +13,15 @@
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signer, SigningKey};
-use multiview_mesh::peer::PeerKey;
-use multiview_mesh::relay::{RelayConfig, RelayQueue, RelayedBinding, RELAY_QUEUE_CAP};
-use multiview_licence::entitlement::{Entitlement, EntitlementFlags, GpuLimit, HardwareClass, Tier};
+use multiview_licence::entitlement::{
+    Entitlement, EntitlementFlags, GpuLimit, HardwareClass, Tier,
+};
 use multiview_licence::lease::{Lease, LeaseSource};
 use multiview_licence::store::{LeaseBinding, LeaseStore};
 use multiview_licence::verify::{PinnedKey, SignedLease};
 use multiview_licence::ACTIVATION_WINDOW_DAYS;
+use multiview_mesh::peer::PeerKey;
+use multiview_mesh::relay::{RelayConfig, RelayQueue, RelayedBinding, RELAY_QUEUE_CAP};
 use rand_core::OsRng;
 
 fn epoch() -> DateTime<Utc> {
@@ -68,7 +70,11 @@ fn a_relayed_binding_installs_at_the_destination_using_the_server_key() {
         .install_binding(carried.binding(), &pinned, now)
         .expect("a server-signed relayed binding installs end-to-end");
     assert_eq!(lease.serial, "serial-RLY");
-    assert_eq!(lease.source, LeaseSource::Relay, "the relayed grant is audited as Relay");
+    assert_eq!(
+        lease.source,
+        LeaseSource::Relay,
+        "the relayed grant is audited as Relay"
+    );
 }
 
 #[test]
@@ -107,7 +113,9 @@ fn a_tampered_relayed_binding_is_rejected() {
 
     let store = LeaseStore::with_clock(std::sync::Arc::new(move || now));
     assert!(
-        store.install_binding(carried.binding(), &pinned, now).is_err(),
+        store
+            .install_binding(carried.binding(), &pinned, now)
+            .is_err(),
         "a tampered relayed binding fails the server signature check"
     );
 }
@@ -127,13 +135,20 @@ fn the_relay_queue_is_bounded_drop_oldest() {
         );
         queue.push(carried);
     }
-    assert_eq!(queue.len(), RELAY_QUEUE_CAP, "the queue never exceeds the cap");
+    assert_eq!(
+        queue.len(),
+        RELAY_QUEUE_CAP,
+        "the queue never exceeds the cap"
+    );
     // The oldest (serial-0) was dropped; the newest is retained.
     let drained: Vec<String> = queue
         .drain()
         .map(|c| c.binding().signed.lease.serial.clone())
         .collect();
-    assert!(!drained.contains(&"serial-0".to_owned()), "the oldest was dropped");
+    assert!(
+        !drained.contains(&"serial-0".to_owned()),
+        "the oldest was dropped"
+    );
     assert!(
         drained.contains(&format!("serial-{RELAY_QUEUE_CAP}")),
         "the newest is retained"
@@ -145,7 +160,10 @@ fn relay_is_opt_out_by_default() {
     // A machine must explicitly opt IN to relay for neighbours (brief §9.2). The
     // default is decline — no neighbour traffic is carried unless enabled.
     let cfg = RelayConfig::default();
-    assert!(!cfg.enabled, "relay is opt-out by default (a machine declines)");
+    assert!(
+        !cfg.enabled,
+        "relay is opt-out by default (a machine declines)"
+    );
 }
 
 #[test]

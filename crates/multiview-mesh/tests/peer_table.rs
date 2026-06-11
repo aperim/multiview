@@ -49,7 +49,11 @@ fn re_observing_advances_last_seen_and_does_not_duplicate() {
     table.observe(obs(0x02, ClaimState::Claimed, 42));
     assert_eq!(table.len(), 1, "the same digest is one peer, not two");
     let peer = table.get(&key(0x02)).expect("peer present");
-    assert_eq!(peer.last_seen, Duration::from_secs(42), "last_seen advances");
+    assert_eq!(
+        peer.last_seen,
+        Duration::from_secs(42),
+        "last_seen advances"
+    );
     assert!(peer.claimed, "the claim state updates on re-observation");
 }
 
@@ -75,7 +79,10 @@ fn a_peer_exactly_at_the_window_is_not_yet_stale() {
     table.observe(obs(0x05, ClaimState::Claimed, 0));
     // Exactly at the window boundary: still considered fresh (strictly-greater ages).
     let removed = table.age_out(PEER_STALE_AFTER);
-    assert_eq!(removed, 0, "a peer exactly at the staleness window is not yet stale");
+    assert_eq!(
+        removed, 0,
+        "a peer exactly at the staleness window is not yet stale"
+    );
     assert!(table.get(&key(0x05)).is_some());
 }
 

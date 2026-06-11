@@ -1959,6 +1959,145 @@
         }
       }
     },
+    "/api/v1/mesh/peers": {
+      "get": {
+        "tags": [
+          "mesh"
+        ],
+        "summary": "`GET /api/v1/mesh/peers` — the untrusted discovered-peer inventory (role:\nread).",
+        "description": "Each peer is a salted-digest id, an optional name (only once adopted), a\n`claimed` flag, `last_seen` (seconds), and `relaying_for_us`. A peer is\n**never** auto-trusted; relaying is an explicit operator confirm-adopt\n(ADR-0041 doctrine). The ids are pure hex — never a raw identifier (brief §8).",
+        "operationId": "list_peers",
+        "responses": {
+          "200": {
+            "description": "The untrusted discovered-peer inventory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MeshPeerDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mesh/relay": {
+      "put": {
+        "tags": [
+          "mesh"
+        ],
+        "summary": "`PUT /api/v1/mesh/relay` — opt this machine in/out of relaying neighbours\n(role: write).",
+        "description": "A real, persisted toggle: the new state is written to the shared mesh state\nand the updated status is returned. Discovery is unaffected (always-on) — this\ntoggles only the **relay** opt-in (brief §9.2). The change is recorded in the\naudit log (an auditable account-side action, brief §10/§11).",
+        "operationId": "set_relay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelaySetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relay opt-in updated; the new mesh status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeshStatusDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to toggle relay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mesh/status": {
+      "get": {
+        "tags": [
+          "mesh"
+        ],
+        "summary": "`GET /api/v1/mesh/status` — the always-on discovery + relay summary (role:\nread).",
+        "description": "Always `200`: discovery is always-on, so this is a pure data report —\n`{discovery, relay_enabled, role, via?, peers_count}`.",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "description": "The always-on mesh discovery + relay status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeshStatusDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/outputs": {
       "get": {
         "tags": [
@@ -6311,6 +6450,13 @@
           }
         }
       },
+      "DiscoveryModeDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_mesh::DiscoveryMode`] (Conspect, ADR-0051 §2).\n\nSerde-equivalent: a unit enum rendered `snake_case`. There is exactly **one**\nvalue — `always_on` — and no way to set any other: discovery runs whenever the\naccount plane runs (the spec's *locked* row, no off switch exists).",
+        "enum": [
+          "always_on"
+        ]
+      },
       "DocumentDiff": {
         "type": "object",
         "description": "The added / removed / changed top-level keys between two documents.\n\nA pragmatic, UI-facing structural diff over JSON objects: it reports which\ntop-level keys were added, removed, or whose value changed. Non-object\ndocuments (or a type change at the root) are reported as a single synthetic\n`<root>` change so the diff is always total.",
@@ -6896,6 +7042,136 @@
           "audio",
           "data"
         ]
+      },
+      "MeshPeerDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_mesh::Peer`] — a single entry in the untrusted\ndiscovered-peer inventory `GET /api/v1/mesh/peers` returns.\n\nSerde-equivalent to the real peer. The `key` is the salted-digest **hex** id\n(64 chars, never a raw identifier — brief §8); `name` is present only once the\noperator has confirm-adopted + named the peer; `last_seen` is whole seconds;\n`relaying_for_us` is an operator-set adoption flag, never auto (the peer is\n**untrusted** until explicitly confirm-adopted — ADR-0041 doctrine).",
+        "required": [
+          "key",
+          "claimed",
+          "last_seen",
+          "relaying_for_us"
+        ],
+        "properties": {
+          "claimed": {
+            "type": "boolean",
+            "description": "Whether the peer advertised itself as claimed (observed from the announce)."
+          },
+          "key": {
+            "type": "string",
+            "description": "The peer's salted-digest id (64-char lowercase hex; never a raw identifier)."
+          },
+          "last_seen": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The whole-seconds monotonic instant the peer was last seen.",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An operator-assigned name, present only once the peer is adopted + named."
+          },
+          "relaying_for_us": {
+            "type": "boolean",
+            "description": "Whether THIS machine relays for the peer — set only by explicit operator\nconfirm-adopt, never by observation (untrusted inventory)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MeshRoleDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Own internet path; not relaying for neighbours.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "direct"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Online and opted-in to relay an offline neighbour's heartbeat.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "relay"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Offline; leafing through an adopted relaying neighbour.",
+            "required": [
+              "via",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "leaf"
+                ]
+              },
+              "via": {
+                "type": "string",
+                "description": "The peer this machine relays its heartbeat through (salted-digest hex\nid — never a raw identifier)."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_mesh::MeshRole`] (Conspect, ADR-0051 §4).\n\nSerde-equivalent: **internally tagged** on `kind` (`direct`/`relay`/`leaf`,\nkebab) — never untagged (conventions §5). The `leaf` variant carries the `via`\npeer (a salted-digest hex id) it leafs its heartbeat through."
+      },
+      "MeshStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_mesh::MeshStatus`] — the always-on mesh\ndiscovery + relay summary `GET /api/v1/mesh/status` (and the `PUT\n/api/v1/mesh/relay` reply) renders.\n\nSerde-equivalent to the real status (pinned byte-for-byte by a round-trip test\nin `tests/mesh.rs`). The mesh crate carries no `utoipa` dependency, so this\nmodule owns the `OpenAPI` contract. Discovery is always-on (no off switch);\n`via` is present only when the role is `leaf`.",
+        "required": [
+          "discovery",
+          "relay_enabled",
+          "role",
+          "peers_count"
+        ],
+        "properties": {
+          "discovery": {
+            "$ref": "#/components/schemas/DiscoveryModeDoc",
+            "description": "Discovery is always-on (the only value; no off switch exists)."
+          },
+          "peers_count": {
+            "type": "integer",
+            "description": "How many peers are in the untrusted discovered-peer inventory.",
+            "minimum": 0
+          },
+          "relay_enabled": {
+            "type": "boolean",
+            "description": "Whether this machine relays neighbours' heartbeats (the opt-in toggle)."
+          },
+          "role": {
+            "$ref": "#/components/schemas/MeshRoleDoc",
+            "description": "The computed mesh role (`direct`/`relay`/`leaf`)."
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The peer this machine leafs through, present only when the role is `leaf`\n(a salted-digest hex id)."
+          }
+        },
+        "additionalProperties": false
       },
       "NmosAccess": {
         "type": "string",
@@ -7835,6 +8111,20 @@
             "description": "The kind of resource being registered."
           }
         }
+      },
+      "RelaySetRequest": {
+        "type": "object",
+        "description": "The `PUT /api/v1/mesh/relay` request body: the relay opt-in state.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this machine should relay neighbours' heartbeats (brief §9.2)."
+          }
+        },
+        "additionalProperties": false
       },
       "Resource": {
         "type": "object",
@@ -9741,6 +10031,10 @@
     {
       "name": "licence",
       "description": "Local licence (Conspect): the computed licence resource + ladder (enforcement is data), lease install, and the salted challenge export. All-local; never off air."
+    },
+    {
+      "name": "mesh",
+      "description": "Local mesh (Conspect): always-on mDNS discovery status (no off switch), the relay opt-in toggle, and the untrusted discovered-peer inventory. Control-plane only; never back-pressures the engine."
     },
     {
       "name": "salvos",

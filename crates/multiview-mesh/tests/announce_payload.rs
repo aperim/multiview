@@ -16,9 +16,11 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
-use multiview_mesh::announce::{AnnouncePayload, EntitlementSummary, SaltedDigest, ANNOUNCE_PROTOCOL_VERSION};
-use multiview_mesh::ClaimState;
 use multiview_licence::EnforcementLevel;
+use multiview_mesh::announce::{
+    AnnouncePayload, EntitlementSummary, SaltedDigest, ANNOUNCE_PROTOCOL_VERSION,
+};
+use multiview_mesh::ClaimState;
 use rand_core::OsRng;
 
 fn epoch() -> DateTime<Utc> {
@@ -30,10 +32,7 @@ fn signed_payload(key: &SigningKey, claim: ClaimState) -> AnnouncePayload {
     let granted = epoch();
     let expires = granted + chrono::Duration::days(35);
     let summary = EntitlementSummary::new(EnforcementLevel::Active, granted, expires);
-    let digests = vec![
-        SaltedDigest::new([0x11; 32]),
-        SaltedDigest::new([0x22; 32]),
-    ];
+    let digests = vec![SaltedDigest::new([0x11; 32]), SaltedDigest::new([0x22; 32])];
     AnnouncePayload::sign(ANNOUNCE_PROTOCOL_VERSION, digests, claim, summary, key)
 }
 
@@ -84,15 +83,7 @@ fn no_raw_identifier_appears_anywhere_in_the_serialised_payload() {
     let payload = signed_payload(&key, ClaimState::Claimed);
     let text = serde_json::to_string(&payload).expect("serialises");
     for forbidden in [
-        "serial",
-        "mac",
-        "hostname",
-        "rtsp://",
-        "http://",
-        "https://",
-        "url",
-        "/dev/",
-        "tier",
+        "serial", "mac", "hostname", "rtsp://", "http://", "https://", "url", "/dev/", "tier",
     ] {
         assert!(
             !text.contains(forbidden),
@@ -155,7 +146,10 @@ fn the_payload_round_trips_through_its_wire_form() {
     let payload = signed_payload(&key, ClaimState::Claimed);
     let bytes = payload.to_wire().expect("encode");
     let back = AnnouncePayload::from_wire(&bytes).expect("decode");
-    assert_eq!(payload, back, "the payload round-trips through its wire form");
+    assert_eq!(
+        payload, back,
+        "the payload round-trips through its wire form"
+    );
     // And a decoded genuine payload still verifies.
     assert!(back.verify(&key.verifying_key()).is_ok());
 }
@@ -163,5 +157,8 @@ fn the_payload_round_trips_through_its_wire_form() {
 #[test]
 fn garbage_wire_bytes_are_a_typed_error_never_a_panic() {
     let err = AnnouncePayload::from_wire(&[0xFF, 0x00, 0x13, 0x37]);
-    assert!(err.is_err(), "garbage bytes decode to a typed error, never a panic");
+    assert!(
+        err.is_err(),
+        "garbage bytes decode to a typed error, never a panic"
+    );
 }

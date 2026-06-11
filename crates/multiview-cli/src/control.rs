@@ -66,6 +66,12 @@ use tokio::task::JoinHandle;
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
 /// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
 /// from `config` (not expected for a validated config).
+// reason: this is the control-plane bind seam; each parameter (listen, config,
+// publisher, commands, preview, the Conspect LicenceState + MeshState, and the
+// shutdown future) is a distinct, independently-owned input the bind threads into
+// the `AppState`. Bundling them into a struct would only move the arity behind a
+// one-use builder without improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub async fn bind_and_serve<F>(
     listen: &str,
     config: &MultiviewConfig,
@@ -73,6 +79,7 @@ pub async fn bind_and_serve<F>(
     commands: CommandSender,
     preview: SharedPreview,
     licence: Option<multiview_control::LicenceState>,
+    mesh: Option<Arc<multiview_mesh::MeshState>>,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)>
 where
@@ -155,6 +162,16 @@ where
     // opinion. `None` keeps the empty unlicensed default (a store-only run / test).
     let state = match licence {
         Some(licence) => state.with_licence(licence),
+        None => state,
+    };
+
+    // The Conspect local-mesh plane (ADR-0051): share the SAME `MeshState` the cli
+    // owns + (under `mesh-mdns`) the always-on announce/browse loop maintains, so
+    // `/api/v1/mesh/*` renders + toggles the live discovery state. `None` keeps the
+    // empty always-on default (a store-only run / test). Control-plane only; the
+    // store holds no engine handle and can never back-pressure the engine (inv #10).
+    let state = match mesh {
+        Some(mesh) => state.with_mesh(mesh),
         None => state,
     };
 
@@ -2170,6 +2187,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            None,
             None,
             async move {
                 let _ = shutdown_rx.await;

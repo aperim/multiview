@@ -33,8 +33,8 @@ use axum::Json;
 use multiview_mesh::{MeshStatus, Peer};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{Action, Principal};
 use crate::audit::AuditAction;
+use crate::auth::{Action, Principal};
 use crate::error::ControlResult;
 use crate::state::AppState;
 

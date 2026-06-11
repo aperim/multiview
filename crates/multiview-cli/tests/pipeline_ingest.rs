@@ -498,6 +498,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
         commands,
         Arc::clone(&provider),
         None,
+        None,
         async move {
             let _ = shutdown_rx.await;
         },

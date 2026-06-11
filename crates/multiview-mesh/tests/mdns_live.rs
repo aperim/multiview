@@ -58,10 +58,16 @@ fn two_services_discover_each_other_over_the_wire() {
     let seen_by_b = b.poll_received().expect("poll b");
 
     // Each saw at least one announcement, and the bytes decode to a payload.
-    assert!(!seen_by_a.is_empty() || !seen_by_b.is_empty(), "at least one peer was discovered");
+    assert!(
+        !seen_by_a.is_empty() || !seen_by_b.is_empty(),
+        "at least one peer was discovered"
+    );
     for r in seen_by_a.into_iter().chain(seen_by_b) {
         let payload = r.decode().expect("a received announcement decodes");
         assert_eq!(payload.protocol_version, ANNOUNCE_PROTOCOL_VERSION);
-        assert!(payload.peer_key().is_some(), "the announcement carries a digest");
+        assert!(
+            payload.peer_key().is_some(),
+            "the announcement carries a digest"
+        );
     }
 }

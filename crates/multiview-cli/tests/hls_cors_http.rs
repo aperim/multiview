@@ -148,6 +148,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         commands,
         multiview_control::no_preview(),
         None,
+        None,
         async move {
             let _ = shutdown_rx.await;
         },
