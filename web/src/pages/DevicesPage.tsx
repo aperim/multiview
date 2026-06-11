@@ -17,6 +17,7 @@ import type { ColumnDef } from '@tanstack/react-table';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ArrowRight, Radar } from 'lucide-react';
 
+import { CastPanel } from '../cast/CastPanel';
 import { scanDevices } from '../devices/api';
 import type { DiscoveredServiceView } from '../devices/api';
 import { DeviceStateBadge } from '../devices/DeviceStateBadge';
@@ -685,6 +686,7 @@ export function DevicesPage(): JSX.Element {
               });
             }}
           />
+          <CastPanel />
           <ApplySemanticsCallout
             helpTo="/help/devices"
             helpLabel={t`How device changes apply`}

@@ -100,6 +100,13 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
       return <Trans>Add at least one member device to the group.</Trans>;
     case 'duplicate-member':
       return <Trans>This device is already a member of the group.</Trans>;
+    case 'cast-authority':
+      return (
+        <Trans>
+          Enter host[:port] — wrap an IPv6 literal in brackets, e.g.
+          [2001:db8::20]:8009. The port defaults to 8009.
+        </Trans>
+      );
   }
 }
 

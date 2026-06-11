@@ -29,7 +29,8 @@ describe('casting help copy doctrine', () => {
         </MemoryRouter>
       </TestProviders>,
     );
-    return document.body.textContent ?? '';
+    // This lib.dom version types the textContent GETTER as plain `string`.
+    return document.body.textContent;
   }
 
   it('states what casting is: server-initiated, not browser tab casting', async () => {
