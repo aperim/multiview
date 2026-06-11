@@ -90,7 +90,7 @@ fn resume_starts_from_a_valid_active_toml() {
     let active = boot.replace("#101418", "#f0f0f0");
     let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
 
-    let start = resolve_start_config(boot_config, &boot_path);
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
     assert!(start.resumed, "a valid active.toml must be resumed");
     assert!(start.resume_fallback.is_none());
     assert_eq!(
@@ -112,7 +112,7 @@ fn resume_falls_back_to_boot_on_a_corrupt_active() {
     let boot = boot_doc("start = \"resume\"");
     let (_dir, boot_path, boot_config) = stage(&boot, Some("this is [not the schema"));
 
-    let start = resolve_start_config(boot_config, &boot_path);
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
     assert!(!start.resumed, "a corrupt active.toml must not resume");
     let reason = start
         .resume_fallback
@@ -134,7 +134,7 @@ fn resume_falls_back_to_boot_when_active_is_missing() {
     let boot = boot_doc("start = \"resume\"");
     let (_dir, boot_path, boot_config) = stage(&boot, None);
 
-    let start = resolve_start_config(boot_config, &boot_path);
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
     assert!(!start.resumed);
     assert!(start.resume_fallback.is_some());
     assert_eq!(in_a_color(&start.running).as_deref(), Some("#101418"));
@@ -154,7 +154,7 @@ fn resume_splices_storeless_sections_from_the_boot_file() {
     let active = boot_doc("start = \"resume\"").replace("#101418", "#f0f0f0");
     let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
 
-    let start = resolve_start_config(boot_config, &boot_path);
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
     assert!(start.resumed, "the valid active.toml must still resume");
     assert_eq!(
         start
@@ -185,7 +185,7 @@ fn the_default_boot_policy_ignores_an_existing_active() {
     let active = boot.replace("#101418", "#f0f0f0");
     let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
 
-    let start = resolve_start_config(boot_config, &boot_path);
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
     assert!(!start.resumed, "start = boot must never resume");
     assert!(
         start.resume_fallback.is_none(),

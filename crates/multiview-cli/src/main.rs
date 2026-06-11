@@ -105,12 +105,13 @@ async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     if let Ok(canonical) = args.config.canonicalize() {
         args.config = canonical;
     }
-    let boot = load_validated(&args.config)?;
+    let (boot_text, boot) = load_validated(&args.config)?;
     // Boot/Loaded/Running (ADR-W022 §4): resolve the starting Running state —
     // under `[control] start = "resume"` a valid persisted `active.toml`
-    // becomes the starting document wholesale (the engine is built from it);
-    // Loaded stays the boot snapshot and the boot file stays the watch target.
-    let start = multiview_cli::boot::resolve_start_config(boot, &args.config);
+    // becomes the starting document (with the boot file's restart-only
+    // sections spliced in — review M1); Loaded stays the boot snapshot and
+    // the boot file stays the watch target.
+    let start = multiview_cli::boot::resolve_start_config(boot, boot_text, &args.config);
 
     if args.software {
         return run_software(&start, &args).await;
@@ -369,12 +370,16 @@ async fn serve_control_plane(
     // hot-reloads the impacted parts through the SAME router state + command
     // bus; an invalid write warns and changes nothing. A control-plane tokio
     // tenant — it can never pace or stall the engine (inv #1/#10). The diff
-    // baseline is the RUNNING document (the resumed one under resume).
+    // baseline is the RUNNING document (the resumed one under resume), and
+    // the boot-load TEXT seeds the last-observed content (review m4: the
+    // unchanged boot file must never clobber a resumed baseline; an edit in
+    // the boot window differs from this text and still applies).
     let watch = multiview_cli::config_watch::spawn(
         config_path.to_path_buf(),
         config.clone(),
         state,
-        multiview_cli::config_watch::WatchOptions::default(),
+        multiview_cli::config_watch::WatchOptions::default()
+            .with_initial_observed(start.boot_text.clone()),
     );
     Ok((handle, command_rx, hub, watch, persist))
 }
@@ -791,7 +796,9 @@ fn load_subtitles(path: &Path) -> anyhow::Result<multiview_overlay::subtitle::Cu
 }
 
 /// Load and validate a config, failing with a clear error if it is invalid.
-fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
+/// Returns the raw text alongside the parsed document — the text seeds the
+/// ADR-W020 watcher's last-observed content (review m4).
+fn load_validated(path: &Path) -> anyhow::Result<(String, MultiviewConfig)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
     let config = MultiviewConfig::load_from_toml(&text)
@@ -799,5 +806,5 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
     config
         .validate()
         .with_context(|| format!("validating config {}", path.display()))?;
-    Ok(config)
+    Ok((text, config))
 }

@@ -34,6 +34,12 @@ pub struct StartConfig {
     /// The immutable Loaded snapshot (the boot document at process start) —
     /// the revert-to-start target in both modes.
     pub loaded: MultiviewConfig,
+    /// The raw boot-file TEXT as read at process start: the watcher's
+    /// initial last-observed content (review m4 — under a resume the
+    /// UNCHANGED boot file must never clobber the resumed baseline; only a
+    /// real content change applies, and an edit landing in the boot window
+    /// IS a content change against this text).
+    pub boot_text: String,
     /// The `[control] start` policy the boot file declared.
     pub start: StartMode,
     /// Whether Running actually came from a valid persisted `active.toml`.
@@ -88,7 +94,11 @@ fn splice_storeless_sections(mut running: MultiviewConfig, boot: &MultiviewConfi
 /// recorded in [`StartConfig::resume_fallback`]. The default `boot` policy
 /// never reads `active.toml`.
 #[must_use]
-pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartConfig {
+pub fn resolve_start_config(
+    boot: MultiviewConfig,
+    boot_text: String,
+    boot_path: &Path,
+) -> StartConfig {
     let start = boot
         .control
         .as_ref()
@@ -97,6 +107,7 @@ pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartCon
         return StartConfig {
             running: boot.clone(),
             loaded: boot,
+            boot_text,
             start,
             resumed: false,
             resume_fallback: None,
@@ -117,6 +128,7 @@ pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartCon
                     StartConfig {
                         running,
                         loaded: boot,
+                        boot_text,
                         start,
                         resumed: true,
                         resume_fallback: None,
@@ -136,6 +148,7 @@ pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartCon
                     StartConfig {
                         running: boot.clone(),
                         loaded: boot,
+                        boot_text,
                         start,
                         resumed: false,
                         resume_fallback: Some(reason),
@@ -153,6 +166,7 @@ pub fn resolve_start_config(boot: MultiviewConfig, boot_path: &Path) -> StartCon
             StartConfig {
                 running: boot.clone(),
                 loaded: boot,
+                boot_text,
                 start,
                 resumed: false,
                 resume_fallback: Some(reason),

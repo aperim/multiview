@@ -69,12 +69,14 @@ const MISSING_POLLS_BEFORE_REPORT: u32 = 5;
 #[derive(Debug, Clone)]
 pub struct WatchOptions {
     poll_interval: Duration,
+    initial_observed: Option<String>,
 }
 
 impl Default for WatchOptions {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(1),
+            initial_observed: None,
         }
     }
 }
@@ -85,6 +87,22 @@ impl WatchOptions {
     #[must_use]
     pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
         self.poll_interval = poll_interval;
+        self
+    }
+
+    /// Seed the loop's last-observed CONTENT with the boot-file text the run
+    /// loaded at start (review m4): a settled observation whose content
+    /// still equals the last observed content is adopted without applying —
+    /// under `start = "resume"` the watcher's baseline is the RESUMED
+    /// document while the file still holds the boot document, and the
+    /// UNCHANGED file must never clobber the resumed Running state. An edit
+    /// landing in the boot window IS a content change against this seed and
+    /// still applies. Without a seed the first settled poll diffs whatever
+    /// content it finds against the baseline (the ADR-W020 boot-window
+    /// semantics, unchanged).
+    #[must_use]
+    pub fn with_initial_observed(mut self, content: String) -> Self {
+        self.initial_observed = Some(content);
         self
     }
 }
@@ -274,6 +292,12 @@ async fn watch_loop(
     // (review M2): the first settled poll diffs the file against the boot
     // baseline, closing the boot-load → watcher-spawn window.
     let mut applied: Option<Fingerprint> = None;
+    // The last CONTENT this loop settled on (review m4) — seeded with the
+    // boot-load text when the caller provides it, advanced on every settled
+    // apply/adopt (never on reject/retry). A settled fingerprint change whose
+    // content still equals it is adopted without applying: under a resume
+    // the unchanged boot file must never clobber the resumed baseline.
+    let mut last_observed: Option<String> = options.initial_observed.clone();
     // The fingerprint of a latched-REJECTED content (invalid / unreadable /
     // a buggy expected write): handled once, never re-warned each poll —
     // and, unlike `applied`, never treated as "the file matches the running
@@ -370,8 +394,31 @@ async fn watch_loop(
             if adopt_expected_text(&path, &text, &mut baseline) {
                 applied = Some(now);
                 rejected = None;
+                last_observed = Some(text);
             } else {
                 rejected = Some(now);
+            }
+            continue;
+        }
+        if last_observed.as_deref() == Some(text.as_str()) {
+            // Review m4: the CONTENT is unchanged — a touch/identical rewrite
+            // or, under `start = "resume"`, the unchanged boot file observed
+            // for the first time. Nothing to apply; mirror the
+            // fingerprint-match branch above (the latched conditions resolve
+            // the same way).
+            applied = Some(now);
+            rejected = None;
+            if invalid_active {
+                clear_invalid(
+                    &state,
+                    &path,
+                    "the file is back at the last observed content",
+                    &mut invalid_active,
+                );
+            }
+            if incomplete_active {
+                resync_all_stores(&state, ACTOR, &baseline);
+                clear_apply_incomplete(&state, &path, &mut incomplete_active);
             }
             continue;
         }
@@ -386,14 +433,15 @@ async fn watch_loop(
             ApplyResult::Settled => {
                 applied = Some(now);
                 rejected = None;
+                last_observed = Some(text);
             }
             ApplyResult::RejectedInvalid => {
                 rejected = Some(now);
             }
             ApplyResult::Retry => {
-                // Review M1: engine command(s) were shed — leave `applied`
-                // AND the baseline un-advanced so a later poll re-reads and
-                // re-applies the whole (idempotent) change.
+                // Review M1: engine command(s) were shed — leave `applied`,
+                // the baseline AND `last_observed` un-advanced so a later
+                // poll re-reads and re-applies the whole (idempotent) change.
             }
         }
     }

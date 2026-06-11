@@ -712,6 +712,96 @@ async fn an_external_boot_edit_during_a_resumed_run_still_hot_applies() {
     watch.stop();
 }
 
+/// Review m4 — the resume no-op rewrite guard: in a RESUMED run the watcher
+/// observes the UNCHANGED boot file (its content differs from the resumed
+/// baseline, but it is exactly what the run loaded at boot); it must NOT
+/// re-apply the boot document over the resumed Running state. A REAL edit —
+/// content differing from the last observed content — still hot-applies,
+/// diffed against the RESUMED baseline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_run_does_not_reapply_the_unchanged_boot_file() {
+    // The resumed Running state: in_a near-white (differs from the boot doc).
+    let active_doc = BOOT_DOC.replace("#101418", "#f0f0f0");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let boot_path = dir.path().join("multiview.toml");
+    std::fs::write(&boot_path, BOOT_DOC).expect("write boot file");
+    let boot_config = MultiviewConfig::load_from_toml(BOOT_DOC).expect("parse boot");
+    let active_config = MultiviewConfig::load_from_toml(&active_doc).expect("parse active");
+
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let (sender, mut commands) = command_bus(64);
+    let seeded = multiview_control::seed_resources(&active_config).expect("seed stores");
+    let state = AppState::new(
+        publisher,
+        sender,
+        Arc::new(InMemoryRepository::new()),
+        Arc::new(support::seeded_keys()),
+    )
+    .with_seeded_resources(seeded)
+    .with_base_document(serde_json::to_value(&active_config).expect("active doc to JSON"))
+    .with_boot_model(Arc::new(BootModel::new(
+        boot_path.clone(),
+        boot_config,
+        StartMode::Resume,
+        true,
+        None,
+    )));
+    // The watcher starts exactly as a resumed run wires it: the baseline is
+    // the RESUMED document, and the boot-load observed the boot file's text.
+    let watch = spawn_watch(
+        boot_path.clone(),
+        active_config,
+        state.clone(),
+        WatchOptions::default()
+            .with_poll_interval(TEST_POLL)
+            .with_initial_observed(BOOT_DOC.to_owned()),
+    );
+
+    // Many settle windows: the UNCHANGED boot file must never be applied
+    // over the resumed state.
+    tokio::time::sleep(TEST_POLL * 10).await;
+    assert_eq!(
+        state.config_watch.snapshot().applied_count,
+        0,
+        "the unchanged boot file must not clobber the resumed Running state"
+    );
+    assert!(
+        commands.try_drain().is_empty(),
+        "no engine commands for an unchanged boot file"
+    );
+    assert_eq!(
+        stored_color(&state).as_deref(),
+        Some("#f0f0f0"),
+        "the stores keep the resumed values"
+    );
+
+    // A REAL edit still hot-applies, diffed against the RESUMED baseline.
+    std::fs::write(&boot_path, BOOT_DOC.replace("#101418", "#123456")).expect("edit boot file");
+    assert!(
+        wait_until(SETTLE, || {
+            state.config_watch.snapshot().applied_count >= 1
+        })
+        .await,
+        "a real boot-file edit during a resumed run must still hot-apply"
+    );
+    let drained = commands.try_drain();
+    assert!(
+        drained.iter().any(|c| match c {
+            Command::UpsertSource { source, .. } => {
+                source.id == "in_a"
+                    && serde_json::to_value(source.as_ref())
+                        .ok()
+                        .and_then(|v| v.get("color").and_then(|c| c.as_str().map(str::to_owned)))
+                        .as_deref()
+                        == Some("#123456")
+            }
+            _ => false,
+        }),
+        "the real edit must ride UpsertSource with the edited colour, got {drained:?}"
+    );
+    watch.stop();
+}
+
 /// Pin (d): the persisted `active.toml` round-trips
 /// `MultiviewConfig::load_from_toml` + `validate`, and carries the live edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
