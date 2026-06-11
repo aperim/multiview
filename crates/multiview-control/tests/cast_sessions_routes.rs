@@ -444,3 +444,108 @@ async fn stop_clears_the_tombstone_so_session_ids_stay_bounded() {
     );
     registry_probe.stop(&id).await;
 }
+
+#[tokio::test]
+async fn ephemeral_sessions_never_reach_the_config_export() {
+    // The start route's contract: an ad-hoc cast session is runtime-only —
+    // it must NEVER ride `GET /config/export` (config-as-code carries only
+    // adopted devices; a restart intentionally forgets ad-hoc sessions).
+    let h = cast_harness();
+
+    // Seed the minimum exportable document (a working layout + the source
+    // and output it references), mirroring the config_export suite.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/layouts/working",
+            OPERATOR_TOKEN,
+            &serde_json::json!({
+                "name": "working",
+                "body": {
+                    "canvas": {
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": "30/1",
+                        "pixel_format": "nv12",
+                        "background": "#101014",
+                        "color": { "profile": "sdr-bt709-limited" }
+                    },
+                    "layout": { "kind": "absolute" },
+                    "cells": [{
+                        "id": "a",
+                        "rect": { "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5 },
+                        "source": { "input_id": "cam1" }
+                    }]
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "layout seed must land");
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &serde_json::json!({
+                "name": "Cam 1",
+                "body": { "id": "cam1", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam1" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "source seed must land");
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/outputs/out-a",
+            OPERATOR_TOKEN,
+            &serde_json::json!({
+                "name": "LL-HLS",
+                "body": { "id": "out-a", "kind": "ll_hls", "path": "/var/lib/multiview/hls", "codec": "h264" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "output seed must land");
+
+    // A live ad-hoc session…
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &start_body(Some("out-a")),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    // …lists live but is absent from the exported document.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await.as_array().expect("an array").len(),
+        1,
+        "the session is live"
+    );
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("an export body");
+    let text = String::from_utf8(body.to_vec()).expect("UTF-8 TOML");
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("export is a valid MultiviewConfig document");
+    assert!(
+        parsed.devices.is_empty(),
+        "no device rows: the ephemeral session must not be exported"
+    );
+    assert!(
+        !text.contains(&id),
+        "the session id never appears anywhere in the export"
+    );
+}
