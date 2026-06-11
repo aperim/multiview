@@ -15,7 +15,7 @@ import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
 import { useQuery } from '@tanstack/react-query';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity,
   KeyRound,
@@ -233,12 +233,25 @@ function targetOutputKind(kind: string): OutputKind {
   }
 }
 
+/** The §9 tab ids; `?tab=` deep links (e.g. the list's stream column) validate against this set. */
+const DETAIL_TABS = ['overview', 'streams', 'sync', 'maintenance', 'events'] as const;
+
+/** A device-detail tab id. */
+type DetailTab = (typeof DETAIL_TABS)[number];
+
+/** The initial tab for a `?tab=` query value; unknown/absent falls back to Overview. */
+function detailTabFromParam(param: string | null): DetailTab {
+  return DETAIL_TABS.find((tab) => tab === param) ?? 'overview';
+}
+
 /** Device detail with the §9 tabs. */
 export function DeviceDetailPage(): JSX.Element {
   const { t } = useLingui();
   const params = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const deviceId = params.id ?? '';
+  const initialTab = detailTabFromParam(searchParams.get('tab'));
 
   const record = useQuery({
     queryKey: ['devices', 'record', deviceId],
@@ -421,7 +434,7 @@ export function DeviceDetailPage(): JSX.Element {
         />
       ) : null}
 
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="overview">
             <Trans>Overview</Trans>

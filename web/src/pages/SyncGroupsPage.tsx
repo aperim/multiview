@@ -51,13 +51,37 @@ function tierLabel(tier: SyncTier): JSX.Element {
   }
 }
 
-/** The weakest-member tier a group can claim, from the adopted devices. */
-function groupTier(group: SyncGroupView, devices: readonly DeviceView[]): SyncTier {
-  const drivers = group.members.map(
-    (member) =>
-      devices.find((device) => device.id === member.device)?.driver ?? 'unknown',
+/**
+ * The weakest-member tier a group can claim, plus the single member that
+ * limits it — named only when exactly one member sits at the weakest tier
+ * while others publish a strictly better one (the brief §8 sketch:
+ * "bounded-skew — limited by dev-foyer-decoder"). A shared weakest tier names
+ * nobody: singling one member out would be arbitrary.
+ */
+function groupTierDetail(
+  group: SyncGroupView,
+  devices: readonly DeviceView[],
+): { tier: SyncTier; limitedBy: string | undefined } {
+  const memberTiers = group.members.map((member) => ({
+    device: member.device,
+    tier: weakestMemberTier([
+      devices.find((candidate) => candidate.id === member.device)?.driver ??
+        'unknown',
+    ]),
+  }));
+  const tier = weakestMemberTier(
+    group.members.map(
+      (member) =>
+        devices.find((device) => device.id === member.device)?.driver ?? 'unknown',
+    ),
   );
-  return weakestMemberTier(drivers);
+  const atWeakest = memberTiers.filter((member) => member.tier === tier);
+  const sole = atWeakest.length === 1 ? atWeakest.at(0) : undefined;
+  return {
+    tier,
+    limitedBy:
+      sole !== undefined && memberTiers.length > 1 ? sole.device : undefined,
+  };
 }
 
 /** The editable member rows inside the create/edit dialog. */
@@ -232,11 +256,22 @@ export function SyncGroupsPage(): JSX.Element {
           <HelpLink to="/help/sync" label={t`About sync tiers`} compact />
         </span>
       ),
-      cell: (ctx): JSX.Element => (
-        <Badge variant="outline">
-          {tierLabel(groupTier(ctx.row.original, devices.data ?? []))}
-        </Badge>
-      ),
+      cell: (ctx): JSX.Element => {
+        const { tier, limitedBy } = groupTierDetail(
+          ctx.row.original,
+          devices.data ?? [],
+        );
+        return (
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            <Badge variant="outline">{tierLabel(tier)}</Badge>
+            {limitedBy !== undefined ? (
+              <span className="text-xs text-muted-foreground">
+                <Trans>limited by {limitedBy}</Trans>
+              </span>
+            ) : null}
+          </span>
+        );
+      },
     },
     {
       id: 'measure',

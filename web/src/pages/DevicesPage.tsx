@@ -399,6 +399,20 @@ function DiscoveryPanel({
   );
 }
 
+/**
+ * An accessible empty-cell placeholder: the em-dash is decorative (hidden from
+ * AT) and the meaning is carried by sr-only text — the State-cell pattern,
+ * applied to every placeholder cell.
+ */
+function PlaceholderCell({ label }: { readonly label: JSX.Element }): JSX.Element {
+  return (
+    <span className="text-sm text-muted-foreground">
+      <span aria-hidden="true">—</span>
+      <span className="sr-only">{label}</span>
+    </span>
+  );
+}
+
 /** The sync-group chip for a device, when it is a member of one. */
 function SyncGroupChip({
   deviceId,
@@ -411,11 +425,50 @@ function SyncGroupChip({
     group.members.some((m) => m.device === deviceId),
   );
   if (member === undefined) {
-    return <span aria-hidden="true">—</span>;
+    return <PlaceholderCell label={<Trans>Not in a sync group.</Trans>} />;
   }
   return (
     <Link to="/sync-groups" className="inline-flex">
       <Badge variant="outline">{member.name}</Badge>
+    </Link>
+  );
+}
+
+/**
+ * The list's "current stream link" cell (managed-devices.md §9): the FIRST
+ * device-reported stream's role + health, deep-linking to the detail page's
+ * Streams tab where every stream (and binding) lives.
+ */
+function StreamCell({
+  deviceId,
+  status,
+}: {
+  readonly deviceId: string;
+  readonly status: DeviceStatus | undefined;
+}): JSX.Element {
+  const first = (status?.streams ?? []).at(0);
+  if (first === undefined) {
+    return <PlaceholderCell label={<Trans>No active stream.</Trans>} />;
+  }
+  return (
+    <Link
+      to={`/devices/${encodeURIComponent(deviceId)}?tab=streams`}
+      className="inline-flex items-center gap-1.5 underline-offset-2 hover:underline"
+    >
+      <Badge variant="outline">{first.role}</Badge>
+      {first.healthy ? (
+        <Badge variant="live">
+          <span>
+            <Trans>healthy</Trans>
+          </span>
+        </Badge>
+      ) : (
+        <Badge variant="stale">
+          <span>
+            <Trans>unhealthy</Trans>
+          </span>
+        </Badge>
+      )}
     </Link>
   );
 }
@@ -525,7 +578,7 @@ export function DevicesPage(): JSX.Element {
             <Trans>{desired} (desired)</Trans>
           </span>
         ) : (
-          <span aria-hidden="true">—</span>
+          <PlaceholderCell label={<Trans>No mode reported.</Trans>} />
         );
       },
     },
@@ -537,9 +590,19 @@ export function DevicesPage(): JSX.Element {
         return temperature !== undefined ? (
           <span className="text-xs">{`${String(temperature)} °C`}</span>
         ) : (
-          <span aria-hidden="true">—</span>
+          <PlaceholderCell label={<Trans>No temperature reported.</Trans>} />
         );
       },
+    },
+    {
+      id: 'stream',
+      header: t`Stream`,
+      cell: (ctx): JSX.Element => (
+        <StreamCell
+          deviceId={ctx.row.original.id}
+          status={statusFor(ctx.row.original.id)}
+        />
+      ),
     },
     {
       id: 'last-seen',

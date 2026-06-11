@@ -25,6 +25,7 @@ import type {
   TileSnapshotEntry,
 } from "./envelope";
 import type { DeviceDiscovered, DeviceStatus } from "./generated-types";
+import { resourceKeys } from "../resources/queries";
 // `LifecycleState` (LIVE/STALE/RECONNECTING/NO_SIGNAL) comes from the generated
 // AsyncAPI schema types — the canonical source of truth for tile lifecycle values
 // (resilience invariant #2). `envelope.ts` re-exports it as `TileState` for
@@ -85,6 +86,14 @@ export interface DeviceEventEntry {
 
 /** The device-events ring bound (drop-oldest beyond this). */
 const DEVICE_EVENTS_RING_MAX = 200;
+
+/**
+ * The minimum engine-clock advance (ns) between {@link ENGINE_CLOCK_QUERY_KEY}
+ * writes. Envelopes arrive at event rate; rewriting the clock reference on
+ * every one re-renders every page holding the ref at that same rate. 500 ms is
+ * far finer than anything aged against the reference ("last seen Ns ago").
+ */
+const ENGINE_CLOCK_MIN_ADVANCE_NS = 500_000_000;
 
 /** Per-corr cap on live discovery rows (drop-newest beyond this). */
 const DISCOVERED_ROWS_MAX = 100;
@@ -245,6 +254,13 @@ function pushDeviceEvent(client: QueryClient, envelope: Envelope): void {
       return [entry, ...(current ?? [])].slice(0, DEVICE_EVENTS_RING_MAX);
     },
   );
+  if (event.kind === "adopted" || event.kind === "removed") {
+    // Registry membership changed (possibly by another operator): re-read the
+    // stored devices list rather than waiting for an unrelated refetch. Mode
+    // and error churn deliberately does NOT refetch — it is status, not
+    // membership.
+    void client.invalidateQueries({ queryKey: resourceKeys.list("devices") });
+  }
 }
 
 function pushDiscoveredRow(client: QueryClient, envelope: Envelope): void {
@@ -260,7 +276,13 @@ function pushDiscoveredRow(client: QueryClient, envelope: Envelope): void {
     DISCOVERED_LIVE_QUERY_KEY,
     (current): Record<string, readonly DeviceDiscovered[]> => {
       const base = current ?? {};
-      const rows = base[corr] ?? [];
+      const rows = base[corr];
+      if (rows === undefined) {
+        // A new scan's rows begin: keep ONLY the active scan. Finished scans'
+        // rows otherwise accumulate one capped array per corr for the whole
+        // session (the REST inventory snapshot covers them between scans).
+        return { [corr]: [row] };
+      }
       if (rows.length >= DISCOVERED_ROWS_MAX) {
         return base;
       }
@@ -300,12 +322,23 @@ export function useEngineEvents(): EngineEvents {
         if (envelope.seq > 0) {
           setLastSeq(envelope.seq);
           // Pair the newest engine-monotonic ts with the wall clock so engine
-          // timestamps (device last-seen) can be aged honestly.
+          // timestamps (device last-seen) can be aged honestly. Throttled:
+          // rewriting the ref on every envelope would re-render every page
+          // holding it at envelope rate (the stored ref + elapsed wall time
+          // already ages accurately between writes).
           if (envelope.ts > 0) {
-            queryClient.setQueryData<EngineClockRef>(ENGINE_CLOCK_QUERY_KEY, {
-              engineTs: envelope.ts,
-              wallMs: Date.now(),
-            });
+            const stored = queryClient.getQueryData<EngineClockRef>(
+              ENGINE_CLOCK_QUERY_KEY,
+            );
+            if (
+              stored === undefined ||
+              envelope.ts - stored.engineTs >= ENGINE_CLOCK_MIN_ADVANCE_NS
+            ) {
+              queryClient.setQueryData<EngineClockRef>(ENGINE_CLOCK_QUERY_KEY, {
+                engineTs: envelope.ts,
+                wallMs: Date.now(),
+              });
+            }
           }
         }
         if (envelope.topic === CONTROL_TOPIC) {

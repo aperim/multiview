@@ -126,6 +126,13 @@ export function DevicesHelpPage(): JSX.Element {
               </Trans>
             </DocTerm>
           </DocDefinitions>
+          <Prose>
+            <Trans>
+              ZowieTek, ZowieBox and related marks are trademarks of Zowietek
+              Electronics, Ltd. This project is independent and not affiliated
+              with or endorsed by Zowietek.
+            </Trans>
+          </Prose>
         </DocSection>
 
         <DocSection id="binding-streams" title={<Trans>Binding device streams</Trans>}>
