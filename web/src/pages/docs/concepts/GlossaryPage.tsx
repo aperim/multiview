@@ -60,6 +60,17 @@ export function GlossaryPage(): JSX.Element {
           </Prose>
         </DocSection>
 
+        <DocSection id="display-node" title={<Trans>Display node</Trans>}>
+          <Prose>
+            <Trans>
+              A small computer running Multiview's own playout software,
+              driving one or more physical displays as a managed device.
+              Enrolled by keypair identity, display nodes reach the
+              frame-accurate sync tier — the class used for video walls.
+            </Trans>
+          </Prose>
+        </DocSection>
+
         <DocSection id="genlock" title={<Trans>Genlock</Trans>}>
           <Prose>
             <Trans>
@@ -127,6 +138,18 @@ export function GlossaryPage(): JSX.Element {
               partial chunks and players can request the next part before it
               is finished, cutting typical delay from 6–30 s to roughly
               2–5 s while keeping plain-HTTP delivery and CDN scalability.
+            </Trans>
+          </Prose>
+        </DocSection>
+
+        <DocSection id="managed-device" title={<Trans>Managed device</Trans>}>
+          <Prose>
+            <Trans>
+              Hardware Multiview supervises as declarative desired state: a
+              decoder, display node, or cast target adopted by the operator.
+              A compiled-in driver probes and converges the device, and its
+              streams bind as ordinary sources/outputs annotated with
+              device_ref. Program output never depends on any device.
             </Trans>
           </Prose>
         </DocSection>
@@ -258,6 +281,18 @@ export function GlossaryPage(): JSX.Element {
               loss by retransmission inside a configurable latency window and
               encrypts with AES, making it the standard choice for
               contribution over the internet.
+            </Trans>
+          </Prose>
+        </DocSection>
+
+        <DocSection id="sync-group" title={<Trans>Sync group</Trans>}>
+          <Prose>
+            <Trans>
+              A named set of display devices that should present together,
+              with a per-member offset trim and a drift-alarm threshold. The
+              group claims only its weakest member's sync tier, and the
+              achieved tier is measured — never assumed. Cast devices can
+              never be members.
             </Trans>
           </Prose>
         </DocSection>

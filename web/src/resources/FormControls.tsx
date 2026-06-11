@@ -96,6 +96,10 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
           50 — never a decimal.
         </Trans>
       );
+    case 'members-required':
+      return <Trans>Add at least one member device to the group.</Trans>;
+    case 'duplicate-member':
+      return <Trans>This device is already a member of the group.</Trans>;
   }
 }
 
