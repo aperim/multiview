@@ -32,6 +32,7 @@ pub mod discovery;
 pub mod health;
 pub mod inputs;
 pub mod licence;
+pub mod mesh;
 pub mod outputs;
 pub mod overlays;
 pub mod preview;
@@ -780,6 +781,14 @@ pub fn api_router() -> Router<AppState> {
             "/licensing/heartbeat-status",
             get(licence::get_heartbeat_status),
         )
+        // Local mesh (Conspect, CONSPECT-3a / ADR-0051): the always-on discovery
+        // + relay status (GET, never an off switch — the spec's locked row), the
+        // relay opt-in toggle (a real persisted PUT), and the untrusted
+        // discovered-peer inventory (GET). Control-plane only; no engine handle
+        // (invariant #10). There is intentionally NO route that disables discovery.
+        .route("/mesh/status", get(mesh::get_status))
+        .route("/mesh/relay", axum::routing::put(mesh::set_relay))
+        .route("/mesh/peers", get(mesh::list_peers))
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(

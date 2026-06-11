@@ -29,6 +29,7 @@ use arc_swap::ArcSwap;
 use multiview_licence::verify::PinnedKey;
 use multiview_licence::watcher::{LeaseDirectoryWatcher, DEFAULT_LEASE_DIR};
 use multiview_licence::{EnforcementLevel, LeaseStore};
+use multiview_mesh::MeshState;
 
 /// The env var the pinned issuer **verifying key** is read from (hex-encoded
 /// Ed25519 public key, 64 hex chars / 32 bytes). When unset (or malformed), no
@@ -118,6 +119,12 @@ pub struct EntitlementPlane {
     pub signal: WatermarkSignal,
     /// The pinned issuer key, if one was configured (the install path needs it).
     pub pinned: Option<PinnedKey>,
+    /// The shared local-mesh discovery/relay state (Conspect, ADR-0051): the
+    /// untrusted discovered-peer inventory + the relay opt-in the control plane's
+    /// `/api/v1/mesh/*` routes render + toggle, and (under `mesh-mdns`) the
+    /// always-on announce/browse loop maintains. Always wired so the API serves a
+    /// real shared store; control-plane only, no engine handle (invariant #10).
+    pub mesh: Arc<MeshState>,
 }
 
 impl EntitlementPlane {
@@ -156,7 +163,109 @@ impl EntitlementPlane {
             store,
             signal,
             pinned,
+            // A fresh, empty mesh state: always-on discovery, no peers yet, relay
+            // declined (opt-out default). The control plane renders + toggles it;
+            // under `mesh-mdns` the spawned announce/browse loop folds discovered
+            // neighbours into it. Control-plane only (invariant #10).
+            mesh: Arc::new(MeshState::new()),
         }
+    }
+
+    /// Spawn the always-on local-mesh **browse + age** loop (Conspect, ADR-0051
+    /// §2/§5) — the `mesh-mdns` feature only.
+    ///
+    /// Starts the live mDNS service (IPv6-first `ff02::fb`, IPv4 legacy interop)
+    /// and folds discovered neighbours (untrusted) into the shared
+    /// [`MeshState`](multiview_mesh::MeshState) the control plane serves, aging out
+    /// peers it stops hearing from. **Best-effort, never blocks (invariant #10):**
+    /// a daemon that fails to start is logged and skipped (discovery simply yields
+    /// no peers — never off air, never a crash); the browse drain is non-blocking
+    /// and the loop sleeps between rounds, holding no engine handle.
+    ///
+    /// The loop **browses only** — it does not yet *announce* a signed summary,
+    /// because signing requires this machine's own Ed25519 key and salted
+    /// fingerprint digests, which are provisioned by the licence-server handshake +
+    /// claim-time salt (the operator-confirm items O1/O2/O6, the conspect brief
+    /// §14) that are sequenced after the local plane. Once that material is wired,
+    /// the announce side folds in here over the same transport (the
+    /// [`announce_browse_step`](multiview_mesh::driver::announce_browse_step) round
+    /// the offline tests already cover) without touching the discovery path.
+    #[cfg(feature = "mesh-mdns")]
+    pub fn spawn_mesh_discovery(&self) {
+        use std::time::Instant;
+
+        use multiview_mesh::peer::PeerObservation;
+        use multiview_mesh::service::{decode_received, MdnsService, DEFAULT_PORT};
+        use multiview_mesh::transport::MeshTransport;
+
+        // The instance name is this machine's stable hex peer id once a fingerprint
+        // is provisioned; until then a per-process random hex anchor keeps our own
+        // announcement (if any) distinct. Browse-only here, so the host/instance are
+        // informational. A `.local.` host derived from the process is fine for mDNS.
+        let host = "multiview.local.".to_owned();
+        let instance = format!("multiview-{:016x}", std::process::id());
+        let service = match MdnsService::start(&instance, &host, DEFAULT_PORT) {
+            Ok(service) => service,
+            Err(err) => {
+                tracing::info!(
+                    %err,
+                    "local-mesh mDNS discovery unavailable this run (no multicast \
+                     interface?) — best-effort, never off air; /api/v1/mesh serves an \
+                     empty inventory"
+                );
+                return;
+            }
+        };
+        let mesh = Arc::clone(&self.mesh);
+        let start = Instant::now();
+        tokio::spawn(async move {
+            loop {
+                // Browse (non-blocking) + fold untrusted observations + age out.
+                // Browse-only until the machine signing key + salt land (O1/O2/O6).
+                let now = start.elapsed();
+                match service.poll_received() {
+                    Ok(received) => {
+                        for announcement in &received {
+                            match decode_received(announcement) {
+                                Ok(payload) => {
+                                    if let Some(key) = payload.peer_key() {
+                                        mesh.observe(PeerObservation {
+                                            key,
+                                            claim_state: payload.claim_state,
+                                            observed_at: now,
+                                        });
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::debug!(%err, "ignoring a malformed mesh announcement");
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::debug!(%err, "mesh browse poll failed this round (best-effort)");
+                    }
+                }
+                mesh.age_out(now);
+                tokio::time::sleep(multiview_mesh::driver::ANNOUNCE_INTERVAL).await;
+            }
+        });
+        tracing::info!(
+            service = multiview_mesh::service::SERVICE_TYPE,
+            "local-mesh discovery running (always-on mDNS browse, IPv6-first; \
+             /api/v1/mesh/peers serves the untrusted inventory)"
+        );
+    }
+
+    /// No-op when the `mesh-mdns` feature is off: the shared [`MeshState`] is still
+    /// wired (so `/api/v1/mesh/*` serves it), but no live socket loop runs and the
+    /// default build stays socket-free + `cargo deny`-clean (ADR-0051 §6).
+    #[cfg(not(feature = "mesh-mdns"))]
+    pub fn spawn_mesh_discovery(&self) {
+        tracing::debug!(
+            "local-mesh live discovery is OFF (build without `mesh-mdns`); \
+             /api/v1/mesh serves the wired (empty) inventory"
+        );
     }
 
     /// The current sampled enforcement level for the S1 startup gate.

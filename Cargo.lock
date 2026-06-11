@@ -2768,6 +2768,7 @@ dependencies = [
  "fastrand",
  "flume",
  "if-addrs",
+ "log",
  "mio",
  "socket-pktinfo",
  "socket2 0.6.4",
@@ -2915,6 +2916,7 @@ dependencies = [
  "multiview-hal",
  "multiview-input",
  "multiview-licence",
+ "multiview-mesh",
  "multiview-output",
  "multiview-overlay",
  "multiview-preview",
@@ -2983,6 +2985,7 @@ dependencies = [
  "multiview-engine",
  "multiview-events",
  "multiview-licence",
+ "multiview-mesh",
  "multiview-preview",
  "multiview-telemetry",
  "proptest",
@@ -3135,6 +3138,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "multiview-mesh"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "mdns-sd",
+ "multiview-core",
+ "multiview-events",
+ "multiview-licence",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
