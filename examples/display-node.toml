@@ -26,6 +26,10 @@ connector = "HDMI-A-1"
 # mode = { width = 1920, height = 1080, refresh = "60000/1001" }
 # EDID-less chain (forced CVT-RB timing; such heads have no ELD → no audio):
 # forced_mode = { width = 1920, height = 1080, refresh = "60/1" }
+# HDMI audio: runs the real ELD-gated ALSA sink, fed by the program audio
+# bus. On the current build that bus is SILENCE (per-source audio decode →
+# bus routing is the AUD work-lane); node heads hear the ingest's audio the
+# moment it lands, with no node-side changes.
 audio = true
 
 # What the head shows once the tile ladder bottoms out: last-good first, then

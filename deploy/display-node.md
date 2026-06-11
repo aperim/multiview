@@ -49,6 +49,12 @@ Notes that matter in the field:
 
 - **EDID-less heads** need `forced_mode` (CVT-RB timing) and have **no audio
   path** (no EDID ⇒ no ELD ⇒ HDMI audio is gated off; video runs).
+- **HDMI audio carries the program bus.** `audio = true` runs the real
+  ELD-gated ALSA sink (DEV-B4: format negotiation, buffer-level servo,
+  channel fold), fed by the program audio bus — which, on the current build,
+  is **silence**: per-source audio decode→bus routing is the AUD work-lane
+  and has not shipped yet. The moment it lands, node heads hear the ingest's
+  audio with zero node-side changes (the node runs the standard pipeline).
 - `connector = "auto"` is only accepted on single-head nodes.
 - Frame rates are exact rationals (`"60000/1001"`), never floats.
 
