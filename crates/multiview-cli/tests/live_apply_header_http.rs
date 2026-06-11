@@ -83,9 +83,12 @@ fn apply_header(response: &str) -> Option<String> {
 
 /// Bind a server with `capability`, POST an rtsp source, return the header.
 async fn header_for(capability: LiveSourceCapability) -> Option<String> {
-    // A stable admin secret so the test can authenticate (the env var is set
-    // process-wide; this test file is its own test binary, so no other test's
-    // bootstrap-token path races it).
+    // A stable admin secret so the test can authenticate. NOTE: the env var is
+    // PROCESS-WIDE — this works only because this file is its own test binary
+    // and every test in it uses the same auth mode. Any test added to THIS
+    // binary must keep using MULTIVIEW_CONTROL_TOKEN-based auth (never the
+    // bootstrap-token or auth-disabled paths), or it will race this setting
+    // under the parallel test runner.
     std::env::set_var("MULTIVIEW_CONTROL_TOKEN", "test-secret");
     let cfg = config();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(8));

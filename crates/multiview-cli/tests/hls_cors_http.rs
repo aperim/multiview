@@ -147,7 +147,9 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         publisher,
         commands,
         multiview_control::no_preview(),
-        multiview_control::LiveSourceCapability::synthetic_and_network(),
+        // Conservative fixture capability: this test asserts the HLS delivery
+        // surface, not apply semantics — never over-claim live-ness here.
+        multiview_control::LiveSourceCapability::synthetic_only(),
         async move {
             let _ = shutdown_rx.await;
         },

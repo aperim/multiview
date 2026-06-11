@@ -497,7 +497,9 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
         Arc::clone(&publisher),
         commands,
         Arc::clone(&provider),
-        multiview_control::LiveSourceCapability::synthetic_and_network(),
+        // Conservative fixture capability: this test asserts serving/preview,
+        // not apply semantics — never over-claim live-ness here.
+        multiview_control::LiveSourceCapability::synthetic_only(),
         async move {
             let _ = shutdown_rx.await;
         },
