@@ -186,6 +186,59 @@ fn monitor_debounces_a_kernel_event_burst_into_one_reprobe() {
     monitor.stop();
 }
 
+/// A scripted source that yields pre-loaded receive RESULTS (errors
+/// included), then idles — models the kernel socket failure paths the
+/// real netlink source surfaces (e.g. an ENOBUFS overrun).
+struct FlakySource {
+    steps: VecDeque<Result<Option<Vec<u8>>, String>>,
+}
+
+impl UeventSource for FlakySource {
+    fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, String> {
+        if let Some(step) = self.steps.pop_front() {
+            return step;
+        }
+        // An idle socket: bounded wait, nothing arrived.
+        std::thread::sleep(timeout.min(Duration::from_millis(5)));
+        Ok(None)
+    }
+}
+
+/// DEV-B5 F4: a netlink receive **error** can mean the kernel DROPPED
+/// datagrams (an ENOBUFS queue overrun) — possibly the one drm hotplug
+/// uevent. Event mode has no periodic re-probe, so a swallowed event would
+/// be lost for the rest of the run. The monitor must treat any receive
+/// error as "connector state may have changed unobserved" and request one
+/// debounced recovery re-probe itself (idempotent — the flip loop that owns
+/// the device just probes and finds nothing changed in the benign case).
+#[test]
+fn a_netlink_receive_error_requests_a_recovery_reprobe() {
+    let flag_a = ReprobeFlag::new();
+    let flag_b = ReprobeFlag::new();
+    let monitor = HotplugMonitor::start(
+        HotplugMode::Netlink(FlakySource {
+            steps: VecDeque::from(vec![Err(
+                "uevent recv: ENOBUFS (kernel socket overrun — datagrams dropped)".to_owned(),
+            )]),
+        }),
+        vec![flag_a.clone(), flag_b.clone()],
+        Duration::from_millis(500),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !(flag_a.is_requested() && flag_b.is_requested())
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    monitor.stop();
+    assert!(
+        flag_a.take() && flag_b.take(),
+        "a receive error (possible uevent overrun) must request a recovery \
+         re-probe on every sink — a swallowed drm hotplug event is otherwise \
+         lost forever in event mode"
+    );
+}
+
 #[test]
 fn polling_mode_requests_reprobes_periodically() {
     let flag = ReprobeFlag::new();
