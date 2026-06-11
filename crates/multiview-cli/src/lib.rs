@@ -43,6 +43,12 @@ pub mod cli;
 pub mod control;
 pub mod live_overlays;
 pub mod live_sources;
+/// The `multiview node` display-node support shell (DEV-B5 / ADR-0045): the
+/// build-feature gate (`display-kms` + `ffmpeg`, clear errors otherwise) and
+/// the load → validate → lower path from a node TOML to the runnable
+/// `MultiviewConfig`. Always compiled, so the default build tests the
+/// rejection path and a node build tests the acceptance path.
+pub mod node;
 /// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
 /// `display` output must FAIL a non-`display-kms` build with a clear error —
 /// never be silently skipped. Always compiled, so the default build tests the

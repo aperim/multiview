@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser as _;
-use multiview_cli::cli::{Cli, Command, RunArgs, ValidateArgs};
+use multiview_cli::cli::{Cli, Command, NodeArgs, RunArgs, ValidateArgs};
 use multiview_cli::control;
 use multiview_cli::run::{RunReport, SoftwareEngine};
 use multiview_cli::validate::validate_config;
@@ -77,6 +77,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Validate(args) => run_validate(&args),
         Command::Run(args) => run_run(args).await,
+        Command::Node(args) => run_node(args).await,
     }
 }
 
@@ -174,6 +175,121 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// The `node` subcommand (ADR-0045 / DEV-B5): gate on the build features,
+/// load → validate → lower the node document, then drive the **standard full
+/// pipeline** over the lowered config — one supervised ingest (the unchanged
+/// `multiview-input` pacer/jitter/normalize/reconnect stack) → the framestore
+/// tile ladder (last-good, then the configured local slate) → single-source
+/// full-canvas composite → the DEV-B1..B4 display sink(s) + ALSA HDMI audio.
+/// `--ticks`/`--duration` bound the run (diagnostics/soak); otherwise the
+/// node runs as the daemon until Ctrl-C/SIGTERM.
+///
+/// Until DEV-C2 lands the epoch + link-offset frame chooser, presentation
+/// rides the display sink's existing repeat/drop reconciliation; the node
+/// document's `timing.link_offset_ms` is recorded but not yet consumed.
+#[cfg(all(feature = "ffmpeg", feature = "display-kms"))]
+async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
+    use multiview_cli::pipeline::Pipeline;
+
+    multiview_cli::node::ensure_node_supported().map_err(|reason| anyhow::anyhow!(reason))?;
+    let (node_cfg, config) = multiview_cli::node::load_node_run_config(&args.config)?;
+    let mut pipeline = Pipeline::build(&config).context("building the node pipeline")?;
+    let cadence = pipeline.cadence();
+    tracing::info!(
+        ingest = %node_cfg.ingest.url(),
+        heads = node_cfg.displays.len(),
+        link_offset_ms = node_cfg.timing.link_offset_ms,
+        "node: pipeline built (presentation rides the display sink's repeat/drop \
+         reconciliation until the DEV-C2 epoch frame chooser)"
+    );
+
+    let report = if let Some(ticks) = args.tick_budget(cadence) {
+        tracing::info!(ticks, "node run: bounded");
+        pipeline.run_for(ticks).await.context("bounded node run")?
+    } else {
+        tracing::info!("node run: until Ctrl-C/SIGTERM");
+        run_node_until_signalled(pipeline, cadence).await?
+    };
+    println!("{}", report.render());
+    Ok(if report.faltered {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Without `display-kms` + `ffmpeg` this build cannot run a display node:
+/// report the gate's clear, actionable error (the DEV-B1 precedent — never a
+/// silent skip).
+#[cfg(not(all(feature = "ffmpeg", feature = "display-kms")))]
+#[allow(clippy::unused_async)]
+// reason: this is the unsupported half of an `async fn` pair; the supported
+// counterpart awaits the full pipeline, so the signature must match for the
+// one `run_node(..).await` call site to compile under either feature set.
+async fn run_node(_args: NodeArgs) -> anyhow::Result<ExitCode> {
+    match multiview_cli::node::ensure_node_supported() {
+        Err(reason) => Err(anyhow::anyhow!(reason)),
+        Ok(()) => Err(anyhow::anyhow!(
+            "internal: the node support gate passed in a build without display-kms + ffmpeg"
+        )),
+    }
+}
+
+/// Drive the node pipeline until Ctrl-C (SIGINT) or SIGTERM (the systemd stop
+/// signal), with **no control plane**: node enrollment/management is DEV-B6,
+/// and a node must not silently open a listener nobody configured. The
+/// outbound publisher exists because the drive path publishes engine state
+/// through it (wait-free, invariant #10); nothing subscribes on a node.
+#[cfg(all(feature = "ffmpeg", feature = "display-kms"))]
+async fn run_node_until_signalled(
+    pipeline: multiview_cli::pipeline::Pipeline,
+    cadence: multiview_core::time::Rational,
+) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
+    let stop = StopSignal::new();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let preview_slot = multiview_cli::preview::program_slot();
+
+    let stop_for_signal = stop.clone();
+    let signal = tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    tracing::warn!(error = %e, "SIGTERM handler unavailable; Ctrl-C only");
+                    if ctrl_c.await.is_ok() {
+                        tracing::info!("Ctrl-C received; stopping after the current frame");
+                        stop_for_signal.stop();
+                    }
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("Ctrl-C received; stopping after the current frame"),
+            _ = term.recv() => tracing::info!("SIGTERM received; stopping after the current frame"),
+        }
+        stop_for_signal.stop();
+    });
+
+    // The live per-tick counter (shared with the engine ProgramSet supervisor;
+    // the DEV-B5 sd_notify watchdog samples the same counter so liveness pings
+    // reflect the output clock actually advancing — invariant #1's signal).
+    let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let drain: ControlDrain = Box::new(|_d: &mut CompositorDrive<Nv12Image>| {});
+    let report = drive_main_program_in_set(
+        pipeline,
+        cadence,
+        &stop,
+        &publisher,
+        &preview_slot,
+        drain,
+        ticks,
+    )
+    .await?;
+    signal.abort();
+    Ok(report)
 }
 
 /// The per-run-path inputs the control plane is wired from: the live preview
@@ -375,9 +491,17 @@ async fn run_pipeline_until_ctrl_c(
     // MP-1 (ADR-0030 §2.2): build the engine `ProgramSet` and drive this single
     // program (id "main") through it — behaviour-identical to today (one program,
     // the same drive/stop/publisher/preview/drain). See `drive_main_program_in_set`.
-    let report =
-        drive_main_program_in_set(pipeline, cadence, &stop, &publisher, &preview_slot, drain)
-            .await?;
+    let main_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let report = drive_main_program_in_set(
+        pipeline,
+        cadence,
+        &stop,
+        &publisher,
+        &preview_slot,
+        drain,
+        main_ticks,
+    )
+    .await?;
 
     // The pipeline loop returned; stop the metrics poller (it also self-stops on
     // the StopSignal within one sample period) and tear down the live-source hub
@@ -407,10 +531,12 @@ async fn run_pipeline_until_ctrl_c(
 /// `run_until_serving` drive, the same `StopSignal` (Ctrl-C reaches the program via
 /// the supervisor's per-program stop handle), the same publisher/preview/drain. The
 /// set owns the program's lifecycle (spawn on its own supervised task, stop, join)
-/// and samples its **live** `ticks_emitted` off a shared counter the pipeline
-/// increments per tick — exactly the N-concurrent-programs machinery, exercised
-/// here at N=1. MP-5 routes the config's `[[programs]]` into the same
-/// `ProgramSet::start` for N>1.
+/// and samples its **live** `ticks_emitted` off the caller-supplied shared counter
+/// the pipeline increments per tick — exactly the N-concurrent-programs machinery,
+/// exercised here at N=1. MP-5 routes the config's `[[programs]]` into the same
+/// `ProgramSet::start` for N>1. The caller keeps a clone of `main_ticks` where it
+/// needs the live count itself (the node's sd_notify watchdog gates its liveness
+/// pings on this counter advancing — DEV-B5).
 ///
 /// # Errors
 ///
@@ -423,6 +549,7 @@ async fn drive_main_program_in_set(
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     preview_slot: &multiview_cli::preview::ProgramSlot,
     drain: ControlDrain,
+    main_ticks: Arc<std::sync::atomic::AtomicU64>,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
     // The shared monotonic reference every program in the set reads (its one program
     // reads it for its own clock's seed; identical to the inline `Monotonic` source
@@ -430,10 +557,6 @@ async fn drive_main_program_in_set(
     let mut programs: ProgramSet<RealtimePacer> =
         ProgramSet::new(Arc::new(multiview_engine::MonotonicTimeSource::new()));
     let program_id = ProgramId::new(ProgramId::MAIN).context("the reserved \"main\" program id")?;
-    // The live per-tick counter the `ProgramSet` samples for "main": the pipeline
-    // increments it once per emitted output tick (a single wait-free `fetch_add`),
-    // so `programs.ticks_emitted("main")` is genuinely live, not fabricated.
-    let main_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Recover the run's `PipelineReport` from the supervised task.
     let (report_tx, report_rx) =
         tokio::sync::oneshot::channel::<Result<multiview_cli::pipeline::PipelineReport, String>>();
