@@ -71,6 +71,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alsa"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812947049edcd670a82cd5c73c3661d2e58468577ba8489de58e1a73c04cbd5d"
+dependencies = [
+ "alsa-sys",
+ "bitflags",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
+name = "alsa-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad7569085a265dd3f607ebecce7458eaab2132a84393534c95b18dcbc3f31e04"
+dependencies = [
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3055,6 +3077,7 @@ dependencies = [
 name = "multiview-output"
 version = "0.1.0"
 dependencies = [
+ "alsa",
  "axum 0.8.9",
  "drm",
  "drm-ffi",
@@ -3065,6 +3088,7 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-rtsp-server",
  "http-body-util",
+ "multiview-audio",
  "multiview-core",
  "multiview-ffmpeg",
  "multiview-framestore",

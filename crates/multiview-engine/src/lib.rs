@@ -92,6 +92,7 @@ pub mod clock;
 pub mod cycle;
 pub mod degrade;
 pub mod drive;
+pub mod epoch;
 pub mod error;
 pub mod ha;
 pub mod heads;
@@ -119,6 +120,11 @@ pub use clock::{ManualTimeSource, MonotonicTimeSource, OutputClock, Tick, TimeSo
 pub use cycle::{FreezeTile, RoundRobin};
 pub use degrade::{ControlLoop, ControlStep};
 pub use drive::{CompositedFrame, CompositorDrive};
+pub use epoch::{
+    clock_quality_of, clock_source_of, EpochAnchor, EpochPolicy, EpochSampler, EpochSamplerConfig,
+    EpochStatus, EpochTracker, EpochUpdate, SystemWallSampler, WallClockSampler, WallSample,
+    EPOCH_RATE,
+};
 pub use error::{Error, Result};
 pub use ha::{
     Cluster, Epoch, FailoverDecision, FailoverPolicy, HaNode, HaStateMachine, Heartbeat,

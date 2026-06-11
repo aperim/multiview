@@ -326,6 +326,51 @@ segment_ms = 2000`}
           />
         </DocSection>
 
+        <DocSection id="devices" title={<Trans>Devices</Trans>}>
+          <Prose>
+            <Trans>
+              Each <Code>[[devices]]</Code> entry adopts one managed device as
+              desired state: a <Code>driver</Code> (<Code>zowietek</Code>,{" "}
+              <Code>displaynode</Code>, or <Code>cast</Code>), an IPv6-first
+              management <Code>address</Code> (required for zowietek/cast;
+              optional for an enrolled display node), an optional{" "}
+              <Code>desired_mode</Code> the driver re-converges on every
+              reconnect, an optional <Code>alarm_on_offline</Code> severity,
+              and write-only credentials via <Code>auth.secret_ref</Code>.
+              Applying a config adopts and converges idempotently.
+            </Trans>
+          </Prose>
+          <CodeBlock label={t`Example device`}>{`[[devices]]
+id = "dev-foyer"
+display_name = "Foyer decoder"
+driver = "zowietek"
+address = "http://[fd00:db8::42]"
+desired_mode = "decoder"
+alarm_on_offline = "major"
+
+[devices.auth]
+secret_ref = "op://Site/foyer-decoder/credentials"`}</CodeBlock>
+        </DocSection>
+
+        <DocSection id="sync-groups" title={<Trans>Sync groups</Trans>}>
+          <Prose>
+            <Trans>
+              Each <Code>[[sync_groups]]</Code> entry aligns member devices'
+              presentation: <Code>target_skew_ms</Code> (1–10000) is the
+              drift-alarm threshold and every member carries a per-device{" "}
+              <Code>offset_ms</Code> trim (0–10000). Cast devices can never be
+              members; the group reports its weakest member's tier.
+            </Trans>
+          </Prose>
+          <CodeBlock label={t`Example sync group`}>{`[[sync_groups]]
+id = "lobby-wall"
+target_skew_ms = 80
+members = [
+  { device = "dev-node-left", offset_ms = 0 },
+  { device = "dev-foyer", offset_ms = 120 },
+]`}</CodeBlock>
+        </DocSection>
+
         <DocSection id="validation" title={<Trans>Validation and import / export</Trans>}>
           <Prose>
             <Trans>

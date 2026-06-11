@@ -3045,7 +3045,10 @@ export interface components {
             applied_count: number;
             last_applied?: null | components["schemas"]["WatchStamp"];
             last_rejected?: null | components["schemas"]["WatchStamp"];
-            /** @description The watched config file path (absent when not watching). */
+            /**
+             * @description The watched config file path (absent when no watcher was ever
+             *     started; kept after a stop so the status names what *was* watched).
+             */
             path?: string | null;
             /**
              * @description Section names changed on disk that only apply on restart (sorted,

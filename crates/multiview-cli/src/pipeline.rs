@@ -960,6 +960,16 @@ pub struct Pipeline {
     /// an empty map leaves the snapshot unchanged (inv #10 — never on the hot
     /// loop).
     inventories: std::collections::BTreeMap<String, multiview_core::stream::StreamInventory>,
+    /// The shared outbound presentation epoch (DEV-C1 / ADR-M010): written at
+    /// ~1 Hz by the timing-status task, read by the HLS rolling playlist at
+    /// each segment close to stamp `EXT-X-PROGRAM-DATE-TIME` from the same
+    /// map the control WS publishes. Cloned into each HLS sink at build time.
+    epoch: multiview_output::SharedEpoch,
+    /// The run's epoch **anchor** slot (DEV-C1): `drive_streaming` stores the
+    /// tick-0 seed + the run's monotonic source here when the program clock
+    /// seeds; the timing-status task binds to it lazily (lock-free load —
+    /// publishing/reading can never block the engine, inv #1/#10).
+    epoch_anchor: crate::timing_status::EpochAnchorSlot,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -1139,7 +1149,11 @@ impl Pipeline {
             cuda_ordinal: None,
         };
 
-        let built = build_outputs(&config.outputs)?;
+        // The shared outbound presentation epoch (DEV-C1 / ADR-M010): one cell
+        // per pipeline, written by the timing-status task and read by every
+        // HLS rolling playlist (PDT) — one anchor, every surface agrees.
+        let epoch = multiview_output::SharedEpoch::new();
+        let built = build_outputs(&config.outputs, &epoch)?;
         #[cfg(feature = "display-kms")]
         let has_display = !built.display.is_empty();
         #[cfg(not(feature = "display-kms"))]
@@ -1235,6 +1249,8 @@ impl Pipeline {
             analog_clocks,
             #[cfg(feature = "overlay")]
             overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
+            epoch,
+            epoch_anchor: crate::timing_status::anchor_slot(),
         })
     }
 
@@ -1450,6 +1466,24 @@ impl Pipeline {
     #[must_use]
     pub fn preview_stores(&self) -> HashMapStores {
         self.stores.clone()
+    }
+
+    /// DEV-C1 (ADR-M010): the shared outbound presentation-epoch cell this
+    /// pipeline's HLS sinks stamp `EXT-X-PROGRAM-DATE-TIME` from. The
+    /// timing-status task writes it (~1 Hz); reading/writing is a tiny
+    /// lock-guarded `Copy` access on off-hot-path threads only.
+    #[must_use]
+    pub fn shared_epoch(&self) -> multiview_output::SharedEpoch {
+        self.epoch.clone()
+    }
+
+    /// DEV-C1 (ADR-M010): the run's epoch **anchor** slot. `drive_streaming`
+    /// publishes the tick-0 seed + the run's monotonic source into it when the
+    /// program clock seeds; the timing-status task binds to it lazily with a
+    /// lock-free load (inv #1/#10 — neither side can block the engine).
+    #[must_use]
+    pub fn epoch_anchor_slot(&self) -> crate::timing_status::EpochAnchorSlot {
+        Arc::clone(&self.epoch_anchor)
     }
 
     /// RT-10b: the live subtitle re-point handle for the running pipeline, or
@@ -1754,6 +1788,54 @@ impl Pipeline {
         // streaming/web level (this output is a live streaming multiview).
         let audio_loudnorm = self.encode_cfg.audio.as_ref().and_then(program_loudnorm);
 
+        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
+        // startup, before the output clock runs — and keep their handles alive
+        // for the whole run (drop = stop + join, off the hot path). Each sink
+        // owns its device on a dedicated thread; the engine side holds only
+        // wait-free mailbox publishers, fed in `state_of` exactly where the
+        // live-preview slot is filled. A startup failure (no such connector,
+        // no usable mode, modeset rejected) fails the run like any other
+        // misconfigured output; after startup the sinks can never fail the
+        // engine (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get
+        // an ELD-gated ALSA audio sink wired to their flip clock; the
+        // publishers feed from the bake consumer below.
+        #[cfg(feature = "display-kms")]
+        let started_displays = start_display_sinks(
+            std::mem::take(&mut self.display_plans),
+            self.cadence,
+            display_audio_format(self.encode_cfg.audio.as_ref()),
+        )?;
+        #[cfg(feature = "display-kms")]
+        let display_publishers = started_displays.publishers;
+        // Keep the video + audio sink threads alive for the whole run; dropping
+        // the handles at end of run stops + joins them (off the hot path).
+        #[cfg(feature = "display-kms")]
+        let _display_handles = started_displays.handles;
+        #[cfg(feature = "display-kms")]
+        let _display_audio_handles = started_displays.audio_handles;
+        #[cfg(feature = "display-kms")]
+        let display_audio_publishers = started_displays.audio_publishers;
+        #[cfg(not(feature = "display-kms"))]
+        let display_audio_publishers: Vec<
+            multiview_output::display::audio::DisplayAudioPublisher,
+        > = Vec::new();
+        // The display-audio feed (DEV-B4): heads receive the SAME post-loudnorm
+        // program block the stream encodes when this run carries program audio;
+        // a video-only run with audio-enabled heads gets a dedicated program
+        // bus (currently silence, correctly paced by tick index) so the audio
+        // path is real either way.
+        let display_audio = DisplayAudioFeed {
+            dedicated_bus: if audio_bus.is_none() && !display_audio_publishers.is_empty() {
+                Some(multiview_audio::program::ProgramBus::new(
+                    display_audio_format(self.encode_cfg.audio.as_ref()),
+                    self.cadence,
+                ))
+            } else {
+                None
+            },
+            publishers: display_audio_publishers,
+        };
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -1768,6 +1850,7 @@ impl Pipeline {
             encoder,
             audio_bus,
             audio_loudnorm,
+            display_audio,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -1780,12 +1863,25 @@ impl Pipeline {
         // caller's `stop` (Arc-backed) as its own handle, so the existing Ctrl-C /
         // control-plane stop still ends the run unchanged. A spec/cadence mismatch
         // is a build-assembly bug, surfaced as a typed error (never a panic).
+        // The timing-status task (DEV-C1 / ADR-M010) needs the run's monotonic
+        // source to bracket its wall reads on the SAME timeline tick 0 is
+        // seeded on; clone the handle before the program takes ownership.
+        let ts_for_anchor = Arc::clone(&ts);
         let mut program =
             MultiviewProgram::new(&self.program_spec, clock, drive, ts, pacer, stop.clone())
                 .map_err(|e| PipelineError::Program {
                     program: self.program_spec.id.clone(),
                     reason: e.to_string(),
                 })?;
+        // Publish the run's epoch anchor (tick-0 seed + monotonic source) into
+        // the shared slot — a single lock-free store the off-hot-path
+        // timing-status task reads to derive the outbound presentation epoch.
+        // Publishing a value can never pace the clock (inv #1/#10).
+        self.epoch_anchor
+            .store(Some(Arc::new(multiview_engine::epoch::EpochAnchor::new(
+                ts_for_anchor,
+                program.seed_nanos(),
+            ))));
 
         // The hot-loop drop counter (live drop-on-overload) and the queue
         // high-watermark probe. Both are wait-free atomics shared with the
@@ -1847,18 +1943,10 @@ impl Pipeline {
             publisher.publish_event(event);
         }
         let input_fragment = crate::control::input_inventories_fragment(&self.inventories);
-        // DEV-B1 / ADR-0044: start the configured DRM/KMS display heads NOW —
-        // startup, before the output clock runs — and keep their handles alive
-        // for the whole run (drop = stop + join, off the hot path). Each sink
-        // owns its device on a dedicated thread; the engine side holds only
-        // wait-free mailbox publishers, fed in `state_of` exactly where the
-        // live-preview slot is filled. A startup failure (no such connector,
-        // no usable mode, modeset rejected) fails the run like any other
-        // misconfigured output; after startup the sinks can never fail the
-        // engine (invariants #1 + #10).
-        #[cfg(feature = "display-kms")]
-        let (_display_handles, display_publishers) =
-            start_display_sinks(std::mem::take(&mut self.display_plans), self.cadence)?;
+        // (The DRM/KMS display heads — and their DEV-B4 audio sinks — were
+        // started above, before the egress spawn, so the bake consumer received
+        // the audio publishers; `display_publishers` feeds the video mailboxes
+        // in `state_of` below.)
         // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
         // state (kept here on the hot loop — the bounded cue store holds only a
         // small live window, so it must be sampled now, not after the run), clones
@@ -2536,6 +2624,7 @@ impl StreamEgress {
         encoder: ProgramEncoder,
         audio_bus: Option<multiview_audio::program::ProgramBus>,
         audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+        display_audio: DisplayAudioFeed,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -2593,6 +2682,7 @@ impl StreamEgress {
                     encoder,
                     audio_bus,
                     audio_loudnorm,
+                    display_audio,
                     &consumer_in_flight,
                 )
             })
@@ -2712,6 +2802,41 @@ fn program_audio_bus(
     multiview_audio::program::ProgramBus::new(format, cadence)
 }
 
+/// The audio format the display heads' audio sinks are fed in (DEV-B4): the
+/// run's program-audio format when this run encodes audio (so the heads hear
+/// exactly the stream program), else the canonical 48 kHz stereo a dedicated
+/// display bus mixes. Mirrors [`program_audio_bus`]'s layout mapping so pushed
+/// blocks always match the sink FIFO's channel count.
+fn display_audio_format(
+    cfg: Option<&multiview_output::AudioEncodeConfig>,
+) -> multiview_audio::AudioFormat {
+    let Some(cfg) = cfg else {
+        return multiview_audio::AudioFormat::new(48_000, multiview_audio::ChannelLayout::Stereo);
+    };
+    let layout = match cfg.channels {
+        1 => multiview_audio::ChannelLayout::Mono,
+        _ => multiview_audio::ChannelLayout::Stereo,
+    };
+    multiview_audio::AudioFormat::new(cfg.sample_rate, layout)
+}
+
+/// The display-head audio feed (DEV-B4): the bounded FIFO publishers of every
+/// audio-enabled display output, plus — when the run carries no encode-side
+/// program audio — a dedicated tick-driven program bus so the heads still
+/// receive correctly-paced program audio (silence until sources are routed,
+/// exactly like the encode-side bus). Empty publishers ⇒ the consumer skips
+/// the display branch entirely; each push is a bounded short critical section
+/// into the drop-oldest FIFO (the sink holds that lock only for in-memory
+/// copies, never across a PCM call), so a wedged ALSA device can never reach
+/// back to the bake consumer, let alone the engine (invariants #1 + #10).
+struct DisplayAudioFeed {
+    /// One bounded drop-oldest FIFO publisher per audio-enabled display head.
+    publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+    /// `Some` only when the run has no encode-side audio bus AND there are
+    /// display publishers to feed.
+    dedicated_bus: Option<multiview_audio::program::ProgramBus>,
+}
+
 /// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
 ///
 /// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
@@ -2776,6 +2901,10 @@ fn drive_audio_for_item(
 /// # Errors
 /// Returns [`PipelineError`] if building the baker, baking a frame, or the single
 /// encode fails.
+#[allow(clippy::too_many_arguments)]
+// reason: the consumer owns exactly one of each pipeline stage (baker, encoder,
+// audio bus, loudnorm, display feed); a one-shot bundling struct would only
+// rename the same eight things.
 fn consumer_main(
     ctx: BakeContext,
     hot_rx: &Receiver<StreamItem>,
@@ -2783,6 +2912,7 @@ fn consumer_main(
     mut encoder: ProgramEncoder,
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
     mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
+    mut display_audio: DisplayAudioFeed,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -2828,6 +2958,15 @@ fn consumer_main(
                 Some(norm) => norm.process(block),
                 None => block,
             };
+            // DEV-B4: the display heads hear the SAME post-loudnorm program
+            // block the stream encodes. Each push is a bounded short critical
+            // section into the drop-oldest FIFO (never held across a PCM
+            // call) — a wedged HDMI audio device sheds frames and can never
+            // back-pressure this consumer, let alone the engine
+            // (invariants #1 + #10).
+            for publisher in &display_audio.publishers {
+                publisher.push_audio(&block);
+            }
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
                 .map_err(|e| PipelineError::Output {
@@ -2835,6 +2974,16 @@ fn consumer_main(
                     reason: e.to_string(),
                 })?;
             fan_packets(&sink_txs, &mut live, audio_packets);
+        } else if let Some(bus) = display_audio.dedicated_bus.as_mut() {
+            // A video-only run with audio-enabled display heads: drive the
+            // dedicated display bus by the same absolute tick index (RT-8b —
+            // catching up across shed ticks keeps the sample clock a pure
+            // function of the tick counter) and feed the heads. No encode, no
+            // packets — the stream stays byte-identical to a video-only run.
+            let block = drive_audio_for_item(bus, item.tick_index);
+            for publisher in &display_audio.publishers {
+                publisher.push_audio(&block);
+            }
         }
     }
     // End-of-program: flush the encoder and fan its trailing packets, then drop
@@ -4126,6 +4275,10 @@ struct DisplayOutputPlan {
     mode: multiview_output::display::ModeRequest,
     /// The CVT-RB forced mode for an EDID-less chain, if configured.
     forced_mode: Option<multiview_output::display::ForcedMode>,
+    /// Whether HDMI/DP audio is enabled on this head (the config `audio` block
+    /// is present). The audio sink only runs when this is set AND the ELD is
+    /// valid (DEV-B4 / display-out §5); an EDID-less head has no audio path.
+    audio_enabled: bool,
 }
 
 /// Extract the display-head plan from one `Output::Display` (feature
@@ -4137,6 +4290,7 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
         connector,
         mode,
         forced_mode,
+        audio,
         ..
     } = output
     else {
@@ -4164,6 +4318,10 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
         connector: selector,
         mode: request,
         forced_mode: forced,
+        // The presence of the `audio` block enables HDMI/DP audio (ELD-gated at
+        // runtime); a display output never carries selectable discrete tracks
+        // (capability-validated upstream), so the mode is not inspected here.
+        audio_enabled: audio.is_some(),
     })
 }
 
@@ -4190,12 +4348,44 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
     }
 }
 
+/// Everything [`start_display_sinks`] lit: the per-head video flip loops (and
+/// their mailbox publishers) plus the DEV-B4 audio sinks (and their bounded
+/// drop-oldest FIFO publishers) of the heads whose plan enabled audio. The handle vectors
+/// own the threads — keep them alive for the run; dropping them stops + joins.
+#[cfg(feature = "display-kms")]
+struct StartedDisplaySinks {
+    /// One running flip loop per head.
+    handles: Vec<multiview_output::display::DisplaySinkHandle>,
+    /// The matching wait-free frame mailboxes (same order as `handles`).
+    publishers: Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
+    /// The running ELD-gated ALSA audio sinks (audio-enabled heads only).
+    audio_handles: Vec<multiview_output::display::audio::DisplayAudioSink>,
+    /// The matching bounded drop-oldest audio FIFO publishers.
+    audio_publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+}
+
+/// The display-audio FIFO depth in frames (per channel): ~170 ms @ 48 kHz.
+/// Bounds the worst-case added audio latency AND the drop point under a
+/// wedged/slow device (drop-oldest — the engine-side push never blocks).
+#[cfg(feature = "display-kms")]
+const DISPLAY_AUDIO_FIFO_FRAMES: usize = 8_192;
+
 /// Open and light every configured display head (feature `display-kms`):
 /// scan `/dev/dri` for the connector-owning card, probe + select the mode
 /// (EDID preferred / exact-rational `cadence` match / CVT-RB forced), run the
 /// `TEST_ONLY` validation and the one startup modeset, and spawn the
 /// dedicated flip-loop thread per head (ADR-0044 §1). Startup-only; runs
 /// before the output clock starts.
+///
+/// An audio-enabled head (DEV-B4) additionally gets an ELD-gated ALSA audio
+/// sink: the connector's ALSA endpoints are discovered (vc4 card-per-port or
+/// the HDA `eld#D.P` scan), the sink is wired to this head's flip clock for
+/// the scanout-skew servo term, and fed `audio_format` program blocks. Audio
+/// is **best-effort by construction** (display-out §5): an EDID-less head
+/// (forced mode — no ELD exists) and a connector with no discoverable ALSA
+/// endpoint run video-only with a log line, never an error — and a present
+/// ELD is still re-checked live by the sink itself (hotplug), so audio only
+/// flows while the pipe is lit AND the ELD is valid.
 ///
 /// # Errors
 ///
@@ -4206,17 +4396,16 @@ impl multiview_output::display::DisplayCanvas for CanvasFrame {
 fn start_display_sinks(
     plans: Vec<DisplayOutputPlan>,
     cadence: Rational,
-) -> Result<
-    (
-        Vec<multiview_output::display::DisplaySinkHandle>,
-        Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
-    ),
-    PipelineError,
-> {
+    audio_format: multiview_audio::AudioFormat,
+) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
     use multiview_output::display::{DisplaySink, DisplaySinkConfig};
-    let mut handles = Vec::with_capacity(plans.len());
-    let mut publishers = Vec::with_capacity(plans.len());
+    let mut started = StartedDisplaySinks {
+        handles: Vec::with_capacity(plans.len()),
+        publishers: Vec::with_capacity(plans.len()),
+        audio_handles: Vec::new(),
+        audio_publishers: Vec::new(),
+    };
     for plan in plans {
         let device = KmsDisplayDevice::open_for_connector(&plan.connector).map_err(|e| {
             PipelineError::Output {
@@ -4242,10 +4431,75 @@ fn start_display_sinks(
             kind: "display",
             reason: format!("{}: {e}", plan.output_id),
         })?;
-        handles.push(handle);
-        publishers.push(publisher);
+        if plan.audio_enabled {
+            start_display_audio(&plan.output_id, &handle, audio_format, &mut started);
+        }
+        started.handles.push(handle);
+        started.publishers.push(publisher);
     }
-    Ok((handles, publishers))
+    Ok(started)
+}
+
+/// Start the DEV-B4 ALSA audio sink for one lit head, appending its handle +
+/// publisher to `started`. Best-effort: every miss (EDID-less head, no ALSA
+/// endpoint) logs and returns — the head runs video-only, never an error.
+#[cfg(feature = "display-kms")]
+fn start_display_audio(
+    output_id: &str,
+    handle: &multiview_output::display::DisplaySinkHandle,
+    audio_format: multiview_audio::AudioFormat,
+    started: &mut StartedDisplaySinks,
+) {
+    use multiview_output::display::audio::alsa::discover_for_connector;
+    use multiview_output::display::audio::{DisplayAudioConfig, DisplayAudioSink, FlipClock};
+
+    let head = handle.head();
+    if !head.from_edid {
+        // The documented field condition (display-out §5/§6): a forced-mode
+        // (EDID-less) head publishes no ELD, so it has NO audio path — video
+        // only, stated rather than a surprise.
+        tracing::info!(
+            output = %output_id,
+            connector = %head.connector,
+            "display head runs a forced (EDID-less) mode: no ELD, so no audio path; video only"
+        );
+        return;
+    }
+    let Some(found) = discover_for_connector(&head.connector) else {
+        tracing::warn!(
+            output = %output_id,
+            connector = %head.connector,
+            "display audio enabled but no ALSA endpoint was discovered for the connector; \
+             head runs video-only"
+        );
+        return;
+    };
+    tracing::info!(
+        output = %output_id,
+        connector = %head.connector,
+        card = %found.card_id,
+        "display audio: ALSA endpoints discovered (ELD-gated sink starting)"
+    );
+    // The head's flip telemetry is the scanout clock the audio servo's skew
+    // term anchors against (display-out §5: the three-clock problem).
+    let stats = handle.stats();
+    let flip: FlipClock = Box::new(move || stats.snapshot().last_flip_ns);
+    let (audio_handle, audio_publisher) = DisplayAudioSink::start_with_flip_clock(
+        DisplayAudioConfig {
+            output_id: output_id.to_owned(),
+            format: audio_format,
+            fifo_capacity_frames: DISPLAY_AUDIO_FIFO_FRAMES,
+            // Matches the video sink's poll: bounds stop latency and how fast
+            // an idle/ELD-waiting sink reacts, without busy-waiting (the
+            // blocking PCM write paces the steady state on hardware).
+            poll_interval: Duration::from_millis(4),
+        },
+        found.eld,
+        found.pcm,
+        Some(flip),
+    );
+    started.audio_handles.push(audio_handle);
+    started.audio_publishers.push(audio_publisher);
 }
 
 /// Build the runnable sinks from the config outputs.
@@ -4260,7 +4514,10 @@ fn start_display_sinks(
 /// proprietary runtime-loaded SDK), so they are honestly skipped with a log
 /// line rather than pretended-runnable — a config mixing one with a supported
 /// output still produces that supported output.
-fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
+fn build_outputs(
+    outputs: &[Output],
+    epoch: &multiview_output::SharedEpoch,
+) -> Result<BuiltOutputs, PipelineError> {
     // A display output in a non-display-kms build is a configuration the
     // binary cannot honour: fail the build clearly, never skip (DEV-B1).
     crate::outputs::ensure_display_outputs_supported(outputs).map_err(|reason| {
@@ -4295,11 +4552,15 @@ fn build_outputs(outputs: &[Output]) -> Result<BuiltOutputs, PipelineError> {
                 // and disk bounded, instead of 404ing until a finalize that never
                 // comes. A 6-segment window is the rolling DVR depth.
                 runnable.push(RunnableOutput::Hls {
+                    // The sink shares the pipeline's epoch cell so each closed
+                    // segment is PDT-stamped from the SAME outbound epoch the
+                    // control WS publishes (DEV-C1 / ADR-M010).
                     sink: PacketMuxSink::segment_live(
                         dir,
                         prefix,
                         playlist_path.clone(),
                         HLS_LIVE_WINDOW,
+                        epoch.clone(),
                     ),
                     playlist_path,
                 });

@@ -15,6 +15,7 @@ import { Trans, useLingui } from '@lingui/react/macro';
 import { CircleCheck, Hourglass, MonitorCog } from 'lucide-react';
 import type { ColumnDef } from '@tanstack/react-table';
 
+import { OutputFromDeviceSection } from '../devices/FromDevice';
 import { useOutputs } from '../resources/queries';
 import type { SaveResourceVars } from '../resources/queries';
 import type { OutputKind, OutputView } from '../resources/types';
@@ -609,6 +610,11 @@ export function OutputsPage(): JSX.Element {
       })}
       renderFields={(form, setForm, creating, errors): JSX.Element => (
         <>
+          {creating ? (
+            // Device decode targets (ADR-M009 facet (b)): picking one binds
+            // the new output to the device via device_ref.
+            <OutputFromDeviceSection form={form} setForm={setForm} />
+          ) : null}
           <FormField
             id="output-id"
             label={t`Identifier`}

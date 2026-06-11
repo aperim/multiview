@@ -9311,7 +9311,7 @@
               "string",
               "null"
             ],
-            "description": "The watched config file path (absent when not watching)."
+            "description": "The watched config file path (absent when no watcher was ever\nstarted; kept after a stop so the status names what *was* watched)."
           },
           "restart_pending": {
             "type": "array",

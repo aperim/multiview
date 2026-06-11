@@ -206,6 +206,13 @@ display-kms = ["multiview-output/display-kms"]
 # elsewhere / on a denied read the badge honestly shows the assumed default.
 ntp = ["multiview-engine/ntp"]
 
+# Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline
+# the outbound presentation epoch's wall estimate (DEV-C1 / ADR-M010): PTP then
+# outranks the system clock while disciplined (ADR-T012). Off by default; pulls
+# the engine's `ptp` feature (safe `rustix` PHC reads -- no unsafe in this crate).
+# Compile-verified only in CI (no PTP NIC); PTP NEVER paces the tick loop.
+ptp = ["multiview-engine/ptp"]
+
 # Real libav* end-to-end pipeline: ingest (demux/decode) -> per-tile framestores
 # -> EngineRuntime drive (CPU reference compositor) -> encode the canvas once
 # (LGPL `mpeg2video` by default) -> fan out to the file + HLS output sinks. Wires
@@ -295,6 +302,11 @@ nvidia = [
     # SILENTLY keeps the CPU reference backend (the on-hardware "GPU never engages,
     # CPU pegged at 4K" bug). `gpu` pulls `multiview-compositor/wgpu` + `dep:wgpu`.
     "gpu",
+    # Measure the kernel NTP/chrony discipline (adjtimex) instead of assuming it:
+    # without `ntp` the deploy image's epoch path has NO kernel reading at all and
+    # the published `timing.status` quality honestly reports freerun (DEV-C1
+    # review finding 3) — a Linux deploy build must measure, not assume.
+    "ntp",
     "multiview-hal/cuda",
     "multiview-compositor/cuda",
     "multiview-compositor/wgpu",
@@ -335,6 +347,8 @@ linux-vaapi = [
     # `gpu` gates the run-path GPU-compositor SELECTION (see the `nvidia` note);
     # without it the wgpu compositor compiles but the run stays on the CPU backend.
     "gpu",
+    # Measured kernel NTP discipline for the epoch path (see the `nvidia` note).
+    "ntp",
     "multiview-hal/vaapi",
     "multiview-hal/qsv",
     "multiview-compositor/vaapi",
@@ -351,6 +365,10 @@ linux-vaapi = [
 full = [
     "nvidia",
     "linux-vaapi",
+    # `ntp` comes transitively via the Linux presets above; named explicitly so
+    # the everything-non-GPL build keeps the measured discipline path even if a
+    # preset is refactored.
+    "ntp",
     "multiview-hal/videotoolbox",
     "multiview-compositor/metal",
     # The cli `overlay` feature (the pure-Rust overlay/caption burn-in path) comes
