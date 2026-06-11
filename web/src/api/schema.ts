@@ -518,6 +518,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/licence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/licence` — the computed licence resource (role: read).
+         * @description Always `200` (enforcement is **data**, never an error path): a `licensed:true`
+         *     resource with the computed ladder `state`/`enforcement` when a lease is
+         *     installed, a `licensed:false` resource otherwise.
+         */
+        get: operations["get_licence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licence/challenge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/licence/challenge` — the `<host>.challenge` export as an
+         *     `application/cbor` attachment (role: read).
+         * @description The challenge carries **only** salted digests + monotonic counters — never a
+         *     raw serial, MAC, or hostname (data minimisation, brief §3/§8). The digests +
+         *     counters are sourced from the entitlement plane; CONSPECT-1 renders the
+         *     machine's current installed-lease count and an empty salted-digest set when
+         *     the cli has not yet supplied a salted machine fingerprint (the cli wiring is
+         *     CONSPECT-10). The body is canonical CBOR a portal consumes byte-for-byte.
+         */
+        get: operations["get_challenge"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licence/lease": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/licence/lease` — verify + install a presented signed lease
+         *     binding (CBOR body; role: write).
+         * @description Returns `200 {lease, valid_to}` on success, or an RFC 9457 problem on
+         *     rejection: `signature_invalid` (422), `fingerprint_mismatch` (409),
+         *     `lease_stale` (409). A binding that is not well-formed CBOR is a `422`
+         *     `malformed_binding` (bad-inputs-are-the-purpose). When no issuer key has been
+         *     pinned, the install is refused with a `409` `no_pinned_key`. A rejection never
+         *     degrades the machine — the previously-installed (or empty) state stays put
+         *     (fail toward leniency).
+         */
+        post: operations["install_lease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/licensing/heartbeat-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/licensing/heartbeat-status` — the read-only heartbeat status
+         *     (role: read).
+         * @description Always `200` (it is a data report, never an error path): the honest local
+         *     heartbeat status (transport + last/next contact + payload fields). With no
+         *     lease installed it reports `transport: "none"` and null contact instants. The
+         *     spec mandates **no** mutating endpoint exists for the heartbeat — this is
+         *     read-only, and the router wires only `GET`.
+         */
+        get: operations["get_heartbeat_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs": {
         parameters: {
             query?: never;
@@ -1780,6 +1880,50 @@ export interface components {
             up_ms: number;
         };
         /**
+         * @description `OpenAPI` mirror of [`multiview_licence::EnforcementLevel`].
+         *
+         *     Serde-equivalent: a unit enum rendered `kebab-case`. Every level keeps a
+         *     running program **on air** (ADR-0050 §6.3, invariant #1) — enforcement is
+         *     data the surface renders, never a control-flow decision.
+         * @enum {string}
+         */
+        EnforcementLevelDoc: "active" | "warning" | "config-locked" | "watermark" | "block-new-instance" | "unlicensed-build";
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::GpuLimit`].
+         *
+         *     Serde-equivalent: adjacently tagged on `kind`, value under `value`,
+         *     `snake_case` tags (`{"kind":"unlimited"}` / `{"kind":"limited","value":2}`).
+         */
+        GpuLimitDoc: {
+            /** @enum {string} */
+            kind: "unlimited";
+        } | {
+            /** @enum {string} */
+            kind: "limited";
+            /**
+             * Format: int32
+             * @description At most this many GPUs may be in use before the `over_gpu` reason fires.
+             */
+            value: number;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::HardwareClass`].
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case`.
+         * @enum {string}
+         */
+        HardwareClassDoc: "standard" | "datacenter" | "edge";
+        /**
+         * @description `OpenAPI` mirror of `multiview_licence::HardwareClassView` (the
+         *     licensed-vs-detected class pair).
+         */
+        HardwareClassViewDoc: {
+            /** @description The class detected on the machine (a mismatch is a ladder reason). */
+            detected: components["schemas"]["HardwareClassDoc"];
+            /** @description The class the entitlement is licensed for. */
+            licensed: components["schemas"]["HardwareClassDoc"];
+        };
+        /**
          * @description `OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).
          *
          *     The body of `GET /api/v1/health`: an actionable health warning carrying a
@@ -1804,6 +1948,40 @@ export interface components {
             since: number;
             /** @description The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`). */
             subsystem: string;
+        };
+        /**
+         * @description The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).
+         *
+         *     With no licence-server client yet (blocked on the external wire-protocol doc,
+         *     brief §14 O1), this reports **honestly from local state**: the transport the
+         *     active lease arrived over, the lease install instant as `last_at`, the lease's
+         *     `next_contact_due` as `next_due`, and the exhaustive payload-field list. There
+         *     is **no** mutating endpoint for the heartbeat (the spec mandates none) — the
+         *     `POST /api/v1/account/licence/heartbeat` force-now action is a later,
+         *     feature-gated item (brief §11 #4), not this read surface.
+         */
+        HeartbeatStatus: {
+            /**
+             * @description The instant this machine last accepted a lease (the install instant), RFC
+             *     3339; `None` when no lease is installed (no heartbeat yet — honest).
+             */
+            last_at?: string | null;
+            /**
+             * @description When the next licensing contact is due (the active lease's
+             *     `next_contact_due`), RFC 3339; `None` when no lease is installed.
+             */
+            next_due?: string | null;
+            /**
+             * @description The exhaustive list of fields a heartbeat payload carries
+             *     ([`HEARTBEAT_PAYLOAD_FIELDS`]) — reported, never raw identifiers (§8).
+             */
+            payload_fields: string[];
+            /**
+             * @description The transport the active lease arrived over: `"direct"` (online server
+             *     contact), `"relay"` (mesh relay), or `"file"` (a dropped offline lease).
+             *     `"none"` when no lease is installed.
+             */
+            transport: string;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::IndexCell`]. */
         IndexCellDoc: {
@@ -1847,6 +2025,13 @@ export interface components {
             "x-nmos-api"?: components["schemas"]["NmosApiClaim"];
         };
         /**
+         * @description `OpenAPI` mirror of [`multiview_licence::LadderState`] (the seven conditions).
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case`.
+         * @enum {string}
+         */
+        LadderStateDoc: "compliant" | "grace" | "lapsed_soft" | "lapsed_hard" | "evaluation" | "class_mismatch" | "over_gpu";
+        /**
          * @description A persisted layout resource.
          *
          *     The `body` is the opaque, validated layout document the editor produces; the
@@ -1871,6 +2056,110 @@ export interface components {
             body: unknown;
             /** @description Human-friendly name. */
             name: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::Lease`] (the dated entitlement
+         *     bounds, ADR-0050 §4).
+         *
+         *     Serde-equivalent: the dated fields are RFC 3339 date-time strings (how
+         *     `chrono`'s `DateTime<Utc>` serialises), the day counts are integers.
+         */
+        LeaseDoc: {
+            /** @description When the lease term expires (RFC 3339). */
+            expires_at: string;
+            /**
+             * Format: int64
+             * @description The number of grace days that follow expiry.
+             */
+            grace_days: number;
+            /** @description The end of the grace window (RFC 3339). */
+            grace_until: string;
+            /** @description When the lease was granted (RFC 3339). */
+            granted_at: string;
+            /** @description The absolute hard bound from grant (RFC 3339). */
+            hard_at: string;
+            /** @description When the next heartbeat is due (RFC 3339). */
+            next_contact_due: string;
+            /** @description The opaque lease serial (server-issued; not a hardware identifier). */
+            serial: string;
+            /** @description Where this grant came from (drives the term). */
+            source: components["schemas"]["LeaseSourceDoc"];
+        };
+        /**
+         * @description The `200` body of a successful `POST /api/v1/licence/lease` install: the
+         *     installed lease's serial and its `valid_to` (the lease term expiry, RFC 3339).
+         */
+        LeaseInstalled: {
+            /** @description The serial of the lease that was verified + installed. */
+            serial: string;
+            /** @description The instant the installed lease term expires (RFC 3339). */
+            valid_to: string;
+        };
+        /**
+         * @description `OpenAPI` body of a successful `POST /api/v1/licence/lease` install: the
+         *     installed lease's serial + its `valid_to` (the lease's `expires_at`, RFC
+         *     3339). Mirrors the [`crate::routes::licence::LeaseInstalled`] handler shape.
+         */
+        LeaseInstalledDoc: {
+            /** @description The serial of the lease that was verified + installed. */
+            serial: string;
+            /** @description The instant the installed lease term expires (RFC 3339). */
+            valid_to: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::LeaseSource`].
+         *
+         *     Serde-equivalent: a unit enum rendered `snake_case` (`online`/`relay`/`file`).
+         * @enum {string}
+         */
+        LeaseSourceDoc: "online" | "relay" | "file";
+        /**
+         * @description The computed licence resource rendered at `GET /api/v1/licence`.
+         *
+         *     A single shape that always serialises (never `5xx`): `licensed` is `true` with
+         *     the full computed `status` when a verified lease is installed, and `false`
+         *     with `status: null` when none is — an honest "unlicensed" data report rather
+         *     than an error. The control plane, the chrome banner, and the portals all read
+         *     the same computed `status.enforcement` level; there is no second opinion.
+         */
+        LicenceResource: {
+            /** @description Whether a verified lease is currently installed. */
+            licensed: boolean;
+            status?: null | components["schemas"]["LicenceStatusDoc"];
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_licence::LicenceStatusView`] — the computed
+         *     licence resource `GET /api/v1/licence` renders.
+         *
+         *     Serde-equivalent to the real view. The `state`/`enforcement` are **computed**
+         *     (the ladder, off the hot loop); every value keeps a running program on air.
+         */
+        LicenceStatusDoc: {
+            /** @description Whether the startup gate should refuse a new engine instance (S1). */
+            blocks_new_instances: boolean;
+            /** @description Whether the engine should deny hot-reconfiguration (derived, S2). */
+            config_locked: boolean;
+            /** @description The canonical enforcement level derived from the state. */
+            enforcement: components["schemas"]["EnforcementLevelDoc"];
+            /** @description The GPU allowance carried by the entitlement. */
+            gpu_limit: components["schemas"]["GpuLimitDoc"];
+            /**
+             * Format: int32
+             * @description The number of GPUs currently in use (informs the `over_gpu` reason only).
+             */
+            gpus_in_use: number;
+            /** @description The licensed-vs-detected hardware class. */
+            hardware_class: components["schemas"]["HardwareClassViewDoc"];
+            /** @description The dated lease this status reflects. */
+            lease: components["schemas"]["LeaseDoc"];
+            /** @description Machine-readable reason codes the UI renders. */
+            reasons: string[];
+            /** @description The computed ladder state (the seven conditions). */
+            state: components["schemas"]["LadderStateDoc"];
+            /** @description The opaque commercial tier (rendered, never computed). */
+            tier: string;
+            /** @description Whether the engine should stamp a corner watermark (derived, S3). */
+            watermark: boolean;
         };
         /**
          * @description `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
@@ -4545,6 +4834,190 @@ export interface operations {
             };
             /** @description If-Match precondition failed. */
             412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_licence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The computed licence resource (enforcement is data; always 200). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenceResource"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_challenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The salted challenge export (CBOR attachment). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/cbor": unknown;
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    install_lease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The signed lease binding, canonical CBOR. */
+        requestBody: {
+            content: {
+                "application/cbor": number[];
+            };
+        };
+        responses: {
+            /** @description Lease verified + installed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LeaseInstalled"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to install. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Fingerprint mismatch, stale grant, or no pinned key. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The binding body exceeds the size cap. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Malformed CBOR or an invalid signature. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_heartbeat_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The honest local heartbeat status (read-only; no mutating endpoint exists). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeartbeatStatus"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
