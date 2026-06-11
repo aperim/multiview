@@ -967,11 +967,10 @@ impl KmsBackend for KmsDisplayDevice {
     }
 
     fn wait_events(&mut self, timeout: Duration) -> Result<Vec<FlipEvent>, DisplayError> {
-        let timeout_ms = i32::try_from(timeout.as_millis())
-            .unwrap_or(i32::MAX)
-            .max(1);
+        // A 1 ms floor keeps a zero/sub-ms request from busy-polling.
+        let timeout = poll_timespec(timeout.max(Duration::from_millis(1)));
         let mut fds = [PollFd::new(&self.card, PollFlags::IN)];
-        match rustix::event::poll(&mut fds, timeout_ms) {
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
             Ok(0) => Ok(Vec::new()),
             Ok(_) => {
                 let events = self
@@ -1333,6 +1332,121 @@ fn native_mode_from_info(info: &DisplayModeInfo) -> Result<Mode, DisplayError> {
         .and_then(|hz| u32::try_from(hz).ok())
         .unwrap_or(0);
     Ok(Mode::from(raw))
+}
+
+/// Convert a [`Duration`] into the `Timespec` rustix's `poll(2)` takes.
+fn poll_timespec(timeout: Duration) -> rustix::event::Timespec {
+    rustix::event::Timespec {
+        tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(timeout.subsec_nanos()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kernel uevent hotplug source (DEV-B5 / ADR-0045)
+// ---------------------------------------------------------------------------
+
+/// The kernel's own uevent multicast group (`sockaddr_nl.nl_groups` bit 0 ⇒
+/// mask `1`). udevd's processed stream uses a different group and is
+/// deliberately never joined (display-out §10).
+const KERNEL_UEVENT_GROUP: u32 = 1;
+
+/// Whether a `/proc/self/uid_map` body is the **initial** user namespace's
+/// identity mapping (`0 0 4294967295`).
+///
+/// Kernel kobject uevents are delivered only to network namespaces owned by
+/// the initial user namespace: a normal rootful container (which shares it)
+/// receives them; a **rootless** container (its own userns) opens and binds
+/// the uevent socket without error but **never receives anything** — so the
+/// socket's existence cannot be the mode signal, this mapping is.
+#[must_use]
+pub fn is_initial_user_namespace(uid_map: &str) -> bool {
+    let mut lines = uid_map.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        // The initial mapping is a single line; subuid-style maps have more.
+        return false;
+    }
+    let fields: Vec<&str> = first.split_whitespace().collect();
+    fields == ["0", "0", "4294967295"]
+}
+
+/// The real `NETLINK_KOBJECT_UEVENT` hotplug source: a non-blocking netlink
+/// datagram socket joined to the **kernel** uevent group (group mask `1`),
+/// read through a bounded `poll(2)` wait. Implements
+/// [`UeventSource`](super::hotplug::UeventSource) for the
+/// [`HotplugMonitor`](super::hotplug::HotplugMonitor).
+#[derive(Debug)]
+pub struct KernelUeventSocket {
+    /// The bound netlink socket.
+    fd: std::os::fd::OwnedFd,
+}
+
+impl KernelUeventSocket {
+    /// Open and bind the kernel uevent socket.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable reason when the socket cannot be opened/bound, **or**
+    /// when this process runs outside the initial user namespace (rootless
+    /// container): there the socket binds fine but the kernel never delivers
+    /// uevents to it, so the caller must use the `force_probe` polling
+    /// fallback instead.
+    pub fn open() -> Result<Self, String> {
+        let uid_map = std::fs::read_to_string("/proc/self/uid_map")
+            .map_err(|e| format!("reading /proc/self/uid_map: {e}"))?;
+        if !is_initial_user_namespace(&uid_map) {
+            return Err(
+                "this process runs in a non-initial user namespace (rootless container): \
+                 kernel uevents are not delivered to its network namespace"
+                    .to_owned(),
+            );
+        }
+        let fd = rustix::net::socket_with(
+            rustix::net::AddressFamily::NETLINK,
+            rustix::net::SocketType::DGRAM,
+            rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+            Some(rustix::net::netlink::KOBJECT_UEVENT),
+        )
+        .map_err(|e| format!("opening the kernel uevent netlink socket: {e}"))?;
+        let addr = rustix::net::netlink::SocketAddrNetlink::new(0, KERNEL_UEVENT_GROUP);
+        rustix::net::bind(&fd, &addr)
+            .map_err(|e| format!("joining the kernel uevent netlink group: {e}"))?;
+        Ok(Self { fd })
+    }
+}
+
+impl super::hotplug::UeventSource for KernelUeventSocket {
+    fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, String> {
+        let timeout = poll_timespec(timeout.max(Duration::from_millis(1)));
+        let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {}
+            Err(e) if e == rustix::io::Errno::INTR => return Ok(None),
+            Err(e) => return Err(format!("polling the uevent socket: {e}")),
+        }
+        // Kernel uevents are small (UEVENT_BUFFER_SIZE = 2 KiB); 8 KiB gives
+        // headroom and a truncated oversize datagram only loses property
+        // tail-bytes the parser does not need.
+        let mut buf = vec![0_u8; 8_192];
+        match rustix::net::recv(&self.fd, &mut *buf, rustix::net::RecvFlags::empty()) {
+            Ok((received, _reported_len)) => {
+                buf.truncate(received);
+                Ok(Some(buf))
+            }
+            Err(e)
+                if e == rustix::io::Errno::AGAIN
+                    || e == rustix::io::Errno::WOULDBLOCK
+                    || e == rustix::io::Errno::INTR =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(format!("reading the uevent socket: {e}")),
+        }
+    }
 }
 
 #[cfg(test)]

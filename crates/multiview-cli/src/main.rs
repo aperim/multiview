@@ -196,6 +196,9 @@ async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
     multiview_cli::node::ensure_node_supported().map_err(|reason| anyhow::anyhow!(reason))?;
     let (node_cfg, config) = multiview_cli::node::load_node_run_config(&args.config)?;
     let mut pipeline = Pipeline::build(&config).context("building the node pipeline")?;
+    // The rootless-container hotplug fallback cadence (kernel uevents stay
+    // the primary path; ADR-0045 / display-out §10).
+    pipeline.set_display_hotplug_poll(std::time::Duration::from_secs(node_cfg.hotplug.poll_secs));
     let cadence = pipeline.cadence();
     tracing::info!(
         ingest = %node_cfg.ingest.url(),
@@ -352,7 +355,7 @@ async fn run_node_until_signalled(
     report
 }
 
-/// Spawn the node's sd_notify watchdog thread: every `interval` (half the
+/// Spawn the node's `sd_notify` watchdog thread: every `interval` (half the
 /// systemd `WatchdogSec` budget) it samples the live output-tick counter and
 /// sends `WATCHDOG=1` **only when the counter advanced** since the previous
 /// check ([`multiview_cli::sdnotify::WatchdogGate`]). Returns [`None`] when
@@ -403,6 +406,18 @@ fn spawn_node_watchdog(
             None
         }
     }
+}
+
+/// Spawn the best-effort Ctrl-C watcher: raises the run's [`StopSignal`] so
+/// the engine finishes the current frame cleanly. The watcher can never
+/// back-pressure the engine (invariant #10).
+fn spawn_ctrl_c_watcher(stop: StopSignal) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl-C received; stopping after the current frame");
+            stop.stop();
+        }
+    })
 }
 
 /// The per-run-path inputs the control plane is wired from: the live preview
@@ -558,13 +573,7 @@ async fn run_pipeline_until_ctrl_c(
             )
         };
 
-    let stop_for_signal = stop.clone();
-    let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop_for_signal.stop();
-        }
-    });
+    let signal = spawn_ctrl_c_watcher(stop.clone());
 
     // Sample CPU/host-memory/per-GPU load at ~1.3 Hz and PUSH `Event::SystemMetrics`
     // onto the SAME outbound publisher the control plane forwards to the WebUI
@@ -603,8 +612,9 @@ async fn run_pipeline_until_ctrl_c(
 
     // MP-1 (ADR-0030 §2.2): build the engine `ProgramSet` and drive this single
     // program (id "main") through it — behaviour-identical to today (one program,
-    // the same drive/stop/publisher/preview/drain). See `drive_main_program_in_set`.
-    let main_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // the same drive/stop/publisher/preview/drain). This path observes the live
+    // tick counter only through the set; the node path passes its own shared
+    // counter for the sd_notify watchdog.
     let report = drive_main_program_in_set(
         pipeline,
         cadence,
@@ -612,7 +622,7 @@ async fn run_pipeline_until_ctrl_c(
         &publisher,
         &preview_slot,
         drain,
-        main_ticks,
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
     )
     .await?;
 
@@ -648,7 +658,7 @@ async fn run_pipeline_until_ctrl_c(
 /// the pipeline increments per tick — exactly the N-concurrent-programs machinery,
 /// exercised here at N=1. MP-5 routes the config's `[[programs]]` into the same
 /// `ProgramSet::start` for N>1. The caller keeps a clone of `main_ticks` where it
-/// needs the live count itself (the node's sd_notify watchdog gates its liveness
+/// needs the live count itself (the node's `sd_notify` watchdog gates its liveness
 /// pings on this counter advancing — DEV-B5).
 ///
 /// # Errors
@@ -812,13 +822,7 @@ async fn run_software_until_ctrl_c(
             )
         };
 
-    let stop_for_signal = stop.clone();
-    let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop_for_signal.stop();
-        }
-    });
+    let signal = spawn_ctrl_c_watcher(stop.clone());
 
     // The off-hot-path system-metrics poller: samples whole-system CPU + host
     // memory + per-GPU load at ~1.3 Hz and PUSHES `Event::SystemMetrics` onto the
