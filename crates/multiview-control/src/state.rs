@@ -15,6 +15,7 @@ use multiview_events::Event;
 use multiview_licence::verify::PinnedKey;
 use multiview_licence::{ChallengeFile, LeaseStore};
 
+use crate::account_audit::{AccountAuditRepository, InMemoryAccountAudit};
 use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
 use crate::audio_routing::AudioRoutingStore;
 use crate::audit::{AuditRepository, InMemoryAuditLog};
@@ -25,6 +26,7 @@ use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowse
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
+use crate::pending_actions::{InMemoryPendingActions, PendingActionRepository};
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
 use crate::resource_store::{
     InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore,
@@ -472,6 +474,19 @@ pub struct AppState {
     /// The change audit log: every successful mutation is recorded here
     /// (who/what/when) and queryable read-only over HTTP.
     pub audit: Arc<dyn AuditRepository>,
+    /// The **account-side** append-only audit store (Conspect, ADR-0053 §4):
+    /// every account action (lease install, remote action requested/cancelled/
+    /// executed, salvo fire, consent/relay change, …) is recorded here as an
+    /// immutable, timestamped, actor-attributed entry. Separate from the
+    /// change-audit log so engine/config and account/licensing trails are not
+    /// conflated. Control-plane-only; cannot back-pressure the engine (inv #10).
+    pub account_audit: Arc<dyn AccountAuditRepository>,
+    /// The **pending remote-actions queue** (Conspect, the brief §10/§11): the
+    /// backend for the SPA pending-action strip. Fed **locally now** (operator
+    /// restart/reboot/salvo) and **portal-fed later** (over the O1-blocked
+    /// heartbeat/relay transport). Local cancel always wins. Control-plane-only;
+    /// cannot back-pressure the engine (inv #10).
+    pub pending_actions: Arc<dyn PendingActionRepository>,
     /// The config/layout revision store (immutable revisions + diff + rollback).
     pub config_versions: Arc<dyn ConfigVersionStore>,
     /// The `Idempotency-Key` deduplication store.
@@ -578,6 +593,8 @@ impl AppState {
             jwt: None,
             jwt_api_name: "multiview".to_owned(),
             audit: Arc::new(InMemoryAuditLog::new()),
+            account_audit: Arc::new(InMemoryAccountAudit::new()),
+            pending_actions: Arc::new(InMemoryPendingActions::new()),
             config_versions: Arc::new(InMemoryConfigVersionStore::new()),
             idempotency: Arc::new(IdempotencyStore::new()),
             // Bound the in-flight correlations: a generous ceiling for pending
@@ -691,6 +708,40 @@ impl AppState {
             self.ack_now(),
             detail,
         );
+    }
+
+    /// Replace the account-side append-only audit store (e.g. to share one with a
+    /// test, or to use a persistent backend).
+    #[must_use]
+    pub fn with_account_audit(mut self, account_audit: Arc<dyn AccountAuditRepository>) -> Self {
+        self.account_audit = account_audit;
+        self
+    }
+
+    /// Replace the pending remote-actions queue (e.g. to share one with a test).
+    #[must_use]
+    pub fn with_pending_actions(
+        mut self,
+        pending_actions: Arc<dyn PendingActionRepository>,
+    ) -> Self {
+        self.pending_actions = pending_actions;
+        self
+    }
+
+    /// Record an account-side action in the append-only account audit store,
+    /// stamped with the current acknowledgement clock. Convenience the account
+    /// handlers + the lease-install seam call so the who/what/when is captured in
+    /// one place. The store's assigned `seq` is not surfaced here (callers do not
+    /// need it); query the trail to observe it.
+    pub fn audit_account(
+        &self,
+        actor: &str,
+        kind: crate::account_audit::AccountAuditKind,
+        detail: Option<serde_json::Value>,
+    ) {
+        let _seq = self
+            .account_audit
+            .record(actor, kind, self.ack_now(), detail);
     }
 
     /// Replace the alarm store (e.g. to share one store with an ingest task or

@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod account_audit;
 pub mod alarm_ingest;
 pub mod alarm_store;
 pub mod audio_routing;
@@ -52,6 +53,7 @@ pub mod is07;
 pub mod jwt;
 pub mod nmos;
 pub mod notify;
+pub mod pending_actions;
 pub mod preview;
 pub mod problem;
 pub mod realtime;
@@ -84,6 +86,10 @@ pub mod sqlite;
 use axum::routing::get;
 use axum::Router;
 
+pub use account_audit::{
+    AccountAuditEntry, AccountAuditKind, AccountAuditPage, AccountAuditRepository,
+    AccountAuditStore, InMemoryAccountAudit, ACCOUNT_AUDIT_KIND, DEFAULT_ACCOUNT_AUDIT_CAPACITY,
+};
 pub use alarm_ingest::{alarm_transition, ingest_step, run_alarm_ingest, IngestStep};
 pub use alarm_store::{
     AlarmFilter, AlarmRepository, InMemoryAlarmStore, VersionedAlarm, ALARM_KIND,
@@ -121,6 +127,11 @@ pub use nmos::{nmos_router, NmosRegistry, NMOS_RECEIVER_KIND};
 pub use notify::email::{EmailEnvelope, EmailMessage};
 pub use notify::webhook::{WebhookPayload, WebhookRequest};
 pub use notify::{AlarmTransitionKind, Destination, RoutingRule, SeverityRouter};
+pub use pending_actions::{
+    CancelOutcome, ExecuteOutcome, InMemoryPendingActions, PendingAction, PendingActionKind,
+    PendingActionRepository, PendingActionState, PendingActionStore,
+    DEFAULT_PENDING_ACTION_CAPACITY, PENDING_ACTION_KIND,
+};
 pub use preview::{
     no_preview, no_whep, FocusCaps, GatedWhep, NoPreview, NoWhep, PreviewProvider, SharedPreview,
     SharedWhep, WhepAnswer, WhepProvider, WhepReject, WhepScope,

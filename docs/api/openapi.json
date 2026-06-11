@@ -13,6 +13,211 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/account/audit": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`GET /api/v1/account/audit` — the append-only account audit log, paginated\n(role: read).",
+        "description": "Returns `{entries, next_cursor}`: entries oldest-first within the page,\nresumable via `?cursor=next_cursor`, optionally `?filter=<kind>`. There is no\nmutating verb on this resource — the log is append-only by construction.",
+        "operationId": "list_account_audit",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Resume strictly after this `seq` cursor (from a previous `next_cursor`).\nAbsent fetches from the beginning of the log.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "description": "Restrict the listing to a single action kind (`kebab-case` slug).",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/AccountAuditKind"
+                }
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of entries to return (clamped to\n[`MAX_AUDIT_PAGE_LIMIT`]; defaults to [`DEFAULT_AUDIT_PAGE_LIMIT`]).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of account-audit entries (oldest-first) + the resume cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountAuditPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/actions/pending": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`GET /api/v1/actions/pending` — the pending remote-actions strip (role: read).",
+        "description": "Returns the actions awaiting local execution or cancellation, oldest-first.\nAn action that has executed or been cancelled drops out of this list.",
+        "operationId": "list_pending_actions",
+        "responses": {
+          "200": {
+            "description": "The pending remote actions (oldest-first).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PendingAction"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/actions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`POST /api/v1/actions/{id}/cancel` — cancel a pending action locally (role:\nwrite).",
+        "description": "**Local always wins:** a pending action the operator cancels here is\ncancelled, and any later (portal-fed) execution attempt is refused. An action\nthat has **already executed** answers `410 Gone` `already_executed` — the\ntruthful \"too late\", never a fake success. An unknown id is `404`. The cancel\nis recorded in the append-only account audit store.",
+        "operationId": "cancel_action",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The action id to cancel.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The action was pending and is now cancelled (local wins).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelledBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to cancel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No action with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The action has already executed — too late to cancel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/alarms": {
       "get": {
         "tags": [
@@ -3900,6 +4105,79 @@
         }
       }
     },
+    "/api/v1/salvos/{id}/fire": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`POST /api/v1/salvos/{id}/fire` — fire a named salvo through the command bus\n(role: write) → `202 {action_id, queued_at}`.",
+        "description": "The named salvo must exist (else `404 salvo_unknown`). On success a `Salvo`\npending action is queued, the engine `TakeSalvo` command is submitted to the\nbounded bus (a full bus sheds to `503`, never blocking the engine), the action\nis marked executed, and the fire is recorded in the account audit store. The\naction id is the pending-action id (the operator can correlate it on the\nstrip + the audit trail).",
+        "operationId": "fire_salvo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The named salvo to fire.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Fire queued + submitted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FiredBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to fire.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No salvo with that name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/salvos/{id}/take": {
       "post": {
         "tags": [
@@ -5264,6 +5542,84 @@
           }
         }
       },
+      "AccountAuditEntry": {
+        "type": "object",
+        "description": "One immutable account-audit entry: who did what, and when.\n\nThe four spec fields (brief §11: `{at, actor, kind, detail}`) plus a\nmonotonic `seq` cursor the store assigns on append so pagination is stable\nand resumable even when two entries share an `at` timestamp.",
+        "required": [
+          "seq",
+          "at_nanos",
+          "actor",
+          "kind"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "description": "The authenticated principal that performed the action (its key id), or a\nwell-known system actor for machine-originated events — the **actor**."
+          },
+          "at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the action was recorded — the\n**when** (`at`)."
+          },
+          "detail": {
+            "description": "An optional structured detail (e.g. the lease serial, the salvo name, the\naction id). Never contains secrets or raw identifiers (brief §8)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AccountAuditKind",
+            "description": "The kind of account action — the **kind**."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The monotonic sequence number the store assigned on append — the stable\npagination cursor. Strictly increasing; never reused.",
+            "minimum": 0
+          }
+        }
+      },
+      "AccountAuditKind": {
+        "type": "string",
+        "description": "The kind of account-side action an [`AccountAuditEntry`] records.\n\nEach variant names a distinct auditable account action from ADR-0053 §4 +\nthe brief §10. Serialised `kebab-case` so the slug is stable across the\nmachine and the portal. `#[non_exhaustive]` so a future account action adds a\nvariant without breaking the wire contract.",
+        "enum": [
+          "claim",
+          "transfer",
+          "lease-grant",
+          "lease-install",
+          "enforcement-change",
+          "consent-change",
+          "relay-toggle",
+          "context-pack-export",
+          "data-request-approve",
+          "data-request-deny",
+          "action-requested",
+          "action-cancelled",
+          "action-executed"
+        ]
+      },
+      "AccountAuditPage": {
+        "type": "object",
+        "description": "A page of account-audit entries plus the cursor to resume from.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountAuditEntry"
+            },
+            "description": "The entries in this page, oldest-first within the page (ascending `seq`)."
+          },
+          "next_cursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The cursor to pass as `?cursor=` to fetch the next page, or `None` when\nthis page reached the end of the log. Opaque to clients (the `seq` of the\nlast returned entry).",
+            "minimum": 0
+          }
+        }
+      },
       "AckStateDoc": {
         "oneOf": [
           {
@@ -5805,6 +6161,19 @@
           }
         ],
         "description": "`OpenAPI` mirror of [`multiview_core::tally::BusSource`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
+      },
+      "CancelledBody": {
+        "type": "object",
+        "description": "The `200` body of a successful cancel.",
+        "required": [
+          "cancelled"
+        ],
+        "properties": {
+          "cancelled": {
+            "type": "boolean",
+            "description": "Always `true` on the `200` path — the action is cancelled."
+          }
+        }
       },
       "CaptionSelectorDoc": {
         "oneOf": [
@@ -6560,6 +6929,25 @@
           "block-new-instance",
           "unlicensed-build"
         ]
+      },
+      "FiredBody": {
+        "type": "object",
+        "description": "The `202` body of a successful salvo fire.",
+        "required": [
+          "action_id",
+          "queued_at_nanos"
+        ],
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "description": "The queued action id (also the pending-action + audit correlation id)."
+          },
+          "queued_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds, from the ack-clock) the fire\nwas queued — the audit entry and the pending action share this instant."
+          }
+        }
       },
       "GpuLimitDoc": {
         "oneOf": [
@@ -7723,6 +8111,61 @@
             "description": "The tally target the override applies to."
           }
         }
+      },
+      "PendingAction": {
+        "type": "object",
+        "description": "One queued remote action.",
+        "required": [
+          "action_id",
+          "kind",
+          "requested_by",
+          "requested_at_nanos",
+          "state"
+        ],
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "description": "The opaque, unique action id (a UUID) the cancel/execute paths address."
+          },
+          "detail": {
+            "description": "An optional structured detail (e.g. the salvo name a `salvo` action\nfires). Never contains secrets."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PendingActionKind",
+            "description": "The kind of action."
+          },
+          "requested_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the action was queued."
+          },
+          "requested_by": {
+            "type": "string",
+            "description": "The principal (or portal/system actor) that requested the action."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PendingActionState",
+            "description": "The action's lifecycle state."
+          }
+        }
+      },
+      "PendingActionKind": {
+        "type": "string",
+        "description": "The kind of remote action queued for local approval/execution.\n\nSerialised `kebab-case` so the slug is stable across the machine and the\nportal. `#[non_exhaustive]` so a future action kind adds a variant without\nbreaking the wire contract.",
+        "enum": [
+          "restart",
+          "reboot",
+          "salvo"
+        ]
+      },
+      "PendingActionState": {
+        "type": "string",
+        "description": "The lifecycle state of a queued action.\n\nAn action is `Pending` until it is either `Executed` (it ran) or `Cancelled`\n(the operator cancelled it locally first). Both terminal states are immutable\nonce reached — the local cancel cannot be undone by a later execution, and an\nexecuted action cannot be retroactively cancelled (local-always-wins applies\nonly *before* execution).",
+        "enum": [
+          "pending",
+          "executed",
+          "cancelled"
+        ]
       },
       "PerceivedSeverityDoc": {
         "type": "string",
@@ -9995,6 +10438,10 @@
     {
       "name": "audit",
       "description": "Read-only change audit log (who/what/when)"
+    },
+    {
+      "name": "account",
+      "description": "Account-side (Conspect): append-only audit (cursor-paginated), pending remote-actions strip + local-wins cancel, and named-salvo fire. Locally drivable now; portal-fed over the heartbeat/relay transport later."
     },
     {
       "name": "preview",

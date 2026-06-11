@@ -22,6 +22,7 @@ use crate::problem::Problem;
 use crate::repository::{Layout, LayoutInput, VersionedLayout, LAYOUT_KIND};
 use crate::state::AppState;
 
+pub mod account;
 pub mod alarms;
 pub mod audio;
 pub mod audit;
@@ -790,6 +791,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/salvos/{id}/arm", post(salvos::arm_salvo))
         .route("/salvos/{id}/take", post(salvos::take_salvo))
         .route("/salvos/{id}/cancel", post(salvos::cancel_salvo))
+        // Salvo parity (Conspect §11): fire a named salvo through the bus → 202.
+        .route("/salvos/{id}/fire", post(account::fire_salvo))
         // Per-stream crosspoint routing (RT-11): classify (plan) + apply (take).
         .route("/routing/plan", post(routing::plan_route))
         .route("/routing/{kind}/take", post(routing::take_route))
@@ -829,6 +832,11 @@ pub fn api_router() -> Router<AppState> {
         )
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
+        // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
+        .route("/account/audit", get(account::list_account_audit))
+        // Pending remote-actions strip + local cancel (local always wins).
+        .route("/actions/pending", get(account::list_pending_actions))
+        .route("/actions/{id}/cancel", post(account::cancel_action))
         // Config-as-code export: the live stores rendered as multiview.toml.
         .route("/config/export", get(config::export_config))
         // Config versioning: history + commit, single revision, diff, rollback.

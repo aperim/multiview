@@ -309,6 +309,19 @@ pub(crate) async fn install_lease(
     match state.licence.store.install_binding(&binding, pinned, now) {
         Ok(lease) => {
             let valid_to = lease.valid_to_rfc3339();
+            // Account-side evidence trail (ADR-0053 §4 / brief §10): every lease
+            // install is an immutable, timestamped, actor-attributed entry. The
+            // detail carries the lease serial + its term expiry — never a raw
+            // identifier (data minimisation, brief §8). Written off the hot loop
+            // into a control-plane store (inv #10).
+            state.audit_account(
+                &principal.key_id,
+                crate::account_audit::AccountAuditKind::LeaseInstall,
+                Some(serde_json::json!({
+                    "serial": lease.serial,
+                    "valid_to": valid_to,
+                })),
+            );
             let installed = LeaseInstalled {
                 serial: lease.serial,
                 valid_to,
