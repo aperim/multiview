@@ -6747,6 +6747,15 @@ impl TileScaler {
     ) -> Result<Nv12Image, String> {
         let src = ScaleSpec::new(frame.format(), frame.width(), frame.height());
         let dst = ScaleSpec::new(Pixel::NV12, self.tile_w, self.tile_h);
+        if src == dst {
+            // Identity: the decoded frame already IS tile-sized NV12 (the
+            // runtime-add shape — an unbound source decodes at canvas
+            // geometry, ADR-W018 §4). Read the planes out directly: no
+            // libswscale no-op (which zeroes NV12 chroma on FFmpeg 7/8 —
+            // the hw Defect A) and no intermediate full-frame copy on this
+            // hot decode loop.
+            return video_to_nv12(frame, tag);
+        }
         let rebuild = match &self.scaler {
             Some(s) => s.source() != src || s.destination() != dst,
             None => true,
