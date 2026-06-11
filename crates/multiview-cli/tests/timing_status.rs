@@ -62,9 +62,14 @@ fn sampler(seed_nanos: i64, wall_ns: i64) -> EpochSampler<FakeWall, NoNtp> {
             wall_ns,
         },
         NoNtp,
+        // The assumed-locked badge classifier + a UTC PHC fixture (no PTP is
+        // attached in these tests); the conservative epoch-path default is
+        // pinned separately by the finding-3 test below, which uses
+        // `EpochSamplerConfig::default()`.
         EpochSamplerConfig {
             policy: EpochPolicy::new_default(),
             sys: SystemRefConfig::new_default(),
+            ptp_utc_offset_ns: 0,
         },
     )
 }
@@ -137,6 +142,29 @@ fn a_build_without_an_ntp_reading_publishes_a_non_locked_quality_by_default() {
         "the honest no-measurement state is freerun"
     );
     assert_eq!(ts.clock_source, ClockSource::System);
+}
+
+#[test]
+fn the_configured_ptp_utc_offset_reaches_the_sampler_config() {
+    // Review finding 1, the WIRING half: the validated `[timing]
+    // ptp_utc_offset_s` knob must actually flow into the sampler the spawned
+    // task constructs — a UTC-PHC deployment that sets `0` must not be
+    // silently run with the 37 s default. Every other epoch-path default (the
+    // conservative classifier, the standard re-anchor policy) is preserved.
+    let options = TimingStatusOptions {
+        stream_id: "main".to_owned(),
+        link_offset_ns: 0,
+        ptp_phc: Some("/dev/ptp0".to_owned()),
+        ptp_utc_offset_ns: 0,
+    };
+    assert_eq!(
+        options.epoch_sampler_config(),
+        EpochSamplerConfig {
+            ptp_utc_offset_ns: 0,
+            ..EpochSamplerConfig::new_default()
+        },
+        "the configured TAI−UTC offset must override exactly the timescale field"
+    );
 }
 
 #[test]

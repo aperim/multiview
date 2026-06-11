@@ -18,6 +18,15 @@
     clippy::indexing_slicing
 )]
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use multiview_compositor::blend::LinearRgba;
+use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+use multiview_core::color::ColorInfo;
+use multiview_core::layout::{Canvas, Cell, FitMode, Layout};
 use multiview_core::time::{MediaTime, Rational};
 use multiview_core::wallclock::WallClockRef;
 use multiview_engine::epoch::{
@@ -26,8 +35,12 @@ use multiview_engine::epoch::{
 };
 use multiview_engine::ptp::{LockState, ReferenceStatus};
 use multiview_engine::sysref::{NtpQuery, NtpReading, SystemRefConfig};
-use multiview_engine::{LatestState, OutputClock};
+use multiview_engine::{
+    CompositorDrive, CooperativePacer, EnginePublisher, EngineRuntime, LatestState,
+    ManualTimeSource, OutputClock, StopSignal, TimeSource,
+};
 use multiview_events::{ClockQuality, ClockSource};
+use multiview_framestore::TileStore;
 use proptest::prelude::*;
 
 /// A policy with easy-to-reason-about thresholds for the tests.
@@ -201,10 +214,17 @@ impl NtpQuery for FakeNtp {
     }
 }
 
+/// The shared sampler fixture: the test policy, the assumed-locked system
+/// classifier, and a **UTC PHC** (`ptp_utc_offset_ns: 0`) so the PTP-leg
+/// tests below exercise the servo-offset math with ns-scale offsets. The
+/// timescale-conversion behaviour (TAI PHC, the 37 s default, the residual
+/// guard) is pinned by the dedicated *Timescale* tests, which build their own
+/// configs from `EpochSamplerConfig::default()`.
 fn sampler_config() -> EpochSamplerConfig {
     EpochSamplerConfig {
         policy: policy(),
         sys: SystemRefConfig::new_default(),
+        ptp_utc_offset_ns: 0,
     }
 }
 
@@ -301,6 +321,7 @@ fn sampler_reports_freerun_honestly() {
             est_error_tolerance_ns: 100_000,
             assumed_when_unavailable: LockState::Freerun,
         },
+        ptp_utc_offset_ns: 0,
     };
     let mut s = EpochSampler::new(0, wall, FakeNtp(None), config);
     let status = s.sample_once();
@@ -481,6 +502,21 @@ fn sampler_holds_the_epoch_across_wall_jitter() {
 // ---------------------------------------------------------------------------
 // Invariant #1: epoch observation never paces the tick stream
 // ---------------------------------------------------------------------------
+//
+// Two tests, two layers of the claim:
+//
+// * `epoch_observation_does_not_change_the_tick_stream` pins the STRUCTURAL
+//   property only: `OutputClock` derives every PTS purely from its tick
+//   index, and the sampler holds no handle into the clock, so interleaving
+//   epoch samples between ticks cannot change the emitted PTS stream. On its
+//   own this is a weak chaos claim — the unpaced `tick()` loop has no
+//   deadline, so it cannot catch a stall or a missed schedule.
+// * `epoch_churn_cannot_stall_or_skew_a_paced_engine_runtime` is the
+//   behavioural gate: a REAL `EngineRuntime`, paced tick-by-tick on a
+//   `ManualTimeSource`, must keep every deadline and publish the exact
+//   oracle PTS while an `EpochSampler` churns full-speed on a contending OS
+//   thread — sharing the run's monotonic time source and a flapping PTP
+//   handle, the production topology.
 
 /// A pathological wall source: jumps hours back and forth every sample.
 struct WildWall {
@@ -532,11 +568,225 @@ fn run_clock(n: u64, observe_epoch: bool) -> Vec<MediaTime> {
 
 #[test]
 fn epoch_observation_does_not_change_the_tick_stream() {
+    // Structural pin only (see the section comment): identical PTS streams
+    // prove the sampler cannot reach into `out_pts = f(tick)`; the paced
+    // runtime test below is the deadline-keeping (stall/skew) gate.
     const TICKS: u64 = 50_000;
     let baseline = run_clock(TICKS, false);
     let observed = run_clock(TICKS, true);
     assert_eq!(
         baseline, observed,
         "out_pts = f(tick) must be identical with the epoch sampler churning vs off (inv #1)"
+    );
+}
+
+/// Independent i128 oracle for `out_pts = f(tick)` (the same shape as the
+/// runtime soak's), computed WITHOUT the clock's own rescale. Half away from
+/// zero made explicit.
+fn oracle_pts_ns(tick: i64, cadence: Rational) -> i64 {
+    let numerator: i128 = i128::from(tick) * 1_000_000_000_i128 * i128::from(cadence.den);
+    let denominator: i128 = i128::from(cadence.num);
+    let q = numerator / denominator;
+    let r = numerator % denominator;
+    let rounded = if r * 2 >= denominator { q + 1 } else { q };
+    i64::try_from(rounded).expect("oracle pts fits in i64")
+}
+
+/// A wall source for the churn thread: brackets with the RUN's shared
+/// monotonic time source (the production `SystemWallSampler` shape) around a
+/// wall reading that jumps hours back and forth every sample.
+struct ChurningWall {
+    time: Arc<dyn TimeSource>,
+    i: i64,
+}
+
+impl WallClockSampler for ChurningWall {
+    fn sample(&mut self) -> WallSample {
+        self.i += 1;
+        let jump = if self.i % 2 == 0 {
+            3_600_000_000_000i64
+        } else {
+            -7_200_000_000_000i64
+        };
+        let mono_before_ns = self.time.now_nanos();
+        let wall_ns = 1_700_000_000_000_000_000 + jump;
+        let mono_after_ns = self.time.now_nanos();
+        WallSample {
+            mono_before_ns,
+            wall_ns,
+            mono_after_ns,
+        }
+    }
+}
+
+/// The compact per-tick snapshot the paced-runtime chaos test publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TickSnapshot {
+    index: u64,
+    pts_ns: i64,
+}
+
+#[test]
+#[allow(
+    // reason: like the runtime soak this is one cohesive chaos scenario
+    // (build drive -> spawn churn thread -> pace+verify every tick) that
+    // reads better as a single narrative than carved into helpers.
+    clippy::too_many_lines
+)]
+fn epoch_churn_cannot_stall_or_skew_a_paced_engine_runtime() {
+    // Big enough to interleave thousands of sampler iterations with the tick
+    // loop; tiny canvas keeps the CPU reference compositor fast in debug.
+    const TICKS: u64 = 20_000;
+    let (w, h) = (32u32, 24u32);
+    let cadence = Rational::FPS_59_94;
+
+    // One never-fed store: every tile is NoSignal, yet one valid frame per
+    // tick must still land on schedule.
+    let mut stores = HashMap::new();
+    stores.insert(
+        "cam".to_owned(),
+        Arc::new(TileStore::<Nv12Image>::with_defaults("cam")),
+    );
+    let color = ColorInfo::default().resolve_defaults(1920, 1080);
+    let layout = Layout {
+        name: "epoch-chaos".to_owned(),
+        canvas: Canvas {
+            width: w,
+            height: h,
+            fps_num: 60_000,
+            fps_den: 1_001,
+        },
+        cells: vec![Cell {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            z: 0,
+            fit: FitMode::Contain,
+            source: Some("cam".to_owned()),
+            ..Cell::default()
+        }],
+    };
+    let drive = CompositorDrive::new(
+        Arc::new(layout),
+        stores,
+        Nv12Image::solid(w, h, 16, 128, 128, color).expect("nosignal card"),
+        CanvasColor::default(),
+        LinearRgba::TRANSPARENT,
+    )
+    .expect("drive");
+
+    let clock = OutputClock::new(cadence).expect("valid cadence");
+    let time_source = Arc::new(ManualTimeSource::new());
+    let ts_for_runtime: Arc<dyn TimeSource> = time_source.clone();
+    let publisher: Arc<EnginePublisher<TickSnapshot, u64>> = Arc::new(EnginePublisher::new(64));
+    let mut runtime = EngineRuntime::new(clock, drive, ts_for_runtime, CooperativePacer);
+    let seed = runtime.seed_nanos();
+
+    // ---- The churn thread: the production epoch-sampler topology (the run's
+    // shared monotonic source + a wait-free PTP handle), driven full-speed
+    // with a wild wall clock and a flapping PTP reference.
+    let stop_churn = Arc::new(AtomicBool::new(false));
+    let churn_time: Arc<dyn TimeSource> = time_source.clone();
+    let churn_stop = Arc::clone(&stop_churn);
+    let churn = std::thread::spawn(move || {
+        let handle: LatestState<ReferenceStatus> = LatestState::new();
+        let mut sampler = EpochSampler::new(
+            seed,
+            ChurningWall {
+                time: churn_time,
+                i: 0,
+            },
+            FakeNtp(None),
+            EpochSamplerConfig::default(),
+        )
+        .with_ptp(handle.clone());
+        let mut samples: u64 = 0;
+        while !churn_stop.load(Ordering::Acquire) {
+            let state = match samples % 4 {
+                0 => LockState::Locked,
+                1 => LockState::Holdover,
+                2 => LockState::Freerun,
+                _ => LockState::Acquiring,
+            };
+            let off = i64::try_from(samples).unwrap_or(0).saturating_mul(1_000_003);
+            handle.publish(ptp_status(state, off));
+            let _ = sampler.sample_once();
+            samples = samples.saturating_add(1);
+            std::thread::yield_now();
+        }
+        samples
+    });
+
+    // ---- Drive the runtime in the background; pace it tick-by-tick here.
+    let stop = StopSignal::new();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_time()
+        .build()
+        .expect("tokio runtime");
+    let run_pub = Arc::clone(&publisher);
+    let engine_join = rt.spawn(async move {
+        runtime
+            .run_for(
+                run_pub.as_ref(),
+                &stop,
+                TICKS,
+                |f| TickSnapshot {
+                    index: f.tick.index,
+                    pts_ns: f.pts().as_nanos(),
+                },
+                |f| Some(f.tick.index),
+            )
+            .await
+    });
+
+    let pts_at = |i: u64| -> i64 {
+        seed + oracle_pts_ns(i64::try_from(i).expect("tick fits"), cadence)
+    };
+    for i in 0..TICKS {
+        // Before tick i's deadline the runtime must be parked at exactly i
+        // emitted ticks — it paces to the clock, never runs ahead, no matter
+        // how hard the sampler churns. (Tick 0's deadline equals the seed,
+        // which the source already meets — skip i == 0.)
+        if i >= 1 {
+            assert_eq!(
+                publisher.state.sequence(),
+                i,
+                "runtime ran ahead of its deadline at tick {i} while the epoch sampler churned"
+            );
+        }
+        time_source.set(pts_at(i));
+        let started = Instant::now();
+        let snap = loop {
+            if let Some(snap) = publisher.state.latest() {
+                if snap.index >= i {
+                    break snap;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "runtime STALLED at tick {i} (epoch churn must never stall the engine)"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(snap.index, i, "exactly one frame per tick, in order");
+        assert_eq!(
+            snap.pts_ns,
+            oracle_pts_ns(i64::try_from(i).expect("tick fits"), cadence),
+            "published pts must equal the independent oracle at tick {i}"
+        );
+    }
+
+    // The engine ran every tick and returned cleanly — never stalled.
+    let outcome = rt.block_on(engine_join).expect("join").expect("run");
+    assert_eq!(outcome.ticks, TICKS, "the runtime produced every tick");
+    assert_eq!(outcome.stop, multiview_engine::RunStop::Completed);
+
+    stop_churn.store(true, Ordering::Release);
+    let samples = churn.join().expect("churn thread");
+    assert!(
+        samples > 0,
+        "the churn thread must actually have sampled (the chaos is real)"
     );
 }
