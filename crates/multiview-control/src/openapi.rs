@@ -106,6 +106,10 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::salvos::arm_salvo,
         crate::routes::salvos::take_salvo,
         crate::routes::salvos::cancel_salvo,
+        crate::routes::account::fire_salvo,
+        crate::routes::account::list_account_audit,
+        crate::routes::account::list_pending_actions,
+        crate::routes::account::cancel_action,
         crate::routes::routing::plan_route,
         crate::routes::routing::take_route,
         crate::routes::tally::list_tally,
@@ -140,6 +144,15 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::command::OperationId,
         crate::audit::AuditEntry,
         crate::audit::AuditAction,
+        // Account-side append-only audit + remote-actions (Conspect, ADR-0053).
+        crate::account_audit::AccountAuditEntry,
+        crate::account_audit::AccountAuditKind,
+        crate::account_audit::AccountAuditPage,
+        crate::pending_actions::PendingAction,
+        crate::pending_actions::PendingActionKind,
+        crate::pending_actions::PendingActionState,
+        crate::routes::account::CancelledBody,
+        crate::routes::account::FiredBody,
         crate::versioning::ConfigRevision,
         crate::versioning::RevisionId,
         crate::versioning::DocumentDiff,
@@ -286,6 +299,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         (name = "routing", description = "Per-stream crosspoint routing: classify (plan) + apply (take)"),
         (name = "tally", description = "Tally state, profiles, and manual override"),
         (name = "audit", description = "Read-only change audit log (who/what/when)"),
+        (name = "account", description = "Account-side (Conspect): append-only audit (cursor-paginated), pending remote-actions strip + local-wins cancel, and named-salvo fire. Locally drivable now; portal-fed over the heartbeat/relay transport later."),
         (name = "preview", description = "Live preview: WHEP focus sessions per scope (program/input/output)"),
         (name = "config", description = "Config/layout versioning: revisions, diff, rollback"),
         (name = "nmos", description = "AMWA NMOS Node API: IS-04 resources + IS-05 connection"),
@@ -386,6 +400,8 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/salvos/{id}/arm"),
     ("POST", "/api/v1/salvos/{id}/take"),
     ("POST", "/api/v1/salvos/{id}/cancel"),
+    // Salvo parity (Conspect §11): fire a named salvo → 202.
+    ("POST", "/api/v1/salvos/{id}/fire"),
     // Per-stream crosspoint routing (RT-11): plan (classify) + take (apply).
     ("POST", "/api/v1/routing/plan"),
     ("POST", "/api/v1/routing/{kind}/take"),
@@ -405,6 +421,11 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/v1/preview/outputs/{id}/whep/{session_id}"),
     // Read-only change audit log.
     ("GET", "/api/v1/audit"),
+    // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
+    ("GET", "/api/v1/account/audit"),
+    // Pending remote-actions strip + local cancel (local always wins).
+    ("GET", "/api/v1/actions/pending"),
+    ("POST", "/api/v1/actions/{id}/cancel"),
     // Config versioning: history + commit, single revision, diff, rollback.
     ("GET", "/api/v1/config/{target}"),
     ("PUT", "/api/v1/config/{target}"),
