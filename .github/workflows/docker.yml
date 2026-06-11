@@ -199,7 +199,12 @@ jobs:
             echo "::error::no source digests for variant ${SUFFIX:-generic}"; exit 1
           fi
           docker buildx imagetools create "${TAG_ARGS[@]}" "${SRC[@]}"
-          DIGEST="$(docker buildx imagetools inspect "${REF}:${VERSION}${SUFFIX}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          # Inspect via the FIRST tag from the metadata-action list: the action's
+          # `version` output already carries the flavor suffix (e.g. `edge-nvidia`),
+          # so appending ${SUFFIX} again composed a doubled `edge-nvidia-nvidia`
+          # ref that does not exist and failed every nvidia merge on main.
+          FIRST_TAG="$(head -n1 <<< "$TAGS")"
+          DIGEST="$(docker buildx imagetools inspect "$FIRST_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Verify attestations survived the merge
