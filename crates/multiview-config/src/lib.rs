@@ -31,6 +31,7 @@
 
 pub mod audio;
 pub mod device;
+pub mod discovery;
 pub mod error;
 pub mod failover;
 pub mod grid;
@@ -43,6 +44,7 @@ pub mod salvo;
 pub mod schema;
 pub mod sync_group;
 pub mod tally;
+pub mod timing;
 pub mod wall;
 
 use std::collections::{HashMap, HashSet};
@@ -58,6 +60,7 @@ pub use audio::{
     TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
 pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
+pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
 pub use layout_doc::{LayoutCanvas, LayoutDocument};
@@ -76,6 +79,7 @@ pub use schema::{
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
+pub use timing::{TimingConfig, MAX_LINK_OFFSET_MS, MAX_PTP_UTC_OFFSET_S};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 
 /// The management control-plane listener.
@@ -149,6 +153,12 @@ pub struct MultiviewConfig {
     /// alarm beyond `target_skew_ms`.
     #[serde(default)]
     pub sync_groups: Vec<SyncGroup>,
+    /// mDNS/DNS-SD discovery browse configuration (ADR-M008 §6): the
+    /// operator-configured zowietek-control service type (the vendor's type is
+    /// unverified — never fabricated) and any extra DNS-SD types to browse.
+    /// Absent ⇒ only the built-in Cast + NDI types are browsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryConfig>,
     /// The management control-plane listener. When present, `multiview run`
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +182,13 @@ pub struct MultiviewConfig {
     /// its desugared v3 form route identically. Schema v3 introduces this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingTable>,
+    /// Outbound presentation-timing knobs (ADR-M010 / DEV-C1): the per-
+    /// deployment link offset every epoch consumer adds before presenting, and
+    /// the optional PHC device the `ptp` build disciplines the epoch from.
+    /// Absent ⇒ [`TimingConfig::default`] (a uniform 150 ms link offset,
+    /// system-clock wall source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TimingConfig>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -270,7 +287,9 @@ impl MultiviewConfig {
     ///   declared output / wall head;
     /// - sync-group ids are unique, every member references a declared
     ///   device, no device belongs to two groups, and skew/offset bounds are
-    ///   sane.
+    ///   sane;
+    /// - every `[discovery]` service type is a well-formed DNS-SD type
+    ///   (`_name._tcp` / `_name._udp`, optionally `.local.`-suffixed).
     ///
     /// # Errors
     ///
@@ -294,9 +313,13 @@ impl MultiviewConfig {
         self.validate_walls()?;
         self.validate_devices()?;
         self.validate_sync_groups()?;
+        self.validate_discovery()?;
         self.validate_control()?;
         self.validate_placement()?;
         self.validate_routing()?;
+        if let Some(timing) = &self.timing {
+            timing.validate()?;
+        }
 
         // Solving + the core structural check covers geometry (rects in 0..1,
         // positive extent, valid cadence) and grid wiring (areas resolve).
@@ -317,6 +340,16 @@ impl MultiviewConfig {
             source.validate()?;
         }
         Ok(())
+    }
+
+    /// Validate the `[discovery]` browse configuration (ADR-M008 §6): every
+    /// configured DNS-SD service type is well-formed
+    /// ([`DiscoveryConfig::validate`]).
+    fn validate_discovery(&self) -> Result<(), ConfigError> {
+        match &self.discovery {
+            Some(discovery) => discovery.validate(),
+            None => Ok(()),
+        }
     }
 
     /// Validate managed devices (ADR-M008): each is internally consistent

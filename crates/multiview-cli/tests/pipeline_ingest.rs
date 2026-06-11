@@ -497,9 +497,10 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
         Arc::clone(&publisher),
         commands,
         Arc::clone(&provider),
-        // Conservative fixture capability: this test asserts serving/preview,
-        // not apply semantics — never over-claim live-ness here.
-        multiview_control::LiveSourceCapability::synthetic_only(),
+        // Conservative fixture capability (the default caps: synthetic-only
+        // sources, no overlay seam): this test asserts serving/preview, not
+        // apply semantics — never over-claim live-ness here.
+        multiview_control::LiveApplyCaps::default(),
         async move {
             let _ = shutdown_rx.await;
         },

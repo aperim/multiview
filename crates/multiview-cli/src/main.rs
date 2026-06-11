@@ -98,6 +98,13 @@ fn run_validate(args: &ValidateArgs) -> anyhow::Result<ExitCode> {
 async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let config = load_validated(&args.config)?;
 
+    // A configured `[timing].ptp_phc` in a build without the `ptp` feature is
+    // a capability this binary cannot provide: fail the run at startup with a
+    // clear error (the DEV-B1 display-output fail-fast precedent) — never
+    // silently ride the system clock while the config asks for a PHC.
+    multiview_cli::timing_gate::ensure_ptp_phc_supported(config.timing.as_ref())
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+
     if args.software {
         return run_software(&config, &args).await;
     }
@@ -176,19 +183,24 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
     })
 }
 
-/// The engine-side seams a run path hands the control plane: the program
-/// preview slot, the per-source stores, the shared stop registry, and the
-/// optional decoded-ingest spawner (ADR-W018 level 2 — the full-pipeline path
-/// only).
-struct EngineSeams {
-    /// The wait-free program-preview slot the run loop fills.
+/// The per-run-path inputs the control plane is wired from: the live preview
+/// taps (the program slot the run loop fills + the per-source store map), the
+/// producer stop registry the live-source hub shares with the run's startup
+/// supervisors, the optional decoded-ingest spawner (ADR-W018 level 2 — the
+/// full-pipeline path only), and what this run path can take live (ADR-W021 —
+/// the binary is the only place that knows both the compiled features and the
+/// path).
+struct ControlPlaneWiring {
+    /// The shared program-frame slot the run loop fills for previews.
     program_slot: multiview_cli::preview::ProgramSlot,
-    /// The startup per-source frame stores (the preview thumbnails' source).
+    /// The per-source last-good stores (the preview provider's initial map).
     stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
-    /// The shared per-source producer stop registry (live remove/edit teardown).
+    /// The per-source producer stop registry (shared with the live-source hub).
     registry: multiview_cli::live_sources::StopRegistry,
-    /// The decoded-ingest spawner (`Some` ⇔ network kinds live-apply).
+    /// The decoded-ingest spawner (`Some` ⇔ network kinds live-apply, ADR-W018).
     ingest: Option<Arc<dyn multiview_cli::live_sources::IngestSpawner>>,
+    /// What the running engine can take live (per-collection header honesty).
+    live_apply: multiview_control::LiveApplyCaps,
 }
 
 /// Bring up the management control plane for a run (one wiring for BOTH run
@@ -199,10 +211,10 @@ struct EngineSeams {
 /// Returns the server task handle, the engine-side [`multiview_control::CommandReceiver`]
 /// (the caller builds its path-specific frame-boundary drain from it), and the
 /// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
-/// returns). The hub shares `registry`, so a live remove can tear down a
-/// startup producer (generator or ingest thread) too.
+/// returns). The hub shares the wiring's stop registry, so a live remove can
+/// tear down a startup producer (generator or ingest thread) too.
 ///
-/// `seams.ingest` is the run's decoded-ingest spawner (ADR-W018 level 2): the
+/// `wiring.ingest` is the run's decoded-ingest spawner (ADR-W018 level 2): the
 /// full-pipeline path passes `Pipeline::live_ingest_spawner` so network/file
 /// sources spawn the same supervised `ingest_loop` live; the software path
 /// passes `None`. The capability declared to the control plane is **derived
@@ -212,27 +224,28 @@ async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
-    seams: EngineSeams,
+    wiring: ControlPlaneWiring,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<(
     tokio::task::JoinHandle<std::io::Result<()>>,
     multiview_control::CommandReceiver,
     multiview_cli::live_sources::LiveSourceHub,
 )> {
-    let EngineSeams {
+    let ControlPlaneWiring {
         program_slot,
         stores,
         registry,
         ingest,
-    } = seams;
+        live_apply,
+    } = wiring;
     let (commands, command_rx) = command_bus(64);
     // The honesty keystone (ADR-W018): network kinds are declared live-appliable
     // exactly when the hub below carries a real ingest spawner.
-    let live_capability = if ingest.is_some() {
+    let live_apply = live_apply.with_sources(if ingest.is_some() {
         multiview_control::LiveSourceCapability::synthetic_and_network()
     } else {
         multiview_control::LiveSourceCapability::synthetic_only()
-    };
+    });
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
     // the SHARED, live-updatable preview store map, off the clock thread.
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
@@ -252,7 +265,7 @@ async fn serve_control_plane(
         Arc::clone(publisher),
         commands,
         provider,
-        live_capability,
+        live_apply,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -261,6 +274,87 @@ async fn serve_control_plane(
     .with_context(|| format!("binding the control plane on {listen}"))?;
     tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
     Ok((handle, command_rx, hub))
+}
+
+/// Wire the control plane for the full-pipeline run, when `[control]` is
+/// configured: declare what THIS build + run path can take live (ADR-W018
+/// sources via the pipeline's real ingest spawner; ADR-W021 overlays iff the
+/// `overlay`-featured bake consumer renders them), serve the plane, and build
+/// the frame-boundary command drain over the run's live seams. Without a
+/// `[control]` section it returns the no-op drain (no server, no hub).
+#[cfg(feature = "ffmpeg")]
+async fn wire_pipeline_control_plane(
+    config: &MultiviewConfig,
+    publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    preview_slot: &multiview_cli::preview::ProgramSlot,
+    pipeline: &multiview_cli::pipeline::Pipeline,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<(
+    Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    ControlDrain,
+    Option<multiview_cli::live_sources::LiveSourceHub>,
+)> {
+    let Some(cfg) = config.control.as_ref() else {
+        drop(shutdown_rx);
+        return Ok((
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+        ));
+    };
+    // What THIS build + run path can take live (ADR-W021): with the
+    // `overlay` feature the bake consumer renders the overlay working
+    // set, so overlay documents the renderer draws (analog-face
+    // clocks — `live_overlays::renders_live`, the same predicate the
+    // drain warns by) apply live; without it nothing overlay-side
+    // renders and the honest default (everything `restart`) stands.
+    #[cfg(feature = "overlay")]
+    let live_apply = multiview_control::LiveApplyCaps::default().with_overlays(
+        multiview_control::OverlayLiveCapability::new(multiview_cli::live_overlays::renders_live),
+    );
+    #[cfg(not(feature = "overlay"))]
+    let live_apply = multiview_control::LiveApplyCaps::default();
+    let (handle, command_rx, hub) = serve_control_plane(
+        &cfg.listen,
+        config,
+        publisher,
+        ControlPlaneWiring {
+            program_slot: Arc::clone(preview_slot),
+            stores: pipeline.preview_stores(),
+            registry: pipeline.stop_registry(),
+            // The real decoded-ingest spawner (ADR-W018 level 2):
+            // network/file sources live-apply through the SAME
+            // supervised ingest_loop the startup path builds.
+            ingest: Some(pipeline.live_ingest_spawner()),
+            live_apply,
+        },
+        shutdown_rx,
+    )
+    .await?;
+    // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
+    // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
+    // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
+    // drive start, and the drain reads it wait-free (inv #1/#10). Only under
+    // `overlay` (without it the run renders no subtitles, so there is no layer).
+    // The live overlay seam (ADR-W021) rides the same variant; the
+    // live-source seam (ADR-W018) rides both.
+    #[cfg(feature = "overlay")]
+    let drain: ControlDrain = Box::new(control::command_drain_with_seams(
+        command_rx,
+        config.clone(),
+        Arc::clone(publisher),
+        pipeline.subtitle_route_slot(),
+        pipeline.overlay_apply_slot(),
+        hub.handle(),
+    ));
+    #[cfg(not(feature = "overlay"))]
+    let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+        command_rx,
+        config.clone(),
+        Arc::clone(publisher),
+        hub.handle(),
+    ));
+    Ok((Some(handle), drain, Some(hub)))
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
@@ -283,54 +377,9 @@ async fn run_pipeline_until_ctrl_c(
     let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain, live_hub): (Option<_>, ControlDrain, Option<_>) =
-        if let Some(cfg) = config.control.as_ref() {
-            let (handle, command_rx, hub) = serve_control_plane(
-                &cfg.listen,
-                config,
-                &publisher,
-                EngineSeams {
-                    program_slot: Arc::clone(&preview_slot),
-                    stores: pipeline.preview_stores(),
-                    registry: pipeline.stop_registry(),
-                    // The real decoded-ingest spawner (ADR-W018 level 2):
-                    // network/file sources live-apply through the SAME
-                    // supervised ingest_loop the startup path builds.
-                    ingest: Some(pipeline.live_ingest_spawner()),
-                },
-                shutdown_rx,
-            )
+    let (server, drain, live_hub) =
+        wire_pipeline_control_plane(config, &publisher, &preview_slot, &pipeline, shutdown_rx)
             .await?;
-            // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
-            // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
-            // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
-            // drive start, and the drain reads it wait-free (inv #1/#10). Only under
-            // `overlay` (without it the run renders no subtitles, so there is no layer).
-            // The live-source seam (ADR-W018) rides both variants.
-            #[cfg(feature = "overlay")]
-            let drain: ControlDrain = Box::new(control::command_drain_with_seams(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                pipeline.subtitle_route_slot(),
-                hub.handle(),
-            ));
-            #[cfg(not(feature = "overlay"))]
-            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                hub.handle(),
-            ));
-            (Some(handle), drain, Some(hub))
-        } else {
-            drop(shutdown_rx);
-            (
-                None,
-                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
-                None,
-            )
-        };
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
@@ -350,6 +399,25 @@ async fn run_pipeline_until_ctrl_c(
         multiview_cli::system_metrics::default_load_source(),
         stop.clone(),
         None,
+    );
+
+    // DEV-C1 (ADR-M010): the ~1 Hz outbound presentation-epoch publisher — one
+    // `WallClockRef` per program as conflated `timing.status` on the control WS
+    // plus the shared HLS-PDT cell every HLS sink stamps from. It binds lazily
+    // to the run's tick-0 anchor (published when the clock seeds) and never
+    // touches the engine (inv #1/#10); it self-stops on the run's StopSignal.
+    let timing_cfg = config.timing.clone().unwrap_or_default();
+    let timing_task = multiview_cli::timing_status::spawn(
+        Arc::clone(&publisher),
+        pipeline.epoch_anchor_slot(),
+        pipeline.shared_epoch(),
+        multiview_cli::timing_status::TimingStatusOptions {
+            stream_id: multiview_config::ProgramId::MAIN.to_owned(),
+            link_offset_ns: timing_cfg.link_offset_ns(),
+            ptp_phc: timing_cfg.ptp_phc.clone(),
+            ptp_utc_offset_ns: timing_cfg.ptp_utc_offset_ns(),
+        },
+        stop.clone(),
     );
 
     // SA-0 (ADR-0035): at build time, off the output-clock thread (the clock is
@@ -382,10 +450,11 @@ async fn run_pipeline_until_ctrl_c(
         drive_main_program_in_set(pipeline, cadence, &stop, &publisher, &preview_slot, drain)
             .await?;
 
-    // The pipeline loop returned; stop the metrics poller (it also self-stops on
-    // the StopSignal within one sample period) and tear down the live-source hub
-    // (it stops + joins every runtime producer).
+    // The pipeline loop returned; stop the metrics + timing pollers (both also
+    // self-stop on the StopSignal within one sample period) and tear down the
+    // live-source hub (it stops + joins every runtime producer).
     metrics_task.abort();
+    timing_task.abort();
     if let Some(hub) = live_hub {
         hub.shutdown();
     }
@@ -551,7 +620,7 @@ async fn run_software_until_ctrl_c(
                 &cfg.listen,
                 config,
                 &publisher,
-                EngineSeams {
+                ControlPlaneWiring {
                     program_slot: engine.program_preview(),
                     stores: engine.preview_stores(),
                     registry: engine.stop_registry(),
@@ -559,6 +628,10 @@ async fn run_software_until_ctrl_c(
                     // the capability (and the apply header) honestly stays
                     // synthetic-only.
                     ingest: None,
+                    // The software engine has no bake stage: no overlay
+                    // document renders on this path, so the honest default
+                    // (everything `restart`) is the truth (ADR-W021).
+                    live_apply: multiview_control::LiveApplyCaps::default(),
                 },
                 shutdown_rx,
             )
@@ -602,15 +675,35 @@ async fn run_software_until_ctrl_c(
         None,
     );
 
+    // DEV-C1 (ADR-M010): the outbound presentation epoch publishes on the
+    // software path too — `timing.status` per program on the same drop-oldest
+    // broadcast. The software run has no HLS sinks, so its epoch cell has no
+    // PDT consumer; the WS surface is identical to the full-pipeline path.
+    let timing_cfg = config.timing.clone().unwrap_or_default();
+    let timing_task = multiview_cli::timing_status::spawn(
+        Arc::clone(&publisher),
+        engine.epoch_anchor_slot(),
+        multiview_output::SharedEpoch::new(),
+        multiview_cli::timing_status::TimingStatusOptions {
+            stream_id: multiview_config::ProgramId::MAIN.to_owned(),
+            link_offset_ns: timing_cfg.link_offset_ns(),
+            ptp_phc: timing_cfg.ptp_phc.clone(),
+            ptp_utc_offset_ns: timing_cfg.ptp_utc_offset_ns(),
+        },
+        stop.clone(),
+    );
+
     let report = engine
         .run_until_stopped_with_control(&stop, publisher.as_ref(), drain)
         .await
         .context("headless run until Ctrl-C")?;
 
-    // The engine loop returned; stop the metrics poller (it also self-stops on the
-    // StopSignal within one sample period), tear down the live-source hub (it
-    // stops + joins every runtime producer), and bring the control server down.
+    // The engine loop returned; stop the metrics + timing pollers (both also
+    // self-stop on the StopSignal within one sample period), tear down the
+    // live-source hub (it stops + joins every runtime producer), and bring the
+    // control server down.
     metrics_task.abort();
+    timing_task.abort();
     if let Some(hub) = live_hub {
         hub.shutdown();
     }
