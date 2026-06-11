@@ -157,12 +157,20 @@ msgstr ""
 msgid "<0>WebSocket</0> (primary) at <1>/api/v1/ws</1> — bidirectional, used for the live UI."
 msgstr ""
 
+#: src/pages/LicencePage.tsx:342
+msgid "1. Export the challenge"
+msgstr ""
+
 #: src/layout/components/LayoutEditor.tsx:98
 msgid "1+5"
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:252
 msgid "12-hour clock"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:364
+msgid "2. Install the lease"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:94
@@ -181,9 +189,17 @@ msgstr ""
 msgid "5.1 surround"
 msgstr ""
 
+#: src/pages/AccountPage.tsx:71
+msgid "6 characters, from an ambiguity-free alphabet (no 0/O/1/I/L). Case-insensitive."
+msgstr ""
+
 #: src/pages/SimplePages.tsx:945
 #~ msgid "A codec is required for this output kind."
 #~ msgstr ""
+
+#: src/pages/SupportPage.tsx:484
+msgid "A context pack carries diagnostics, logs, and a redacted config — never media, never raw identifiers, never secret values. It leaves the machine only when you explicitly attach it to a ticket."
+msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:125
 msgid "A CSS-grid layout with <0>columns</0> and <1>rows</1> track lists (<2>fr</2> / <3>px</3> / <4>%</4>), a <5>gap</5>, and an <6>areas</6> map that names where each cell sits."
@@ -247,12 +263,20 @@ msgstr ""
 msgid "A named, atomically applied recall of multiview state: one salvo can switch the layout, rebind sources into cells, and update tally and labels in a single action. Borrowed from router control, where a salvo fires many crosspoint takes at once."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:375
+msgid "A paid plan adds an entitled support queue."
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:209
 msgid "A per-cell <0>qos</0> block sets a degradation <1>priority</1> and strategy, so the engine sheds the cheapest tiles first under load before touching the program output."
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:487
 msgid "A probe watches one cell for a fail state and raises an alarm after its dwell window."
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:33
+msgid "A quick first step: license this machine so it is ready to run."
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:728
@@ -265,6 +289,10 @@ msgstr ""
 
 #: src/pages/docs/FeaturesPage.tsx:139
 msgid "A salvo is a named, atomically-applied recall. One salvo can switch the layout, rebind sources into cells, set tally colors, and update under-monitor display text — all at once — so an operator can move a whole arrangement (say, a VTR review setup) with a single action instead of a series of separate edits."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:74
+msgid "A signed summary only — salted digests and a signed entitlement summary, never raw identity. The exhaustive list:"
 msgstr ""
 
 #: src/pages/docs/concepts/GlossaryPage.tsx:101
@@ -309,6 +337,10 @@ msgstr ""
 
 #: src/pages/docs/concepts/ColorPage.tsx:26
 msgid "A video stream does not just carry pixel values — it carries an agreement about what those values <0>mean</0>. Three standards cover almost everything: <1>BT.601</1> (standard definition), <2>BT.709</2> (high definition — the default assumption for most content today), and <3>BT.2020</3> (ultra-HD and HDR, with a much wider color gamut). Each defines its own recipe for turning the YUV numbers in the stream back into red, green, and blue."
+msgstr ""
+
+#: src/pages/AccountPage.tsx:65
+msgid "ABC234"
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:311
@@ -374,6 +406,19 @@ msgstr ""
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
+#: src/app/navigation.tsx:60
+#: src/pages/AccountPage.tsx:139
+msgid "Account"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:180
+msgid "Account audit log"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:231
+msgid "Account audit log, oldest first within the page."
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:266
 msgid "Acknowledge"
 msgstr ""
@@ -423,6 +468,7 @@ msgid "Active only"
 msgstr ""
 
 #: src/pages/AuditPage.tsx:111
+#: src/pages/SystemActionsPage.tsx:235
 msgid "Actor"
 msgstr ""
 
@@ -485,7 +531,7 @@ msgstr ""
 msgid "Alarm policy (dwell, severity, latching)"
 msgstr ""
 
-#: src/app/navigation.tsx:46
+#: src/app/navigation.tsx:52
 #: src/docs/registry.ts:231
 #: src/pages/AlarmsPage.tsx:152
 #: src/pages/docs/FeaturesPage.tsx:149
@@ -514,6 +560,15 @@ msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:61
 msgid "All endpoints live under <0>/api/v1</0>."
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:204
+msgid "All kinds"
+msgstr ""
+
+#: src/pages/DataPage.tsx:91
+#: src/pages/MeshPage.tsx:65
+msgid "Always on"
 msgstr ""
 
 #: src/components/TallyLampBadge.tsx:42
@@ -556,6 +611,14 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:219
 msgid "Analog (hands on a dial)"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:195
+msgid "and install the signed lease by hand."
+msgstr ""
+
+#: src/pages/DataPage.tsx:193
+msgid "Anonymised daily product analytics. Opt-in, off by default, and revocable at any time. Separate from the licensing heartbeat — a different pipe, different consent, different data."
 msgstr ""
 
 #: src/resources/FormControls.tsx:76
@@ -662,6 +725,14 @@ msgstr ""
 msgid "As an input, HLS arrives in bursts (whole segments at a time), so Multiview paces it back to real time internally before it is sampled onto the wall. As an output it is the easiest way to let many people open the multiview in a browser or player."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:366
+msgid "Ask in the community discussions"
+msgstr ""
+
+#: src/pages/DataPage.tsx:343
+msgid "Assemble a redacted local diagnostics bundle for your own troubleshooting — logs and engine state, never media or raw identifiers. Built from the local buffer, independent of telemetry consent."
+msgstr ""
+
 #: src/layout/components/AreaMatrixEditor.tsx:281
 msgid "Assign to selection"
 msgstr ""
@@ -679,7 +750,11 @@ msgstr ""
 msgid "ATSC A/85 (−24 LKFS)"
 msgstr ""
 
-#: src/app/navigation.tsx:41
+#: src/pages/SupportPage.tsx:164
+msgid "Attached automatically"
+msgstr ""
+
+#: src/app/navigation.tsx:47
 #: src/pages/AudioPage.tsx:338
 #: src/pages/OutputsPage.tsx:432
 msgid "Audio"
@@ -697,7 +772,7 @@ msgstr ""
 msgid "Audio silence"
 msgstr ""
 
-#: src/app/navigation.tsx:48
+#: src/app/navigation.tsx:55
 #: src/pages/AuditPage.tsx:55
 msgid "Audit"
 msgstr ""
@@ -746,6 +821,10 @@ msgstr ""
 msgid "Back to dashboard"
 msgstr ""
 
+#: src/pages/SystemActionsPage.tsx:281
+msgid "Back to start"
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:94
 msgid "Background fill as a hex color (e.g. #101014)."
 msgstr ""
@@ -781,6 +860,10 @@ msgstr ""
 
 #: src/pages/OverlaysPage.tsx:66
 msgid "Blank renders UTC."
+msgstr ""
+
+#: src/pages/SupportPage.tsx:155
+msgid "Blocking"
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:261
@@ -832,6 +915,10 @@ msgstr ""
 msgid "Buffers and lags under loss"
 msgstr ""
 
+#: src/pages/DataPage.tsx:360
+msgid "Build diagnostics snapshot"
+msgstr ""
+
 #: src/pages/TallyPage.tsx:321
 msgid "Bus"
 msgstr ""
@@ -846,6 +933,7 @@ msgstr ""
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
+#: src/pages/SystemActionsPage.tsx:151
 #: src/pages/TallyPage.tsx:432
 #: src/resources/CrudPage.tsx:342
 #: src/resources/CrudPage.tsx:387
@@ -893,6 +981,10 @@ msgstr ""
 msgid "canvas or a cell id"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:181
+msgid "Canvas watermark on"
+msgstr ""
+
 #: src/layout/components/validationMessages.tsx:21
 msgid "Canvas width and height must be positive whole numbers."
 msgstr ""
@@ -907,6 +999,10 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:573
 msgid "Captions"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:281
+msgid "Carry the file to an online portal to obtain a signed lease."
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:117
@@ -946,6 +1042,10 @@ msgstr ""
 msgid "Centre y (px)"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:280
+msgid "Challenge exported"
+msgstr ""
+
 #: src/pages/AuditPage.tsx:106
 msgid "Change log, newest first."
 msgstr ""
@@ -957,6 +1057,10 @@ msgstr ""
 #: src/resources/FormControls.tsx:333
 #~ msgid "Changes saved here are stored, not yet live: the engine does not hot-add sources or outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
 #~ msgstr ""
+
+#: src/components/account/chrome.tsx:152
+msgid "Changes to sources, outputs, and layouts are read-only until the next licensing contact."
+msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:142
 #~ msgid "Changing an output's codec is a controlled restart of that output (consumers reconnect); it never interrupts the compositor or the other outputs. The codec field on an output is validated against what the transport can carry — for example <0>h265</0> is rejected on classic RTMP — and against what the host can actually encode."
@@ -995,6 +1099,31 @@ msgstr ""
 #: src/docs/registry.ts:481
 #: src/pages/docs/concepts/GlossaryPage.tsx:38
 msgid "Chroma subsampling"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:53
+msgid "Claim code"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:78
+#: src/pages/WelcomePage.tsx:79
+msgid "Claim this machine"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:141
+msgid "Claim this machine to an owner, transfer it, or deactivate it."
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:67
+msgid "Claim with a code"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:242
+msgid "Claimed"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:85
+msgid "Claiming with a code requires licence-server connectivity (not yet wired in this build). Use the offline path below to license this machine now."
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:213
@@ -1090,12 +1219,24 @@ msgstr ""
 msgid "Commands"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:344
+msgid "Community support"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:303
 msgid "Compliance standard"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:427
+msgid "Compose a redacted diagnostics pack to attach to a ticket. Preview it here first — nothing leaves the machine until you attach it."
+msgstr ""
+
 #: src/pages/docs/ComposePage.tsx:83
 msgid "Compose merges files left to right. The GPU overlay files swap the <0>multiview</0> image and add device access; the other services are inherited unchanged. Layer an overlay on top of the base file:"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:480
+msgid "Compose preview"
 msgstr ""
 
 #: src/docs/registry.ts:88
@@ -1176,6 +1317,10 @@ msgstr ""
 msgid "Connector"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:424
+msgid "Context pack"
+msgstr ""
+
 #: src/pages/SourcesPage.tsx:351
 msgid "Continue past the target"
 msgstr ""
@@ -1213,12 +1358,28 @@ msgstr ""
 msgid "Corner radius must be a whole number of pixels (0 or more)."
 msgstr ""
 
+#: src/pages/DataPage.tsx:280
+msgid "costs you nothing functional — every feature works the same. We simply have no usage signal from your machine."
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:141
 msgid "Could not acknowledge alarm"
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:153
 msgid "Could not apply layout"
+msgstr ""
+
+#: src/pages/DataPage.tsx:316
+msgid "Could not assemble the snapshot"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:91
+msgid "Could not cancel the action"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:411
+msgid "Could not compose the bundle"
 msgstr ""
 
 #: src/resources/CrudPage.tsx:243
@@ -1245,6 +1406,14 @@ msgstr ""
 msgid "Could not export configuration"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:285
+msgid "Could not export the challenge"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:316
+msgid "Could not install the lease"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:204
 msgid "Could not load alarms:"
 msgstr ""
@@ -1265,6 +1434,14 @@ msgstr ""
 msgid "Could not load overlays:"
 msgstr ""
 
+#: src/pages/MeshPage.tsx:228
+msgid "Could not load peers:"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:119
+msgid "Could not load pending actions:"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:491
 msgid "Could not load probes:"
 msgstr ""
@@ -1281,6 +1458,10 @@ msgstr ""
 msgid "Could not load sources:"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:541
+msgid "Could not load support options:"
+msgstr ""
+
 #: src/pages/TallyPage.tsx:307
 msgid "Could not load tally state:"
 msgstr ""
@@ -1290,7 +1471,36 @@ msgid "Could not load the audio routing:"
 msgstr ""
 
 #: src/pages/AuditPage.tsx:96
+#: src/pages/SystemActionsPage.tsx:220
 msgid "Could not load the audit log:"
+msgstr ""
+
+#: src/pages/DataPage.tsx:101
+msgid "Could not load the heartbeat status:"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:476
+msgid "Could not load the licence:"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:242
+msgid "Could not load the licensing contact:"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:157
+msgid "Could not load the mesh status:"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:227
+msgid "Could not load the ticket:"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:303
+msgid "Could not load tickets:"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:84
+msgid "Could not raise the ticket"
 msgstr ""
 
 #: src/auth/LoginPage.tsx:53
@@ -1312,6 +1522,18 @@ msgstr ""
 
 #: src/pages/AudioPage.tsx:500
 msgid "Could not save the audio routing:"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:210
+msgid "Could not send the reply"
+msgstr ""
+
+#: src/pages/DataPage.tsx:178
+msgid "Could not update consent"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:114
+msgid "Could not update relay setting"
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:339
@@ -1386,10 +1608,23 @@ msgstr ""
 msgid "D:HH:MM:SS (drop day when zero)"
 msgstr ""
 
-#: src/app/navigation.tsx:36
+#: src/app/navigation.tsx:42
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "لوحة القيادة"
+
+#: src/app/navigation.tsx:61
+#: src/pages/DataPage.tsx:377
+msgid "Data"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:190
+msgid "Deactivate"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:183
+msgid "Deactivate this machine"
+msgstr ""
 
 #: src/components/SystemFooter.tsx:153
 #~ msgid "DEC"
@@ -1459,6 +1694,10 @@ msgstr ""
 msgid "Degradation"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:154
+msgid "Degraded"
+msgstr ""
+
 #: src/pages/LayoutsPage.tsx:118
 #: src/pages/LayoutsPage.tsx:313
 #: src/pages/SalvosPage.tsx:307
@@ -1518,6 +1757,10 @@ msgstr ""
 msgid "Deleted"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:129
+msgid "Description"
+msgstr ""
+
 #: src/docs/registry.ts:31
 #: src/pages/docs/OverviewPage.tsx:54
 msgid "Design pillars"
@@ -1532,8 +1775,20 @@ msgstr ""
 msgid "Destination URL"
 msgstr ""
 
+#: src/pages/SystemActionsPage.tsx:237
+msgid "Detail"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:477
 msgid "Detect per-cell fail states — black, freeze, silence, and loudness violations — and raise X.733 alarms."
+msgstr ""
+
+#: src/pages/DataPage.tsx:340
+msgid "Diagnostics snapshot"
+msgstr ""
+
+#: src/pages/DataPage.tsx:311
+msgid "Diagnostics snapshot ready"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:265
@@ -1558,6 +1813,14 @@ msgstr ""
 
 #: src/components/ConnectionStatus.tsx:47
 msgid "Disconnected"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:238
+msgid "Discovered peers (untrusted, read-only)."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:49
+msgid "Discovery"
 msgstr ""
 
 #: src/pages/AudioPage.tsx:419
@@ -1585,7 +1848,7 @@ msgstr ""
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr ""
 
-#: src/app/navigation.tsx:49
+#: src/app/navigation.tsx:56
 msgid "Docs"
 msgstr ""
 
@@ -1601,8 +1864,16 @@ msgstr ""
 msgid "Documentation"
 msgstr ""
 
+#: src/pages/DataPage.tsx:364
+msgid "Download snapshot"
+msgstr ""
+
 #: src/pages/SettingsPage.tsx:141
 msgid "Download the current stores (sources, outputs, overlays, layouts, canvas) as multiview.toml. Stored UI edits take effect when Multiview restarts with this file; live actions (apply layout, swap, routing, salvos) act on the running engine immediately."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:345
+msgid "Downloads a salted challenge as a CBOR file. It carries no raw identifiers — only salted digests the licence server can verify."
 msgstr ""
 
 #: src/layout/components/SourcePalette.tsx:190
@@ -1619,6 +1890,10 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:504
 msgid "Drawn with the count. Leave blank for none."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:417
+msgid "Drop the lease file into the machine's configured licence directory; it is picked up on the next start."
 msgstr ""
 
 #: src/layout/components/SourcePalette.tsx:188
@@ -1714,6 +1989,10 @@ msgstr ""
 msgid "Each cell carries its own normalized rectangle (0.0–1.0) in a <0>rect</0> field."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:511
+msgid "Each entry is a location that was masked — never the value."
+msgstr ""
+
 #: src/pages/docs/concepts/ResiliencePage.tsx:79
 msgid "Each input continuously writes its newest decoded frame into a small per-tile store; the compositor reads the latest complete frame from that store at every output tick and never waits for an input. When a source hiccups, the store simply keeps handing out the most recent frame it has — the \"last good\" one. A brief network blip is therefore invisible: the tile holds a fraction-of-a-second-old picture until fresh frames resume."
 msgstr ""
@@ -1799,6 +2078,10 @@ msgstr ""
 msgid "Encoder utilisation: ours over device total"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:178
+msgid "Enforcement"
+msgstr ""
+
 #: src/pages/OutputsPage.tsx:422
 msgid "Engine default (mixed program bus)"
 msgstr ""
@@ -1864,8 +2147,16 @@ msgstr ""
 msgid "Enter an exact rational rate like 60000/1001, or a whole number like 50 — never a decimal."
 msgstr ""
 
+#: src/pages/LicencePage.tsx:116
+msgid "Entitlement"
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:86
 msgid "Errors"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:183
+msgid "Every account-side action — claim, transfer, lease, consent, enforcement change, and more. Immutable and append-only."
 msgstr ""
 
 #: src/layout/components/validationMessages.tsx:29
@@ -1896,8 +2187,28 @@ msgstr ""
 msgid "Exact rational Hz (60000/1001) or a whole number — never a decimal."
 msgstr ""
 
+#: src/pages/LicencePage.tsx:157
+msgid "Expired"
+msgstr ""
+
 #: src/pages/OutputsPage.tsx:426
 msgid "Explicit track list"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:193
+msgid "export a challenge"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:223
+msgid "Export a challenge"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:212
+msgid "Export a signed challenge from this machine, take it to an online portal to obtain a signed lease, then install the lease here. The exchange is Ed25519-signed end-to-end."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:358
+msgid "Export challenge"
 msgstr ""
 
 #: src/resources/FormControls.tsx:432
@@ -1946,6 +2257,10 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:195
 msgid "Fill colour"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:193
+msgid "Filter by kind"
 msgstr ""
 
 #: src/pages/AuditPage.tsx:73
@@ -2081,6 +2396,10 @@ msgstr ""
 msgid "Glossary: PTP"
 msgstr ""
 
+#: src/pages/WelcomePage.tsx:52
+msgid "Go to the dashboard"
+msgstr ""
+
 #: src/pages/docs/concepts/TransportsPage.tsx:256
 msgid "Good on LAN; not for WAN"
 msgstr ""
@@ -2119,6 +2438,10 @@ msgstr ""
 msgid "GPU access"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:144
+msgid "GPU allowance"
+msgstr ""
+
 #: src/docs/registry.ts:104
 #: src/pages/docs/ComposePage.tsx:81
 msgid "GPU overlays"
@@ -2135,6 +2458,14 @@ msgstr ""
 
 #: src/pages/SystemPage.tsx:342
 msgid "GPUs"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:151
+msgid "GPUs in use"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:166
+msgid "Grace until"
 msgstr ""
 
 #: src/components/TallyLampBadge.tsx:36
@@ -2164,13 +2495,29 @@ msgstr ""
 msgid "H.265 / HEVC"
 msgstr ""
 
+#: src/pages/AccountPage.tsx:173
+msgid "Hand this machine to a new owner. The 72-hour transfer window and the same-machine fingerprint check apply when the licence server confirms the move."
+msgstr ""
+
 #: src/docs/registry.ts:381
 #: src/pages/docs/concepts/CodecsPage.tsx:93
 msgid "Hardware acceleration"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:141
+msgid "Hardware class — detected"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:138
+msgid "Hardware class — licensed"
+msgstr ""
+
 #: src/pages/docs/concepts/CodecsPage.tsx:114
 msgid "Hardware encoders also sidestep the GPL obligation of the software H.264/H.265 encoders, keeping the default build license-clean."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:423
+msgid "Have an online neighbour relay the exchange over the local mesh — no file to carry (see the Mesh screen)."
 msgstr ""
 
 #: src/docs/registry.ts:414
@@ -2200,6 +2547,10 @@ msgstr ""
 #: src/layout/components/LayoutEditor.tsx:235
 #: src/pages/OutputsPage.tsx:326
 msgid "Height (px)"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:347
+msgid "Help from the community and the documentation. The in-app docs cover most setup and troubleshooting."
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:365
@@ -2297,6 +2648,18 @@ msgstr ""
 msgid "IEEE 1588 — distributing time over Ethernet from a grandmaster clock so every device agrees on \"now\" to about a microsecond. Under the SMPTE ST 2059 broadcast profile, frame boundaries are computable from the time itself, making PTP the IP facility's replacement for both genlock and timecode distribution."
 msgstr ""
 
+#: src/pages/MeshPage.tsx:185
+msgid "If this machine is isolated — no internet path and no relaying neighbour — you can still license it offline:"
+msgstr ""
+
+#: src/pages/DataPage.tsx:286
+msgid "If you can spare it, leaving telemetry on helps a small team build the right things — thank you."
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:70
+msgid "If you have a 6-character pairing code, claim this machine to your account."
+msgstr ""
+
 #: src/docs/registry.ts:55
 #: src/pages/docs/ContainerPage.tsx:33
 msgid "Images"
@@ -2312,6 +2675,10 @@ msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:285
 msgid "In-facility broadcast distribution"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:456
+msgid "Include"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:72
@@ -2345,6 +2712,18 @@ msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:304
 msgid "Inside a production network that already speaks it: NDI."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:394
+msgid "Install lease"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:408
+msgid "Install methods"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:398
+msgid "Installed lease"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:316
@@ -2391,6 +2770,7 @@ msgstr ""
 #: src/pages/ProbesPage.tsx:542
 #: src/pages/SourcesPage.tsx:754
 #: src/pages/SourcesPage.tsx:880
+#: src/pages/SystemActionsPage.tsx:234
 msgid "Kind"
 msgstr ""
 
@@ -2428,6 +2808,15 @@ msgstr ""
 
 #: src/pages/AudioPage.tsx:199
 msgid "Language (route {row})"
+msgstr ""
+
+#: src/pages/DataPage.tsx:212
+msgid "last changed"
+msgstr ""
+
+#: src/pages/DataPage.tsx:115
+#: src/pages/LicencePage.tsx:250
+msgid "Last contact"
 msgstr ""
 
 #: src/docs/registry.ts:511
@@ -2507,7 +2896,7 @@ msgstr ""
 #~ msgid "Layout saved; apply accepted"
 #~ msgstr ""
 
-#: src/app/navigation.tsx:37
+#: src/app/navigation.tsx:43
 #: src/docs/registry.ts:201
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:25
@@ -2517,6 +2906,26 @@ msgstr "التخطيطات"
 
 #: src/docs/registry.ts:196
 msgid "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:170
+msgid "Leafing through"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:374
+msgid "Lease file"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:307
+msgid "Lease installed"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:154
+msgid "Lease serial"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:435
+msgid "Leases and challenges are Ed25519-signed and verified against a public key pinned in the binary. A spoofed or man-in-the-middle licence server cannot forge a valid lease — it lacks the private key — so impersonating the server achieves nothing. The exchange is safe to carry over any medium."
 msgstr ""
 
 #: src/pages/AuditPage.tsx:79
@@ -2529,6 +2938,23 @@ msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:315
 msgid "Letting many viewers watch the composed wall: HLS, or LL-HLS when delay matters."
+msgstr ""
+
+#: src/app/navigation.tsx:59
+#: src/pages/LicencePage.tsx:459
+msgid "Licence"
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:91
+msgid "License this machine offline: export a signed challenge and install the lease you receive in return."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:226
+msgid "Licensing contact"
+msgstr ""
+
+#: src/pages/DataPage.tsx:74
+msgid "Licensing heartbeat"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:164
@@ -2604,11 +3030,16 @@ msgid "Loading audio routing…"
 msgstr ""
 
 #: src/pages/AuditPage.tsx:92
+#: src/pages/SystemActionsPage.tsx:216
 msgid "Loading audit log…"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:349
 msgid "Loading canvas…"
+msgstr ""
+
+#: src/pages/DataPage.tsx:97
+msgid "Loading heartbeat status…"
 msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:146
@@ -2619,12 +3050,32 @@ msgstr ""
 msgid "Loading layouts…"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:472
+msgid "Loading licence…"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:238
+msgid "Loading licensing contact…"
+msgstr ""
+
 #: src/pages/OutputsPage.tsx:584
 msgid "Loading outputs…"
 msgstr ""
 
 #: src/pages/OverlaysPage.tsx:229
 msgid "Loading overlays…"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:155
+msgid "Loading ownership state…"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:224
+msgid "Loading peers…"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:115
+msgid "Loading pending actions…"
 msgstr ""
 
 #: src/layout/components/GridLayoutEditor.tsx:808
@@ -2647,8 +3098,20 @@ msgstr ""
 msgid "Loading sources…"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:537
+msgid "Loading support options…"
+msgstr ""
+
 #: src/pages/TallyPage.tsx:303
 msgid "Loading tally state…"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:223
+msgid "Loading ticket…"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:299
+msgid "Loading tickets…"
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:67
@@ -2703,6 +3166,10 @@ msgstr ""
 msgid "Luma threshold (0–255)"
 msgstr ""
 
+#: src/pages/MeshPage.tsx:215
+msgid "Machines discovered on the local network. This inventory is untrusted and read-only — a peer is never auto-trusted."
+msgstr ""
+
 #: src/pages/SourcesPage.tsx:589
 msgid "Magazine-addressed page, 100–899."
 msgstr ""
@@ -2732,6 +3199,7 @@ msgid "Max true-peak (dBTP)"
 msgstr ""
 
 #: src/pages/AuditPage.tsx:112
+#: src/pages/SystemActionsPage.tsx:236
 msgid "Media time"
 msgstr ""
 
@@ -2741,6 +3209,11 @@ msgstr ""
 
 #: src/pages/SystemPage.tsx:279
 msgid "Memory"
+msgstr ""
+
+#: src/app/navigation.tsx:62
+#: src/pages/MeshPage.tsx:281
+msgid "Mesh"
 msgstr ""
 
 #: src/pages/AlarmsPage.tsx:164
@@ -2773,7 +3246,7 @@ msgstr ""
 msgid "Modern GPUs and SoCs contain dedicated video engines — separate silicon for decode and encode that runs at a fraction of the power of a CPU doing the same work. Multiview uses them through each platform's standard interface: NVDEC/NVENC on NVIDIA, VAAPI on Intel and AMD (including Quick Sync), and VideoToolbox on Apple Silicon. With acceleration, decoding a wall of sources and encoding the canvas leaves the CPU almost idle; without it, a handful of HD decodes can saturate a machine."
 msgstr ""
 
-#: src/app/navigation.tsx:42
+#: src/app/navigation.tsx:48
 #: src/pages/MonitoringPage.tsx:131
 msgid "Monitoring"
 msgstr ""
@@ -2829,7 +3302,7 @@ msgstr ""
 msgid "Multicast Listener Discovery version 2 — the IPv6 protocol a receiver uses to tell the network which multicast groups (and, with source-specific multicast, which senders) it wants. It is the IPv6 successor to IPv4's IGMP and the primary group-join mechanism in Multiview's IPv6-first multicast support."
 msgstr ""
 
-#: src/app/Sidebar.tsx:22
+#: src/app/Sidebar.tsx:27
 msgid "Multiview"
 msgstr ""
 
@@ -2843,6 +3316,10 @@ msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:35
 msgid "Multiview is a hardware-accelerated live video multiview generator. It ingests many live sources, composites them into a templated grid on the GPU, and serves the combined picture as a continuous output stream. It is designed for monitoring walls and production multiviewers where the output must never stall."
+msgstr ""
+
+#: src/pages/DataPage.tsx:151
+msgid "Multiview is source-available, so a source build can compile the heartbeat client out. We state that plainly: removing it does not grant a commercial right — the licence terms bind regardless of the binary. The official builds carry the heartbeat for the smooth claim and lease experience."
 msgstr ""
 
 #: src/pages/docs/concepts/LatencyPage.tsx:127
@@ -2903,7 +3380,7 @@ msgstr ""
 msgid "Names declared by the audio routing block; the program bus is always available as \"prog\"."
 msgstr ""
 
-#: src/app/AppLayout.tsx:68
+#: src/app/AppLayout.tsx:74
 msgid "Navigation"
 msgstr ""
 
@@ -2927,6 +3404,10 @@ msgstr ""
 msgid "NDI source name to advertise"
 msgstr ""
 
+#: src/pages/MeshPage.tsx:212
+msgid "Nearby peers"
+msgstr ""
+
 #: src/pages/docs/concepts/GlossaryPage.tsx:160
 msgid "Network delivery where one sender transmits a single copy of a stream to a group address and the network fans it out to every subscribed receiver. Extremely efficient for in-facility distribution, but requires a managed network that routes multicast. Receivers subscribe via MLDv2 (IPv6) or IGMP (legacy IPv4)."
 msgstr ""
@@ -2941,6 +3422,14 @@ msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:176
 msgid "New cell"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:190
+msgid "New instances allowed"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:188
+msgid "New instances blocked"
 msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:334
@@ -2973,11 +3462,26 @@ msgstr ""
 msgid "New source"
 msgstr ""
 
+#: src/pages/DataPage.tsx:121
+#: src/pages/LicencePage.tsx:253
+msgid "Next due"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:271
+msgid "Next page"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:255
+#: src/pages/MeshPage.tsx:263
+msgid "No"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:209
 msgid "No alarms match the current filter."
 msgstr ""
 
 #: src/pages/AuditPage.tsx:101
+#: src/pages/SystemActionsPage.tsx:225
 msgid "No audit entries match."
 msgstr ""
 
@@ -3013,12 +3517,28 @@ msgstr ""
 msgid "No inputs are available to preview."
 msgstr ""
 
+#: src/pages/WelcomePage.tsx:88
+msgid "No internet here?"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:205
+msgid "No internet path? Pair this machine by hand instead of with a code."
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:122
 msgid "No layout cells found — enter the cell id to watch."
 msgstr ""
 
 #: src/pages/LayoutsPage.tsx:228
 msgid "No layouts are defined yet."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:484
+msgid "No licence installed"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:487
+msgid "No licence is installed on this machine. Use the offline exchange to install a signed lease."
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:102
@@ -3031,6 +3551,14 @@ msgstr ""
 
 #: src/pages/OverlaysPage.tsx:228
 msgid "No overlays configured."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:233
+msgid "No peers discovered."
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:123
+msgid "No pending actions."
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:489
@@ -3078,6 +3606,14 @@ msgstr ""
 msgid "No tally targets are reporting a lamp state."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:307
+msgid "No tickets yet."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:183
+msgid "No watermark"
+msgstr ""
+
 #: src/pages/SalvosPage.tsx:240
 msgid "None"
 msgstr ""
@@ -3112,6 +3648,10 @@ msgstr ""
 
 #: src/pages/OutputsPage.tsx:93
 msgid "Not yet runnable in this build"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:498
+msgid "Nothing was redacted."
 msgstr ""
 
 #: src/components/HealthBanner.tsx:41
@@ -3149,6 +3689,8 @@ msgid "Object"
 msgstr ""
 
 #: src/components/TallyLampBadge.tsx:48
+#: src/pages/DataPage.tsx:207
+#: src/pages/MeshPage.tsx:144
 msgid "Off"
 msgstr ""
 
@@ -3160,8 +3702,25 @@ msgstr ""
 msgid "Offline"
 msgstr ""
 
+#: src/pages/AccountPage.tsx:202
+msgid "Offline claim"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:329
+msgid "Offline exchange"
+msgstr ""
+
+#: src/pages/DataPage.tsx:207
+#: src/pages/MeshPage.tsx:144
+msgid "On"
+msgstr ""
+
 #: src/layout/components/CellPropertiesPanel.tsx:166
 msgid "On signal loss"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:225
+msgid "on the Licence screen."
 msgstr ""
 
 #: src/pages/AudioPage.tsx:151
@@ -3180,16 +3739,25 @@ msgstr ""
 msgid "Opacity must be between 0 and 1."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:293
+msgid "Open a ticket to read and reply to its thread."
+msgstr ""
+
 #: src/components/HelpLink.tsx:50
 msgid "open documentation"
 msgstr ""
 
-#: src/app/AppLayout.tsx:62
+#: src/app/AppLayout.tsx:68
 msgid "Open navigation"
 msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:50
 msgid "Open the API playground"
+msgstr ""
+
+#: src/components/account/chrome.tsx:83
+#: src/components/account/chrome.tsx:157
+msgid "Open the licence screen"
 msgstr ""
 
 #: src/components/SystemFooter.tsx:225
@@ -3236,7 +3804,7 @@ msgstr ""
 msgid "Output path"
 msgstr ""
 
-#: src/app/navigation.tsx:39
+#: src/app/navigation.tsx:45
 #: src/docs/registry.ts:153
 #: src/docs/registry.ts:211
 #: src/pages/docs/ConfigPage.tsx:248
@@ -3249,7 +3817,7 @@ msgstr "المخرجات"
 msgid "Over the layout drop zone."
 msgstr ""
 
-#: src/app/navigation.tsx:40
+#: src/app/navigation.tsx:46
 #: src/docs/registry.ts:148
 #: src/docs/registry.ts:216
 #: src/layout/components/SourcePalette.tsx:224
@@ -3287,6 +3855,10 @@ msgstr ""
 msgid "Overview"
 msgstr ""
 
+#: src/pages/AccountPage.tsx:151
+msgid "Ownership"
+msgstr ""
+
 #: src/pages/NotFoundPage.tsx:14
 msgid "Page not found"
 msgstr ""
@@ -3301,6 +3873,18 @@ msgstr ""
 
 #: src/pages/SettingsPage.tsx:92
 msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:241
+msgid "Peer"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:177
+msgid "Peers discovered"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:103
+msgid "Pending actions"
 msgstr ""
 
 #: src/layout/components/AreaMatrixEditor.tsx:179
@@ -3353,7 +3937,7 @@ msgstr ""
 msgid "Primaries"
 msgstr ""
 
-#: src/app/Sidebar.tsx:20
+#: src/app/Sidebar.tsx:25
 msgid "Primary"
 msgstr ""
 
@@ -3365,9 +3949,13 @@ msgstr ""
 msgid "Priority must be a whole number (higher is shed last)."
 msgstr ""
 
-#: src/app/navigation.tsx:45
+#: src/app/navigation.tsx:51
 #: src/pages/ProbesPage.tsx:474
 msgid "Probes"
+msgstr ""
+
+#: src/pages/DataPage.tsx:190
+msgid "Product telemetry"
 msgstr ""
 
 #: src/pages/TallyPage.tsx:162
@@ -3427,12 +4015,36 @@ msgstr ""
 msgid "Push to/from streaming platforms"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:153
+msgid "Question"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:299
+msgid "Queued remote actions you can cancel locally, and the immutable account audit trail."
+msgstr ""
+
 #: src/pages/OverlaysPage.tsx:96
 msgid "Radius (px)"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:100
+msgid "Raise a support ticket against your entitled queue."
+msgstr ""
+
+#: src/pages/SupportPage.tsx:97
+msgid "Raise a ticket"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:529
+msgid "Raise a ticket, read your threads, and compose a redacted context pack."
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:358
 msgid "Raise dwell (ms)"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:186
+msgid "Raise ticket"
 msgstr ""
 
 #: src/pages/SourcesPage.tsx:671
@@ -3447,14 +4059,34 @@ msgstr ""
 msgid "Reach zero, then count the overrun up"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:357
+msgid "Read the in-app documentation"
+msgstr ""
+
 #: src/docs/registry.ts:182
 #: src/pages/docs/ApiPage.tsx:96
 msgid "Realtime streams"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:198
+msgid "Reasons"
+msgstr ""
+
 #: src/pages/SalvosPage.tsx:212
 #: src/pages/SalvosPage.tsx:372
 msgid "Recalled layout"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:176
+msgid "Reconfiguration allowed"
+msgstr ""
+
+#: src/components/account/chrome.tsx:148
+msgid "Reconfiguration is locked by the licence state."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:174
+msgid "Reconfiguration locked"
 msgstr ""
 
 #: src/docs/registry.ts:438
@@ -3483,12 +4115,37 @@ msgstr ""
 msgid "Red"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:494
+msgid "Redactions in this pack"
+msgstr ""
+
 #: src/pages/OutputsPage.tsx:338
 msgid "Refresh (exact rational)"
 msgstr ""
 
 #: src/pages/docs/DocsLayout.tsx:174
 msgid "Related"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:126
+msgid "Relay"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:141
+#: src/pages/MeshPage.tsx:148
+msgid "Relay neighbours' heartbeats"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:243
+msgid "Relaying for us"
+msgstr ""
+
+#: src/pages/AccountPage.tsx:185
+msgid "Release this machine from its owner and return its lease. Program output is never interrupted by deactivation."
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:106
+msgid "Remote actions queued for this machine. You can cancel one locally before it runs — a local cancel always wins before execution."
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:264
@@ -3536,12 +4193,28 @@ msgstr ""
 msgid "Rename area {selectedArea}"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:162
+msgid "renews at"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:157
+msgid "Renews on"
+msgstr ""
+
 #: src/layout/components/LayoutEditor.tsx:442
 msgid "Replace cells"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:416
 msgid "Replace the current cells?"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:254
+msgid "Reply"
+msgstr ""
+
+#: src/pages/SystemActionsPage.tsx:138
+msgid "requested by"
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:39
@@ -3578,12 +4251,20 @@ msgstr ""
 msgid "REST conventions"
 msgstr ""
 
+#: src/components/account/chrome.tsx:116
+msgid "Review actions"
+msgstr ""
+
 #: src/pages/docs/components.tsx:147
 msgid "Roadmap"
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:237
 msgid "Robustness"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:163
+msgid "Role"
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:383
@@ -3596,6 +4277,10 @@ msgstr ""
 
 #: src/pages/AudioPage.tsx:341
 msgid "Route each input's audio: program-mix membership and discrete tracks."
+msgstr ""
+
+#: src/pages/SupportPage.tsx:113
+msgid "Routes to"
 msgstr ""
 
 #. placeholder {0}: String(rowIndex + 1)
@@ -3661,6 +4346,10 @@ msgstr ""
 msgid "Running in containers"
 msgstr ""
 
+#: src/pages/DataPage.tsx:132
+msgid "Salted digests and a signed lease request — never raw serials, MAC addresses, or media. The exhaustive list:"
+msgstr ""
+
 #: src/docs/registry.ts:566
 #: src/pages/docs/concepts/GlossaryPage.tsx:242
 msgid "Salvo"
@@ -3678,7 +4367,7 @@ msgstr ""
 msgid "Salvo saved"
 msgstr ""
 
-#: src/app/navigation.tsx:44
+#: src/app/navigation.tsx:50
 #: src/docs/registry.ts:226
 #: src/pages/docs/FeaturesPage.tsx:137
 #: src/pages/SalvosPage.tsx:171
@@ -3795,22 +4484,42 @@ msgstr ""
 msgid "Send backward"
 msgstr ""
 
+#: src/pages/DataPage.tsx:204
+#: src/pages/DataPage.tsx:218
+msgid "Send daily product telemetry"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:266
+msgid "Send reply"
+msgstr ""
+
+#. placeholder {0}: result.serial
+#. placeholder {1}: result.valid_to
+#: src/pages/LicencePage.tsx:308
+msgid "Serial {0}, valid to {1}."
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:272
 msgid "Serves the canvas at a <0>mount</0> with a <1>latency_profile</1> hint."
 msgstr ""
 
-#: src/app/navigation.tsx:50
+#: src/app/navigation.tsx:57
 #: src/pages/SettingsPage.tsx:47
 msgid "Settings"
 msgstr "الإعدادات"
 
 #: src/pages/AlarmsPage.tsx:217
 #: src/pages/ProbesPage.tsx:435
+#: src/pages/SupportPage.tsx:143
 msgid "Severity"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:380
 msgid "Severity (X.733)"
+msgstr ""
+
+#: src/pages/DataPage.tsx:271
+msgid "shares anonymised usage counts that help us prioritise the features and hardware you actually use."
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:174
@@ -3850,12 +4559,17 @@ msgstr ""
 msgid "Silence level (dBFS)"
 msgstr ""
 
-#: src/app/AppLayout.tsx:45
+#: src/app/AppLayout.tsx:51
 msgid "Skip to content"
 msgstr ""
 
 #: src/layout/components/LayoutEditor.tsx:170
 msgid "Snap to grid"
+msgstr ""
+
+#. placeholder {0}: ready.snapshot_id
+#: src/pages/DataPage.tsx:312
+msgid "Snapshot {0} assembled."
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:385
@@ -3875,7 +4589,7 @@ msgstr ""
 msgid "Source URL"
 msgstr ""
 
-#: src/app/navigation.tsx:38
+#: src/app/navigation.tsx:44
 #: src/docs/registry.ts:138
 #: src/docs/registry.ts:206
 #: src/layout/components/SourcePalette.tsx:203
@@ -3926,6 +4640,14 @@ msgstr ""
 msgid "STALE"
 msgstr ""
 
+#: src/pages/AccountPage.tsx:179
+msgid "Start a transfer"
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:100
+msgid "Start the offline exchange"
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:81
 msgid "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retried request is applied at most once."
 msgstr ""
@@ -3938,8 +4660,14 @@ msgstr ""
 msgid "Static source hint"
 msgstr ""
 
+#: src/pages/DataPage.tsx:88
+#: src/pages/MeshPage.tsx:62
 #: src/pages/OutputsPage.tsx:532
 msgid "Status"
+msgstr ""
+
+#: src/pages/DataPage.tsx:278
+msgid "Staying off"
 msgstr ""
 
 #: src/pages/AudioPage.tsx:61
@@ -3985,6 +4713,10 @@ msgstr ""
 msgid "Styling: <0>z</0> stacking order, <1>opacity</1>, <2>corner_radius</2>, and a <3>border</3>."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:117
+msgid "Subject"
+msgstr ""
+
 #: src/components/HealthBanner.tsx:72
 msgid "Subsystem:"
 msgstr ""
@@ -3995,6 +4727,11 @@ msgstr ""
 
 #: src/pages/ProbesPage.tsx:272
 msgid "Successive frames differing by less than this per-mille of full-scale luma count as frozen."
+msgstr ""
+
+#: src/app/navigation.tsx:63
+#: src/pages/SupportPage.tsx:527
+msgid "Support"
 msgstr ""
 
 #: src/pages/SettingsPage.tsx:75
@@ -4009,9 +4746,14 @@ msgstr ""
 #~ msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
 #~ msgstr ""
 
-#: src/app/navigation.tsx:47
+#: src/app/navigation.tsx:53
 #: src/pages/SystemPage.tsx:236
 msgid "System"
+msgstr ""
+
+#: src/app/navigation.tsx:54
+#: src/pages/SystemActionsPage.tsx:297
+msgid "System actions"
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:269
@@ -4027,7 +4769,7 @@ msgstr ""
 msgid "Takes effect at the next frame boundary."
 msgstr ""
 
-#: src/app/navigation.tsx:43
+#: src/app/navigation.tsx:49
 #: src/docs/registry.ts:221
 #: src/docs/registry.ts:576
 #: src/pages/docs/concepts/GlossaryPage.tsx:265
@@ -4188,16 +4930,40 @@ msgstr ""
 msgid "The latency window is the key dial: it is the time budget SRT has to repair loss. A small window (~120 ms) keeps the feed snappy but tolerates little loss; a large window (1–4 s) rides out bad networks at the cost of delay. The payload is an MPEG transport stream, so codec choices follow the MPEG-TS rules."
 msgstr ""
 
+#: src/components/account/enforcement-copy.ts:37
+msgid "The lease has lapsed further, so a corner watermark is added to the canvas; the running program stays on air."
+msgstr ""
+
+#: src/components/account/enforcement-copy.ts:35
+msgid "The lease has lapsed past its grace period, so reconfiguration is locked until the next licensing contact; the running program stays on air."
+msgstr ""
+
+#: src/components/account/enforcement-copy.ts:39
+msgid "The lease is long past contact, so starting a new engine instance is blocked; any running program stays on air."
+msgstr ""
+
 #: src/docs/registry.ts:423
 msgid "The LIVE / STALE / RECONNECTING / NO SIGNAL ladder, last-good frames, and why output never stalls."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:283
+msgid "The local mesh: always-on discovery, and an opt-in relay that lets an offline machine reach the licence server through a neighbour."
 msgstr ""
 
 #: src/pages/docs/concepts/GlossaryPage.tsx:125
 msgid "The low-latency extension of HLS: segments are published in partial chunks and players can request the next part before it is finished, cutting typical delay from 6–30 s to roughly 2–5 s while keeping plain-HTTP delivery and CDN scalability."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:167
+msgid "The machine version, tier, enforcement level, and salted fingerprint score — a number, never raw identifiers."
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:26
 msgid "The management API, its conventions, the realtime event streams, and where to find the live, interactive reference."
+msgstr ""
+
+#: src/pages/DataPage.tsx:77
+msgid "The minimum monthly contact that keeps your entitlement live. This is the licensing keep-alive — not analytics — so it carries only what licensing needs."
 msgstr ""
 
 #: src/pages/AudioPage.tsx:257
@@ -4319,6 +5085,10 @@ msgstr ""
 msgid "The tracks overflow the canvas (fixed sizes or percentages exceed it) — an area would land outside the output frame."
 msgstr ""
 
+#: src/pages/LicencePage.tsx:229
+msgid "The transport the active lease arrived over, and when the next licensing contact is due."
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:98
 msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 msgstr ""
@@ -4404,6 +5174,10 @@ msgstr ""
 msgid "This grid layout's body could not be parsed (its track or area lists are malformed). Fix the stored document via the API."
 msgstr ""
 
+#: src/components/account/enforcement-copy.ts:41
+msgid "This is a source build with the licensing client compiled out, reported honestly; the program stays on air."
+msgstr ""
+
 #: src/pages/docs/concepts/ResiliencePage.tsx:90
 msgid "This is also why one bad source can never take down the wall: the disturbance is contained to that tile's rectangle. The output keeps emitting a complete, valid frame every tick regardless — even if every source died at once, the canvas would show slates and a still-ticking clock, not stop."
 msgstr ""
@@ -4430,6 +5204,22 @@ msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:322
 msgid "This layout's body could not be parsed into an editable form. Fix the stored document via the API."
+msgstr ""
+
+#: src/pages/MeshPage.tsx:52
+msgid "This machine announces and browses for neighbours on the local network so an offline machine can have its heartbeat relayed. Discovery is part of running the account plane — there is no off switch."
+msgstr ""
+
+#: src/pages/AccountPage.tsx:157
+msgid "This machine is claimed."
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:46
+msgid "This machine is licensed and ready."
+msgstr ""
+
+#: src/pages/AccountPage.tsx:159
+msgid "This machine is not claimed to an owner yet."
 msgstr ""
 
 #: src/auth/LoginPage.tsx:67
@@ -4460,6 +5250,10 @@ msgstr ""
 msgid "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 msgstr ""
 
+#: src/pages/AccountPage.tsx:119
+msgid "This requires licence-server connectivity (not yet wired in this build)."
+msgstr ""
+
 #: src/pages/PlaceholderPage.tsx:27
 msgid "This screen is part of an upcoming milestone."
 msgstr ""
@@ -4472,12 +5266,25 @@ msgstr ""
 msgid "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
 msgstr ""
 
+#: src/pages/SupportPage.tsx:271
+msgid "This ticket is closed."
+msgstr ""
+
 #: src/pages/SettingsPage.tsx:170
 msgid "This toast is announced to assistive technology."
 msgstr ""
 
 #: src/resources/FormControls.tsx:51
 msgid "This URL must start with http:// or https://."
+msgstr ""
+
+#: src/pages/SupportPage.tsx:80
+msgid "Ticket raised"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:135
+#: src/pages/SupportPage.tsx:175
+msgid "Tier"
 msgstr ""
 
 #: src/pages/TallyPage.tsx:217
@@ -4561,7 +5368,17 @@ msgstr ""
 msgid "Transfer"
 msgstr ""
 
+#: src/pages/AccountPage.tsx:158
+#~ msgid "Transfer and deactivation require licence-server connectivity (not yet wired in this build)."
+#~ msgstr ""
+
+#: src/pages/AccountPage.tsx:171
+msgid "Transfer ownership"
+msgstr ""
+
+#: src/pages/DataPage.tsx:109
 #: src/pages/docs/concepts/TransportsPage.tsx:228
+#: src/pages/LicencePage.tsx:247
 #: src/pages/OutputsPage.tsx:509
 #: src/pages/OutputsPage.tsx:635
 msgid "Transport"
@@ -4574,6 +5391,10 @@ msgstr ""
 #: src/docs/registry.ts:243
 #: src/pages/docs/concepts/TransportsPage.tsx:44
 msgid "Transports compared"
+msgstr ""
+
+#: src/pages/DataPage.tsx:269
+msgid "Turning it on"
 msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:35
@@ -4593,6 +5414,29 @@ msgstr ""
 msgid "Unacknowledged"
 msgstr ""
 
+#: src/components/account/chrome.tsx:41
+msgid "Unclaimed"
+msgstr ""
+
+#: src/pages/DataPage.tsx:317
+#: src/pages/LicencePage.tsx:286
+#: src/pages/LicencePage.tsx:317
+#: src/pages/SupportPage.tsx:412
+msgid "Unknown error"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:148
+msgid "unlimited"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:412
+msgid "Upload the lease file on this screen (the method above)."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:367
+msgid "Upload the signed lease file you received. It is verified against the pinned licence-server key before it is installed."
+msgstr ""
+
 #: src/pages/SourcesPage.tsx:565
 msgid "Use the source wall-clock when trusted"
 msgstr ""
@@ -4601,9 +5445,17 @@ msgstr ""
 msgid "Used"
 msgstr ""
 
+#: src/pages/LicencePage.tsx:400
+msgid "valid to"
+msgstr ""
+
 #: src/docs/registry.ts:158
 #: src/pages/docs/ConfigPage.tsx:319
 msgid "Validation and import / export"
+msgstr ""
+
+#: src/pages/DataPage.tsx:260
+msgid "version"
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:277
@@ -4620,6 +5472,14 @@ msgstr ""
 
 #: src/pages/docs/concepts/GlossaryPage.tsx:90
 msgid "Video using a brightness curve (PQ or HLG) and usually the BT.2020 gamut that represents far brighter highlights and deeper shadows than standard dynamic range (SDR). HDR tiles must be tone-mapped onto an SDR canvas or they look dim and grey."
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:57
+msgid "View licence details"
+msgstr ""
+
+#: src/pages/DataPage.tsx:255
+msgid "View the full telemetry schema"
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:231
@@ -4677,6 +5537,10 @@ msgstr ""
 msgid "Watch / live / channel URL"
 msgstr ""
 
+#: src/pages/WelcomePage.tsx:31
+msgid "Welcome to Multiview"
+msgstr ""
+
 #: src/docs/registry.ts:457
 #: src/pages/docs/concepts/LatencyPage.tsx:50
 msgid "What each protocol adds"
@@ -4684,6 +5548,18 @@ msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:323
 msgid "What each protocol adds to latency"
+msgstr ""
+
+#: src/pages/MeshPage.tsx:71
+msgid "What is announced"
+msgstr ""
+
+#: src/pages/DataPage.tsx:239
+msgid "What is never sent"
+msgstr ""
+
+#: src/pages/DataPage.tsx:227
+msgid "What is sent when you opt in"
 msgstr ""
 
 #: src/docs/registry.ts:26
@@ -4695,8 +5571,16 @@ msgstr ""
 msgid "What Multiview is, the design pillars, and how to get started."
 msgstr ""
 
+#: src/pages/DataPage.tsx:129
+msgid "What the heartbeat carries"
+msgstr ""
+
 #: src/pages/docs/concepts/ResiliencePage.tsx:18
 msgid "What the LIVE, STALE, RECONNECTING, and NO SIGNAL badges mean, and why the output never stalls on a bad input."
+msgstr ""
+
+#: src/pages/DataPage.tsx:379
+msgid "What this machine sends, and to whom. Two separate pipes: the mandatory licensing heartbeat and the opt-in product telemetry."
 msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:18
@@ -4712,8 +5596,16 @@ msgstr ""
 msgid "What transcoding is, the common video codecs, hardware acceleration, and the encode-once model."
 msgstr ""
 
+#: src/pages/MeshPage.tsx:129
+msgid "When on, this machine relays an offline neighbour's licensing heartbeat to the server and carries the signed response back. The payload is end-to-end signed — this machine cannot read, forge, or alter it, and earns no entitlement from carrying it."
+msgstr ""
+
 #: src/pages/docs/ContainerPage.tsx:175
 msgid "When the config has a <0>[control]</0> section, the binary binds that listener and serves the web UI, REST API, and docs alongside the engine. Authenticate callers with a bearer token — supply it through the <1>MULTIVIEW_CONTROL_TOKEN</1> environment variable so it is never baked into an image or written to the config file. The presented token is <2>admin.<secret></2>; if the variable is unset, the server generates one and logs it once at startup. Publish the listener's port (default <3>8080</3>) to reach it."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:332
+msgid "When this machine has no internet path to the licence server, exchange a lease by hand: export a signed challenge here, obtain a lease from an online portal, then install the lease below."
 msgstr ""
 
 #: src/pages/docs/concepts/LatencyPage.tsx:18
@@ -4757,6 +5649,10 @@ msgstr ""
 msgid "Width (px)"
 msgstr ""
 
+#: src/pages/SupportPage.tsx:436
+msgid "Window"
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:88
 msgid "Working pixel format: <0>nv12</0> (8-bit) or <1>p010</1> (10-bit)."
 msgstr ""
@@ -4765,8 +5661,49 @@ msgstr ""
 msgid "Writes an HLS playlist and segments to <0>path</0> with a <1>codec</1> and a <2>segment_ms</2> duration."
 msgstr ""
 
+#: src/pages/MeshPage.tsx:255
+#: src/pages/MeshPage.tsx:260
+msgid "Yes"
+msgstr ""
+
 #: src/pages/docs/OverviewPage.tsx:102
 msgid "You can also run the binary directly against a config file with <0>multiview run path/to/multiview.toml</0>. See the sections below for the container, compose, config, and API details."
+msgstr ""
+
+#: src/components/account/chrome.tsx:110
+msgid "You have remote actions awaiting review."
+msgstr ""
+
+#: src/pages/WelcomePage.tsx:43
+msgid "You're set"
+msgstr ""
+
+#: src/pages/LicencePage.tsx:461
+msgid "Your entitlement, the enforcement state, and the offline lease exchange. Enforcement degrades only conveniences; a running program always stays on air."
+msgstr ""
+
+#: src/components/account/enforcement-copy.ts:31
+msgid "Your licence is active and nothing is restricted."
+msgstr ""
+
+#: src/components/account/enforcement-copy.ts:33
+msgid "Your licence lease is approaching expiry; conveniences still work and the program stays on air."
+msgstr ""
+
+#: src/pages/LicencePage.tsx:119
+msgid "Your licensed tier, hardware class, and the lease this machine holds."
+msgstr ""
+
+#: src/pages/SupportPage.tsx:371
+msgid "Your plan includes community best-effort support"
+msgstr ""
+
+#: src/pages/SupportPage.tsx:90
+#~ msgid "Your ticket routes to this queue:"
+#~ msgstr ""
+
+#: src/pages/SupportPage.tsx:290
+msgid "Your tickets"
 msgstr ""
 
 #. placeholder {0}: cell.z
