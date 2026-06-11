@@ -60,6 +60,13 @@ pub const MAX_FRAME_LEN: usize = 64 * 1024;
 /// (the session actor then rides its 5 s reconnect cadence).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long one frame write may take before the channel is declared dead: a
+/// device that accepts the TLS session but stops draining its socket must
+/// not wedge the actor's send path (the steady loop services heartbeats and
+/// control commands between sends). On expiry the write errors and the
+/// session actor rides its supervised reconnect.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The wire `CastMessage` (BSD-3-Clause Chromium Open Screen
 /// `cast_channel.proto`), hand-declared with prost-derive — no protoc, no
 /// build step. Every field is modelled `optional` and **always populated on
@@ -93,12 +100,14 @@ struct WireCastMessage {
     payload_binary: Option<Vec<u8>>,
 }
 
-/// Write one frame: 4-byte big-endian length prefix + protobuf body.
+/// Write one frame: 4-byte big-endian length prefix + protobuf body, bounded
+/// by [`WRITE_TIMEOUT`].
 ///
 /// # Errors
 ///
-/// [`CastChannelError`] on a write failure (the channel is then dead and the
-/// session actor rides its supervised reconnect).
+/// [`CastChannelError`] on a write failure or a peer that does not drain the
+/// frame within the write window (the channel is then dead and the session
+/// actor rides its supervised reconnect).
 pub async fn write_frame<W: AsyncWrite + Unpin + Send>(
     writer: &mut W,
     frame: &CastFrame,
@@ -116,16 +125,24 @@ pub async fn write_frame<W: AsyncWrite + Unpin + Send>(
     let len = u32::try_from(body.len()).map_err(|_| CastChannelError {
         message: "cast frame exceeds the u32 length prefix".to_owned(),
     })?;
-    writer
-        .write_all(&len.to_be_bytes())
+    let write = async {
+        writer
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(CastChannelError::new)?;
+        writer
+            .write_all(&body)
+            .await
+            .map_err(CastChannelError::new)?;
+        writer.flush().await.map_err(CastChannelError::new)
+    };
+    tokio::time::timeout(WRITE_TIMEOUT, write)
         .await
-        .map_err(CastChannelError::new)?;
-    writer
-        .write_all(&body)
-        .await
-        .map_err(CastChannelError::new)?;
-    writer.flush().await.map_err(CastChannelError::new)?;
-    Ok(())
+        .map_err(|_elapsed| CastChannelError {
+            message: format!(
+                "cast frame write timed out after {WRITE_TIMEOUT:?} (peer not draining)"
+            ),
+        })?
 }
 
 /// Read one frame: the length prefix (bounded by [`MAX_FRAME_LEN`]) + body.
