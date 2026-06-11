@@ -229,7 +229,12 @@ const fn default_poll_secs() -> u64 {
 }
 
 /// The `multiview node` configuration document (TOML).
+///
+/// `deny_unknown_fields` on the document **root** (matching every sub-table):
+/// a typo'd top-level section (`[cnavas]`) is a loud parse error naming the
+/// offender, never a silent fall-back to the defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct NodeConfig {
     /// Document schema version (defaults to 1).
