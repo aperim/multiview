@@ -181,17 +181,60 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/check-inclusive-language.sh
 
+  # ── web gates (guardrails: "all three pillars are blocking CI") ─────────────
+  # The SPA's typing + test pillars run here, not just locally: eslint
+  # (strictTypeChecked, --max-warnings=0), tsc --noEmit, the full vitest suite,
+  # and the production build. `npm ci` (never `npm install`) keeps lockfile
+  # discipline. The typecheck gate runs inside `npm run build`, which per
+  # web/package.json is `lingui compile && tsc --noEmit && vite build` —
+  # lingui compile must precede tsc because the compiled pseudo-locale
+  # message module is generated, not committed.
   web:
-    name: web build
+    name: web lint + typecheck + test + build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: install
-        working-directory: web
-        run: npm install
-      - name: build
-        working-directory: web
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install (npm ci)
+        run: npm ci
+      - name: eslint
+        run: npm run lint
+      - name: vitest
+        run: npm run test
+      - name: build (lingui compile + tsc --noEmit + vite build)
         run: npm run build
+
+  # ── web e2e (Playwright, real Chromium) ──────────────────────────────────────
+  # The e2e specs in web/e2e/ guard failure classes jsdom cannot reproduce
+  # (real Radix focus/scroll-lock + ResizeObserver, e.g. the ResourceTable
+  # re-render-loop renderer OOM). Playwright's webServer (playwright.config.ts)
+  # builds the production bundle and serves it via `vite preview`; the API is
+  # mocked per-test with page.route, so no backend or GPU is needed and the
+  # job runs on the free ubuntu runner. Chromium only — the suite targets
+  # renderer behaviour, not cross-browser CSS.
+  web-e2e:
+    name: web e2e (Playwright chromium)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install (npm ci)
+        run: npm ci
+      - name: install Chromium (browser + OS deps)
+        run: npx playwright install --with-deps chromium
+      - name: playwright test
+        run: npm run test:e2e
