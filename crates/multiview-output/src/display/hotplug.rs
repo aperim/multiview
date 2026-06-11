@@ -298,10 +298,25 @@ fn netlink_loop<S: UeventSource>(
             Ok(Some(datagram)) => datagram,
             Ok(None) => continue,
             Err(reason) => {
-                // Keep going: a transient socket failure must not end hotplug
-                // for the rest of the run. The bounded wait above prevents a
-                // hot error loop from spinning.
                 tracing::warn!(reason, "display hotplug uevent receive failed");
+                // A receive error can mean the kernel DROPPED datagrams (an
+                // ENOBUFS queue overrun) — possibly the one drm hotplug
+                // uevent — and event mode has no periodic re-probe, so a
+                // swallowed event would otherwise be lost for the rest of
+                // the run. Treat the error as "connector state may have
+                // changed unobserved": request a recovery re-probe on every
+                // sink, through the same debounce gate (a persistent error
+                // storm collapses to one request per window) and the same
+                // idempotent flag the relight path consumes.
+                let now_ns = u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                if gate.observe(now_ns) {
+                    for flag in flags {
+                        flag.request();
+                    }
+                }
+                // Keep going: a transient socket failure must not end hotplug
+                // for the rest of the run. The bounded wait prevents a hot
+                // error loop from spinning.
                 std::thread::sleep(NETLINK_RECV_TIMEOUT);
                 continue;
             }
