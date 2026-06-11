@@ -347,7 +347,7 @@ Covered fully in §2.2 (Layout) — overlays are first-class layers in the layou
 | Observability | slo_dashboard | GET .../observability/slo; WS | Dashboard > Output Validity | RO | Zero-gap/PTS/TR101290. |
 | Observability | live_preview | GET/PUT .../observability/preview; WS /v1/ws/preview | Dashboard > Live Preview | Hot start/stop | Extra encode session. |
 | Preview (WHEP) | program/input/output focus sessions | POST/DELETE /v1/preview/program/whep · /v1/preview/inputs/{id}/whep · /v1/preview/outputs/{id}/whep | Monitoring program card; tile focus dialog; Outputs preview; layout-editor live preview | Hot start/stop | Sub-second WebRTC focus preview; FocusGate-capped, shed-first (ADR-P006); output scope labels real-vs-approx (ADR-P005). |
-| Preview | transport capabilities | GET /v1/preview/capabilities | Preview panes (transport auto-select; WHEP → JPEG fallback badge) | RO | {webrtc, scopes{program{whep,fidelity},inputs{whep},outputs{whep}}, fallback:"jpeg"}; drives the SPA fallback ladder (ADR-W020). |
+| Preview | transport capabilities | GET /v1/preview/capabilities | Preview panes (transport auto-select; WHEP → JPEG fallback badge) | RO | {webrtc, scopes{program{whep,fidelity},inputs{whep},outputs{whep}}, fallback:"jpeg"}; drives the SPA fallback ladder (ADR-W023). |
 | Observability | tile_thumbnails | GET .../observability/tiles; WS /v1/ws/thumbnails | Dashboard > Tiles | RO | 1-5 Hz. |
 | Observability | audio_meters_ws | GET/PUT .../observability/metering; WS /v1/ws/meters | Dashboard > Audio Meters | Hot config | 10-25 Hz numeric. |
 | Output health | per-output health/metrics/preview | GET /v1/outputs/{id}/health; .../metrics; .../preview.jpg; WS | Outputs > Health panel + thumbnail | RO | Validity SLO. |

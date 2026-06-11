@@ -214,7 +214,7 @@ switching state would corrupt docs, code search, and operator expectations alike
   SCAFFOLD `ControlLoop` admission seam into the run becomes load-bearing for switcher work
   ([ADR-0054](ADR-0054.md) backlog).
 - `/api/v1/preview` gains one scope (`buses/{bus}`), mirrored into OpenAPI and the SPA ladder
-  ([ADR-W020](ADR-W020.md)); the switcher API surface stays state-only. The pre-overlay→on-clock
+  ([ADR-W023](ADR-W023.md)); the switcher API surface stays state-only. The pre-overlay→on-clock
   DSK transition re-anchors the `program` slot meaning and ships together with the `clean` tap.
 - Docs/UI carry the normative vocabulary; reviewers should reject new text that uses bare "preview"
   for bus state. ADR-P001–P006 are unaffected in substance: the preview subsystem gains a scope but

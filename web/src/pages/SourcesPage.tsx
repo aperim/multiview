@@ -55,6 +55,7 @@ import {
   FormField,
   SelectField,
 } from '../resources/FormControls';
+import { SourceFromDeviceSection } from '../devices/FromDevice';
 import { tileForSource, useLiveTiles } from '../resources/useLiveTiles';
 import type { LiveTile } from '../realtime/useEngineEvents';
 import { HelpLink } from '../components/HelpLink';
@@ -854,6 +855,11 @@ export function SourcesPage(): JSX.Element {
       })}
       renderFields={(form, setForm, creating, errors): JSX.Element => (
         <>
+          {creating ? (
+            // Device-projected streams (ADR-M009 facet (a)): picking one
+            // prefills the transport form and stamps device_ref.
+            <SourceFromDeviceSection form={form} setForm={setForm} />
+          ) : null}
           <FormField
             id="source-id"
             label={t`Identifier`}

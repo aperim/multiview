@@ -8,7 +8,7 @@
   operation id), [ADR-RT008](ADR-RT008.md) (realtime taxonomy), [ADR-M012](ADR-M012.md) (resource
   model), [ADR-0055](ADR-0055.md) (transition engine), [ADR-P007](ADR-P007.md) (preview bus +
   monitor tiers), [ADR-W011](ADR-W011.md) (no-color-alone), [ADR-W015](ADR-W015.md) (typed forms),
-  [ADR-W016](ADR-W016.md) (in-app docs), [ADR-W020](ADR-W020.md) (preview transport ladder)
+  [ADR-W016](ADR-W016.md) (in-app docs), [ADR-W023](ADR-W023.md) (preview transport ladder)
 
 ## Context
 
@@ -145,7 +145,7 @@ switcher lands on the typed, convention-conforming path from day one.
    `crates/multiview-cli/src/preview.rs:28`, served by `CliPreviewProvider`, `preview.rs:38`,
    through the JPEG routes in `crates/multiview-control/src/routes/preview.rs`) so the panel shows
    ~1 Hz PGM/PVW/clean stills honestly labelled as stills. Sub-second WHEP monitors arrive via the
-   [ADR-W020](ADR-W020.md) `<PreviewSurface>` ladder and the preview crate — a separate fidelity
+   [ADR-W023](ADR-W023.md) `<PreviewSurface>` ladder and the preview crate — a separate fidelity
    lane ([ADR-P007](ADR-P007.md)), not a blocker for the panel.
 10. **Multi-box composition editor: import the layout-editor pure model — do not fork.** The
     framework-free view-model in `web/src/layout/model.ts` (`NormalizedRect` `:67`, `clampRect`

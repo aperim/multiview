@@ -62,6 +62,17 @@ drm = "0.15"
 drm-ffi = "0.9"
 gbm = { version = "0.18", default-features = false }
 rustix = { version = "0.38", features = ["event"] }
+# Off-by-default `display-kms` path ONLY (DEV-B4 / ADR-0044 §5): the real ALSA
+# HDMI audio sink (`display::audio::alsa`). `alsa` is the project's SAFE Rust
+# wrapper over libasound (MIT/Apache-2.0 bindings; the libasound2 C library is
+# LGPL-2.1, resolved by DYNAMIC LINK at run time — never vendored), so enabling
+# it does NOT make the build GPL and `multiview-output` stays
+# `forbid(unsafe_code)`. The pure servo/ELD-parse/xrun/FIFO/sink-seam is ALWAYS
+# compiled and CI-tested over the mock; this feature only adds the
+# libasound-speaking PCM + `/proc/asound` ELD reader, exercised on hardware.
+# Pulled in ONLY by `multiview-output`'s `display-kms` feature, so the default
+# build links nothing and `cargo deny` (`all-features = false`) never scans it.
+alsa = "0.11"
 # Internal crates
 multiview-core = { path = "crates/multiview-core" }
 multiview-hal = { path = "crates/multiview-hal" }

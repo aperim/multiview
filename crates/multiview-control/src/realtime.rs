@@ -151,6 +151,12 @@ impl CorrKey {
             // than mis-correlated.
             | Command::UpsertSource { .. }
             | Command::RemoveSource { .. }
+            // Live overlay upsert/remove (ADR-W022): the drain emits a
+            // `job.progress` outcome whose phase string is not a per-operation
+            // key (two applies of the same overlay are indistinguishable) —
+            // left uncorrelated rather than mis-correlated, like ApplyLayout.
+            | Command::UpsertOverlay { .. }
+            | Command::RemoveOverlay { .. }
             | Command::SetTallyOverride { .. } => None,
         }
     }

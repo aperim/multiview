@@ -51,6 +51,7 @@ pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
+pub mod live_apply;
 pub mod nmos;
 pub mod notify;
 pub mod pending_actions;
@@ -73,6 +74,7 @@ pub(crate) mod typed_resources;
 pub mod versioning;
 pub mod warning_ingest;
 pub mod warning_store;
+pub mod watch_status;
 
 #[cfg(feature = "embed-web")]
 pub mod spa;
@@ -106,7 +108,8 @@ pub use auth::{
     authorize_object, authorize_output, provision_admin_keys, Action, ApiKeyStore, Principal, Role,
 };
 pub use command::{
-    command_bus, Command, CommandReceiver, CommandSender, OperationId, ResolvedLayout, SubmitError,
+    command_bus, resolve_layout_document, Command, CommandReceiver, CommandSender, OperationId,
+    ResolvedLayout, SubmitError,
 };
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use devices::{
@@ -119,6 +122,7 @@ pub use is07::{
     Is07EventType, Is07Message, Is07Payload, Is07Subscription, Is07Timing,
 };
 pub use jwt::{JwtError, JwtValidator, SignatureAlgorithm};
+pub use live_apply::{LiveApplyCaps, OverlayLiveCapability};
 pub use nmos::is04::{Device, MediaFormat, Node, Receiver, Registration, ResourceCore, Sender};
 pub use nmos::is05::{
     parse_sdp_transport, Activation, ActivationMode, ConnectionRequest, ConnectionState,
@@ -185,6 +189,7 @@ pub use warning_ingest::{
     CompositeMismatchView, WarningIngestStep,
 };
 pub use warning_store::{InMemoryWarningStore, WarningFilter, WarningRepository, WARNING_KIND};
+pub use watch_status::{ConfigWatchStatus, WatchStamp, WatchStatusBody};
 
 /// Build the complete control-plane [`Router`] for the given [`AppState`].
 ///
