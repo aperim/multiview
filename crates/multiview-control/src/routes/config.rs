@@ -797,6 +797,13 @@ pub(crate) async fn promote_to_boot(
             model.boot_path().display()
         ))));
     }
+    // The write landed: confirm it (review B1 (2)) so the token is drained
+    // if a different settled content supersedes this write before it ever
+    // settles — a stale token must never eat a later real edit restoring
+    // the same bytes.
+    if let Some(handle) = watch_handle.as_ref() {
+        crate::config_watch::confirm_server_write(handle, &toml);
+    }
     let revision = state
         .config_versions
         .commit(

@@ -111,15 +111,29 @@ impl WatchOptions {
 /// not grow memory; older banked tokens are shed oldest-first).
 const MAX_EXPECTED_TOKENS: usize = 8;
 
+/// One banked expected-write announcement: the content hash plus whether the
+/// announced write actually LANDED on disk (review B1 (2)). A landed write
+/// that a different settled content supersedes can never be the next settled
+/// observation, so its token is drained; an unlanded announcement (the write
+/// still in flight) survives an interleaving edit and suppresses exactly its
+/// content when it finally lands (review m3, pinned).
+#[derive(Debug, Clone, Copy)]
+struct ExpectedToken {
+    /// The announced content's hash.
+    hash: u64,
+    /// Whether the announcing writer confirmed the write landed on disk.
+    landed: bool,
+}
+
 /// The cloneable handle [`spawn`] returns: self-write suppression for the
 /// promote-to-boot lane ([`ConfigWatchHandle::expect_write`]) and a stop flag
 /// for run teardown.
 #[derive(Debug, Clone)]
 pub struct ConfigWatchHandle {
-    /// Hashes of expected (server-side) write contents; each suppresses one
+    /// Banked expected (server-side) write announcements; each suppresses one
     /// reload of EXACTLY that content (review m3 — a banked token must never
     /// eat an unrelated external edit).
-    expected: Arc<std::sync::Mutex<std::collections::VecDeque<u64>>>,
+    expected: Arc<std::sync::Mutex<std::collections::VecDeque<ExpectedToken>>>,
     /// Raised by [`ConfigWatchHandle::stop`]; the loop exits on its next poll.
     stop: Arc<AtomicBool>,
 }
@@ -129,14 +143,36 @@ impl ConfigWatchHandle {
     /// change carries this content it is adopted as the new baseline WITHOUT
     /// applying anything (the server-side writer — e.g. a promote-to-boot
     /// flow — already applied the state it serialized). Call immediately
-    /// before writing the file. The token is content-paired: an unrelated
-    /// external edit landing first is still applied normally (review m3).
+    /// before writing the file; confirm success with
+    /// [`ConfigWatchHandle::mark_write_landed`] or release a failure with
+    /// [`ConfigWatchHandle::release_write`]. The token is content-paired: an
+    /// unrelated external edit landing first is still applied normally
+    /// (review m3).
     pub fn expect_write(&self, content: &str) {
         let mut tokens = lock_tokens(&self.expected);
         if tokens.len() >= MAX_EXPECTED_TOKENS {
             tokens.pop_front();
         }
-        tokens.push_back(content_hash(content));
+        tokens.push_back(ExpectedToken {
+            hash: content_hash(content),
+            landed: false,
+        });
+    }
+
+    /// Confirm that the announced write of exactly `content` LANDED on disk
+    /// (review B1 (2)). File writes are ordered: once a landed write is
+    /// superseded by a different settled content it can never be the next
+    /// settled observation, so the watcher drains its token — a stale token
+    /// must never eat a much later REAL edit that restores the same bytes
+    /// (`git checkout`, editor undo). An announcement never confirmed keeps
+    /// the in-flight semantics (review m3, pinned): it survives interleaving
+    /// edits and suppresses exactly its content when it finally settles.
+    pub fn mark_write_landed(&self, content: &str) {
+        let hash = content_hash(content);
+        let mut tokens = lock_tokens(&self.expected);
+        if let Some(token) = tokens.iter_mut().rev().find(|t| t.hash == hash) {
+            token.landed = true;
+        }
     }
 
     /// Release a banked expected-write token for exactly `content` (review
@@ -145,7 +181,15 @@ impl ConfigWatchHandle {
     /// to carry the same content. Returns whether a token was released.
     #[must_use = "whether a token was actually released is diagnostic; ignore it explicitly"]
     pub fn release_write(&self, content: &str) -> bool {
-        self.consume_expected_for(content)
+        let hash = content_hash(content);
+        let mut tokens = lock_tokens(&self.expected);
+        match tokens.iter().position(|t| t.hash == hash) {
+            Some(index) => {
+                tokens.remove(index);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Stop the watcher (it exits on its next poll tick and marks the
@@ -154,25 +198,38 @@ impl ConfigWatchHandle {
         self.stop.store(true, Ordering::Release);
     }
 
-    /// Consume the banked token matching `text`'s content, if one exists.
+    /// Consume the banked token matching `text`'s content, if one exists —
+    /// together with every OLDER banked token (review B1 (2)): writes are
+    /// ordered, so announcements older than this settled write were
+    /// superseded by it and must never eat a later real edit.
     fn consume_expected_for(&self, text: &str) -> bool {
         let hash = content_hash(text);
         let mut tokens = lock_tokens(&self.expected);
-        match tokens.iter().position(|t| *t == hash) {
+        match tokens.iter().position(|t| t.hash == hash) {
             Some(index) => {
-                tokens.remove(index);
+                tokens.drain(..=index);
                 true
             }
             None => false,
         }
+    }
+
+    /// Drain every LANDED token (review B1 (2)): called when a settled
+    /// observation matches no banked announcement — an announcement whose
+    /// write already landed was necessarily superseded by this settled
+    /// content (writes are ordered), so its token is stale. Unlanded
+    /// announcements (writes still in flight) are kept (review m3, pinned).
+    fn drain_landed(&self) {
+        let mut tokens = lock_tokens(&self.expected);
+        tokens.retain(|t| !t.landed);
     }
 }
 
 /// Lock the token queue, recovering from a poisoned lock (a panicked banker
 /// must not wedge the watcher).
 fn lock_tokens(
-    tokens: &std::sync::Mutex<std::collections::VecDeque<u64>>,
-) -> std::sync::MutexGuard<'_, std::collections::VecDeque<u64>> {
+    tokens: &std::sync::Mutex<std::collections::VecDeque<ExpectedToken>>,
+) -> std::sync::MutexGuard<'_, std::collections::VecDeque<ExpectedToken>> {
     match tokens.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -184,8 +241,19 @@ fn lock_tokens(
 /// to the watched path, so the watcher adopts exactly that write as its new
 /// baseline instead of re-applying it. The token is content-paired (review
 /// m3): an unrelated external edit landing first is still applied normally.
+/// Pair with [`confirm_server_write`] on success or
+/// [`ConfigWatchHandle::release_write`] on failure.
 pub fn expect_server_write(handle: &ConfigWatchHandle, content: &str) {
     handle.expect_write(content);
+}
+
+/// Confirm a previously announced server-side write of exactly `content`
+/// landed on disk (review B1 (2)): call this immediately after the atomic
+/// write succeeds, so a token whose write is later superseded by a different
+/// settled content is drained instead of lingering to eat a future real edit
+/// carrying the same bytes.
+pub fn confirm_server_write(handle: &ConfigWatchHandle, content: &str) {
+    handle.mark_write_landed(content);
 }
 
 /// A stable in-process hash of a write's content (`DefaultHasher` — this is a
@@ -399,6 +467,13 @@ async fn watch_loop(
             }
             continue;
         }
+        // This settled content matches no banked announcement: any
+        // announcement whose write already LANDED was superseded by it
+        // (writes are ordered) — drain those tokens so a stale one can never
+        // eat a later real edit carrying the same bytes (review B1 (2)).
+        // Unlanded announcements (writes still in flight) survive
+        // (review m3, pinned).
+        handle.drain_landed();
         if last_observed.as_deref() == Some(text.as_str()) {
             // Review m4: the CONTENT is unchanged — a touch/identical rewrite
             // or, under `start = "resume"`, the unchanged boot file observed
