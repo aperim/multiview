@@ -505,6 +505,13 @@ impl NodeConfig {
             placement: None,
             audio: None,
             routing: None,
+            // The node's own `timing.link_offset_ms` is the DEV-C2
+            // RECEIVER-side frame-chooser knob (recorded above, not yet
+            // consumed — see the module doc); the engine document's
+            // `[timing]` block is the DEV-C1 OUTBOUND presentation-epoch
+            // policy. They are distinct surfaces, so the lowering leaves the
+            // outbound block absent (the engine's documented default).
+            timing: None,
         };
         lowered.validate()?;
         Ok(lowered)
