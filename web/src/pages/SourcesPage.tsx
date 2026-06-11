@@ -533,9 +533,11 @@ export function SourcesPage(): JSX.Element {
               and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a
               full engine run. NDI, YouTube and AES67 sources — and every kind
               on a software run — are stored and go live via config export +
-              restart. Deleting any source removes it from the running engine
-              immediately. Each save response declares which applied
-              (X-Multiview-Apply: live or restart); the save toast echoes it.
+              restart. One gap: a network source added or edited live picks up
+              its closed captions only after the next restart. Deleting any
+              source removes it from the running engine immediately. Each save
+              response declares which applied (X-Multiview-Apply: live or
+              restart); the save toast echoes it.
             </Trans>
           }
         />

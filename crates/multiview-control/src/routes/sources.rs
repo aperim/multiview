@@ -185,7 +185,7 @@ pub(crate) async fn get_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
-            (status = 201, description = "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary — synthetic kinds (bars/solid/clock) on every run, network/file kinds (rtsp/hls/ts/srt/rtmp/file) on a full-engine run — `restart` otherwise (ndi/youtube/aes67, or a run without the decoder; ADR-W018).", body = crate::resource_store::Resource),
+            (status = 201, description = "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary — synthetic kinds (bars/solid/clock) on every run, network/file kinds (rtsp/hls/ts/srt/rtmp/file) on a full-engine run — `restart` otherwise (ndi/youtube/aes67, or a run without the decoder; ADR-W018). One live-apply gap: a live-added network source's closed captions attach at the next restart (ADR-W018 §4).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 422, description = "The body is not a valid source document (detail names the field path).", body = crate::problem::Problem),
@@ -229,7 +229,7 @@ pub(crate) async fn create_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
-            (status = 200, description = "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary (synthetic kinds on every run; network/file kinds on a full-engine run — an edit swaps the producer behind the same tile store), `restart` otherwise (ADR-W018).", body = crate::resource_store::Resource),
+            (status = 200, description = "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary (synthetic kinds on every run; network/file kinds on a full-engine run — an edit swaps the producer behind the same tile store), `restart` otherwise (ADR-W018). One live-apply gap: a network source edited live reads closed captions only after the next restart (ADR-W018 §4).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 404, description = "No source with that id.", body = crate::problem::Problem),

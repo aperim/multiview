@@ -337,7 +337,7 @@ msgstr "About probes and alarms"
 
 #: src/pages/docs/FeaturesPage.tsx:53
 #: src/pages/SourcesPage.tsx:513
-#: src/pages/SourcesPage.tsx:600
+#: src/pages/SourcesPage.tsx:602
 msgid "About source transports"
 msgstr "About source transports"
 
@@ -606,7 +606,7 @@ msgstr "Appearance and language preferences."
 msgid "Apple"
 msgstr "Apple"
 
-#: src/pages/SourcesPage.tsx:546
+#: src/pages/SourcesPage.tsx:548
 msgid "Applied to the running engine immediately (the response declared live apply)."
 msgstr "Applied to the running engine immediately (the response declared live apply)."
 
@@ -1585,7 +1585,7 @@ msgstr "DVB teletext page"
 msgid "e.g. black-cam-1"
 msgstr "e.g. black-cam-1"
 
-#: src/pages/SourcesPage.tsx:577
+#: src/pages/SourcesPage.tsx:579
 msgid "e.g. cam-north"
 msgstr "e.g. cam-north"
 
@@ -2192,7 +2192,7 @@ msgstr "Idempotency"
 #: src/pages/ProbesPage.tsx:520
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
-#: src/pages/SourcesPage.tsx:573
+#: src/pages/SourcesPage.tsx:575
 #: src/pages/TallyPage.tsx:364
 msgid "Identifier"
 msgstr "Identifier"
@@ -2294,7 +2294,7 @@ msgstr "Jitter buffer"
 #: src/pages/ProbesPage.tsx:419
 #: src/pages/ProbesPage.tsx:542
 #: src/pages/SourcesPage.tsx:457
-#: src/pages/SourcesPage.tsx:594
+#: src/pages/SourcesPage.tsx:596
 msgid "Kind"
 msgstr "Kind"
 
@@ -2781,7 +2781,7 @@ msgstr "Mute on the program mix (route {row})"
 #: src/pages/ProbesPage.tsx:532
 #: src/pages/SalvosPage.tsx:210
 #: src/pages/SourcesPage.tsx:452
-#: src/pages/SourcesPage.tsx:585
+#: src/pages/SourcesPage.tsx:587
 #: src/pages/TallyPage.tsx:241
 msgid "Name"
 msgstr "Name"
@@ -3403,7 +3403,7 @@ msgstr "Remove row"
 msgid "Removed from the store. The running engine is unchanged until a config export + restart."
 msgstr "Removed from the store. The running engine is unchanged until a config export + restart."
 
-#: src/pages/SourcesPage.tsx:553
+#: src/pages/SourcesPage.tsx:555
 msgid "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
 msgstr "Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed."
 
@@ -3598,8 +3598,12 @@ msgid "Saved as {0}. Restart Multiview with this file to apply stored changes."
 msgstr "Saved as {0}. Restart Multiview with this file to apply stored changes."
 
 #: src/pages/SourcesPage.tsx:530
-msgid "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
-msgstr "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
+#~ msgid "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
+#~ msgstr "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
+
+#: src/pages/SourcesPage.tsx:530
+msgid "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. One gap: a network source added or edited live picks up its closed captions only after the next restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
+msgstr "Saves apply to the running engine immediately where it can ingest the kind: synthetic sources (bars, solid colour, clock) always, and network/file sources (RTSP, HLS, TS, SRT, RTMP, file) on a full engine run. NDI, YouTube and AES67 sources — and every kind on a software run — are stored and go live via config export + restart. One gap: a network source added or edited live picks up its closed captions only after the next restart. Deleting any source removes it from the running engine immediately. Each save response declares which applied (X-Multiview-Apply: live or restart); the save toast echoes it."
 
 #: src/layout/components/GridLayoutEditor.tsx:268
 #: src/layout/components/LayoutEditor.tsx:189
@@ -3820,11 +3824,11 @@ msgstr "Stored. It goes live via config export + restart; the running engine is 
 #~ msgid "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
 #~ msgstr "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
 
-#: src/pages/SourcesPage.tsx:548
+#: src/pages/SourcesPage.tsx:550
 msgid "Stored. The running engine cannot apply this kind live on this run; it goes live via config export + restart."
 msgstr "Stored. The running engine cannot apply this kind live on this run; it goes live via config export + restart."
 
-#: src/pages/SourcesPage.tsx:550
+#: src/pages/SourcesPage.tsx:552
 msgid "Stored. The save response declared no apply semantics; it goes live at the latest via config export + restart."
 msgstr "Stored. The save response declared no apply semantics; it goes live at the latest via config export + restart."
 
