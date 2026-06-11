@@ -225,8 +225,7 @@ fn a_netlink_receive_error_requests_a_recovery_reprobe() {
         Duration::from_millis(500),
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !(flag_a.is_requested() && flag_b.is_requested())
-        && std::time::Instant::now() < deadline
+    while !(flag_a.is_requested() && flag_b.is_requested()) && std::time::Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }

@@ -111,7 +111,9 @@ async fn a_control_less_node_run_composites_the_configured_on_loss_slate_not_bla
         gpu_pin: None,
         audio: None,
     }];
-    lowered.validate().expect("the HLS-swapped document validates");
+    lowered
+        .validate()
+        .expect("the HLS-swapped document validates");
 
     let mut pipeline = Pipeline::build(&lowered).expect("builds");
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
