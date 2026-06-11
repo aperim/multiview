@@ -95,6 +95,14 @@ struct Rig {
 /// stores from it, start the warning ingest, and spawn the watcher at the
 /// fast test poll.
 fn rig(doc: &str) -> Rig {
+    rig_with(doc, 64, |_| {})
+}
+
+/// [`rig`] with a chosen command-bus `capacity` and a `boot_window` hook that
+/// runs AFTER the baseline document is loaded but BEFORE the watcher is
+/// spawned — exactly the real boot window between `load_validated` in
+/// `run_run` and `serve_control_plane`'s spawn (ADR-W020 review M2).
+fn rig_with(doc: &str, capacity: usize, boot_window: impl FnOnce(&std::path::Path)) -> Rig {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("multiview.toml");
     std::fs::write(&path, doc).expect("write boot config");
@@ -102,7 +110,7 @@ fn rig(doc: &str) -> Rig {
     config.validate().expect("boot config validates");
 
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
-    let (sender, commands) = command_bus(64);
+    let (sender, commands) = command_bus(capacity);
     let warnings: Arc<dyn WarningRepository> = Arc::new(InMemoryWarningStore::new());
     tokio::spawn(run_warning_ingest(
         publisher.subscribe(),
@@ -116,6 +124,8 @@ fn rig(doc: &str) -> Rig {
         Arc::new(ApiKeyStore::new(b"watch-test-pepper".to_vec())),
     )
     .with_seeded_resources(seeded);
+
+    boot_window(&path);
 
     let handle = spawn_watch(
         path.clone(),
@@ -521,15 +531,15 @@ async fn an_atomic_rename_is_detected() {
     r.handle.stop();
 }
 
-/// `expect_write()` suppresses exactly one reload (the promote-to-boot flow
-/// writes the file server-side and must not re-trigger), while a LATER
-/// external edit still applies against the adopted baseline.
+/// `expect_write(content)` suppresses exactly one reload of that content (the
+/// promote-to-boot flow writes the file server-side and must not re-trigger),
+/// while a LATER external edit still applies against the adopted baseline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expect_write_suppresses_one_reload_then_watching_resumes() {
     let mut r = rig(INITIAL_DOC);
 
-    r.handle.expect_write();
     let promoted = INITIAL_DOC.replace("#101418", "#303438");
+    r.handle.expect_write(&promoted);
     std::fs::write(&r.path, &promoted).expect("server-side write");
 
     // Several polls elapse: the expected write is adopted silently.
@@ -563,6 +573,202 @@ async fn expect_write_suppresses_one_reload_then_watching_resumes() {
             .iter()
             .any(|c| matches!(c, Command::UpsertSource { source, .. } if source.id == "in_a")),
         "the later external edit must apply, got {drained:?}"
+    );
+    r.handle.stop();
+}
+
+/// REVIEW M1 (the shed corner): a valid edit whose engine command is SHED on
+/// a full bus must NOT advance the baseline or claim "applied" — the status
+/// records a partial-apply rejection, an interim health warning is raised,
+/// and the watcher RE-APPLIES idempotently on a later poll once the bus
+/// drains; the warning then clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shed_apply_is_retried_and_never_claims_applied() {
+    // A capacity-1 bus, pre-filled with a dummy command so the watcher's
+    // UpsertSource submission is shed (Full).
+    let mut r = rig_with(INITIAL_DOC, 1, |_| {});
+    r.state
+        .commands
+        .try_submit(Command::Start {
+            op: multiview_control::OperationId::new(),
+        })
+        .expect("fill the capacity-1 bus");
+
+    std::fs::write(&r.path, INITIAL_DOC.replace("#101418", "#f0f0f0")).expect("rewrite config");
+
+    // The shed attempt is surfaced: a partial-apply rejection naming the shed
+    // (NOT a claimed apply) + an interim health warning.
+    assert!(
+        wait_until(SETTLE, || {
+            r.state
+                .config_watch
+                .snapshot()
+                .last_rejected
+                .is_some_and(|stamp| stamp.detail.contains("shed"))
+        })
+        .await,
+        "a shed submission must record a partial-apply rejection naming the shed"
+    );
+    assert_eq!(
+        applied_count(&r.state),
+        0,
+        "the status must never claim applied while a command was shed"
+    );
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "a shed apply raises the interim apply-incomplete warning"
+    );
+
+    // Drain the bus (the dummy goes away): the watcher's retry now lands.
+    let first = r.commands.try_drain();
+    assert!(
+        first
+            .iter()
+            .any(|c| matches!(c, Command::Start { .. })),
+        "the dummy filled the bus, got {first:?}"
+    );
+    assert!(
+        wait_until(SETTLE, || applied_count(&r.state) >= 1).await,
+        "the shed edit must be re-applied once the bus drains"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained
+            .iter()
+            .any(|c| matches!(c, Command::UpsertSource { source, .. } if source.id == "in_a")),
+        "the retried apply must submit the shed UpsertSource, got {drained:?}"
+    );
+    assert!(
+        wait_until(SETTLE, || !has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "a completed retry clears the apply-incomplete warning"
+    );
+    r.handle.stop();
+}
+
+/// REVIEW M2 (the startup window): an edit landing between the boot-time
+/// config load and the watcher spawn must be DETECTED and applied — never
+/// silently adopted as the baseline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edit_in_the_boot_window_is_applied_not_adopted() {
+    // The boot_window hook writes the edit AFTER the baseline was loaded but
+    // BEFORE the watcher spawns — the exact run_run → serve_control_plane gap.
+    let mut r = rig_with(INITIAL_DOC, 64, |path| {
+        std::fs::write(path, INITIAL_DOC.replace("#101418", "#f0f0f0"))
+            .expect("edit in the boot window");
+    });
+
+    assert!(
+        wait_until(SETTLE, || applied_count(&r.state) >= 1).await,
+        "an edit landing in the boot window must be applied, not adopted"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained
+            .iter()
+            .any(|c| matches!(c, Command::UpsertSource { source, .. } if source.id == "in_a")),
+        "the boot-window edit must ride the UpsertSource machinery, got {drained:?}"
+    );
+    r.handle.stop();
+}
+
+/// REVIEW m2: stopping the watcher (or its task dying) must flip the
+/// watch-status to inactive — the UI must never show "Watching" for a dead
+/// watcher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_the_watcher_marks_the_status_inactive() {
+    let r = rig(INITIAL_DOC);
+    assert!(
+        r.state.config_watch.snapshot().active,
+        "the spawned watcher reports active"
+    );
+    r.handle.stop();
+    assert!(
+        wait_until(SETTLE, || !r.state.config_watch.snapshot().active).await,
+        "a stopped watcher must mark the watch-status inactive"
+    );
+}
+
+/// REVIEW m3: an expect_write token is paired with the CONTENT the server
+/// will write — a banked token must not eat a REAL external edit that lands
+/// first; the expected content is still suppressed when it arrives later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_banked_expect_token_does_not_eat_a_real_external_edit() {
+    let mut r = rig(INITIAL_DOC);
+
+    // The server banks a token for content it has NOT written yet.
+    let promoted = INITIAL_DOC.replace("#101418", "#303438");
+    r.handle.expect_write(&promoted);
+
+    // A REAL external edit (different content) lands first: it must APPLY.
+    std::fs::write(&r.path, INITIAL_DOC.replace("#101418", "#f0f0f0")).expect("external edit");
+    assert!(
+        wait_until(SETTLE, || applied_count(&r.state) >= 1).await,
+        "a banked token must not suppress a real external edit"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained
+            .iter()
+            .any(|c| matches!(c, Command::UpsertSource { source, .. } if source.id == "in_a")),
+        "the external edit must ride the UpsertSource machinery, got {drained:?}"
+    );
+
+    // The promoted content arrives later: the banked token suppresses exactly
+    // that write (no second apply, no commands).
+    std::fs::write(&r.path, &promoted).expect("server-side write");
+    tokio::time::sleep(TEST_POLL * 8).await;
+    assert_eq!(
+        applied_count(&r.state),
+        1,
+        "the expected content must be adopted silently when it finally lands"
+    );
+    assert!(
+        r.commands.try_drain().is_empty(),
+        "the expected content must enqueue nothing"
+    );
+    r.handle.stop();
+}
+
+/// REVIEW m5: a latched `config-file-invalid` warning (here: the file went
+/// missing) must CLEAR when the file comes back at the already-applied
+/// content (rename away, then rename back) — the invalid condition resolved
+/// even though no new content needs applying.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_away_and_back_clears_the_latched_invalid_warning() {
+    let r = rig(INITIAL_DOC);
+    let parked = r.path.with_extension("toml.parked");
+
+    std::fs::rename(&r.path, &parked).expect("rename the config away");
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-invalid"
+        ))
+        .await,
+        "a persistently missing config file raises config-file-invalid"
+    );
+
+    std::fs::rename(&parked, &r.path).expect("rename the config back");
+    assert!(
+        wait_until(SETTLE, || !has_active_warning(
+            &r.warnings,
+            "config-file-invalid"
+        ))
+        .await,
+        "the warning must clear when the file is back at the applied content"
+    );
+    assert_eq!(
+        applied_count(&r.state),
+        0,
+        "coming back unchanged applies nothing"
     );
     r.handle.stop();
 }

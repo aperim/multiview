@@ -160,3 +160,45 @@ fn diff_sources(running: &MultiviewConfig, next: &MultiviewConfig) -> Vec<Source
     }
     changes
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{backstop_unrecognized, ConfigDiff};
+
+    /// REVIEW m1 backstop: if the per-section comparison ever reports an
+    /// EMPTY diff for two documents that are NOT equal (a future field missed
+    /// by a partial compare — normally impossible: `between` destructures the
+    /// config exhaustively, so a new field is a compile error), the backstop
+    /// must surface a named "unrecognized" restart section rather than let
+    /// the change vanish silently.
+    #[test]
+    fn an_empty_diff_for_unequal_documents_reports_unrecognized() {
+        let mut diff = ConfigDiff::default();
+        assert!(diff.is_empty());
+        backstop_unrecognized(&mut diff, false);
+        assert!(
+            diff.changed_sections.contains("unrecognized"),
+            "unequal documents with an empty diff must surface an unrecognized section"
+        );
+        assert!(!diff.is_empty());
+    }
+
+    /// The backstop never fires for genuinely identical documents, and never
+    /// touches a non-empty diff.
+    #[test]
+    fn the_backstop_is_inert_for_equal_documents_and_nonempty_diffs() {
+        let mut diff = ConfigDiff::default();
+        backstop_unrecognized(&mut diff, true);
+        assert!(diff.is_empty(), "equal documents stay an empty diff");
+
+        let mut nonempty = ConfigDiff::default();
+        nonempty.changed_sections.insert("outputs");
+        backstop_unrecognized(&mut nonempty, false);
+        assert!(
+            !nonempty.changed_sections.contains("unrecognized"),
+            "a non-empty diff already carries the change; no backstop entry"
+        );
+    }
+}
