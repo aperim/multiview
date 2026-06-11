@@ -98,6 +98,9 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::licence::get_licence,
         crate::routes::licence::install_lease,
         crate::routes::licence::get_challenge,
+        crate::routes::mesh::get_status,
+        crate::routes::mesh::set_relay,
+        crate::routes::mesh::list_peers,
         crate::routes::salvos::list_salvos,
         crate::routes::salvos::put_salvo,
         crate::routes::salvos::arm_salvo,
@@ -205,6 +208,15 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::openapi_schemas::EnforcementLevelDoc,
         crate::openapi_schemas::LeaseDoc,
         crate::openapi_schemas::LeaseInstalledDoc,
+        // Local mesh (Conspect, CONSPECT-3a / ADR-0051): the always-on
+        // discovery + relay status, the relay opt-in request body, and the
+        // untrusted discovered-peer inventory. The Doc mirrors match the
+        // multiview-mesh serde shapes (pinned byte-for-byte by tests/mesh.rs).
+        crate::routes::mesh::RelaySetRequest,
+        crate::openapi_schemas::DiscoveryModeDoc,
+        crate::openapi_schemas::MeshRoleDoc,
+        crate::openapi_schemas::MeshStatusDoc,
+        crate::openapi_schemas::MeshPeerDoc,
         crate::openapi_schemas::AlarmKindDoc,
         crate::openapi_schemas::AlarmScopeDoc,
         crate::openapi_schemas::AckStateDoc,
@@ -272,6 +284,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         (name = "alarms", description = "Monitoring alarms: list + acknowledge"),
         (name = "health", description = "Health warnings: active capability mismatches + remediation (read-only)"),
         (name = "licence", description = "Local licence (Conspect): the computed licence resource + ladder (enforcement is data), lease install, and the salted challenge export. All-local; never off air."),
+        (name = "mesh", description = "Local mesh (Conspect): always-on mDNS discovery status (no off switch), the relay opt-in toggle, and the untrusted discovered-peer inventory. Control-plane only; never back-pressures the engine."),
         (name = "salvos", description = "Salvo definitions + arm/take/cancel"),
         (name = "routing", description = "Per-stream crosspoint routing: classify (plan) + apply (take)"),
         (name = "tally", description = "Tally state, profiles, and manual override"),
@@ -359,6 +372,12 @@ impl ApiDoc {
             ("GET", "/api/v1/licence"),
             ("POST", "/api/v1/licence/lease"),
             ("GET", "/api/v1/licence/challenge"),
+            // Local mesh (Conspect, CONSPECT-3a / ADR-0051): always-on discovery
+            // status (GET-only — no off switch, the spec's locked row), the relay
+            // opt-in toggle, and the untrusted discovered-peer inventory.
+            ("GET", "/api/v1/mesh/status"),
+            ("PUT", "/api/v1/mesh/relay"),
+            ("GET", "/api/v1/mesh/peers"),
             ("GET", "/api/v1/salvos"),
             ("GET", "/api/v1/salvos/{id}"),
             ("PUT", "/api/v1/salvos/{id}"),

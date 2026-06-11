@@ -14,6 +14,7 @@ use multiview_engine::EnginePublisher;
 use multiview_events::Event;
 use multiview_licence::verify::PinnedKey;
 use multiview_licence::{ChallengeFile, LeaseStore};
+use multiview_mesh::MeshState;
 
 use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
 use crate::audio_routing::AudioRoutingStore;
@@ -482,6 +483,14 @@ pub struct AppState {
     /// only; it can never back-pressure the engine or take a program off air
     /// (invariant #1/#10). The default is empty + unpinned.
     pub licence: LicenceState,
+    /// The local-mesh discovery/relay plane (Conspect, ADR-0051): the untrusted
+    /// discovered-peer inventory, the relay opt-in toggle, and the computed mesh
+    /// role the `/api/v1/mesh/*` routes render + toggle. The binary wires the same
+    /// `Arc<MeshState>` the always-on announce/browse loop maintains, so the
+    /// endpoints serve live discovery state. Control-plane only (an `RwLock` over a
+    /// bounded inventory, no engine handle) — it can never back-pressure the engine
+    /// (invariant #10). The default is an empty, relay-declined state.
+    pub mesh: Arc<MeshState>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -547,6 +556,10 @@ impl AppState {
             // unlicensed data and the install path refuses until the binary
             // pins an issuer key + wires a store (CONSPECT-10). Never off air.
             licence: LicenceState::default(),
+            // Empty mesh state by default: always-on discovery with no peers yet
+            // and relay declined. The binary swaps in the shared store the
+            // announce/browse loop maintains. Control-plane only (invariant #10).
+            mesh: Arc::new(MeshState::new()),
         }
     }
 
@@ -558,6 +571,17 @@ impl AppState {
     #[must_use]
     pub fn with_licence(mut self, licence: LicenceState) -> Self {
         self.licence = licence;
+        self
+    }
+
+    /// Wire the local-mesh plane (Conspect, ADR-0051): the shared
+    /// [`MeshState`](multiview_mesh::MeshState) the always-on announce/browse loop
+    /// maintains, so `/api/v1/mesh/*` serves live discovery state. The binary
+    /// passes the same `Arc` it spawns the loop with; tests inject a pre-seeded
+    /// store. Control-plane only (invariant #10).
+    #[must_use]
+    pub fn with_mesh(mut self, mesh: Arc<MeshState>) -> Self {
+        self.mesh = mesh;
         self
     }
 

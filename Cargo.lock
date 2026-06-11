@@ -2947,6 +2947,7 @@ dependencies = [
  "multiview-engine",
  "multiview-events",
  "multiview-licence",
+ "multiview-mesh",
  "multiview-preview",
  "multiview-telemetry",
  "proptest",

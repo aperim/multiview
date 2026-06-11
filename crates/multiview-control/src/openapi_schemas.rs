@@ -1744,3 +1744,89 @@ pub struct LeaseInstalledDoc {
     /// The instant the installed lease term expires (RFC 3339).
     pub valid_to: String,
 }
+
+/// `OpenAPI` mirror of [`multiview_mesh::DiscoveryMode`] (Conspect, ADR-0051 §2).
+///
+/// Serde-equivalent: a unit enum rendered `snake_case`. There is exactly **one**
+/// value — `always_on` — and no way to set any other: discovery runs whenever the
+/// account plane runs (the spec's *locked* row, no off switch exists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryModeDoc {
+    /// Discovery is always on (the only value).
+    AlwaysOn,
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::MeshRole`] (Conspect, ADR-0051 §4).
+///
+/// Serde-equivalent: **internally tagged** on `kind` (`direct`/`relay`/`leaf`,
+/// kebab) — never untagged (conventions §5). The `leaf` variant carries the `via`
+/// peer (a salted-digest hex id) it leafs its heartbeat through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MeshRoleDoc {
+    /// Own internet path; not relaying for neighbours.
+    Direct,
+    /// Online and opted-in to relay an offline neighbour's heartbeat.
+    Relay,
+    /// Offline; leafing through an adopted relaying neighbour.
+    Leaf {
+        /// The peer this machine relays its heartbeat through (salted-digest hex
+        /// id — never a raw identifier).
+        via: String,
+    },
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::MeshStatus`] — the always-on mesh
+/// discovery + relay summary `GET /api/v1/mesh/status` (and the `PUT
+/// /api/v1/mesh/relay` reply) renders.
+///
+/// Serde-equivalent to the real status (pinned byte-for-byte by a round-trip test
+/// in `tests/mesh.rs`). The mesh crate carries no `utoipa` dependency, so this
+/// module owns the `OpenAPI` contract. Discovery is always-on (no off switch);
+/// `via` is present only when the role is `leaf`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct MeshStatusDoc {
+    /// Discovery is always-on (the only value; no off switch exists).
+    pub discovery: DiscoveryModeDoc,
+    /// Whether this machine relays neighbours' heartbeats (the opt-in toggle).
+    pub relay_enabled: bool,
+    /// The computed mesh role (`direct`/`relay`/`leaf`).
+    pub role: MeshRoleDoc,
+    /// The peer this machine leafs through, present only when the role is `leaf`
+    /// (a salted-digest hex id).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub via: Option<String>,
+    /// How many peers are in the untrusted discovered-peer inventory.
+    pub peers_count: usize,
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::Peer`] — a single entry in the untrusted
+/// discovered-peer inventory `GET /api/v1/mesh/peers` returns.
+///
+/// Serde-equivalent to the real peer. The `key` is the salted-digest **hex** id
+/// (64 chars, never a raw identifier — brief §8); `name` is present only once the
+/// operator has confirm-adopted + named the peer; `last_seen` is whole seconds;
+/// `relaying_for_us` is an operator-set adoption flag, never auto (the peer is
+/// **untrusted** until explicitly confirm-adopted — ADR-0041 doctrine).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct MeshPeerDoc {
+    /// The peer's salted-digest id (64-char lowercase hex; never a raw identifier).
+    pub key: String,
+    /// An operator-assigned name, present only once the peer is adopted + named.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    /// Whether the peer advertised itself as claimed (observed from the announce).
+    pub claimed: bool,
+    /// The whole-seconds monotonic instant the peer was last seen.
+    pub last_seen: u64,
+    /// Whether THIS machine relays for the peer — set only by explicit operator
+    /// confirm-adopt, never by observation (untrusted inventory).
+    pub relaying_for_us: bool,
+}

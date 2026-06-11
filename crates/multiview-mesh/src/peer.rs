@@ -44,10 +44,34 @@ pub const PEER_DIGEST_LEN: usize = 32;
 /// different salts cannot correlate a peer across them. The key renders as
 /// lowercase hex for the API surface ([`PeerKey::as_hex`]) — still never a raw
 /// identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+///
+/// **Wire shape:** serialises as the lowercase-hex string (64 chars), not a raw
+/// byte array — the id every API surface (`GET /api/v1/mesh/peers`, the `via`
+/// in `GET /api/v1/mesh/status`) renders and adoption addresses. The `Serialize`/
+/// `Deserialize` impls go through [`PeerKey::as_hex`]/[`PeerKey::from_hex`] so the
+/// JSON shape is the stable, human-meaningful hex id, never `[171, 171, …]`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeerKey {
     digest: [u8; PEER_DIGEST_LEN],
+}
+
+impl Serialize for PeerKey {
+    /// Serialise as the lowercase-hex id (the stable API surface; never a raw
+    /// byte array).
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for PeerKey {
+    /// Parse from the 64-char lowercase-hex id, the inverse of the `Serialize`
+    /// impl. A malformed id is a typed deserialisation error (never a panic).
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let hex = String::deserialize(deserializer)?;
+        Self::from_hex(&hex).ok_or_else(|| {
+            serde::de::Error::custom("a peer key must be exactly 64 lowercase-hex characters")
+        })
+    }
 }
 
 impl PeerKey {
