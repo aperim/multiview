@@ -1,4 +1,4 @@
-//! sd_notify protocol tests (DEV-B5 / ADR-0045): the dependency-free systemd
+//! `sd_notify` protocol tests (DEV-B5 / ADR-0045): the dependency-free systemd
 //! readiness/watchdog datagram protocol — message encoding (exact bytes),
 //! `WATCHDOG_USEC`/`WATCHDOG_PID` parsing, the tick-gated watchdog liveness
 //! gate, and real `SOCK_DGRAM` delivery to a path (and, on Linux, abstract)
@@ -14,7 +14,7 @@ use std::os::unix::net::UnixDatagram;
 use std::time::Duration;
 
 use multiview_cli::sdnotify::{
-    encode_states, watchdog_interval_from, NotifyState, Notifier, WatchdogGate,
+    encode_states, watchdog_interval_from, Notifier, NotifyState, WatchdogGate,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,10 @@ fn encode_ready_is_the_exact_protocol_line() {
 
 #[test]
 fn encode_joins_states_with_newlines() {
-    let bytes = encode_states(&[NotifyState::Ready, NotifyState::Status("node up: 1 head lit")]);
+    let bytes = encode_states(&[
+        NotifyState::Ready,
+        NotifyState::Status("node up: 1 head lit"),
+    ]);
     assert_eq!(bytes, b"READY=1\nSTATUS=node up: 1 head lit".to_vec());
 }
 
@@ -61,7 +64,7 @@ fn watchdog_interval_halves_the_usec_budget() {
     // systemd's own guidance: ping at half WatchdogSec.
     assert_eq!(
         watchdog_interval_from(Some("3000000"), None, 42),
-        Some(Duration::from_micros(1_500_000))
+        Some(Duration::from_millis(1_500))
     );
 }
 
@@ -69,7 +72,7 @@ fn watchdog_interval_halves_the_usec_budget() {
 fn watchdog_interval_respects_the_pid_filter() {
     assert_eq!(
         watchdog_interval_from(Some("3000000"), Some("42"), 42),
-        Some(Duration::from_micros(1_500_000)),
+        Some(Duration::from_millis(1_500)),
         "a matching WATCHDOG_PID keeps the watchdog"
     );
     assert_eq!(
@@ -93,12 +96,18 @@ fn watchdog_interval_rejects_zero_and_garbage() {
 #[test]
 fn watchdog_gate_pings_only_while_ticks_advance() {
     let mut gate = WatchdogGate::new();
-    assert!(!gate.should_ping(0), "no tick yet: no ping (startup is\
-        covered by the unit's start timeout, not the watchdog)");
+    assert!(
+        !gate.should_ping(0),
+        "no tick yet: no ping (startup is\
+        covered by the unit's start timeout, not the watchdog)"
+    );
     assert!(gate.should_ping(1), "the clock advanced: ping");
     assert!(gate.should_ping(60), "still advancing: ping");
-    assert!(!gate.should_ping(60), "the clock stalled: WITHHOLD the ping\
-        so systemd restarts the node (invariant #1's enforcement)");
+    assert!(
+        !gate.should_ping(60),
+        "the clock stalled: WITHHOLD the ping\
+        so systemd restarts the node (invariant #1's enforcement)"
+    );
     assert!(gate.should_ping(61), "advancing again: ping resumes");
 }
 
@@ -131,8 +140,8 @@ fn notifier_sends_to_an_abstract_socket() {
     // An abstract-namespace name unique to this test run; NOTIFY_SOCKET
     // encodes it with a leading '@'.
     let name = format!("multiview-sdnotify-test-{}", std::process::id());
-    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
-        .expect("abstract addr");
+    let addr =
+        std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract addr");
     let receiver = UnixDatagram::bind_addr(&addr).expect("bind abstract receiver");
     receiver
         .set_read_timeout(Some(Duration::from_secs(5)))

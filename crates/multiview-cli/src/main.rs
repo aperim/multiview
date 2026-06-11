@@ -205,12 +205,25 @@ async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
          reconciliation until the DEV-C2 epoch frame chooser)"
     );
 
+    // The systemd integration (ADR-0045 deployment): best-effort sd_notify —
+    // inert without NOTIFY_SOCKET (containers, dev shells).
+    let notifier = multiview_cli::sdnotify::Notifier::from_env();
+
     let report = if let Some(ticks) = args.tick_budget(cadence) {
         tracing::info!(ticks, "node run: bounded");
-        pipeline.run_for(ticks).await.context("bounded node run")?
+        // A bounded run is a diagnostic/soak: READY up front (the daemon path
+        // gates READY on the first frame boundary instead), STOPPING on the
+        // way out even when the run errors.
+        notifier.notify(&[
+            multiview_cli::sdnotify::NotifyState::Ready,
+            multiview_cli::sdnotify::NotifyState::Status("bounded node run"),
+        ]);
+        let outcome = pipeline.run_for(ticks).await.context("bounded node run");
+        notifier.notify(&[multiview_cli::sdnotify::NotifyState::Stopping]);
+        outcome?
     } else {
         tracing::info!("node run: until Ctrl-C/SIGTERM");
-        run_node_until_signalled(pipeline, cadence).await?
+        run_node_until_signalled(pipeline, cadence, notifier).await?
     };
     println!("{}", report.render());
     Ok(if report.faltered {
@@ -246,6 +259,7 @@ async fn run_node(_args: NodeArgs) -> anyhow::Result<ExitCode> {
 async fn run_node_until_signalled(
     pipeline: multiview_cli::pipeline::Pipeline,
     cadence: multiview_core::time::Rational,
+    notifier: multiview_cli::sdnotify::Notifier,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
@@ -277,7 +291,45 @@ async fn run_node_until_signalled(
     // the DEV-B5 sd_notify watchdog samples the same counter so liveness pings
     // reflect the output clock actually advancing — invariant #1's signal).
     let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let drain: ControlDrain = Box::new(|_d: &mut CompositorDrive<Nv12Image>| {});
+
+    // READY=1 at the FIRST frame boundary: the drain runs on the output-clock
+    // loop once per tick, so its first invocation means the display heads are
+    // lit (the modeset precedes the loop) and the clock is emitting. The
+    // notify is one non-blocking datagram syscall, sent exactly once
+    // (invariants #1 + #10 hold).
+    let ready_notifier = notifier.clone();
+    let mut ready_sent = false;
+    let drain: ControlDrain = Box::new(move |_d: &mut CompositorDrive<Nv12Image>| {
+        if !ready_sent {
+            ready_sent = true;
+            ready_notifier.notify(&[
+                multiview_cli::sdnotify::NotifyState::Ready,
+                multiview_cli::sdnotify::NotifyState::Status(
+                    "node presenting: output clock running, display head(s) lit",
+                ),
+            ]);
+            tracing::info!("node: first frame boundary reached (sd_notify READY)");
+        }
+    });
+
+    // The tick-gated watchdog (DEV-B5): pings WATCHDOG=1 at half the
+    // WatchdogSec budget while the output clock advances; a stalled clock
+    // withholds the ping so systemd restarts the node (invariant #1's
+    // enforcement). No WATCHDOG_USEC (or an inert notifier) ⇒ no thread.
+    let watchdog_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = if notifier.is_active() {
+        multiview_cli::sdnotify::watchdog_interval_from_env().and_then(|interval| {
+            spawn_node_watchdog(
+                notifier.clone(),
+                interval,
+                Arc::clone(&ticks),
+                Arc::clone(&watchdog_stop),
+            )
+        })
+    } else {
+        None
+    };
+
     let report = drive_main_program_in_set(
         pipeline,
         cadence,
@@ -287,9 +339,70 @@ async fn run_node_until_signalled(
         drain,
         ticks,
     )
-    .await?;
+    .await;
+
+    watchdog_stop.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(handle) = watchdog {
+        if handle.join().is_err() {
+            tracing::warn!("the node watchdog thread panicked during the run");
+        }
+    }
+    notifier.notify(&[multiview_cli::sdnotify::NotifyState::Stopping]);
     signal.abort();
-    Ok(report)
+    report
+}
+
+/// Spawn the node's sd_notify watchdog thread: every `interval` (half the
+/// systemd `WatchdogSec` budget) it samples the live output-tick counter and
+/// sends `WATCHDOG=1` **only when the counter advanced** since the previous
+/// check ([`multiview_cli::sdnotify::WatchdogGate`]). Returns [`None`] when
+/// the thread cannot be spawned (logged; the node still runs — the watchdog
+/// is an enforcement aid, not a dependency).
+#[cfg(all(feature = "ffmpeg", feature = "display-kms"))]
+fn spawn_node_watchdog(
+    notifier: multiview_cli::sdnotify::Notifier,
+    interval: std::time::Duration,
+    ticks: Arc<std::sync::atomic::AtomicU64>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    use std::sync::atomic::Ordering;
+    let spawned = std::thread::Builder::new()
+        .name("node-sd-watchdog".to_owned())
+        .spawn(move || {
+            let mut gate = multiview_cli::sdnotify::WatchdogGate::new();
+            // Sleep in short slices so a stop request is honoured promptly
+            // even under a multi-second ping interval.
+            let slice = std::time::Duration::from_millis(250).min(interval);
+            let mut next = std::time::Instant::now() + interval;
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(slice);
+                if std::time::Instant::now() < next {
+                    continue;
+                }
+                next += interval;
+                if gate.should_ping(ticks.load(Ordering::Relaxed)) {
+                    notifier.notify(&[multiview_cli::sdnotify::NotifyState::Watchdog]);
+                } else {
+                    tracing::warn!(
+                        "output clock has not advanced this watchdog interval: withholding \
+                         the systemd WATCHDOG ping (systemd will restart the node)"
+                    );
+                }
+            }
+        });
+    match spawned {
+        Ok(handle) => {
+            tracing::info!(
+                interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
+                "systemd watchdog active (tick-gated pings at half WatchdogSec)"
+            );
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not spawn the sd_notify watchdog thread");
+            None
+        }
+    }
 }
 
 /// The per-run-path inputs the control plane is wired from: the live preview

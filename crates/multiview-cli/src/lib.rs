@@ -56,6 +56,10 @@ pub mod node;
 pub mod outputs;
 pub mod preview;
 pub mod run;
+/// Dependency-free systemd sd_notify (DEV-B5 / ADR-0045): READY/STOPPING/
+/// STATUS + the tick-gated WATCHDOG over one non-blocking `AF_UNIX`
+/// `SOCK_DGRAM` — best-effort, inert without `NOTIFY_SOCKET`.
+pub mod sdnotify;
 pub mod system_metrics;
 pub mod validate;
 
