@@ -1235,6 +1235,149 @@ async fn a_failed_promote_write_releases_the_banked_expect_token() {
     watch.stop();
 }
 
+/// Review B1 interleaving (2) — the superseded-token leak: a promote whose
+/// write LANDED is superseded by an external edit E before it ever settles
+/// (the watcher only observes E — interleaving (1) applies it). The banked
+/// token is now stale: a much later REAL edit that restores exactly the
+/// promoted bytes (a `git checkout`, an editor undo) must be APPLIED, never
+/// eaten by the leftover token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_superseded_promote_token_does_not_eat_a_later_real_edit() {
+    let mut r = rig(BOOT_DOC);
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    recolor_in_a(&r, "#c0c0c0").await;
+    let _ = r.commands.try_drain();
+
+    // The promote WRITES W successfully: token banked AND the write landed.
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let w_text = std::fs::read_to_string(&r.boot_path).expect("read the promoted W");
+
+    // E supersedes W inside the settle window; the watcher's first settled
+    // observation is E and it applies (interleaving (1), pinned elsewhere).
+    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#123456"))
+        .expect("external edit superseding the promote");
+    assert!(
+        wait_until(SETTLE, || {
+            r.state.config_watch.snapshot().applied_count >= 1
+        })
+        .await,
+        "the superseding edit must apply"
+    );
+    let _ = r.commands.try_drain();
+
+    // A later REAL edit restores exactly the promoted bytes. The stale token
+    // (whose write was superseded without ever settling) must not eat it.
+    std::fs::write(&r.boot_path, &w_text).expect("real edit restoring the promoted bytes");
+    assert!(
+        wait_until(SETTLE, || {
+            r.state.config_watch.snapshot().applied_count >= 2
+        })
+        .await,
+        "the byte-identical REAL edit must be APPLIED, not eaten by the stale token"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            Command::UpsertSource { source, .. } if source.id == "in_a"
+        )),
+        "restoring the promoted bytes must ride UpsertSource, got {drained:?}"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#c0c0c0"),
+        "the stores must follow the restored content"
+    );
+    watch.stop();
+}
+
+/// Review M4 follow-on — the retry after a shed revert must actually re-send
+/// the shed engine commands and complete: a shed revert applies nothing
+/// durable (the stores stay at the running state), so a retry once the bus
+/// drains re-runs the whole revert — UpsertSource rides, the stores resync
+/// to Loaded, the response claims the revert, and the
+/// `config-file-apply-incomplete` warning clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retried_revert_re_sends_the_shed_engine_commands() {
+    let mut r = rig_with(BOOT_DOC, 1);
+    // The live edit's own UpsertSource fills the capacity-1 bus.
+    recolor_in_a(&r, "#f0f0f0").await;
+
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/revert-to-start", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = body_json(resp).await;
+    assert_eq!(body["reverted"], serde_json::json!(false));
+    assert!(body["shed"].as_u64().is_some_and(|n| n >= 1));
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "the shed revert raises the incomplete warning"
+    );
+
+    // The engine catches up: draining the bus frees its capacity.
+    let _ = r.commands.try_drain();
+
+    // RETRY: it must re-send the shed engine command and complete.
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/revert-to-start", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["reverted"],
+        serde_json::json!(true),
+        "the retry must complete the revert, got {body:?}"
+    );
+    assert_eq!(body["shed"], serde_json::json!(0));
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| match c {
+            Command::UpsertSource { source, .. } => {
+                source.id == "in_a"
+                    && serde_json::to_value(source.as_ref())
+                        .ok()
+                        .and_then(|v| v.get("color").and_then(|c| c.as_str().map(str::to_owned)))
+                        .as_deref()
+                        == Some("#101418")
+            }
+            _ => false,
+        }),
+        "the retried revert must re-send the shed UpsertSource with the Loaded colour, got {drained:?}"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the completed retry resyncs the stores to Loaded"
+    );
+    assert!(
+        wait_until(SETTLE, || !has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "the completed retry clears the incomplete warning"
+    );
+}
+
 /// Review M4 — revert 202 honesty under a full bus: when engine command(s)
 /// are SHED the response must NOT claim a full revert (`reverted: false`,
 /// `shed` count surfaced, partial summary) and the

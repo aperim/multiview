@@ -177,6 +177,41 @@ fn resume_splices_storeless_sections_from_the_boot_file() {
     );
 }
 
+/// Review M1 fallback branch: when the splice produces a document that no
+/// longer validates (here: boot's salvo recalls a source the persisted
+/// Running state no longer carries), the run falls back to the boot document
+/// with the reason surfaced — never starts from an invalid combination.
+#[test]
+fn resume_falls_back_when_the_splice_does_not_validate() {
+    let boot = format!(
+        "{}[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n[[salvos]]\nid = \"s1\"\n\
+         [[salvos.sources]]\ncell = \"cell_a\"\ninput_id = \"in_b\"\n",
+        boot_doc("start = \"resume\"")
+    );
+    // The previous run removed in_b live; its persisted Running state has
+    // neither in_b nor any salvos (machine-written, valid on its own).
+    let active = boot_doc("start = \"resume\"").replace("#101418", "#f0f0f0");
+    let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
+
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
+    assert!(
+        !start.resumed,
+        "a splice that does not validate must not resume"
+    );
+    let reason = start
+        .resume_fallback
+        .expect("the fallback reason is surfaced");
+    assert!(
+        reason.contains("validate"),
+        "the reason should name the validation failure, got: {reason}"
+    );
+    assert_eq!(
+        in_a_color(&start.running).as_deref(),
+        Some("#101418"),
+        "Running must fall back to the boot document"
+    );
+}
+
 /// The default policy is `boot`: an existing `active.toml` is IGNORED unless
 /// the boot file opts into resume.
 #[test]
