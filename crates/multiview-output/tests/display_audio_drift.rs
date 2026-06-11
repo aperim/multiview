@@ -2,18 +2,19 @@
 //! (DEV-B4 adversarial review MAJOR-1: the skew half of the three-clock servo
 //! must be CLOSED-loop).
 //!
-//! These sims drive the REAL `AudioFifo` + `BufferServo` + `AdaptiveResampler`
-//! + `SkewTracker` exactly as `steady_state_drain` does — same per-iteration
-//! order (observe skew → servo on the fill → reciprocal ratio → pop a
-//! 480-frame quantum → resample → write → account) — with a **device crystal
-//! that drifts in ppm against the display/flip clock**, fast-forwarded over
-//! simulated hours. The resampler ratio must be able to *cancel* the measured
-//! skew (content-position accounting): if the tracker instead accumulates
-//! post-resample device frames, the device consumes those at its own crystal
-//! rate regardless of the ratio, the measurement is uncontrollable, the servo
-//! integrates into the clamp, the FIFO pegs, and the loop late-drops forever.
-//! A frozen flip clock (wedged display) must degrade to fill-only control —
-//! never peg the clamp or storm drops — and re-anchor when flips resume.
+//! These sims drive the REAL `AudioFifo` plus `BufferServo`,
+//! `AdaptiveResampler` and `SkewTracker` exactly as `steady_state_drain` does
+//! — same per-iteration order (observe skew → servo on the fill → reciprocal
+//! ratio → pop a 480-frame quantum → resample → write → account) — with a
+//! **device crystal that drifts in ppm against the display/flip clock**,
+//! fast-forwarded over simulated hours. The resampler ratio must be able to
+//! *cancel* the measured skew (content-position accounting): if the tracker
+//! instead accumulates post-resample device frames, the device consumes those
+//! at its own crystal rate regardless of the ratio, the measurement is
+//! uncontrollable, the servo integrates into the clamp, the FIFO pegs, and
+//! the loop late-drops forever. A frozen flip clock (wedged display) must
+//! degrade to fill-only control — never peg the clamp or storm drops — and
+//! re-anchor when flips resume.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -29,9 +30,9 @@
 use multiview_audio::{AdaptiveResampler, AudioBlock, AudioFormat, ChannelLayout, RatioPpm};
 use multiview_output::display::audio::{drain_ratio, AudioFifo, BufferServo, SkewTracker};
 
-/// The drain quantum the real loop pops per iteration (sink.rs DRAIN_FRAMES).
+/// The drain quantum the real loop pops per iteration (sink.rs `DRAIN_FRAMES`).
 const QUANTUM: usize = 480;
-/// The FIFO capacity the pipeline configures (DISPLAY_AUDIO_FIFO_FRAMES).
+/// The FIFO capacity the pipeline configures (`DISPLAY_AUDIO_FIFO_FRAMES`).
 const CAPACITY: usize = 8_192;
 /// The canonical content/device sample rate.
 const RATE: f64 = 48_000.0;
@@ -249,8 +250,9 @@ fn skew_fed_to_the_servo_is_clamped_to_the_input_band() {
     // k_skew * 50 ppm — it can never peg the +-5000 ppm ratio clamp on its own.
     let mut tracker = SkewTracker::new();
     tracker.on_written(4_800, RatioPpm::ZERO);
-    let _ = tracker.skew_input(1_000_000_000, None, RatioPpm::ZERO, 48_000); // anchor
-    // Ten seconds of audio against one second of scanout: raw ~9 000 ms.
+    // Anchor, then ten seconds of audio against one second of scanout:
+    // raw ~9 000 ms.
+    let _ = tracker.skew_input(1_000_000_000, None, RatioPpm::ZERO, 48_000);
     tracker.on_written(480_000, RatioPpm::ZERO);
     let s = tracker.skew_input(2_000_000_000, None, RatioPpm::ZERO, 48_000);
     assert!(

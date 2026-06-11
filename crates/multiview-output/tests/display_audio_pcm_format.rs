@@ -47,10 +47,7 @@ fn negotiation_prefers_float_then_widest_integer_first() {
     );
     // No S32 => S24 before S16.
     assert_eq!(
-        negotiate_sample_format(|f| matches!(
-            f,
-            PcmSampleFormat::S24 | PcmSampleFormat::S16
-        )),
+        negotiate_sample_format(|f| matches!(f, PcmSampleFormat::S24 | PcmSampleFormat::S16)),
         Some(PcmSampleFormat::S24)
     );
     // A device offering none of them cannot be driven.
@@ -80,6 +77,12 @@ fn f32_to_s24_is_sample_accurate() {
 fn f32_to_s32_is_sample_accurate() {
     assert_eq!(
         f32_to_s32(&[0.0, 1.0, -1.0, 0.5, -4.0]),
-        vec![0, 2_147_483_647, -2_147_483_647, 1_073_741_824, -2_147_483_647]
+        vec![
+            0,
+            2_147_483_647,
+            -2_147_483_647,
+            1_073_741_824,
+            -2_147_483_647
+        ]
     );
 }
