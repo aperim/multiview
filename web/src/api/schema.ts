@@ -1336,6 +1336,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sync-groups/{id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/sync-groups/{id}/status` — the read-only runtime status of a
+         *     sync group (role: read): the **weakest-member** achieved tier (never
+         *     over-claimed), per-member measured skew, and drift-alarm state.
+         * @description Reads the latest-wins [`SyncGroupRuntime`](crate::devices::sync_runtime::SyncGroupRuntime)
+         *     (never persisted/exported). A freshly-seeded group with no measurements yet
+         *     honestly reports the `none` tier. `404` when the id is not a configured group.
+         */
+        get: operations["get_sync_group_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync-groups/{id}/test-pattern": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/sync-groups/{id}/test-pattern` — emit a burnt-in frame counter
+         *     + binary flash on the group's members for visual sync verification (role:
+         *     write; `202` + operation id).
+         * @description Publishes a `sync.test-pattern` lifecycle event the member nodes consume to
+         *     drive their overlay machinery (the existing `Identify` flash + a frame
+         *     counter); the engine program output is untouched (invariant #1/#10). The
+         *     request body is optional — sensible defaults apply.
+         */
+        post: operations["test_pattern_sync_group"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tally": {
         parameters: {
             query?: never;
@@ -3538,6 +3587,64 @@ export interface components {
             /** @description Human-friendly name. */
             name: string;
         };
+        /**
+         * @description `OpenAPI` mirror of [`crate::devices::sync_runtime::SyncGroupStatus`]
+         *     (DEV-C3, ADR-M010): the read-only runtime status
+         *     `GET /sync-groups/{id}/status` returns — the **weakest-member** achieved
+         *     tier, per-member measured skew, and drift-alarm state. Derived telemetry
+         *     only; never persisted or exported.
+         */
+        SyncGroupStatusDoc: {
+            /**
+             * @description The tier the group actually achieves — the weakest member's, never
+             *     over-claimed (`frame-accurate` / `bounded-skew` / `none`).
+             */
+            achieved: string;
+            /** @description Whether any member's drift alarm is currently raised. */
+            drift_alarm: boolean;
+            /** @description The sync-group id. */
+            group: string;
+            /**
+             * @description The single member that limits the tier, where exactly one member is the
+             *     weakest while others are strictly better.
+             */
+            limited_by?: string | null;
+            /**
+             * Format: float
+             * @description The worst measured member skew across the group (milliseconds).
+             */
+            measured_skew_ms?: number | null;
+            /** @description Each member's runtime status. */
+            members: components["schemas"]["SyncMemberStatusDoc"][];
+            /**
+             * Format: int32
+             * @description The configured drift-alarm threshold (milliseconds).
+             */
+            target_skew_ms: number;
+        };
+        /**
+         * @description The request body for `POST /api/v1/sync-groups/{id}/test-pattern` (DEV-C3):
+         *     emit a burnt-in frame counter + binary flash on the group's members for
+         *     visual sync verification. All fields optional; sensible defaults apply.
+         */
+        SyncGroupTestPatternInputDoc: {
+            /**
+             * Format: int32
+             * @description How long the test pattern stays active (seconds, `1..=300`). Defaults to
+             *     10 s.
+             */
+            duration_s?: number | null;
+            /**
+             * Format: int32
+             * @description The binary-flash period (milliseconds). Defaults to 1000 ms (1 Hz flash).
+             */
+            flash_period_ms?: number | null;
+            /**
+             * @description Whether to burn in a per-frame counter (for OCR cross-comparison).
+             *     Defaults to `true`.
+             */
+            frame_counter?: boolean | null;
+        };
         /** @description `OpenAPI` mirror of one sync-group member (`{ device, offset_ms }`). */
         SyncMemberDoc: {
             /** @description The member device id (must resolve to a declared device). */
@@ -3547,6 +3654,32 @@ export interface components {
              * @description The per-member presentation offset trim in milliseconds (defaults to 0).
              */
             offset_ms?: number;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`crate::devices::sync_runtime::SyncMemberStatus`]
+         *     (DEV-C3, ADR-M010): one member's read-only runtime status inside a
+         *     [`SyncGroupStatusDoc`]. Runtime telemetry only — never persisted/exported.
+         */
+        SyncMemberStatusDoc: {
+            /**
+             * @description The tier this member achieves right now (`frame-accurate` /
+             *     `bounded-skew` / `none`); absent until a clock quality is seen.
+             */
+            achieved?: string | null;
+            /** @description The member device id. */
+            device: string;
+            /** @description Whether this member's drift alarm is currently raised. */
+            drift_alarm: boolean;
+            /**
+             * Format: float
+             * @description The member's measured presentation skew (milliseconds), where measured.
+             */
+            measured_skew_ms?: number | null;
+            /**
+             * Format: int32
+             * @description The configured per-member presentation offset trim (milliseconds).
+             */
+            offset_ms: number;
         };
         /** @description The `200` body of a hot (Class-1 / Reset-lite) `/routing/{kind}/take`. */
         TakeApplied: {
@@ -8275,6 +8408,110 @@ export interface operations {
                 };
             };
             /** @description Not authorized to measure. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No sync group with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_sync_group_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sync-group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The group's runtime status (weakest-member tier, per-member skew, drift state). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncGroupStatusDoc"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read this group. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No sync group with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_pattern_sync_group: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sync-group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SyncGroupTestPatternInputDoc"];
+            };
+        };
+        responses: {
+            /** @description Test pattern accepted; the members render it. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
             403: {
                 headers: {
                     [name: string]: unknown;

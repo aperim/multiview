@@ -486,6 +486,13 @@ fn build_messages_device_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/DeviceSync" }
     }));
+    map.insert("SyncGroupTestPattern".to_owned(), json!({
+        "name": "SyncGroupTestPattern",
+        "title": "Sync-group test pattern triggered",
+        "summary": "A burnt-in frame counter + binary flash was triggered on a sync group's members for visual sync verification (sync.test-pattern on topic `devices`; lossless lifecycle lane).",
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/SyncGroupTestPattern" }
+    }));
     map.insert("DeviceDiscovered".to_owned(), json!({
         "name": "DeviceDiscovered",
         "title": "Untrusted discovery-inventory row",
@@ -658,6 +665,7 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/DeviceMode" },
         { "$ref": "#/components/schemas/DeviceError" },
         { "$ref": "#/components/schemas/DeviceSync" },
+        { "$ref": "#/components/schemas/SyncGroupTestPattern" },
         { "$ref": "#/components/schemas/DeviceDiscovered" },
         { "$ref": "#/components/schemas/CastSessionStarted" },
         { "$ref": "#/components/schemas/CastSessionRemoved" },
@@ -744,6 +752,7 @@ fn device_event_schemas() -> Value {
         "DeviceError": device_error_schema(),
         "SyncChange": sync_change_schema(),
         "DeviceSync": device_sync_schema(),
+        "SyncGroupTestPattern": sync_group_test_pattern_schema(),
         "DeviceDiscovered": device_discovered_schema(),
         "CastSessionStarted": cast_session_started_schema(),
         "CastSessionRemoved": cast_session_removed_schema(),
@@ -1576,6 +1585,27 @@ fn sync_group_skew_schema() -> Value {
             "group": { "type": "string", "description": "The sync group measured." },
             "achieved": { "$ref": "#/components/schemas/AchievedSync" },
             "measured_skew_ms": { "type": "number", "format": "float", "description": "The worst measured member skew (ms), where a measurement exists." }
+        }
+    })
+}
+
+fn sync_group_test_pattern_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `sync.test-pattern` (DEV-C3 / ADR-M010): the group's member ",
+            "devices should render a burnt-in frame-index counter + a binary flash for ",
+            "the configured duration so the displays can be photographed/OCR'd to ",
+            "confirm they present the same frame index (frame-accuracy acceptance). A ",
+            "control-plane lifecycle event the nodes consume to drive their overlay ",
+            "machinery; the engine program output is untouched.",
+        ),
+        "required": ["group", "duration_ms", "frame_counter", "flash_period_ms"],
+        "properties": {
+            "group": { "type": "string", "description": "The sync group whose members display the test pattern." },
+            "duration_ms": { "type": "integer", "format": "int64", "minimum": 0, "description": "How long the test pattern stays active (ms)." },
+            "frame_counter": { "type": "boolean", "description": "Whether a per-frame burnt-in counter is rendered (for OCR cross-comparison across displays)." },
+            "flash_period_ms": { "type": "integer", "format": "int64", "minimum": 0, "description": "Binary-flash period (ms): on for the first half, off for the second." }
         }
     })
 }

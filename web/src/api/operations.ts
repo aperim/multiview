@@ -124,21 +124,28 @@ function isAcceptedBody(value: unknown): value is AcceptedBody {
  * `POST` a long-running command and return its `202 Accepted` body. The
  * command's outcome arrives later on the realtime stream, never in this response
  * (conventions section 6).
+ *
+ * An optional JSON `body` is sent when the command takes parameters (e.g. the
+ * sync-group test-pattern duration/flash); when omitted no body or
+ * content-type is set, so a body-less command verb is unchanged.
  */
 export async function submitOperation(
   path: string,
   options: RequestOptions = {},
+  body?: unknown,
 ): Promise<AcceptedBody> {
+  const hasBody = body !== undefined;
   const response = await fetch(apiUrl(options, path), {
     method: 'POST',
-    headers: buildHeaders(options, false),
+    headers: buildHeaders(options, hasBody),
+    ...(hasBody ? { body: JSON.stringify(body) } : {}),
   });
   if (!response.ok) {
     throw await readProblem(response);
   }
-  const body: unknown = await response.json();
-  if (!isAcceptedBody(body)) {
+  const responseBody: unknown = await response.json();
+  if (!isAcceptedBody(responseBody)) {
     throw new OperationApiError('The server returned an unexpected command body.');
   }
-  return body;
+  return responseBody;
 }

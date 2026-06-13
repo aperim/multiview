@@ -23,7 +23,14 @@ import { parseDeviceStatus } from '../realtime/envelope';
 import type { DeviceStatus } from '../realtime/generated-types';
 import type { EngineClockRef } from '../realtime/useEngineEvents';
 import { parseDeviceDriver } from './forms';
-import type { DeviceView, SyncGroupView, SyncMemberView, SyncTier } from './types';
+import type {
+  DeviceView,
+  SyncGroupStatusView,
+  SyncGroupView,
+  SyncMemberStatusView,
+  SyncMemberView,
+  SyncTier,
+} from './types';
 
 // --- projections ---------------------------------------------------------------
 
@@ -270,6 +277,122 @@ export async function measureSyncGroup(
   options: RequestOptions = {},
 ): Promise<AcceptedBody> {
   return submitOperation(`/api/v1/sync-groups/${encodeURIComponent(id)}/measure`, options);
+}
+
+/** Parse a wire tier string into a {@link SyncTier}, or `undefined` for any
+ * value the UI does not understand (never an invented tier). */
+function parseSyncTier(value: unknown): SyncTier | undefined {
+  return value === 'frame-accurate' || value === 'bounded-skew' || value === 'none'
+    ? value
+    : undefined;
+}
+
+function numberField(value: Record<string, unknown>, key: string): number | undefined {
+  const v = value[key];
+  return typeof v === 'number' ? v : undefined;
+}
+
+/** Project one wire member-status object into a {@link SyncMemberStatusView}. */
+function parseSyncMemberStatus(value: unknown): SyncMemberStatusView | undefined {
+  if (!isRecord(value) || typeof value.device !== 'string') {
+    return undefined;
+  }
+  return {
+    device: value.device,
+    offsetMs: numberField(value, 'offset_ms') ?? 0,
+    achieved: parseSyncTier(value.achieved),
+    measuredSkewMs: numberField(value, 'measured_skew_ms'),
+    driftAlarm: value.drift_alarm === true,
+  };
+}
+
+/** Project the wire `SyncGroupStatusDoc` into a {@link SyncGroupStatusView}.
+ * Malformed members are dropped; the achieved tier defaults to the safe `none`
+ * under-claim if the server value is unrecognised. */
+function parseSyncGroupStatus(value: unknown): SyncGroupStatusView | undefined {
+  if (!isRecord(value) || typeof value.group !== 'string') {
+    return undefined;
+  }
+  const members: SyncMemberStatusView[] = [];
+  if (Array.isArray(value.members)) {
+    for (const raw of value.members) {
+      const member = parseSyncMemberStatus(raw);
+      if (member !== undefined) {
+        members.push(member);
+      }
+    }
+  }
+  return {
+    group: value.group,
+    targetSkewMs: numberField(value, 'target_skew_ms') ?? 0,
+    achieved: parseSyncTier(value.achieved) ?? 'none',
+    limitedBy: typeof value.limited_by === 'string' ? value.limited_by : undefined,
+    measuredSkewMs: numberField(value, 'measured_skew_ms'),
+    driftAlarm: value.drift_alarm === true,
+    members,
+  };
+}
+
+/**
+ * `GET /api/v1/sync-groups/{id}/status` — the read-only runtime status: the
+ * WEAKEST-member achieved tier (computed by the server, never over-claimed),
+ * per-member measured skew, and drift-alarm state. A `404` (the id is not a
+ * configured group) yields `undefined`, never an invented status.
+ */
+export async function fetchSyncGroupStatus(
+  id: string,
+  options: RequestOptions = {},
+): Promise<SyncGroupStatusView | undefined> {
+  const response = await fetch(
+    apiUrl(options, `/api/v1/sync-groups/${encodeURIComponent(id)}/status`),
+    { method: 'GET', headers: buildHeaders(options, false) },
+  );
+  if (response.status === 404) {
+    return undefined;
+  }
+  if (!response.ok) {
+    throw await readProblem(response);
+  }
+  const body: unknown = await response.json();
+  return parseSyncGroupStatus(body);
+}
+
+/** The optional parameters of the sync-group test-pattern action. */
+export interface TestPatternOptions {
+  /** Active duration in seconds (1–300; server defaults to 10). */
+  readonly durationS?: number;
+  /** Whether to burn in a per-frame counter (server defaults to true). */
+  readonly frameCounter?: boolean;
+  /** Binary-flash period in ms (server defaults to 1000). */
+  readonly flashPeriodMs?: number;
+}
+
+/**
+ * `POST /api/v1/sync-groups/{id}/test-pattern` — emit a burnt-in frame counter
+ * + binary flash on the group's members for visual sync verification (202 +
+ * operation id; the members render it via the `sync.test-pattern` realtime
+ * event). The engine program output is untouched.
+ */
+export async function testPatternSyncGroup(
+  id: string,
+  params: TestPatternOptions = {},
+  options: RequestOptions = {},
+): Promise<AcceptedBody> {
+  const body: Record<string, number | boolean> = {};
+  if (params.durationS !== undefined) {
+    body.duration_s = params.durationS;
+  }
+  if (params.frameCounter !== undefined) {
+    body.frame_counter = params.frameCounter;
+  }
+  if (params.flashPeriodMs !== undefined) {
+    body.flash_period_ms = params.flashPeriodMs;
+  }
+  return submitOperation(
+    `/api/v1/sync-groups/${encodeURIComponent(id)}/test-pattern`,
+    options,
+    body,
+  );
 }
 
 // --- projection endpoints (ADR-M009 facets (a)/(b)) -------------------------------

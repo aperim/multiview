@@ -71,3 +71,48 @@ export interface SyncGroupView {
  * never over-claimed; the MEASURED tier comes from the runtime status lane.
  */
 export type SyncTier = 'frame-accurate' | 'bounded-skew' | 'none';
+
+/**
+ * One member's MEASURED runtime status inside a {@link SyncGroupStatusView}
+ * (DEV-C3): its live achieved tier (capability degraded by clock quality),
+ * measured presentation skew, and drift-alarm state. The server computes these
+ * — the SPA never derives the tier from the driver string.
+ */
+export interface SyncMemberStatusView {
+  /** The member device id. */
+  readonly device: string;
+  /** Configured per-member presentation offset trim (ms). */
+  readonly offsetMs: number;
+  /**
+   * The tier this member achieves right now, or `undefined` until a clock
+   * quality has been observed (honest: nothing measured, nothing claimed).
+   */
+  readonly achieved: SyncTier | undefined;
+  /** The member's measured presentation skew (ms), where measured. */
+  readonly measuredSkewMs: number | undefined;
+  /** Whether this member's drift alarm is currently raised. */
+  readonly driftAlarm: boolean;
+}
+
+/**
+ * A sync group's read-only runtime status (DEV-C3, `GET
+ * /sync-groups/{id}/status`): the WEAKEST-member achieved tier (never
+ * over-claimed), the sole limiting member, the worst measured skew, and the
+ * drift-alarm state. Derived telemetry only — never persisted/exported.
+ */
+export interface SyncGroupStatusView {
+  /** The sync-group id. */
+  readonly group: string;
+  /** The configured drift-alarm threshold (ms). */
+  readonly targetSkewMs: number;
+  /** The tier the group actually achieves — the weakest member's. */
+  readonly achieved: SyncTier;
+  /** The sole member that limits the tier, where exactly one is weakest. */
+  readonly limitedBy: string | undefined;
+  /** The worst measured member skew across the group (ms). */
+  readonly measuredSkewMs: number | undefined;
+  /** Whether any member's drift alarm is currently raised. */
+  readonly driftAlarm: boolean;
+  /** Each member's runtime status. */
+  readonly members: readonly SyncMemberStatusView[];
+}

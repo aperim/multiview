@@ -13,6 +13,10 @@ msgstr ""
 "Language-Team: \n"
 "Plural-Forms: \n"
 
+#: src/pages/SyncGroupsPage.tsx:114
+msgid "—"
+msgstr "—"
+
 #: src/layout/components/CellPropertiesPanel.tsx:120
 msgid "\"No signal\" card"
 msgstr "\"No signal\" card"
@@ -367,7 +371,7 @@ msgstr "A source is an ingest input bound into the multiview by id."
 msgid "A stable id for the registry — referenced by sync groups and config export."
 msgstr "A stable id for the registry — referenced by sync groups and config export."
 
-#: src/pages/SyncGroupsPage.tsx:330
+#: src/pages/SyncGroupsPage.tsx:405
 msgid "A sync group aligns its member devices' presentation; the achieved tier is measured, never assumed."
 msgstr "A sync group aligns its member devices' presentation; the achieved tier is measured, never assumed."
 
@@ -462,11 +466,11 @@ msgid "About source transports"
 msgstr "About source transports"
 
 #: src/pages/docs/DisplayNodesHelpPage.tsx:66
-#: src/pages/SyncGroupsPage.tsx:256
+#: src/pages/SyncGroupsPage.tsx:324
 msgid "About sync tiers"
 msgstr "About sync tiers"
 
-#: src/pages/SyncGroupsPage.tsx:324
+#: src/pages/SyncGroupsPage.tsx:399
 msgid "About synchronized output"
 msgstr "About synchronized output"
 
@@ -499,6 +503,10 @@ msgstr "Accessible editing path: Cells form + Inspector in the editor"
 msgid "Accessible toasts announce via a live region."
 msgstr "Accessible toasts announce via a live region."
 
+#: src/pages/SyncGroupsPage.tsx:323
+msgid "Achieved tier"
+msgstr "Achieved tier"
+
 #: src/pages/DeviceDetailPage.tsx:966
 msgid "achieved tier not measured yet"
 msgstr "achieved tier not measured yet"
@@ -529,7 +537,8 @@ msgstr "Action"
 #: src/pages/ProbesPage.tsx:452
 #: src/pages/SettingsPage.tsx:381
 #: src/pages/SourcesPage.tsx:488
-#: src/pages/SyncGroupsPage.tsx:295
+#: src/pages/SyncGroupsPage.tsx:340
+#: src/pages/SyncGroupsPage.tsx:370
 #: src/pages/TallyPage.tsx:367
 msgid "Actions"
 msgstr "Actions"
@@ -583,7 +592,7 @@ msgstr "Add cell"
 msgid "Add column"
 msgstr "Add column"
 
-#: src/pages/SyncGroupsPage.tsx:193
+#: src/pages/SyncGroupsPage.tsx:240
 msgid "Add member"
 msgstr "Add member"
 
@@ -1091,7 +1100,7 @@ msgstr "Bound to device"
 msgid "Bound to device {0}."
 msgstr "Bound to device {0}."
 
-#: src/pages/SyncGroupsPage.tsx:48
+#: src/pages/SyncGroupsPage.tsx:53
 msgid "Bounded skew"
 msgstr "Bounded skew"
 
@@ -1235,7 +1244,7 @@ msgstr "Cast an HLS rendition the engine already serves to a Google Cast device.
 msgid "Cast device (cast)"
 msgstr "Cast device (cast)"
 
-#: src/pages/SyncGroupsPage.tsx:107
+#: src/pages/SyncGroupsPage.tsx:154
 msgid "Cast devices are never offered: they cannot join a synchronized canvas (Tier D). The group claims the weakest member's tier — never more."
 msgstr "Cast devices are never offered: they cannot join a synchronized canvas (Tier D). The group claims the weakest member's tier — never more."
 
@@ -1381,8 +1390,8 @@ msgid "Chroma subsampling"
 msgstr "Chroma subsampling"
 
 #: src/pages/SyncGroupsPage.tsx:255
-msgid "Claimed tier"
-msgstr "Claimed tier"
+#~ msgid "Claimed tier"
+#~ msgstr "Claimed tier"
 
 #: src/pages/SalvosPage.tsx:213
 msgid "Clauses"
@@ -1556,7 +1565,7 @@ msgstr "Configured output sinks."
 msgid "Configured overlay layers."
 msgstr "Configured overlay layers."
 
-#: src/pages/SyncGroupsPage.tsx:331
+#: src/pages/SyncGroupsPage.tsx:406
 msgid "Configured sync groups."
 msgstr "Configured sync groups."
 
@@ -1722,7 +1731,7 @@ msgstr "Could not load salvos:"
 msgid "Could not load sources:"
 msgstr "Could not load sources:"
 
-#: src/pages/SyncGroupsPage.tsx:334
+#: src/pages/SyncGroupsPage.tsx:409
 msgid "Could not load sync groups:"
 msgstr "Could not load sync groups:"
 
@@ -1747,7 +1756,7 @@ msgid "Could not load the configuration file watch status."
 msgstr "Could not load the configuration file watch status."
 
 #: src/pages/DeviceDetailPage.tsx:982
-#: src/pages/SyncGroupsPage.tsx:221
+#: src/pages/SyncGroupsPage.tsx:272
 msgid "Could not measure"
 msgstr "Could not measure"
 
@@ -1819,6 +1828,10 @@ msgstr "Could not start casting"
 #: src/pages/DevicesPage.tsx:315
 msgid "Could not start the scan"
 msgstr "Could not start the scan"
+
+#: src/pages/SyncGroupsPage.tsx:289
+msgid "Could not start the test pattern"
+msgstr "Could not start the test pattern"
 
 #: src/cast/CastPanel.tsx:99
 msgid "Could not stop the cast"
@@ -2045,7 +2058,7 @@ msgstr "Delete salvo?"
 msgid "Delete source"
 msgstr "Delete source"
 
-#: src/pages/SyncGroupsPage.tsx:301
+#: src/pages/SyncGroupsPage.tsx:376
 msgid "Delete sync group"
 msgstr "Delete sync group"
 
@@ -2108,7 +2121,7 @@ msgstr "Device-reported streams"
 #: src/docs/registry.ts:158
 #: src/pages/DevicesPage.tsx:649
 #: src/pages/docs/ConfigPage.tsx:329
-#: src/pages/SyncGroupsPage.tsx:339
+#: src/pages/SyncGroupsPage.tsx:414
 msgid "Devices"
 msgstr "Devices"
 
@@ -2249,7 +2262,11 @@ msgstr "Drag cancelled."
 msgid "Drag, resize and rotate cells on the canvas, or drop a source from the palette. The same cells are fully editable on the Cells tab without a pointer."
 msgstr "Drag, resize and rotate cells on the canvas, or drop a source from the palette. The same cells are fully editable on the Cells tab without a pointer."
 
-#: src/pages/SyncGroupsPage.tsx:408
+#: src/pages/SyncGroupsPage.tsx:94
+msgid "Drift alarm"
+msgstr "Drift alarm"
+
+#: src/pages/SyncGroupsPage.tsx:483
 msgid "Drift-alarm threshold, 1–10000 ms: a member drifting past this raises a warning alarm."
 msgstr "Drift-alarm threshold, 1–10000 ms: a member drifting past this raises a warning alarm."
 
@@ -2325,7 +2342,7 @@ msgstr "e.g. dev-lounge-tv"
 msgid "e.g. head-0"
 msgstr "e.g. head-0"
 
-#: src/pages/SyncGroupsPage.tsx:383
+#: src/pages/SyncGroupsPage.tsx:458
 msgid "e.g. lobby-wall"
 msgstr "e.g. lobby-wall"
 
@@ -2451,8 +2468,8 @@ msgstr "Edit salvo"
 msgid "Edit source"
 msgstr "Edit source"
 
-#: src/pages/SyncGroupsPage.tsx:300
-#: src/pages/SyncGroupsPage.tsx:329
+#: src/pages/SyncGroupsPage.tsx:375
+#: src/pages/SyncGroupsPage.tsx:404
 msgid "Edit sync group"
 msgstr "Edit sync group"
 
@@ -2732,7 +2749,7 @@ msgstr "Frame rate (rational)"
 msgid "Frame rate must be an exact rational like 30000/1001 — not a decimal."
 msgstr "Frame rate must be an exact rational like 30000/1001 — not a decimal."
 
-#: src/pages/SyncGroupsPage.tsx:46
+#: src/pages/SyncGroupsPage.tsx:51
 msgid "Frame-accurate"
 msgstr "Frame-accurate"
 
@@ -2903,11 +2920,11 @@ msgstr "Green"
 msgid "Grid areas"
 msgstr "Grid areas"
 
-#: src/pages/SyncGroupsPage.tsx:320
+#: src/pages/SyncGroupsPage.tsx:395
 msgid "Group display devices for synchronized presentation, with per-member offset trims and a drift alarm threshold."
 msgstr "Group display devices for synchronized presentation, with per-member offset trims and a drift alarm threshold."
 
-#: src/pages/SyncGroupsPage.tsx:350
+#: src/pages/SyncGroupsPage.tsx:425
 msgid "Groups are stored and exported with the configuration; alignment and drift measurement run against the adopted member devices. Program output is never interrupted by sync changes."
 msgstr "Groups are stored and exported with the configuration; alignment and drift measurement run against the adopted member devices. Program output is never interrupted by sync changes."
 
@@ -3049,7 +3066,7 @@ msgstr "How Multiview works, how to run it, and how to drive it from config-as-c
 msgid "How RTSP, NDI, SRT, RTMP, HLS, MPEG-TS, and file sources carry video — and which one fits which job."
 msgstr "How RTSP, NDI, SRT, RTMP, HLS, MPEG-TS, and file sources carry video — and which one fits which job."
 
-#: src/pages/SyncGroupsPage.tsx:348
+#: src/pages/SyncGroupsPage.tsx:423
 msgid "How sync groups apply"
 msgstr "How sync groups apply"
 
@@ -3079,7 +3096,7 @@ msgstr "Idempotency"
 #: src/pages/SalvosPage.tsx:211
 #: src/pages/SalvosPage.tsx:341
 #: src/pages/SourcesPage.tsx:581
-#: src/pages/SyncGroupsPage.tsx:379
+#: src/pages/SyncGroupsPage.tsx:454
 #: src/pages/TallyPage.tsx:364
 msgid "Identifier"
 msgstr "Identifier"
@@ -3376,9 +3393,14 @@ msgstr "Lifetime (seconds, optional)"
 msgid "Limit detection to a zone (default: the full frame)"
 msgstr "Limit detection to a zone (default: the full frame)"
 
+#. placeholder {0}: status.limitedBy
+#: src/pages/SyncGroupsPage.tsx:87
+msgid "limited by {0}"
+msgstr "limited by {0}"
+
 #: src/pages/SyncGroupsPage.tsx:269
-msgid "limited by {limitedBy}"
-msgstr "limited by {limitedBy}"
+#~ msgid "limited by {limitedBy}"
+#~ msgstr "limited by {limitedBy}"
 
 #: src/pages/docs/concepts/ColorPage.tsx:65
 msgid "Limited content interpreted as full: blacks turn grey, the picture looks <0>washed out and low-contrast</0>."
@@ -3500,7 +3522,7 @@ msgstr "Loading salvos…"
 msgid "Loading sources…"
 msgstr "Loading sources…"
 
-#: src/pages/SyncGroupsPage.tsx:333
+#: src/pages/SyncGroupsPage.tsx:408
 msgid "Loading sync groups…"
 msgstr "Loading sync groups…"
 
@@ -3622,7 +3644,7 @@ msgstr "Matrix"
 msgid "Max true-peak (dBTP)"
 msgstr "Max true-peak (dBTP)"
 
-#: src/pages/SyncGroupsPage.tsx:289
+#: src/pages/SyncGroupsPage.tsx:352
 msgid "Measure"
 msgstr "Measure"
 
@@ -3631,13 +3653,17 @@ msgid "Measure now"
 msgstr "Measure now"
 
 #: src/pages/DeviceDetailPage.tsx:973
-#: src/pages/SyncGroupsPage.tsx:283
+#: src/pages/SyncGroupsPage.tsx:346
 msgid "Measure skew"
 msgstr "Measure skew"
 
 #: src/pages/SyncGroupsPage.tsx:278
-msgid "Measured"
-msgstr "Measured"
+#~ msgid "Measured"
+#~ msgstr "Measured"
+
+#: src/pages/SyncGroupsPage.tsx:333
+msgid "Measured skew"
+msgstr "Measured skew"
 
 #: src/docs/registry.ts:395
 #: src/pages/docs/SyncHelpPage.tsx:84
@@ -3645,7 +3671,7 @@ msgid "Measured, never assumed"
 msgstr "Measured, never assumed"
 
 #: src/pages/DeviceDetailPage.tsx:978
-#: src/pages/SyncGroupsPage.tsx:215
+#: src/pages/SyncGroupsPage.tsx:266
 msgid "Measurement running"
 msgstr "Measurement running"
 
@@ -3658,12 +3684,12 @@ msgid "Medium (~2–5 s)"
 msgstr "Medium (~2–5 s)"
 
 #. placeholder {0}: index + 1
-#: src/pages/SyncGroupsPage.tsx:120
+#: src/pages/SyncGroupsPage.tsx:167
 msgid "Member device {0}"
 msgstr "Member device {0}"
 
-#: src/pages/SyncGroupsPage.tsx:104
-#: src/pages/SyncGroupsPage.tsx:239
+#: src/pages/SyncGroupsPage.tsx:151
+#: src/pages/SyncGroupsPage.tsx:307
 msgid "Members"
 msgstr "Members"
 
@@ -3858,8 +3884,8 @@ msgstr "Mute on the program mix (route {row})"
 #: src/pages/SalvosPage.tsx:210
 #: src/pages/SourcesPage.tsx:453
 #: src/pages/SourcesPage.tsx:593
-#: src/pages/SyncGroupsPage.tsx:234
-#: src/pages/SyncGroupsPage.tsx:391
+#: src/pages/SyncGroupsPage.tsx:302
+#: src/pages/SyncGroupsPage.tsx:466
 #: src/pages/TallyPage.tsx:241
 msgid "Name"
 msgstr "Name"
@@ -3952,8 +3978,8 @@ msgstr "New salvo"
 msgid "New source"
 msgstr "New source"
 
-#: src/pages/SyncGroupsPage.tsx:327
-#: src/pages/SyncGroupsPage.tsx:328
+#: src/pages/SyncGroupsPage.tsx:402
+#: src/pages/SyncGroupsPage.tsx:403
 msgid "New sync group"
 msgstr "New sync group"
 
@@ -4110,7 +4136,7 @@ msgstr "No source"
 msgid "No sources configured."
 msgstr "No sources configured."
 
-#: src/pages/SyncGroupsPage.tsx:332
+#: src/pages/SyncGroupsPage.tsx:407
 msgid "No sync groups configured."
 msgstr "No sync groups configured."
 
@@ -4186,6 +4212,10 @@ msgstr "Not in a sync group."
 msgid "Not in the running engine — no live state. Synthetic, network and file sources join a running full engine when saved; NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr "Not in the running engine — no live state. Synthetic, network and file sources join a running full engine when saved; NDI, YouTube and AES67 sources join after a config export + restart."
 
+#: src/pages/SyncGroupsPage.tsx:78
+msgid "Not measured"
+msgstr "Not measured"
+
 #: src/pages/DeviceDetailPage.tsx:200
 msgid "Not probed yet."
 msgstr "Not probed yet."
@@ -4198,7 +4228,7 @@ msgstr "not started yet"
 msgid "Not static"
 msgstr "Not static"
 
-#: src/pages/SyncGroupsPage.tsx:50
+#: src/pages/SyncGroupsPage.tsx:55
 msgid "Not synchronized"
 msgstr "Not synchronized"
 
@@ -4273,7 +4303,7 @@ msgstr "Off (pinned off)"
 msgid "Offline"
 msgstr "Offline"
 
-#: src/pages/SyncGroupsPage.tsx:144
+#: src/pages/SyncGroupsPage.tsx:191
 msgid "Offset trim (ms)"
 msgstr "Offset trim (ms)"
 
@@ -4326,7 +4356,12 @@ msgid "Open the system metrics page"
 msgstr "Open the system metrics page"
 
 #. placeholder {0}: accepted.operation_id
-#: src/pages/SyncGroupsPage.tsx:216
+#: src/pages/SyncGroupsPage.tsx:284
+msgid "Operation {0}; the group's displays show a frame counter + flash for visual sync verification."
+msgstr "Operation {0}; the group's displays show a frame counter + flash for visual sync verification."
+
+#. placeholder {0}: accepted.operation_id
+#: src/pages/SyncGroupsPage.tsx:267
 msgid "Operation {0}; the measured skew arrives on the realtime stream."
 msgstr "Operation {0}; the measured skew arrives on the realtime stream."
 
@@ -4404,6 +4439,10 @@ msgstr "Outputs"
 #: src/layout/components/SourcePalette.tsx:185
 msgid "Over the layout drop zone."
 msgstr "Over the layout drop zone."
+
+#: src/pages/SyncGroupsPage.tsx:127
+msgid "over the target skew"
+msgstr "over the target skew"
 
 #: src/app/navigation.tsx:41
 #: src/docs/registry.ts:148
@@ -4735,7 +4774,7 @@ msgstr "Remote contribution feeds"
 
 #: src/layout/components/CellsForm.tsx:364
 #: src/layout/components/GridLayoutEditor.tsx:537
-#: src/pages/SyncGroupsPage.tsx:170
+#: src/pages/SyncGroupsPage.tsx:217
 msgid "Remove"
 msgstr "Remove"
 
@@ -4753,7 +4792,7 @@ msgstr "Remove column"
 msgid "Remove device"
 msgstr "Remove device"
 
-#: src/pages/SyncGroupsPage.tsx:161
+#: src/pages/SyncGroupsPage.tsx:208
 msgid "Remove member"
 msgstr "Remove member"
 
@@ -4782,7 +4821,7 @@ msgstr "Removed from the store. The running engine is unchanged until a config e
 msgid "Removed. An analog clock overlay disappears from the running engine immediately (the response header confirms); other kinds change nothing until a config export + restart."
 msgstr "Removed. An analog clock overlay disappears from the running engine immediately (the response header confirms); other kinds change nothing until a config export + restart."
 
-#: src/pages/SyncGroupsPage.tsx:359
+#: src/pages/SyncGroupsPage.tsx:434
 msgid "Removed. Member devices keep running; only the alignment grouping is gone."
 msgstr "Removed. Member devices keep running; only the alignment grouping is gone."
 
@@ -5207,6 +5246,10 @@ msgstr "Severity (X.733)"
 msgid "Show a test notification"
 msgstr "Show a test notification"
 
+#: src/pages/SyncGroupsPage.tsx:357
+msgid "Show test pattern"
+msgstr "Show test pattern"
+
 #: src/pages/SourcesPage.tsx:261
 msgid "Sidecar file (SRT/WebVTT)"
 msgstr "Sidecar file (SRT/WebVTT)"
@@ -5352,7 +5395,7 @@ msgstr "Stored and applied: the device's supervised driver converges it now. Con
 msgid "Stored. Analog clock overlays apply to the running engine immediately; other kinds go live via config export + restart."
 msgstr "Stored. Analog clock overlays apply to the running engine immediately; other kinds go live via config export + restart."
 
-#: src/pages/SyncGroupsPage.tsx:358
+#: src/pages/SyncGroupsPage.tsx:433
 msgid "Stored. Drift is measured against the group's target skew; the achieved tier is reported, never over-claimed."
 msgstr "Stored. Drift is measured against the group's target skew; the achieved tier is reported, never over-claimed."
 
@@ -5449,7 +5492,7 @@ msgstr "Sync group"
 #: src/pages/DevicesPage.tsx:671
 #: src/pages/docs/ConfigPage.tsx:355
 #: src/pages/docs/SyncHelpPage.tsx:68
-#: src/pages/SyncGroupsPage.tsx:317
+#: src/pages/SyncGroupsPage.tsx:392
 msgid "Sync groups"
 msgstr "Sync groups"
 
@@ -5512,11 +5555,11 @@ msgstr "Target"
 msgid "Target mode"
 msgstr "Target mode"
 
-#: src/pages/SyncGroupsPage.tsx:246
+#: src/pages/SyncGroupsPage.tsx:314
 msgid "Target skew"
 msgstr "Target skew"
 
-#: src/pages/SyncGroupsPage.tsx:401
+#: src/pages/SyncGroupsPage.tsx:476
 msgid "Target skew (ms)"
 msgstr "Target skew (ms)"
 
@@ -5538,12 +5581,17 @@ msgid "Test notification"
 msgstr "Test notification"
 
 #: src/pages/DeviceDetailPage.tsx:1030
+#: src/pages/SyncGroupsPage.tsx:363
 msgid "Test pattern"
 msgstr "Test pattern"
 
 #: src/pages/DeviceDetailPage.tsx:1023
 msgid "Test pattern requested"
 msgstr "Test pattern requested"
+
+#: src/pages/SyncGroupsPage.tsx:283
+msgid "Test pattern running"
+msgstr "Test pattern running"
 
 #: src/pages/docs/concepts/TransportsPage.tsx:292
 msgid "Testing, placeholders, layout work"
@@ -5981,7 +6029,7 @@ msgstr "This control plane does not serve config export yet. Update the server t
 msgid "This device is already a member of the group."
 msgstr "This device is already a member of the group."
 
-#: src/pages/SyncGroupsPage.tsx:305
+#: src/pages/SyncGroupsPage.tsx:380
 msgid "this document's shape isn't editable in this UI; it is preserved as authored"
 msgstr "this document's shape isn't editable in this UI; it is preserved as authored"
 

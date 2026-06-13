@@ -48,6 +48,10 @@ pub const ACK_NANOS: i64 = 1_700_000_000_000_000_000;
 /// receiver so a test can drive both sides of the isolation channels.
 pub struct Harness {
     pub router: Router,
+    /// The served control-plane state (cloned from the router's; all `Arc`
+    /// handles), so a test can drive control-plane methods directly (e.g.
+    /// `announce_sync_offsets`) and observe the published events.
+    pub state: AppState,
     pub engine: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     pub commands: CommandReceiver,
     /// The shared alarm store the router reads/writes — also the ingest sink, so
@@ -168,7 +172,8 @@ pub fn harness_customized(
     .with_ack_clock(Arc::new(|| MediaTime::from_nanos(ACK_NANOS)));
     let state = customize(state);
     Harness {
-        router: multiview_control::router(state),
+        router: multiview_control::router(state.clone()),
+        state,
         engine,
         commands: rx,
         alarms,

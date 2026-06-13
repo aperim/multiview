@@ -49,6 +49,8 @@ pub mod enroll;
 pub mod projection;
 pub mod registry;
 pub mod state_machine;
+pub mod sync_drift;
+pub mod sync_runtime;
 pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;

@@ -114,6 +114,21 @@ tempfile = "3"
 name = "pipeline_ingest"
 required-features = ["ffmpeg"]
 
+# DEV-B4 audit: the display-sink teardown must run its blocking stop/join off
+# the async worker. The `pipeline` module (the only place that bundle lives) is
+# `ffmpeg`-gated, so the teardown-isolation test needs the same gate.
+[[test]]
+name = "display_teardown"
+required-features = ["ffmpeg"]
+
+# DEV-B2 audit: scanout affinity must be wired into admission — the display
+# head's connector resolves to its owning GPU and the compositor is placed
+# there, not on the least-loaded GPU. Needs the display-head plan + the
+# `pipeline` module's `scanout_localities` (both `ffmpeg` + `display-kms`).
+[[test]]
+name = "scanout_admission"
+required-features = ["ffmpeg", "display-kms"]
+
 # The node pipeline-wiring test (DEV-B5 / ADR-0045) builds the lowered node
 # document through the standard pipeline (plans only — no hardware) and
 # threads the hotplug polling cadence; it needs the full node feature pair.
@@ -229,7 +244,7 @@ gpu = ["multiview-compositor/wgpu", "dep:wgpu"]
 # skip. The CLI itself adds NO unsafe and stays `forbid(unsafe_code)`. The
 # run wiring lives in the `ffmpeg`-gated pipeline (the only live run path), so
 # a deploy build combines them: `--features nvidia,display-kms` etc.
-display-kms = ["multiview-output/display-kms"]
+display-kms = ["multiview-output/display-kms", "multiview-hal/display-kms"]
 
 # Live node enrollment against a controller (DEV-B6 / ADR-0045 §9): a
 # `multiview node` whose config carries a `[controller]` block generates +

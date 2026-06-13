@@ -11,6 +11,7 @@ import type { UseQueryResult } from '@tanstack/react-query';
 
 import {
   fetchDeviceStatus,
+  fetchSyncGroupStatus,
   listDiscovered,
   listDisplayHeads,
   listOutputTargets,
@@ -24,7 +25,7 @@ import type {
   OutputTargetView,
   SourceCandidateView,
 } from './api';
-import type { DeviceView, SyncGroupView } from './types';
+import type { DeviceView, SyncGroupStatusView, SyncGroupView } from './types';
 import { listResources } from '../resources/api';
 import { resourceKeys } from '../resources/queries';
 import type { ResourceRecord } from '../resources/types';
@@ -55,6 +56,38 @@ export function useSyncGroups(): UseQueryResult<readonly SyncGroupView[]> {
       return records.map(toSyncGroupView);
     },
   });
+}
+
+/** How often the sync-group runtime-status poll refreshes. */
+const SYNC_STATUS_REFETCH_MS = 5_000;
+
+/**
+ * The merged per-group runtime status for `ids` (DEV-C3): the server-computed
+ * WEAKEST-member achieved tier, per-member measured skew, and drift-alarm
+ * state, polled from `GET /sync-groups/{id}/status`. A group with no status
+ * (404 / never seeded) is simply absent — never fabricated.
+ */
+export function useSyncGroupStatuses(
+  ids: readonly string[],
+): Readonly<Record<string, SyncGroupStatusView>> {
+  const results = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: ['sync-groups', 'status', id],
+      queryFn: async (): Promise<SyncGroupStatusView | null> =>
+        (await fetchSyncGroupStatus(id)) ?? null,
+      refetchInterval: SYNC_STATUS_REFETCH_MS,
+      retry: false,
+    })),
+  });
+  // Plain per-render merge (the map is tiny; consumers read fields).
+  const merged: Record<string, SyncGroupStatusView> = {};
+  ids.forEach((id, index) => {
+    const status = results[index]?.data;
+    if (status !== null && status !== undefined) {
+      merged[id] = status;
+    }
+  });
+  return merged;
 }
 
 /**
