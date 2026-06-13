@@ -6709,6 +6709,234 @@
         }
       }
     },
+    "/api/v1/whip/{source_id}": {
+      "post": {
+        "tags": [
+          "whip"
+        ],
+        "summary": "`POST /api/v1/whip/{source_id}` — publish: an SDP offer in, `201` + answer\nSDP + `Location` out (RFC 9725).",
+        "operationId": "whip_publish",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "description": "The webrtc source id to publish to.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "SDP offer",
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Session created; SDP answer in the body, Location at the session resource.",
+            "content": {
+              "application/sdp": {}
+            }
+          },
+          "400": {
+            "description": "Malformed SDP offer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing credentials (the source token or a Write API key).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A credential lacking publish rights.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "The offer shares no supported codec (H.264 + Opus).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A publisher already holds this source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not application/sdp.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No ingest transport available to admit the publisher.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "whip"
+        ],
+        "summary": "`OPTIONS /api/v1/whip/{source_id}` — CORS preflight; advertises\n`Accept-Post: application/sdp`. Unauthenticated by browser construction.",
+        "operationId": "whip_options",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "description": "The webrtc source id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Preflight; Accept-Post: application/sdp."
+          }
+        }
+      }
+    },
+    "/api/v1/whip/{source_id}/sessions/{session_id}": {
+      "delete": {
+        "tags": [
+          "whip"
+        ],
+        "summary": "`DELETE /api/v1/whip/{source_id}/sessions/{session_id}` — tear the session\ndown. `200` (idempotent within the tombstone window), `404` for an unknown id.",
+        "operationId": "whip_delete",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "description": "The webrtc source id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHIP session id from the publish Location.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session released (idempotent within the tombstone window)."
+          },
+          "401": {
+            "description": "Missing credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A credential lacking rights.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such live/known session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "whip"
+        ],
+        "summary": "`PATCH /api/v1/whip/{source_id}/sessions/{session_id}` — **`405`** (vanilla\nICE; trickle / ICE restart unimplemented, ADR-T014 §2). `Allow: DELETE,\nOPTIONS`.",
+        "operationId": "whip_patch",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "description": "The webrtc source id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHIP session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "405": {
+            "description": "Trickle ICE / ICE restart are not supported (vanilla ICE)."
+          }
+        }
+      }
+    },
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
       "patch": {
         "tags": [
