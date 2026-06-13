@@ -175,17 +175,24 @@ pub struct WhepEgress {
     host_candidate: Option<SocketAddr>,
     /// Relay candidates (TURN-allocated) to register on each session, with the
     /// local socket the relayed traffic egresses from (ADR-0048 §5.1).
-    relay_candidates: Vec<(SocketAddr, SocketAddr)>,
+    ///
+    /// Interior-mutable: a TURN `Allocate` completes asynchronously, *after* the
+    /// transport is constructed and shared (`Arc<WhepEgress>`), so the driver's
+    /// in-crate TURN client publishes each learned relay at runtime through
+    /// [`Self::learn_relay`]. Every subsequently-negotiated session offers the
+    /// current set as `typ relay` candidates — the operator's NAT-traversal path.
+    relay_candidates: Mutex<Vec<(SocketAddr, SocketAddr)>>,
     next_id: Mutex<u64>,
 }
 
 impl std::fmt::Debug for WhepEgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let live = self.sessions.lock().map_or(0, |s| s.len());
+        let relays = self.relay_candidates.lock().map_or(0, |r| r.len());
         f.debug_struct("WhepEgress")
             .field("sessions", &live)
             .field("host_candidate", &self.host_candidate)
-            .field("relay_candidates", &self.relay_candidates.len())
+            .field("relay_candidates", &relays)
             .finish_non_exhaustive()
     }
 }
@@ -204,7 +211,7 @@ impl WhepEgress {
         Self {
             sessions: Mutex::new(HashMap::new()),
             host_candidate: None,
-            relay_candidates: Vec::new(),
+            relay_candidates: Mutex::new(Vec::new()),
             next_id: Mutex::new(0),
         }
     }
@@ -216,15 +223,16 @@ impl WhepEgress {
         Self {
             sessions: Mutex::new(HashMap::new()),
             host_candidate: Some(host),
-            relay_candidates: Vec::new(),
+            relay_candidates: Mutex::new(Vec::new()),
             next_id: Mutex::new(0),
         }
     }
 
-    /// Build an egress transport with a host candidate **and** TURN relay
+    /// Build an egress transport with a host candidate **and** seeded TURN relay
     /// candidates (the operator's NAT-traversal path, ADR-0048 §5.1). Each
     /// `(relayed, local)` pair is the address a TURN Allocate yielded and the
-    /// local socket the relayed traffic egresses from.
+    /// local socket the relayed traffic egresses from. Further relays the driver
+    /// learns at runtime are added with [`Self::learn_relay`].
     #[must_use]
     pub fn with_candidates(
         host: SocketAddr,
@@ -233,8 +241,26 @@ impl WhepEgress {
         Self {
             sessions: Mutex::new(HashMap::new()),
             host_candidate: Some(host),
-            relay_candidates,
+            relay_candidates: Mutex::new(relay_candidates),
             next_id: Mutex::new(0),
+        }
+    }
+
+    /// Publish a TURN **relay** candidate the egress driver's in-crate TURN client
+    /// allocated at runtime (ADR-0048 §5.1): `relayed` is the address the TURN
+    /// server allocated, `local` the socket the relayed traffic egresses from.
+    ///
+    /// Idempotent — a relay already known is not added twice (a re-allocation or a
+    /// `poll_output`/`handle_input` both surfacing the same relay is harmless).
+    /// Every subsequently-negotiated session offers the current set as `typ relay`
+    /// candidates, so a browser behind NAT can WHEP-play via the operator's TURN
+    /// relay. A poisoned lock is ignored (best-effort; the relay is simply not
+    /// added — the session still answers with its host candidate).
+    pub fn learn_relay(&self, relayed: SocketAddr, local: SocketAddr) {
+        if let Ok(mut relays) = self.relay_candidates.lock() {
+            if !relays.iter().any(|(r, l)| *r == relayed && *l == local) {
+                relays.push((relayed, local));
+            }
         }
     }
 
@@ -278,10 +304,17 @@ impl WhepEgress {
                     reason: "egress could not gather a host candidate",
                 })?;
         }
-        for (relayed, local) in &self.relay_candidates {
+        // Offer every TURN relay the driver has learned so far (a snapshot taken
+        // under a short-lived lock; the driver may add more between sessions).
+        let relays = self
+            .relay_candidates
+            .lock()
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        for (relayed, local) in relays {
             // A relay candidate that str0m rejects is non-fatal: it only loses
             // that reachability path, never the session.
-            let _ = session.add_relay_candidate(*relayed, *local);
+            let _ = session.add_relay_candidate(relayed, local);
         }
         let sdp_answer = session
             .accept_offer(offer)
