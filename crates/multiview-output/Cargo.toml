@@ -80,7 +80,10 @@ glib = { workspace = true, optional = true }
 drm = { workspace = true, optional = true }
 drm-ffi = { workspace = true, optional = true }
 gbm = { workspace = true, optional = true }
-rustix = { workspace = true, optional = true }
+# `event` for the safe poll(2) on the DRM event fd; `time` (DEV-C2) for the safe
+# `clock_gettime(CLOCK_MONOTONIC/REALTIME)` pair the node presentation clock
+# samples (no `unsafe` — this crate stays `forbid(unsafe_code)`).
+rustix = { workspace = true, optional = true, features = ["time"] }
 
 # Off-by-default `display-kms` path ONLY (DEV-B4 / ADR-0044 §5): the real ALSA
 # HDMI audio sink (`display::audio::alsa`). `alsa` is the SAFE Rust wrapper over

@@ -87,6 +87,13 @@ pub mod flip;
 pub mod hotplug;
 pub mod mailbox;
 pub mod mode;
+/// DEV-C2 / ADR-0045 §1 / ADR-M010 — the **pull-side presentation discipline**:
+/// the pure deadline-vs-vblank frame chooser, the exact-rational flip-anchored
+/// vblank predictor, the bounded drop-oldest presentation queue, and the
+/// monotonic/wall clock + epoch plan the node sink runs with. Pure, exact
+/// integer ns, CI-tested hardware-free over the scripted backend + clock seam;
+/// nothing here feeds back to the engine (invariants #1 + #10).
+pub mod present;
 pub mod sink;
 pub mod strategy;
 
@@ -105,6 +112,10 @@ pub use mailbox::{frame_mailbox, FramePublisher, FrameReader, MailboxFrame};
 pub use mode::{
     cvt_rb_mode, refresh_matches, select_mode, DisplayModeInfo, ForcedMode, ModeError, ModeRequest,
     SelectedMode,
+};
+pub use present::{
+    choose_frame, link_offset_ms_to_ns, FrameChoice, PresentQueue, PresentationClock,
+    PresentationPlan, VblankPredictor, PRESENT_QUEUE_DEPTH,
 };
 pub use sink::{DisplaySink, DisplaySinkConfig, DisplaySinkHandle, DisplayStats, StatsSnapshot};
 pub use strategy::{
