@@ -976,6 +976,13 @@ pub struct Pipeline {
     /// thread per plan; the threads publish into [`Self::stores`] as frames
     /// arrive (never buffered ahead of the clock — the BUG-2 fix).
     ingest_plans: Vec<IngestPlan>,
+    /// The shared WHIP publisher rendezvous (ADR-T014): the control plane's
+    /// `WhipProvider` writes a negotiated publisher into it and each webrtc
+    /// source's `drive_webrtc` loop reads. Exposed to the run wiring via
+    /// [`Self::webrtc_registry`] so the same registry backs the provider. Only
+    /// under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    webrtc_registry: crate::webrtc_ingest::WhipRegistry,
     /// Per-source last-good **audio** stores (AUD-2), keyed by source id. Shared
     /// (`Arc`) between each source's audio decode thread (writer) and the
     /// [`ProgramBus`](multiview_audio::program::ProgramBus) the bake consumer
@@ -1266,6 +1273,26 @@ impl Pipeline {
             }
         }
 
+        // WHIP ingest wiring (ADR-T014, `webrtc-native`): one shared publisher
+        // rendezvous registry the control plane's WhipProvider writes to and each
+        // webrtc source's `drive_webrtc` loop reads from. Stamp it (and, for an
+        // audio-accepting source, a freshly-built AudioStore that joins the
+        // program bus below) onto every webrtc ingest plan — the peer of the
+        // `cuda_ordinal` stamping. Without the feature this is absent.
+        #[cfg(feature = "webrtc-native")]
+        let webrtc_registry = crate::webrtc_ingest::WhipRegistry::new();
+        #[cfg(feature = "webrtc-native")]
+        for plan in &mut ingest_plans {
+            if let SourceLocation::Webrtc { audio } = &plan.location {
+                plan.webrtc_registry = Some(webrtc_registry.clone());
+                if *audio {
+                    let store = crate::audio::new_store();
+                    audio_stores.insert(plan.id.clone(), Arc::clone(&store));
+                    plan.webrtc_audio_store = Some(store);
+                }
+            }
+        }
+
         let nosignal_card =
             Nv12Image::solid(config.canvas.width, config.canvas.height, 16, 128, 128, tag)
                 .map_err(|e| PipelineError::Engine(e.to_string()))?;
@@ -1371,6 +1398,8 @@ impl Pipeline {
             stores,
             stop_registry: crate::live_sources::stop_registry(),
             ingest_plans,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry,
             audio_stores,
             audio_ingest_plans,
             tone_ingest_plans,
@@ -1503,6 +1532,16 @@ impl Pipeline {
     #[must_use]
     pub fn stop_registry(&self) -> crate::live_sources::StopRegistry {
         Arc::clone(&self.stop_registry)
+    }
+
+    /// The shared WHIP publisher rendezvous registry (ADR-T014). The run wiring
+    /// hands this to the control plane's `WhipProvider` so a `POST` rendezvous'd
+    /// publisher reaches the matching webrtc source's `drive_webrtc` loop. Only
+    /// under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    #[must_use]
+    pub fn webrtc_registry(&self) -> crate::webrtc_ingest::WhipRegistry {
+        self.webrtc_registry.clone()
     }
 
     /// The resolved concrete encoder name.
@@ -6298,6 +6337,11 @@ fn drive_webrtc(plan: &IngestPlan, _audio: bool, stop: &AtomicBool) {
 /// never pacing (inv #1/#10); a decode error on one unit is logged and the unit
 /// dropped (the tile holds last-good — bad inputs are the product, inv #2).
 #[cfg(feature = "webrtc-native")]
+#[allow(clippy::too_many_lines)]
+// reason: a straight-line per-event pump (lazy-build the H.264/Opus decoders,
+// route each MediaEvent to its decode→publish helper) whose value is reading it
+// top-to-bottom in one place, matching `ingest_loop`/`consumer_main`. Splitting
+// it would scatter the session lifecycle across helpers without improving clarity.
 fn drive_webrtc_producer(
     plan: &IngestPlan,
     producer: &mut multiview_input::webrtc::transport::WebRtcProducer,
@@ -6421,18 +6465,15 @@ fn publish_webrtc_video(
             return;
         }
         match decoder.receive_frame() {
-            Ok(Some(decoded)) => {
-                let image = match to_tile.convert(&decoded.frame, tag) {
-                    Ok(image) => image,
-                    Err(reason) => {
-                        tracing::debug!(source = %plan.id, %reason, "webrtc tile scale dropped a frame");
-                        continue;
-                    }
+            Ok(Some(picture)) => {
+                let Ok(image) = to_tile.convert(&picture.frame, tag) else {
+                    tracing::debug!(source = %plan.id, "webrtc tile scale dropped a frame");
+                    continue;
                 };
                 // Normalize the verbatim 32-bit RTP PTS onto the unified ns
                 // timeline (anchored to the source's ingest start). A frame with
                 // no usable PTS falls back to the decoder's own rescaled time.
-                let pts = timeline_pts(normalizer, decoded.raw_pts, decoded.meta.pts);
+                let pts = timeline_pts(normalizer, picture.raw_pts, picture.meta.pts);
                 // Stamp publish with the source-relative instant; the OUTPUT clock
                 // paces emission, never this stamp (inputs are sampled, inv #1).
                 let _ = start;
@@ -6462,18 +6503,17 @@ fn publish_webrtc_audio(
     // stream is assumed (a real SSRC change re-anchors via the discontinuity
     // flag the depacketizer raises).
     let raw_ts = u32::try_from(unit.raw_pts.unwrap_or(0) & i64::from(u32::MAX)).unwrap_or(0);
-    let rebased = rebaser.rebase(raw_ts, 0, unit.discontinuity);
+    let anchor = rebaser.rebase(raw_ts, 0, unit.discontinuity);
     if let Err(err) = decoder.push(&unit.data, unit.raw_pts) {
         tracing::debug!(source = %plan.id, error = %err, "opus push dropped a frame");
         return;
     }
-    let mut frame = rebased.store_frame;
+    let mut frame = anchor.store_frame;
     loop {
         match decoder.receive_block() {
             Ok(Some(samples)) => {
-                let block = match webrtc_audio_block(&samples) {
-                    Some(block) => block,
-                    None => continue,
+                let Some(block) = webrtc_audio_block(&samples) else {
+                    continue;
                 };
                 let frames = i64::try_from(block.frame_count()).unwrap_or(0);
                 if let Err(err) = store.publish_at(frame, &block) {
@@ -6564,6 +6604,11 @@ fn resolve_youtube_master(watch_url: &str) -> Result<String, String> {
 /// Uses `ffmpeg-next`'s safe `Input`/`Parameters` value types only to bridge the
 /// container's stream parameters into `multiview-ffmpeg`'s safe `StreamVideoDecoder`
 /// (which `multiview-ffmpeg`'s `Demuxer` does not yet surface). No `unsafe`, no FFI.
+#[allow(clippy::too_many_lines)]
+// reason: the cohesive run-path open-and-stream routine (open + variant-pin +
+// decoder build + caption-route build + the packet/frame pump) read top-to-bottom
+// in one place; the feature-gated guarded-unreachable arms (synthetic/ndi/webrtc
+// never reach here) tip the count without changing the linear flow.
 fn open_and_stream(
     plan: &IngestPlan,
     tag: multiview_core::color::ColorInfo,

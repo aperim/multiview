@@ -25,11 +25,17 @@ fn opus_48k_identity_anchor_and_advance() {
     // First packet anchors at store frame 0.
     let first = r.rebase(1_000_000, 0xAAAA, false);
     assert_eq!(first.store_frame, 0, "first packet anchors at frame 0");
-    assert!(!first.reanchored, "the first packet is an anchor, not a re-anchor");
+    assert!(
+        !first.reanchored,
+        "the first packet is an anchor, not a re-anchor"
+    );
     // A 20 ms Opus packet advances the RTP timestamp by 960 ticks (48k * 0.02);
     // at the identity rate that is +960 store frames.
     let second = r.rebase(1_000_960, 0xAAAA, false);
-    assert_eq!(second.store_frame, 960, "a 20 ms advance maps to +960 frames");
+    assert_eq!(
+        second.store_frame, 960,
+        "a 20 ms advance maps to +960 frames"
+    );
     let third = r.rebase(1_001_920, 0xAAAA, false);
     assert_eq!(third.store_frame, 1920);
 }

@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use multiview_control::{WhipAnswer, WhipAuth, WhipProvider, WhipReject};
 use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection};
+use multiview_webrtc::config::{EndpointConfig, IceServer, TurnCredentials};
 use multiview_webrtc::error::WebRtcError;
 use multiview_webrtc::transport::{RtpRing, WhipHandle};
 
@@ -247,6 +248,159 @@ impl WhipProvider for CliWhipProvider {
     fn active_sessions(&self) -> usize {
         self.handle.live_publisher_count()
     }
+}
+
+/// Map the config `[webrtc]` section onto the crate's plain [`EndpointConfig`]
+/// (ADR-0048 §9): the single dual-stack UDP port, the advertised host
+/// candidates, the session caps/GC horizons, the CORS allow-list, and the
+/// STUN/TURN ICE servers. `multiview-webrtc` never depends on
+/// `multiview-config`, so this lives in the cli.
+fn endpoint_config_from(config: &multiview_config::MultiviewConfig) -> EndpointConfig {
+    let w = &config.webrtc;
+    let advertised_addresses = w
+        .advertised_addresses
+        .iter()
+        // A bare IP literal becomes a candidate; a hostname (no literal IP) is
+        // dropped here — str0m candidates are IPs (DNS resolution is a deploy
+        // concern, not a candidate). Config validation already vetted the shape.
+        .filter_map(|a| a.parse::<std::net::IpAddr>().ok())
+        .collect();
+    let ice_servers = w.ice_servers.iter().filter_map(ice_server_from).collect();
+    EndpointConfig {
+        udp_port: w.udp_port,
+        advertised_addresses,
+        max_sessions: w.max_sessions,
+        session_idle_timeout: std::time::Duration::from_millis(w.session_idle_timeout.millis()),
+        tombstone_ttl: multiview_webrtc::config::DEFAULT_TOMBSTONE_TTL,
+        cors_allow_origins: w.cors_allow_origins.clone(),
+        ice_servers,
+    }
+}
+
+/// Map one config ICE-server entry onto the crate's [`IceServer`]. The URL's
+/// `stun:`/`turn:` scheme + bracketed authority is parsed to a `SocketAddr`; an
+/// unparseable entry is dropped (config validation vetted the shape, but a
+/// hostname-only TURN URL is not a candidate transport address here). `None`
+/// skips the entry rather than failing the whole run.
+fn ice_server_from(server: &multiview_config::IceServerConfig) -> Option<IceServer> {
+    let addr = parse_ice_url_addr(&server.url)?;
+    match server.kind {
+        multiview_config::IceServerKindConfig::Stun => Some(IceServer::stun(addr)),
+        multiview_config::IceServerKindConfig::Turn => {
+            let creds = match (&server.password, &server.static_auth_secret) {
+                (Some(password), _) => {
+                    let mut c = TurnCredentials::long_term(
+                        server.username.clone().unwrap_or_default(),
+                        password.clone(),
+                    );
+                    c.realm.clone_from(&server.realm);
+                    c
+                }
+                (None, Some(secret)) => {
+                    let mut c = TurnCredentials::ephemeral_rest(
+                        server.username.clone().unwrap_or_default(),
+                        secret.clone(),
+                    );
+                    c.realm.clone_from(&server.realm);
+                    c
+                }
+                // Config validation rejects a credential-less TURN server, so this
+                // is unreachable for a validated config; skip rather than panic.
+                (None, None) => return None,
+            };
+            Some(IceServer::turn(addr, creds))
+        }
+        // `IceServerKindConfig` is `#[non_exhaustive]`: a future kind we cannot
+        // map is dropped (the run continues; it is not a candidate transport).
+        _ => None,
+    }
+}
+
+/// Parse a `stun:`/`turn:`/`turns:` URL's transport address into a `SocketAddr`.
+/// Strips the scheme and an optional `?transport=` query; brackets an IPv6
+/// authority. `None` when the host part is not an IP literal (a DNS name is not
+/// a candidate transport address here).
+fn parse_ice_url_addr(url: &str) -> Option<std::net::SocketAddr> {
+    let rest = url
+        .strip_prefix("stun:")
+        .or_else(|| url.strip_prefix("turns:"))
+        .or_else(|| url.strip_prefix("turn:"))
+        .unwrap_or(url);
+    // Drop a `?transport=udp` suffix.
+    let authority = rest.split('?').next().unwrap_or(rest);
+    authority.parse::<std::net::SocketAddr>().ok()
+}
+
+/// Build the per-source WHIP publish policies from the config's `webrtc` sources
+/// (their token + audio acceptance), keyed by source id.
+fn webrtc_source_policies(
+    config: &multiview_config::MultiviewConfig,
+) -> HashMap<String, WebrtcSourcePolicy> {
+    let mut policies = HashMap::new();
+    for source in &config.sources {
+        if let multiview_config::SourceKind::Webrtc { token, audio } = &source.kind {
+            policies.insert(
+                source.id.clone(),
+                WebrtcSourcePolicy {
+                    token: token.clone(),
+                    audio: *audio,
+                },
+            );
+        }
+    }
+    policies
+}
+
+/// Bind the native WHIP endpoint, spawn its driver task, and build the
+/// [`CliWhipProvider`] over the shared publisher `registry` — the run wiring's
+/// single entry point (ADR-T014 / ADR-0048).
+///
+/// Returns `None` (so the control plane keeps the default `NoWhip` `503`) when
+/// the config declares **no** `webrtc` source — there is nothing to publish to,
+/// so the endpoint is not bound. Also returns `None` if the endpoint bind fails
+/// (a port clash / bad config): the run continues with WHIP unavailable rather
+/// than failing the whole pipeline (a WHIP source then rides `NO_SIGNAL`).
+///
+/// The driver task is `tokio::spawn`ed and owns the socket; it can never
+/// back-pressure the engine (invariant #10). A run-lifetime task — it is not
+/// joined here (the process exit tears it down), matching the always-on
+/// announce/browse + device-poller tenants.
+#[must_use]
+pub fn build_whip_provider(
+    config: &multiview_config::MultiviewConfig,
+    registry: WhipRegistry,
+) -> Option<multiview_control::SharedWhip> {
+    let policies = webrtc_source_policies(config);
+    if policies.is_empty() {
+        // No WHIP sources configured — keep the default NoWhip (the routes stay
+        // present and answer 503); never bind a socket for nothing.
+        return None;
+    }
+    let endpoint_config = endpoint_config_from(config);
+    let (endpoint, handle) = match multiview_webrtc::transport::WhipEndpoint::bind(endpoint_config)
+    {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(error = %err, "WHIP endpoint bind failed; WHIP ingest unavailable this run (sources ride NO_SIGNAL)");
+            return None;
+        }
+    };
+    // The driver owns the socket on its own task for the run's lifetime; a
+    // never-raised stop flag keeps it running until process exit (the same
+    // posture as the mesh/device-poller control-plane tenants).
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(async move {
+        if let Err(err) = endpoint.run(stop).await {
+            tracing::warn!(error = %err, "WHIP endpoint driver exited");
+        }
+    });
+    tracing::info!(
+        sources = policies.len(),
+        "WHIP ingest endpoint bound; publishers may POST /api/v1/whip/{{source}}"
+    );
+    Some(std::sync::Arc::new(CliWhipProvider::new(
+        handle, registry, policies,
+    )))
 }
 
 #[cfg(test)]

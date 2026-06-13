@@ -322,7 +322,11 @@ fn publish_at_reordered_packet_lands_behind_head() {
     // [10,20) is the still-unwritten hole -> silence.
     assert!(s[20..40].iter().all(|&v| v == 0.0), "hole stays silence");
     for (k, &v) in s[40..60].iter().enumerate() {
-        assert_eq!(v, (2000 + k) as f32, "the earlier-arrived later packet survives");
+        assert_eq!(
+            v,
+            (2000 + k) as f32,
+            "the earlier-arrived later packet survives"
+        );
     }
 }
 
@@ -337,7 +341,9 @@ fn publish_at_is_bounded_drop_oldest() {
     let total = cap * 5;
     let mut frame = 0usize;
     while frame < total {
-        store.publish_at(i64::try_from(frame).unwrap(), &ramp(frame * 2, chunk)).unwrap();
+        store
+            .publish_at(i64::try_from(frame).unwrap(), &ramp(frame * 2, chunk))
+            .unwrap();
         frame += chunk;
     }
     assert!(
@@ -351,11 +357,9 @@ fn publish_at_is_bounded_drop_oldest() {
 #[test]
 fn publish_at_rejects_format_mismatch() {
     let store = AudioStore::new(stereo(), 48_000);
-    let mono = AudioBlock::from_interleaved(
-        AudioFormat::new(FS, ChannelLayout::Mono),
-        vec![0.0; 10],
-    )
-    .unwrap();
+    let mono =
+        AudioBlock::from_interleaved(AudioFormat::new(FS, ChannelLayout::Mono), vec![0.0; 10])
+            .unwrap();
     assert!(
         store.publish_at(0, &mono).is_err(),
         "a format mismatch must be rejected, never silently written"
