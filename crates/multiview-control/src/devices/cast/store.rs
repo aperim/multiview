@@ -28,6 +28,13 @@ pub struct CastSessionRecord {
     pub output: String,
     /// The resolved device-reachable media URL the session LOADs.
     pub media_url: String,
+    /// When the receiver **accepted** the session's `LOAD` (the first
+    /// `MEDIA_STATUS` attributing an active media session to our actor — the
+    /// moment the cast verifiably began showing), as Unix nanoseconds from
+    /// the control plane's injectable clock (the same `AckClock` the audit
+    /// log stamps with). `None` until then: a session whose LOAD was refused,
+    /// or is still establishing, has not started (DEV-D3.1).
+    pub started_unix_ns: Option<i64>,
 }
 
 /// The `Mutex`-guarded map of live ephemeral sessions, id-sorted.
@@ -66,6 +73,20 @@ impl CastSessionStore {
     /// Remove (and return) the record for `id`.
     pub fn remove(&self, id: &str) -> Option<CastSessionRecord> {
         self.lock().remove(id)
+    }
+
+    /// Stamp `id`'s started-at (Unix nanoseconds). **First-write-wins**: the
+    /// session started when its LOAD was first accepted; a supervised re-LOAD
+    /// after an IDLE never moves the start. A no-op for an id this store does
+    /// not track — a *saved* cast device's actor runs the same driver but has
+    /// no ephemeral record to stamp.
+    pub fn mark_started(&self, id: &str, started_unix_ns: i64) {
+        let mut guard = self.lock();
+        if let Some(record) = guard.get_mut(id) {
+            if record.started_unix_ns.is_none() {
+                record.started_unix_ns = Some(started_unix_ns);
+            }
+        }
     }
 
     /// All live session records, id-sorted.

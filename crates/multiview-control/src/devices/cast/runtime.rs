@@ -83,6 +83,14 @@ impl<C: CastConnector + 'static> DevicePollerFactory for CastSessionFactory<C> {
             );
             return None;
         };
+        // The started-at stamp (DEV-D3.1): at the actor's LOAD-accept moment
+        // (the receiver created our media session — the cast verifiably began)
+        // stamp the ephemeral session record from the control plane's
+        // injectable clock. First-write-wins in the store; a no-op for a
+        // SAVED cast device's id (no ephemeral record to stamp).
+        let stamp_store = Arc::clone(&wiring.cast_sessions);
+        let stamp_clock = Arc::clone(&wiring.clock);
+        let stamp_id = device.id.clone();
         let actor = CastSessionActor::new(
             &device.id,
             Arc::clone(&self.connector),
@@ -90,7 +98,10 @@ impl<C: CastConnector + 'static> DevicePollerFactory for CastSessionFactory<C> {
             target.clone(),
             wiring.broadcaster.clone(),
             self.config,
-        );
+        )
+        .with_load_accepted_hook(Arc::new(move || {
+            stamp_store.mark_started(&stamp_id, (stamp_clock)().as_nanos());
+        }));
         // Spawn inside the ambient Tokio runtime when there is one — the
         // running control plane (axum handlers, boot seeding) always has one.
         // A synchronous caller (no ambient runtime: the factory unit tests, a

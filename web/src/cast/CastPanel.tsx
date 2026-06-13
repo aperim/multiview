@@ -23,7 +23,8 @@ import { CastStartDialog } from './CastStartDialog';
 import { SaveAsDeviceDialog } from './SaveAsDeviceDialog';
 import { CAST_SESSIONS_QUERY_KEY, useCastSessions } from './queries';
 import { DeviceStateBadge } from '../devices/DeviceStateBadge';
-import { LastSeenCell } from '../devices/lastSeen';
+import { LastSeenAge, LastSeenCell } from '../devices/lastSeen';
+import { useNowMs } from '../devices/useNowMs';
 import { useDeviceStatuses, useEngineClockRef } from '../devices/queries';
 import type { DeviceStatus } from '../realtime/generated-types';
 import type { EngineClockRef } from '../realtime/useEngineEvents';
@@ -32,6 +33,38 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { toast } from '../components/ui/use-toast';
+
+const NS_PER_MS = 1_000_000;
+const MS_PER_S = 1_000;
+
+/**
+ * When the receiver accepted the session's `LOAD` (DEV-D3.1). `startedUnixNs`
+ * is Unix-epoch wall nanoseconds — unlike the engine-monotonic `last_seen_ts`
+ * it ages directly against wall time, so it needs no engine clock reference.
+ * Until the LOAD is accepted the cell says so honestly; a start is never
+ * fabricated.
+ */
+function StartedCell({
+  startedUnixNs,
+}: {
+  readonly startedUnixNs: number | undefined;
+}): JSX.Element {
+  const nowMs = useNowMs();
+  if (startedUnixNs === undefined) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        <Trans>not started yet</Trans>
+      </span>
+    );
+  }
+  const ageMs = nowMs - startedUnixNs / NS_PER_MS;
+  const seconds = Number.isFinite(ageMs) ? Math.max(0, Math.round(ageMs / MS_PER_S)) : 0;
+  return (
+    <span className="text-xs text-muted-foreground">
+      <Trans>started</Trans> <LastSeenAge seconds={seconds} />
+    </span>
+  );
+}
 
 /** One session row: identity, rendition, live state, honest latency, verbs. */
 function SessionRow({
@@ -86,6 +119,7 @@ function SessionRow({
           <code className="text-xs">{session.state}</code>
         )}
         <CastLatencyBadge />
+        <StartedCell startedUnixNs={session.startedUnixNs} />
         <LastSeenCell lastSeenTs={status?.last_seen_ts ?? undefined} clock={clock} />
       </span>
       <span className="inline-flex items-center gap-2">
