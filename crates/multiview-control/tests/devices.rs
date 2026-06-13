@@ -384,8 +384,105 @@ async fn reboot_returns_202() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
 
+/// DEV-A4 fix 2: the `reboot` route is WIRED end-to-end — it dispatches
+/// `PollerControl::Reboot` to the device's running poller, which issues a real
+/// fire-and-forget `/system` reboot to the (scripted) transport. Proves the verb
+/// is not a no-op stub: a `202` is returned AND a reboot write reaches the device.
 #[tokio::test]
-async fn identify_returns_204() {
+async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
+    use multiview_config::Device;
+    use multiview_control::devices::zowietek::client::{ScriptedReply, ScriptedTransport};
+    use multiview_control::devices::zowietek::poller::PollerConfig;
+    use multiview_control::devices::zowietek::ZowietekDriver;
+    use multiview_control::devices::{
+        DevicePollerFactory, DevicePollerRegistry, PollerHandle, PollerWiring, ZowietekPoller,
+    };
+
+    // A scripted transport the test keeps a handle to, so it can observe the
+    // reboot write the route ultimately drives through the poller.
+    let transport = ScriptedTransport::new();
+    transport.push(
+        "system",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "uuid": "u" } }),
+        ),
+    );
+    transport.push(
+        "venc",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "encoder" } }),
+        ),
+    );
+    // The reboot request drops the socket (the verified reboot hazard).
+    transport.push("system", ScriptedReply::socket_dropped());
+
+    // A factory that spawns a real poller over THAT transport for the device.
+    struct SharedFactory(ScriptedTransport);
+    impl DevicePollerFactory for SharedFactory {
+        fn spawn(&self, device: &Device, wiring: &PollerWiring) -> Option<PollerHandle> {
+            let driver = ZowietekDriver::new(
+                &device.id,
+                Arc::new(self.0.clone()),
+                wiring.broadcaster.clone(),
+                Arc::clone(&wiring.drivers),
+                "admin",
+                "admin",
+            );
+            let poller = ZowietekPoller::new(
+                &device.id,
+                driver,
+                Arc::clone(wiring.broadcaster.registry()),
+                "[fd00:db8::1]",
+                PollerConfig::test_fast(),
+            );
+            Some(poller.spawn())
+        }
+    }
+
+    let pollers = Arc::new(DevicePollerRegistry::with_factory(Arc::new(SharedFactory(
+        transport.clone(),
+    ))));
+    let h = harness_with(move |state| state.with_device_pollers(Arc::clone(&pollers)));
+    // Seeding the device spawns the poller through the registry (the create
+    // route's start_device_poller).
+    seed_device(&h, "dev-foyer").await;
+
+    let resp = send(
+        &h.router,
+        post_if_match("/api/v1/devices/dev-foyer/reboot", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "reboot is accepted (202)");
+
+    // The dispatch is async over the poller's control channel; wait (bounded)
+    // for the reboot write to actually reach the device's `system` module.
+    let mut sent = false;
+    for _ in 0..200 {
+        if transport
+            .last_request()
+            .is_some_and(|r| {
+                r.module == "system"
+                    && r.body.get("opt").and_then(serde_json::Value::as_str) == Some("reboot")
+            })
+        {
+            sent = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        sent,
+        "the reboot route drove a real /system reboot write to the device, last = {:?}",
+        transport.last_request()
+    );
+}
+
+/// SAFETY/HONESTY (DEV-A4 fix 2): `identify` has no grounded vendor opt on this
+/// build (no ZowieTek SDK present), so the route must REFUSE honestly with a
+/// `501 Not Implemented` problem+json rather than return a fake `204` that never
+/// reaches the device.
+#[tokio::test]
+async fn identify_returns_501_honest_rejection() {
     let h = harness();
     seed_device(&h, "dev-foyer").await;
     let resp = send(
@@ -393,11 +490,26 @@ async fn identify_returns_204() {
         post_if_match("/api/v1/devices/dev-foyer/identify", OPERATOR_TOKEN, None),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "identify is not grounded on this driver/firmware build — honest 501, not a fake 204"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["status"], 501,
+        "the problem document mirrors the 501 status: {body}"
+    );
+    assert_eq!(
+        body["type"], "/problems/not-implemented",
+        "the problem type is the not-implemented slug: {body}"
+    );
 }
 
+/// SAFETY/HONESTY (DEV-A4 fix 2): `test-pattern` is likewise ungrounded on this
+/// build, so the route refuses with a `501 Not Implemented` problem+json.
 #[tokio::test]
-async fn test_pattern_returns_204() {
+async fn test_pattern_returns_501_honest_rejection() {
     let h = harness();
     seed_device(&h, "dev-foyer").await;
     let resp = send(
@@ -409,7 +521,13 @@ async fn test_pattern_returns_204() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "test-pattern is not grounded on this driver/firmware build — honest 501, not a fake 204"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], 501, "501 problem document: {body}");
 }
 
 #[tokio::test]

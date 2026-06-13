@@ -217,6 +217,12 @@ pub enum PollerControl {
     /// The operator updated the stored credential (`secret_ref`): re-arm a probe
     /// out of `AUTH_FAILED` (drives the lifecycle breaker closed).
     SecretUpdated,
+    /// Reboot the device (the `reboot` route's dispatch, DEV-A4 fix 2): the
+    /// actor issues the **fire-and-forget** reboot to the live transport and
+    /// rides the expected socket drop into `UNREACHABLE`→reconnect (the device
+    /// returns no HTTP response when it reboots — managed-devices.md §3.1). A
+    /// driver with no reboot verb (the cast actor) logs and drops it.
+    Reboot,
     /// Set the device's audio volume to `percent` (0–100) — the Cast driver's
     /// receiver-namespace `SET_VOLUME` (DEV-D2, ADR-M011). Carried as an
     /// integer percent so the command stays `Eq`-comparable (no float here);
@@ -528,6 +534,10 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
                 }
             }
             PollerControl::SecretUpdated => self.secret_updated(),
+            PollerControl::Reboot => {
+                // RED placeholder (DEV-A4 fix 2): not yet wired to the transport.
+                tracing::debug!(device = %self.device_id, "reboot received (not yet wired)");
+            }
             PollerControl::SetVolume { percent } => {
                 // A receiver-volume verb (the cast driver's, DEV-D2): the
                 // zowietek management API has no volume control, so the

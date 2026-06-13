@@ -241,6 +241,42 @@ async fn auth_failed_opens_the_breaker_no_reconnect_storm() {
     );
 }
 
+/// A `PollerControl::Reboot` command (DEV-A4 fix 2) issues a real fire-and-forget
+/// reboot to the device: a `system`-module write is sent and the expected socket
+/// drop is ridden (no error). This proves the reboot verb is WIRED end-to-end to
+/// the transport, not a no-op stub.
+#[tokio::test]
+async fn reboot_command_fires_fire_and_forget_to_the_device() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    transport.push("venc", venc_encoder());
+    // The reboot request: the device drops the socket with no HTTP response
+    // (the verified reboot hazard) — fire_and_forget treats this as expected.
+    transport.push("system", ScriptedReply::socket_dropped());
+    let mut poller = poller("dev-a", &transport, &broadcaster, &status, &drivers);
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    let system_before = transport.request_count("system");
+
+    poller.handle_control(PollerControl::Reboot).await;
+
+    // A reboot write was actually issued to the device's `system` module — the
+    // verb dispatches to the live transport, it is not a swallowed no-op.
+    assert_eq!(
+        transport.request_count("system"),
+        system_before + 1,
+        "reboot issues one fire-and-forget /system write to the device"
+    );
+    let last = transport.last_request().expect("a request was recorded");
+    assert_eq!(last.module, "system", "reboot targets the system module");
+    assert_eq!(
+        last.body.get("opt").and_then(serde_json::Value::as_str),
+        Some("reboot"),
+        "the reboot request carries the reboot opt: {:?}",
+        last.body
+    );
+}
+
 /// A `PollerControl::SetMode` command to an ONLINE device records the desired
 /// mode and dispatches the convergence — but with no grounded decode-table index
 /// (DEV-A4 fix 3) the convergence REFUSES rather than issue a global stop, so the

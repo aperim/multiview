@@ -520,6 +520,42 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
         Ok(())
     }
 
+    // ---- Facet (c) / management: reboot -----------------------------------
+
+    /// Reboot the device, **fire-and-forget** (DEV-A4 fix 2, management facet).
+    ///
+    /// Reboot is a documented vendor management verb (managed-devices.md §3.2),
+    /// and the firmware drops the socket with **no HTTP response** when it
+    /// reboots — the verified fire-and-forget hazard (§3.1). So this issues one
+    /// fire-and-forget request and treats the dropped socket as the expected
+    /// outcome ([`ZowietekClient::fire_and_forget`]); the caller (the poller)
+    /// then rides `UNREACHABLE`→reconnect and re-probes on return. A device that
+    /// answers with a non-success status (the reboot was refused) surfaces that
+    /// error instead.
+    ///
+    /// The fire-and-forget **mechanism** (socket-drop → ride reconnect) is
+    /// verified; the exact reboot `group`/`opt` is taken from the documented
+    /// `system`-module management verb and is flagged below as a hardware-
+    /// grounding item — it is a destructive, operator-initiated action carrying
+    /// an explicit intent, never an automatic one.
+    ///
+    /// # Errors
+    ///
+    /// [`ZowietekClientError`] when the device answers with a non-success status
+    /// (the reboot was refused) or a malformed body — never for the expected
+    /// dropped socket.
+    pub async fn reboot(&self) -> Result<(), ZowietekClientError> {
+        let session = self.session_clone()?;
+        // GROUNDING NOTE (managed-devices.md §3.1/§3.2): reboot is a documented
+        // management verb on the `system` module; the fire-and-forget mechanism
+        // is verified (the box returns no HTTP response and drops the socket).
+        // The exact group/opt token is to be confirmed against the vendor SDK on
+        // hardware — kept here as the documented management-verb shape.
+        self.client
+            .fire_and_forget(&session, "system", "system", "reboot", Value::Null)
+            .await
+    }
+
     // ---- Internals ---------------------------------------------------------
 
     /// Apply the close-before-open switch on the decode table: stop the current
