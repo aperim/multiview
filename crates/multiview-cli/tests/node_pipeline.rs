@@ -65,6 +65,45 @@ fn the_node_hotplug_polling_cadence_threads_into_the_pipeline() {
     assert_eq!(pipeline.display_hotplug_poll(), Duration::from_secs(3));
 }
 
+/// DEV-C2: the node's `timing.link_offset_ms` is **consumed** — the runner
+/// converts it to ns (exact, never float) and threads it into the pipeline as
+/// the pull-side frame chooser's link offset. A plain build never sets it (a
+/// `multiview run` display output stays undisciplined latest-wins).
+#[test]
+fn the_node_link_offset_threads_into_the_pipeline_as_presentation() {
+    const NODE_WITH_LINK_OFFSET: &str = r#"
+[ingest]
+kind = "rtsp"
+url = "rtsp://[2001:db8::10]:8554/program"
+
+[[displays]]
+connector = "HDMI-A-1"
+
+[timing]
+link_offset_ms = 250
+"#;
+    let node = NodeConfig::load_from_toml(NODE_WITH_LINK_OFFSET).expect("parses");
+    assert_eq!(node.timing.link_offset_ms, 250);
+    let lowered = node.to_multiview_config().expect("lowers");
+    let mut pipeline = Pipeline::build(&lowered).expect("builds");
+    // A plain build leaves presentation discipline OFF (node-only; ADR-0045).
+    assert_eq!(
+        pipeline.node_link_offset_ns(),
+        None,
+        "a fresh build never disciplines a display output"
+    );
+    // The runner converts ms → ns exactly and enables the chooser.
+    let link_offset_ns =
+        multiview_output::display::present::link_offset_ms_to_ns(node.timing.link_offset_ms);
+    assert_eq!(link_offset_ns, 250_000_000, "250 ms is exactly 250e6 ns");
+    pipeline.set_node_presentation(link_offset_ns);
+    assert_eq!(
+        pipeline.node_link_offset_ns(),
+        Some(250_000_000),
+        "the link offset is consumed by the node presentation path"
+    );
+}
+
 /// A node document whose feed is DEAD (an RTSP URL nothing serves) and whose
 /// `on_loss` slate is the **no-signal card** — the tile must ride the
 /// framestore ladder into its down state and composite that card.
