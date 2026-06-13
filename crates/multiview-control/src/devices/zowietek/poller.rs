@@ -559,13 +559,22 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
         let Some(desired) = self.desired_mode.clone() else {
             return;
         };
-        if let Err(err) = self.driver.converge_mode(&desired).await {
+        // Resolve a concrete, grounded decode-table index to scope the switch to
+        // (DEV-A4 fix 3). The mode-switch `streamplay` opts are an OPEN
+        // protocol-grounding item (managed-devices.md §3.3): until they are
+        // validated against the vendor SDK on a spare decode index, no grounded
+        // index is available and this is `None`, so `converge_mode` REFUSES
+        // (records the desire, issues no wire write) rather than fire a global
+        // stop that would halt all decode on a production unit.
+        let index = self.driver.convergence_index();
+        if let Err(err) = self.driver.converge_mode(&desired, index).await {
             tracing::warn!(
                 device = %self.device_id,
                 mode = %desired,
                 error = %err,
-                "zowietek desired_mode convergence failed after coming ONLINE; \
-                 re-converges on the next adopt/reconnect pass"
+                "zowietek desired_mode convergence deferred/failed; \
+                 re-converges on the next adopt/reconnect pass once a grounded \
+                 decode-table index is available"
             );
         }
     }

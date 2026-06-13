@@ -241,24 +241,18 @@ async fn auth_failed_opens_the_breaker_no_reconnect_storm() {
     );
 }
 
-/// A `PollerControl::SetMode` command dispatched to the actor runs the driver's
-/// plan → converge (close-before-open) and publishes a `device.mode` event.
+/// A `PollerControl::SetMode` command to an ONLINE device records the desired
+/// mode and dispatches the convergence — but with no grounded decode-table index
+/// (DEV-A4 fix 3) the convergence REFUSES rather than issue a global stop, so the
+/// poller issues ZERO `/streamplay` wire writes and defers. The set-mode is still
+/// handled (the desire is recorded for the next grounded pass); what it must
+/// never do is global-stop decode on a production unit.
 #[tokio::test]
-async fn set_mode_command_dispatches_convergence() {
-    let (engine, broadcaster, status, drivers) = harness();
-    let mut sub = engine.subscribe();
+async fn set_mode_command_records_intent_and_defers_without_a_global_stop() {
+    let (_engine, broadcaster, status, drivers) = harness();
     let transport = ScriptedTransport::new();
     transport.push("system", login_ok());
     transport.push("venc", venc_encoder());
-    // Convergence to decoder: close then open (each a /streamplay request).
-    transport.push(
-        "streamplay",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
-    );
-    transport.push(
-        "streamplay",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
-    );
     let mut poller = poller("dev-a", &transport, &broadcaster, &status, &drivers);
     assert_eq!(poller.adopt_step().await, PollerStep::Online);
 
@@ -269,23 +263,18 @@ async fn set_mode_command_dispatches_convergence() {
         })
         .await;
 
-    // The close request preceded the open request (close-before-open).
-    let order = transport.streamplay_request_order();
-    assert!(
-        order.len() >= 2,
-        "set-mode convergence issues a close then an open"
+    // The desire was recorded (deferred to a future grounded convergence pass)…
+    assert_eq!(
+        poller.desired_mode(),
+        Some("decoder"),
+        "set-mode records the operator's desired mode"
     );
-    // A device.mode event carrying the DEV-class impact was published.
-    let mut saw_mode = false;
-    while let Ok(evt) = sub.try_recv() {
-        if let Event::DeviceMode(m) = &*evt.event {
-            assert_eq!(m.impact, multiview_events::ImpactClass::Device);
-            saw_mode = true;
-        }
-    }
-    assert!(
-        saw_mode,
-        "set-mode dispatched a device.mode convergence event"
+    // …and NO global decode-table mutation was issued: with no grounded index the
+    // convergence refuses rather than fire the global `streamplay`/stop.
+    assert_eq!(
+        transport.request_count("streamplay"),
+        0,
+        "set-mode on an ONLINE box with no grounded index issues ZERO /streamplay writes"
     );
 }
 
@@ -411,29 +400,19 @@ async fn set_mode_while_auth_failed_records_intent_and_bypasses_no_breaker() {
     );
 }
 
-/// A device adopted with `desired_mode` set re-converges onto that mode once
-/// adopt reaches ONLINE: the close-before-open `/streamplay` switch is issued
-/// without any operator `set-mode`, making the documented "re-converges
-/// desired_mode on adopt" behaviour real.
+/// SAFETY (DEV-A4 fix 3): a device adopted with `desired_mode` records the
+/// desire when adopt reaches ONLINE, but — with no grounded decode-table index —
+/// the convergence REFUSES rather than fire a global `/streamplay` stop. Adopting
+/// a production unit must NEVER global-stop its decode; the switch is deferred to
+/// a future grounded pass. (Before fix 3, adopt issued a close+open global stop.)
 #[tokio::test]
-async fn adopt_converges_desired_mode_after_online() {
-    let (engine, broadcaster, status, drivers) = harness();
-    let mut sub = engine.subscribe();
+async fn adopt_with_desired_mode_records_intent_and_does_not_global_stop() {
+    let (_engine, broadcaster, status, drivers) = harness();
     let transport = ScriptedTransport::new();
     transport.push("system", login_ok());
-    // The box powers up in encoder mode; desired_mode is decoder → must switch.
+    // The box powers up in encoder mode; desired_mode is decoder → a switch is
+    // wanted, but it must not be applied via a global stop.
     transport.push("venc", venc_encoder());
-    // The decode-table enumeration the encoder poller skips is not pushed (an
-    // encoder has no decode table). The convergence to decoder issues a close
-    // then an open (each a /streamplay request).
-    transport.push(
-        "streamplay",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
-    );
-    transport.push(
-        "streamplay",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
-    );
     let driver = ZowietekDriver::new(
         "dev-a",
         Arc::new(transport.clone()),
@@ -457,24 +436,17 @@ async fn adopt_converges_desired_mode_after_online() {
         Some(DeviceState::Online),
         "adopt drove the lifecycle to ONLINE"
     );
-    // Convergence ran: a close preceded an open on /streamplay — driven by
-    // desired_mode, NOT by an operator set-mode command.
-    let order = transport.streamplay_request_order();
-    assert!(
-        order.len() >= 2,
-        "desired_mode convergence issued a close then an open after adopt"
+    assert_eq!(
+        poller.desired_mode(),
+        Some("decoder"),
+        "the declared desired_mode is recorded for a future grounded convergence"
     );
-    // A device.mode (DEV-class) convergence event was published.
-    let mut saw_mode = false;
-    while let Ok(evt) = sub.try_recv() {
-        if let Event::DeviceMode(m) = &*evt.event {
-            assert_eq!(m.impact, multiview_events::ImpactClass::Device);
-            saw_mode = true;
-        }
-    }
-    assert!(
-        saw_mode,
-        "desired_mode convergence on adopt published a device.mode event"
+    // No global decode-table mutation: the convergence refused for lack of a
+    // grounded index, so adopt issued ZERO /streamplay switch.
+    assert_eq!(
+        transport.request_count("streamplay"),
+        0,
+        "adopt with desired_mode and no grounded index issues ZERO /streamplay writes"
     );
 }
 
@@ -540,11 +512,14 @@ async fn auth_failed_suppresses_desired_mode_convergence() {
     );
 }
 
-/// A supervised reconnect that reaches ONLINE re-converges `desired_mode`: the
-/// driver re-applies the desired mode after the channel comes back, so the
-/// device is restored to its declared mode without an operator command.
+/// SAFETY (DEV-A4 fix 3): a supervised reconnect that reaches ONLINE re-records
+/// the `desired_mode` but, with no grounded decode-table index, issues NO mutating
+/// `/streamplay` stop/start — a box that rebooted into the wrong mode is NOT
+/// "fixed" by a global stop that would halt all decode on a production unit. The
+/// reconnect may still read the decode table (enumeration), but it never issues a
+/// `stop` or `start` opt. (Before fix 3, reconnect global-stopped to switch.)
 #[tokio::test]
-async fn reconnect_reconverges_desired_mode() {
+async fn reconnect_does_not_global_stop_to_reconverge() {
     let (_engine, broadcaster, status, drivers) = harness();
     let transport = ScriptedTransport::new();
     // Adopt: the box is ALREADY in decoder mode, so adopt converges no-op.
@@ -555,7 +530,8 @@ async fn reconnect_reconverges_desired_mode() {
             json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "decoder" } }),
         ),
     );
-    // Adopt enumerates the decoder output targets (decode-mode box).
+    // Adopt enumerates the decoder output targets (decode-mode box) — a getinfo
+    // READ, never a stop/start.
     transport.push(
         "streamplay",
         ScriptedReply::json(
@@ -564,18 +540,10 @@ async fn reconnect_reconverges_desired_mode() {
     );
     // Poll drops the socket → UNREACHABLE.
     transport.push("streamplay", ScriptedReply::socket_dropped());
-    // Reconnect: the box came back in ENCODER mode (it rebooted) → reconnect
-    // must re-converge it to decoder (close + open).
+    // Reconnect: the box came back in ENCODER mode (it rebooted). The desired
+    // mode is decoder, but the reconnect must NOT global-stop to switch it.
     transport.push("system", login_ok());
     transport.push("venc", venc_encoder());
-    transport.push(
-        "streamplay",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
-    );
-    transport.push(
-        "streamplay",
-        ScriptedReply::json(json!({ "rsp": "succeed", "status": "00000" })),
-    );
     let driver = ZowietekDriver::new(
         "dev-a",
         Arc::new(transport.clone()),
@@ -594,25 +562,29 @@ async fn reconnect_reconverges_desired_mode() {
     .with_desired_mode(Some("decoder".to_owned()));
 
     assert_eq!(poller.adopt_step().await, PollerStep::Online);
-    let after_adopt = transport.request_count("streamplay");
     assert_eq!(poller.poll_step().await, PollerStep::Unreachable);
-
     assert_eq!(poller.reconnect_step().await, PollerStep::Online);
-    // Reconnect re-converged: at least the close + open switch beyond the adopt
-    // enumeration and the dropped poll.
+
+    // The desire is still recorded after reconnect…
+    assert_eq!(
+        poller.desired_mode(),
+        Some("decoder"),
+        "reconnect keeps the recorded desired_mode"
+    );
+    // …and NO mutating stop/start was ever issued on /streamplay (only reads).
     let order = transport.streamplay_request_order();
-    let close = order
+    let mutating = order
         .iter()
-        .filter(|r| r.body.get("opt").and_then(serde_json::Value::as_str) == Some("stop"))
+        .filter(|r| {
+            matches!(
+                r.body.get("opt").and_then(serde_json::Value::as_str),
+                Some("stop" | "start")
+            )
+        })
         .count();
-    let open = order
-        .iter()
-        .filter(|r| r.body.get("opt").and_then(serde_json::Value::as_str) == Some("start"))
-        .count();
-    assert!(
-        close >= 1 && open >= 1,
-        "reconnect re-converged desired_mode (close-before-open) after returning ONLINE; \
-         before-reconnect streamplay count was {after_adopt}, order = {order:?}"
+    assert_eq!(
+        mutating, 0,
+        "reconnect issued ZERO mutating /streamplay stop/start (no global stop); order = {order:?}"
     );
 }
 

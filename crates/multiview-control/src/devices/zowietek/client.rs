@@ -316,6 +316,24 @@ pub enum ZowietekClientError {
         /// The offending field value.
         field: u64,
     },
+    /// A mode convergence was requested without a concrete, grounded decode-table
+    /// index to scope the stop/start to (DEV-A4 fix 3). Convergence **refuses**
+    /// rather than issue a global, un-indexed `streamplay`/stop that would stop
+    /// **all** decode on the device — including a production unit. The desire is
+    /// recorded by the poller and re-converged once a grounded index is available
+    /// (the `streamplay` stop/start opts remain an OPEN protocol-grounding item,
+    /// managed-devices.md §3.3, pending validation against the vendor SDK on a
+    /// spare decode index).
+    #[error(
+        "device {device:?}: mode convergence to {desired:?} requires a grounded, index-scoped \
+         decode-table target; refused rather than issue a global stop (no index available)"
+    )]
+    ConvergenceUngrounded {
+        /// The device the convergence was requested for.
+        device: String,
+        /// The desired mode the convergence would have applied.
+        desired: String,
+    },
 }
 
 /// A logged-in session: the `uuid` the device returns at login, used only at

@@ -146,6 +146,35 @@ impl ModeConvergence {
     }
 }
 
+/// A concrete, device-reported decode-table index that scopes a mode
+/// convergence's `streamplay` stop/start to **one** slot (DEV-A4 fix 3).
+///
+/// Convergence is a mutating wire path; the only safe way to operate the decode
+/// table is against a specific index. Without one, a stop would be **global**
+/// (`data=Null`) and stop **all** decode on the device — catastrophic for a
+/// production unit. [`ZowietekDriver::converge_mode`] therefore takes an
+/// `Option<DecodeIndex>` and **refuses** (no wire write) when it is `None`.
+///
+/// An index is only ever obtained from a slot the driver actually enumerated
+/// from the live decode table ([`ZowietekDriver::convergence_index`]), never
+/// fabricated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DecodeIndex(u64);
+
+impl DecodeIndex {
+    /// Wrap a concrete, device-reported decode-table index.
+    #[must_use]
+    pub const fn new(index: u64) -> Self {
+        Self(index)
+    }
+
+    /// The raw index value.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// The `zowietek` driver for one device.
 ///
 /// Holds the typed [`ZowietekClient`] (over a transport seam), the
@@ -404,6 +433,27 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
         }
     }
 
+    /// The concrete, grounded decode-table index a mode convergence should scope
+    /// its `streamplay` stop/start to, or [`None`] when none is available
+    /// (DEV-A4 fix 3).
+    ///
+    /// Returning [`None`] makes [`converge_mode`](ZowietekDriver::converge_mode)
+    /// **refuse** rather than issue a global stop. Today this is always [`None`]:
+    /// the vendor mode-switch `streamplay` opts (which index a switch operates,
+    /// and the exact stop/start payload) are an **OPEN protocol-grounding item**
+    /// (managed-devices.md §3.3) — they must be validated against the vendor SDK
+    /// on a **spare** decode index before any live, index-scoped convergence is
+    /// enabled. Until then the safe behaviour is to record the desire and defer,
+    /// never to guess an index and mutate a production decode table.
+    #[must_use]
+    pub fn convergence_index(&self) -> Option<DecodeIndex> {
+        // OPEN (managed-devices.md §3.3): no grounded mapping from a desired mode
+        // to the decode-table index a switch operates exists yet (no vendor SDK
+        // on this build to validate it). Returning `None` keeps convergence
+        // fail-safe — it can never global-stop a production unit.
+        None
+    }
+
     /// Converge the device to `desired` workmode close-before-open, publishing
     /// `device.mode` (DEV-class impact) at the start of a real switch.
     ///
@@ -413,10 +463,25 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
     /// (the device enforces close-before-open with dedicated status codes). A
     /// no-op plan publishes nothing and touches the device not at all.
     ///
+    /// `index` scopes the stop/start to **one** decode-table slot (DEV-A4 fix 3).
+    /// When it is [`None`] the convergence **refuses** —
+    /// [`ConvergenceUngrounded`](ZowietekClientError::ConvergenceUngrounded), no
+    /// wire write — rather than issue a global, un-indexed stop that would halt
+    /// **all** decode on the device (including a production unit). The desire
+    /// stays recorded by the poller and re-converges once a grounded index is
+    /// available (managed-devices.md §3.3, an OPEN protocol-grounding item).
+    ///
     /// # Errors
     ///
-    /// [`ZowietekClientError`] if the close or open step fails on the wire.
-    pub async fn converge_mode(&self, desired: &str) -> Result<(), ZowietekClientError> {
+    /// [`ConvergenceUngrounded`](ZowietekClientError::ConvergenceUngrounded) when
+    /// `index` is [`None`] (a real switch is needed but no grounded target
+    /// exists); otherwise the [`ZowietekClientError`] from the close or open
+    /// step on the wire.
+    pub async fn converge_mode(
+        &self,
+        desired: &str,
+        index: Option<DecodeIndex>,
+    ) -> Result<(), ZowietekClientError> {
         let plan = self.plan_mode_convergence(desired);
         let ModeConvergence::Switch { to, .. } = &plan else {
             // Already converged: no restart, no event.
@@ -430,7 +495,7 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
         // doc); the close must precede the open. A failure of either step
         // publishes a `device.mode` Failed so the operator sees the convergence
         // did not complete (the driver re-converges on the next pass).
-        if let Err(err) = self.apply_mode_switch(&session, to).await {
+        if let Err(err) = self.apply_mode_switch(&session, to, index).await {
             self.broadcaster.mode_failed(&self.device_id, to);
             return Err(err);
         }
@@ -449,7 +514,9 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
         &self,
         session: &ZowietekSession,
         to: &str,
+        index: Option<DecodeIndex>,
     ) -> Result<(), ZowietekClientError> {
+        let _ = index;
         self.client
             .request(
                 session,
