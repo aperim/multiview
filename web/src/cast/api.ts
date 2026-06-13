@@ -46,6 +46,15 @@ export interface CastSessionView {
   readonly mediaUrl: string;
   /** The live lifecycle state token (DEV-A3 wire vocabulary). */
   readonly state: string;
+  /**
+   * When the receiver accepted the session's `LOAD` (the first `MEDIA_STATUS`
+   * attributing an active media session to the actor — the moment the cast
+   * verifiably began showing), as Unix-epoch wall nanoseconds. `undefined`
+   * until then: a session whose LOAD was refused, or is still establishing,
+   * has not started (DEV-D3.1). Unlike the engine-monotonic `last_seen_ts`,
+   * this is wall time and ages directly against `Date.now()`.
+   */
+  readonly startedUnixNs: number | undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,6 +83,10 @@ export function toCastSessionView(doc: CastSessionDoc): CastSessionView {
     output: doc.output,
     mediaUrl: doc.media_url,
     state: doc.state,
+    startedUnixNs:
+      typeof doc.started_unix_ns === 'number' && Number.isFinite(doc.started_unix_ns)
+        ? doc.started_unix_ns
+        : undefined,
   };
 }
 

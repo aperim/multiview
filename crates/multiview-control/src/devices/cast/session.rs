@@ -138,6 +138,16 @@ impl<C: CastConnector> CastConnector for Arc<C> {
     }
 }
 
+/// Invoked at the moment the receiver **accepts** this actor's `LOAD` — the
+/// first `MEDIA_STATUS` attributing an active media session to us (DEV-D3.1).
+///
+/// Fired once per LOAD adoption (a supervised re-LOAD that is accepted again
+/// re-fires it; the consumer decides idempotence — the session store's
+/// started-at stamp is first-write-wins). The closure runs on the actor task:
+/// it must be cheap and non-blocking (the cast wiring's stamp is one bounded
+/// `Mutex`-guarded map write — pure control plane, invariant #10).
+pub type LoadAcceptedHook = Arc<dyn Fn() + Send + Sync>;
+
 /// Session-actor timing (the ADR-M011 numbers as defaults).
 ///
 /// A plain record (not `#[non_exhaustive]`) so tests can build it directly,
@@ -267,6 +277,9 @@ pub struct CastSessionActor<C: CastConnector> {
     preempted: bool,
     /// The last published player-state mode token (conflated status field).
     mode: &'static str,
+    /// Fired when the receiver accepts our LOAD (the started-at stamp's
+    /// trigger); [`None`] when nothing consumes the moment.
+    load_accepted: Option<LoadAcceptedHook>,
 }
 
 impl<C: CastConnector + 'static> CastSessionActor<C> {
@@ -297,7 +310,16 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
             reload_due: None,
             preempted: false,
             mode: "connecting",
+            load_accepted: None,
         }
+    }
+
+    /// Attach the [`LoadAcceptedHook`] fired when the receiver accepts this
+    /// actor's `LOAD` (the ephemeral session's started-at stamp, DEV-D3.1).
+    #[must_use]
+    pub fn with_load_accepted_hook(mut self, hook: LoadAcceptedHook) -> Self {
+        self.load_accepted = Some(hook);
+        self
     }
 
     /// The id this actor publishes under.
@@ -790,6 +812,14 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
         // excludes it.
         if let Some(entry) = entries.iter().find(|e| e.player_state != PlayerState::Idle) {
             self.media_session_id = entry.media_session_id;
+            // The receiver ACCEPTED our LOAD — an active media session is
+            // attributed to us for the first time. This is the one moment a
+            // cast session verifiably *started* (a REST accept or a bare LOAD
+            // dispatch would lie about loads the receiver then rejects), so
+            // it is what fires the started-at stamp (DEV-D3.1).
+            if let Some(hook) = self.load_accepted.as_ref() {
+                hook();
+            }
             return self.handle_player_state(entry.player_state, entry.idle_reason.as_deref());
         }
         if let Some(entry) = entries.first() {
@@ -896,6 +926,13 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
                 tracing::debug!(
                     device = %self.device_id,
                     "secret-updated is not a cast verb; ignored (CASTV2 has no sender auth)"
+                );
+                true
+            }
+            PollerControl::Reboot => {
+                tracing::debug!(
+                    device = %self.device_id,
+                    "reboot is not a cast verb; ignored (no reboot control over a cast receiver)"
                 );
                 true
             } // Exhaustive in this crate (`#[non_exhaustive]` only gates

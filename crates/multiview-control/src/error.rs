@@ -81,6 +81,14 @@ pub enum ControlError {
     /// A persistence/repository fault.
     #[error("repository error: {0}")]
     Repository(String),
+
+    /// The requested action is not implemented by this driver / firmware build
+    /// (`501 Not Implemented`). Used for device verbs whose vendor protocol is
+    /// not grounded on this build (no vendor SDK present) — the API refuses
+    /// honestly rather than return a fake `202`/`204` that never reaches the
+    /// device (DEV-A4 fix 2). The detail names the verb and why.
+    #[error("not supported: {0}")]
+    Unsupported(String),
 }
 
 impl ControlError {
@@ -125,6 +133,9 @@ impl ControlError {
             }
             Self::Repository(msg) => {
                 Problem::new(500, "repository", "Internal repository error").with_detail(msg)
+            }
+            Self::Unsupported(msg) => {
+                Problem::new(501, "not-implemented", "Action not implemented").with_detail(msg)
             }
         }
     }

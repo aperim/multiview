@@ -70,11 +70,11 @@ msgstr ""
 msgid "{desired} (desired)"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:60
+#: src/devices/lastSeen.tsx:27
 msgid "{hours} h ago"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:57
+#: src/devices/lastSeen.tsx:24
 msgid "{minutes} min ago"
 msgstr ""
 
@@ -84,7 +84,7 @@ msgstr ""
 msgid "{option} (custom — preserved)"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:53
+#: src/devices/lastSeen.tsx:20
 msgid "{seconds} s ago"
 msgstr ""
 
@@ -403,7 +403,7 @@ msgstr ""
 msgid "About adopting devices"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:152
+#: src/cast/CastPanel.tsx:186
 msgid "About casting"
 msgstr ""
 
@@ -1222,12 +1222,12 @@ msgstr ""
 msgid "Captions"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:131
+#: src/cast/CastPanel.tsx:165
 #: src/cast/CastStartDialog.tsx:219
 msgid "Cast"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:146
+#: src/cast/CastPanel.tsx:180
 msgid "Cast an HLS rendition the engine already serves to a Google Cast device. Sessions here are ephemeral — they are not part of the configuration until saved as a device — and playback runs seconds behind live."
 msgstr ""
 
@@ -1247,7 +1247,7 @@ msgstr ""
 msgid "Cast playback is Tier D on the sync ladder: seconds-class glass-to-glass latency, typically 6–30 s behind live. The Default Media Receiver buffers whole HLS segments before it plays, so the floor is several segment durations; LL-HLS does not auto-engage there, even when the rendition serves low-latency parts. This is inherent to casting, not a fault — use it for ambient monitoring on TVs, not for time-critical confidence monitoring, and never expect a cast device to join a synchronized wall (cast devices are excluded from sync groups)."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:59
+#: src/cast/CastPanel.tsx:92
 msgid "Cast stopped"
 msgstr ""
 
@@ -1263,7 +1263,7 @@ msgstr ""
 msgid "Cast to a device"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:140
+#: src/cast/CastPanel.tsx:174
 msgid "Cast to a device…"
 msgstr ""
 
@@ -1677,7 +1677,7 @@ msgstr ""
 msgid "Could not load alarms:"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:156
+#: src/cast/CastPanel.tsx:190
 msgid "Could not load cast sessions:"
 msgstr ""
 
@@ -1820,7 +1820,7 @@ msgstr ""
 msgid "Could not start the scan"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:66
+#: src/cast/CastPanel.tsx:99
 msgid "Could not stop the cast"
 msgstr ""
 
@@ -3914,7 +3914,7 @@ msgstr ""
 msgid "Networks, VLANs, and the manual address"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:81
+#: src/devices/lastSeen.tsx:48
 msgid "Never seen."
 msgstr ""
 
@@ -3969,7 +3969,7 @@ msgstr ""
 msgid "No audit entries match."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:161
+#: src/cast/CastPanel.tsx:195
 msgid "No cast sessions running."
 msgstr ""
 
@@ -4188,6 +4188,10 @@ msgstr ""
 
 #: src/pages/DeviceDetailPage.tsx:200
 msgid "Not probed yet."
+msgstr ""
+
+#: src/cast/CastPanel.tsx:56
+msgid "not started yet"
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:252
@@ -5020,12 +5024,12 @@ msgstr ""
 msgid "Save & apply to engine"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:95
+#: src/cast/CastPanel.tsx:129
 #: src/cast/SaveAsDeviceDialog.tsx:101
 msgid "Save as device"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:100
+#: src/cast/CastPanel.tsx:134
 msgid "Save as device…"
 msgstr ""
 
@@ -5137,7 +5141,7 @@ msgstr ""
 msgid "Seeding from a preset replaces every cell in this draft. Nothing is saved until you save the layout."
 msgstr ""
 
-#: src/devices/lastSeen.tsx:93
+#: src/devices/lastSeen.tsx:60
 msgid "seen (age unknown)"
 msgstr ""
 
@@ -5310,6 +5314,10 @@ msgstr ""
 msgid "start: {0}"
 msgstr ""
 
+#: src/cast/CastPanel.tsx:64
+msgid "started"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:183
 #: src/pages/DevicesPage.tsx:545
 #: src/pages/SettingsPage.tsx:374
@@ -5328,11 +5336,11 @@ msgstr ""
 msgid "Stereo"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:108
+#: src/cast/CastPanel.tsx:142
 msgid "Stop"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:105
+#: src/cast/CastPanel.tsx:139
 msgid "Stop cast"
 msgstr ""
 
@@ -5625,11 +5633,11 @@ msgstr ""
 msgid "The device flashes its identify indicator."
 msgstr ""
 
-#: src/devices/lastSeen.tsx:91
+#: src/devices/lastSeen.tsx:58
 msgid "The device has answered, but without a live event stream its engine timestamp cannot be aged."
 msgstr ""
 
-#: src/devices/lastSeen.tsx:77
+#: src/devices/lastSeen.tsx:44
 msgid "The device has not answered yet."
 msgstr ""
 
@@ -5792,7 +5800,7 @@ msgstr ""
 msgid "The Real Time Streaming Protocol — the standard way IP cameras and encoders serve a live stream by URL (for example <0>rtsp://camera.local:8554/main</0>). The control channel negotiates the session and the media flows as RTP, over UDP or interleaved in TCP, with latency well under a second."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:60
+#: src/cast/CastPanel.tsx:93
 msgid "The receiver app was stopped; the device returns to its idle screen."
 msgstr ""
 

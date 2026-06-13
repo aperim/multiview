@@ -11,7 +11,7 @@
 //! (invariants #1 + #10) — its failure mode is a frozen monitor showing the
 //! last framebuffer while program output continues untouched.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -19,14 +19,19 @@ use std::time::Duration;
 use super::canvas::DisplayCanvas;
 use super::device::{ConnectorSelector, DisplayError, HeadSetup, KmsBackend, SubmitError};
 use super::hotplug::ReprobeFlag;
-use super::mailbox::{frame_mailbox, FramePublisher, FrameReader};
+use super::mailbox::{frame_mailbox, FramePublisher, FrameReader, MailboxFrame};
 use super::mode::{select_mode, ForcedMode, ModeRequest, SelectedMode};
+use super::present::{choose_frame, FrameChoice, PresentQueue, PresentationPlan, VblankPredictor};
 use super::FlipDriver;
 use multiview_core::time::Rational;
 
 /// Configuration for one display sink (one connector = one head = one sink;
 /// walls are one sink per head — no canvas spanning, brief §9).
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: the optional [`PresentationPlan`] carries a boxed
+/// [`PresentationClock`](super::present::PresentationClock) trait object, which
+/// is single-ownership by construction (each sink reads its own clock).
+#[derive(Debug)]
 pub struct DisplaySinkConfig {
     /// The owning output's stable id (diagnostics/telemetry labels).
     pub output_id: String,
@@ -41,10 +46,16 @@ pub struct DisplaySinkConfig {
     /// The bounded event-wait used by the flip loop. Also bounds how quickly
     /// an idle pipe notices a new mailbox frame; a few milliseconds is right.
     pub poll_interval: Duration,
+    /// DEV-C2 — the node presentation plan: the outbound presentation epoch,
+    /// the fixed receiver-side link offset, and the monotonic/wall clock pair
+    /// the pull-side frame chooser runs against. `None` ⇒ the DEV-B1
+    /// undisciplined latest-wins loop (a non-node display output).
+    pub presentation: Option<PresentationPlan>,
 }
 
 /// Wait-free flip-loop telemetry counters (ADR-0044: flip timestamps and
-/// conflation are exported from day one).
+/// conflation are exported from day one; DEV-C2 adds the presentation-discipline
+/// counters and the flip-timestamp skew telemetry).
 #[derive(Debug, Default)]
 pub struct DisplayStats {
     /// Successful nonblocking commits.
@@ -61,6 +72,23 @@ pub struct DisplayStats {
     reprobes: AtomicU64,
     /// Re-light modesets applied after a disconnect→reconnect (DEV-B5).
     relights: AtomicU64,
+    /// DEV-C2: disciplined presents — a frame chosen against the predicted
+    /// vblank (epoch + flip anchor present).
+    presented: AtomicU64,
+    /// DEV-C2: undisciplined latest-wins presents — light-up before a flip
+    /// anchor exists, or no epoch published (the output never waits for timing).
+    undisciplined_presents: AtomicU64,
+    /// DEV-C2: queued frames dropped as late (drop-if-late: every frame older
+    /// than the one chosen for a vblank, plus pull-side queue overflows).
+    late_skips: AtomicU64,
+    /// DEV-C2: the most recent flip-timestamp skew (kernel flip ts − the
+    /// committed frame's scheduled monotonic instant), in ns. Stored as the
+    /// `i64` bit pattern so a negative skew (flip earlier than scheduled) round-
+    /// trips exactly through the atomic.
+    last_flip_skew_ns: AtomicI64,
+    /// DEV-C2: the largest absolute flip-timestamp skew observed (ns) — the
+    /// presentation-discipline drift high-watermark.
+    max_flip_skew_abs_ns: AtomicI64,
 }
 
 /// One coherent read of the sink counters.
@@ -81,6 +109,16 @@ pub struct StatsSnapshot {
     pub reprobes: u64,
     /// Re-light modesets applied after a disconnect→reconnect.
     pub relights: u64,
+    /// DEV-C2: disciplined presents (chosen against the predicted vblank).
+    pub presented: u64,
+    /// DEV-C2: undisciplined latest-wins presents (no epoch / no flip anchor).
+    pub undisciplined_presents: u64,
+    /// DEV-C2: queued frames dropped as late (drop-if-late + queue overflow).
+    pub late_skips: u64,
+    /// DEV-C2: the most recent flip-timestamp skew (flip ts − scheduled), ns.
+    pub last_flip_skew_ns: i64,
+    /// DEV-C2: the largest absolute flip-timestamp skew observed, ns.
+    pub max_flip_skew_abs_ns: i64,
 }
 
 impl DisplayStats {
@@ -95,6 +133,11 @@ impl DisplayStats {
             last_flip_ns: self.last_flip_ns.load(Ordering::Relaxed),
             reprobes: self.reprobes.load(Ordering::Relaxed),
             relights: self.relights.load(Ordering::Relaxed),
+            presented: self.presented.load(Ordering::Relaxed),
+            undisciplined_presents: self.undisciplined_presents.load(Ordering::Relaxed),
+            late_skips: self.late_skips.load(Ordering::Relaxed),
+            last_flip_skew_ns: self.last_flip_skew_ns.load(Ordering::Relaxed),
+            max_flip_skew_abs_ns: self.max_flip_skew_abs_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -199,6 +242,7 @@ impl DisplaySink {
             forced_mode,
             engine_cadence,
             poll_interval,
+            presentation,
         } = config;
         let connectors = backend.probe_connectors()?;
         let desc = match &connector {
@@ -242,6 +286,11 @@ impl DisplaySink {
             "display head lit"
         );
 
+        // DEV-C2: the vblank predictor is anchored on the COMMITTED scanout
+        // mode's exact-rational refresh (the device's pixel clock / raster
+        // totals), not the engine cadence — the predictor lives in the
+        // display's vblank domain.
+        let refresh = setup.mode.refresh();
         let (publisher, reader) = frame_mailbox::<F>();
         let stats = Arc::new(DisplayStats::default());
         let stop = Arc::new(AtomicBool::new(false));
@@ -256,7 +305,16 @@ impl DisplaySink {
                 .name(format!("display-{}", setup.connector))
                 .spawn(move || {
                     flip_loop(
-                        backend, &reader, &stop, &stats, poll, &output_id, &head, &reprobe,
+                        backend,
+                        &reader,
+                        &stop,
+                        &stats,
+                        poll,
+                        &output_id,
+                        &head,
+                        &reprobe,
+                        presentation,
+                        refresh,
                     );
                 })
                 .map_err(|e| DisplayError::Device(format!("spawning the sink thread: {e}")))?
@@ -289,7 +347,7 @@ impl DisplaySink {
 #[allow(clippy::too_many_arguments)]
 // reason: the loop is the move-target of the one sink thread; every argument
 // is one owned/shared piece of the sink's state, and bundling them into a
-// struct would only relocate the same eight names.
+// struct would only relocate the same names.
 fn flip_loop<F, B>(
     mut backend: B,
     reader: &FrameReader<F>,
@@ -299,6 +357,8 @@ fn flip_loop<F, B>(
     output_id: &str,
     head: &HeadSetup,
     reprobe: &ReprobeFlag,
+    presentation: Option<PresentationPlan>,
+    refresh: Rational,
 ) where
     F: DisplayCanvas + Send + Sync,
     B: KmsBackend,
@@ -307,6 +367,18 @@ fn flip_loop<F, B>(
     // Startup proved the connector connected (a disconnected head fails
     // `DisplaySink::start`); reprobe transitions are tracked against that.
     let mut connected = true;
+    // DEV-C2 pull-side presentation state (only used when a plan is present):
+    // the bounded present queue, the flip-anchored vblank predictor, the
+    // sequence last drained from the mailbox (so the queue takes each frame
+    // once), and the scheduled monotonic instant of the in-flight committed
+    // frame (for the flip-timestamp skew telemetry).
+    let mut present = presentation.map(|plan| PresentState::<F> {
+        plan,
+        queue: PresentQueue::new(),
+        predictor: VblankPredictor::new(refresh),
+        drained_seq: 0,
+        in_flight_scheduled_mono_ns: None,
+    });
     while !stop.load(Ordering::Acquire) {
         if reprobe.take() {
             handle_reprobe(&mut backend, head, &mut connected, stats, output_id);
@@ -316,8 +388,20 @@ fn flip_loop<F, B>(
                 for event in events {
                     driver.on_flip_complete();
                     stats.flips.fetch_add(1, Ordering::Relaxed);
-                    let ns = u64::try_from(event.timestamp.as_nanos()).unwrap_or(u64::MAX);
-                    stats.last_flip_ns.store(ns, Ordering::Relaxed);
+                    let flip_ns = i64::try_from(event.timestamp.as_nanos()).unwrap_or(i64::MAX);
+                    stats.last_flip_ns.store(
+                        u64::try_from(flip_ns).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
+                    if let Some(pres) = present.as_mut() {
+                        // Re-anchor the vblank grid on the measured flip, and
+                        // export the flip-timestamp skew of the frame this flip
+                        // completes (flip ts − its scheduled monotonic instant).
+                        pres.predictor.on_flip(flip_ns);
+                        if let Some(scheduled) = pres.in_flight_scheduled_mono_ns.take() {
+                            record_flip_skew(stats, flip_ns, scheduled);
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -327,29 +411,256 @@ fn flip_loop<F, B>(
                 std::thread::sleep(poll_interval);
             }
         }
-        let Some((frame, seq)) = reader.latest() else {
-            continue;
-        };
-        if !driver.wants_commit(seq) {
-            continue;
+        match present.as_mut() {
+            Some(pres) => {
+                disciplined_step(&mut backend, reader, &mut driver, stats, output_id, pres);
+            }
+            None => {
+                undisciplined_step(&mut backend, reader, &mut driver, stats, output_id);
+            }
         }
-        match backend.submit_frame(&*frame) {
-            Ok(()) => {
-                driver.on_commit_submitted(seq);
-                stats.commits.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The DEV-C2 pull-side presentation state carried across loop iterations
+/// (present only on a node sink with a [`PresentationPlan`]). The present queue
+/// holds [`MailboxFrame`] clones — cheap `Arc` bumps, so the bounded queue
+/// keeps 2–3 frames alive without ever copying a canvas.
+struct PresentState<F> {
+    plan: PresentationPlan,
+    queue: PresentQueue<MailboxFrame<F>>,
+    predictor: VblankPredictor,
+    drained_seq: u64,
+    in_flight_scheduled_mono_ns: Option<i64>,
+}
+
+/// The DEV-B1 undisciplined loop body: commit the latest mailbox frame when the
+/// pipe is idle and the frame is newer than what was last committed. `EBUSY` is
+/// conflation; device errors hold last-good. Used for non-node display outputs.
+fn undisciplined_step<F, B>(
+    backend: &mut B,
+    reader: &FrameReader<F>,
+    driver: &mut FlipDriver,
+    stats: &DisplayStats,
+    output_id: &str,
+) where
+    F: DisplayCanvas + Send + Sync,
+    B: KmsBackend,
+{
+    let Some((frame, seq)) = reader.latest() else {
+        return;
+    };
+    if !driver.wants_commit(seq) {
+        return;
+    }
+    match backend.submit_frame(&*frame) {
+        Ok(()) => {
+            driver.on_commit_submitted(seq);
+            stats.commits.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(SubmitError::Busy) => {
+            driver.on_commit_busy();
+            stats.busy_conflations.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(SubmitError::Device(e)) => {
+            stats.submit_errors.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                output = %output_id,
+                error = %e,
+                "display frame commit failed; holding the last framebuffer"
+            );
+        }
+    }
+}
+
+/// The DEV-C2 disciplined loop body: drain the latest mailbox frame into the
+/// bounded present queue, then (if the pipe is idle) choose the queued frame
+/// nearest the predicted vblank — `wall_at(pts) + link_offset` closest to the
+/// predicted next vblank, repeat-if-early, drop-if-late — and commit it.
+///
+/// Falls back to undisciplined latest-wins (presenting the newest queued frame)
+/// whenever the epoch is unpublished or the predictor has no flip anchor yet:
+/// the output never waits for timing. A lost controller feed only stops epoch
+/// updates — the node keeps the last epoch and free-runs (display-out §8).
+fn disciplined_step<F, B>(
+    backend: &mut B,
+    reader: &FrameReader<F>,
+    driver: &mut FlipDriver,
+    stats: &DisplayStats,
+    output_id: &str,
+    pres: &mut PresentState<F>,
+) where
+    F: DisplayCanvas + Send + Sync,
+    B: KmsBackend,
+{
+    // Drain the latest mailbox frame into the bounded present queue exactly
+    // once (newest-wins; the engine-side publish stays wait-free — this is the
+    // pull side of the seam). A queue overflow is a late skip (drop-oldest).
+    if let Some((frame, seq)) = reader.latest() {
+        if seq > pres.drained_seq {
+            let pts_ns = frame.pts_ns();
+            if pres.queue.push(frame, seq, pts_ns) {
+                stats.late_skips.fetch_add(1, Ordering::Relaxed);
             }
-            Err(SubmitError::Busy) => {
-                driver.on_commit_busy();
-                stats.busy_conflations.fetch_add(1, Ordering::Relaxed);
+            pres.drained_seq = seq;
+        }
+    }
+    // A commit is in flight: the kernel allows at most one per CRTC, so no
+    // decision can land until the pending flip drains (KMS repeats the glass).
+    if driver.in_flight() || pres.queue.is_empty() {
+        return;
+    }
+    let (mono_now_ns, wall_now_ns) = pres.plan.clock.now_pair();
+    let wall_minus_mono = wall_now_ns.saturating_sub(mono_now_ns);
+    // Disciplined choice needs BOTH a published epoch and a flip anchor. Either
+    // missing ⇒ honest undisciplined latest-wins (present the newest queued
+    // frame). The output never waits for timing.
+    let (choice, disciplined) = match (
+        pres.plan.epoch.get(),
+        pres.predictor.predicted_next_ns(mono_now_ns),
+    ) {
+        (Some(epoch), Some(vblank_mono_ns)) => {
+            // The deadlines are in the epoch's WALL domain; the predicted vblank
+            // is MONOTONIC (the KMS flip-timestamp domain). Bridge the vblank
+            // into the wall domain with the just-sampled `wall − mono` offset so
+            // the comparison is apples-to-apples.
+            let deadlines = pres.queue.deadlines(epoch, pres.plan.link_offset_ns);
+            let vblank_wall_ns = vblank_mono_ns.saturating_add(wall_minus_mono);
+            (
+                choose_frame(&deadlines, vblank_wall_ns, pres.predictor.period_ns()),
+                true,
+            )
+        }
+        // Latest-wins: the newest queued frame (the back of the queue). The
+        // present-queue is non-empty here (checked above).
+        _ => (
+            FrameChoice::Present {
+                index: pres.queue.len().saturating_sub(1),
+            },
+            false,
+        ),
+    };
+    match choice {
+        FrameChoice::Idle | FrameChoice::RepeatEarly => {
+            // Nothing to present this vblank, or the nearest frame belongs to
+            // the next vblank: KMS repeats the current framebuffer for free.
+        }
+        FrameChoice::Present { index } => {
+            commit_chosen(
+                backend,
+                driver,
+                stats,
+                output_id,
+                pres,
+                index,
+                wall_minus_mono,
+                disciplined,
+            );
+        }
+    }
+}
+
+/// Commit the queued frame at `index` (already chosen): submit it, and on
+/// success consume the queue through it (every earlier entry is a late skip),
+/// record its scheduled monotonic instant for the flip-skew telemetry, and bump
+/// the present counters (disciplined vs undisciplined). `EBUSY` keeps the chosen
+/// frame queued (the retry candidate after the pending flip drains); a device
+/// error holds last-good.
+#[allow(clippy::too_many_arguments)]
+// reason: each argument is one distinct piece of the commit's context (the
+// device, the flip driver, the counters, the chosen index, the clock offset,
+// and the disciplined/undisciplined classification); a wrapper struct would
+// only relocate the same names.
+fn commit_chosen<F, B>(
+    backend: &mut B,
+    driver: &mut FlipDriver,
+    stats: &DisplayStats,
+    output_id: &str,
+    pres: &mut PresentState<F>,
+    index: usize,
+    wall_minus_mono: i64,
+    disciplined: bool,
+) where
+    F: DisplayCanvas + Send + Sync,
+    B: KmsBackend,
+{
+    // Clone the chosen frame out of the queue (a cheap `Arc` bump) so the queue
+    // borrow is released before the mutable `pop_through` below.
+    let Some((frame, seq, pts_ns)) = pres.queue.entry(index).map(|(f, s, p)| (f.clone(), s, p))
+    else {
+        return;
+    };
+    match backend.submit_frame(&*frame) {
+        Ok(()) => {
+            driver.on_commit_submitted(seq);
+            stats.commits.fetch_add(1, Ordering::Relaxed);
+            if disciplined {
+                stats.presented.fetch_add(1, Ordering::Relaxed);
+            } else {
+                stats.undisciplined_presents.fetch_add(1, Ordering::Relaxed);
             }
-            Err(SubmitError::Device(e)) => {
-                stats.submit_errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    output = %output_id,
-                    error = %e,
-                    "display frame commit failed; holding the last framebuffer"
-                );
+            // The chosen frame's scheduled MONOTONIC instant — its wall deadline
+            // mapped back through the just-sampled `wall − mono` offset — so the
+            // flip-completion handler can export the skew against the kernel's
+            // flip timestamp (which is monotonic). Disciplined deadlines use the
+            // epoch; without one (undisciplined) the scheduled instant is the
+            // frame's own pts + link offset in the mono domain, the honest
+            // fallback (skew telemetry stays meaningful pre-epoch).
+            let deadline_wall = match pres.plan.epoch.get() {
+                Some(epoch) => epoch
+                    .wall_at(pts_ns)
+                    .saturating_add(pres.plan.link_offset_ns),
+                None => pts_ns
+                    .saturating_add(wall_minus_mono)
+                    .saturating_add(pres.plan.link_offset_ns),
+            };
+            pres.in_flight_scheduled_mono_ns = Some(deadline_wall.saturating_sub(wall_minus_mono));
+            // Consume the queue through the chosen frame: every earlier entry
+            // was a late skip (drop-if-late).
+            let skips = pres.queue.pop_through(index);
+            if skips > 0 {
+                stats
+                    .late_skips
+                    .fetch_add(u64::try_from(skips).unwrap_or(u64::MAX), Ordering::Relaxed);
             }
+        }
+        Err(SubmitError::Busy) => {
+            // EBUSY = an unaccounted-for kernel flip is pending: become
+            // in-flight WITHOUT consuming the chosen frame — it is the retry
+            // candidate after the pending flip drains.
+            driver.on_commit_busy();
+            stats.busy_conflations.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(SubmitError::Device(e)) => {
+            stats.submit_errors.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                output = %output_id,
+                error = %e,
+                "display frame commit failed; holding the last framebuffer"
+            );
+        }
+    }
+}
+
+/// Record one flip-timestamp skew sample (DEV-C2): `flip_ns − scheduled_ns`
+/// (kernel flip timestamp minus the committed frame's scheduled monotonic
+/// instant), and update the absolute high-watermark. Both are monotonic-domain
+/// ns, so the subtraction is exact.
+fn record_flip_skew(stats: &DisplayStats, flip_ns: i64, scheduled_ns: i64) {
+    let skew = flip_ns.saturating_sub(scheduled_ns);
+    stats.last_flip_skew_ns.store(skew, Ordering::Relaxed);
+    let abs = skew.saturating_abs();
+    // Monotonic max via a relaxed CAS loop (telemetry only — no ordering needs).
+    let mut cur = stats.max_flip_skew_abs_ns.load(Ordering::Relaxed);
+    while abs > cur {
+        match stats.max_flip_skew_abs_ns.compare_exchange_weak(
+            cur,
+            abs,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => cur = observed,
         }
     }
 }

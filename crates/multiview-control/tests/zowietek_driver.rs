@@ -14,8 +14,10 @@
 
 use std::sync::Arc;
 
-use multiview_control::devices::zowietek::client::{ScriptedReply, ScriptedTransport};
-use multiview_control::devices::zowietek::{ModeConvergence, ZowietekDriver};
+use multiview_control::devices::zowietek::client::{
+    ScriptedReply, ScriptedTransport, ZowietekClientError,
+};
+use multiview_control::devices::zowietek::{DecodeIndex, ModeConvergence, ZowietekDriver};
 use multiview_control::devices::{DeviceBroadcaster, DeviceDriverRegistry, DeviceStatusRegistry};
 use multiview_engine::EnginePublisher;
 use multiview_events::{DeviceState, Event};
@@ -320,8 +322,10 @@ async fn mode_convergence_is_close_before_open_with_a_declared_dev_impact() {
         detail.contains("no Multiview outputs are affected"),
         "the declared impact states program output is untouched: {detail:?}"
     );
+    // Convergence is scoped to a concrete, grounded decode-table index (DEV-A4
+    // fix 3) — the only safe way to operate the decode table.
     driver
-        .converge_mode("decoder")
+        .converge_mode("decoder", Some(DecodeIndex::new(2)))
         .await
         .expect("convergence succeeds");
     // The close request was issued before the open request (close-before-open).
@@ -330,6 +334,25 @@ async fn mode_convergence_is_close_before_open_with_a_declared_dev_impact() {
         order.len() >= 2,
         "close-before-open issues a close then an open"
     );
+    // SAFETY: NEITHER the stop NOR the start was a global, un-indexed call —
+    // every mutating /streamplay request names the concrete decode index `2`,
+    // never `data: null` (which would stop ALL decode on a production unit).
+    for r in &order {
+        let data = r.body.get("data");
+        assert_ne!(
+            data,
+            Some(&json!(null)),
+            "a mode-switch /streamplay request must never carry a global data:null: {:?}",
+            r.body
+        );
+        assert_eq!(
+            data.and_then(|d| d.get("index"))
+                .and_then(serde_json::Value::as_u64),
+            Some(2),
+            "the stop/start is scoped to the grounded decode index 2: {:?}",
+            r.body
+        );
+    }
     // A device.mode event was published carrying the DEV-class impact.
     let mut saw_mode = false;
     while let Ok(evt) = sub.try_recv() {
@@ -341,6 +364,82 @@ async fn mode_convergence_is_close_before_open_with_a_declared_dev_impact() {
     assert!(
         saw_mode,
         "device.mode (DEV impact) was published on converge"
+    );
+}
+
+/// SAFETY (DEV-A4 fix 3): a convergence requested with NO grounded decode-table
+/// index must REFUSE — it issues ZERO `/streamplay` wire writes (never the
+/// global, un-indexed `data:null` stop that would halt ALL decode on the
+/// device, including a production unit) and returns the typed
+/// `ConvergenceUngrounded` refusal. The desire is left for the poller to
+/// re-converge once a grounded index exists.
+#[tokio::test]
+async fn convergence_without_a_grounded_index_refuses_and_issues_no_global_stop() {
+    let (_engine, broadcaster, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    // Currently encoder-mode; the desired mode is decoder → a real switch.
+    transport.push(
+        "venc",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "encoder" } }),
+        ),
+    );
+    let driver = ZowietekDriver::new(
+        "dev-prod",
+        Arc::new(transport.clone()),
+        broadcaster.clone(),
+        Arc::clone(&drivers),
+        "admin",
+        "admin",
+    );
+    driver.probe_and_adopt().await.expect("adopt ok");
+
+    // No grounded index available → convergence must refuse, not global-stop.
+    let result = driver.converge_mode("decoder", None).await;
+    assert!(
+        matches!(
+            result,
+            Err(ZowietekClientError::ConvergenceUngrounded { .. })
+        ),
+        "an un-grounded convergence refuses with ConvergenceUngrounded, got {result:?}"
+    );
+    assert_eq!(
+        transport.request_count("streamplay"),
+        0,
+        "a refused convergence issues ZERO /streamplay wire writes — no global stop"
+    );
+}
+
+/// SAFETY (DEV-A4 fix 3): the driver's `convergence_index()` is `None` today —
+/// the vendor mode-switch opts are an OPEN protocol-grounding item — so the
+/// poller-driven convergence path can never obtain an index and therefore can
+/// never global-stop. This pins the fail-safe default so a future change that
+/// starts returning an index is a conscious, reviewed step.
+#[tokio::test]
+async fn convergence_index_is_ungrounded_by_default() {
+    let (_engine, broadcaster, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    transport.push(
+        "venc",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "decoder" } }),
+        ),
+    );
+    let driver = ZowietekDriver::new(
+        "dev-dec",
+        Arc::new(transport),
+        broadcaster.clone(),
+        Arc::clone(&drivers),
+        "admin",
+        "admin",
+    );
+    driver.probe_and_adopt().await.expect("adopt ok");
+    assert_eq!(
+        driver.convergence_index(),
+        None,
+        "no grounded decode-index mapping exists yet (managed-devices.md §3.3 OPEN item)"
     );
 }
 

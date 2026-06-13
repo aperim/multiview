@@ -1923,7 +1923,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "`POST /api/v1/devices/{id}/identify` — flash the device's identify indicator\n(role: write; fire-and-forget `204`).",
+        "summary": "`POST /api/v1/devices/{id}/identify` — flash the device's identify indicator.",
+        "description": "**Not implemented on this build (`501`)** — DEV-A4 fix 2. The `zowietek`\ndriver has no grounded vendor opt for an identify indicator (no vendor SDK\nis present in this repo to ground one), so the route refuses honestly with an\n`application/problem+json` rather than return a fake `204` that never reaches\nthe device. It re-enables to a wired verb once the firmware opt is grounded\nagainst the vendor SDK (managed-devices.md §3).",
         "operationId": "identify_device",
         "parameters": [
           {
@@ -1937,9 +1938,6 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Identify acknowledged."
-          },
           "401": {
             "description": "Missing or invalid credentials.",
             "content": {
@@ -1962,6 +1960,16 @@
           },
           "404": {
             "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Identify is not implemented by this driver/firmware build (no grounded vendor opt).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2101,7 +2109,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}/reboot` — reboot the device (role: write; `202`).",
-        "description": "A long-running management verb (ADR-W017): the operation id is minted and\n`202`'d; the outcome arrives on the realtime stream once the driver lands.",
+        "description": "A long-running management verb (ADR-W017): the operation id is minted and\n`202`'d, then the route **dispatches** `PollerControl::Reboot` to the device's\nrunning driver poller (DEV-A4), which issues the **fire-and-forget** reboot to\nthe device — the box drops the socket with no HTTP response, so the poller\nrides `UNREACHABLE`→reconnect and re-probes on return (managed-devices.md\n§3.1). The dispatch is non-blocking `try_send`, so it never back-pressures the\nengine (invariant #10). When no live poller is running (the default build's\nno-op factory, or a device whose driver was not spawned), the `202` is still\nreturned but nothing applies the reboot — there is no live transport to drive.",
         "operationId": "reboot_device",
         "parameters": [
           {
@@ -2116,7 +2124,7 @@
         ],
         "responses": {
           "202": {
-            "description": "Reboot accepted; outcome on the realtime stream.",
+            "description": "Reboot accepted; the driver issues the fire-and-forget reboot and the device rides UNREACHABLE→reconnect.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2365,7 +2373,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "`POST /api/v1/devices/{id}/test-pattern` — display a test pattern on the\ndevice (role: write; fire-and-forget `204`).",
+        "summary": "`POST /api/v1/devices/{id}/test-pattern` — display a test pattern on the\ndevice.",
+        "description": "**Not implemented on this build (`501`)** — DEV-A4 fix 2. Same disposition as\n`identify`: no grounded vendor opt for a test pattern on this build (no\nvendor SDK), so the route refuses honestly with `application/problem+json`\nrather than ship a fake `204`. Wired once the firmware opt is grounded.",
         "operationId": "test_pattern",
         "parameters": [
           {
@@ -2379,9 +2388,6 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Test-pattern acknowledged."
-          },
           "401": {
             "description": "Missing or invalid credentials.",
             "content": {
@@ -2404,6 +2410,16 @@
           },
           "404": {
             "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Test-pattern is not implemented by this driver/firmware build (no grounded vendor opt).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6921,6 +6937,14 @@
           "output": {
             "type": "string",
             "description": "The output id whose rendition the session casts."
+          },
+          "started_unix_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the receiver **accepted** the session's `LOAD` (the first\n`MEDIA_STATUS` attributing an active media session to the actor — the\nmoment the cast verifiably began showing), as Unix nanoseconds from\nthe control plane's clock. Absent until then: a session whose LOAD was\nrefused, or is still establishing, has not started (DEV-D3.1)."
           },
           "state": {
             "type": "string",

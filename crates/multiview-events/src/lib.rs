@@ -41,12 +41,13 @@ pub mod topic;
 pub use envelope::{Envelope, FrameKind, SchemaVersion};
 pub use error::{Error, Result};
 pub use event::{
-    AchievedSync, AddressFamily, AlarmTransition, Alert, AlertSeverity, AudioMeter, ClockQuality,
-    ClockSource, DeviceAdopted, DeviceCapabilities, DeviceDiscovered, DeviceError, DeviceMode,
-    DeviceRemoved, DeviceState, DeviceStatus, DeviceStreamRole, DeviceStreamStatus, DeviceSync,
-    DeviceSyncSummary, Event, GpuMetrics, GpuVendor, HealthWarning, ImpactClass, InputConnection,
-    InputStreams, JobProgress, LifecycleState, ModePhase, OutputRunState, OutputStatus, SalvoEvent,
-    SalvoPhase, SyncCapability, SyncChange, SyncGroupSkew, SystemMetrics, TallyEvent, TallyTarget,
+    AchievedSync, AddressFamily, AlarmTransition, Alert, AlertSeverity, AudioMeter,
+    CastSessionRemoved, CastSessionStarted, ClockQuality, ClockSource, DeviceAdopted,
+    DeviceCapabilities, DeviceDiscovered, DeviceError, DeviceMode, DeviceRemoved, DeviceState,
+    DeviceStatus, DeviceStreamRole, DeviceStreamStatus, DeviceSync, DeviceSyncSummary, Event,
+    GpuMetrics, GpuVendor, HealthWarning, ImpactClass, InputConnection, InputStreams, JobProgress,
+    LifecycleState, ModePhase, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase,
+    SyncCapability, SyncChange, SyncGroupSkew, SystemMetrics, TallyEvent, TallyTarget,
     TileSnapshotEntry, TileState, TilesSnapshot, TimingStatus, WarningCode, WarningSeverity,
 };
 pub use ordering::{Accepted, TopicCursor};

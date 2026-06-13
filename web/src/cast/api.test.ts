@@ -47,6 +47,7 @@ describe('toCastSessionView', () => {
       output: 'hls-out',
       mediaUrl: 'http://[fd00::7]:8080/hls/hls-out/index.m3u8',
       state: 'ONLINE',
+      startedUnixNs: undefined,
     });
   });
 
@@ -55,6 +56,20 @@ describe('toCastSessionView', () => {
     void name;
     expect(toCastSessionView({ ...rest, name: null }).name).toBeUndefined();
     expect(toCastSessionView(rest).name).toBeUndefined();
+  });
+
+  it('projects started_unix_ns onto startedUnixNs (the LOAD-accept stamp)', () => {
+    expect(
+      toCastSessionView({ ...SESSION_DOC, started_unix_ns: 1_700_000_000_000_000_000 })
+        .startedUnixNs,
+    ).toBe(1_700_000_000_000_000_000);
+  });
+
+  it('folds an absent started_unix_ns to undefined — a start is never fabricated', () => {
+    expect(toCastSessionView(SESSION_DOC).startedUnixNs).toBeUndefined();
+    expect(
+      toCastSessionView({ ...SESSION_DOC, started_unix_ns: null }).startedUnixNs,
+    ).toBeUndefined();
   });
 });
 

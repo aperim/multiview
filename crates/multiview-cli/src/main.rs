@@ -270,9 +270,12 @@ fn spawn_stop_on_signal(stop: StopSignal) -> tokio::task::JoinHandle<()> {
 /// `--ticks`/`--duration` bound the run (diagnostics/soak); otherwise the
 /// node runs as the daemon until Ctrl-C/SIGTERM.
 ///
-/// Until DEV-C2 lands the epoch + link-offset frame chooser, presentation
-/// rides the display sink's existing repeat/drop reconciliation; the node
-/// document's `timing.link_offset_ms` is recorded but not yet consumed.
+/// Presentation runs the DEV-C2 pull-side discipline: each head presents the
+/// frame whose `wall_at(pts) + link_offset` is nearest the predicted next
+/// vblank (repeat-if-early, drop-if-late), consuming the node document's
+/// `timing.link_offset_ms` against the run's local outbound presentation epoch
+/// (a future controller WS-client fills the same seam); a lost feed free-runs
+/// on the held epoch so the heads never falter (inv #1/#10).
 #[cfg(all(feature = "ffmpeg", feature = "display-kms"))]
 async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
     use multiview_cli::pipeline::Pipeline;
@@ -283,13 +286,23 @@ async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
     // The rootless-container hotplug fallback cadence (kernel uevents stay
     // the primary path; ADR-0045 / display-out §10).
     pipeline.set_display_hotplug_poll(std::time::Duration::from_secs(node_cfg.hotplug.poll_secs));
+    // DEV-C2: enable pull-side presentation discipline — the display heads
+    // present the frame whose `wall_at(pts) + link_offset` is nearest the
+    // predicted next vblank (repeat-if-early, drop-if-late), consuming the
+    // node's `timing.link_offset_ms`. The epoch is the run's local outbound
+    // presentation epoch (a future controller WS-client fills the same seam,
+    // DEV-B6); a lost feed free-runs on the last epoch (inv #1/#10).
+    let link_offset_ns =
+        multiview_output::display::present::link_offset_ms_to_ns(node_cfg.timing.link_offset_ms);
+    pipeline.set_node_presentation(link_offset_ns);
     let cadence = pipeline.cadence();
     tracing::info!(
         ingest = %node_cfg.ingest.url(),
         heads = node_cfg.displays.len(),
         link_offset_ms = node_cfg.timing.link_offset_ms,
-        "node: pipeline built (presentation rides the display sink's repeat/drop \
-         reconciliation until the DEV-C2 epoch frame chooser)"
+        "node: pipeline built (DEV-C2 pull-side presentation discipline active: \
+         wall_at(pts) + link_offset nearest the predicted vblank, free-running \
+         on the last epoch if the feed drops)"
     );
 
     // The systemd integration (ADR-0045 deployment): best-effort sd_notify —

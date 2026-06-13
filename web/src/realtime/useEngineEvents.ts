@@ -26,6 +26,7 @@ import type {
 } from "./envelope";
 import type { DeviceDiscovered, DeviceStatus } from "./generated-types";
 import { resourceKeys } from "../resources/queries";
+import { CAST_SESSIONS_QUERY_KEY } from "../cast/queries";
 // `LifecycleState` (LIVE/STALE/RECONNECTING/NO_SIGNAL) comes from the generated
 // AsyncAPI schema types — the canonical source of truth for tile lifecycle values
 // (resilience invariant #2). `envelope.ts` re-exports it as `TileState` for
@@ -298,6 +299,16 @@ function clearDeviceCaches(client: QueryClient): void {
 }
 
 /**
+ * A cast-session membership change (`cast.session.started` / `.removed`,
+ * DEV-D3.1) re-reads the ephemeral session list immediately rather than
+ * waiting for its 15 s REST re-poll. The list's own conflated `device.status`
+ * lane keeps each row's state fresh; only the SET OF ROWS needs this nudge.
+ */
+function refreshCastSessions(client: QueryClient): void {
+  void client.invalidateQueries({ queryKey: CAST_SESSIONS_QUERY_KEY });
+}
+
+/**
  * Connect to the engine realtime stream and reconcile snapshots/deltas into the
  * Query cache. Returns the live connection status for the UI shell.
  */
@@ -375,6 +386,11 @@ export function useEngineEvents(): EngineEvents {
           }
           case "device.discovered": {
             pushDiscoveredRow(queryClient, envelope);
+            return;
+          }
+          case "cast.session.started":
+          case "cast.session.removed": {
+            refreshCastSessions(queryClient);
             return;
           }
           default:

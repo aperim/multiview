@@ -45,7 +45,9 @@ use multiview_config::Device;
 
 use super::poller::{PollerControl, PollerHandle};
 use crate::devices::broadcaster::DeviceBroadcaster;
+use crate::devices::cast::store::CastSessionStore;
 use crate::devices::driver_registry::DeviceDriverRegistry;
+use crate::state::AckClock;
 
 /// The control-plane handles a [`DevicePollerFactory`] needs to wire a freshly
 /// spawned poller into the running control plane: the broadcaster it publishes
@@ -61,6 +63,15 @@ pub struct PollerWiring {
     /// The driver registry the poller enumerates source/output facets into (read
     /// by the projection routes).
     pub drivers: Arc<DeviceDriverRegistry>,
+    /// The ephemeral cast-session store the cast driver stamps started-at
+    /// into at its LOAD-accept moment (DEV-D3.1). A no-op for ids the store
+    /// does not track (saved cast devices run the same driver but have no
+    /// ephemeral record); other drivers ignore it entirely.
+    pub cast_sessions: Arc<CastSessionStore>,
+    /// The control plane's injectable clock (the same `AckClock` the audit
+    /// log stamps with — Unix nanoseconds by default) the cast driver reads
+    /// the started-at stamp from.
+    pub clock: AckClock,
 }
 
 /// An object-safe seam that spawns a poller actor for one managed device.
@@ -477,6 +488,8 @@ mod tests {
         let wiring = PollerWiring {
             broadcaster: crate::devices::DeviceBroadcaster::new(engine, status),
             drivers: Arc::new(crate::devices::DeviceDriverRegistry::new()),
+            cast_sessions: Arc::new(crate::devices::cast::store::CastSessionStore::new()),
+            clock: Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
         };
         let dev = device("dev-a");
         assert_eq!(dev.driver, DeviceDriver::Zowietek);
@@ -506,6 +519,8 @@ mod tests {
         let wiring = PollerWiring {
             broadcaster: crate::devices::DeviceBroadcaster::new(engine, status),
             drivers: Arc::new(crate::devices::DeviceDriverRegistry::new()),
+            cast_sessions: Arc::new(crate::devices::cast::store::CastSessionStore::new()),
+            clock: Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
         };
         assert!(factory.spawn(&device("dev-a"), &wiring).is_none());
     }

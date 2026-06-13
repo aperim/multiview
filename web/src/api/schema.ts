@@ -1867,6 +1867,15 @@ export interface components {
             /** @description The output id whose rendition the session casts. */
             output: string;
             /**
+             * Format: int64
+             * @description When the receiver **accepted** the session's `LOAD` (the first
+             *     `MEDIA_STATUS` attributing an active media session to the actor — the
+             *     moment the cast verifiably began showing), as Unix nanoseconds from
+             *     the control plane's clock. Absent until then: a session whose LOAD was
+             *     refused, or is still establishing, has not started (DEV-D3.1).
+             */
+            started_unix_ns?: number | null;
+            /**
              * @description The session's live lifecycle state (the DEV-A3 wire vocabulary, e.g.
              *     `ADOPTING`/`ONLINE`/`DEGRADED`), read from the latest-wins status
              *     registry.

@@ -96,6 +96,26 @@
         "summary": "Per-input/track peak/RMS/clip meter sample (numeric only, never audio data).",
         "title": "High-rate audio meter sample"
       },
+      "CastSessionRemoved": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `devices` with envelope `id` = session id when a session is stopped (`DELETE /api/v1/cast/sessions/{id}` — the receiver STOP that clears the TV) or promoted to a saved device (`POST /{id}/save` retires the ephemeral record while playback continues under the promoted device id).",
+        "name": "CastSessionRemoved",
+        "payload": {
+          "$ref": "#/components/schemas/CastSessionRemoved"
+        },
+        "summary": "An ad-hoc cast session was removed (cast.session.removed on topic `devices`; lossless lifecycle lane).",
+        "title": "Ephemeral cast session removed"
+      },
+      "CastSessionStarted": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `devices` with envelope `id` = session id when `POST /api/v1/cast/sessions` accepts a start (the runtime record exists and its supervised actor is spawned): the session-list MEMBERSHIP changed, so clients refresh the list immediately instead of waiting for a REST re-poll. The session's live state rides the conflated `device.status` lane keyed by the same session id.",
+        "name": "CastSessionStarted",
+        "payload": {
+          "$ref": "#/components/schemas/CastSessionStarted"
+        },
+        "summary": "An ad-hoc cast session was started (cast.session.started on topic `devices`; lossless lifecycle lane).",
+        "title": "Ephemeral cast session started"
+      },
       "DeviceAdopted": {
         "contentType": "application/json",
         "name": "DeviceAdopted",
@@ -231,6 +251,12 @@
                 },
                 {
                   "$ref": "#/components/schemas/DeviceDiscovered"
+                },
+                {
+                  "$ref": "#/components/schemas/CastSessionStarted"
+                },
+                {
+                  "$ref": "#/components/schemas/CastSessionRemoved"
                 },
                 {
                   "$ref": "#/components/schemas/TimingStatus"
@@ -560,6 +586,46 @@
           "clip",
           "overflow",
           "sampled_hz"
+        ],
+        "type": "object"
+      },
+      "CastSessionRemoved": {
+        "description": "Data body of `cast.session.removed`: an ephemeral cast session was removed — stopped (the receiver STOP that clears the TV) or promoted to a saved device (playback continues under the promoted device id).",
+        "properties": {
+          "session_id": {
+            "description": "The runtime session id that was removed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "CastSessionStarted": {
+        "description": "Data body of `cast.session.started`: an ephemeral cast session was started (session-list membership changed). The session's live state rides the conflated `device.status` lane keyed by the same session id.",
+        "properties": {
+          "address": {
+            "description": "The device authority dialled (`host[:port]`, IPv6 bracketed).",
+            "type": "string"
+          },
+          "name": {
+            "description": "The operator-facing name, if given.",
+            "type": "string"
+          },
+          "output": {
+            "description": "The output id whose HLS rendition the session casts.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The runtime session id (`cast-session-…`, UUID-fresh per start).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "address",
+          "output"
         ],
         "type": "object"
       },
