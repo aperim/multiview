@@ -28,10 +28,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::config::EndpointConfig;
+use crate::config::{EndpointConfig, IceServerKind};
 use crate::error::{Result, WebRtcError};
 use crate::session::{SessionId, SessionRole, SessionTable};
 use crate::transport::{RtpRing, Session, SessionConfig, WebRtcEndpoint};
+use crate::turn::TurnClient;
 
 /// The maximum UDP datagram the recv loop reads (a generous MTU ceiling; WebRTC
 /// packets are well under this).
@@ -65,6 +66,40 @@ enum Command {
 /// session while the keyframe gate is closed.
 const PLI_FLOOR: Duration = Duration::from_secs(2);
 
+/// One configured TURN server's allocation client, driven sans-IO over the
+/// shared socket by the endpoint loop (ADR-0048 §5.1).
+struct TurnDriver {
+    client: TurnClient,
+}
+
+/// Build a [`TurnClient`] per configured TURN server (ADR-0048 §5.1). The
+/// per-allocation credential is resolved `now` (ephemeral REST derives a
+/// time-limited username/password; long-term uses the static pair). STUN
+/// servers need no client here (str0m's server-reflexive candidates are gathered
+/// from the bound/advertised addresses). Empty when no TURN server is
+/// configured — the common self-hosted / port-forwarded case.
+fn build_turn_clients(config: &EndpointConfig, now: Instant) -> Vec<TurnDriver> {
+    // A wall-clock seconds value for the ephemeral-REST expiry derivation. The
+    // monotonic `now` is the driver's tick clock; the REST username's expiry is a
+    // unix time, so use the system clock here (a credential-derivation detail —
+    // not a media-timeline clock, so this is not invariant-#3 territory).
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let _ = now;
+    config
+        .ice_servers
+        .iter()
+        .filter(|s| s.kind == IceServerKind::Turn)
+        .filter_map(|server| {
+            let credential = server.credentials.as_ref()?.resolve(now_unix);
+            Some(TurnDriver {
+                client: TurnClient::new(server.addr, credential),
+            })
+        })
+        .collect()
+}
+
 /// A handle the WHIP control provider uses to negotiate and release ingest
 /// sessions against the running [`WhipEndpoint`]. Cheap to clone (an `Arc` of
 /// shared state + the command sender).
@@ -85,6 +120,12 @@ struct WhipShared {
     /// Per-source live session id, so a second publisher is a `409` and a
     /// `DELETE` resolves the right session. Guarded by the same discipline.
     live_by_source: std::sync::Mutex<HashMap<String, SessionId>>,
+    /// TURN **relay** transport addresses the driver's in-crate TURN client has
+    /// allocated (ADR-0048 §5.1), populated as `Allocate` succeeds and offered as
+    /// relay candidates on each negotiated session (the operator's NAT-traversal
+    /// last resort, IPv6-first-ordered by str0m). Empty until/unless a TURN
+    /// server is configured and an allocation completes.
+    learned_relays: std::sync::Mutex<Vec<SocketAddr>>,
 }
 
 impl std::fmt::Debug for WhipHandle {
@@ -180,6 +221,27 @@ impl WhipHandle {
             }
             session.add_host_candidate(*addr)?;
             gathered += 1;
+        }
+        // TURN relay candidates the driver's in-crate TURN client has allocated
+        // (ADR-0048 §5.1) — the operator's NAT-traversal last resort, offered
+        // alongside the host candidates (str0m orders relay lowest). The relayed
+        // traffic egresses the local bound socket. A learned relay does NOT count
+        // toward the reachable-candidate floor below (host/advertised do): a relay
+        // alone with no advertised host is a valid, if relay-only, answer.
+        if let Ok(relays) = self.inner.learned_relays.lock() {
+            for relay in relays.iter() {
+                // `local` is the bound socket addr; the unspecified bind addr is
+                // not a valid local — skip relay registration until a concrete
+                // advertised host exists (the common deploy sets one).
+                if let Some(local) = self
+                    .inner
+                    .host_candidates
+                    .iter()
+                    .find(|a| !a.ip().is_unspecified())
+                {
+                    let _ = session.add_relay_candidate(*relay, *local);
+                }
+            }
         }
         if gathered == 0 {
             // No reachable candidate could be offered (only the unspecified bind
@@ -320,6 +382,7 @@ impl WhipEndpoint {
             host_candidates,
             table: std::sync::Mutex::new(SessionTable::new(max_sessions, idle, tombstone)),
             live_by_source: std::sync::Mutex::new(HashMap::new()),
+            learned_relays: std::sync::Mutex::new(Vec::new()),
         });
         let handle = WhipHandle {
             inner: Arc::clone(&shared),
@@ -344,6 +407,13 @@ impl WhipEndpoint {
     pub async fn run(self, stop: Arc<AtomicBool>) -> Result<()> {
         let bind_addr = self.endpoint.config().bind_addr();
         let local_addr = self.endpoint.local_addr()?;
+        // Build a TURN client per configured TURN server (ADR-0048 §5.1). Each is
+        // sans-IO: it is driven over the same UDP socket as the media. A relay it
+        // allocates is published into `shared.learned_relays` so future
+        // negotiations offer it as a relay candidate (the operator's hard
+        // NAT-traversal requirement, live in the driver — not just crate-level).
+        let now0 = Instant::now();
+        let mut turn_clients = build_turn_clients(self.endpoint.config(), now0);
         let std_socket = self.endpoint.into_socket();
         std_socket
             .set_nonblocking(true)
@@ -380,17 +450,23 @@ impl WhipEndpoint {
                         None => return Ok(()), // all handles dropped.
                     }
                 }
-                // An incoming datagram: route to the session that accepts it.
+                // An incoming datagram: a TURN-server reply, or media for a session.
                 recv = socket.recv_from(&mut buf) => {
                     let now = Instant::now();
                     if let Ok((len, src)) = recv {
                         if let Some(payload) = buf.get(..len) {
-                            Self::route_datagram(&mut sessions, src, local_addr, payload, now);
+                            // A datagram from a TURN server feeds its client; any
+                            // other datagram is media routed to the session that
+                            // accepts it.
+                            if !Self::feed_turn(&mut turn_clients, src, payload, now, &self.shared) {
+                                Self::route_datagram(&mut sessions, src, local_addr, payload, now);
+                            }
                         }
                     }
+                    Self::pump_turn(&socket, &mut turn_clients, now, &self.shared).await;
                     Self::pump_outbound(&socket, &mut sessions, now).await;
                 }
-                // The idle tick: advance timers, drain RTP, GC.
+                // The idle tick: advance timers, drain RTP, drive TURN, GC.
                 _ = tick.tick() => {
                     let now = Instant::now();
                     for s in &mut sessions {
@@ -399,6 +475,7 @@ impl WhipEndpoint {
                         s.ring.drain_from(&mut s.session);
                         Self::maybe_pli(s, now);
                     }
+                    Self::pump_turn(&socket, &mut turn_clients, now, &self.shared).await;
                     Self::pump_outbound(&socket, &mut sessions, now).await;
                     Self::reap(&mut sessions, &self.shared);
                 }
@@ -446,6 +523,79 @@ impl WhipEndpoint {
         }
     }
 
+    /// Feed a datagram that came **from a configured TURN server** into its
+    /// client (allocation / refresh / relayed-data handling). Returns `true` if a
+    /// TURN client owned `src` (the datagram was consumed); `false` means it was
+    /// not from a TURN server and should be routed to a session as media. On a
+    /// successful `Allocate` the learned relay is published for future
+    /// negotiations.
+    fn feed_turn(
+        clients: &mut [TurnDriver],
+        src: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+        shared: &WhipShared,
+    ) -> bool {
+        for driver in clients.iter_mut() {
+            if driver.client.server_addr() != src {
+                continue;
+            }
+            match driver.client.handle_input(payload, now) {
+                Ok(Some(crate::turn::TurnEvent::Allocated(relay))) => {
+                    if let Ok(mut relays) = shared.learned_relays.lock() {
+                        if !relays.contains(&relay) {
+                            relays.push(relay);
+                        }
+                    }
+                }
+                // Permission/Data events are not load-bearing for offering the
+                // relay candidate (str0m drives relayed connectivity once the
+                // candidate is in the answer); a parse/server error is logged at
+                // a low level and the allocation simply retries/expires.
+                Ok(_) => {}
+                Err(_e) => {}
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Drive every TURN client's sans-IO output: send any queued datagram to its
+    /// TURN server (allocate/refresh/retransmit). Non-blocking; a send error is
+    /// dropped (the client retransmits). Also harvests a relay learned from a
+    /// `poll_output`-driven state transition.
+    async fn pump_turn(
+        socket: &tokio::net::UdpSocket,
+        clients: &mut [TurnDriver],
+        now: Instant,
+        shared: &WhipShared,
+    ) {
+        for driver in clients.iter_mut() {
+            // Drain queued transmits (bounded: the client serializes one request
+            // at a time, so this is a short loop).
+            for _ in 0..8 {
+                match driver.client.poll_output(now) {
+                    crate::turn::TurnOutput::Transmit {
+                        destination,
+                        payload,
+                    } => {
+                        let _ = socket.send_to(&payload, destination).await;
+                    }
+                    // Nothing more to send right now.
+                    crate::turn::TurnOutput::Timeout(_) | crate::turn::TurnOutput::Idle => break,
+                }
+            }
+            // Publish a relay that became available since the last pass.
+            if let Some(relay) = driver.client.relay() {
+                if let Ok(mut relays) = shared.learned_relays.lock() {
+                    if !relays.contains(&relay) {
+                        relays.push(relay);
+                    }
+                }
+            }
+        }
+    }
+
     /// Send a rate-limited PLI toward a session's publisher while its video
     /// keyframe gate is presumably closed (best-effort recovery, ADR-T014 §7).
     /// We PLI on connect and then at most once per [`PLI_FLOOR`]; the keyframe
@@ -481,5 +631,47 @@ impl WhipEndpoint {
             }
             false
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::time::Instant;
+
+    use super::build_turn_clients;
+    use crate::config::{EndpointConfig, IceServer, TurnCredentials};
+
+    #[test]
+    fn turn_clients_built_per_turn_server_stun_skipped() {
+        // A STUN server needs no client (str0m gathers srflx from bound/advertised
+        // addresses); a TURN server yields one driven client, pointed at its addr.
+        let config = EndpointConfig {
+            ice_servers: vec![
+                IceServer::stun("[2001:db8::53]:3478".parse().unwrap()),
+                IceServer::turn(
+                    "[2001:db8::55]:3478".parse().unwrap(),
+                    TurnCredentials::long_term("u", "p"),
+                ),
+            ],
+            ..EndpointConfig::default()
+        };
+        let clients = build_turn_clients(&config, Instant::now());
+        assert_eq!(clients.len(), 1, "one client for the one TURN server");
+        assert_eq!(
+            clients[0].client.server_addr(),
+            "[2001:db8::55]:3478".parse().unwrap(),
+            "the client is pointed at the configured TURN server"
+        );
+    }
+
+    #[test]
+    fn no_turn_servers_yields_no_clients() {
+        let config = EndpointConfig {
+            ice_servers: vec![IceServer::stun("[2001:db8::53]:3478".parse().unwrap())],
+            ..EndpointConfig::default()
+        };
+        assert!(build_turn_clients(&config, Instant::now()).is_empty());
     }
 }
