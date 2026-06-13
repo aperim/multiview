@@ -75,6 +75,7 @@ pub mod versioning;
 pub mod warning_ingest;
 pub mod warning_store;
 pub mod watch_status;
+pub mod whep_output;
 pub mod whip;
 
 #[cfg(feature = "embed-web")]
@@ -191,6 +192,10 @@ pub use warning_ingest::{
 };
 pub use warning_store::{InMemoryWarningStore, WarningFilter, WarningRepository, WARNING_KIND};
 pub use watch_status::{ConfigWatchStatus, WatchStamp, WatchStatusBody};
+pub use whep_output::{
+    no_whep_output, NoWhepOutput, SharedWhepOutput, WhepOutputAnswer, WhepOutputAuth,
+    WhepOutputProvider, WhepOutputReject,
+};
 pub use whip::{no_whip, NoWhip, SharedWhip, WhipAnswer, WhipAuth, WhipProvider, WhipReject};
 
 /// Build the complete control-plane [`Router`] for the given [`AppState`].

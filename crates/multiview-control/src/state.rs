@@ -541,6 +541,14 @@ pub struct AppState {
     /// Isolation-safe (invariant #10): a WHIP publisher is an ingest source that
     /// can never back-pressure the engine.
     pub whip: crate::whip::SharedWhip,
+    /// The WHEP **output-viewer** transport seam (ADR-0049 §5.1): a browser
+    /// `POST`s an SDP offer to `/api/v1/whep/{output_id}` to play the real encoded
+    /// program rendition. The default ([`NoWhepOutput`](crate::whep_output::NoWhepOutput))
+    /// refuses every offer with an honest `503`; the binary swaps in a
+    /// `multiview-webrtc`-backed provider. Isolation-safe (invariant #10): a WHEP
+    /// viewer is a real-output consumer fed the encode-once program over a bounded
+    /// drop-oldest ring and can never back-pressure the engine.
+    pub whep_output: crate::whep_output::SharedWhepOutput,
     /// Whether authentication is **disabled** (every request runs as a local
     /// admin). Off by default — the control plane requires a verified API key.
     /// An operator turns this on **explicitly** (config/env) for a trusted/local
@@ -697,6 +705,7 @@ impl AppState {
             preview: crate::preview::no_preview(),
             whep: crate::preview::no_whep(),
             whip: crate::whip::no_whip(),
+            whep_output: crate::whep_output::no_whep_output(),
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
@@ -816,6 +825,15 @@ impl AppState {
     #[must_use]
     pub fn with_whip(mut self, whip: crate::whip::SharedWhip) -> Self {
         self.whip = whip;
+        self
+    }
+
+    /// Replace the WHEP output-viewer transport provider (ADR-0049 §5.1; the
+    /// binary wires a `multiview-webrtc`-backed one, the default refuses every
+    /// viewer `503`).
+    #[must_use]
+    pub fn with_whep_output(mut self, whep_output: crate::whep_output::SharedWhepOutput) -> Self {
+        self.whep_output = whep_output;
         self
     }
 

@@ -154,6 +154,10 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::whip::whip_delete,
         crate::routes::whip::whip_patch,
         crate::routes::whip::whip_options,
+        crate::routes::whep_output::whep_view,
+        crate::routes::whep_output::whep_delete,
+        crate::routes::whep_output::whep_patch,
+        crate::routes::whep_output::whep_options,
         crate::nmos::get_self,
         crate::nmos::list_devices,
         crate::nmos::list_senders,
@@ -391,6 +395,8 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         (name = "account", description = "Account-side (Conspect): append-only audit (cursor-paginated), pending remote-actions strip + local-wins cancel, and named-salvo fire. Locally drivable now; portal-fed over the heartbeat/relay transport later."),
         (name = "support", description = "Local support (Conspect): tier-derived entitlement routing (free → community), the local CS-xxxx ticket store with auto-attached machine context (§7.1), the previewable redacted media-free context-pack composer (consent-independent, §7.2), and local approve/deny of inbound egress data requests (nothing leaves without a local yes). Local lifecycle fully functional; portal sync rides the later transport."),
         (name = "preview", description = "Live preview: WHEP focus sessions per scope (program/input/output)"),
+        (name = "whip", description = "WHIP ingest (RFC 9725): WebRTC contribution publishers POST to a source-derived endpoint (ADR-T014)"),
+        (name = "whep", description = "WHEP-serve output viewers (ADR-0049): browsers POST to an output-derived endpoint to play the real encoded program over WebRTC"),
         (name = "config", description = "Config/layout versioning: revisions, diff, rollback"),
         (name = "nmos", description = "AMWA NMOS Node API: IS-04 resources + IS-05 connection"),
         (name = "realtime", description = "WebSocket + SSE event stream"),
@@ -528,6 +534,11 @@ const REST_ROUTES: &[(&str, &str)] = &[
     // CORS preflight — documented via utoipa, not enumerated as primary verbs).
     ("POST", "/api/v1/whip/{source_id}"),
     ("DELETE", "/api/v1/whip/{source_id}/sessions/{session_id}"),
+    // WHEP-serve output viewers (ADR-0049 §5.1): view an output-derived endpoint;
+    // DELETE the session resource to release the slot (PATCH 405 / OPTIONS CORS
+    // preflight documented via utoipa, not enumerated as primary verbs).
+    ("POST", "/api/v1/whep/{output_id}"),
+    ("DELETE", "/api/v1/whep/{output_id}/sessions/{session_id}"),
     ("GET", "/api/v1/audit"),
     // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
     ("GET", "/api/v1/account/audit"),

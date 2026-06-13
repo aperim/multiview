@@ -45,6 +45,7 @@ pub mod support;
 pub mod sync_groups;
 pub mod tally;
 pub mod telemetry;
+pub mod whep_output;
 pub mod whip;
 
 /// A `202 Accepted` body returned for an asynchronously-applied command.
@@ -896,6 +897,20 @@ pub fn api_router() -> Router<AppState> {
         .route(
             "/whip/{source_id}/sessions/{session_id}",
             axum::routing::delete(whip::whip_delete).patch(whip::whip_patch),
+        )
+        // WHEP-serve output viewers (ADR-0049 §5.1): a browser POSTs an SDP offer
+        // to the output-derived endpoint -> 201 + answer SDP + Location, then
+        // receives the real encoded program over SRTP; DELETE the session resource
+        // to release the viewer slot. PATCH is 405 (vanilla ICE); OPTIONS is the
+        // CORS preflight. A real-output surface distinct from the preview focus
+        // WHEP routes above.
+        .route(
+            "/whep/{output_id}",
+            post(whep_output::whep_view).options(whep_output::whep_options),
+        )
+        .route(
+            "/whep/{output_id}/sessions/{session_id}",
+            axum::routing::delete(whep_output::whep_delete).patch(whep_output::whep_patch),
         )
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
