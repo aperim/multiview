@@ -190,7 +190,10 @@ mod tests {
         assert!(slot.is_empty());
         assert!(slot.pop().is_none(), "empty slot yields None");
 
-        assert!(!slot.push(block(fmt, 0.1, 960)), "first push evicts nothing");
+        assert!(
+            !slot.push(block(fmt, 0.1, 960)),
+            "first push evicts nothing"
+        );
         assert!(!slot.push(block(fmt, 0.2, 960)));
         assert_eq!(slot.len(), 2);
         // FIFO order: oldest out first.

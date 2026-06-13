@@ -45,7 +45,11 @@ fn build_one_driver_client_per_turn_server_stun_skipped() {
         ..EndpointConfig::default()
     };
     let driver = TurnRelayDriver::from_config(&config, Instant::now());
-    assert_eq!(driver.client_count(), 1, "one client for the one TURN server");
+    assert_eq!(
+        driver.client_count(),
+        1,
+        "one client for the one TURN server"
+    );
     assert!(!driver.is_empty());
 }
 

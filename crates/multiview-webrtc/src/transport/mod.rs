@@ -826,4 +826,3 @@ fn bind_dual_stack(addr: SocketAddr) -> Result<std::net::UdpSocket> {
 pub const fn dual_stack_unspecified() -> IpAddr {
     IpAddr::V6(Ipv6Addr::UNSPECIFIED)
 }
-

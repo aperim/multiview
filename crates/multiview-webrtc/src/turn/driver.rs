@@ -149,7 +149,8 @@ impl TurnRelayDriver {
             if driven.client.server_addr() != src {
                 continue;
             }
-            if let Ok(Some(TurnEvent::Allocated(relay))) = driven.client.handle_input(payload, now) {
+            if let Ok(Some(TurnEvent::Allocated(relay))) = driven.client.handle_input(payload, now)
+            {
                 Self::push_relay(&mut self.pending_relays, &mut self.known_relays, relay);
             }
             // Also catch a relay reached without an explicit `Allocated` event

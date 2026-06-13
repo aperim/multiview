@@ -490,9 +490,9 @@ impl CliWhepProvider {
         // candidate's `raddr`); the bound host candidate, or the unspecified bind
         // address as a fallback.
         let local = host.unwrap_or_else(|| {
-            endpoint
-                .local_addr()
-                .unwrap_or_else(|_| std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)))
+            endpoint.local_addr().unwrap_or_else(|_| {
+                std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+            })
         });
         spawn_driver(
             Arc::clone(&egress),
@@ -523,7 +523,10 @@ impl CliWhepProvider {
         scope: &WhepScope,
         codec: PreviewCodec,
         opus: bool,
-    ) -> (Arc<SlotMediaSource>, Option<crate::preview::ProgramAudioSlot>) {
+    ) -> (
+        Arc<SlotMediaSource>,
+        Option<crate::preview::ProgramAudioSlot>,
+    ) {
         let (reader, audio_scope) = match scope {
             WhepScope::Input(id) => (
                 SlotReader::Input {
@@ -637,8 +640,7 @@ fn spawn_driver(
                                 continue;
                             }
                             let dst = endpoint.local_addr().unwrap_or(source);
-                            let _ =
-                                egress.handle_datagram_broadcast(source, dst, payload, now);
+                            let _ = egress.handle_datagram_broadcast(source, dst, payload, now);
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(_) => break,
@@ -948,8 +950,11 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
                 return Some(reply.to_bytes(None));
             }
             self.saw_auth = true;
-            let mut reply =
-                StunMessage::with_transaction(Class::Success, Method::Allocate, msg.transaction_id());
+            let mut reply = StunMessage::with_transaction(
+                Class::Success,
+                Method::Allocate,
+                msg.transaction_id(),
+            );
             reply.push(Attribute::XorRelayedAddress(self.relay));
             reply.push(Attribute::Lifetime(600));
             reply.push(Attribute::Username(self.username.clone()));
@@ -960,7 +965,10 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
     }
 
     fn relay_candidate_count(candidates: &[String]) -> usize {
-        candidates.iter().filter(|c| c.contains("typ relay")).count()
+        candidates
+            .iter()
+            .filter(|c| c.contains("typ relay"))
+            .count()
     }
 
     #[test]
@@ -983,7 +991,11 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
             ..EndpointConfig::default()
         };
         let mut turn = TurnRelayDriver::from_config(&config, now);
-        assert_eq!(turn.client_count(), 1, "the WHEP driver built a TURN client");
+        assert_eq!(
+            turn.client_count(),
+            1,
+            "the WHEP driver built a TURN client"
+        );
         let egress = WhepEgress::with_host_candidate(host);
 
         // Drive the pump in a shuttle: the closure captures the TURN datagrams and
@@ -1084,7 +1096,9 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
         // and the resulting frames reach the audio feed the transport drains.
         let tap = ProgramAudioSlot::new();
         let media = program_media(true, Some(tap.clone()));
-        let audio_feed = media.audio_feed().expect("an Opus offer wires an audio feed");
+        let audio_feed = media
+            .audio_feed()
+            .expect("an Opus offer wires an audio feed");
 
         // Feed several 20 ms blocks (>1 so libopus surely emits at least one
         // packet) and pump.
@@ -1171,7 +1185,10 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
         }
         let sessions = vec![video_only_session()];
         fan_program_audio(Some(&shared), sessions.iter());
-        assert!(shared.is_empty(), "the tap is drained even with no audio sink");
+        assert!(
+            shared.is_empty(),
+            "the tap is drained even with no audio sink"
+        );
     }
 
     #[test]
@@ -1193,7 +1210,10 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
             started.elapsed() < std::time::Duration::from_secs(10),
             "pumping into a drop-oldest feed never blocks on a stalled consumer"
         );
-        assert!(tap.is_empty(), "each pump drains the bounded tap (never grows)");
+        assert!(
+            tap.is_empty(),
+            "each pump drains the bounded tap (never grows)"
+        );
     }
 
     /// A no-op preview media source for the egress `accept_session` in these

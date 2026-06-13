@@ -401,9 +401,8 @@ async fn run_pipeline_until_ctrl_c(
     // #1/#10). `None` (no audio / no WHEP build) means the consumer pushes
     // nothing, byte-identical to today.
     #[cfg(feature = "webrtc-native")]
-    let program_audio: Option<multiview_cli::preview::ProgramAudioSlot> = pipeline
-        .has_program_audio()
-        .then(|| {
+    let program_audio: Option<multiview_cli::preview::ProgramAudioSlot> =
+        pipeline.has_program_audio().then(|| {
             let slot = multiview_cli::preview::ProgramAudioSlot::new();
             pipeline.set_program_audio_preview(slot.clone());
             slot

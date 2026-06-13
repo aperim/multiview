@@ -580,7 +580,11 @@ mod tests {
             ..EndpointConfig::default()
         };
         let driver = TurnRelayDriver::from_config(&config, Instant::now());
-        assert_eq!(driver.client_count(), 1, "one client for the one TURN server");
+        assert_eq!(
+            driver.client_count(),
+            1,
+            "one client for the one TURN server"
+        );
     }
 
     #[test]
