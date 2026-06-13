@@ -153,3 +153,45 @@ fn tempdir() -> PathBuf {
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
+
+#[test]
+fn a_node_document_validates_through_the_validate_command() {
+    // Operators validate /etc/multiview/node.toml with the SAME command as
+    // engine documents (DEV-B5): `validate` detects the node shape (a
+    // top-level [ingest]) and runs the node schema's validation + lowering.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("node.toml");
+    fs::write(
+        &path,
+        "[ingest]\nkind = \"rtsp\"\nurl = \"rtsp://[::1]:8554/x\"\n\n[[displays]]\n",
+    )
+    .expect("write");
+    let report = validate_config(&path).expect("validate runs");
+    assert!(report.is_ok(), "a valid node document passes: {report:?}");
+    let rendered = report.render();
+    assert!(rendered.contains("OK"), "{rendered}");
+    assert!(
+        rendered.contains("display node"),
+        "the summary says what kind of document this is: {rendered}"
+    );
+}
+
+#[test]
+fn a_broken_node_document_fails_with_the_node_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("node.toml");
+    // srt kind with an rtsp URL: parses, fails NODE validation — the report
+    // must carry the node schema's reason, not an engine parse error.
+    fs::write(
+        &path,
+        "[ingest]\nkind = \"srt\"\nurl = \"rtsp://[::1]:8554/x\"\n\n[[displays]]\n",
+    )
+    .expect("write");
+    let report = validate_config(&path).expect("validate runs");
+    assert!(!report.is_ok());
+    let rendered = report.render();
+    assert!(
+        rendered.contains("srt"),
+        "the node validation detail surfaces: {rendered}"
+    );
+}
