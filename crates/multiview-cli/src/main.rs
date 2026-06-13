@@ -97,26 +97,45 @@ fn run_validate(args: &ValidateArgs) -> anyhow::Result<ExitCode> {
 /// software engine (`--software`), the full libav\* pipeline (default, `ffmpeg`
 /// feature), or — with neither available — report readiness.
 async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
-    let config = load_validated(&args.config)?;
+    // Review M3: canonicalize the boot path up front so a symlinked config is
+    // watched, promoted, and state-dir-anchored at its REAL file — a promote's
+    // atomic rename must replace the file, never the symlink pointing at it.
+    // A canonicalization failure keeps the given path (the load below reports
+    // any real problem with it).
+    let mut args = args;
+    if let Ok(canonical) = args.config.canonicalize() {
+        args.config = canonical;
+    }
+    let (boot_text, boot) = load_validated(&args.config)?;
+    // Boot/Loaded/Running (ADR-W022 §4): resolve the starting Running state —
+    // under `[control] start = "resume"` a valid persisted `active.toml`
+    // becomes the starting document (with the boot file's restart-only
+    // sections spliced in — review M1); Loaded stays the boot snapshot and
+    // the boot file stays the watch target.
+    let start = multiview_cli::boot::resolve_start_config(boot, boot_text, &args.config);
 
     // A configured `[timing].ptp_phc` in a build without the `ptp` feature is
     // a capability this binary cannot provide: fail the run at startup with a
     // clear error (the DEV-B1 display-output fail-fast precedent) — never
     // silently ride the system clock while the config asks for a PHC.
-    multiview_cli::timing_gate::ensure_ptp_phc_supported(config.timing.as_ref())
+    multiview_cli::timing_gate::ensure_ptp_phc_supported(start.running.timing.as_ref())
         .map_err(|reason| anyhow::anyhow!(reason))?;
 
     if args.software {
-        return run_software(&config, &args).await;
+        return run_software(&start, &args).await;
     }
 
-    run_pipeline(&config, &args).await
+    run_pipeline(&start, &args).await
 }
 
 /// The FFmpeg-free software run: the output-clock + CPU compositor driving the
 /// built-in test-pattern sources (the software end-to-end smoke of the
 /// output-clock invariant), serving the API/WebUI just like the full build.
-async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_software(
+    start: &multiview_cli::boot::StartConfig,
+    args: &RunArgs,
+) -> anyhow::Result<ExitCode> {
+    let config = &start.running;
     let mut engine = SoftwareEngine::build(config)?;
     let cadence = engine.cadence();
     let report = if let Some(ticks) = args.tick_budget(cadence) {
@@ -127,7 +146,7 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("software bounded run")?
     } else {
         tracing::info!("software run: until Ctrl-C");
-        run_software_until_ctrl_c(&mut engine, config, &args.config).await?
+        run_software_until_ctrl_c(&mut engine, start, &args.config).await?
     };
 
     println!("{}", report.render());
@@ -141,9 +160,13 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// The full libav\* end-to-end pipeline (the `ffmpeg` feature): ingest →
 /// composite → encode-once → fan out to the configured file/HLS outputs.
 #[cfg(feature = "ffmpeg")]
-async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_pipeline(
+    start: &multiview_cli::boot::StartConfig,
+    args: &RunArgs,
+) -> anyhow::Result<ExitCode> {
     use multiview_cli::pipeline::Pipeline;
 
+    let config = &start.running;
     let mut pipeline = Pipeline::build(config).context("building the pipeline")?;
     if let Some(subs) = &args.subtitles {
         let track = load_subtitles(subs)
@@ -173,7 +196,7 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         // MP-1 (ADR-0030 §2.2): the daemon run path builds an engine `ProgramSet`
         // and drives this single program (id "main") through it — move the owned
         // pipeline in (the set spawns it on its own supervised task).
-        run_pipeline_until_ctrl_c(pipeline, config, &args.config).await?
+        run_pipeline_until_ctrl_c(pipeline, start, &args.config).await?
     };
 
     println!("{}", report.render());
@@ -181,6 +204,60 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    })
+}
+
+/// The debounce window for the ADR-W022 Running persister: at most one
+/// `active.toml` write per window (control-plane file I/O only; inv #10).
+const RUNNING_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Raise `stop` when the process receives Ctrl-C (SIGINT) or — on Unix —
+/// SIGTERM (review m2: `docker stop` and systemd send SIGTERM, and the
+/// graceful teardown — the final `active.toml` persist included — must run
+/// for both). The watcher task cannot back-pressure the engine (inv #10);
+/// the run loop observes `stop` once per tick and finishes the current frame
+/// cleanly.
+fn spawn_stop_on_signal(stop: StopSignal) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    tokio::select! {
+                        result = tokio::signal::ctrl_c() => {
+                            if result.is_ok() {
+                                tracing::info!("Ctrl-C received; stopping after the current frame");
+                                stop.stop();
+                            }
+                        }
+                        _ = term.recv() => {
+                            tracing::info!("SIGTERM received; stopping after the current frame");
+                            stop.stop();
+                        }
+                    }
+                }
+                Err(error) => {
+                    // SIGTERM registration failing is exotic (resource limits);
+                    // degrade to Ctrl-C-only rather than dying silent.
+                    tracing::warn!(
+                        error = %error,
+                        "SIGTERM handler unavailable; stopping on Ctrl-C only"
+                    );
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        tracing::info!("Ctrl-C received; stopping after the current frame");
+                        stop.stop();
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::info!("Ctrl-C received; stopping after the current frame");
+                stop.stop();
+            }
+        }
     })
 }
 
@@ -425,16 +502,23 @@ fn spawn_node_watchdog(
     }
 }
 
-/// Spawn the best-effort Ctrl-C watcher: raises the run's [`StopSignal`] so
-/// the engine finishes the current frame cleanly. The watcher can never
-/// back-pressure the engine (invariant #10).
-fn spawn_ctrl_c_watcher(stop: StopSignal) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop.stop();
-        }
-    })
+/// The run's handle on the debounced ADR-W022 Running persister: the spawned
+/// task plus the served [`multiview_control::AppState`] it persists from.
+struct RunningPersist {
+    /// The debounced persist task ([`multiview_control::boot_model::spawn_running_persist`]).
+    task: tokio::task::JoinHandle<()>,
+    /// The served control-plane state (one set of stores with the router).
+    state: multiview_control::AppState,
+}
+
+impl RunningPersist {
+    /// Stop the debounced persister at teardown: abort → **await the task's
+    /// termination** → one final best-effort persist capturing changes
+    /// younger than the debounce (review M2: the ordering restores the
+    /// deterministic `.tmp` single-writer guarantee; fail-soft on error).
+    async fn finish(self) {
+        multiview_control::boot_model::finish_running_persist(self.task, &self.state).await;
+    }
 }
 
 /// The per-run-path inputs the control plane is wired from: the live preview
@@ -460,16 +544,24 @@ struct ControlPlaneWiring {
 /// Bring up the management control plane for a run (one wiring for BOTH run
 /// paths — ADR-W013/ADR-W018): the live-source hub over the run's per-source
 /// stop registry + the shared (live-updatable) preview store map, the preview
-/// provider, the bounded command bus, the bound server, and the ADR-W020
+/// provider, the bounded command bus, the bound server, the ADR-W020
 /// config-file watcher over `config_path` (external file edits hot-reload the
 /// impacted parts through the same command bus; an invalid file changes
-/// nothing).
+/// nothing), and the ADR-W022 Boot/Loaded/Running model (the Loaded snapshot
+/// persisted to `loaded.toml`, the debounced `active.toml` Running persister,
+/// and the boot-model/revert/promote API surface).
+///
+/// `start` is the run's resolved cold-start state; its `running` document is
+/// what the engine was built from, so it seeds the stores AND becomes the
+/// watcher's diff baseline (under a resume the baseline is the resumed
+/// document while `config_path` stays the boot file — pin (b)).
 ///
 /// Returns the server task handle, the engine-side [`multiview_control::CommandReceiver`]
 /// (the caller builds its path-specific frame-boundary drain from it), the
 /// [`multiview_cli::live_sources::LiveSourceHub`] (shut down after the run loop
-/// returns), and the config-watch handle (stop it at teardown; its
-/// `expect_write` seam suppresses server-side writes). The hub shares the
+/// returns), the config-watch handle (stop it at teardown; its
+/// `expect_write` seam suppresses server-side writes), and the Running
+/// persister (call [`RunningPersist::finish`] at teardown). The hub shares the
 /// wiring's stop registry, so a live remove can tear down a startup producer
 /// (generator or ingest thread) too.
 ///
@@ -481,7 +573,7 @@ struct ControlPlaneWiring {
 /// exactly when a real spawner backs the claim.
 async fn serve_control_plane(
     listen: &str,
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     config_path: &Path,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     wiring: ControlPlaneWiring,
@@ -491,7 +583,9 @@ async fn serve_control_plane(
     multiview_control::CommandReceiver,
     multiview_cli::live_sources::LiveSourceHub,
     multiview_cli::config_watch::ConfigWatchHandle,
+    RunningPersist,
 )> {
+    let config = &start.running;
     let ControlPlaneWiring {
         program_slot,
         stores,
@@ -520,12 +614,17 @@ async fn serve_control_plane(
     let provider: multiview_control::SharedPreview = Arc::new(
         multiview_cli::preview::CliPreviewProvider::new(program_slot, shared_stores),
     );
+    // The Boot/Loaded/Running model (ADR-W022): Loaded is the immutable boot
+    // snapshot; the model backs `GET /api/v1/config/boot-model` and the
+    // revert-to-start/promote actions.
+    let boot_model = Arc::new(start.to_boot_model(config_path));
     let (addr, handle, state) = control::bind_and_serve(
         listen,
         config,
         Arc::clone(publisher),
         commands,
         provider,
+        Some(Arc::clone(&boot_model)),
         live_apply,
         async move {
             let _ = shutdown_rx.await;
@@ -534,28 +633,57 @@ async fn serve_control_plane(
     .await
     .with_context(|| format!("binding the control plane on {listen}"))?;
     tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
+    // Persist the Loaded snapshot to `loaded.toml` (forensics + the on-disk
+    // revert target record). Fail-soft: the in-memory snapshot is
+    // authoritative; a write failure is warned, never fatal.
+    if let Err(reason) = multiview_control::boot_model::persist_loaded(&boot_model) {
+        tracing::warn!(
+            reason = %reason,
+            "could not persist the Loaded snapshot (fail-soft; the in-memory snapshot is authoritative)"
+        );
+    }
+    // The debounced Running persister (ADR-W022 §3): waits on the ONE
+    // `running_changed` choke-point signal the audit recorder fires, then
+    // writes `active.toml` atomically. Control-plane file I/O only (inv #10).
+    let persist = RunningPersist {
+        task: multiview_control::boot_model::spawn_running_persist(
+            state.clone(),
+            RUNNING_PERSIST_DEBOUNCE,
+        ),
+        state: state.clone(),
+    };
     // Watch the boot config file for external edits (ADR-W020): a valid write
     // hot-reloads the impacted parts through the SAME router state + command
     // bus; an invalid write warns and changes nothing. A control-plane tokio
-    // tenant — it can never pace or stall the engine (inv #1/#10).
+    // tenant — it can never pace or stall the engine (inv #1/#10). The diff
+    // baseline is the RUNNING document (the resumed one under resume), and
+    // the boot-load TEXT seeds the last-observed content (review m4: the
+    // unchanged boot file must never clobber a resumed baseline; an edit in
+    // the boot window differs from this text and still applies).
     let watch = multiview_cli::config_watch::spawn(
         config_path.to_path_buf(),
         config.clone(),
         state,
-        multiview_cli::config_watch::WatchOptions::default(),
+        multiview_cli::config_watch::WatchOptions::default()
+            .with_initial_observed(start.boot_text.clone()),
     );
-    Ok((handle, command_rx, hub, watch))
+    Ok((handle, command_rx, hub, watch, persist))
 }
 
 /// Wire the control plane for the full-pipeline run, when `[control]` is
 /// configured: declare what THIS build + run path can take live (ADR-W018
 /// sources via the pipeline's real ingest spawner; ADR-W021 overlays iff the
-/// `overlay`-featured bake consumer renders them), serve the plane, and build
+/// `overlay`-featured bake consumer renders them), serve the plane (with the
+/// run's ADR-W022 Boot/Loaded/Running model + Running persister), and build
 /// the frame-boundary command drain over the run's live seams. Without a
 /// `[control]` section it returns the no-op drain (no server, no hub).
 #[cfg(feature = "ffmpeg")]
+#[allow(clippy::type_complexity)]
+// reason: the one-shot wiring tuple of this run path's control-plane handles
+// (server task, drain, hub, watch, persister), each `Option`al on whether
+// `[control]` is configured. A named struct would be used exactly once.
 async fn wire_pipeline_control_plane(
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     config_path: &Path,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     preview_slot: &multiview_cli::preview::ProgramSlot,
@@ -566,12 +694,15 @@ async fn wire_pipeline_control_plane(
     ControlDrain,
     Option<multiview_cli::live_sources::LiveSourceHub>,
     Option<multiview_cli::config_watch::ConfigWatchHandle>,
+    Option<RunningPersist>,
 )> {
+    let config = &start.running;
     let Some(cfg) = config.control.as_ref() else {
         drop(shutdown_rx);
         return Ok((
             None,
             Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
             None,
             None,
         ));
@@ -588,9 +719,9 @@ async fn wire_pipeline_control_plane(
     );
     #[cfg(not(feature = "overlay"))]
     let live_apply = multiview_control::LiveApplyCaps::default();
-    let (handle, command_rx, hub, watch) = serve_control_plane(
+    let (handle, command_rx, hub, watch, persist) = serve_control_plane(
         &cfg.listen,
-        config,
+        start,
         config_path,
         publisher,
         ControlPlaneWiring {
@@ -629,7 +760,7 @@ async fn wire_pipeline_control_plane(
         Arc::clone(publisher),
         hub.handle(),
     ));
-    Ok((Some(handle), drain, Some(hub), Some(watch)))
+    Ok((Some(handle), drain, Some(hub), Some(watch), Some(persist)))
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
@@ -642,9 +773,10 @@ async fn wire_pipeline_control_plane(
 #[cfg(feature = "ffmpeg")]
 async fn run_pipeline_until_ctrl_c(
     pipeline: multiview_cli::pipeline::Pipeline,
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     config_path: &Path,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
+    let config = &start.running;
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let preview_slot = multiview_cli::preview::program_slot();
@@ -653,8 +785,8 @@ async fn run_pipeline_until_ctrl_c(
     let cadence = pipeline.cadence();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain, live_hub, config_watch) = wire_pipeline_control_plane(
-        config,
+    let (server, drain, live_hub, config_watch, running_persist) = wire_pipeline_control_plane(
+        start,
         config_path,
         &publisher,
         &preview_slot,
@@ -663,7 +795,9 @@ async fn run_pipeline_until_ctrl_c(
     )
     .await?;
 
-    let signal = spawn_ctrl_c_watcher(stop.clone());
+    // Review m2: Ctrl-C AND (on Unix) SIGTERM both run the graceful teardown,
+    // so `docker stop`/systemd shutdowns capture the final `active.toml` too.
+    let signal = spawn_stop_on_signal(stop.clone());
 
     // Sample CPU/host-memory/per-GPU load at ~1.3 Hz and PUSH `Event::SystemMetrics`
     // onto the SAME outbound publisher the control plane forwards to the WebUI
@@ -737,12 +871,16 @@ async fn run_pipeline_until_ctrl_c(
 
     // The pipeline loop returned; stop the metrics + timing pollers (both also
     // self-stop on the StopSignal within one sample period), the config-file
-    // watcher, and tear down the live-source hub (it stops + joins every
-    // runtime producer).
+    // watcher, the Running persister (with one final best-effort `active.toml`
+    // capture — ADR-W022 §3), and tear down the live-source hub (it stops +
+    // joins every runtime producer).
     metrics_task.abort();
     timing_task.abort();
     if let Some(watch) = config_watch {
         watch.stop();
+    }
+    if let Some(persist) = running_persist {
+        persist.finish().await;
     }
     if let Some(hub) = live_hub {
         hub.shutdown();
@@ -857,7 +995,11 @@ async fn drive_main_program_in_set(
 // reason: this is the no-`ffmpeg` half of an `async fn` pair; the `ffmpeg`
 // counterpart awaits the full pipeline, so the signature must match for the one
 // `run_pipeline(..).await` call site to compile under either feature set.
-async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_pipeline(
+    start: &multiview_cli::boot::StartConfig,
+    args: &RunArgs,
+) -> anyhow::Result<ExitCode> {
+    let config = &start.running;
     if args.subtitles.is_some() {
         tracing::warn!(
             "--subtitles needs the `ffmpeg`+`overlay` features (full pipeline); ignoring"
@@ -886,9 +1028,10 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// watcher cannot back-pressure the engine (invariant #10).
 async fn run_software_until_ctrl_c(
     engine: &mut SoftwareEngine,
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     config_path: &Path,
 ) -> anyhow::Result<RunReport> {
+    let config = &start.running;
     let stop = StopSignal::new();
 
     // The engine's outbound publisher, shared read-only with the control plane
@@ -903,47 +1046,59 @@ async fn run_software_until_ctrl_c(
     // control plane is up, a no-op otherwise. The server serves until
     // `shutdown_rx` resolves (once the engine loop returns).
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
-        if let Some(cfg) = config.control.as_ref() {
-            let (handle, command_rx, hub, watch) = serve_control_plane(
-                &cfg.listen,
-                config,
-                config_path,
-                &publisher,
-                ControlPlaneWiring {
-                    program_slot: engine.program_preview(),
-                    stores: engine.preview_stores(),
-                    registry: engine.stop_registry(),
-                    // The software engine has no decoder: no ingest spawner, so
-                    // the capability (and the apply header) honestly stays
-                    // synthetic-only.
-                    ingest: None,
-                    // The software engine has no bake stage: no overlay
-                    // document renders on this path, so the honest default
-                    // (everything `restart`) is the truth (ADR-W021).
-                    live_apply: multiview_control::LiveApplyCaps::default(),
-                },
-                shutdown_rx,
-            )
-            .await?;
-            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                hub.handle(),
-            ));
-            (Some(handle), drain, Some(hub), Some(watch))
-        } else {
-            drop(shutdown_rx);
-            (
-                None,
-                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
-                None,
-                None,
-            )
-        };
+    #[allow(clippy::type_complexity)]
+    // reason: the one-shot wiring tuple of this run path's control-plane
+    // handles (server task, drain, hub, watch, persister), each `Option`al on
+    // whether `[control]` is configured. A named struct would be used once.
+    let (server, drain, live_hub, config_watch, running_persist): (
+        Option<_>,
+        ControlDrain,
+        Option<_>,
+        Option<_>,
+        Option<RunningPersist>,
+    ) = if let Some(cfg) = config.control.as_ref() {
+        let (handle, command_rx, hub, watch, persist) = serve_control_plane(
+            &cfg.listen,
+            start,
+            config_path,
+            &publisher,
+            ControlPlaneWiring {
+                program_slot: engine.program_preview(),
+                stores: engine.preview_stores(),
+                registry: engine.stop_registry(),
+                // The software engine has no decoder: no ingest spawner, so
+                // the capability (and the apply header) honestly stays
+                // synthetic-only.
+                ingest: None,
+                // The software engine has no bake stage: no overlay
+                // document renders on this path, so the honest default
+                // (everything `restart`) is the truth (ADR-W021).
+                live_apply: multiview_control::LiveApplyCaps::default(),
+            },
+            shutdown_rx,
+        )
+        .await?;
+        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+            hub.handle(),
+        ));
+        (Some(handle), drain, Some(hub), Some(watch), Some(persist))
+    } else {
+        drop(shutdown_rx);
+        (
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+            None,
+            None,
+        )
+    };
 
-    let signal = spawn_ctrl_c_watcher(stop.clone());
+    // Review m2: Ctrl-C AND (on Unix) SIGTERM both run the graceful teardown,
+    // so `docker stop`/systemd shutdowns capture the final `active.toml` too.
+    let signal = spawn_stop_on_signal(stop.clone());
 
     // The off-hot-path system-metrics poller: samples whole-system CPU + host
     // memory + per-GPU load at ~1.3 Hz and PUSHES `Event::SystemMetrics` onto the
@@ -985,12 +1140,16 @@ async fn run_software_until_ctrl_c(
 
     // The engine loop returned; stop the metrics + timing pollers (both also
     // self-stop on the StopSignal within one sample period), the config-file
-    // watcher, tear down the live-source hub (it stops + joins every runtime
-    // producer), and bring the control server down.
+    // watcher, the Running persister (with one final best-effort `active.toml`
+    // capture — ADR-W022 §3), tear down the live-source hub (it stops + joins
+    // every runtime producer), and bring the control server down.
     metrics_task.abort();
     timing_task.abort();
     if let Some(watch) = config_watch {
         watch.stop();
+    }
+    if let Some(persist) = running_persist {
+        persist.finish().await;
     }
     if let Some(hub) = live_hub {
         hub.shutdown();
@@ -1028,7 +1187,9 @@ fn load_subtitles(path: &Path) -> anyhow::Result<multiview_overlay::subtitle::Cu
 }
 
 /// Load and validate a config, failing with a clear error if it is invalid.
-fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
+/// Returns the raw text alongside the parsed document — the text seeds the
+/// ADR-W020 watcher's last-observed content (review m4).
+fn load_validated(path: &Path) -> anyhow::Result<(String, MultiviewConfig)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
     let config = MultiviewConfig::load_from_toml(&text)
@@ -1036,5 +1197,5 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
     config
         .validate()
         .with_context(|| format!("validating config {}", path.display()))?;
-    Ok(config)
+    Ok((text, config))
 }
