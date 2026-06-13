@@ -400,15 +400,16 @@ pub fn canonical_message(
     format!("{method}\n{path}\n{device_id}\n{ts}\n{body_hex}")
 }
 
-/// Lower-case hex of a byte slice (no `as` casts; small fixed alphabet).
+/// Lower-case hex of a byte slice (no `as` casts; small fixed alphabet,
+/// index-safe via `get`).
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
         let hi = usize::from(b >> 4);
         let lo = usize::from(b & 0x0f);
-        out.push(char::from(HEX[hi]));
-        out.push(char::from(HEX[lo]));
+        out.push(char::from(HEX.get(hi).copied().unwrap_or(b'0')));
+        out.push(char::from(HEX.get(lo).copied().unwrap_or(b'0')));
     }
     out
 }
@@ -627,7 +628,7 @@ impl NodeEnrollState {
 
         // 3) A presented token: redeem it one-time and bind a fresh device.
         if let Some(bearer) = request.token.as_deref() {
-            let device_id = self.redeem_token(&mut guard, bearer, now)?;
+            let device_id = redeem_token(&mut guard, bearer, now)?;
             guard.identities.insert(
                 device_id.clone(),
                 NodeIdentity {
@@ -654,7 +655,7 @@ impl NodeEnrollState {
         if guard.pending.len() >= MAX_PENDING_PAIRINGS {
             return Err(EnrollError::PairingTableFull);
         }
-        let code = self.fresh_code(&guard);
+        let code = fresh_code(&guard);
         guard.pending.insert(
             fingerprint,
             PendingPairing {
@@ -671,52 +672,6 @@ impl NodeEnrollState {
             pairing_code: code,
             retry_secs: PAIRING_RETRY_SECS,
         })
-    }
-
-    /// Redeem a bearer token under the lock, minting a fresh `displaynode`
-    /// device id and marking the token used. One-time: a token already used (or
-    /// revoked/expired/unknown) is refused.
-    fn redeem_token(
-        &self,
-        guard: &mut EnrollInner,
-        bearer: &str,
-        now_s: u64,
-    ) -> Result<String, EnrollError> {
-        let (token_id, secret) = bearer.split_once('.').ok_or(EnrollError::TokenRejected)?;
-        let presented_hash = sha256(secret.as_bytes());
-        let record = guard
-            .tokens
-            .get(token_id)
-            .ok_or(EnrollError::TokenRejected)?;
-        // Constant-time hash compare so a redeem attempt cannot probe the secret
-        // by timing.
-        if record.secret_hash.ct_eq(&presented_hash).unwrap_u8() != 1 {
-            return Err(EnrollError::TokenRejected);
-        }
-        if !record.is_redeemable(now_s) {
-            return Err(EnrollError::TokenRejected);
-        }
-        guard.seq = guard.seq.wrapping_add(1);
-        let device_id = format!("node-{}", random_hex(8));
-        if let Some(record) = guard.tokens.get_mut(token_id) {
-            record.used_by = Some(device_id.clone());
-        }
-        Ok(device_id)
-    }
-
-    /// Mint a fresh pairing code not currently shown by another pending node
-    /// (so two simultaneous pairings never collide).
-    fn fresh_code(&self, guard: &EnrollInner) -> String {
-        // A handful of tries is plenty: the alphabet is 31^6 ≈ 8.9e8, and at
-        // most 32 codes are live, so a collision is vanishingly rare. After the
-        // bounded tries (never an unbounded loop) we accept the last candidate.
-        for _ in 0..8 {
-            let code = random_code();
-            if !guard.pending.values().any(|p| p.code == code) {
-                return code;
-            }
-        }
-        random_code()
     }
 
     // --- Pairing completion --------------------------------------------------
@@ -744,20 +699,20 @@ impl NodeEnrollState {
         else {
             return PairCompletion::NotFound;
         };
-        let assigned = match device_id {
-            Some(id) => id.to_owned(),
-            None => {
-                guard.seq = guard.seq.wrapping_add(1);
-                format!("node-{}", random_hex(8))
-            }
+        let assigned = if let Some(id) = device_id {
+            id.to_owned()
+        } else {
+            guard.seq = guard.seq.wrapping_add(1);
+            format!("node-{}", random_hex(8))
         };
         let Some(pending) = guard.pending.get_mut(&fingerprint) else {
             return PairCompletion::NotFound;
         };
         pending.paired_device_id = Some(assigned.clone());
-        let node_name = display_name
-            .map(str::to_owned)
-            .unwrap_or_else(|| pending.node_name.clone());
+        let node_name = match display_name {
+            Some(name) => name.to_owned(),
+            None => pending.node_name.clone(),
+        };
         let public_key_b64 = BASE64.encode(pending.public_key.to_bytes());
         let heads = pending.heads.clone();
         PairCompletion::Completed {
@@ -848,7 +803,7 @@ impl NodeEnrollState {
             .verify_strict(message.as_bytes(), &signature)
             .map_err(|_| EnrollError::Unauthorized)?;
         identity.last_ts = ts;
-        identity.heads = heads.clone();
+        identity.heads.clone_from(&heads);
         Ok(VerifiedHeartbeat {
             device_id: device_id.to_owned(),
             heads,
@@ -918,6 +873,52 @@ fn key_fingerprint(key: &VerifyingKey) -> String {
 /// SHA-256 of a byte slice as a fixed array.
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+/// Redeem a bearer token under the lock, minting a fresh `displaynode` device id
+/// and marking the token used. One-time: a token already used (or
+/// revoked/expired/unknown) is refused. Operates on the locked guard, so it is a
+/// free function (no `&self`).
+fn redeem_token(
+    guard: &mut EnrollInner,
+    bearer: &str,
+    now_s: u64,
+) -> Result<String, EnrollError> {
+    let (token_id, secret) = bearer.split_once('.').ok_or(EnrollError::TokenRejected)?;
+    let presented_hash = sha256(secret.as_bytes());
+    let record = guard
+        .tokens
+        .get(token_id)
+        .ok_or(EnrollError::TokenRejected)?;
+    // Constant-time hash compare so a redeem attempt cannot probe the secret by
+    // timing.
+    if record.secret_hash.ct_eq(&presented_hash).unwrap_u8() != 1 {
+        return Err(EnrollError::TokenRejected);
+    }
+    if !record.is_redeemable(now_s) {
+        return Err(EnrollError::TokenRejected);
+    }
+    guard.seq = guard.seq.wrapping_add(1);
+    let device_id = format!("node-{}", random_hex(8));
+    if let Some(record) = guard.tokens.get_mut(token_id) {
+        record.used_by = Some(device_id.clone());
+    }
+    Ok(device_id)
+}
+
+/// Mint a fresh pairing code not currently shown by another pending node (so two
+/// simultaneous pairings never collide). Operates on the locked guard.
+fn fresh_code(guard: &EnrollInner) -> String {
+    // A handful of tries is plenty: the alphabet is 31^6 ≈ 8.9e8, and at most 32
+    // codes are live, so a collision is vanishingly rare. After the bounded
+    // tries (never an unbounded loop) we accept the last candidate.
+    for _ in 0..8 {
+        let code = random_code();
+        if !guard.pending.values().any(|p| p.code == code) {
+            return code;
+        }
+    }
+    random_code()
 }
 
 /// `n` bytes of CSPRNG randomness rendered as lower-case hex (`2n` chars). Falls

@@ -232,7 +232,6 @@ pub(crate) async fn enroll_node(
                 &device_id,
                 &request.node_name,
                 &request.public_key,
-                request.display_assignment(),
             );
             let body = EnrollResponse {
                 status: "enrolled",
@@ -272,10 +271,9 @@ fn ensure_enrolled_device(
     device_id: &str,
     node_name: &str,
     public_key_b64: &str,
-    display_assign: Option<serde_json::Value>,
 ) {
     if state.devices.get(device_id).is_err() {
-        let body = displaynode_body(public_key_b64, display_assign);
+        let body = displaynode_body(public_key_b64, None);
         let name = if node_name.is_empty() {
             device_id.to_owned()
         } else {
@@ -594,15 +592,5 @@ impl AppState {
     fn node_enroll_status_online(&self, device_id: &str) {
         self.device_status
             .set_status(DeviceStatus::new(device_id, DeviceState::Online));
-    }
-}
-
-impl EnrollRequest {
-    /// The display assignment this enroll request carries, if any. A node does
-    /// not assign itself (the operator does, via the Display tab), so this is
-    /// `None` today — the hook exists for a future "enroll with a pre-baked
-    /// assignment" flow without reshaping the device-create path.
-    fn display_assignment(&self) -> Option<serde_json::Value> {
-        None
     }
 }

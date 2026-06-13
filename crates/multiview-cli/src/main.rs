@@ -219,6 +219,16 @@ async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
     // inert without NOTIFY_SOCKET (containers, dev shells).
     let notifier = multiview_cli::sdnotify::Notifier::from_env();
 
+    // Node enrollment (DEV-B6 / ADR-0045 §9): if the node config carries a
+    // `[controller]` block, enroll + heartbeat against the controller on a
+    // detached background task — entirely additive and off the engine/output
+    // path (invariant #10), so a controller outage never affects
+    // decode-and-present, and a node with no `[controller]` block runs exactly
+    // as DEV-B5. Gated behind `node-enroll` (the live HTTP transport); without
+    // the feature a configured controller block is honestly reported as
+    // unbuilt, never silently ignored.
+    spawn_node_enrollment(&node_cfg, &args.config);
+
     let report = if let Some(ticks) = args.tick_budget(cadence) {
         tracing::info!(ticks, "node run: bounded");
         // A bounded run is a diagnostic/soak: READY up front (the daemon path
@@ -241,6 +251,51 @@ async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Spawn the node-enrollment background task if the node config carries a
+/// `[controller]` block (DEV-B6 / ADR-0045 §9).
+///
+/// Additive + isolation-safe (invariant #10): the task only generates/loads the
+/// node identity and talks to the controller; it never touches the engine or
+/// output path, so its outcome cannot affect decode-and-present. A configured
+/// controller block in a build WITHOUT the `node-enroll` feature is reported
+/// honestly (the live transport is unbuilt) rather than silently ignored; with
+/// no controller block the node runs unenrolled exactly as DEV-B5.
+#[cfg(all(feature = "ffmpeg", feature = "display-kms"))]
+fn spawn_node_enrollment(
+    node_cfg: &multiview_config::node::NodeConfig,
+    config_path: &std::path::Path,
+) {
+    let Some(controller) = node_cfg.controller.clone() else {
+        return;
+    };
+    #[cfg(feature = "node-enroll")]
+    {
+        let node = node_cfg.clone();
+        let config_path = config_path.to_path_buf();
+        tracing::info!(
+            controller = %controller.url,
+            "node enrollment: spawning the controller enroll/heartbeat task (DEV-B6)"
+        );
+        tokio::spawn(async move {
+            if let Err(e) =
+                multiview_cli::node_enroll::run_enrollment(&node, &controller, &config_path).await
+            {
+                tracing::warn!(error = %e, "node enrollment task exited");
+            }
+        });
+    }
+    #[cfg(not(feature = "node-enroll"))]
+    {
+        let _ = config_path;
+        tracing::warn!(
+            controller = %controller.url,
+            "node config declares a [controller] block but this binary was built WITHOUT the \
+             `node-enroll` feature: the node runs unenrolled. Rebuild with \
+             `--features display-kms,ffmpeg,node-enroll` to enroll."
+        );
+    }
 }
 
 /// Without `display-kms` + `ffmpeg` this build cannot run a display node:

@@ -75,6 +75,28 @@ tempfile = { version = "3", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Node-side enrollment (DEV-B6, ADR-0045 §9): the `multiview node` appliance
+# GENERATES + persists an Ed25519 keypair and SIGNS its heartbeats against the
+# controller. `ed25519-dalek` is pure Rust (`BSD-3-Clause`; the `ed25519` /
+# `curve25519-dalek` closure is `MIT`), with no native deps — the keypair +
+# signing core is ALWAYS compiled and tested. `base64` renders the public key /
+# signature for the wire; `getrandom` seeds keygen. The live HTTP enroll runner
+# needs `reqwest`, gated behind the off-by-default `node-enroll` feature so the
+# baseline build stays socket-free.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = [
+    "rand_core",
+] }
+base64 = "0.22.1"
+getrandom = "0.2"
+sha2 = "0.10.9"
+# The live enrollment HTTP transport: OFF by default (`node-enroll`). Pinned to
+# the `rustls-tls` backend (NEVER OpenSSL/native-tls), the same posture as the
+# zowietek driver's reqwest, so the dependency graph stays native-lib-free.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = [
     "test-util",
@@ -208,6 +230,16 @@ gpu = ["multiview-compositor/wgpu", "dep:wgpu"]
 # run wiring lives in the `ffmpeg`-gated pipeline (the only live run path), so
 # a deploy build combines them: `--features nvidia,display-kms` etc.
 display-kms = ["multiview-output/display-kms"]
+
+# Live node enrollment against a controller (DEV-B6 / ADR-0045 §9): a
+# `multiview node` whose config carries a `[controller]` block generates +
+# persists its Ed25519 keypair, enrolls (zero-touch with a token, else screen
+# pairing), and heartbeats — becoming a managed `displaynode` device. The
+# keypair + signing + request-building CORE is always compiled and tested; this
+# feature only adds the live `reqwest` HTTP transport, so the baseline build
+# stays socket-free. Combine with the node build: `--features
+# display-kms,ffmpeg,node-enroll`.
+node-enroll = ["dep:reqwest"]
 
 # Report the MEASURED kernel NTP/PTP discipline status on the wall-clock badge
 # (ENG-3b) instead of an assumed one. Off by default: it pulls the engine's `ntp`

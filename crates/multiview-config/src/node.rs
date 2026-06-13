@@ -228,6 +228,72 @@ const fn default_poll_secs() -> u64 {
     5
 }
 
+/// Optional controller-enrollment knobs (DEV-B6, ADR-0045 §9).
+///
+/// **Additive and entirely optional**: a node with no `[controller]` block runs
+/// exactly as DEV-B5 (decode-and-present, no management plane). When present, a
+/// background task (off the engine/output path — invariant #10) generates and
+/// persists an Ed25519 keypair, enrolls against the controller (presenting a
+/// one-time `token` for zero-touch, else showing a pairing card), and
+/// heartbeats — so the node becomes a managed `displaynode` device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct NodeController {
+    /// The controller's API base URL, IPv6-first (bracketed literals, e.g.
+    /// `https://[fd00:db8::1]:8080`). The node POSTs `/api/v1/devices/enroll`
+    /// and `/api/v1/devices/{id}/heartbeat` against this base.
+    pub url: String,
+    /// A one-time enrollment token (`<id>.<secret>`) for **zero-touch**
+    /// enrollment (the operator minted it in Settings → Display Nodes). Absent
+    /// ⇒ the node falls to **screen pairing** (shows a code/QR and waits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_token: Option<String>,
+    /// Where the node persists its Ed25519 keypair (the enrolled identity).
+    /// Generated on first start if absent; reused across reboots so a re-enroll
+    /// maps to the SAME device. Defaults to `node-identity.key` beside the
+    /// config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_path: Option<std::path::PathBuf>,
+    /// The human-friendly node name reported at enrollment (the device's
+    /// display name). Defaults to the host name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+}
+
+impl NodeController {
+    /// Validate the controller block: a non-empty, scheme-bearing URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] when the URL is empty or carries no
+    /// `scheme://` (so an enrollment attempt would only fail at connect time).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let url = self.url.trim();
+        if url.is_empty() {
+            return Err(ConfigError::Validation(
+                "controller: url must not be empty (e.g. \"https://[fd00:db8::1]:8080\")"
+                    .to_owned(),
+            ));
+        }
+        if !url.contains("://") {
+            return Err(ConfigError::Validation(format!(
+                "controller: url {url:?} must carry a scheme (http:// or https://)"
+            )));
+        }
+        if let Some(token) = &self.enrollment_token {
+            if token.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "controller: enrollment_token must not be empty (omit it to use screen \
+                     pairing instead)"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The `multiview node` configuration document (TOML).
 ///
 /// `deny_unknown_fields` on the document **root** (matching every sub-table):
@@ -258,6 +324,10 @@ pub struct NodeConfig {
     /// last-good first, then this slate (default: SMPTE/EBU bars).
     #[serde(default = "default_failover_slate")]
     pub on_loss: FailoverSlate,
+    /// Optional controller-enrollment knobs (DEV-B6, ADR-0045 §9). Absent ⇒
+    /// the node runs unenrolled (exactly the DEV-B5 behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<NodeController>,
 }
 
 /// Serde default for [`NodeConfig::schema_version`].
@@ -370,6 +440,9 @@ impl NodeConfig {
                 POLL_SECS_RANGE.start(),
                 POLL_SECS_RANGE.end()
             )));
+        }
+        if let Some(controller) = &self.controller {
+            controller.validate()?;
         }
         Ok(())
     }
@@ -545,4 +618,82 @@ fn validate_positive_fps(label: &str, fps: Fps) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod controller_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::NodeConfig;
+
+    /// A minimal valid node document (one ingest, one head) the controller-block
+    /// tests append a `[controller]` table to.
+    const BASE: &str = r#"
+[ingest]
+kind = "rtsp"
+url = "rtsp://[2001:db8::10]:8554/program"
+[[displays]]
+connector = "HDMI-A-1"
+"#;
+
+    #[test]
+    fn a_node_without_a_controller_block_is_unenrolled() {
+        // The DEV-B5 baseline: no `[controller]` block, so the node runs
+        // decode-and-present with no management plane.
+        let cfg = NodeConfig::load_from_toml(BASE).expect("the baseline node parses");
+        cfg.validate().expect("the baseline node validates");
+        assert!(
+            cfg.controller.is_none(),
+            "a node without [controller] is unenrolled (additive — DEV-B5 unchanged)"
+        );
+    }
+
+    #[test]
+    fn a_controller_block_parses_and_validates() {
+        let doc = format!(
+            "{BASE}\n[controller]\nurl = \"https://[fd00:db8::1]:8080\"\n\
+             enrollment_token = \"enr-abc.def\"\nnode_name = \"Lobby left\"\n"
+        );
+        let cfg = NodeConfig::load_from_toml(&doc).expect("the controller node parses");
+        cfg.validate().expect("the controller node validates");
+        let controller = cfg.controller.expect("the controller block is present");
+        assert_eq!(controller.url, "https://[fd00:db8::1]:8080");
+        assert_eq!(controller.enrollment_token.as_deref(), Some("enr-abc.def"));
+        assert_eq!(controller.node_name.as_deref(), Some("Lobby left"));
+    }
+
+    #[test]
+    fn a_controller_with_no_token_is_the_pairing_path() {
+        // No `enrollment_token` ⇒ screen pairing; still a valid document.
+        let doc = format!("{BASE}\n[controller]\nurl = \"https://[fd00:db8::1]:8080\"\n");
+        let cfg = NodeConfig::load_from_toml(&doc).expect("parses");
+        cfg.validate().expect("validates");
+        assert!(cfg.controller.unwrap().enrollment_token.is_none());
+    }
+
+    #[test]
+    fn an_empty_controller_url_is_rejected() {
+        let doc = format!("{BASE}\n[controller]\nurl = \"\"\n");
+        let cfg = NodeConfig::load_from_toml(&doc).expect("parses (validation is separate)");
+        let err = cfg.validate().expect_err("an empty controller url is rejected");
+        assert!(err.to_string().contains("controller"), "{err}");
+    }
+
+    #[test]
+    fn a_schemeless_controller_url_is_rejected() {
+        let doc = format!("{BASE}\n[controller]\nurl = \"fd00:db8::1\"\n");
+        let cfg = NodeConfig::load_from_toml(&doc).expect("parses");
+        let err = cfg.validate().expect_err("a schemeless controller url is rejected");
+        assert!(err.to_string().contains("scheme"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_controller_field_is_rejected_naming_it() {
+        let doc = format!(
+            "{BASE}\n[controller]\nurl = \"https://[fd00:db8::1]:8080\"\nuurl = \"x\"\n"
+        );
+        let err = NodeConfig::load_from_toml(&doc)
+            .expect_err("an unknown controller field is a parse error");
+        assert!(err.to_string().contains("uurl"), "{err}");
+    }
 }
