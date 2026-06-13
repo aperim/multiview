@@ -104,6 +104,33 @@ pub struct WhipNegotiated {
     pub answer_sdp: String,
     /// The per-session drop-oldest RTP ring the ingest source drains.
     pub ring: RtpRing,
+    /// The negotiated **video** RTP payload type (H.264), parsed from the answer
+    /// so the consumer can route the ring's packets to the H.264 depacketizer
+    /// without re-parsing SDP. `None` if no video section was negotiated.
+    pub video_payload_type: Option<u8>,
+    /// The negotiated **audio** RTP payload type (Opus), or `None` when audio was
+    /// declined (`audio = false`) or not offered.
+    pub audio_payload_type: Option<u8>,
+}
+
+/// Parse the first payload type of the `m=<kind>` section from an answer SDP.
+///
+/// Walks `m=video …`/`m=audio …` lines; the first numeric format token on the
+/// line is the (single) negotiated dynamic payload type str0m answers with.
+/// Best-effort and panic-free — `None` when the section is absent/unparseable.
+fn answer_payload_type(sdp: &str, media: &str) -> Option<u8> {
+    let prefix = format!("m={media} ");
+    for line in sdp.lines() {
+        let Some(rest) = line.strip_prefix(&prefix) else {
+            continue;
+        };
+        // `m=video <port> <proto> <fmt> [<fmt> …]` — the 3rd+ tokens are PTs.
+        return rest
+            .split_whitespace()
+            .nth(2)
+            .and_then(|pt| pt.parse::<u8>().ok());
+    }
+    None
 }
 
 impl WhipHandle {
@@ -204,10 +231,14 @@ impl WhipHandle {
             self.forget_source(source_id);
             return Err(WebRtcError::AtCapacity);
         }
+        let video_payload_type = answer_payload_type(&answer_sdp, "video");
+        let audio_payload_type = answer_payload_type(&answer_sdp, "audio");
         Ok(WhipNegotiated {
             session_id,
             answer_sdp,
             ring,
+            video_payload_type,
+            audio_payload_type,
         })
     }
 

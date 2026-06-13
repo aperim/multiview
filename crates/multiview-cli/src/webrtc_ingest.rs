@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use multiview_control::{WhipAnswer, WhipAuth, WhipProvider, WhipReject};
+use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection};
 use multiview_webrtc::error::WebRtcError;
 use multiview_webrtc::transport::{RtpRing, WhipHandle};
 
@@ -52,13 +53,56 @@ pub struct WebrtcSourcePolicy {
     pub audio: bool,
 }
 
+/// A connected publisher handed from the provider to the source's drive loop:
+/// the per-session RTP ring plus the negotiated payload types (so the drive loop
+/// routes the ring's packets to the H.264 / Opus depacketizer without re-parsing
+/// SDP).
+#[derive(Debug, Clone)]
+pub struct WhipPublisher {
+    /// The per-session drop-oldest RTP ring carrying the decrypted packets.
+    pub ring: RtpRing,
+    /// The negotiated video (H.264) payload type, if any.
+    pub video_payload_type: Option<u8>,
+    /// The negotiated audio (Opus) payload type, if audio was accepted.
+    pub audio_payload_type: Option<u8>,
+}
+
+impl WhipPublisher {
+    /// Build the [`NegotiatedSession`] the pure
+    /// [`RtpRouter`](multiview_input::webrtc::route::RtpRouter)/`WebRtcProducer`
+    /// needs to route this publisher's ring by payload type. The answerer
+    /// *receives* (`RecvOnly`), binding H.264 video and (when present) Opus
+    /// audio — the only codecs Multiview answers (ADR-T014 §2).
+    #[must_use]
+    pub fn negotiated_session(&self) -> NegotiatedSession {
+        let mut sections = Vec::new();
+        if let Some(pt) = self.video_payload_type {
+            sections.push(NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: pt,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            });
+        }
+        if let Some(pt) = self.audio_payload_type {
+            sections.push(NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: pt,
+                codec: Codec::OPUS,
+                direction: SdpDirection::RecvOnly,
+            });
+        }
+        NegotiatedSession { sections }
+    }
+}
+
 /// The shared per-source publisher rendezvous: the slot `negotiate` writes a
-/// freshly-negotiated [`RtpRing`] into and [`drive_webrtc`] reads.
+/// freshly-negotiated [`WhipPublisher`] into and [`drive_webrtc`] reads.
 ///
 /// Lock-guarded over a short critical section neither side holds across I/O.
 #[derive(Debug, Default, Clone)]
 pub struct WhipRegistry {
-    inner: Arc<Mutex<HashMap<String, RtpRing>>>,
+    inner: Arc<Mutex<HashMap<String, WhipPublisher>>>,
 }
 
 impl WhipRegistry {
@@ -68,20 +112,20 @@ impl WhipRegistry {
         Self::default()
     }
 
-    /// Publish a freshly-negotiated ring for `source_id` (replacing any prior —
-    /// the prior publisher's ring is closed so its drive loop ends cleanly).
-    pub fn publish(&self, source_id: &str, ring: RtpRing) {
+    /// Publish a freshly-negotiated publisher for `source_id` (replacing any
+    /// prior — the prior publisher's ring is closed so its drive loop ends).
+    pub fn publish(&self, source_id: &str, publisher: WhipPublisher) {
         if let Ok(mut map) = self.inner.lock() {
-            if let Some(prev) = map.insert(source_id.to_owned(), ring) {
-                prev.close();
+            if let Some(prev) = map.insert(source_id.to_owned(), publisher) {
+                prev.ring.close();
             }
         }
     }
 
-    /// Take the current ring for `source_id`, if a publisher is connected. The
-    /// drive loop calls this; once taken it owns the ring until it ends.
+    /// Take the current publisher for `source_id`, if one is connected. The drive
+    /// loop calls this; once taken it owns the ring until it ends.
     #[must_use]
-    pub fn take(&self, source_id: &str) -> Option<RtpRing> {
+    pub fn take(&self, source_id: &str) -> Option<WhipPublisher> {
         self.inner.lock().ok().and_then(|mut m| m.remove(source_id))
     }
 }
@@ -180,8 +224,16 @@ impl WhipProvider for CliWhipProvider {
             .negotiate(source_id, offer, policy.audio)
             .map_err(|e| Self::map_endpoint_error(&e))?;
 
-        // Rendezvous the ring to the source's drive loop, then answer.
-        self.registry.publish(source_id, negotiated.ring);
+        // Rendezvous the publisher (ring + negotiated PTs) to the source's drive
+        // loop, then answer.
+        self.registry.publish(
+            source_id,
+            WhipPublisher {
+                ring: negotiated.ring,
+                video_payload_type: negotiated.video_payload_type,
+                audio_payload_type: negotiated.audio_payload_type,
+            },
+        );
         Ok(WhipAnswer {
             session_id: negotiated.session_id.as_str().to_owned(),
             sdp: negotiated.answer_sdp,
@@ -274,6 +326,14 @@ mod tests {
         .is_ok());
     }
 
+    fn publisher(ring: RtpRing) -> WhipPublisher {
+        WhipPublisher {
+            ring,
+            video_payload_type: Some(96),
+            audio_payload_type: Some(111),
+        }
+    }
+
     #[test]
     fn registry_rendezvous_publishes_and_takes_once() {
         let reg = WhipRegistry::new();
@@ -287,13 +347,16 @@ mod tests {
             ssrc: 7,
             payload: vec![0x65, 0x10],
         });
-        reg.publish("cam-1", ring);
-        let taken = reg.take("cam-1").expect("the drive loop takes the ring");
+        reg.publish("cam-1", publisher(ring));
+        let taken = reg
+            .take("cam-1")
+            .expect("the drive loop takes the publisher");
         assert_eq!(
-            taken.len(),
+            taken.ring.len(),
             1,
             "the taken ring carries the published packet"
         );
+        assert_eq!(taken.video_payload_type, Some(96));
         // Taken once: a second take finds nothing until the next publish.
         assert!(reg.take("cam-1").is_none());
     }
@@ -302,11 +365,10 @@ mod tests {
     fn registry_replacing_a_ring_closes_the_prior() {
         let reg = WhipRegistry::new();
         let first = RtpRing::new();
-        reg.publish("cam-1", first.clone());
+        reg.publish("cam-1", publisher(first.clone()));
         // A new publisher replaces the slot; the prior ring is closed so its
         // (now-orphaned) drive loop ends cleanly rather than leaking.
-        let second = RtpRing::new();
-        reg.publish("cam-1", second);
+        reg.publish("cam-1", publisher(RtpRing::new()));
         assert!(
             first.is_ended(),
             "the replaced ring is closed (drained EOS)"
