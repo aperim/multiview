@@ -498,6 +498,30 @@ fn build_messages_device_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/DeviceDiscovered" }
     }));
+    insert_cast_session_messages(&mut map);
+    map.insert("TimingStatus".to_owned(), json!({
+        "name": "TimingStatus",
+        "title": "Outbound presentation epoch + sync telemetry",
+        "summary": "The per-program WallClockRef epoch, link offset, clock source/quality, and per-sync-group achieved skew (timing.status on topic `devices`).",
+        "description": concat!(
+            "Emitted on topic `devices` with envelope `id` = program or sync-group id ",
+            "(ADR-M010). CONFLATED latest-wins and excluded from the lossless replay ",
+            "ring: the epoch is an exact affine map that stays valid when stale, so a ",
+            "receiver that misses updates keeps the last epoch and free-runs — it ",
+            "degrades, never stalls. The achieved tier is the MEASURED tier, never an ",
+            "aspirational one.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/TimingStatus" }
+    }));
+    map
+}
+
+/// Insert the cast-session membership lifecycle message definitions
+/// (`cast.session.started`/`.removed`, DEV-D3.1) onto the Devices realtime
+/// surface — extracted from [`build_messages_device_events`] to keep that
+/// builder under the line budget.
+fn insert_cast_session_messages(map: &mut serde_json::Map<String, Value>) {
     map.insert("CastSessionStarted".to_owned(), json!({
         "name": "CastSessionStarted",
         "title": "Ephemeral cast session started",
@@ -527,22 +551,6 @@ fn build_messages_device_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/CastSessionRemoved" }
     }));
-    map.insert("TimingStatus".to_owned(), json!({
-        "name": "TimingStatus",
-        "title": "Outbound presentation epoch + sync telemetry",
-        "summary": "The per-program WallClockRef epoch, link offset, clock source/quality, and per-sync-group achieved skew (timing.status on topic `devices`).",
-        "description": concat!(
-            "Emitted on topic `devices` with envelope `id` = program or sync-group id ",
-            "(ADR-M010). CONFLATED latest-wins and excluded from the lossless replay ",
-            "ring: the epoch is an exact affine map that stays valid when stale, so a ",
-            "receiver that misses updates keeps the last epoch and free-runs — it ",
-            "degrades, never stalls. The achieved tier is the MEASURED tier, never an ",
-            "aspirational one.",
-        ),
-        "contentType": "application/json",
-        "payload": { "$ref": "#/components/schemas/TimingStatus" }
-    }));
-    map
 }
 
 /// Build control-frame message definitions ($hello, $subscribe, …).

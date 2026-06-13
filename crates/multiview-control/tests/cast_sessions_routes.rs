@@ -442,6 +442,10 @@ async fn stop_clears_the_tombstone_so_session_ids_stay_bounded() {
     let wiring = PollerWiring {
         broadcaster: DeviceBroadcaster::new(engine, Arc::new(DeviceStatusRegistry::new())),
         drivers: Arc::new(DeviceDriverRegistry::new()),
+        cast_sessions: std::sync::Arc::new(
+            multiview_control::devices::cast::store::CastSessionStore::new(),
+        ),
+        clock: std::sync::Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
     };
     assert!(
         registry_probe.start(&dev, &wiring),
@@ -560,8 +564,8 @@ async fn ephemeral_sessions_never_reach_the_config_export() {
 // ---------------------------------------------------------------------------
 
 /// An inbound frame from the device (scripted-channel test vocabulary,
-/// mirroring the cast_session.rs builders).
-fn from_device(namespace: &str, payload: serde_json::Value) -> CastFrame {
+/// mirroring the `cast_session.rs` builders).
+fn from_device(namespace: &str, payload: &serde_json::Value) -> CastFrame {
     CastFrame {
         namespace: namespace.to_owned(),
         source: PLATFORM_RECEIVER_ID.to_owned(),
@@ -570,11 +574,11 @@ fn from_device(namespace: &str, payload: serde_json::Value) -> CastFrame {
     }
 }
 
-/// A RECEIVER_STATUS carrying the launched Default Media Receiver.
+/// A `RECEIVER_STATUS` carrying the launched Default Media Receiver.
 fn receiver_status_with_app() -> CastFrame {
     from_device(
         NS_RECEIVER,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "RECEIVER_STATUS",
             "requestId": 0,
             "status": { "applications": [{
@@ -587,11 +591,11 @@ fn receiver_status_with_app() -> CastFrame {
     )
 }
 
-/// A MEDIA_STATUS with one active (PLAYING) media session.
+/// A `MEDIA_STATUS` with one active (PLAYING) media session.
 fn media_status_playing() -> CastFrame {
     from_device(
         NS_MEDIA,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "MEDIA_STATUS",
             "requestId": 0,
             "status": [{ "mediaSessionId": 1, "playerState": "PLAYING" }]
@@ -679,7 +683,10 @@ async fn save_promotion_publishes_cast_session_removed() {
             removed = removed || r.session_id == id;
         }
     }
-    assert!(removed, "save published cast.session.removed for the session id");
+    assert!(
+        removed,
+        "save published cast.session.removed for the session id"
+    );
 }
 
 #[tokio::test]
@@ -784,7 +791,10 @@ async fn started_unix_ns_appears_once_the_receiver_accepts_the_load() {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let doc = body_json(resp).await;
-        if let Some(value) = doc.get("started_unix_ns").and_then(serde_json::Value::as_i64) {
+        if let Some(value) = doc
+            .get("started_unix_ns")
+            .and_then(serde_json::Value::as_i64)
+        {
             break value;
         }
         assert!(

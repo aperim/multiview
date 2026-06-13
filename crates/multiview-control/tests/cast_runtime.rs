@@ -34,6 +34,10 @@ fn wiring() -> (PollerWiring, Arc<DeviceStatusRegistry>) {
     let wiring = PollerWiring {
         broadcaster: DeviceBroadcaster::new(engine, Arc::clone(&status)),
         drivers: Arc::new(DeviceDriverRegistry::new()),
+        cast_sessions: std::sync::Arc::new(
+            multiview_control::devices::cast::store::CastSessionStore::new(),
+        ),
+        clock: std::sync::Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
     };
     (wiring, status)
 }
