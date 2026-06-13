@@ -232,3 +232,46 @@ Decisions **Accepted** during the foundation build-out — the as-built state of
 - [ADR-W011](ADR-W011.md) — Realtime status/tally/alarms — no color alone + disciplined aria-live
 - [ADR-W012](ADR-W012.md) — i18n — Lingui v5 + ECMAScript Intl, client-localized errors
 - [ADR-W013](ADR-W013.md) — Serve the management plane from `multiview run` — control↔engine integration (3 isolation-safe paths, Class-1/2)
+
+## Feature intake 2026-06-13
+
+Decisions from the 2026-06-13 operator feature-request intake (all **Proposed**) — see the
+[intake catalog](../development/feature-intake-2026-06-13.md) + [dependency map](../architecture/feature-dependency-map.md).
+
+- [ADR-0060](ADR-0060.md) — Structured, resource-scoped logging taxonomy + libav log routing/correlation
+- [ADR-0061](ADR-0061.md) — Per-process vs system-wide resource attribution (encoder/decoder/GPU/CPU) + stats UI
+- [ADR-0062](ADR-0062.md) — ONVIF client + WS-Discovery + manual cross-subnet endpoint add (managed-device facet)
+- [ADR-0063](ADR-0063.md) — ONVIF server: present Multiview outputs as ONVIF/RTSP devices + PTZ passthrough
+- [ADR-0064](ADR-0064.md) — PTZ control model: ONVIF PTZ + VISCA / VISCA-over-IP profile
+- [ADR-0065](ADR-0065.md) — UniFi Protect compatibility over ONVIF/RTSP + clean-room nominative adoption shim
+- [ADR-0066](ADR-0066.md) — Inference seam + read-only frame-tap (embedded ONNX vs external model service)
+- [ADR-0067](ADR-0067.md) — Detection event model + record-on-named-object trigger
+- [ADR-0068](ADR-0068.md) — Configurable motion / scene-change detection (zones/sensitivity/debounce; feeds record + cues)
+- [ADR-0069](ADR-0069.md) — Transcoded ISO + trigger-gated capture (extends ADR-0037)
+- [ADR-0070](ADR-0070.md) — Object-store / S3 offload + lifecycle (async, bounded, never back-pressures)
+- [ADR-0071](ADR-0071.md) — Iceberg / S3 Tables event+media metadata catalog via SeaweedFS
+- [ADR-0072](ADR-0072.md) — Cue model & bus + cue-action vocabulary mapped onto the switcher macro/command surface
+- [ADR-0073](ADR-0073.md) — GPI/GPO/GPIO/relay — Raspberry Pi GPIO mode (edges/levels/min-pulse/debounce/retrigger-lockout)
+- [ADR-0074](ADR-0074.md) — SCTE-104 + SCTE-35 cue ingest + emit
+- [ADR-0075](ADR-0075.md) — HLS/DASH manifest cues (EXT-X-DATERANGE / CUE-OUT/IN, DASH inband+MPD events)
+- [ADR-0076](ADR-0076.md) — BXF / automation metadata exchange
+- [ADR-0077](ADR-0077.md) — Switcher audio mixer: input strips, buses, and the send matrix (extends ADR-0059)
+- [ADR-0078](ADR-0078.md) — Switcher audio: mix-minus / IFB / talkback, with safety by construction
+- [ADR-0079](ADR-0079.md) — Switcher audio: monitor/PFL/AFL, AFV via the visibility graph, output audio-track routing
+- [ADR-0080](ADR-0080.md) — HTML/CSS/JS motion-graphics engine (offscreen GPU surface, isolation, budget)
+- [ADR-0081](ADR-0081.md) — Templating / data-binding (window-variable injection + optional template language; n-source graphics)
+- [ADR-0082](ADR-0082.md) — Render-to-VT (bake an HTML graphic to a media asset)
+- [ADR-0083](ADR-0083.md) — URL-as-input SourceKind (headless web page: JS-on-load/event, interval + conditional refresh)
+- [ADR-0084](ADR-0084.md) — SIP/SIPS + SRTP stack & seam (inbound call = source, outbound = output/return)
+- [ADR-0085](ADR-0085.md) — SIP media ↔ engine bridge (reuse the WebRTC RTP/SRTP engine; audio into mix-minus)
+- [ADR-0086](ADR-0086.md) — Control-surface model + MIDI mapping (generic surface; RM-LP350G profile)
+- [ADR-0087](ADR-0087.md) — Online-service URL ingest (extends ADR-0015: Vimeo + download-to-VT + record-to-S3/Iceberg)
+- [ADR-0088](ADR-0088.md) — Output metadata model (per-transport metadata where supported; extends ADR-M002/C006)
+- [ADR-0089](ADR-0089.md) — Output orientation (rotation/flip; canvas-rotate vs display-rotation tag; per-output)
+- [ADR-0090](ADR-0090.md) — Ubiquitous non-disruptive preview (preview anywhere a stream is referenced)
+- [ADR-0091](ADR-0091.md) — Live-apply-everywhere + staging/pending-changes + high-risk gate
+- [ADR-0092](ADR-0092.md) — Operator-triggered hardware re-assessment + re-placement with explicit interrupt confirmation
+- [ADR-0093](ADR-0093.md) — Typed track/stream selection replacing free-text
+- [ADR-0094](ADR-0094.md) — Subtitle layer enable/disable in the layout editor + per-output subtitle selection
+- [ADR-T016](ADR-T016.md) — Layered consumption offsets: universal input + per-output/per-layout/per-switcher overrides
+- [ADR-T017](ADR-T017.md) — A/V offset semantics: muxed vs separate feeds, independent audio/video, bounded realization
