@@ -70,7 +70,7 @@ pub struct ConfigDiff {
     /// Every other changed section, by its authored TOML name (`outputs`,
     /// `overlays`, `probes`, `audio`, `control`, `placement`, `salvos`,
     /// `tally_profiles`, `walls`, `devices`, `sync_groups`, `routing`,
-    /// `discovery`, `timing`, `schema_version`). Sorted + deduplicated.
+    /// `discovery`, `timing`, `webrtc`, `schema_version`). Sorted + deduplicated.
     pub changed_sections: BTreeSet<&'static str>,
 }
 
@@ -102,6 +102,7 @@ impl ConfigDiff {
             routing: running_routing,
             discovery: running_discovery,
             timing: running_timing,
+            webrtc: running_webrtc,
         } = running;
         let MultiviewConfig {
             schema_version: next_schema_version,
@@ -123,6 +124,7 @@ impl ConfigDiff {
             routing: next_routing,
             discovery: next_discovery,
             timing: next_timing,
+            webrtc: next_webrtc,
         } = next;
 
         // Canvas: the pinned signal is geometry + cadence BY VALUE (the
@@ -139,7 +141,7 @@ impl ConfigDiff {
         let canvas_cosmetic_changed = !canvas_signal_changed && running_canvas != next_canvas;
 
         let mut changed_sections = BTreeSet::new();
-        let sectioned: [(&'static str, bool); 15] = [
+        let sectioned: [(&'static str, bool); 16] = [
             (
                 "schema_version",
                 running_schema_version != next_schema_version,
@@ -161,6 +163,7 @@ impl ConfigDiff {
             ("routing", running_routing != next_routing),
             ("discovery", running_discovery != next_discovery),
             ("timing", running_timing != next_timing),
+            ("webrtc", running_webrtc != next_webrtc),
         ];
         for (name, changed) in sectioned {
             if changed {

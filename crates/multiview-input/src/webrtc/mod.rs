@@ -13,16 +13,25 @@
 //!
 //! The ICE agent, DTLS handshake, and SRTP depacketization need a real network
 //! stack and a crypto stack; they live behind the off-by-default **`webrtc`**
-//! feature in the `transport` submodule (compiled only with that feature
-//! enabled), keeping the default build pure-Rust, native-dep-free, and
-//! LGPL-clean. The model in this module carries the correctness load and is fully
-//! tested.
+//! feature (compiled only with that feature enabled), keeping the default
+//! build pure-Rust, native-dep-free, and LGPL-clean. The gated half is still
+//! itself pure and exhaustively tested over *injected* packets: the
+//! [`transport`] module owns the session lifecycle, the application-layer
+//! `MediaEngine` seam, and the keyframe-gated H.264 depacketizer (RFC 6184);
+//! the [`opus`] module owns the Opus depacketizer (RFC 7587); and the
+//! [`route`] module dispatches decrypted RTP by negotiated payload type into
+//! typed compressed media events (ADR-T014). The model in this module carries
+//! the negotiation correctness load and is fully tested.
 //!
 //! ## Isolation (invariants #1 / #10)
 //!
 //! Negotiated media feeds the last-good stores like every other ingest path — it
 //! is *sampled*, never *pacing*. Nothing here blocks the output clock.
 
+#[cfg(feature = "webrtc")]
+pub mod opus;
+#[cfg(feature = "webrtc")]
+pub mod route;
 #[cfg(feature = "webrtc")]
 pub mod transport;
 

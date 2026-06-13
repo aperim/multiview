@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use multiview_preview::whep::native::{parse_answer_attributes, Str0mWhepTransport};
 use multiview_preview::whep::transport::{
-    sample_feed, EncodedSample, PreviewMediaSource, SampleFeed, SampleSink, SessionState,
-    WhepTransport,
+    sample_feed, EncodedSample, PreviewMediaSource, SampleFeed, SampleKind, SampleSink,
+    SessionState, WhepTransport,
 };
 use multiview_preview::whep::{PreviewCodec, WhepSession};
 use multiview_preview::AccessScope;
@@ -55,13 +55,57 @@ a=rtpmap:96 H264/90000\r\n\
 a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
 a=rtpmap:97 VP8/90000\r\n";
 
+/// A realistic browser WHEP offer carrying BOTH the video m-line of
+/// [`BROWSER_OFFER`] and an Opus audio m-line, bundled — the shape every real
+/// browser offer takes when the client wants preview audio (ADR-P006).
+const AV_BROWSER_OFFER: &str = "v=0\r\n\
+o=- 4611731400430051336 2 IN IP6 ::1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+a=msid-semantic: WMS\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
+c=IN IP6 ::\r\n\
+a=rtcp:9 IN IP6 ::\r\n\
+a=ice-ufrag:tEsT\r\n\
+a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+a=ice-options:trickle\r\n\
+a=fingerprint:sha-256 \
+6F:8E:1A:2B:3C:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:\
+F8:09:1A:2B:3C:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=recvonly\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
+a=rtpmap:97 VP8/90000\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP6 ::\r\n\
+a=rtcp:9 IN IP6 ::\r\n\
+a=ice-ufrag:tEsT\r\n\
+a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+a=ice-options:trickle\r\n\
+a=fingerprint:sha-256 \
+6F:8E:1A:2B:3C:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:\
+F8:09:1A:2B:3C:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7\r\n\
+a=setup:actpass\r\n\
+a=mid:1\r\n\
+a=recvonly\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n";
+
 /// An in-memory media source for the native transport: hands out a `SampleFeed`
 /// the transport drains; lets the test feed samples via the producer `SampleSink`.
+/// Audio (Opus by definition on this seam, ADR-P006) is optional: `new` builds a
+/// video-only source, `with_audio` adds an Opus feed handed out at most once.
 struct FakeMediaSource {
     codec: PreviewCodec,
     #[allow(dead_code)]
     sink: SampleSink,
     feed: std::sync::Mutex<Option<SampleFeed>>,
+    audio: std::sync::Mutex<Option<SampleFeed>>,
 }
 
 impl FakeMediaSource {
@@ -71,7 +115,15 @@ impl FakeMediaSource {
             codec,
             sink,
             feed: std::sync::Mutex::new(Some(feed)),
+            audio: std::sync::Mutex::new(None),
         }
+    }
+
+    fn with_audio(codec: PreviewCodec, depth: usize, audio_depth: usize) -> Self {
+        let source = Self::new(codec, depth);
+        let (_audio_sink, audio_feed) = sample_feed(audio_depth);
+        *source.audio.lock().expect("fresh mutex") = Some(audio_feed);
+        source
     }
 }
 
@@ -85,6 +137,10 @@ impl PreviewMediaSource for FakeMediaSource {
             .ok()
             .and_then(|mut g| g.take())
             .unwrap_or_else(|| sample_feed(1).1)
+    }
+    fn audio_feed(&self) -> Option<SampleFeed> {
+        // At most once, like `feed()`: once taken, audio reads as absent.
+        self.audio.lock().ok().and_then(|mut g| g.take())
     }
 }
 
@@ -200,6 +256,37 @@ a=rtpmap:111 opus/48000/2\r\n";
 }
 
 #[test]
+fn native_accept_takes_the_audio_feed_when_the_offer_has_opus_audio() {
+    // ADR-P006: a session whose offer negotiates an Opus audio m-line gets the
+    // source's (at-most-once) audio feed wired to the transport at accept.
+    let transport = Str0mWhepTransport::new();
+    let media = FakeMediaSource::with_audio(PreviewCodec::H264, 2, 3);
+    let _ta = transport
+        .accept(AV_BROWSER_OFFER, PreviewCodec::H264, &media)
+        .expect("native transport accepts the AV offer");
+    assert!(
+        media.audio_feed().is_none(),
+        "the native transport took the audio feed exactly once"
+    );
+}
+
+#[test]
+fn native_accept_leaves_audio_absent_for_a_video_only_offer() {
+    // ADR-P006: sessions whose offer carries no audio m-line simply leave
+    // audio absent — the transport must NOT take (and hold) an audio feed it
+    // can never send.
+    let transport = Str0mWhepTransport::new();
+    let media = FakeMediaSource::with_audio(PreviewCodec::H264, 2, 3);
+    let _ta = transport
+        .accept(BROWSER_OFFER, PreviewCodec::H264, &media)
+        .expect("native transport accepts the video-only offer");
+    assert!(
+        media.audio_feed().is_some(),
+        "no audio m-line: the source's audio feed is left untaken"
+    );
+}
+
+#[test]
 fn parse_answer_attributes_extracts_the_ice_dtls_lines() {
     // The pure SDP-munging seam: given an SDP answer string (the shape str0m
     // produces), extract exactly the ICE ufrag/pwd, the DTLS fingerprint
@@ -285,6 +372,7 @@ fn native_loopback_dtls_srtp() {
         data: Arc::from([0u8, 1, 2, 3].as_slice()),
         rtp_timestamp: 0,
         keyframe: true,
+        kind: SampleKind::Video,
     });
     transport.close(&ta.session_id).expect("close");
 }

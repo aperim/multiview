@@ -34,7 +34,7 @@ use multiview_engine::isolation::event_stream;
 use multiview_preview::whep::program::{
     FidelityLabel, IdentityPreviewEncoder, ProgramFocusSource, ProgramFrame, ProgramTap,
 };
-use multiview_preview::whep::transport::{PreviewMediaSource, SampleFeed};
+use multiview_preview::whep::transport::{PreviewMediaSource, SampleFeed, SampleKind};
 use multiview_preview::whep::PreviewCodec;
 use multiview_preview::{FocusCaps, FocusGate};
 
@@ -150,6 +150,36 @@ async fn program_focus_feed_drops_oldest_never_blocks_on_slow_transport() {
     assert!(
         feed.dropped() > 0,
         "a lagging feed drops the oldest samples"
+    );
+}
+
+#[tokio::test]
+async fn program_focus_source_emits_video_samples_and_carries_no_audio_feed() {
+    // ADR-P006: the canvas-tap program source is video-only — its samples are
+    // tagged `SampleKind::Video` (90 kHz RTP clock) and its audio feed is the
+    // trait default `None` (program audio rides the shared program Opus
+    // rendition of ADR-0049, a different source, not this canvas tap).
+    let (canvas, _seed) = event_stream::<ProgramFrame>(4);
+    let tap = ProgramTap::new();
+    let up = canvas.clone();
+    let lease = tap
+        .subscribe(move || (up.subscribe(), || {}))
+        .expect("subscribe");
+    let source = ProgramFocusSource::new(lease, IdentityPreviewEncoder::new(PreviewCodec::H264), 2);
+
+    assert!(
+        source.audio_feed().is_none(),
+        "the canvas-tap program source has no audio feed"
+    );
+
+    let feed = source.feed();
+    canvas.publish(frame(0));
+    assert_eq!(source.pump_available(), 1);
+    let sample = feed.pop().expect("one encoded sample");
+    assert_eq!(
+        sample.kind,
+        SampleKind::Video,
+        "canvas samples ride the 90 kHz video clock"
     );
 }
 

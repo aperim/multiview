@@ -124,6 +124,24 @@ impl StreamVideoDecoder {
         })
     }
 
+    /// Wrap an already-opened libav video decoder (crate-internal): the
+    /// receive path — NV12 conversion, color detection, A53 extraction, genpts
+    /// fallback — for decoders that are **not** built from container
+    /// parameters, e.g. the packet-fed WHIP H.264 decoder
+    /// ([`H264PacketDecoder`](crate::packet_decode::H264PacketDecoder),
+    /// ADR-T014) whose geometry comes from the in-band SPS.
+    pub(crate) fn from_parts(decoder: ffmpeg::decoder::Video, time_base: Rational) -> Self {
+        Self {
+            decoder,
+            time_base,
+            to_nv12: None,
+            last_pts_ns: None,
+            fallback_step_ns: Self::DEFAULT_FALLBACK_STEP_NS,
+            hw_decoder_name: None,
+            hw_device: None,
+        }
+    }
+
     /// Build a decoder for `parameters`, **preferring NVDEC hardware decode**
     /// (`*_cuvid`) when `want_hw` is set, the build compiled the `cuda` feature,
     /// and the linked libav offers a cuvid wrapper for the stream's codec — else
