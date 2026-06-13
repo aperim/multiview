@@ -14,11 +14,13 @@
 //! configured local slate) — node resilience equals product resilience by
 //! construction, never by re-implementation.
 //!
-//! The `timing.link_offset_ms` knob is **recorded and validated here but not
-//! yet consumed**: the epoch + link-offset frame chooser is DEV-C2 (consuming
-//! the DEV-C1 outbound presentation epoch). Until that lands, the node
-//! presents through the display sink's existing repeat/drop reconciliation
-//! (ADR-0044 §1), which this knob does not alter.
+//! The `timing.link_offset_ms` knob is **recorded and validated here** and
+//! **consumed by the DEV-C2 node frame chooser**: the node runner threads it
+//! into the display sink's pull-side presentation discipline, which presents
+//! the frame whose `wall_at(pts) + link_offset` is nearest the predicted next
+//! vblank (repeat-if-early, drop-if-late), consuming the DEV-C1 outbound
+//! presentation epoch (ADR-0045 / display-out §8). It configures the
+//! receiver-side runner, so it does **not** lower into the engine document.
 //!
 //! [ADR-0045]: https://github.com/aperim/multiview/blob/main/docs/decisions/ADR-0045.md
 
@@ -192,12 +194,12 @@ pub struct NodeCanvas {
 #[non_exhaustive]
 pub struct NodeTiming {
     /// The fixed per-deployment receiver-side delay, in milliseconds, added to
-    /// the program epoch when choosing the frame for a vblank (AES67's link
-    /// offset applied to video — uniformity across nodes matters, not
-    /// smallness). **Recorded and validated today; consumed by the DEV-C2
-    /// epoch frame chooser.** Until DEV-C2 lands the node presents through
-    /// the display sink's existing repeat/drop reconciliation, which this
-    /// value does not alter.
+    /// `wall_at(pts)` when the DEV-C2 pull-side frame chooser picks the frame
+    /// for a vblank (AES67's link offset applied to video — uniformity across
+    /// nodes matters, not smallness). **Recorded and validated here, consumed by
+    /// the node frame chooser** (the runner threads it into the display sink's
+    /// presentation discipline). The documented envelope is 100–300 ms
+    /// (display-out §8); `0` (the default) presents against the bare epoch.
     #[serde(default)]
     pub link_offset_ms: u32,
 }
@@ -505,12 +507,13 @@ impl NodeConfig {
             placement: None,
             audio: None,
             routing: None,
-            // The node's own `timing.link_offset_ms` is the DEV-C2
-            // RECEIVER-side frame-chooser knob (recorded above, not yet
-            // consumed — see the module doc); the engine document's
-            // `[timing]` block is the DEV-C1 OUTBOUND presentation-epoch
-            // policy. They are distinct surfaces, so the lowering leaves the
-            // outbound block absent (the engine's documented default).
+            // The node's own `timing.link_offset_ms` is the DEV-C2 RECEIVER-side
+            // frame-chooser knob — consumed by the node runner's presentation
+            // discipline (see the module doc), NOT the engine document; the
+            // engine document's `[timing]` block is the DEV-C1 OUTBOUND
+            // presentation-epoch policy. They are distinct surfaces, so the
+            // lowering leaves the outbound block absent (the engine's documented
+            // default).
             timing: None,
         };
         lowered.validate()?;

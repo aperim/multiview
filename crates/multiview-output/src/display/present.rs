@@ -363,9 +363,12 @@ impl RealtimePresentationClock {
     /// One `clock_gettime` reading as integer nanoseconds.
     fn read_ns(clock: rustix::time::ClockId) -> i64 {
         let ts = rustix::time::clock_gettime(clock);
+        // `display-kms` is Linux-only, where `rustix::time::Timespec` carries
+        // both fields as `i64` (`tv_nsec` is always `0..1e9`), so the seconds
+        // term cannot realistically overflow; `saturating_*` is belt-and-braces.
         ts.tv_sec
             .saturating_mul(1_000_000_000)
-            .saturating_add(i64::from(ts.tv_nsec))
+            .saturating_add(ts.tv_nsec)
     }
 }
 
