@@ -9,6 +9,7 @@ import { setupServer } from 'msw/node';
 
 import {
   driverSyncTier,
+  fetchSyncGroupStatus,
   lastSeenAgeSeconds,
   listDiscovered,
   listOutputTargets,
@@ -16,6 +17,7 @@ import {
   fetchDeviceStatus,
   scanDevices,
   setDeviceMode,
+  testPatternSyncGroup,
   toDeviceView,
   toSyncGroupView,
   weakestMemberTier,
@@ -259,5 +261,78 @@ describe('typed action calls', () => {
     expect(status?.state).toBe('UNREACHABLE');
     expect(status?.temperature_c).toBe(47.5);
     expect(await fetchDeviceStatus('dev-gone')).toBeUndefined();
+  });
+
+  it('fetchSyncGroupStatus parses the weakest-member projection and 404s to undefined', async () => {
+    server.use(
+      http.get('*/api/v1/sync-groups/wall/status', () =>
+        HttpResponse.json({
+          group: 'wall',
+          target_skew_ms: 80,
+          achieved: 'bounded-skew',
+          limited_by: 'dev-a',
+          measured_skew_ms: 42.5,
+          drift_alarm: false,
+          members: [
+            { device: 'dev-a', offset_ms: 120, achieved: 'bounded-skew', measured_skew_ms: 42.5, drift_alarm: false },
+            { device: 'dev-b', offset_ms: 0, achieved: 'frame-accurate', measured_skew_ms: 3.1, drift_alarm: false },
+          ],
+        }),
+      ),
+      http.get('*/api/v1/sync-groups/gone/status', () =>
+        HttpResponse.json({ title: 'not found', status: 404 }, { status: 404 }),
+      ),
+    );
+    const status = await fetchSyncGroupStatus('wall');
+    expect(status?.achieved).toBe('bounded-skew');
+    expect(status?.limitedBy).toBe('dev-a');
+    expect(status?.measuredSkewMs).toBe(42.5);
+    expect(status?.driftAlarm).toBe(false);
+    expect(status?.members).toHaveLength(2);
+    expect(status?.members[0]?.achieved).toBe('bounded-skew');
+    expect(status?.members[1]?.achieved).toBe('frame-accurate');
+    expect(await fetchSyncGroupStatus('gone')).toBeUndefined();
+  });
+
+  it('fetchSyncGroupStatus under-claims an unrecognised tier to none', async () => {
+    server.use(
+      http.get('*/api/v1/sync-groups/odd/status', () =>
+        HttpResponse.json({
+          group: 'odd',
+          target_skew_ms: 50,
+          achieved: 'genlock-grade',
+          drift_alarm: false,
+          members: [],
+        }),
+      ),
+    );
+    // An unknown server tier is never displayed as a real claim: it folds to
+    // the safe `none` under-claim.
+    const status = await fetchSyncGroupStatus('odd');
+    expect(status?.achieved).toBe('none');
+  });
+
+  it('testPatternSyncGroup posts the parameters and returns the 202 body', async () => {
+    let posted: unknown;
+    server.use(
+      http.post('*/api/v1/sync-groups/wall/test-pattern', async ({ request }) => {
+        posted = await request.json();
+        return HttpResponse.json(
+          { operation_id: 'op-tp', kind: 'test-pattern' },
+          { status: 202 },
+        );
+      }),
+    );
+    const accepted = await testPatternSyncGroup('wall', {
+      durationS: 5,
+      frameCounter: true,
+      flashPeriodMs: 500,
+    });
+    expect(accepted.operation_id).toBe('op-tp');
+    expect(posted).toEqual({
+      duration_s: 5,
+      frame_counter: true,
+      flash_period_ms: 500,
+    });
   });
 });

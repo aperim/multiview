@@ -11,9 +11,9 @@ import type { JSX } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
 import type { ColumnDef } from '@tanstack/react-table';
 import { Link } from 'react-router-dom';
-import { Plus, Ruler, Trash2 } from 'lucide-react';
+import { AlertTriangle, FlaskConical, Plus, Ruler, Trash2 } from 'lucide-react';
 
-import { measureSyncGroup, weakestMemberTier } from '../devices/api';
+import { measureSyncGroup, testPatternSyncGroup } from '../devices/api';
 import {
   emptySyncGroupForm,
   syncGroupFormFromRecord,
@@ -22,8 +22,13 @@ import {
   validateSyncGroupForm,
 } from '../devices/forms';
 import type { SyncGroupField, SyncGroupFormState } from '../devices/forms';
-import { useDevices, useSyncGroups } from '../devices/queries';
-import type { DeviceView, SyncGroupView, SyncTier } from '../devices/types';
+import { useDevices, useSyncGroupStatuses, useSyncGroups } from '../devices/queries';
+import type {
+  DeviceView,
+  SyncGroupStatusView,
+  SyncGroupView,
+  SyncTier,
+} from '../devices/types';
 import type { SaveResourceVars } from '../resources/queries';
 import { CrudPage, NameCell, RowActions } from '../resources/CrudPage';
 import type { FieldErrors } from '../resources/forms';
@@ -39,7 +44,7 @@ import { Button } from '../components/ui/button';
 import { Label } from '../components/ui/label';
 import { toast } from '../components/ui/use-toast';
 
-/** The localized label for a claimed sync tier. */
+/** The localized label for an achieved sync tier. */
 function tierLabel(tier: SyncTier): JSX.Element {
   switch (tier) {
     case 'frame-accurate':
@@ -51,37 +56,79 @@ function tierLabel(tier: SyncTier): JSX.Element {
   }
 }
 
+/** Format a measured skew (ms) to a stable one-decimal string. */
+function formatSkewMs(skewMs: number): string {
+  return `${skewMs.toFixed(1)} ms`;
+}
+
 /**
- * The weakest-member tier a group can claim, plus the single member that
- * limits it — named only when exactly one member sits at the weakest tier
- * while others publish a strictly better one (the brief §8 sketch:
- * "bounded-skew — limited by dev-foyer-decoder"). A shared weakest tier names
- * nobody: singling one member out would be arbitrary.
+ * The server-computed achieved tier (weakest member, never over-claimed) with
+ * the sole limiting member named where one exists, plus a text+icon drift-alarm
+ * indicator. Until the runtime has a measurement the cell honestly reads
+ * "Not measured" rather than guessing a tier from the driver.
  */
-function groupTierDetail(
-  group: SyncGroupView,
-  devices: readonly DeviceView[],
-): { tier: SyncTier; limitedBy: string | undefined } {
-  const memberTiers = group.members.map((member) => ({
-    device: member.device,
-    tier: weakestMemberTier([
-      devices.find((candidate) => candidate.id === member.device)?.driver ??
-        'unknown',
-    ]),
-  }));
-  const tier = weakestMemberTier(
-    group.members.map(
-      (member) =>
-        devices.find((device) => device.id === member.device)?.driver ?? 'unknown',
-    ),
+function AchievedTierCell({
+  status,
+}: {
+  readonly status: SyncGroupStatusView | undefined;
+}): JSX.Element {
+  if (status === undefined) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        <Trans>Not measured</Trans>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <Badge variant="outline">{tierLabel(status.achieved)}</Badge>
+      {status.limitedBy !== undefined ? (
+        <span className="text-xs text-muted-foreground">
+          <Trans>limited by {status.limitedBy}</Trans>
+        </span>
+      ) : null}
+      {status.driftAlarm ? (
+        // WCAG: the alarm carries an icon AND text, never colour alone.
+        <Badge variant="destructive" className="gap-1">
+          <AlertTriangle aria-hidden="true" className="size-3" />
+          <Trans>Drift alarm</Trans>
+        </Badge>
+      ) : null}
+    </span>
   );
-  const atWeakest = memberTiers.filter((member) => member.tier === tier);
-  const sole = atWeakest.length === 1 ? atWeakest.at(0) : undefined;
-  return {
-    tier,
-    limitedBy:
-      sole !== undefined && memberTiers.length > 1 ? sole.device : undefined,
-  };
+}
+
+/**
+ * The worst measured member skew across the group (the server's runtime
+ * measurement). Absent until a measurement exists — never fabricated.
+ */
+function MeasuredSkewCell({
+  status,
+}: {
+  readonly status: SyncGroupStatusView | undefined;
+}): JSX.Element {
+  const skew = status?.measuredSkewMs;
+  if (skew === undefined) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        <Trans>—</Trans>
+      </span>
+    );
+  }
+  const overTarget =
+    status !== undefined && skew > status.targetSkewMs;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Badge variant={overTarget ? 'destructive' : 'outline'}>
+        {formatSkewMs(skew)}
+      </Badge>
+      {overTarget ? (
+        <span className="sr-only">
+          <Trans>over the target skew</Trans>
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 /** The editable member rows inside the create/edit dialog. */
@@ -207,6 +254,10 @@ export function SyncGroupsPage(): JSX.Element {
   const { t } = useLingui();
   const groups = useSyncGroups();
   const devices = useDevices();
+  // The server computes the achieved tier (weakest member) + per-member skew +
+  // drift state; the SPA reads it, it never re-derives the tier from drivers.
+  const groupIds = (groups.data ?? []).map((group) => group.id);
+  const statuses = useSyncGroupStatuses(groupIds);
 
   const measureNow = (group: SyncGroupView): void => {
     measureSyncGroup(group.id)
@@ -219,6 +270,23 @@ export function SyncGroupsPage(): JSX.Element {
       .catch((error: unknown): void => {
         toast({
           title: t`Could not measure`,
+          description: error instanceof Error ? error.message : String(error),
+          variant: 'destructive',
+        });
+      });
+  };
+
+  const testPatternNow = (group: SyncGroupView): void => {
+    testPatternSyncGroup(group.id)
+      .then((accepted): void => {
+        toast({
+          title: t`Test pattern running`,
+          description: t`Operation ${accepted.operation_id}; the group's displays show a frame counter + flash for visual sync verification.`,
+        });
+      })
+      .catch((error: unknown): void => {
+        toast({
+          title: t`Could not start the test pattern`,
           description: error instanceof Error ? error.message : String(error),
           variant: 'destructive',
         });
@@ -252,42 +320,49 @@ export function SyncGroupsPage(): JSX.Element {
       id: 'tier',
       header: (): JSX.Element => (
         <span className="inline-flex items-center gap-1.5">
-          <Trans>Claimed tier</Trans>
+          <Trans>Achieved tier</Trans>
           <HelpLink to="/help/sync" label={t`About sync tiers`} compact />
         </span>
       ),
-      cell: (ctx): JSX.Element => {
-        const { tier, limitedBy } = groupTierDetail(
-          ctx.row.original,
-          devices.data ?? [],
-        );
-        return (
-          <span className="inline-flex flex-wrap items-center gap-1.5">
-            <Badge variant="outline">{tierLabel(tier)}</Badge>
-            {limitedBy !== undefined ? (
-              <span className="text-xs text-muted-foreground">
-                <Trans>limited by {limitedBy}</Trans>
-              </span>
-            ) : null}
-          </span>
-        );
-      },
+      cell: (ctx): JSX.Element => (
+        <AchievedTierCell status={statuses[ctx.row.original.id]} />
+      ),
+    },
+    {
+      id: 'skew',
+      header: t`Measured skew`,
+      cell: (ctx): JSX.Element => (
+        <MeasuredSkewCell status={statuses[ctx.row.original.id]} />
+      ),
     },
     {
       id: 'measure',
-      header: t`Measured`,
+      header: t`Actions`,
       cell: (ctx): JSX.Element => (
-        <Button
-          variant="outline"
-          size="sm"
-          aria-label={`${t`Measure skew`}: ${ctx.row.original.name}`}
-          onClick={(): void => {
-            measureNow(ctx.row.original);
-          }}
-        >
-          <Ruler aria-hidden="true" />
-          <Trans>Measure</Trans>
-        </Button>
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            aria-label={`${t`Measure skew`}: ${ctx.row.original.name}`}
+            onClick={(): void => {
+              measureNow(ctx.row.original);
+            }}
+          >
+            <Ruler aria-hidden="true" />
+            <Trans>Measure</Trans>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            aria-label={`${t`Show test pattern`}: ${ctx.row.original.name}`}
+            onClick={(): void => {
+              testPatternNow(ctx.row.original);
+            }}
+          >
+            <FlaskConical aria-hidden="true" />
+            <Trans>Test pattern</Trans>
+          </Button>
+        </span>
       ),
     },
     {
