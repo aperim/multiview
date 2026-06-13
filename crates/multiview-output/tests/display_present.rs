@@ -24,9 +24,9 @@ use multiview_core::time::Rational;
 use multiview_core::wallclock::WallClockRef;
 use multiview_output::display::{
     choose_frame, frame_mailbox, ConnectorDesc, ConnectorSelector, DisplayCanvas, DisplayError,
-    DisplayModeInfo, DisplaySink, DisplaySinkConfig, FlipEvent, FrameChoice, HeadSetup,
-    KmsBackend, ModeRequest, PresentQueue, PresentationClock, PresentationPlan, SubmitError,
-    VblankPredictor, PRESENT_QUEUE_DEPTH,
+    DisplayModeInfo, DisplaySink, DisplaySinkConfig, FlipEvent, FrameChoice, HeadSetup, KmsBackend,
+    ModeRequest, PresentQueue, PresentationClock, PresentationPlan, SubmitError, VblankPredictor,
+    PRESENT_QUEUE_DEPTH,
 };
 use multiview_output::SharedEpoch;
 
@@ -261,7 +261,7 @@ fn the_mailbox_stamps_the_pts_atomically_with_the_frame() {
 // ---------------------------------------------------------------------------
 
 /// A scripted mono/wall clock pair: `mono` is the test-driven virtual
-/// CLOCK_MONOTONIC (the KMS flip-timestamp domain); wall = mono + the fixed
+/// `CLOCK_MONOTONIC` (the KMS flip-timestamp domain); wall = mono + the fixed
 /// offset (the epoch domain).
 struct ScriptedClock {
     mono: Arc<AtomicI64>,
@@ -459,7 +459,7 @@ fn wait_until(pred: impl Fn() -> bool) {
 }
 
 /// Wait for the sink to complete at least two further full loop iterations
-/// (wait_events → drain mailbox → decide), proving it has observed everything
+/// (`wait_events` → drain mailbox → decide), proving it has observed everything
 /// published before this call.
 fn two_full_iterations(wait_calls: &Arc<Mutex<u64>>) {
     let start = *wait_calls.lock().unwrap();
@@ -505,7 +505,7 @@ fn the_sink_presents_by_deadline_against_the_predicted_vblank() {
     let stats = handle.stats();
 
     // -- 1. Light up: no flip anchor exists yet → undisciplined latest-wins.
-    publisher.publish(TestCanvas::tagged(b'A'), 1_000_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'A'), 1_000_000_000);
     wait_until(|| stats.snapshot().commits == 1);
     assert_eq!(stats.snapshot().undisciplined_presents, 1);
     // Release A's flip (vblank 1.020 s) and anchor the predictor.
@@ -515,7 +515,7 @@ fn the_sink_presents_by_deadline_against_the_predicted_vblank() {
     // -- 2. Repeat-if-early: B is due at mono 1.062 s (pts 1.057 s + 5 ms
     //       link offset). The next vblank is 1.040 s: B is 22 ms early —
     //       nearer the FOLLOWING vblank — so nothing commits.
-    publisher.publish(TestCanvas::tagged(b'B'), 1_057_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'B'), 1_057_000_000);
     two_full_iterations(&wait_calls);
     two_full_iterations(&wait_calls);
     assert_eq!(
@@ -538,9 +538,9 @@ fn the_sink_presents_by_deadline_against_the_predicted_vblank() {
     //       1.060 − 1.062 = −2 ms) and the next predicted vblank is
     //       1.080 s — C is 12 ms away, D is 8 ms away → D presents, C is
     //       dropped late, never submitted.
-    publisher.publish(TestCanvas::tagged(b'C'), 1_063_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'C'), 1_063_000_000);
     two_full_iterations(&wait_calls);
-    publisher.publish(TestCanvas::tagged(b'D'), 1_083_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'D'), 1_083_000_000);
     two_full_iterations(&wait_calls);
     assert_eq!(
         stats.snapshot().commits,
@@ -597,7 +597,7 @@ fn ebusy_keeps_the_chosen_frame_as_the_retry_candidate() {
             .expect("the sink starts");
     let stats = handle.stats();
 
-    publisher.publish(TestCanvas::tagged(b'A'), 1_000_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'A'), 1_000_000_000);
     wait_until(|| stats.snapshot().busy_conflations == 1);
     assert_eq!(stats.snapshot().commits, 0, "EBUSY is not a commit");
     // The unaccounted-for kernel flip drains at its vblank; the SAME frame A
@@ -623,12 +623,12 @@ fn without_any_epoch_the_sink_still_presents_latest_wins() {
             .expect("the sink starts");
     let stats = handle.stats();
 
-    publisher.publish(TestCanvas::tagged(b'A'), 1_000_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'A'), 1_000_000_000);
     wait_until(|| stats.snapshot().commits == 1);
     // Release A's flip so the pipe idles again.
     mono.store(1_021_000_000, Ordering::Release);
     wait_until(|| stats.snapshot().flips == 1);
-    publisher.publish(TestCanvas::tagged(b'B'), 1_037_000_000);
+    publisher.publish_at(TestCanvas::tagged(b'B'), 1_037_000_000);
     two_full_iterations(&wait_calls);
     wait_until(|| stats.snapshot().commits == 2);
     assert_eq!(

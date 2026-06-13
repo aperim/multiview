@@ -5065,6 +5065,11 @@ fn start_display_sinks(
                 // an idle pipe notices a fresh mailbox frame; well under one
                 // frame period at any broadcast cadence.
                 poll_interval: Duration::from_millis(4),
+                // DEV-C2: the per-head node presentation plan (epoch + link
+                // offset + the monotonic/wall clock). `start_display_sinks`
+                // threads it from the run's plan; a non-node display output
+                // (no plan) runs the DEV-B1 undisciplined latest-wins loop.
+                presentation: plan.presentation.take(),
             },
         )
         .map_err(|e| PipelineError::Output {
