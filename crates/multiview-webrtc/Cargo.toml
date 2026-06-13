@@ -62,5 +62,10 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net"] }
 # client own.
 "native" = ["dep:str0m", "dep:socket2", "tokio/net"]
 
+[[example]]
+name = "whip_publish"
+path = "examples/whip_publish.rs"
+required-features = ["native"]
+
 [lints]
 workspace = true

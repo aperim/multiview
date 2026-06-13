@@ -18,9 +18,12 @@
     clippy::missing_panics_doc
 )]
 
+mod fake_turn;
+
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use fake_turn::FakeTurnServer as FakeTurn;
 use multiview_webrtc::transport::{MediaKind, Session, SessionConfig};
 
 /// The offerer/answerer host addresses (loopback-style, but never actually
@@ -172,6 +175,74 @@ fn answer_is_str0m_native_ipv6_first_and_bundled() {
         answer.contains("typ host") && answer.contains("::1"),
         "v6 host candidate present in:\n{answer}"
     );
+}
+
+#[test]
+fn relay_candidate_from_turn_appears_in_the_offer() {
+    // The operator's NAT-traversal path: the in-crate TURN client allocates a
+    // relay (proven separately in `turn_client.rs` against a fake server); the
+    // learned relay address is registered with str0m via `add_relay_candidate`
+    // and must surface in the offer SDP as a `typ relay` candidate (IPv6-first).
+    let now = Instant::now();
+    let mut a = Session::new(&SessionConfig::default(), now);
+    let host: SocketAddr = OFFERER_ADDR.parse().unwrap();
+    // A relayed transport address as a TURN Allocate would yield (v6 relay), and
+    // the local socket the relayed traffic egresses from.
+    let relayed: SocketAddr = "[2001:db8::a11]:49152".parse().unwrap();
+    a.add_host_candidate(host).unwrap();
+    a.add_relay_candidate(relayed, host).unwrap();
+    let offer = a.create_offer(&[MediaKind::Video]).unwrap();
+    assert!(
+        offer.contains("typ relay"),
+        "the TURN relay candidate is advertised in:\n{offer}"
+    );
+    assert!(
+        offer.contains("2001:db8::a11"),
+        "the v6 relayed address is present in:\n{offer}"
+    );
+}
+
+#[test]
+fn turn_allocate_drives_to_a_relay_that_can_be_registered() {
+    // End-to-end (offline) TURN: drive the in-crate client to an allocation vs an
+    // in-process fake TURN server, then register the learned relay with a session
+    // — the same wiring the live endpoint uses, with the socket replaced by a
+    // direct shuttle.
+    use multiview_webrtc::turn::message::{Class, Method, StunMessage};
+    use multiview_webrtc::turn::{TurnClient, TurnCredential, TurnOutput, TurnState};
+
+    let now = Instant::now();
+    let server: SocketAddr = "[2001:db8::1]:3478".parse().unwrap();
+    let relay: SocketAddr = "[2001:db8::1]:49152".parse().unwrap();
+    let mut client = TurnClient::new(server, TurnCredential::static_credential("u", "p", None));
+    let mut fake = FakeTurn::new(server, relay, "u", "p", "realm");
+
+    let mut learned = None;
+    for _ in 0..32 {
+        if let TurnOutput::Transmit { payload, .. } = client.poll_output(now) {
+            if let Some(reply) = fake.handle(&payload) {
+                client.handle_input(&reply, now).unwrap();
+            }
+        }
+        if let TurnState::Allocated { relay, .. } = client.state() {
+            learned = Some(relay);
+            break;
+        }
+    }
+    let relay_addr = learned.expect("TURN allocation reached a relay");
+    assert_eq!(relay_addr, relay);
+
+    // Register the relay with a real session — proves the relay address is a
+    // valid str0m relay candidate.
+    let local: SocketAddr = OFFERER_ADDR.parse().unwrap();
+    let mut session = Session::new(&SessionConfig::default(), now);
+    session.add_relay_candidate(relay_addr, local).unwrap();
+    let offer = session.create_offer(&[MediaKind::Video]).unwrap();
+    assert!(offer.contains("typ relay"), "relay candidate registered");
+
+    // Keep the fake-server response codec honest.
+    let probe = StunMessage::request(Method::Binding).to_bytes(None);
+    assert_eq!(StunMessage::parse(&probe).unwrap().class(), Class::Request);
 }
 
 #[test]
