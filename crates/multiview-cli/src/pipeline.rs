@@ -1360,8 +1360,7 @@ impl Pipeline {
         // id for the sink runners. The run wiring reads the registry to bind the
         // WHEP-serve endpoint + spawn the whip_push clients. Under `webrtc-native`.
         #[cfg(feature = "webrtc-native")]
-        let (egress_registry, egress_sinks) =
-            crate::webrtc_outputs::build_egress_registry(config);
+        let (egress_registry, egress_sinks) = crate::webrtc_outputs::build_egress_registry(config);
         let built = build_outputs(
             &config.outputs,
             &epoch,
@@ -3725,7 +3724,11 @@ fn run_webrtc_output(
     // End-of-program: close the feed so the sessions tear down cleanly.
     sink.close();
     if dropped > 0 {
-        tracing::debug!(output = label, dropped, "webrtc egress dropped (slow/absent consumers)");
+        tracing::debug!(
+            output = label,
+            dropped,
+            "webrtc egress dropped (slow/absent consumers)"
+        );
     }
     SinkRunOutcome {
         line: format!("{label}: {delivered} packet(s) fanned to WebRTC egress"),

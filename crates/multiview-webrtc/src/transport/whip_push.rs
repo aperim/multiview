@@ -189,7 +189,11 @@ impl WhipPushClient {
     /// # Errors
     ///
     /// [`WebRtcError::Socket`] / [`WebRtcError::Config`] if the bind fails.
-    pub fn bind(config: crate::config::EndpointConfig, feed: EgressFeed, audio: bool) -> Result<Self> {
+    pub fn bind(
+        config: crate::config::EndpointConfig,
+        feed: EgressFeed,
+        audio: bool,
+    ) -> Result<Self> {
         let endpoint = WebRtcEndpoint::bind(config)?;
         Ok(Self {
             endpoint,

@@ -98,12 +98,14 @@ fn whep_reject_response(output_id: &str, reject: WhepOutputReject) -> Response {
             .with_detail("no configured webrtc output by that id")
             .with_instance(instance)
             .into_response(),
-        WhepOutputReject::NoCompatibleCodec => {
-            Problem::new(406, "whep-no-codec", "No compatible codec in the WHEP offer")
-                .with_detail("Multiview serves H.264 video and Opus audio only")
-                .with_instance(instance)
-                .into_response()
-        }
+        WhepOutputReject::NoCompatibleCodec => Problem::new(
+            406,
+            "whep-no-codec",
+            "No compatible codec in the WHEP offer",
+        )
+        .with_detail("Multiview serves H.264 video and Opus audio only")
+        .with_instance(instance)
+        .into_response(),
         WhepOutputReject::Unavailable => {
             let problem = Problem::new(503, "whep-unavailable", "WHEP viewer capacity exhausted")
                 .with_detail(

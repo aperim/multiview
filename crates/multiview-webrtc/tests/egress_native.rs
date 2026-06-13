@@ -87,9 +87,14 @@ fn whep_serve_sample_write_reaches_the_viewer() {
     viewer.accept_answer(&answer).unwrap();
 
     assert!(
-        pump_until(&mut server, server_addr, &mut viewer, viewer_addr, now, |s, v| {
-            s.is_connected() && v.is_connected()
-        }),
+        pump_until(
+            &mut server,
+            server_addr,
+            &mut viewer,
+            viewer_addr,
+            now,
+            |s, v| { s.is_connected() && v.is_connected() }
+        ),
         "ICE+DTLS must complete"
     );
 
@@ -97,7 +102,9 @@ fn whep_serve_sample_write_reaches_the_viewer() {
     // (invariant #3 — derived from the program tick, never input PTS).
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0xABu8, 1200));
-    server.write_video_sample_at(&au, true, 90_000, now).unwrap();
+    server
+        .write_video_sample_at(&au, true, 90_000, now)
+        .unwrap();
 
     assert!(
         pump_until(
@@ -162,15 +169,22 @@ fn whip_push_offer_answer_and_send_reaches_the_remote() {
     client.accept_answer(&answer).unwrap();
 
     assert!(
-        pump_until(&mut client, client_addr, &mut remote, remote_addr, now, |c, r| {
-            c.is_connected() && r.is_connected()
-        }),
+        pump_until(
+            &mut client,
+            client_addr,
+            &mut remote,
+            remote_addr,
+            now,
+            |c, r| { c.is_connected() && r.is_connected() }
+        ),
         "ICE+DTLS must complete for the push"
     );
 
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0xCDu8, 1200));
-    client.write_video_sample_at(&au, true, 90_000, now).unwrap();
+    client
+        .write_video_sample_at(&au, true, 90_000, now)
+        .unwrap();
 
     assert!(
         pump_until(
@@ -205,9 +219,14 @@ fn one_access_unit_serves_two_viewers() {
             .unwrap();
         let answer = server.accept_offer(&offer).unwrap();
         viewer.accept_answer(&answer).unwrap();
-        assert!(pump_until(&mut server, s_addr, &mut viewer, v_addr, now, |s, v| s
-            .is_connected()
-            && v.is_connected()));
+        assert!(pump_until(
+            &mut server,
+            s_addr,
+            &mut viewer,
+            v_addr,
+            now,
+            |s, v| s.is_connected() && v.is_connected()
+        ));
         (server, viewer)
     };
     let (mut server1, mut viewer1) = connect(s1, v1);
@@ -216,18 +235,35 @@ fn one_access_unit_serves_two_viewers() {
     // The SAME access unit bytes are written into each viewer's session.
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0x77u8, 1000));
-    server1.write_video_sample_at(&au, true, 90_000, now).unwrap();
-    server2.write_video_sample_at(&au, true, 90_000, now).unwrap();
+    server1
+        .write_video_sample_at(&au, true, 90_000, now)
+        .unwrap();
+    server2
+        .write_video_sample_at(&au, true, 90_000, now)
+        .unwrap();
 
-    assert!(pump_until(&mut server1, s1, &mut viewer1, v1, now, |_s, v| v
-        .received_media_count()
-        > 0));
-    assert!(pump_until(&mut server2, s2, &mut viewer2, v2, now, |_s, v| v
-        .received_media_count()
-        > 0));
+    assert!(pump_until(
+        &mut server1,
+        s1,
+        &mut viewer1,
+        v1,
+        now,
+        |_s, v| v.received_media_count() > 0
+    ));
+    assert!(pump_until(
+        &mut server2,
+        s2,
+        &mut viewer2,
+        v2,
+        now,
+        |_s, v| v.received_media_count() > 0
+    ));
     let f1 = viewer1.take_received_media().unwrap();
     let f2 = viewer2.take_received_media().unwrap();
-    assert_eq!(f1.data, f2.data, "both viewers decode the identical program AU");
+    assert_eq!(
+        f1.data, f2.data,
+        "both viewers decode the identical program AU"
+    );
 }
 
 /// Keep `EgressSample` honest in the native build too (it is the carrier the

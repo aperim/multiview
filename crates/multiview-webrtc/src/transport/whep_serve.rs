@@ -206,9 +206,11 @@ impl WhepServeHandle {
         // Per-output capacity (max_viewers) checked before the global pool so the
         // operator's per-output cap is the dominant 503 signal.
         {
-            let viewers = self.inner.viewers_by_output.lock().map_err(|_| {
-                WebRtcError::Transport("whep viewer map poisoned".to_owned())
-            })?;
+            let viewers = self
+                .inner
+                .viewers_by_output
+                .lock()
+                .map_err(|_| WebRtcError::Transport("whep viewer map poisoned".to_owned()))?;
             let live = viewers.get(output_id).map_or(0, Vec::len);
             if u32::try_from(live).unwrap_or(u32::MAX) >= registration.max_viewers {
                 return Err(WebRtcError::AtCapacity);
@@ -250,17 +252,18 @@ impl WhepServeHandle {
 
         // Admit against the endpoint-global viewer pool (OutputViewer counts).
         let session_id = {
-            let mut table = self
-                .inner
-                .table
-                .lock()
-                .map_err(|_| WebRtcError::Transport("whep session table poisoned".to_owned()))?;
+            let mut table =
+                self.inner.table.lock().map_err(|_| {
+                    WebRtcError::Transport("whep session table poisoned".to_owned())
+                })?;
             table.admit(SessionRole::OutputViewer, now)?
         };
         {
-            let mut viewers = self.inner.viewers_by_output.lock().map_err(|_| {
-                WebRtcError::Transport("whep viewer map poisoned".to_owned())
-            })?;
+            let mut viewers = self
+                .inner
+                .viewers_by_output
+                .lock()
+                .map_err(|_| WebRtcError::Transport("whep viewer map poisoned".to_owned()))?;
             viewers
                 .entry(output_id.to_owned())
                 .or_default()
@@ -298,9 +301,7 @@ impl WhepServeHandle {
     pub fn release(&self, output_id: &str, session_id: &str) -> bool {
         let id = SessionId::from_str(session_id);
         let known = match self.inner.viewers_by_output.lock() {
-            Ok(viewers) => viewers
-                .get(output_id)
-                .is_some_and(|ids| ids.contains(&id)),
+            Ok(viewers) => viewers.get(output_id).is_some_and(|ids| ids.contains(&id)),
             Err(_) => false,
         };
         if !known {

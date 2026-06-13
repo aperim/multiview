@@ -401,7 +401,9 @@ pub fn spawn_whip_push_clients(config: &MultiviewConfig, registry: &EgressRegist
 /// **with the per-output [`EgressSink`]s** keyed by id for the pipeline to wire
 /// into its sink runners.
 #[must_use]
-pub fn build_egress_registry(config: &MultiviewConfig) -> (EgressRegistry, HashMap<String, EgressSink>) {
+pub fn build_egress_registry(
+    config: &MultiviewConfig,
+) -> (EgressRegistry, HashMap<String, EgressSink>) {
     let registry = EgressRegistry::new();
     let mut sinks = HashMap::new();
     for output in &config.outputs {

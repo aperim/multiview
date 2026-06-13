@@ -29,14 +29,21 @@ fn push_offer_is_sendonly_actpass_with_host_candidates() {
         /* audio */ true,
     )
     .expect("offer builds");
-    assert!(offer.sdp.contains("a=sendonly"), "offer is sendonly:\n{}", offer.sdp);
+    assert!(
+        offer.sdp.contains("a=sendonly"),
+        "offer is sendonly:\n{}",
+        offer.sdp
+    );
     assert!(
         offer.sdp.contains("a=setup:actpass"),
         "offerer is actpass (answerer chooses DTLS role):\n{}",
         offer.sdp
     );
     assert!(offer.sdp.contains("m=video"), "video m-line present");
-    assert!(offer.sdp.contains("m=audio"), "audio m-line present when audio=true");
+    assert!(
+        offer.sdp.contains("m=audio"),
+        "audio m-line present when audio=true"
+    );
     assert!(
         offer.sdp.contains("typ host") && offer.sdp.contains("2001:db8::1"),
         "the host candidate is advertised (IPv6-first):\n{}",
@@ -46,8 +53,8 @@ fn push_offer_is_sendonly_actpass_with_host_candidates() {
 
 #[test]
 fn push_offer_omits_audio_when_disabled() {
-    let offer =
-        WhipPushOffer::create(&["[2001:db8::1]:8189".parse().unwrap()], false).expect("offer builds");
+    let offer = WhipPushOffer::create(&["[2001:db8::1]:8189".parse().unwrap()], false)
+        .expect("offer builds");
     assert!(offer.sdp.contains("m=video"));
     assert!(
         !offer.sdp.contains("m=audio"),
@@ -68,7 +75,10 @@ fn backoff_starts_low_grows_exponentially_and_caps() {
     // It is capped (never unbounded): many failures stay under the ceiling.
     for _ in 0..50 {
         let d = b.next_delay();
-        assert!(d <= PushBackoff::MAX_DELAY, "backoff is capped at MAX_DELAY");
+        assert!(
+            d <= PushBackoff::MAX_DELAY,
+            "backoff is capped at MAX_DELAY"
+        );
     }
 }
 

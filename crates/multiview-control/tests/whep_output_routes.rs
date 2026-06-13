@@ -80,7 +80,9 @@ impl WhepOutputProvider for FakeWhep {
             };
         }
         if !offer.contains("v=0") {
-            return Err(WhepOutputReject::Malformed("no SDP version line".to_owned()));
+            return Err(WhepOutputReject::Malformed(
+                "no SDP version line".to_owned(),
+            ));
         }
         if self.max_viewers != 0 && self.sessions.lock().unwrap().len() >= self.max_viewers {
             return Err(WhepOutputReject::Unavailable);
@@ -157,7 +159,11 @@ fn post_sdp(path: &str, bearer: Option<&str>, offer: &str) -> Request<Body> {
 async fn output_token_view_yields_created_with_location() {
     let whep = Arc::new(FakeWhep::default());
     let router = router_with_whep(Arc::clone(&whep));
-    let resp = send(&router, post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER)).await;
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let ct = resp
         .headers()
@@ -184,7 +190,11 @@ async fn view_api_key_with_view_scope_is_accepted() {
     let whep = Arc::new(FakeWhep::default());
     let router = router_with_whep(Arc::clone(&whep));
     // A Viewer (View/Read scope) API key suffices for read-shaped viewing.
-    let resp = send(&router, post_sdp("/api/v1/whep/pgm", Some(VIEWER_TOKEN), OFFER)).await;
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(VIEWER_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
 }
 
@@ -192,7 +202,11 @@ async fn view_api_key_with_view_scope_is_accepted() {
 async fn operator_key_also_views() {
     let whep = Arc::new(FakeWhep::default());
     let router = router_with_whep(Arc::clone(&whep));
-    let resp = send(&router, post_sdp("/api/v1/whep/pgm", Some(OPERATOR_TOKEN), OFFER)).await;
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OPERATOR_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
 }
 
@@ -210,7 +224,11 @@ async fn no_credentials_is_unauthorized() {
 #[tokio::test]
 async fn unknown_output_is_not_found() {
     let router = router_with_whep(Arc::new(FakeWhep::default()));
-    let resp = send(&router, post_sdp("/api/v1/whep/nope", Some(OPERATOR_TOKEN), OFFER)).await;
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/nope", Some(OPERATOR_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -218,9 +236,17 @@ async fn unknown_output_is_not_found() {
 async fn over_capacity_is_service_unavailable_with_retry_after() {
     let whep = Arc::new(FakeWhep::capped(1));
     let router = router_with_whep(Arc::clone(&whep));
-    let first = send(&router, post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER)).await;
+    let first = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(first.status(), StatusCode::CREATED);
-    let second = send(&router, post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER)).await;
+    let second = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(
         second.headers().contains_key(header::RETRY_AFTER),
@@ -264,7 +290,11 @@ async fn patch_is_method_not_allowed_with_allow_header() {
 async fn delete_releases_then_404s_unknown() {
     let whep = Arc::new(FakeWhep::default());
     let router = router_with_whep(Arc::clone(&whep));
-    let created = send(&router, post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER)).await;
+    let created = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER),
+    )
+    .await;
     let location = created
         .headers()
         .get(header::LOCATION)
@@ -299,8 +329,17 @@ async fn default_provider_refuses_503() {
     let engine = Arc::new(EnginePublisher::new(64));
     let (tx, _rx) = command_bus(4);
     let keys = ApiKeyStore::new(PEPPER.to_vec());
-    let state = AppState::new(engine, tx, Arc::new(InMemoryRepository::new()), Arc::new(keys));
+    let state = AppState::new(
+        engine,
+        tx,
+        Arc::new(InMemoryRepository::new()),
+        Arc::new(keys),
+    );
     let router = multiview_control::router(state);
-    let resp = send(&router, post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER)).await;
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

@@ -530,7 +530,14 @@ impl Session {
         rtp_ts: u32,
         now: Instant,
     ) -> Result<()> {
-        self.write_sample_at(MediaKind::Video, data, keyframe, rtp_ts, VIDEO_CLOCK_HZ, now)
+        self.write_sample_at(
+            MediaKind::Video,
+            data,
+            keyframe,
+            rtp_ts,
+            VIDEO_CLOCK_HZ,
+            now,
+        )
     }
 
     /// Write one encoded Opus audio frame at the given **48 kHz RTP timestamp**

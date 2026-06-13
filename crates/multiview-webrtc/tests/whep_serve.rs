@@ -21,7 +21,9 @@
 use multiview_webrtc::config::EndpointConfig;
 use multiview_webrtc::egress::egress_feed;
 use multiview_webrtc::error::WebRtcError;
-use multiview_webrtc::transport::{Direction, MediaKind, Session, SessionConfig, WhepServeEndpoint};
+use multiview_webrtc::transport::{
+    Direction, MediaKind, Session, SessionConfig, WhepServeEndpoint,
+};
 
 /// A realistic WHEP recvonly offer from a browser viewer for `kinds`, built by a
 /// throwaway str0m offerer so the endpoint negotiates against a real SDP.
