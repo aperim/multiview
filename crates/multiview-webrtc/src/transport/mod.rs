@@ -199,8 +199,8 @@ impl Session {
 
     /// Register a TURN **relay** candidate: `relayed` is the address the TURN
     /// server allocated, `local` the socket the relayed traffic egresses from.
-    /// This is the operator's NAT-traversal path (ADR-0048 §5, operator
-    /// override of the ADR's stated "no TURN" boundary).
+    /// This is the operator's NAT-traversal path (ADR-0048 §5.1, the
+    /// 2026-06-13 amendment that brought the in-crate TURN client into scope).
     ///
     /// # Errors
     ///
