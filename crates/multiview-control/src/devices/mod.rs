@@ -52,16 +52,16 @@ pub mod state_machine;
 pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;
-pub use enroll::{
-    canonical_message, DisplayHead, EnrollError, EnrollOutcome, EnrollRequest, MintedToken,
-    NodeEnrollState, PairCompletion, PairRequest, PairingRequestSummary, TokenState, TokenSummary,
-    VerifiedHeartbeat,
-};
 pub use discovery::{
     DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
     DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,
 };
 pub use driver_registry::DeviceDriverRegistry;
+pub use enroll::{
+    canonical_message, DisplayHead, EnrollError, EnrollOutcome, EnrollRequest, MintedToken,
+    NodeEnrollState, PairCompletion, PairRequest, PairingRequestSummary, TokenState, TokenSummary,
+    VerifiedHeartbeat,
+};
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;
 pub use state_machine::{DeviceLifecycle, LifecycleEvent};

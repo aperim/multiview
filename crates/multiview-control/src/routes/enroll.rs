@@ -217,7 +217,10 @@ pub(crate) async fn enroll_node(
     State(state): State<AppState>,
     Json(request): Json<EnrollRequest>,
 ) -> ControlResult<Response> {
-    let outcome = state.node_enroll.enroll(&request).map_err(map_enroll_error)?;
+    let outcome = state
+        .node_enroll
+        .enroll(&request)
+        .map_err(map_enroll_error)?;
     match outcome {
         EnrollOutcome::Enrolled {
             device_id,
@@ -227,12 +230,7 @@ pub(crate) async fn enroll_node(
             // re-poll for an already-created device is a no-op). The token path
             // creates a fresh device here; the paired path's record was created
             // at `pair` time, so this only seeds status if missing.
-            ensure_enrolled_device(
-                &state,
-                &device_id,
-                &request.node_name,
-                &request.public_key,
-            );
+            ensure_enrolled_device(&state, &device_id, &request.node_name, &request.public_key);
             let body = EnrollResponse {
                 status: "enrolled",
                 device_id: Some(device_id),
@@ -279,13 +277,10 @@ fn ensure_enrolled_device(
         } else {
             node_name.to_owned()
         };
-        if let Err(e) = state.devices.create(
-            device_id,
-            ResourceInput {
-                name,
-                body,
-            },
-        ) {
+        if let Err(e) = state
+            .devices
+            .create(device_id, ResourceInput { name, body })
+        {
             tracing::warn!(
                 device = %device_id,
                 error = %e,
@@ -295,8 +290,7 @@ fn ensure_enrolled_device(
     }
     // Seed/refresh ONLINE: an enrolled node is reachable by construction (it
     // just spoke to us). Latest-wins; never persisted/exported.
-    state
-        .node_enroll_status_online(device_id);
+    state.node_enroll_status_online(device_id);
 }
 
 /// The `multiview_config::Device` JSON body for a `displaynode`, carrying the
@@ -501,7 +495,8 @@ pub(crate) async fn heartbeat(
     if node_id != id {
         return Err(ControlError::Unauthenticated);
     }
-    let signature_b64 = header_str(&headers, NODE_SIG_HEADER).ok_or(ControlError::Unauthenticated)?;
+    let signature_b64 =
+        header_str(&headers, NODE_SIG_HEADER).ok_or(ControlError::Unauthenticated)?;
     let path = format!("/api/v1/devices/{id}/heartbeat");
     let verified = state
         .node_enroll

@@ -675,7 +675,9 @@ connector = "HDMI-A-1"
     fn an_empty_controller_url_is_rejected() {
         let doc = format!("{BASE}\n[controller]\nurl = \"\"\n");
         let cfg = NodeConfig::load_from_toml(&doc).expect("parses (validation is separate)");
-        let err = cfg.validate().expect_err("an empty controller url is rejected");
+        let err = cfg
+            .validate()
+            .expect_err("an empty controller url is rejected");
         assert!(err.to_string().contains("controller"), "{err}");
     }
 
@@ -683,15 +685,16 @@ connector = "HDMI-A-1"
     fn a_schemeless_controller_url_is_rejected() {
         let doc = format!("{BASE}\n[controller]\nurl = \"fd00:db8::1\"\n");
         let cfg = NodeConfig::load_from_toml(&doc).expect("parses");
-        let err = cfg.validate().expect_err("a schemeless controller url is rejected");
+        let err = cfg
+            .validate()
+            .expect_err("a schemeless controller url is rejected");
         assert!(err.to_string().contains("scheme"), "{err}");
     }
 
     #[test]
     fn an_unknown_controller_field_is_rejected_naming_it() {
-        let doc = format!(
-            "{BASE}\n[controller]\nurl = \"https://[fd00:db8::1]:8080\"\nuurl = \"x\"\n"
-        );
+        let doc =
+            format!("{BASE}\n[controller]\nurl = \"https://[fd00:db8::1]:8080\"\nuurl = \"x\"\n");
         let err = NodeConfig::load_from_toml(&doc)
             .expect_err("an unknown controller field is a parse error");
         assert!(err.to_string().contains("uurl"), "{err}");

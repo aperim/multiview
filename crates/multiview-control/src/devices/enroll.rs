@@ -879,11 +879,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 /// and marking the token used. One-time: a token already used (or
 /// revoked/expired/unknown) is refused. Operates on the locked guard, so it is a
 /// free function (no `&self`).
-fn redeem_token(
-    guard: &mut EnrollInner,
-    bearer: &str,
-    now_s: u64,
-) -> Result<String, EnrollError> {
+fn redeem_token(guard: &mut EnrollInner, bearer: &str, now_s: u64) -> Result<String, EnrollError> {
     let (token_id, secret) = bearer.split_once('.').ok_or(EnrollError::TokenRejected)?;
     let presented_hash = sha256(secret.as_bytes());
     let record = guard
@@ -970,7 +966,10 @@ mod tests {
     fn canonical_message_is_deterministic_and_body_bound() {
         let a = canonical_message("POST", "/p", "dev", 10, b"body");
         let b = canonical_message("POST", "/p", "dev", 10, b"body");
-        assert_eq!(a, b, "the canonical message is a pure function of its parts");
+        assert_eq!(
+            a, b,
+            "the canonical message is a pure function of its parts"
+        );
         let c = canonical_message("POST", "/p", "dev", 10, b"BODY");
         assert_ne!(a, c, "a different body hashes differently");
         assert!(a.contains("dev"));
@@ -1007,6 +1006,8 @@ mod tests {
     fn random_hex_is_the_right_length_and_lowercase() {
         let h = random_hex(8);
         assert_eq!(h.len(), 16);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 }

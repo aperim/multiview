@@ -174,11 +174,10 @@ pub fn identity_path(
     if let Some(path) = &controller.identity_path {
         return path.clone();
     }
-    config_path
-        .parent()
-        .map_or_else(|| PathBuf::from("node-identity.key"), |dir| {
-            dir.join("node-identity.key")
-        })
+    config_path.parent().map_or_else(
+        || PathBuf::from("node-identity.key"),
+        |dir| dir.join("node-identity.key"),
+    )
 }
 
 #[cfg(feature = "node-enroll")]
@@ -247,11 +246,17 @@ mod live {
                 &heads,
             );
             match post_enroll(&client, &base, &body).await {
-                Ok(EnrollPoll::Enrolled { device_id, heartbeat_secs }) => {
+                Ok(EnrollPoll::Enrolled {
+                    device_id,
+                    heartbeat_secs,
+                }) => {
                     tracing::info!(device_id, heartbeat_secs, "node enrolled");
                     break (device_id, heartbeat_secs);
                 }
-                Ok(EnrollPoll::Pairing { pairing_code, retry_secs }) => {
+                Ok(EnrollPoll::Pairing {
+                    pairing_code,
+                    retry_secs,
+                }) => {
                     // The pairing card the node shows on its attached display:
                     // the operator reads this code (and a QR encoding the same)
                     // and completes it in Settings → Display Nodes.
@@ -276,7 +281,8 @@ mod live {
             tokio::time::sleep(Duration::from_secs(heartbeat_secs.max(1))).await;
             let ts = now_secs().max(last_ts + 1);
             last_ts = ts;
-            if let Err(e) = post_heartbeat(&client, &base, &identity, &device_id, ts, &heads).await {
+            if let Err(e) = post_heartbeat(&client, &base, &identity, &device_id, ts, &heads).await
+            {
                 tracing::warn!(error = %e, "heartbeat failed; the controller will mark us stale \
                     until the next one lands");
             }
@@ -285,8 +291,14 @@ mod live {
 
     /// The parsed outcome of an enroll poll.
     enum EnrollPoll {
-        Enrolled { device_id: String, heartbeat_secs: u64 },
-        Pairing { pairing_code: String, retry_secs: u64 },
+        Enrolled {
+            device_id: String,
+            heartbeat_secs: u64,
+        },
+        Pairing {
+            pairing_code: String,
+            retry_secs: u64,
+        },
     }
 
     /// POST `/api/v1/devices/enroll`, parsing the `200`/`202` body.
@@ -317,7 +329,10 @@ mod live {
                 .get("heartbeat_secs")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(10);
-            Ok(EnrollPoll::Enrolled { device_id, heartbeat_secs })
+            Ok(EnrollPoll::Enrolled {
+                device_id,
+                heartbeat_secs,
+            })
         } else if status.as_u16() == 202 {
             let pairing_code = value
                 .get("pairing_code")
@@ -328,7 +343,10 @@ mod live {
                 .get("retry_secs")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(5);
-            Ok(EnrollPoll::Pairing { pairing_code, retry_secs })
+            Ok(EnrollPoll::Pairing {
+                pairing_code,
+                retry_secs,
+            })
         } else {
             Err(format!("enroll rejected: HTTP {status}"))
         }
@@ -443,8 +461,7 @@ mod tests {
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&pub_bytes).unwrap();
         let sig_bytes: [u8; 64] = BASE64.decode(sig_b64).unwrap().try_into().unwrap();
         let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-        let message =
-            multiview_control::canonical_message("POST", path, "node-a", ts, body);
+        let message = multiview_control::canonical_message("POST", path, "node-a", ts, body);
         verifying
             .verify_strict(message.as_bytes(), &signature)
             .expect("the controller verifies the node's signature");
@@ -496,20 +513,18 @@ mod tests {
 
     #[test]
     fn identity_path_defaults_beside_the_config() {
-        let controller: multiview_config::node::NodeController = serde_json::from_value(
-            serde_json::json!({ "url": "https://[fd00:db8::1]:8080" }),
-        )
-        .unwrap();
+        let controller: multiview_config::node::NodeController =
+            serde_json::from_value(serde_json::json!({ "url": "https://[fd00:db8::1]:8080" }))
+                .unwrap();
         let resolved = identity_path(&controller, Path::new("/etc/multiview/node.toml"));
         assert_eq!(resolved, Path::new("/etc/multiview/node-identity.key"));
 
-        let controller: multiview_config::node::NodeController = serde_json::from_value(
-            serde_json::json!({
+        let controller: multiview_config::node::NodeController =
+            serde_json::from_value(serde_json::json!({
                 "url": "https://[fd00:db8::1]:8080",
                 "identity_path": "/var/lib/multiview/id.key"
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         let resolved = identity_path(&controller, Path::new("/etc/multiview/node.toml"));
         assert_eq!(resolved, Path::new("/var/lib/multiview/id.key"));
     }

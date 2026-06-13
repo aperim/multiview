@@ -155,8 +155,8 @@ layout = "main"
         // A typo'd top-level wall field (`column` for `cols`) MUST be a loud
         // parse error naming the offender — never a silent revert to a default.
         let doc = GOOD_WALL.replace("cols = 1", "cols = 1\ncolumn = 2");
-        let err = toml::from_str::<WallConfig>(&doc)
-            .expect_err("an unknown wall field must be rejected");
+        let err =
+            toml::from_str::<WallConfig>(&doc).expect_err("an unknown wall field must be rejected");
         let text = err.to_string();
         assert!(
             text.contains("column"),
@@ -169,9 +169,12 @@ layout = "main"
         // A typo'd per-head field (`orientaton` for `orientation`) MUST be a
         // loud parse error — otherwise the misspelling silently reverts to the
         // default orientation on a config round-trip.
-        let doc = GOOD_WALL.replace("layout = \"main\"", "orientaton = \"portrait\"\nlayout = \"main\"");
-        let err = toml::from_str::<WallConfig>(&doc)
-            .expect_err("an unknown head field must be rejected");
+        let doc = GOOD_WALL.replace(
+            "layout = \"main\"",
+            "orientaton = \"portrait\"\nlayout = \"main\"",
+        );
+        let err =
+            toml::from_str::<WallConfig>(&doc).expect_err("an unknown head field must be rejected");
         let text = err.to_string();
         assert!(
             text.contains("orientaton"),

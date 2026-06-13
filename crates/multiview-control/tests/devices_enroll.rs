@@ -354,7 +354,10 @@ async fn enroll_with_token_creates_an_online_displaynode_device() {
     // It appears ONLINE (the brief: "appears in Devices already ONLINE").
     let resp = send(
         &h.router,
-        get(&format!("/api/v1/devices/{device_id}/status"), OPERATOR_TOKEN),
+        get(
+            &format!("/api/v1/devices/{device_id}/status"),
+            OPERATOR_TOKEN,
+        ),
     )
     .await;
     let status = body_json(resp).await;
@@ -488,7 +491,10 @@ async fn enroll_without_token_yields_a_pairing_code_and_pair_completes() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    assert_eq!(body_json(resp).await["pairing_code"].as_str().unwrap(), code);
+    assert_eq!(
+        body_json(resp).await["pairing_code"].as_str().unwrap(),
+        code
+    );
 
     // The operator sees the pending request (metadata only — never the code or
     // the key, which stay on the node's screen / in the registry).
