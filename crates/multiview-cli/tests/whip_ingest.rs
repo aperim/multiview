@@ -12,7 +12,7 @@
 //!   (the tile holds last-good — never blocks).
 //! * **Dropped publisher rides the state machine (inv #2):** a closed+drained
 //!   ring ends the producer stream, so the source's `drive_webrtc` loop returns
-//!   and the tile rides STALE → NO_SIGNAL — it never stalls other tiles.
+//!   and the tile rides STALE → `NO_SIGNAL` — it never stalls other tiles.
 //!
 //! The live browser/OBS publish + DTLS/SRTP leg is hardware-gated (the
 //! `multiview-webrtc` `native_handshake` shuttle test proves the transport; this
@@ -24,7 +24,9 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation
 )]
 
 use multiview_input::webrtc::route::MediaEvent;
