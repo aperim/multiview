@@ -236,6 +236,30 @@ impl Session {
         Ok(offer.to_sdp_string())
     }
 
+    /// Create an SDP offer adding the given **receive-only** media (the WHEP
+    /// browser/viewer shape), returning the offer SDP string. The matching pending
+    /// offer is stashed for [`Session::accept_answer`].
+    ///
+    /// A WHEP egress server answers a recvonly offer with sendonly media, so this
+    /// is the offer a preview *viewer* produces; the engine-side egress only ever
+    /// [`Session::accept_offer`]s (it never offers).
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if the change set produced no offer.
+    pub fn create_recv_offer(&mut self, kinds: &[MediaKind]) -> Result<String> {
+        let mut change = self.rtc.sdp_api();
+        for kind in kinds {
+            let mid = change.add_media(kind.to_str0m(), Direction::RecvOnly, None, None, None);
+            self.media.push((mid, *kind));
+        }
+        let (offer, pending) = change
+            .apply()
+            .ok_or_else(|| WebRtcError::Transport("recv offer produced no changes".to_owned()))?;
+        self.pending = Some(pending);
+        Ok(offer.to_sdp_string())
+    }
+
     /// Accept a remote SDP offer and return **str0m's own complete answer SDP**
     /// (BUNDLE / mid / rtcp-mux / fmtp; ADR-0048 §10).
     ///
@@ -251,7 +275,19 @@ impl Session {
             .sdp_api()
             .accept_offer(offer)
             .map_err(|e| WebRtcError::Transport(format!("accept_offer: {e}")))?;
-        Ok(answer.to_sdp_string())
+        let answer_sdp = answer.to_sdp_string();
+        // Record the negotiated (mid, kind) pairs so the answerer can also *send*
+        // media (the WHEP egress server answers a recvonly offer with sendonly
+        // media and writes into these mids). str0m exposes `media(mid)` but no
+        // public media iterator, so the negotiated mids + kinds are recovered from
+        // the answer SDP's m-sections (each `m=<kind> ...` + its `a=mid:<mid>`).
+        for (mid, kind) in parse_answer_media(&answer_sdp) {
+            // Don't double-record a mid already tracked (e.g. a re-negotiation).
+            if !self.media.iter().any(|(existing, _)| *existing == mid) {
+                self.media.push((mid, kind));
+            }
+        }
+        Ok(answer_sdp)
     }
 
     /// Apply the remote answer to a pending offer (offerer side).
@@ -580,4 +616,31 @@ fn bind_dual_stack(addr: SocketAddr) -> Result<std::net::UdpSocket> {
 #[must_use]
 pub const fn dual_stack_unspecified() -> IpAddr {
     IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+}
+
+/// Recover the negotiated `(Mid, MediaKind)` pairs from an answer SDP.
+///
+/// Each `m=<kind> ...` section is followed by its `a=mid:<mid>` attribute; this
+/// pairs the kind (video/audio) with the mid str0m assigned, so the answerer can
+/// look up a [`Writer`](str0m::media::Writer) for a sendonly media it must drive.
+fn parse_answer_media(answer_sdp: &str) -> Vec<(Mid, MediaKind)> {
+    let mut out = Vec::new();
+    let mut pending_kind: Option<MediaKind> = None;
+    for raw in answer_sdp.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("m=") {
+            pending_kind = if rest.starts_with("video") {
+                Some(MediaKind::Video)
+            } else if rest.starts_with("audio") {
+                Some(MediaKind::Audio)
+            } else {
+                None
+            };
+        } else if let Some(mid_str) = line.strip_prefix("a=mid:") {
+            if let Some(kind) = pending_kind.take() {
+                out.push((Mid::from(mid_str.trim()), kind));
+            }
+        }
+    }
+    out
 }
