@@ -128,6 +128,32 @@ describe('CastPanel session list', () => {
     ).toBeInTheDocument();
   });
 
+  it('shows the started-at age once the receiver accepted the LOAD', async () => {
+    // started_unix_ns is Unix-epoch wall nanoseconds (the LOAD-accept stamp),
+    // aged directly against wall time — unlike the engine-monotonic last-seen.
+    const startedNs = (Date.now() - 90_000) * 1_000_000; // ~90 s ago
+    server.use(
+      http.get('*/api/v1/cast/sessions', () =>
+        HttpResponse.json([{ ...SESSIONS[0], started_unix_ns: startedNs }]),
+      ),
+    );
+    renderPanel();
+    const panel = await screen.findByTestId('cast-panel');
+    await within(panel).findByText('Lounge TV');
+    // Honest relative readout: "started N min ago" (text, never colour alone).
+    expect(await within(panel).findByText(/started.*min ago/i)).toBeInTheDocument();
+  });
+
+  it('shows "not started yet" when the LOAD has not been accepted (no fabricated time)', async () => {
+    // The default SESSIONS fixture carries no started_unix_ns: the session is
+    // establishing or its LOAD was refused — never invent a start instant.
+    renderPanel();
+    const panel = await screen.findByTestId('cast-panel');
+    await within(panel).findByText('Lounge TV');
+    expect(within(panel).getByText(/not started yet/i)).toBeInTheDocument();
+    expect(within(panel).queryByText(/started.*ago/i)).not.toBeInTheDocument();
+  });
+
   it('stops a session with DELETE /cast/sessions/{id}', async () => {
     let deleted = '';
     server.use(
