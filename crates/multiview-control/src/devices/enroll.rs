@@ -248,10 +248,26 @@ struct PendingPairing {
     node_name: String,
     /// The node's reported display heads (carried onto the device when paired).
     heads: Vec<DisplayHead>,
-    /// When the request first pended (epoch seconds) — the eviction key.
+    /// When the request first pended (epoch seconds) — the eviction key: an
+    /// uncompleted pairing is reclaimed once `now - created_epoch_s` exceeds
+    /// [`PAIRING_TTL_SECS`] (see [`PendingPairing::is_expired`]), so an abandoned
+    /// node cannot hold a slot in the bounded table forever.
     created_epoch_s: u64,
     /// The operator-chosen device id once paired (the node's next poll reads it).
     paired_device_id: Option<String>,
+}
+
+impl PendingPairing {
+    /// Whether this pairing has lived past [`PAIRING_TTL_SECS`] at `now_s` and is
+    /// therefore reclaimable. Only an **uncompleted** pairing
+    /// (`paired_device_id.is_none()`) expires: once the operator has completed
+    /// it, the entry must survive until the node's next poll flips it to
+    /// enrolled, regardless of age. `saturating_sub` keeps a clock that moved
+    /// backwards from spuriously expiring everything.
+    fn is_expired(&self, now_s: u64) -> bool {
+        self.paired_device_id.is_none()
+            && now_s.saturating_sub(self.created_epoch_s) > PAIRING_TTL_SECS
+    }
 }
 
 /// One operator-facing pending-pairing row — model/name metadata only, never the
@@ -597,6 +613,12 @@ impl NodeEnrollState {
         let now = self.now_s();
         let mut guard = self.lock();
 
+        // Reclaim any pending pairings past the TTL before doing anything else,
+        // so a stale entry neither lingers in the bounded table nor can be
+        // completed — the documented `created_epoch_s` eviction, applied lazily
+        // on every enroll (no sweep task, invariant #10 stays self-contained).
+        evict_expired_pairings(&mut guard, now);
+
         // 1) Already bound (a reboot re-poll, or a token already consumed): the
         //    same keypair maps to the SAME device — never a duplicate record.
         if let Some(device_id) = guard
@@ -699,7 +721,12 @@ impl NodeEnrollState {
         display_name: Option<&str>,
     ) -> PairCompletion {
         let wanted = code.trim().to_ascii_uppercase();
+        let now = self.now_s();
         let mut guard = self.lock();
+        // Reclaim TTL-expired pairings first: a code read off a screen long after
+        // the node walked away matches nothing (the entry is gone, not merely
+        // evictable) and the operator gets a `404`.
+        evict_expired_pairings(&mut guard, now);
         let Some(fingerprint) = guard
             .pending
             .iter()
@@ -909,6 +936,14 @@ fn redeem_token(guard: &mut EnrollInner, bearer: &str, now_s: u64) -> Result<Str
         record.used_by = Some(device_id.clone());
     }
     Ok(device_id)
+}
+
+/// Drop every pending pairing that has lived past [`PAIRING_TTL_SECS`] at
+/// `now_s` (an uncompleted, abandoned entry), reclaiming its slot in the bounded
+/// table. Completed pairings are retained until the node's final poll. Operates
+/// on the locked guard; called lazily on the enroll/pair paths (no sweep task).
+fn evict_expired_pairings(guard: &mut EnrollInner, now_s: u64) {
+    guard.pending.retain(|_, p| !p.is_expired(now_s));
 }
 
 /// Mint a fresh pairing code not currently shown by another pending node (so two
