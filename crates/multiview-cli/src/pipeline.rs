@@ -456,6 +456,74 @@ struct LiveIsland {
 #[cfg(feature = "gpu")]
 type LiveIslandSlot = Arc<arc_swap::ArcSwapOption<LiveIsland>>;
 
+/// Tear the run's lit display sinks down **off the async worker** (DEV-B4
+/// audit): a display sink handle's `Drop` does a *blocking* stop + thread-join
+/// (the audio sink polls `thread::is_finished` with a `thread::sleep`, bounded
+/// by its 500 ms detach deadline; the video sink + hotplug monitor block on a
+/// `JoinHandle::join`). Dropping the bundle directly inside the async
+/// [`Pipeline::drive_streaming`] would run those blocking joins on the Tokio
+/// worker thread executing the future — the Drop-join-in-async pattern the
+/// engine safety rules forbid (no blocking in async).
+///
+/// This moves the whole handle bundle onto the blocking pool
+/// ([`tokio::task::spawn_blocking`]) so the stop/join runs on a thread that may
+/// block, then **awaits** the join so teardown still completes before the run
+/// returns. The engine is already stopped by the time this is called, so the
+/// await neither paces nor back-pressures any data-plane path (inv #1/#10):
+/// it only keeps a worker thread free while the (bounded) device teardown runs.
+/// A panic inside the bundle's `Drop` is confined to the blocking task and
+/// surfaced as a log line, never unwound across the await.
+///
+/// `pub` so the audit's teardown-isolation property is provable in an
+/// integration test (the real sink-handle bundle needs hardware; this generic
+/// seam proves the worker stays free over *any* blocking-`Drop` bundle).
+pub async fn teardown_blocking_off_worker<T: Send + 'static>(handles: T, what: &'static str) {
+    let _ = what;
+    // INTENTIONALLY BUGGY (RED): drop the bundle directly on the async worker so
+    // its blocking stop/join runs on this Tokio worker thread. Replaced by the
+    // spawn_blocking fix once the failing test is committed.
+    drop(handles);
+}
+
+/// The **scanout-locality set** for the run's configured display heads (DEV-B2,
+/// ADR-0044 §3): the connector-owning GPUs the composite feeding those heads
+/// must be co-located with. Empty when there are no display heads, or when no
+/// connector resolves to a canonical device (the GPU-less / feature-off probe,
+/// or a connector the inventory does not list) — in which case admission keeps
+/// its load-only pick, exactly as before.
+///
+/// A KMS scanout requires the framebuffer to live on the **connector-owning
+/// GPU**; placing the compositor on a different GPU than the one driving the
+/// display forces the per-frame GPU→host→GPU copy [ADR-0018](../../docs/decisions/ADR-0018.md)
+/// forbids. Feeding this set into the admission [`multiview_hal::PipelineDemand`]
+/// (`with_sink_locality`) makes a display-bound pipeline's startup placement
+/// connector-affine: [`multiview_hal::select_device`]'s Stage-0 gate then admits
+/// only the connector-owning GPU(s), never the merely-least-loaded one.
+///
+/// `selectors` are the heads' [`ConnectorSelector`](multiview_output::display::ConnectorSelector)s.
+/// A named connector resolves to its owner. `Auto` mirrors the sink's own
+/// "first connected connector" pick: the owner of the first connected connector
+/// the inventory lists (card order), so the locality is the single GPU the
+/// `Auto` sink will actually scan out from.
+///
+/// `pub` so the audit's connector-affinity property is provable against an
+/// injected [`ScanoutProbe`](multiview_hal::ScanoutProbe) double (the real probe
+/// needs DRM/hardware; the seam proves the connector → owning-GPU resolution
+/// that feeds admission).
+#[cfg(feature = "display-kms")]
+pub fn scanout_localities(
+    probe: &dyn multiview_hal::ScanoutProbe,
+    device_ids: &[multiview_hal::DeviceId],
+    selectors: &[multiview_output::display::ConnectorSelector],
+) -> Vec<multiview_hal::DeviceId> {
+    // UNWIRED (RED): the pre-fix behaviour the audit found — admission ignores
+    // scanout affinity (the probe + `with_sink_locality` had zero callers), so
+    // no connector resolves to its owning GPU. Replaced by the real resolution
+    // once the failing tests are committed.
+    let _ = (probe, device_ids, selectors);
+    Vec::new()
+}
+
 /// Choose the GPU to host the whole pipeline island at **admission** — the
 /// load-aware, decide-once pick (ADR-0035 Tier-1, ADR-0018; the GPU-placement
 /// principle: *load informs placement, never fragments a pipeline — affinity is
@@ -500,6 +568,13 @@ fn select_admission_pick(
     cadence: Rational,
     tile_count: usize,
     opens_encode_session: bool,
+    // The connector-owning GPU(s) of the run's display heads (DEV-B2,
+    // ADR-0044 §3): a HARD scanout-affinity constraint. Empty = no display sink
+    // (no constraint — every existing call path, the load-only pick). Non-empty
+    // = the composite MUST be placed on a connector-owning GPU, never the
+    // merely-least-loaded one (which would force the per-frame GPU→host→GPU copy
+    // ADR-0018 forbids).
+    display_localities: &[multiview_hal::DeviceId],
 ) -> AdmissionPick {
     use multiview_core::pixel::PixelFormat;
     use multiview_core::traits::BackendKind;
@@ -571,11 +646,19 @@ fn select_admission_pick(
         PixelFormat::Nv12,
         0,
         opens_encode_session,
-    );
+    )
+    // DEV-B2 / ADR-0044 §3: when the run feeds a local display head, declare the
+    // connector-owning GPU(s) as a HARD scanout-affinity constraint. The Stage-0
+    // gate in `select_device` then admits ONLY a connector-owning GPU — so the
+    // composite is placed where the framebuffer must scan out, never the
+    // merely-least-loaded GPU (which would force the per-frame GPU→host→GPU copy
+    // ADR-0018 forbids). Empty = no display head = the unchanged load-only pick.
+    .with_sink_locality(display_localities.to_vec());
 
     // Ask the scorer for the single least-contended GPU that can host the whole
-    // island. A reject (no fit / all over the headroom ceiling) → fall back to
-    // the default adapter / CPU, logged, never a stall (inv #1).
+    // island, subject to the scanout-affinity gate above. A reject (no fit / all
+    // over the headroom ceiling / the connector-owning GPU is not viable) → fall
+    // back to the default adapter / CPU, logged, never a stall (inv #1).
     let selection = match select_device(
         &candidates,
         &demand,
@@ -2244,6 +2327,46 @@ impl Pipeline {
             use multiview_compositor::backend::{GpuTarget, RunBackend};
             let load_source = crate::system_metrics::default_load_source();
             let opens_encode_session = self.encoder.name.ends_with("_nvenc");
+            // DEV-B2 / ADR-0044 §3: when the run drives local display heads,
+            // resolve the connector-owning GPU(s) and pass them to admission as a
+            // HARD scanout-affinity constraint, so the compositor is placed on the
+            // GPU that scans the display out — never a different GPU (which would
+            // force the per-frame GPU→host→GPU copy ADR-0018 forbids). A
+            // `display-kms` build with display heads probes the host's DRM cards
+            // and reconciles them against the visible GPU set (`load_source` polls
+            // the same canonical `DeviceId`s admission scores). Empty for every
+            // other build/run (no heads, no probe) → the unchanged load-only pick.
+            #[cfg(feature = "display-kms")]
+            let display_localities: Vec<multiview_hal::DeviceId> = {
+                let selectors: Vec<multiview_output::display::ConnectorSelector> = self
+                    .display_plans
+                    .iter()
+                    .map(|plan| plan.connector.clone())
+                    .collect();
+                let device_ids: Vec<multiview_hal::DeviceId> = load_source
+                    .poll()
+                    .into_iter()
+                    .map(|load| load.device_id)
+                    .collect();
+                let localities = scanout_localities(
+                    &multiview_hal::DrmScanoutProbe::new(),
+                    &device_ids,
+                    &selectors,
+                );
+                if !localities.is_empty() {
+                    tracing::info!(
+                        heads = self.display_plans.len(),
+                        localities = ?localities.iter().map(multiview_hal::DeviceId::stable_id)
+                            .collect::<Vec<_>>(),
+                        "scanout affinity: pinning the display-bound pipeline to the \
+                         connector-owning GPU(s) (ADR-0044 §3; never the merely-\
+                         least-loaded GPU)"
+                    );
+                }
+                localities
+            };
+            #[cfg(not(feature = "display-kms"))]
+            let display_localities: Vec<multiview_hal::DeviceId> = Vec::new();
             let pick = select_admission_pick(
                 load_source.as_ref(),
                 self.layout.canvas.width,
@@ -2251,6 +2374,7 @@ impl Pipeline {
                 self.cadence,
                 self.layout.cells.len(),
                 opens_encode_session,
+                &display_localities,
             );
             // Stamp the chosen device's CUDA ordinal onto every ingest plan BEFORE
             // the threads spawn, so decode co-locates with the compositor on the
@@ -8478,3 +8602,4 @@ mod live_overlay_bake_tests {
         );
     }
 }
+
