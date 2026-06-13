@@ -332,6 +332,35 @@ pub enum SourceKind {
         /// Source URL.
         url: String,
     },
+    /// WHIP ingest (RFC 9725): a WebRTC **contribution** source — Multiview is
+    /// the server, and a browser or encoder (OBS ≥ 30, `GStreamer`
+    /// `whipclientsink`) publishes media *to* it (ADR-T014 §1).
+    ///
+    /// The WHIP endpoint URL is **derived from the source id, never
+    /// configured**: `POST /api/v1/whip/{source_id}` (e.g.
+    /// `https://[2001:db8::10]:8443/api/v1/whip/cam-field-1`), with the
+    /// session resource at `/api/v1/whip/{source_id}/sessions/{session_id}`.
+    /// One publisher per source at a time; a configured-but-unpublished source
+    /// shows the `NO_SIGNAL` placeholder (there is nothing to dial).
+    Webrtc {
+        /// Optional per-source bearer token (RFC 6750) a publisher presents on
+        /// the WHIP `POST`. `None` ⇒ publishing requires a control-plane API
+        /// key with **Write** scope — a publish endpoint is never anonymous
+        /// (ADR-T014 §2). When set it must be non-empty; the plaintext token
+        /// follows the existing config-secret posture (like the stream keys
+        /// embedded in `rtmp`/`srt` URLs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+        /// Whether the SDP answer accepts the publisher's Opus audio m-line
+        /// (`true`, the default) or answers it `inactive` (`false`). Accepted
+        /// audio rides the standard `AudioStore` → program-bus path
+        /// (ADR-T014 §5).
+        #[serde(
+            default = "default_webrtc_source_audio",
+            skip_serializing_if = "is_true"
+        )]
+        audio: bool,
+    },
     /// NDI input, bound by source name.
     Ndi {
         /// NDI source name (e.g. `STUDIO (CAM 1)`).
@@ -371,6 +400,21 @@ pub enum SourceKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ptp_domain: Option<u8>,
     },
+}
+
+/// Default for [`SourceKind::Webrtc`] `audio`: accept the publisher's Opus
+/// m-line (ADR-T014 §5).
+const fn default_webrtc_source_audio() -> bool {
+    true
+}
+
+/// Skip-serializing predicate for a default-`true` bool field.
+// serde's `skip_serializing_if` contract calls the predicate with the field by
+// reference; the derive fixes the signature, so the by-value shape the lint
+// asks for cannot be used here.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl SourceKind {
@@ -811,6 +855,103 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
+    /// WebRTC program output: serves the program to N browser viewers over
+    /// WHEP (ADR-0049).
+    ///
+    /// **Never encodes video** (invariant #7): it is a fan-out consumer of an
+    /// already-encoded H.264 program rendition — per-viewer marginal cost is
+    /// packetization only. The WHEP endpoint URL is derived from the output's
+    /// stable id: `POST /api/v1/whep/{output_id}`. Audio is **single-track**
+    /// (one Opus m-line): multitrack selections are rejected at config time
+    /// and degrade explicitly to the mixed program bus, never silently.
+    Webrtc {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Display name (like `Aes67`, a WebRTC output carries an explicit
+        /// label — there is no mount/path/url to derive one from).
+        label: String,
+        /// Maximum concurrent WHEP viewer sessions on this output (must be
+        /// `>= 1`; default `8`). Viewers beyond this — or beyond the
+        /// endpoint-global `webrtc.max_sessions` pool (ADR-0048 §8) — receive
+        /// `503` + `Retry-After`.
+        #[serde(
+            default = "default_webrtc_max_viewers",
+            skip_serializing_if = "is_default_webrtc_max_viewers"
+        )]
+        max_viewers: u32,
+        /// Optional per-output bearer token (RFC 6750) a viewer presents on
+        /// the WHEP `POST`. `None` ⇒ viewing requires a control-plane API key
+        /// with **View** scope — never anonymous. When set it must be
+        /// non-empty; plaintext in v1, following the existing config-secret
+        /// posture (like the stream keys embedded in `rtmp`/`srt` URLs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+        /// The **program rendition to consume** — not an encode to spawn
+        /// (ADR-0049). `"h264"` is the only v1 value (default; enforced by
+        /// `Output::validate`). ADR-0049 additionally requires the consumed
+        /// rendition to carry B-frames off + repeat-headers on — enforced
+        /// where the encoder settings live (the cli rendition builder), since
+        /// this schema has no rendition-settings surface to check.
+        #[serde(
+            default = "default_webrtc_codec",
+            skip_serializing_if = "is_default_webrtc_codec"
+        )]
+        codec: String,
+        /// Operator pin for the **encode stage of the rendition this output
+        /// consumes** to a stable GPU ([`DevicePin`], ADR-0018 §2.1). Absent ⇒
+        /// auto-placed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. WebRTC carries **one** Opus m-line
+        /// (single-track, [`Output::audio_capability`]); absent ⇒ the mixed
+        /// program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
+    },
+    /// WHIP push (RFC 9725 **client**): publishes the program to a remote WHIP
+    /// endpoint — the WebRTC sibling of the `rtmp`/`srt` push variants
+    /// (ADR-0049).
+    ///
+    /// **Never encodes video** (invariant #7): it fans the same encoded
+    /// program rendition packets to the remote origin, supervised with backoff
+    /// reconnect exactly like the RTMP/SRT push clients. Audio is
+    /// **single-track** (one Opus m-line).
+    WhipPush {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// The remote WHIP endpoint URL. Must be `http(s)`, with **https
+        /// recommended** (the client follows 307/308 redirects https-only and
+        /// aborts on a plaintext downgrade — ADR-0049). IPv6-first
+        /// (ADR-0042): bracket IPv6 literals, e.g.
+        /// `https://[2001:db8::15]:8443/whip/pgm1`.
+        url: String,
+        /// Optional bearer token (RFC 6750) sent on the WHIP `POST`. When set
+        /// it must be non-empty; plaintext in v1 (the config-secret posture of
+        /// `rtmp`/`srt` url-embedded keys).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+        /// The **program rendition to consume** — not an encode to spawn
+        /// (ADR-0049). `"h264"` is the only v1 value (default).
+        #[serde(
+            default = "default_webrtc_codec",
+            skip_serializing_if = "is_default_webrtc_codec"
+        )]
+        codec: String,
+        /// Operator pin for the **encode stage of the rendition this output
+        /// consumes** to a stable GPU ([`DevicePin`], ADR-0018 §2.1). Absent ⇒
+        /// auto-placed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. WHIP push carries **one** Opus m-line
+        /// (single-track, [`Output::audio_capability`]); absent ⇒ the mixed
+        /// program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
+    },
     /// AES67 / SMPTE ST 2110-30 PCM-audio RTP output (open-audio over IP).
     ///
     /// The first output with **no encode/GPU stage**: it packetizes the program
@@ -924,6 +1065,31 @@ const fn default_aes67_ptime_ms() -> u32 {
     1
 }
 
+/// Default `max_viewers` for a [`Output::Webrtc`] WHEP output (ADR-0049): 8.
+const fn default_webrtc_max_viewers() -> u32 {
+    8
+}
+
+/// Skip-serializing predicate for the default WHEP `max_viewers`.
+// serde's `skip_serializing_if` contract calls the predicate with the field by
+// reference; the derive fixes the signature, so the by-value shape the lint
+// asks for cannot be used here.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_default_webrtc_max_viewers(viewers: &u32) -> bool {
+    *viewers == 8
+}
+
+/// Default codec for the WebRTC output kinds (ADR-0049): the H.264 program
+/// rendition — the only v1 value.
+fn default_webrtc_codec() -> String {
+    "h264".to_owned()
+}
+
+/// Skip-serializing predicate for the default WebRTC codec (`"h264"`).
+fn is_default_webrtc_codec(codec: &str) -> bool {
+    codec == "h264"
+}
+
 impl Output {
     /// The **explicit** operator id this output declares, if any (ADR-0034 /
     /// RT-12). `None` ⇒ no `id` was authored, and [`Output::id`] derives a
@@ -937,6 +1103,8 @@ impl Output {
             | Output::Ndi { id, .. }
             | Output::Rtmp { id, .. }
             | Output::Srt { id, .. }
+            | Output::Webrtc { id, .. }
+            | Output::WhipPush { id, .. }
             | Output::Aes67 { id, .. }
             | Output::Display { id, .. } => id.as_deref(),
         }
@@ -968,6 +1136,10 @@ impl Output {
             | Output::Ndi { gpu_pin, .. }
             | Output::Rtmp { gpu_pin, .. }
             | Output::Srt { gpu_pin, .. }
+            // The WebRTC kinds never encode (invariant #7): their pin targets
+            // the encode stage of the rendition they consume (ADR-0049).
+            | Output::Webrtc { gpu_pin, .. }
+            | Output::WhipPush { gpu_pin, .. }
             // AES67 carries a `gpu_pin` field that is always `None` (no encode
             // stage); it is matched uniformly here and returns `None`.
             | Output::Aes67 { gpu_pin, .. }
@@ -988,6 +1160,8 @@ impl Output {
             | Output::Ndi { audio, .. }
             | Output::Rtmp { audio, .. }
             | Output::Srt { audio, .. }
+            | Output::Webrtc { audio, .. }
+            | Output::WhipPush { audio, .. }
             | Output::Aes67 { audio, .. }
             | Output::Display { audio, .. } => audio.as_ref(),
         }
@@ -1029,6 +1203,12 @@ impl Output {
             Output::Ndi { .. } | Output::Aes67 { .. } | Output::Display { .. } => {
                 OutputAudioCapability::new(TrackDelivery::None, TrackCapacity::AtMost(0))
             }
+            // WebRTC (WHEP serve and WHIP push): one Opus m-line per session —
+            // single-track (ADR-0049). A multitrack selection is rejected at
+            // config time and degrades explicitly to the mixed program bus.
+            Output::Webrtc { .. } | Output::WhipPush { .. } => {
+                OutputAudioCapability::new(TrackDelivery::Simultaneous, TrackCapacity::AtMost(1))
+            }
             // RTMP: endpoint-gated. Legacy = one track; Enhanced-RTMP v2 = N.
             Output::Rtmp { multitrack, .. } => {
                 if *multitrack {
@@ -1058,9 +1238,10 @@ impl Output {
             Output::Ndi { name, .. } => format!("ndi {name}"),
             Output::Rtmp { url, .. } => format!("rtmp {url}"),
             Output::Srt { url, .. } => format!("srt {url}"),
-            // AES67 carries an explicit operator label (it has no mount/path/url
-            // to derive one from); use it verbatim.
-            Output::Aes67 { label, .. } => label.clone(),
+            Output::WhipPush { url, .. } => format!("whip_push {url}"),
+            // WebRTC (WHEP serve) and AES67 carry an explicit operator label
+            // (they have no mount/path/url to derive one from); use it verbatim.
+            Output::Webrtc { label, .. } | Output::Aes67 { label, .. } => label.clone(),
             // A display head is addressed by its KMS connector.
             Output::Display { connector, .. } => format!("display {connector}"),
         }

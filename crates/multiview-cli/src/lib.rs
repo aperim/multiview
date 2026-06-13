@@ -53,6 +53,14 @@ pub mod control;
 pub mod licence;
 pub mod live_overlays;
 pub mod live_sources;
+/// Off-hot-path **program-bus loudness telemetry** (AUD-8): a read-only EBU R128
+/// compliance meter that taps the emitted (post-loudnorm) program audio and
+/// pushes a conflated [`multiview_events::AudioLoudness`] sample (M/S/I/LRA/dBTP +
+/// compliance reference) onto the engine's drop-oldest event stream at ~10 Hz, so
+/// the WebUI loudness meter lights up. Read-only and non-blocking — it can never
+/// back-pressure the engine (inv #10). Always compiled (the pure meter is
+/// GPU/FFmpeg-free); the bake-consumer wiring lives behind the `ffmpeg` pipeline.
+pub mod loudness_telemetry;
 /// The CONSPECT local-metrics retention feed (engine-seam S5; ADR-0052 §3): an
 /// off-hot-loop, read-only subscriber that mirrors live engine events
 /// (utilisation / per-input reconnect / incident markers) into the

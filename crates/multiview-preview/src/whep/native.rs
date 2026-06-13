@@ -145,23 +145,29 @@ pub fn parse_answer_attributes(answer: &str) -> Result<AnswerAttributes, WhepErr
 ///
 /// The `Rtc` is the sans-IO state machine; the [`SessionHandle`] is the testable
 /// lifecycle the control plane reads and `close` drives terminal. The held
-/// [`SampleFeed`] is the drop-oldest media tap the egress loop would drain — kept
-/// here to prove the only coupling is the lossy feed, never an engine handle
-/// (invariant #10).
+/// [`SampleFeed`]s are the drop-oldest media taps the egress loop would drain —
+/// kept here to prove the only coupling is the lossy feeds, never an engine
+/// handle (invariant #10).
 ///
-/// On [`Str0mWhepTransport::close`] the `rtc` and `feed` are *released* (dropped)
-/// to free the peer connection immediately, but the entry is **retained** as a
-/// closed tombstone so the session id stays queryable as
+/// On [`Str0mWhepTransport::close`] the `rtc` and the feeds are *released*
+/// (dropped) to free the peer connection immediately, but the entry is
+/// **retained** as a closed tombstone so the session id stays queryable as
 /// [`SessionState::Closed`] (the WHEP `DELETE …/{id}` may be retried).
 struct Str0mSession {
     /// The sans-IO peer connection. Taken (dropped) on `close`; `None` once the
     /// session is a closed tombstone.
     rtc: Option<Rtc>,
     handle: SessionHandle,
-    /// The drop-oldest media tap the live egress loop drains (env-gated path
+    /// The drop-oldest video tap the live egress loop drains (env-gated path
     /// only). Taken (dropped) on `close`.
     #[allow(dead_code)] // drained by the live egress loop (env-gated path only)
     feed: Option<SampleFeed>,
+    /// The drop-oldest **Opus audio** tap (ADR-P006), taken from the media
+    /// source at accept only when the offer negotiated an Opus audio m-line —
+    /// absent otherwise, and for audio-less sources. Taken (dropped) on
+    /// `close`.
+    #[allow(dead_code)] // drained by the live egress loop (env-gated path only)
+    audio_feed: Option<SampleFeed>,
 }
 
 /// A native [`WhepTransport`] backed by [`str0m`]'s sans-IO ICE/DTLS/SRTP stack.
@@ -383,13 +389,22 @@ impl WhepTransport for Str0mWhepTransport {
 
         let id = self.mint_id();
         let handle = SessionHandle::new(id.clone());
-        // Take the media feed exactly once (the live egress loop drains it).
+        // Take the media feeds exactly once (the live egress loop drains them).
+        // Audio is taken only when the offer actually negotiated an Opus audio
+        // m-line — sessions whose offer carries no (Opus) audio simply leave it
+        // absent (ADR-P006), so a feed that can never be sent is never held.
         let feed = media.feed();
+        let audio_feed = if super::parse_audio_opus(offer).is_some() {
+            media.audio_feed()
+        } else {
+            None
+        };
 
         let session = Str0mSession {
             rtc: Some(rtc),
             handle: handle.clone(),
             feed: Some(feed),
+            audio_feed,
         };
         if let Ok(mut map) = self.sessions.lock() {
             map.insert(id.clone(), session);
@@ -415,7 +430,7 @@ impl WhepTransport for Str0mWhepTransport {
         if let Ok(mut map) = self.sessions.lock() {
             if let Some(session) = map.get_mut(id) {
                 // Drive the lifecycle handle terminal (idempotent), disconnect the
-                // peer connection, and release the Rtc + media feed immediately.
+                // peer connection, and release the Rtc + media feeds immediately.
                 // The entry is retained as a closed tombstone so the id stays
                 // queryable (the WHEP DELETE may be retried / RTCP-timeout fired).
                 session.handle.close();
@@ -423,6 +438,7 @@ impl WhepTransport for Str0mWhepTransport {
                     rtc.disconnect();
                 }
                 session.feed = None;
+                session.audio_feed = None;
             }
             // Absent session is not an error (idempotent DELETE).
         }

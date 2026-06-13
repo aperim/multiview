@@ -102,8 +102,8 @@ impl Topic {
     }
 
     /// Whether this topic is a **high-rate** lane that is conflated/sampled and
-    /// excluded from the lossless replay ring (ADR-RT003): `audio.meters` and
-    /// `system` (cpu/gpu/encoder telemetry).
+    /// excluded from the lossless replay ring (ADR-RT003): `audio.meters`,
+    /// `audio.loudness`, and `system` (cpu/gpu/encoder telemetry).
     ///
     /// High-rate lanes are latest-only and re-snapshotable, so they must not be
     /// kept in the bounded replay ring; the engine never blocks on a slow client
@@ -119,6 +119,6 @@ impl Topic {
     /// Devices events yet.
     #[must_use]
     pub const fn is_high_rate(self) -> bool {
-        matches!(self, Self::AudioMeters | Self::System)
+        matches!(self, Self::AudioMeters | Self::AudioLoudness | Self::System)
     }
 }

@@ -3,9 +3,12 @@
 //! This module owns the *testable core* of a WebRTC receive session: the
 //! connection-state lifecycle, the application-layer **[`MediaEngine`] seam** that
 //! a concrete ICE/DTLS/SRTP engine plugs into, the H.264 RTP **depacketize ->
-//! access-unit** seam ([`H264Depacketizer`]), and the
-//! [`WebRtcProducer`]: a [`FrameProducer`](crate::source::FrameProducer) that
-//! turns decrypted RTP into produced frames for the [`IngestPump`].
+//! access-unit** seam ([`H264Depacketizer`]), and the [`WebRtcProducer`]: an
+//! honest **compressed media-event producer** that turns decrypted RTP into
+//! typed [`MediaEvent`]s — keyframe-gated H.264 access units and Opus audio
+//! frames — for the application layer to decode (ADR-T014: decode happens
+//! there, and frame geometry/color come from the decoder's SPS/VUI, never
+//! from anything declared here).
 //!
 //! ## No native WebRTC library here (pure / LGPL-clean default)
 //!
@@ -21,21 +24,15 @@
 //! ## Isolation (invariants #1 / #2 / #10)
 //!
 //! A WebRTC source is **sampled, never pacing**: the [`WebRtcProducer`] only ever
-//! *pulls* from the engine and writes the resulting frame into the last-good-frame
-//! store via the pump; it never blocks the output clock. The depacketizer is a
-//! pure state machine over injected packets with a **bounded** reorder window that
-//! drops, never grows. A dead or lagging engine yields `None`/`Pending` and is
-//! held — it cannot stall the engine.
-
-use multiview_core::color::ColorInfo;
-use multiview_core::frame::FrameMeta;
-use multiview_core::pixel::PixelFormat;
-use multiview_core::time::{MediaTime, Rational};
+//! *pulls* from the engine and yields what is ready; it never blocks the output
+//! clock. The depacketizers are pure state machines over injected packets with
+//! **bounded** buffers that drop, never grow. A dead or lagging engine yields
+//! `None`/`Pending` and is held — it cannot stall the engine.
 
 use crate::error::Result;
 use crate::normalize::WrapBits;
-use crate::source::{FrameProducer, ProducedFrame};
-use crate::webrtc::{Codec, NegotiatedSession};
+use crate::webrtc::route::{MediaEvent, RtpRouter};
+use crate::webrtc::NegotiatedSession;
 
 /// The RTP media clock rate WebRTC video rides on (90 kHz, RFC 8866 / RFC 6184).
 pub const VIDEO_CLOCK_RATE: u32 = 90_000;
@@ -169,15 +166,18 @@ struct AccessUnit {
 
 /// A keyframe-gated frame emitted by [`H264Depacketizer::push`].
 ///
-/// Carries the reassembled elementary-stream bytes plus the metadata the ingest
-/// pipeline needs: the verbatim RTP timestamp as a producer-timebase raw PTS, the
-/// keyframe flag (the gate keys on it), and a discontinuity flag set when a
-/// sequence gap was observed. [`WebRtcProducer`] maps this into a
-/// [`ProducedFrame`] for the [`IngestPump`](crate::source::IngestPump).
+/// Carries the reassembled **compressed** elementary-stream bytes plus the
+/// metadata the ingest pipeline needs: the verbatim RTP timestamp as a
+/// producer-timebase raw PTS, the keyframe flag (the gate keys on it), and a
+/// discontinuity flag set when a sequence gap was observed. The
+/// [`RtpRouter`](crate::webrtc::route::RtpRouter) maps this into a typed
+/// [`MediaUnit`](crate::webrtc::route::MediaUnit) for the application-layer
+/// decoder (ADR-T014).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepacketizedFrame {
-    /// The reassembled NAL/access-unit bytes.
-    pub pixels: Vec<u8>,
+    /// The reassembled compressed NAL/access-unit bytes (codec bitstream,
+    /// never pixels — decode happens at the application layer).
+    pub data: Vec<u8>,
     /// The 32-bit RTP timestamp surfaced as a producer-timebase raw PTS
     /// ([`WrapBits::Rtp32`]). Always `Some` for WebRTC (every RTP packet is
     /// timestamped); typed `Option` to match [`ProducedFrame::raw_pts`].
@@ -213,6 +213,49 @@ pub trait MediaEngine {
     fn poll_rtp(&mut self) -> Result<Option<RtpFrame>>;
 }
 
+/// Tracks the RTP sequence-number watermark for forward-gap (loss) detection.
+///
+/// Both the H.264 and the Opus depacketizers ride this: [`SequenceTracker::note`]
+/// returns `true` when the packet's sequence is *ahead* of the watermark by
+/// more than one — at least one packet was lost — using the same RFC 1982
+/// serial-number comparison ([`crate::st2110::rtp::seq_after`]) as the other
+/// RTP ingests. A stale reordered packet is **not** a forward gap and does not
+/// move the watermark backwards, so a later in-order packet still detects its
+/// own gap correctly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SequenceTracker {
+    /// The newest sequence number accepted (the watermark).
+    last: Option<u16>,
+}
+
+impl SequenceTracker {
+    /// A tracker with no sequence observed yet (the first packet never gaps).
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// Note a packet's sequence number, returning `true` if a forward gap
+    /// (lost packet) was detected relative to the watermark.
+    pub fn note(&mut self, sequence: u16) -> bool {
+        let gap = match self.last {
+            Some(prev) => {
+                sequence != prev.wrapping_add(1) && crate::st2110::rtp::seq_after(prev, sequence)
+            }
+            None => false,
+        };
+        // Track the newest sequence (ignore a stale reordered packet for the
+        // watermark so a later in-order packet still detects its own gap).
+        let stale = self
+            .last
+            .is_some_and(|prev| !crate::st2110::rtp::seq_after(prev, sequence));
+        if !stale {
+            self.last = Some(sequence);
+        }
+        gap
+    }
+}
+
 /// The H.264 RTP depacketizer (RFC 6184): a pure state machine over injected
 /// packets that reassembles single-NAL / STAP-A / FU-A payloads into
 /// keyframe-gated [`AccessUnit`]s.
@@ -230,8 +273,8 @@ pub struct H264Depacketizer {
     /// The in-progress FU-A reassembly: the reconstructed NAL header plus the
     /// accumulated fragment payloads, and the timestamp/keyframe of the unit.
     fragment: Option<FuAssembly>,
-    /// The last sequence number accepted (for gap detection).
-    last_sequence: Option<u16>,
+    /// The sequence watermark for forward-gap (loss) detection.
+    sequence: SequenceTracker,
 }
 
 /// The in-progress FU-A reassembly.
@@ -261,7 +304,7 @@ impl H264Depacketizer {
         Self {
             gate_open: false,
             fragment: None,
-            last_sequence: None,
+            sequence: SequenceTracker::new(),
         }
     }
 
@@ -392,7 +435,7 @@ impl H264Depacketizer {
             return None;
         }
         Some(DepacketizedFrame {
-            pixels: unit.data,
+            data: unit.data,
             raw_pts: Some(i64::from(unit.timestamp)),
             keyframe: unit.keyframe,
             discontinuity: unit.discontinuity,
@@ -402,21 +445,7 @@ impl H264Depacketizer {
     /// Note a packet's sequence number, returning `true` if a forward gap (lost
     /// packet) was detected relative to the last accepted sequence.
     fn note_sequence(&mut self, sequence: u16) -> bool {
-        let gap = match self.last_sequence {
-            Some(prev) => {
-                sequence != prev.wrapping_add(1) && crate::st2110::rtp::seq_after(prev, sequence)
-            }
-            None => false,
-        };
-        // Track the newest sequence (ignore a stale reordered packet for the
-        // watermark so a later in-order packet still detects its own gap).
-        let stale = self
-            .last_sequence
-            .is_some_and(|prev| !crate::st2110::rtp::seq_after(prev, sequence));
-        if !stale {
-            self.last_sequence = Some(sequence);
-        }
-        gap
+        self.sequence.note(sequence)
     }
 
     /// Abandon any in-progress FU-A reassembly.
@@ -534,108 +563,92 @@ impl WebRtcSession {
     }
 }
 
-/// A [`FrameProducer`] over a [`MediaEngine`]: pulls decrypted RTP, depacketizes
-/// it (keyframe-gated), and yields produced frames for the [`IngestPump`].
+/// An honest compressed **media-event producer** over a [`MediaEngine`]: pulls
+/// decrypted RTP, routes it by negotiated payload type
+/// ([`RtpRouter`](crate::webrtc::route::RtpRouter)), and yields typed
+/// [`MediaEvent`]s — keyframe-gated H.264 video access units and Opus audio
+/// frames — for the application layer to decode.
 ///
-/// This is the IN-2-style bridge for WebRTC: it does **non-blocking pulls only**
-/// from the engine and never paces the output clock. The depacketizer's bounded
-/// reassembly buffer drops, never grows (invariants #1 / #2 / #5). The RTP 32-bit
-/// timestamp is surfaced as the producer's raw PTS; [`WebRtcProducer::wrap_bits`]
-/// reports [`WrapBits::Rtp32`] so the normalizer unwraps it correctly.
+/// This seam is deliberately **compressed-only** (ADR-T014): the bytes it
+/// yields are codec bitstream — never pixels — and it declares no geometry.
+/// Frame geometry comes from the decoder's SPS and color from the H.264 VUI at
+/// the application layer (the `multiview-ffmpeg` packet decoders), so a
+/// publisher that changes resolution mid-session simply yields new metadata
+/// downstream. It does **non-blocking pulls only** from the engine and never
+/// paces the output clock; the depacketizers' bounded buffers drop, never grow
+/// (invariants #1 / #2 / #5).
 ///
-/// [`IngestPump`]: crate::source::IngestPump
+/// ## Timing (invariant #3)
+///
+/// Every [`MediaUnit`](crate::webrtc::route::MediaUnit) surfaces its 32-bit
+/// RTP timestamp **verbatim** as `raw_pts`: video units tick the 90 kHz clock
+/// ([`VIDEO_CLOCK_RATE`]), audio units the 48 kHz Opus clock
+/// ([`AUDIO_CLOCK_RATE`](crate::webrtc::opus::AUDIO_CLOCK_RATE)) — the
+/// per-unit [`timebase`](crate::webrtc::route::MediaUnit::timebase) carries
+/// the distinction. **Both** clocks are 32-bit RTP clocks, so downstream
+/// normalizers unwrap either with [`WebRtcProducer::WRAP_BITS`]
+/// (= [`WrapBits::Rtp32`]): the video path through the
+/// [`PtsNormalizer`](crate::normalize::PtsNormalizer) (ADR-T003), the audio
+/// path through the shared RTP-audio rebase seam (ADR-T013).
 pub struct WebRtcProducer {
     engine: Box<dyn MediaEngine + Send>,
-    depacketizer: H264Depacketizer,
-    codec: Codec,
-    width: u32,
-    height: u32,
+    router: RtpRouter,
 }
 
 impl WebRtcProducer {
-    /// Build a producer around an application-supplied [`MediaEngine`] for the
-    /// negotiated `codec`, decoding to the declared `width` x `height`.
-    ///
-    /// Only H.264 video is currently depacketized; an audio or other-codec engine
-    /// yields no frames (the seam is in place for a future audio rebaser).
+    /// The timestamp wrap width of **both** negotiated RTP clocks — the 90 kHz
+    /// video clock and the 48 kHz audio clock are each 32-bit
+    /// ([`WrapBits::Rtp32`]). Hand this to the
+    /// [`PtsNormalizer`](crate::normalize::PtsNormalizer) (or the ADR-T013
+    /// audio rebase) for either stream.
+    pub const WRAP_BITS: WrapBits = WrapBits::Rtp32;
+
+    /// Build a producer around an application-supplied [`MediaEngine`],
+    /// routing by the session's negotiated payload types (H.264 video + Opus
+    /// audio — the only codecs Multiview answers; any other payload type is
+    /// counted and dropped, never an error).
     #[must_use]
-    pub fn new(engine: Box<dyn MediaEngine + Send>, codec: Codec, width: u32, height: u32) -> Self {
+    pub fn new(engine: Box<dyn MediaEngine + Send>, negotiated: &NegotiatedSession) -> Self {
         Self {
             engine,
-            depacketizer: H264Depacketizer::new(),
-            codec,
-            width,
-            height,
+            router: RtpRouter::new(negotiated),
         }
     }
 
-    /// The negotiated codec this producer depacketizes.
+    /// Pull the next typed media event.
+    ///
+    /// Pulls decrypted RTP from the engine until a complete, gate-admitted
+    /// unit emerges, returning `Ok(None)` when the engine has nothing ready
+    /// (or signals clean end-of-stream) — the caller re-polls later; this
+    /// never blocks and never spins on a silent engine (invariants #1 / #10).
+    ///
+    /// # Errors
+    ///
+    /// Propagates an engine fault ([`MediaEngine::poll_rtp`]); the supervisor
+    /// treats it as a connection fault and reacts, rather than crashing.
+    pub fn next_event(&mut self) -> Result<Option<MediaEvent>> {
+        loop {
+            let Some(packet) = self.engine.poll_rtp()? else {
+                return Ok(None);
+            };
+            if let Some(event) = self.router.route(&packet) {
+                return Ok(Some(event));
+            }
+        }
+    }
+
+    /// The payload-type router: exposes the video keyframe-gate state and the
+    /// unknown-payload-type drop counter (telemetry).
     #[must_use]
-    pub const fn codec(&self) -> Codec {
-        self.codec
-    }
-
-    /// Map a depacketized frame into a [`ProducedFrame`] for the pump, stamping
-    /// the declared geometry. The raw PTS is the verbatim RTP timestamp; the pump
-    /// rebases it via the normalizer ([`WrapBits::Rtp32`]).
-    fn to_produced(&self, frame: DepacketizedFrame) -> ProducedFrame {
-        ProducedFrame {
-            pixels: frame.pixels,
-            raw_pts: frame.raw_pts,
-            discontinuity: frame.discontinuity,
-            meta: FrameMeta {
-                pts: MediaTime::ZERO,
-                width: self.width,
-                height: self.height,
-                format: PixelFormat::Nv12,
-                color: ColorInfo::default(),
-            },
-        }
+    pub fn router(&self) -> &RtpRouter {
+        &self.router
     }
 }
 
 impl core::fmt::Debug for WebRtcProducer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebRtcProducer")
-            .field("codec", &self.codec)
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("gate_open", &self.depacketizer.gate_open())
+            .field("router", &self.router)
             .finish_non_exhaustive()
-    }
-}
-
-impl FrameProducer for WebRtcProducer {
-    fn next_frame(&mut self) -> Result<Option<ProducedFrame>> {
-        // Pull from the engine until a complete, gate-admitted access unit emerges
-        // or the engine signals clean end-of-stream. Each pull is non-blocking; an
-        // empty pull ends this call (the pump re-polls on the next tick) rather
-        // than spinning.
-        loop {
-            let Some(packet) = self.engine.poll_rtp()? else {
-                return Ok(None);
-            };
-            // Only the negotiated video PT is depacketized for now; other PTs
-            // (audio) are sampled and dropped here (the seam for an audio rebaser).
-            if let Some(frame) = self.depacketizer.push(&packet) {
-                return Ok(Some(self.to_produced(frame)));
-            }
-        }
-    }
-
-    fn timebase(&self) -> Rational {
-        // WebRTC video rides a 90 kHz RTP clock.
-        Rational::new(1, i64::from(VIDEO_CLOCK_RATE))
-    }
-
-    fn cadence(&self) -> Rational {
-        // No explicit cadence is negotiated in the SDP subset; assume 30 fps for
-        // the genpts fallback (frames carry real RTP timestamps in practice, so
-        // this only matters for a PTS-less packet).
-        Rational::new(30, 1)
-    }
-
-    fn wrap_bits(&self) -> WrapBits {
-        WrapBits::Rtp32
     }
 }

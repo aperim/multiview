@@ -123,6 +123,64 @@ pub struct AudioMeter {
     pub sampled_hz: u32,
 }
 
+/// A program-bus **EBU R128 loudness** sample (AUD-8): the slow-cadence
+/// compliance lane carrying momentary / short-term / integrated LUFS, loudness
+/// range, and true-peak (dBTP), plus the compliance reference the engine
+/// normalises toward.
+///
+/// Pushed on topic [`crate::topic::Topic::AudioLoudness`], **conflated +
+/// drop-oldest** (inv #10): the meter runs read-only on the off-hot-path audio
+/// bus (BS.1770-4 / EBU Tech 3341/3342, ADR-R006), the engine never blocks on a
+/// client, and a slow UI simply skips samples. Numeric only — never audio
+/// content. **Ballistics are applied client-side** (ADR-R006 wire-to-browser):
+/// the wire carries the raw measured values at ~10 Hz; the browser meter applies
+/// the display decay/peak-hold.
+///
+/// The integrating loudness fields (`momentary`/`short_term`/`integrated`/`lra`/
+/// `true_peak_dbtp`) are `Option` because the meter returns nothing below the
+/// `-70` LUFS absolute gate (e.g. a silenced/lost program) — a `None` is an
+/// honest "no measurement", never a fabricated `-inf` or `0`. The compliance
+/// reference (`target_lufs`/`ceiling_dbtp`/`tolerance_lu`) is always present so
+/// the meter colours against the same target/ceiling the loudnorm processor uses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioLoudness {
+    /// The program/bus index this loudness sample is for.
+    pub program: u32,
+    /// Momentary loudness (400 ms window), LUFS. `None` below the absolute gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub momentary: Option<f32>,
+    /// Short-term loudness (3 s window), LUFS. `None` below the absolute gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_term: Option<f32>,
+    /// Integrated (gated) loudness over the program, LUFS. `None` until enough
+    /// gated audio has accumulated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrated: Option<f32>,
+    /// Loudness range (EBU Tech 3342), LU. `None` until enough gated audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lra: Option<f32>,
+    /// Maximum true-peak across channels (4x oversampled BS.1770), dBTP. `None`
+    /// when true-peak measurement is disabled for this program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_peak_dbtp: Option<f32>,
+    /// The normalisation target loudness, LUFS (the compliance reference — e.g.
+    /// `-23` EBU broadcast / `-16` streaming). Always present.
+    pub target_lufs: f32,
+    /// The true-peak ceiling, dBTP (the compliance reference — e.g. `-1.5`).
+    /// Always present.
+    pub ceiling_dbtp: f32,
+    /// The live convergence tolerance, LU (e.g. `±1` LU). The meter renders the
+    /// in-spec band as `target ± tolerance`. Always present.
+    pub tolerance_lu: f32,
+    /// The makeup gain the loudnorm processor is currently applying, dB (positive
+    /// boosts, negative attenuates). `None` when no normaliser is engaged (the
+    /// program bus is emitted unaltered).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f32>,
+    /// The effective sampling cadence on the wire (Hz).
+    pub sampled_hz: u32,
+}
+
 /// The hardware vendor of a GPU/accelerator (for telemetry display + which
 /// per-engine signals to expect). `#[non_exhaustive]` so a future vendor does
 /// not break the wire enum.
@@ -1154,6 +1212,11 @@ pub enum Event {
     /// High-rate audio meter sample (topic `audio.meters`).
     #[serde(rename = "audio.meter")]
     AudioMeter(AudioMeter),
+    /// Program-bus EBU R128 loudness sample (topic `audio.loudness`): the
+    /// slow-cadence M/S/I/LRA/dBTP compliance lane. Conflated + drop-oldest;
+    /// pushed, never polled (inv #10).
+    #[serde(rename = "audio.loudness")]
+    AudioLoudness(AudioLoudness),
     /// High-rate whole-system metrics sample (topic `system`): cpu / gpu /
     /// encoder-decoder. Conflated + drop-oldest; pushed, never polled.
     #[serde(rename = "system.metrics")]
@@ -1276,6 +1339,7 @@ impl Event {
             Self::TileState(_) => "tile.state",
             Self::TilesSnapshot(_) => "$snapshot",
             Self::AudioMeter(_) => "audio.meter",
+            Self::AudioLoudness(_) => "audio.loudness",
             Self::SystemMetrics(_) => "system.metrics",
             Self::OutputStatus(_) => "output.status",
             Self::AlertRaised(_) => "alert.raised",
@@ -1316,9 +1380,9 @@ impl Event {
     /// status is a snapshot by definition, and the timing epoch is an affine
     /// map that stays valid when stale), while the device lifecycle events on
     /// the same topic stay lossless in the ring. The existing conflated lanes
-    /// (`audio.meter`, `system.metrics`) answer `true` here too, so this
-    /// predicate is the single per-event source of truth for conflation. The
-    /// control session pump consults it in production
+    /// (`audio.meter`, `audio.loudness`, `system.metrics`) answer `true` here
+    /// too, so this predicate is the single per-event source of truth for
+    /// conflation. The control session pump consults it in production
     /// (`multiview-control/src/realtime.rs`: ring exclusion is
     /// `topic.is_high_rate() || event.is_conflated()`), and the
     /// `timing.status` producer (`multiview-cli/src/timing_status.rs`)
@@ -1328,6 +1392,7 @@ impl Event {
         matches!(
             self,
             Self::AudioMeter(_)
+                | Self::AudioLoudness(_)
                 | Self::SystemMetrics(_)
                 | Self::DeviceStatus(_)
                 | Self::TimingStatus(_)
