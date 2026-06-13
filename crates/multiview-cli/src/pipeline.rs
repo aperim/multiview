@@ -1056,6 +1056,15 @@ pub struct Pipeline {
     /// seeds; the timing-status task binds to it lazily (lock-free load —
     /// publishing/reading can never block the engine, inv #1/#10).
     epoch_anchor: crate::timing_status::EpochAnchorSlot,
+    /// The **program-audio preview tap** (ADR-P006 audio): when set (and this run
+    /// carries program audio), the bake consumer pushes each emitted post-loudnorm
+    /// [`AudioBlock`](multiview_audio::format::AudioBlock) into this bounded
+    /// drop-oldest slot, which the live WHEP egress provider drains to Opus-encode
+    /// and send to the peer. `None` on a build/run with no WHEP egress wired, in
+    /// which case the consumer pushes nothing (zero overhead). A preview tap off
+    /// the bake consumer thread — never the output-clock loop; a slow/absent WHEP
+    /// consumer only loses the oldest blocks (inv #1/#10).
+    program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -1436,6 +1445,7 @@ impl Pipeline {
             overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
             epoch,
             epoch_anchor: crate::timing_status::anchor_slot(),
+            program_audio_preview: None,
         })
     }
 
@@ -1568,6 +1578,27 @@ impl Pipeline {
     /// canonical program format).
     pub fn enable_program_audio(&mut self) {
         self.encode_cfg.audio = Some(multiview_output::AudioEncodeConfig::aac(48_000, 2, 128_000));
+    }
+
+    /// Whether this run carries **program audio** (`enable_program_audio` was
+    /// called): the bake consumer mixes + encodes a program-audio stream. The
+    /// binary checks this to decide whether to wire a WHEP program-audio tap.
+    #[must_use]
+    pub fn has_program_audio(&self) -> bool {
+        self.encode_cfg.audio.is_some()
+    }
+
+    /// Attach the **program-audio preview tap** (ADR-P006 audio): the bake
+    /// consumer pushes each emitted post-loudnorm program
+    /// [`AudioBlock`](multiview_audio::format::AudioBlock) into `slot`, which the
+    /// live WHEP egress provider drains to Opus-encode + send to the peer. The cli
+    /// shares the SAME slot here and in `CliWhepProvider::spawn`, so program audio
+    /// reaches a WHEP peer when (and only when) program audio is configured. A
+    /// no-op tap when this run has no program audio (the consumer pushes nothing).
+    /// The push is off the output-clock loop and bounded drop-oldest, so a
+    /// slow/absent WHEP consumer can never back-pressure the engine (inv #1/#10).
+    pub fn set_program_audio_preview(&mut self, slot: crate::preview::ProgramAudioSlot) {
+        self.program_audio_preview = Some(slot);
     }
 
     /// Run the engine for exactly `max_ticks` ticks under the realtime pacer,
@@ -2179,6 +2210,7 @@ impl Pipeline {
             audio_loudness,
             loudness_publisher,
             display_audio,
+            self.program_audio_preview.clone(),
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -3002,6 +3034,7 @@ impl StreamEgress {
         audio_loudness: Option<crate::loudness_telemetry::LoudnessTelemetry>,
         loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
         display_audio: DisplayAudioFeed,
+        program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -3062,6 +3095,7 @@ impl StreamEgress {
                     audio_loudness,
                     loudness_publisher,
                     display_audio,
+                    program_audio_preview,
                     &consumer_in_flight,
                 )
             })
@@ -3334,6 +3368,7 @@ fn consumer_main(
     mut audio_loudness: Option<crate::loudness_telemetry::LoudnessTelemetry>,
     loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
     mut display_audio: DisplayAudioFeed,
+    program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -3413,6 +3448,16 @@ fn consumer_main(
             // (invariants #1 + #10).
             for publisher in &display_audio.publishers {
                 publisher.push_audio(&block);
+            }
+            // ADR-P006 audio: tap the SAME post-loudnorm program block into the
+            // WHEP egress preview slot (when wired), so the live WHEP provider can
+            // Opus-encode it and send it to the peer. A bounded drop-oldest push
+            // off this bake-consumer thread — a slow/absent WHEP consumer only
+            // loses the oldest blocks and can never back-pressure this consumer or
+            // the engine (invariants #1/#10). `None` (no WHEP egress wired) is a
+            // no-op, so a build/run without WHEP egress is byte-identical.
+            if let Some(slot) = program_audio_preview.as_ref() {
+                slot.push(block.clone());
             }
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
