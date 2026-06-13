@@ -398,25 +398,7 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
         DevicePollerFactory, DevicePollerRegistry, PollerHandle, PollerWiring, ZowietekPoller,
     };
 
-    // A scripted transport the test keeps a handle to, so it can observe the
-    // reboot write the route ultimately drives through the poller.
-    let transport = ScriptedTransport::new();
-    transport.push(
-        "system",
-        ScriptedReply::json(
-            json!({ "rsp": "succeed", "status": "00000", "data": { "uuid": "u" } }),
-        ),
-    );
-    transport.push(
-        "venc",
-        ScriptedReply::json(
-            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "encoder" } }),
-        ),
-    );
-    // The reboot request drops the socket (the verified reboot hazard).
-    transport.push("system", ScriptedReply::socket_dropped());
-
-    // A factory that spawns a real poller over THAT transport for the device.
+    // A factory that spawns a real poller over the test's shared transport.
     struct SharedFactory(ScriptedTransport);
     impl DevicePollerFactory for SharedFactory {
         fn spawn(&self, device: &Device, wiring: &PollerWiring) -> Option<PollerHandle> {
@@ -438,6 +420,24 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
             Some(poller.spawn())
         }
     }
+
+    // A scripted transport the test keeps a handle to, so it can observe the
+    // reboot write the route ultimately drives through the poller.
+    let transport = ScriptedTransport::new();
+    transport.push(
+        "system",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "uuid": "u" } }),
+        ),
+    );
+    transport.push(
+        "venc",
+        ScriptedReply::json(
+            json!({ "rsp": "succeed", "status": "00000", "data": { "workmode": "encoder" } }),
+        ),
+    );
+    // The reboot request drops the socket (the verified reboot hazard).
+    transport.push("system", ScriptedReply::socket_dropped());
 
     let pollers = Arc::new(DevicePollerRegistry::with_factory(Arc::new(SharedFactory(
         transport.clone(),
@@ -471,7 +471,11 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
         post_if_match("/api/v1/devices/dev-foyer/reboot", OPERATOR_TOKEN, None),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::ACCEPTED, "reboot is accepted (202)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "reboot is accepted (202)"
+    );
 
     // The dispatch is async over the poller's control channel; wait (bounded)
     // for a reboot write to actually reach the device's `system` module. Scan ALL
@@ -497,7 +501,7 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
 }
 
 /// SAFETY/HONESTY (DEV-A4 fix 2): `identify` has no grounded vendor opt on this
-/// build (no ZowieTek SDK present), so the route must REFUSE honestly with a
+/// build (no vendor SDK present), so the route must REFUSE honestly with a
 /// `501 Not Implemented` problem+json rather than return a fake `204` that never
 /// reaches the device.
 #[tokio::test]

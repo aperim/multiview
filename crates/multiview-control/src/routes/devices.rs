@@ -27,7 +27,7 @@
 //!   declares its DEV-class impact before apply and dispatches a fail-safe
 //!   convergence; `reboot` dispatches a fire-and-forget reboot to the device's
 //!   poller). `identify`/`test-pattern` have no grounded vendor opt on this build
-//!   (no ZowieTek SDK) and **honestly return `501 Not Implemented`** rather than
+//!   (no vendor SDK) and **honestly return `501 Not Implemented`** rather than
 //!   a fake `204` (DEV-A4 fix 2).
 //! * `GET /api/v1/devices/{id}/source-candidates` and `/output-targets` — the
 //!   declared stream-binding projections (ADR-M009): honestly empty until a
@@ -643,7 +643,7 @@ pub(crate) async fn reboot_device(
 /// `POST /api/v1/devices/{id}/identify` — flash the device's identify indicator.
 ///
 /// **Not implemented on this build (`501`)** — DEV-A4 fix 2. The `zowietek`
-/// driver has no grounded vendor opt for an identify indicator (no ZowieTek SDK
+/// driver has no grounded vendor opt for an identify indicator (no vendor SDK
 /// is present in this repo to ground one), so the route refuses honestly with an
 /// `application/problem+json` rather than return a fake `204` that never reaches
 /// the device. It re-enables to a wired verb once the firmware opt is grounded
@@ -676,7 +676,7 @@ pub(crate) async fn identify_device(
 ///
 /// **Not implemented on this build (`501`)** — DEV-A4 fix 2. Same disposition as
 /// `identify`: no grounded vendor opt for a test pattern on this build (no
-/// ZowieTek SDK), so the route refuses honestly with `application/problem+json`
+/// vendor SDK), so the route refuses honestly with `application/problem+json`
 /// rather than ship a fake `204`. Wired once the firmware opt is grounded.
 #[cfg_attr(
     feature = "openapi",

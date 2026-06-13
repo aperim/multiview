@@ -346,7 +346,8 @@ async fn mode_convergence_is_close_before_open_with_a_declared_dev_impact() {
             r.body
         );
         assert_eq!(
-            data.and_then(|d| d.get("index")).and_then(serde_json::Value::as_u64),
+            data.and_then(|d| d.get("index"))
+                .and_then(serde_json::Value::as_u64),
             Some(2),
             "the stop/start is scoped to the grounded decode index 2: {:?}",
             r.body
