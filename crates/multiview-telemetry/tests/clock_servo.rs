@@ -26,10 +26,7 @@ fn registers_the_clock_servo_series_set() {
     let descriptors = reg.series();
     let names: Vec<&str> = descriptors.iter().map(|s| s.name.as_str()).collect();
     for expected in [names::CLOCK_OFFSET_NS, names::CLOCK_FREQUENCY_PPB] {
-        assert!(
-            names.iter().any(|n| *n == expected),
-            "must register {expected}"
-        );
+        assert!(names.contains(&expected), "must register {expected}");
     }
     // Both the ptp and system source legs are registered up-front so a
     // dashboard never shows a missing series when a reference transition
@@ -46,10 +43,7 @@ fn offset_and_frequency_are_recorded_per_source() {
 
     gauges.record(ClockSourceLabel::Ptp, -42_000, 17);
 
-    let ptp_offset = reg.gauge(
-        names::CLOCK_OFFSET_NS,
-        Labels::new().with("source", "ptp"),
-    );
+    let ptp_offset = reg.gauge(names::CLOCK_OFFSET_NS, Labels::new().with("source", "ptp"));
     let ptp_ppb = reg.gauge(
         names::CLOCK_FREQUENCY_PPB,
         Labels::new().with("source", "ptp"),
@@ -72,10 +66,7 @@ fn recording_a_source_does_not_disturb_the_other_leg() {
     gauges.record(ClockSourceLabel::Ptp, 10, 1);
     gauges.record(ClockSourceLabel::System, 900_000, -3);
 
-    let ptp_offset = reg.gauge(
-        names::CLOCK_OFFSET_NS,
-        Labels::new().with("source", "ptp"),
-    );
+    let ptp_offset = reg.gauge(names::CLOCK_OFFSET_NS, Labels::new().with("source", "ptp"));
     let sys_offset = reg.gauge(
         names::CLOCK_OFFSET_NS,
         Labels::new().with("source", "system"),
@@ -118,10 +109,7 @@ fn audio_servo_gauge_records_resample_ppm_per_sink() {
         names::AUDIO_FIFO_FILL_FRACTION,
         Labels::new().with("sink", "hdmi0"),
     );
-    let skew = reg.gauge(
-        names::AUDIO_SKEW_MS,
-        Labels::new().with("sink", "hdmi0"),
-    );
+    let skew = reg.gauge(names::AUDIO_SKEW_MS, Labels::new().with("sink", "hdmi0"));
     assert_eq!(ppm.get(), -12.5);
     assert_eq!(fill.get(), 0.5);
     assert_eq!(skew.get(), 2.0);
