@@ -13,7 +13,10 @@ import { TallyPage } from "../pages/TallyPage";
 import { SalvosPage } from "../pages/SalvosPage";
 import { AlarmsPage } from "../pages/AlarmsPage";
 import { AudioPage } from "../pages/AudioPage";
+import { DeviceDetailPage } from "../pages/DeviceDetailPage";
+import { DevicesPage } from "../pages/DevicesPage";
 import { ProbesPage } from "../pages/ProbesPage";
+import { SyncGroupsPage } from "../pages/SyncGroupsPage";
 import { AuditPage } from "../pages/AuditPage";
 import { SystemPage } from "../pages/SystemPage";
 import { SettingsPage } from "../pages/SettingsPage";
@@ -55,6 +58,9 @@ export const router = createBrowserRouter([
       { path: "outputs", element: <OutputsPage /> },
       { path: "overlays", element: <OverlaysPage /> },
       { path: "audio", element: <AudioPage /> },
+      { path: "devices", element: <DevicesPage /> },
+      { path: "devices/:id", element: <DeviceDetailPage /> },
+      { path: "sync-groups", element: <SyncGroupsPage /> },
       { path: "probes", element: <ProbesPage /> },
       { path: "monitoring", element: <MonitoringPage /> },
       { path: "tally", element: <TallyPage /> },
@@ -92,6 +98,34 @@ export const router = createBrowserRouter([
           { path: "config", element: <ConfigPage /> },
           { path: "api", element: <ApiPage /> },
           { path: "features", element: <FeaturesPage /> },
+          {
+            path: "devices",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/DevicesHelpPage"))
+                .DevicesHelpPage,
+            }),
+          },
+          {
+            path: "devices/adopt",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/DevicesAdoptHelpPage"))
+                .DevicesAdoptHelpPage,
+            }),
+          },
+          {
+            path: "display-nodes",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/DisplayNodesHelpPage"))
+                .DisplayNodesHelpPage,
+            }),
+          },
+          {
+            path: "sync",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/SyncHelpPage"))
+                .SyncHelpPage,
+            }),
+          },
           {
             path: "concepts/transports",
             lazy: async () => ({

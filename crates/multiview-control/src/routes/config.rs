@@ -331,3 +331,31 @@ fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value>
     }
     Ok(document)
 }
+
+/// `GET /api/v1/config/watch-status` — the config-file watch status
+/// (ADR-W020; role: read).
+///
+/// Reports whether this process watches its boot config file for external
+/// edits, the watched path, the last applied/rejected loads, and the
+/// restart-pending section names. A store-only deployment (no watcher)
+/// honestly reports `active: false`.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/config/watch-status",
+        tag = "config",
+        responses(
+            (status = 200, description = "The config-file watch status: active flag, watched path, last applied/rejected loads, restart-pending sections.", body = crate::watch_status::WatchStatusBody),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Authenticated but not authorized to read.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn watch_status(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> ControlResult<Json<crate::watch_status::WatchStatusBody>> {
+    principal.role.require(Action::Read)?;
+    Ok(Json(state.config_watch.snapshot()))
+}

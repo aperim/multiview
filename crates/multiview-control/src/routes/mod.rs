@@ -26,6 +26,7 @@ pub mod account;
 pub mod alarms;
 pub mod audio;
 pub mod audit;
+pub mod cast_sessions;
 pub mod config;
 pub mod devices;
 pub mod discovery;
@@ -526,27 +527,18 @@ pub(crate) async fn cmd_apply_layout(
                 )),
                 other => other,
             })?;
-        let document = multiview_config::LayoutDocument::from_body(&versioned.layout.body)
-            .map_err(|e| {
-                ControlError::Validation(format!(
-                    "stored layout {:?} does not parse as a {{canvas, layout, cells}} \
-                     document: {e}",
-                    req.layout
-                ))
-            })?;
-        let solved = document.solve_named(&req.layout).map_err(|e| {
-            ControlError::Validation(format!(
-                "stored layout {:?} does not solve: {e}",
-                req.layout
-            ))
-        })?;
-        require_class1_canvas(&state, &req.layout, &document)?;
+        // The ONE resolve machinery (parse + solve + Class-1 pinned-canvas
+        // gate), shared with the config-file watcher (ADR-W019/W020). A `None`
+        // running canvas fails closed there.
+        let resolved = crate::command::resolve_layout_document(
+            &req.layout,
+            &versioned.layout.body,
+            state.running_canvas.as_ref(),
+        )?;
         Ok(Command::ApplyLayout {
             op,
             layout: req.layout,
-            document: Some(Box::new(crate::command::ResolvedLayout::new(
-                solved, document,
-            ))),
+            document: Some(Box::new(resolved)),
         })
     })?;
     // State honestly which per-cell property classes land on screen at the
@@ -572,44 +564,6 @@ pub(crate) async fn cmd_apply_layout(
         Some(serde_json::json!({ "command": "apply_layout" })),
     );
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
-}
-
-/// ADR-R004 / ADR-W019 Class-1 gate: output geometry + cadence are **pinned**
-/// for the life of the session, so a stored layout authored for a different
-/// canvas cannot apply live (it is a Class-2 parallel-output migration, not
-/// built yet) — refuse it with `422` here, before any `202`.
-///
-/// The comparison is against [`AppState::running_canvas`] — the **immutable**
-/// snapshot captured from the loaded config at seed time — never the mutable
-/// layouts repository (whose working-layout body any operator `PUT` can
-/// rewrite). When no snapshot was seeded the gate **fails closed** (422): a
-/// document-carrying apply must never ride a 202 into a silent drain hold.
-/// Cadence equality is by value (`Fps`/`Rational` cross-multiply in `i128`),
-/// so a non-reduced `50/2` matches a running `25/1`. The engine's
-/// frame-boundary drain keeps its own backstop against the live drive's
-/// canvas.
-fn require_class1_canvas(
-    state: &AppState,
-    id: &str,
-    document: &multiview_config::LayoutDocument,
-) -> ControlResult<()> {
-    let Some(running) = state.running_canvas.as_ref() else {
-        return Err(ControlError::Validation(format!(
-            "layout {id:?} cannot be applied live: the running canvas is unknown to the \
-             control plane (no pinned-canvas snapshot was seeded), so the Class-1 gate \
-             fails closed (ADR-W019)"
-        )));
-    };
-    let new = &document.canvas;
-    if running != new {
-        return Err(ControlError::Validation(format!(
-            "layout {id:?} was authored for canvas {}x{}@{} but the running session's canvas \
-             is pinned at {}x{}@{} — a Class-2 change (output geometry/cadence cannot change \
-             live; ADR-R004)",
-            new.width, new.height, new.fps, running.width, running.height, running.fps
-        )));
-    }
-    Ok(())
 }
 
 impl axum::extract::FromRequestParts<AppState> for Principal {
@@ -703,9 +657,18 @@ fn resource_router() -> Router<AppState> {
                 .put(probes::update_probe)
                 .delete(probes::delete_probe),
         )
-        // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
-        // plus the read-only runtime status snapshot, the bare-verb actions
-        // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+        .merge(device_router())
+}
+
+/// Build the managed-devices surface (ADR-M008/M009/M011/W017): the device
+/// registry CRUD + status + bare-verb actions + stream-binding projections,
+/// ephemeral Cast sessions, mDNS discovery, and presentation-sync groups.
+/// Split from [`resource_router`] so each stays a readable size.
+fn device_router() -> Router<AppState> {
+    // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
+    // plus the read-only runtime status snapshot, the bare-verb actions
+    // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+    Router::new()
         .route("/devices", get(devices::list_devices))
         .route(
             "/devices/{id}",
@@ -730,6 +693,26 @@ fn resource_router() -> Router<AppState> {
         .route(
             "/devices/{id}/output-targets",
             get(devices::output_targets),
+        )
+        // Ephemeral Cast sessions (DEV-D2, ADR-M011): start/list/stop an
+        // ad-hoc cast of a served HLS rendition, save-as-device promotion,
+        // and the receiver-namespace volume verb. Runtime-only — never part
+        // of the devices store, never exported.
+        .route(
+            "/cast/sessions",
+            get(cast_sessions::list_cast_sessions).post(cast_sessions::start_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}",
+            get(cast_sessions::get_cast_session).delete(cast_sessions::stop_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/save",
+            post(cast_sessions::save_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/volume",
+            post(cast_sessions::set_cast_volume),
         )
         // mDNS device discovery (ADR-M008 §6 / ADR-0041): kick a time-bounded
         // browse (202 + device.discovered events) and read the untrusted
@@ -907,6 +890,10 @@ pub fn api_router() -> Router<AppState> {
         // merged from `conspect_router()` above.)
         // Config-as-code export: the live stores rendered as multiview.toml.
         .route("/config/export", get(config::export_config))
+        // The config-file watch status (ADR-W020): read-only, honest
+        // "not watched" default. A static segment, so it never collides with
+        // the `{target}` capture below (axum prefers static matches).
+        .route("/config/watch-status", get(config::watch_status))
         // Config versioning: history + commit, single revision, diff, rollback.
         .route(
             "/config/{target}",

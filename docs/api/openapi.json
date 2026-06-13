@@ -562,6 +562,412 @@
         }
       }
     },
+    "/api/v1/cast/sessions": {
+      "get": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`GET /api/v1/cast/sessions` — list the live ephemeral sessions (role: read).",
+        "operationId": "list_cast_sessions",
+        "responses": {
+          "200": {
+            "description": "All live ephemeral sessions, id-sorted, each with its live lifecycle state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CastSessionDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`POST /api/v1/cast/sessions` — start an ad-hoc cast session (role: write).",
+        "description": "Resolves the rendition, spawns the supervised session actor through the\nshared poller registry, and records the ephemeral session. The actor\nCONNECTs → `LAUNCH`es the Default Media Receiver (`CC1AD845`) → `LOAD`s the\ndevice-reachable HLS URL, then supervises the session (ADR-M011).",
+        "operationId": "start_cast_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartCastSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The started ephemeral session (runtime-only; never exported).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CastSessionDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to start a session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No castable rendition (control.cast_media_base unset / no HLS output) or no live cast driver in this build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The address is not a valid host[:port], or the named output is not a served HLS rendition.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cast/sessions/{id}": {
+      "get": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`GET /api/v1/cast/sessions/{id}` — fetch one session (role: read).",
+        "operationId": "get_cast_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session, with its live lifecycle state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CastSessionDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`DELETE /api/v1/cast/sessions/{id}` — stop a session (role: write; `204`).",
+        "description": "Dispatches the voluntary [`PollerControl::StopCast`] teardown (the actor\n`STOP`s the receiver app — what actually clears the TV — then exits), joins\nit gracefully (abort after the grace window), drops the runtime\nstatus/record, and **clears the registry tombstone**: session ids are\nUUID-fresh and never reused, so clearing after the deterministic stop keeps\nthe tombstone set bounded under churning sessions.",
+        "operationId": "stop_cast_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The session was stopped and forgotten."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to stop this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cast/sessions/{id}/save": {
+      "post": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`POST /api/v1/cast/sessions/{id}/save` — promote an ephemeral session to a\nnormal `Device{driver: cast}` registry entry (role: write; `201`).",
+        "description": "The promoted device carries the session's address and rendition assignment\nand **does** export (desired state). One actor remains, keyed by the device\nid: the ephemeral actor is stopped (a plain abort — **no** receiver `STOP`,\nso the TV keeps playing across the promotion) and the device's supervised\nactor takes over through the same registry.",
+        "operationId": "save_cast_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id to promote.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveCastSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The promoted device (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write devices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A device with that id already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The promoted device document does not validate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cast/sessions/{id}/volume": {
+      "post": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`POST /api/v1/cast/sessions/{id}/volume` — set the receiver volume\n(role: write; `202` + operation id).",
+        "description": "Dispatches a receiver-namespace `SET_VOLUME` to the running session actor\n— non-blocking `try_send`, never awaited (invariant #10).",
+        "operationId": "set_cast_volume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CastVolumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Volume change accepted; applied by the session actor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to control this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "level_percent is out of range (0–100).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/commands/apply-layout": {
       "post": {
         "tags": [
@@ -675,6 +1081,48 @@
           },
           "422": {
             "description": "The stores do not compose into a valid configuration (detail names the violation).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/watch-status": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`GET /api/v1/config/watch-status` — the config-file watch status\n(ADR-W020; role: read).",
+        "description": "Reports whether this process watches its boot config file for external\nedits, the watched path, the last applied/rejected loads, and the\nrestart-pending section names. A store-only deployment (no watcher)\nhonestly reports `active: false`.",
+        "operationId": "watch_status",
+        "responses": {
+          "200": {
+            "description": "The config-file watch status: active flag, watched path, last applied/rejected loads, restart-pending sections.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchStatusBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2948,7 +3396,7 @@
         },
         "responses": {
           "200": {
-            "description": "The replaced overlay (new ETag in the response header).",
+            "description": "The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the edit was applied at a frame boundary and the running picture visibly follows it — the renderer draws the new document, or it drew the previous one (editing a rendered face away makes it vanish, itself a live change); `restart` otherwise (ADR-W022).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3028,7 +3476,7 @@
         },
         "responses": {
           "201": {
-            "description": "The created overlay (ETag in the response header).",
+            "description": "The created overlay (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine's renderer draws the document (e.g. an analog-face clock on an overlay-rendering build) and it was applied at a frame boundary; `restart` otherwise — non-rendering kinds are stored losslessly and mirrored to the engine with a warning, never lied about (ADR-W022).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3088,7 +3536,7 @@
         ],
         "responses": {
           "204": {
-            "description": "The overlay was deleted."
+            "description": "The overlay was deleted. X-Multiview-Apply: `live` when the running renderer drew the document (its face disappears at the next frame boundary), `restart` otherwise (ADR-W022)."
           },
           "401": {
             "description": "Missing or invalid credentials.",
@@ -7378,6 +7826,61 @@
         ],
         "description": "`OpenAPI` mirror of `multiview_config::CaptionSelector` (tagged by `mode`)."
       },
+      "CastSessionDoc": {
+        "type": "object",
+        "description": "One ephemeral cast session as the API serves it: the descriptive record\nplus the live lifecycle state.",
+        "required": [
+          "id",
+          "address",
+          "output",
+          "media_url",
+          "state"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The device authority dialled (`host[:port]`, IPv6 bracketed)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The runtime session id (`cast-session-…`, UUID-fresh per start)."
+          },
+          "media_url": {
+            "type": "string",
+            "description": "The resolved device-reachable media URL the session LOADs."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator-facing name, if given."
+          },
+          "output": {
+            "type": "string",
+            "description": "The output id whose rendition the session casts."
+          },
+          "state": {
+            "type": "string",
+            "description": "The session's live lifecycle state (the DEV-A3 wire vocabulary, e.g.\n`ADOPTING`/`ONLINE`/`DEGRADED`), read from the latest-wins status\nregistry."
+          }
+        }
+      },
+      "CastVolumeRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/cast/sessions/{id}/volume` request body.",
+        "required": [
+          "level_percent"
+        ],
+        "properties": {
+          "level_percent": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The desired receiver volume as an integer percent (0–100); the actor\nmaps it to the protocol's unit `level`.",
+            "minimum": 0
+          }
+        }
+      },
       "ChannelMap": {
         "type": "object",
         "description": "An IS-08 **map**: each named output channel → its [`ChannelSource`].\n\nA `BTreeMap` so the serialised map and any listing is deterministically\nordered (stable diagnostics + golden tests).",
@@ -10324,6 +10827,26 @@
           }
         }
       },
+      "SaveCastSessionRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/cast/sessions/{id}/save` request body.",
+        "required": [
+          "device_id"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The device id to register the promoted device under."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The promoted device's display name (defaults to the session's name)."
+          }
+        }
+      },
       "ScanAccepted": {
         "type": "object",
         "description": "The `202 Accepted` body for a scan: the operation id correlating the scan and\nthe human-readable scope of what is browsed.",
@@ -11029,6 +11552,33 @@
           "tier": {
             "$ref": "#/components/schemas/StabilityTierDoc",
             "description": "How stable the key is."
+          }
+        }
+      },
+      "StartCastSessionRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/cast/sessions` request body.",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The device authority to dial: `host[:port]`, IPv6 bracketed\n(`[2001:db8::20]:8009`); the CASTV2 port 8009 is the default when\nomitted (Cast **groups** advertise non-default ports — give the\nadvertised one)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An operator-facing name for the session (e.g. the room/TV name)."
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The output id whose HLS rendition to cast. Omitted: the **first\ndeclared** rendition is cast (every HLS output is a rendition of the\nprogram canvas)."
           }
         }
       },
@@ -12159,6 +12709,82 @@
           "warning",
           "critical"
         ]
+      },
+      "WatchStamp": {
+        "type": "object",
+        "description": "One recorded watch event: when it happened and what it was.",
+        "required": [
+          "at_ms",
+          "detail"
+        ],
+        "properties": {
+          "at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the load was applied/rejected, as Unix milliseconds (UTC)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What happened: an applied-change summary, or the rejection reason."
+          }
+        }
+      },
+      "WatchStatusBody": {
+        "type": "object",
+        "description": "The body of `GET /api/v1/config/watch-status`.",
+        "required": [
+          "active",
+          "applied_count",
+          "restart_pending"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether a config-file watcher is running for this process."
+          },
+          "applied_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many file changes have been successfully applied since start.",
+            "minimum": 0
+          },
+          "last_applied": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WatchStamp",
+                "description": "The most recent successfully applied load, if any."
+              }
+            ]
+          },
+          "last_rejected": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WatchStamp",
+                "description": "The most recent rejected (invalid) load, if any."
+              }
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The watched config file path (absent when no watcher was ever\nstarted; kept after a stop so the status names what *was* watched)."
+          },
+          "restart_pending": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Section names changed on disk that only apply on restart (sorted,\ndeduplicated; latched until restart — ADR-W020)."
+          }
+        }
       }
     }
   },
@@ -12190,6 +12816,10 @@
     {
       "name": "devices",
       "description": "Managed-device registry CRUD + status + bare-verb actions + stream-binding projections (ADR-M008/M009/W017)"
+    },
+    {
+      "name": "cast",
+      "description": "Ephemeral Google Cast sessions of a served HLS rendition + save-as-device promotion (ADR-M011). Google Cast and Chromecast are trademarks of Google LLC."
     },
     {
       "name": "discovery",

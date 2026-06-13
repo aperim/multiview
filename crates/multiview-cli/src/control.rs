@@ -62,6 +62,18 @@ use tokio::task::JoinHandle;
 /// Cache-Control tiers, Range/206, and Origin-reflecting CORS, so Cast
 /// receivers and browser players fetch cross-origin without a fronting proxy.
 ///
+/// Also returns a clone of the served [`AppState`] so a sibling control-plane
+/// tenant — the ADR-W020 config-file watcher — reaches the SAME stores,
+/// command bus, audit log, and watch-status slot the router serves (one set
+/// of stores, never a parallel copy).
+///
+/// `live_apply` declares what the **running** engine can take live (ADR-W022):
+/// the caller — the binary, the only place that knows both the compiled
+/// features and the chosen run path — injects it so every mutation route's
+/// `X-Multiview-Apply` header tells the truth per build. Pass
+/// [`multiview_control::LiveApplyCaps::default()`] for a run path with no live
+/// seams (everything honestly declares `restart`).
+///
 /// # Errors
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
 /// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
@@ -80,8 +92,9 @@ pub async fn bind_and_serve<F>(
     preview: SharedPreview,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
+    live_apply: multiview_control::LiveApplyCaps,
     shutdown: F,
-) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)>
+) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -140,7 +153,13 @@ where
     let warning_sub = publisher.subscribe();
     tokio::spawn(run_warning_ingest(warning_sub, Arc::clone(&warnings)));
 
-    let state = AppState::new(
+    // The Cast delivery map (DEV-D2, ADR-M011): `control.cast_media_base` ×
+    // the served HLS mounts. `None` (no base configured / base rejected) means
+    // the cast-session routes refuse with an honest 409 and the poller
+    // registry carries no cast member.
+    let delivery = cast_delivery(config);
+
+    let mut state = AppState::new(
         publisher,
         commands,
         Arc::new(InMemoryRepository::new()),
@@ -153,12 +172,16 @@ where
     )
     .with_preview(preview)
     .with_warning_store(warnings)
-    .with_device_pollers(device_poller_registry())
+    .with_device_pollers(device_poller_registry(delivery.as_ref()))
     .with_auth_disabled(auth_disabled)
+    .with_live_apply(live_apply)
     // The `[discovery]` browse configuration: the operator-configured
     // zowietek-control service type (the vendor's type is unverified — only a
     // configured string is ever recognised) plus any extra DNS-SD types.
     .with_discovery_config(config.discovery.clone().unwrap_or_default());
+    if let Some(delivery) = delivery {
+        state = state.with_cast_delivery(delivery);
+    }
 
     // Install the real mDNS browser when the `discovery` feature is built, so
     // `POST /api/v1/discovery/devices/scan` browses the LAN for Cast / NDI /
@@ -222,7 +245,7 @@ where
     // unauthenticated like `/docs` (media devices cannot send Bearer tokens).
     // Isolation-safe (inv #10): the handlers only read files the segmenter
     // already published to disk — never an engine channel or lock.
-    let mut app = multiview_control::router(state);
+    let mut app = multiview_control::router(state.clone());
     for mount in hls_mounts(config) {
         app = app.nest(
             &mount.route,
@@ -230,37 +253,79 @@ where
         );
     }
     let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
-    Ok((addr, handle))
+    Ok((addr, handle, state))
 }
 
-/// Build the runtime device-poller registry for the control plane (DEV-A4).
+/// Build the runtime device-poller registry for the control plane (DEV-A4/D2).
 ///
-/// With the `devices-net` feature on (which forwards `multiview-control/zowietek`),
-/// the registry carries the reqwest-backed
-/// [`ReqwestPollerFactory`](multiview_control::devices::ReqwestPollerFactory) so
-/// boot-seed/adopt spawn a **live** supervised poller per `zowietek` device,
-/// resolving each device's credentials from its `auth.secret_ref` via
-/// [`resolve_device_credentials`]. Without the feature it is the default no-op
-/// registry (no live transport → no poller spawned; the projection routes stay
-/// honestly empty), so the default build pulls no socket.
+/// With the `devices-net` feature on (which forwards
+/// `multiview-control/devices-net` = `zowietek` + `cast`), the registry carries
+/// a [`CompositePollerFactory`](multiview_control::devices::CompositePollerFactory)
+/// over both live drivers:
+///
+/// * the reqwest-backed
+///   [`ReqwestPollerFactory`](multiview_control::devices::ReqwestPollerFactory),
+///   so boot-seed/adopt spawn a **live** supervised poller per `zowietek`
+///   device, resolving credentials from its `auth.secret_ref` via
+///   [`resolve_device_credentials`];
+/// * the [`CastSessionFactory`](multiview_control::devices::cast::runtime::CastSessionFactory)
+///   over the live [`TlsCastConnector`](multiview_control::devices::cast::net::TlsCastConnector)
+///   and the [`cast_delivery`] map, so a `driver = cast` device (config-declared
+///   or an ad-hoc `/api/v1/cast/sessions` start) gets a supervised CASTV2
+///   session actor (DEV-D2, ADR-M011). Installed only when a delivery map
+///   exists (`control.cast_media_base` set) — without one no device-reachable
+///   media URL can be derived, so the cast member is honestly absent and the
+///   session routes refuse with `409`. A rustls-config build failure (a broken
+///   crypto provider — never expected) is logged and likewise leaves the cast
+///   member out rather than panicking.
+///
+/// Without the feature it is the default no-op registry (no live transport →
+/// no actor spawned; the projection routes stay honestly empty), so the
+/// default build pulls no socket.
 #[cfg(feature = "devices-net")]
-fn device_poller_registry() -> Arc<multiview_control::devices::DevicePollerRegistry> {
-    use multiview_control::devices::{DevicePollerRegistry, ReqwestPollerFactory};
+fn device_poller_registry(
+    cast_delivery: Option<&std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>>,
+) -> Arc<multiview_control::devices::DevicePollerRegistry> {
+    use multiview_control::devices::cast::net::TlsCastConnector;
+    use multiview_control::devices::cast::runtime::CastSessionFactory;
+    use multiview_control::devices::cast::session::CastSessionConfig;
+    use multiview_control::devices::{
+        CompositePollerFactory, DevicePollerFactory, DevicePollerRegistry, ReqwestPollerFactory,
+    };
     // A 5s per-request timeout: generous for a LAN appliance, bounded so a hung
     // device times out into the supervised-reconnect path rather than wedging
     // the poller task.
-    let factory = ReqwestPollerFactory::new(
+    let zowietek = ReqwestPollerFactory::new(
         std::time::Duration::from_secs(5),
         resolve_device_credentials,
     );
-    Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)))
+    let mut members: Vec<Arc<dyn DevicePollerFactory>> = vec![Arc::new(zowietek)];
+    if let Some(delivery) = cast_delivery {
+        match TlsCastConnector::new() {
+            Ok(connector) => members.push(Arc::new(CastSessionFactory::new(
+                Arc::new(connector),
+                Arc::clone(delivery),
+                CastSessionConfig::default(),
+            ))),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "cast TLS connector did not build; running without the cast driver"
+            ),
+        }
+    }
+    Arc::new(DevicePollerRegistry::with_factory(Arc::new(
+        CompositePollerFactory::new(members),
+    )))
 }
 
-/// The default no-op poller registry (no `zowietek` feature): no live device
+/// The default no-op poller registry (no `devices-net` feature): no live device
 /// transport, so no poller is spawned and the projection routes stay honestly
-/// empty — exactly the pre-DEV-A4 behaviour.
+/// empty — exactly the pre-DEV-A4 behaviour. The unused delivery map keeps the
+/// call site feature-free.
 #[cfg(not(feature = "devices-net"))]
-fn device_poller_registry() -> Arc<multiview_control::devices::DevicePollerRegistry> {
+fn device_poller_registry(
+    _cast_delivery: Option<&std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>>,
+) -> Arc<multiview_control::devices::DevicePollerRegistry> {
     Arc::new(multiview_control::devices::DevicePollerRegistry::new())
 }
 
@@ -287,13 +352,22 @@ fn resolve_device_credentials(device: &multiview_config::Device) -> Option<(Stri
 
 /// One HLS delivery mount derived from a configured HLS/LL-HLS output: the
 /// route prefix on the control listener and the on-disk directory it serves
-/// (the configured playlist's parent — where the segmenter writes).
+/// (the configured playlist's parent — where the segmenter writes), plus the
+/// identity the Cast delivery map ([`cast_delivery`], DEV-D2) joins on — the
+/// output id this mount serves and the playlist file name under the mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsMount {
     /// Route prefix, e.g. `/hls/program`.
     pub route: String,
     /// The served directory (the output playlist's parent directory).
     pub dir: std::path::PathBuf,
+    /// The configured output's stable id this mount serves.
+    pub output_id: String,
+    /// The playlist file name under [`route`](Self::route) (the configured
+    /// path's final component), e.g. `multiview.m3u8`. [`None`] when the
+    /// configured path has no usable file name (a directory-shaped path) —
+    /// the mount still serves, but no Cast media URL can be derived from it.
+    pub playlist: Option<String>,
 }
 
 /// Derive the `/hls/{output-id}` delivery mounts for every HLS/LL-HLS output
@@ -332,12 +406,69 @@ pub fn hls_mounts(config: &MultiviewConfig) -> Vec<HlsMount> {
                 n = n.saturating_add(1);
             };
         }
+        let playlist = std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
         mounts.push(HlsMount {
             route: format!("/hls/{segment}"),
             dir,
+            output_id: output.id(),
+            playlist,
         });
     }
     mounts
+}
+
+/// Build the Cast **delivery map** (DEV-D2, ADR-M011): the validated
+/// `control.cast_media_base` × the [`hls_mounts`] this listener serves, giving
+/// output id → the device-reachable playlist URL a Cast session `LOAD`s.
+///
+/// [`None`] when no `cast_media_base` is configured (the cast-session routes
+/// then refuse with an honest `409`) or when the configured base fails the
+/// driver's host rules (loopback / `.local` / bare LAN name — warned loudly,
+/// Cast delivery disabled rather than handing devices an unreachable URL).
+/// The segment format is MPEG-TS for every mount: the DEV-D1 run-path
+/// segmenter writes `.ts` segments only (see
+/// `multiview_output::hls::live::LivePlaylist`); signal `fmp4` here once a
+/// rendition actually serves CMAF.
+#[must_use]
+pub fn cast_delivery(
+    config: &MultiviewConfig,
+) -> Option<std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>> {
+    use multiview_control::devices::cast::media::{
+        CastDelivery, CastMediaBase, CastMediaTarget, HlsSegmentFormat,
+    };
+    let base = config.control.as_ref()?.cast_media_base.as_deref()?;
+    let base = match CastMediaBase::parse(base) {
+        Ok(base) => base,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "control.cast_media_base rejected; Cast delivery is disabled \
+                 (cast sessions will refuse with 409)"
+            );
+            return None;
+        }
+    };
+    let mut delivery = CastDelivery::new();
+    for mount in hls_mounts(config) {
+        let Some(playlist) = mount.playlist else {
+            tracing::warn!(
+                output = %mount.output_id,
+                route = %mount.route,
+                "HLS output path has no playlist file name; not castable"
+            );
+            continue;
+        };
+        delivery.insert(
+            &mount.output_id,
+            CastMediaTarget {
+                url: base.join(&mount.route, &playlist),
+                format: HlsSegmentFormat::MpegTs,
+            },
+        );
+    }
+    Some(std::sync::Arc::new(delivery))
 }
 
 /// Map an output id to a URL-segment-safe mount name (see [`hls_mounts`]).
@@ -658,6 +789,25 @@ pub fn command_drain_with_live_sources(
     }
 }
 
+/// Build the per-tick control hook **with the live overlay seam** (ADR-W022)
+/// threaded in, so `UpsertOverlay`/`RemoveOverlay` apply to the running
+/// engine: the drain mirrors the document into the working overlay set and
+/// publishes the set (generation-bumped) through the lock-free
+/// [`OverlayApplySlot`](crate::live_overlays::OverlayApplySlot) the bake
+/// consumer re-derives from at its next frame — pure data mutation at the
+/// frame boundary, no rasterization, no I/O (invariants #1 + #10).
+pub fn command_drain_with_live_overlays(
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    overlays: crate::live_overlays::OverlayApplySlot,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    let mut drain = CommandDrain::new(commands, config, publisher).with_live_overlays(overlays);
+    move |drive: &mut CompositorDrive<Nv12Image>| {
+        let _applied = drain.apply(drive);
+    }
+}
+
 /// Build the per-tick control hook **with the live run-side routing seams**
 /// threaded in, so per-stream routing commands reach their live crosspoints in the
 /// real run (RT-11 / ADR-0034).
@@ -674,6 +824,10 @@ pub fn command_drain_with_live_sources(
 /// bounded drop-oldest, so neither can pace or stall the output clock
 /// (invariants #1/#10).
 ///
+/// It also threads in the pipeline's **live overlay slot**
+/// ([`Pipeline::overlay_apply_slot`](crate::pipeline::Pipeline::overlay_apply_slot),
+/// ADR-W022) so `UpsertOverlay`/`RemoveOverlay` re-derive the running bake.
+///
 /// The binary wires this on the full libav\* path (`run_pipeline_until_ctrl_c`),
 /// where the pipeline has a subtitle router; the software-engine path (no subtitle
 /// rendering) wires the plain [`command_drain`].
@@ -683,10 +837,12 @@ pub fn command_drain_with_seams(
     config: MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
+    overlays: crate::live_overlays::OverlayApplySlot,
     live: crate::live_sources::LiveSourceHandle,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
     let mut drain = CommandDrain::new(commands, config, publisher)
         .with_subtitle_route(subtitle_route)
+        .with_live_overlays(overlays)
         .with_live_sources(live);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
@@ -755,6 +911,12 @@ pub struct CommandDrain {
     /// spawn/teardown + the preview registry. `None` ⇒ `UpsertSource`/
     /// `RemoveSource` are surfaced held actions (never a silent drop).
     live_sources: Option<crate::live_sources::LiveSourceHandle>,
+    /// The live overlay working-set seam (ADR-W022), when wired
+    /// ([`command_drain_with_live_overlays`] / [`command_drain_with_seams`]):
+    /// the lock-free slot the bake consumer re-derives its overlay render
+    /// state from. `None` ⇒ `UpsertOverlay`/`RemoveOverlay` are surfaced held
+    /// actions (never a silent drop).
+    live_overlays: Option<crate::live_overlays::OverlayApplySlot>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
     cell_ids_set: bool,
     /// Test-only spy counting how many times this drain calls `solve_layout`.
@@ -781,6 +943,7 @@ impl CommandDrain {
             #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
             subtitle_route: None,
             live_sources: None,
+            live_overlays: None,
             cell_ids_set: false,
             #[cfg(test)]
             resolve_spy: None,
@@ -793,6 +956,15 @@ impl CommandDrain {
     #[must_use]
     fn with_live_sources(mut self, live: crate::live_sources::LiveSourceHandle) -> Self {
         self.live_sources = Some(live);
+        self
+    }
+
+    /// Thread in the live overlay working-set seam (ADR-W022) so
+    /// `UpsertOverlay`/`RemoveOverlay` reach the running bake. See
+    /// [`command_drain_with_live_overlays`].
+    #[must_use]
+    fn with_live_overlays(mut self, overlays: crate::live_overlays::OverlayApplySlot) -> Self {
+        self.live_overlays = Some(overlays);
         self
     }
 
@@ -1129,23 +1301,14 @@ impl CommandDrain {
             Command::RemoveSource { ref id, .. } => {
                 self.remove_source(id, drive);
             }
+            Command::UpsertOverlay { ref overlay, .. } => {
+                self.upsert_overlay(overlay);
+            }
+            Command::RemoveOverlay { ref id, .. } => {
+                self.remove_overlay(id);
+            }
             Command::SetTallyOverride { target, color, .. } => {
-                // No tally arbiter is wired into the software engine yet, so this
-                // emits a TallyState echo rather than silently no-op'ing: a forced
-                // colour maps to a program-bus lamp of that colour at the default
-                // brightness; a cleared override (`None`) maps to the unlit default.
-                // FOLLOW-UP: route through the real arbiter once it exists.
-                let tally_state = match color {
-                    Some(color) => multiview_core::tally::TallyState {
-                        color,
-                        ..multiview_core::tally::TallyState::default()
-                    },
-                    None => multiview_core::tally::TallyState::default(),
-                };
-                self.publisher.publish_event(Event::TallyState(TallyEvent {
-                    target,
-                    state: tally_state,
-                }));
+                self.set_tally_override(target, color);
             }
             // `Command` is `#[non_exhaustive]`: a future variant this build does not
             // know about is logged and skipped, never panicked on.
@@ -1153,6 +1316,29 @@ impl CommandDrain {
                 tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
             }
         }
+    }
+
+    /// Apply a `SetTallyOverride`. No tally arbiter is wired into the software
+    /// engine yet, so this emits a `TallyState` echo rather than silently
+    /// no-op'ing: a forced colour maps to a program-bus lamp of that colour at
+    /// the default brightness; a cleared override (`None`) maps to the unlit
+    /// default. FOLLOW-UP: route through the real arbiter once it exists.
+    fn set_tally_override(
+        &self,
+        target: multiview_events::TallyTarget,
+        color: Option<multiview_core::tally::TallyColor>,
+    ) {
+        let tally_state = match color {
+            Some(color) => multiview_core::tally::TallyState {
+                color,
+                ..multiview_core::tally::TallyState::default()
+            },
+            None => multiview_core::tally::TallyState::default(),
+        };
+        self.publisher.publish_event(Event::TallyState(TallyEvent {
+            target,
+            state: tally_state,
+        }));
     }
 }
 
@@ -1359,6 +1545,126 @@ impl CommandDrain {
             tracing::info!(source = %id, "remove_source: no registered store under that id");
         }
         self.config.sources.retain(|s| s.id != id);
+    }
+
+    /// Apply an `UpsertOverlay` (ADR-W022) at the frame boundary: upsert the
+    /// document by id into the working overlay set (the config mirror — the
+    /// same discipline as live sources) and publish the set, generation-
+    /// bumped, through the lock-free slot the bake consumer re-derives from
+    /// at its next frame. Pure data mutation — no rasterization, no I/O, no
+    /// `.await` (invariants #1/#10).
+    ///
+    /// A document the running build does not visibly render
+    /// ([`renders_live`](crate::live_overlays::renders_live) is `false`) is
+    /// still mirrored + published (the working set stays coherent) but warned
+    /// loudly: the route already declared `restart` for it (ADR-W022 §4) and
+    /// the operator should know why nothing changed on screen. Without a
+    /// wired seam the command is a surfaced held action — warned and made
+    /// observable as a `job.progress` `apply_overlay_held` outcome.
+    fn upsert_overlay(&mut self, overlay: &multiview_config::Overlay) {
+        let Some(slot) = self.live_overlays.as_ref() else {
+            tracing::warn!(
+                overlay = %overlay.id,
+                "upsert_overlay held: no live overlay seam on this run path \
+                 (the stored document applies on restart)"
+            );
+            self.publish_overlay_held(&overlay.id, "no live overlay seam on this run path");
+            return;
+        };
+        // Mirror: replace-or-append by id (a live edit replaces, never
+        // duplicates), then publish the WHOLE set — the consumer derives from
+        // the set, so one publish per applied change keeps one truth.
+        match self.config.overlays.iter_mut().find(|o| o.id == overlay.id) {
+            Some(existing) => *existing = overlay.clone(),
+            None => self.config.overlays.push(overlay.clone()),
+        }
+        let generation = crate::live_overlays::publish_set(slot, self.config.overlays.clone());
+        let renders = crate::live_overlays::renders_live(overlay);
+        if renders {
+            tracing::info!(
+                overlay = %overlay.id,
+                generation,
+                "apply_overlay: overlay applied live at the frame boundary"
+            );
+        } else {
+            tracing::warn!(
+                overlay = %overlay.id,
+                kind = %overlay.kind,
+                generation,
+                "apply_overlay: stored + mirrored into the working set, but this \
+                 kind has no live renderer in this build — no visual change (ADR-W022)"
+            );
+        }
+        let message = if renders {
+            format!("overlay {} applied live at the frame boundary", overlay.id)
+        } else {
+            format!(
+                "overlay {} mirrored (kind {} has no live renderer in this build)",
+                overlay.id, overlay.kind
+            )
+        };
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay".to_owned(),
+                pct: 100,
+                message: Some(message),
+            }));
+    }
+
+    /// Apply a `RemoveOverlay` (ADR-W022) at the frame boundary: drop the
+    /// document from the working overlay set and republish — a rendered face
+    /// disappears on the next baked frame. Removing an unknown id publishes
+    /// no new set (the consumer never re-derives spuriously) but is still
+    /// surfaced — warned and observable as a `job.progress`
+    /// `apply_overlay_held` outcome, symmetric with a held upsert, never a
+    /// silent drop. Without a wired seam it is likewise a surfaced held
+    /// action.
+    fn remove_overlay(&mut self, id: &str) {
+        let Some(slot) = self.live_overlays.as_ref() else {
+            tracing::warn!(
+                overlay = %id,
+                "remove_overlay held: no live overlay seam on this run path \
+                 (the stored removal applies on restart)"
+            );
+            self.publish_overlay_held(id, "no live overlay seam on this run path");
+            return;
+        };
+        let before = self.config.overlays.len();
+        self.config.overlays.retain(|o| o.id != id);
+        if self.config.overlays.len() == before {
+            tracing::warn!(
+                overlay = %id,
+                "remove_overlay held: unknown overlay id (nothing to remove); \
+                 no set published"
+            );
+            self.publish_overlay_held(id, "unknown overlay id (nothing to remove)");
+            return;
+        }
+        let generation = crate::live_overlays::publish_set(slot, self.config.overlays.clone());
+        tracing::info!(
+            overlay = %id,
+            generation,
+            "remove_overlay: overlay removed live at the frame boundary"
+        );
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay".to_owned(),
+                pct: 100,
+                message: Some(format!("overlay {id} removed at the frame boundary")),
+            }));
+    }
+
+    /// Make a HELD overlay apply observable on the realtime stream (the
+    /// ADR-W019 pattern): a `job.progress` outcome with the held phase and
+    /// the reason — drop-oldest, never awaits a client (inv #10) — alongside
+    /// the `tracing::warn!`.
+    fn publish_overlay_held(&self, id: &str, reason: &str) {
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay_held".to_owned(),
+                pct: 0,
+                message: Some(format!("overlay {id} not applied: {reason}")),
+            }));
     }
 
     /// Apply a `RouteSubtitle` by driving the run's live subtitle re-point seam
@@ -2271,7 +2577,7 @@ input_id = "in_b"
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         // IPv6-first: the CLI serve path must bind the IPv6 loopback `[::1]`.
-        let (addr, handle) = bind_and_serve(
+        let (addr, handle, _state) = bind_and_serve(
             "[::1]:0",
             &test_config(),
             publisher,
@@ -2279,6 +2585,7 @@ input_id = "in_b"
             multiview_control::no_preview(),
             None,
             None,
+            multiview_control::LiveApplyCaps::default(),
             async move {
                 let _ = shutdown_rx.await;
             },

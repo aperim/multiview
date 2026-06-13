@@ -491,7 +491,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     // IPv6-first: the serve path must bind the IPv6 loopback `[::1]`.
-    let (addr, server) = control::bind_and_serve(
+    let (addr, server, _state) = control::bind_and_serve(
         "[::1]:0",
         &config,
         Arc::clone(&publisher),
@@ -499,6 +499,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
         Arc::clone(&provider),
         None,
         None,
+        multiview_control::LiveApplyCaps::default(),
         async move {
             let _ = shutdown_rx.await;
         },

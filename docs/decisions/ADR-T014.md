@@ -8,7 +8,7 @@
 - **Relates to:** [ADR-0048](ADR-0048.md) (the shared WebRTC transport endpoint —
   `multiview-webrtc` crate, single-socket mux, full ICE, session GC),
   [ADR-0049](ADR-0049.md) (WebRTC program outputs), [ADR-P006](ADR-P006.md) (WHEP
-  preview completion), [ADR-W020](ADR-W020.md) (SPA player + forms),
+  preview completion), [ADR-W023](ADR-W023.md) (SPA player + forms),
   [ADR-T002](ADR-T002.md) (last-good-frame + tile state machine),
   [ADR-T003](ADR-T003.md) (PTS normalization — `WrapBits::Rtp32`),
   [ADR-T013](ADR-T013.md) (the shared RTP-audio → `AudioStore` rebase seam),
@@ -80,7 +80,7 @@ The WHIP endpoint URL is **derived, never configured**:
 `https://[2001:db8::10]:8443/api/v1/whip/cam-field-1`); the session resource is
 `/api/v1/whip/{source_id}/sessions/{session_id}`. One publisher per source at a
 time. The SPA source form displays the derived URL + token with a copy button
-([ADR-W020](ADR-W020.md)). The plaintext `token` follows the existing
+([ADR-W023](ADR-W023.md)). The plaintext `token` follows the existing
 config-secret posture (rtmp/srt URLs already embed stream keys in config): it is
 returned to authorized readers, present in config export, and migrates together
 with url-embedded keys if/when a `secret_ref` indirection lands.
@@ -117,7 +117,7 @@ the `POST` that created the session — the session URL alone is not a capabilit
 The media-signalling CORS layer (`webrtc.cors_allow_origins`, default `*`,
 ADR-0048) exposes `Location`/`Link` (`Access-Control-Expose-Headers: location,
 link`) so browser publishers can read the session URL cross-origin
-([ADR-W020](ADR-W020.md)).
+([ADR-W023](ADR-W023.md)).
 
 ### 3. Control stays native-free — the `WhipProvider` seam
 
