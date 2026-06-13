@@ -406,6 +406,42 @@ fn device_sync_changes_are_tagged_never_untagged() {
 }
 
 #[test]
+fn sync_test_pattern_event_matches_the_wire_shape() {
+    // DEV-C3: the burnt-in-counter + flash test-pattern event is tagged
+    // `sync.test-pattern`, rides the `devices` topic scoped by the GROUP id, is
+    // a lossless lifecycle event (NOT conflated), and round-trips under v1.
+    let env: EventEnvelope = Envelope::new(
+        Topic::Devices,
+        Seq::new(88),
+        MediaTime::from_nanos(42),
+        Event::SyncGroupTestPattern(multiview_events::SyncGroupTestPattern {
+            group: "lobby-wall".to_owned(),
+            duration_ms: 10_000,
+            frame_counter: true,
+            flash_period_ms: 500,
+        }),
+    )
+    .with_id("lobby-wall");
+    let v = serde_json::to_value(&env).unwrap();
+    assert_eq!(v["t"], "sync.test-pattern");
+    assert_eq!(v["topic"], "devices");
+    assert_eq!(v["id"], "lobby-wall");
+    assert_eq!(
+        v["data"],
+        json!({
+            "group": "lobby-wall",
+            "duration_ms": 10_000,
+            "frame_counter": true,
+            "flash_period_ms": 500
+        })
+    );
+    let back: EventEnvelope = serde_json::from_value(v).unwrap();
+    assert_eq!(back, env);
+    // Lossless lifecycle lane: never conflated (it is not a snapshot/telemetry).
+    assert!(!env.payload.is_conflated());
+}
+
+#[test]
 fn device_discovered_correlates_with_the_scan_operation() {
     // Discovery rows stream while a `POST /discovery/devices/scan` 202
     // operation runs, correlated via the envelope `corr` (ADR-RT007); IPv4

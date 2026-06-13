@@ -51,11 +51,19 @@ fn seeded_group_with_no_measurements_claims_none() {
     assert_eq!(status.achieved, AchievedSync::None);
     assert_eq!(status.target_skew_ms, 50);
     assert_eq!(status.members.len(), 2);
-    let left = status.members.iter().find(|m| m.device == "node-l").unwrap();
+    let left = status
+        .members
+        .iter()
+        .find(|m| m.device == "node-l")
+        .unwrap();
     assert_eq!(left.offset_ms, 0);
     assert!(left.measured_skew_ms.is_none());
     assert!(!left.drift_alarm);
-    let right = status.members.iter().find(|m| m.device == "node-r").unwrap();
+    let right = status
+        .members
+        .iter()
+        .find(|m| m.device == "node-r")
+        .unwrap();
     assert_eq!(right.offset_ms, 100);
 }
 
@@ -111,7 +119,11 @@ fn one_freerun_member_caps_group_at_bounded() {
     let status = rt.status("wall").unwrap();
     // node-r degrades to bounded; the group is the weakest member.
     assert_eq!(status.achieved, AchievedSync::BoundedSkew);
-    let right = status.members.iter().find(|m| m.device == "node-r").unwrap();
+    let right = status
+        .members
+        .iter()
+        .find(|m| m.device == "node-r")
+        .unwrap();
     assert_eq!(right.achieved, Some(AchievedSync::BoundedSkew));
     // And the limiting member is named.
     assert_eq!(status.limited_by.as_deref(), Some("node-r"));
@@ -142,7 +154,11 @@ fn sustained_over_target_raises_member_drift_alarm() {
     );
     assert_eq!(t1, DriftTransition::Raised);
     let status = rt.status("wall").unwrap();
-    let left = status.members.iter().find(|m| m.device == "node-l").unwrap();
+    let left = status
+        .members
+        .iter()
+        .find(|m| m.device == "node-l")
+        .unwrap();
     assert!(left.drift_alarm);
 }
 
@@ -187,7 +203,11 @@ fn sustained_recovery_clears_member_drift_alarm() {
     );
     assert_eq!(cleared, DriftTransition::Cleared);
     let status = rt.status("wall").unwrap();
-    let left = status.members.iter().find(|m| m.device == "node-l").unwrap();
+    let left = status
+        .members
+        .iter()
+        .find(|m| m.device == "node-l")
+        .unwrap();
     assert!(!left.drift_alarm);
 }
 

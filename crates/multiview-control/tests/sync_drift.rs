@@ -20,7 +20,7 @@ fn ms(n: i64) -> MediaTime {
     MediaTime::from_nanos(n.saturating_mul(1_000_000))
 }
 
-/// dwell_up = 2 s, dwell_down = 3 s.
+/// `dwell_up` = 2 s, `dwell_down` = 3 s.
 fn hysteresis() -> DriftHysteresis {
     DriftHysteresis::new(ms(2_000), ms(3_000))
 }
@@ -38,21 +38,27 @@ fn within_target_never_raises() {
     }
 }
 
-/// Exceeding the target for less than dwell_up does NOT raise.
+/// Exceeding the target for less than `dwell_up` does NOT raise.
 #[test]
 fn brief_excursion_under_dwell_does_not_raise() {
     let mut mon = DriftMonitor::new(hysteresis());
     // Present at t=0 (starts the dwell), still present at t=1.9 s — under 2 s.
-    assert_eq!(mon.observe(80.0, 50, MediaTime::ZERO), DriftTransition::None);
+    assert_eq!(
+        mon.observe(80.0, 50, MediaTime::ZERO),
+        DriftTransition::None
+    );
     assert_eq!(mon.observe(80.0, 50, ms(1_900)), DriftTransition::None);
     assert!(!mon.is_alarmed());
 }
 
-/// Exceeding the target continuously for dwell_up RAISES exactly once.
+/// Exceeding the target continuously for `dwell_up` RAISES exactly once.
 #[test]
 fn sustained_excursion_raises_after_dwell_up() {
     let mut mon = DriftMonitor::new(hysteresis());
-    assert_eq!(mon.observe(80.0, 50, MediaTime::ZERO), DriftTransition::None);
+    assert_eq!(
+        mon.observe(80.0, 50, MediaTime::ZERO),
+        DriftTransition::None
+    );
     assert_eq!(mon.observe(80.0, 50, ms(1_999)), DriftTransition::None);
     // At exactly dwell_up the alarm raises.
     assert_eq!(mon.observe(80.0, 50, ms(2_000)), DriftTransition::Raised);
@@ -63,7 +69,7 @@ fn sustained_excursion_raises_after_dwell_up() {
 }
 
 /// A raised alarm does NOT clear the instant the skew recovers — it must stay
-/// recovered for dwell_down (hysteresis / anti-flap).
+/// recovered for `dwell_down` (hysteresis / anti-flap).
 #[test]
 fn recovery_under_dwell_down_does_not_clear() {
     let mut mon = DriftMonitor::new(hysteresis());
@@ -75,7 +81,7 @@ fn recovery_under_dwell_down_does_not_clear() {
     assert!(mon.is_alarmed());
 }
 
-/// Sustained recovery for dwell_down CLEARS the alarm exactly once.
+/// Sustained recovery for `dwell_down` CLEARS the alarm exactly once.
 #[test]
 fn sustained_recovery_clears_after_dwell_down() {
     let mut mon = DriftMonitor::new(hysteresis());
@@ -108,7 +114,10 @@ fn fault_returning_within_clear_dwell_does_not_flap() {
 #[test]
 fn measurement_exactly_at_target_is_within_spec() {
     let mut mon = DriftMonitor::new(hysteresis());
-    assert_eq!(mon.observe(50.0, 50, MediaTime::ZERO), DriftTransition::None);
+    assert_eq!(
+        mon.observe(50.0, 50, MediaTime::ZERO),
+        DriftTransition::None
+    );
     assert_eq!(mon.observe(50.0, 50, ms(10_000)), DriftTransition::None);
     assert!(!mon.is_alarmed());
 }
