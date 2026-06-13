@@ -6709,6 +6709,234 @@
         }
       }
     },
+    "/api/v1/whep/{output_id}": {
+      "post": {
+        "tags": [
+          "whep"
+        ],
+        "summary": "`POST /api/v1/whep/{output_id}` — view: an SDP offer in, `201` + answer SDP +\n`Location` out (the program is then sent over SRTP).",
+        "operationId": "whep_view",
+        "parameters": [
+          {
+            "name": "output_id",
+            "in": "path",
+            "description": "The webrtc output id to view.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "SDP offer",
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Session created; SDP answer in the body, Location at the session resource.",
+            "content": {
+              "application/sdp": {}
+            }
+          },
+          "400": {
+            "description": "Malformed SDP offer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing credentials (the output token or a View API key).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A credential lacking view rights.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No configured webrtc output by that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "The offer shares no supported codec (H.264 + Opus).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not application/sdp.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Over max_viewers / the viewer pool, or no serve transport.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "whep"
+        ],
+        "summary": "`OPTIONS /api/v1/whep/{output_id}` — CORS preflight; advertises\n`Accept-Post: application/sdp`.",
+        "operationId": "whep_options",
+        "parameters": [
+          {
+            "name": "output_id",
+            "in": "path",
+            "description": "The webrtc output id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Preflight; Accept-Post: application/sdp."
+          }
+        }
+      }
+    },
+    "/api/v1/whep/{output_id}/sessions/{session_id}": {
+      "delete": {
+        "tags": [
+          "whep"
+        ],
+        "summary": "`DELETE /api/v1/whep/{output_id}/sessions/{session_id}` — tear the viewer\nsession down. `200` (idempotent within the tombstone window), `404` for an\nunknown id.",
+        "operationId": "whep_delete",
+        "parameters": [
+          {
+            "name": "output_id",
+            "in": "path",
+            "description": "The webrtc output id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHEP session id from the view Location.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session released (idempotent within the tombstone window)."
+          },
+          "401": {
+            "description": "Missing credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A credential lacking rights.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such live/known session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "whep"
+        ],
+        "summary": "`PATCH /api/v1/whep/{output_id}/sessions/{session_id}` — **`405`** (vanilla\nICE; trickle / ICE restart unimplemented, ADR-0049 §5.1). `Allow: DELETE,\nOPTIONS`.",
+        "operationId": "whep_patch",
+        "parameters": [
+          {
+            "name": "output_id",
+            "in": "path",
+            "description": "The webrtc output id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "The WHEP session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "405": {
+            "description": "Trickle ICE / ICE restart are not supported (vanilla ICE)."
+          }
+        }
+      }
+    },
     "/api/v1/whip/{source_id}": {
       "post": {
         "tags": [
@@ -13112,6 +13340,14 @@
     {
       "name": "preview",
       "description": "Live preview: WHEP focus sessions per scope (program/input/output)"
+    },
+    {
+      "name": "whip",
+      "description": "WHIP ingest (RFC 9725): WebRTC contribution publishers POST to a source-derived endpoint (ADR-T014)"
+    },
+    {
+      "name": "whep",
+      "description": "WHEP-serve output viewers (ADR-0049): browsers POST to an output-derived endpoint to play the real encoded program over WebRTC"
     },
     {
       "name": "config",
