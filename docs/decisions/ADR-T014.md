@@ -96,7 +96,7 @@ at **64 KiB** (an explicit axum body limit on these routes).
 
 | Request | Response |
 |---|---|
-| `OPTIONS /whip/{source_id}` | CORS preflight; `Accept-Post: application/sdp`. No `Link` ICE-server headers — no STUN/TURN is offered (host + advertised-address candidates only, ADR-0048). |
+| `OPTIONS /whip/{source_id}` | CORS preflight; `Accept-Post: application/sdp`. No `Link` ICE-server headers — Multiview does not hand clients STUN/TURN servers to use; its own candidates (host + advertised, plus relayed via the in-crate TURN client where configured — [ADR-0048 §5.1](ADR-0048.md), Amendment 2026-06-13) are gathered server-side and returned in the answer. |
 | `POST /whip/{source_id}` (`application/sdp` offer) | **`201 Created`** + `Location: …/sessions/{session_id}` + `application/sdp` answer body. No `ETag`: RFC 9725 ties the entity-tag to ICE-restart support, which we do not implement — advertising it would be a lie. |
 | `POST` with any other content type | **`415 Unsupported Media Type`**. |
 | `POST` with a malformed offer | **`400 Bad Request`**. |
