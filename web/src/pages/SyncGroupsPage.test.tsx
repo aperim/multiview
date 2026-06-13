@@ -1,7 +1,8 @@
 // SyncGroupsPage — CRUD over /api/v1/sync-groups with per-member offset_ms,
-// target_skew_ms bounds, the HONEST weakest-member tier claim (managed-
-// devices.md §8 — never over-claimed), cast devices never offered as members
-// (Tier D), and the 202 measure verb.
+// target_skew_ms bounds, the HONEST weakest-member tier (managed-devices.md §8
+// — never over-claimed, now SERVER-computed from live clock quality and read
+// from GET /sync-groups/{id}/status), the drift-alarm indicator, cast devices
+// never offered as members (Tier D), and the 202 measure + test-pattern verbs.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -33,12 +34,31 @@ const GROUPS = [
   },
 ];
 
+// The server computes the achieved tier (weakest member) + per-member skew +
+// drift state and serves it from GET /sync-groups/{id}/status. The default
+// status mirrors the GROUPS fixture: dev-a (a vendor decoder) caps the wall at
+// bounded skew even though dev-b is frame-accurate, and dev-a is the sole
+// limiter — never over-claimed.
+const WALL_STATUS = {
+  group: 'wall',
+  target_skew_ms: 80,
+  achieved: 'bounded-skew',
+  limited_by: 'dev-a',
+  measured_skew_ms: 42.5,
+  drift_alarm: false,
+  members: [
+    { device: 'dev-a', offset_ms: 120, achieved: 'bounded-skew', measured_skew_ms: 42.5, drift_alarm: false },
+    { device: 'dev-b', offset_ms: 0, achieved: 'frame-accurate', measured_skew_ms: 3.1, drift_alarm: false },
+  ],
+};
+
 const server = setupServer(
   http.get('*/api/v1/sync-groups', () => HttpResponse.json(GROUPS)),
   http.get('*/api/v1/devices', () => HttpResponse.json(DEVICES)),
   http.get('*/api/v1/devices/:id/status', () =>
     HttpResponse.json({ title: 'not found', status: 404 }, { status: 404 }),
   ),
+  http.get('*/api/v1/sync-groups/wall/status', () => HttpResponse.json(WALL_STATUS)),
 );
 
 beforeAll(() => {
@@ -60,35 +80,25 @@ function renderGroups(): void {
 }
 
 describe('SyncGroupsPage', () => {
-  it('lists groups with target skew and the honest weakest-member tier', async () => {
+  it('lists groups with target skew and the server-computed weakest-member tier', async () => {
     renderGroups();
     expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
     expect(screen.getByText(/80 ms/)).toBeInTheDocument();
-    // dev-a is a zowietek (Tier C, bounded drift): the group can only claim
-    // bounded skew even though dev-b is frame-accurate.
-    expect(screen.getByText(/bounded skew/i)).toBeInTheDocument();
+    // The achieved tier comes from GET /sync-groups/wall/status (the server
+    // folds dev-a's vendor-decoder bounded tier with dev-b's frame-accurate to
+    // the weakest member). The UI never re-derives it from the driver string.
+    expect(await screen.findByText(/bounded skew/i)).toBeInTheDocument();
   });
 
   it('names the unique weakest member limiting the tier (§8 honesty rule)', async () => {
     renderGroups();
     expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
-    // dev-a (zowietek, bounded skew) is the sole member dragging the group
-    // below dev-b's frame-accurate tier: say so, per the brief's sketch.
-    expect(screen.getByText('limited by dev-a')).toBeInTheDocument();
+    // The server names dev-a as the sole limiter; the UI surfaces it verbatim.
+    expect(await screen.findByText('limited by dev-a')).toBeInTheDocument();
   });
 
-  it('omits the limiter when the weakest tier is shared by several members', async () => {
+  it('omits the limiter when the server reports no sole limiting member', async () => {
     server.use(
-      http.get('*/api/v1/devices', () =>
-        HttpResponse.json([
-          ...DEVICES,
-          {
-            id: 'dev-c',
-            name: 'Stage box',
-            body: { id: 'dev-c', driver: 'zowietek', address: 'http://[fd00::2]' },
-          },
-        ]),
-      ),
       http.get('*/api/v1/sync-groups', () =>
         HttpResponse.json([
           {
@@ -105,12 +115,62 @@ describe('SyncGroupsPage', () => {
           },
         ]),
       ),
+      // Both members sit at the same weakest tier, so the server names no sole
+      // limiter (omitting `limited_by`): naming one would be arbitrary.
+      http.get('*/api/v1/sync-groups/pair/status', () =>
+        HttpResponse.json({
+          group: 'pair',
+          target_skew_ms: 80,
+          achieved: 'bounded-skew',
+          measured_skew_ms: 50.0,
+          drift_alarm: false,
+          members: [
+            { device: 'dev-a', offset_ms: 0, achieved: 'bounded-skew', measured_skew_ms: 50.0, drift_alarm: false },
+            { device: 'dev-c', offset_ms: 0, achieved: 'bounded-skew', measured_skew_ms: 44.0, drift_alarm: false },
+          ],
+        }),
+      ),
     );
     renderGroups();
     expect(await screen.findByText('Pair wall')).toBeInTheDocument();
-    expect(screen.getByText(/bounded skew/i)).toBeInTheDocument();
+    expect(await screen.findByText(/bounded skew/i)).toBeInTheDocument();
     // No single member limits the claim: naming one would be dishonest.
     expect(screen.queryByText(/limited by/i)).not.toBeInTheDocument();
+  });
+
+  it('raises the drift-alarm indicator when the server reports one', async () => {
+    server.use(
+      http.get('*/api/v1/sync-groups/wall/status', () =>
+        HttpResponse.json({ ...WALL_STATUS, drift_alarm: true, measured_skew_ms: 180.5 }),
+      ),
+    );
+    renderGroups();
+    expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
+    // The drift alarm is a text + icon badge (WCAG: never colour alone). The
+    // exact "Drift alarm" badge label distinguishes it from the page's
+    // "drift alarm threshold" descriptive copy.
+    expect(await screen.findByText('Drift alarm')).toBeInTheDocument();
+    // The over-target measured skew is surfaced.
+    expect(screen.getByText(/180\.5 ms/)).toBeInTheDocument();
+  });
+
+  it('test pattern rides the 202 operation path', async () => {
+    let triggered = 0;
+    server.use(
+      http.post('*/api/v1/sync-groups/wall/test-pattern', () => {
+        triggered += 1;
+        return HttpResponse.json(
+          { operation_id: 'op-tp', kind: 'test-pattern' },
+          { status: 202 },
+        );
+      }),
+    );
+    renderGroups();
+    expect(await screen.findByText('Lobby wall')).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole('button', { name: /show test pattern: lobby wall/i }),
+    );
+    expect(triggered).toBe(1);
   });
 
   it('measure rides the 202 operation path', async () => {

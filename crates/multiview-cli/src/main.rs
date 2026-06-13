@@ -820,7 +820,15 @@ async fn run_pipeline_until_ctrl_c(
     // to the run's tick-0 anchor (published when the clock seeds) and never
     // touches the engine (inv #1/#10); it self-stops on the run's StopSignal.
     let timing_cfg = config.timing.clone().unwrap_or_default();
-    let timing_task = multiview_cli::timing_status::spawn(
+    // DEV-C3: share the served control plane's sync-group runtime so the
+    // `timing.status` `groups` lane carries each group's weakest-member achieved
+    // tier + worst measured skew once a driver observes its members. A wait-free
+    // read off the engine each period (invariant #10); `None` when no control
+    // plane is served (the lane is then honestly empty).
+    let sync_runtime = running_persist
+        .as_ref()
+        .map(|p| Arc::clone(&p.state.sync_runtime));
+    let timing_task = multiview_cli::timing_status::spawn_with_runtime(
         Arc::clone(&publisher),
         pipeline.epoch_anchor_slot(),
         pipeline.shared_epoch(),
@@ -830,6 +838,7 @@ async fn run_pipeline_until_ctrl_c(
             ptp_phc: timing_cfg.ptp_phc.clone(),
             ptp_utc_offset_ns: timing_cfg.ptp_utc_offset_ns(),
         },
+        sync_runtime,
         stop.clone(),
     );
 
@@ -1123,7 +1132,13 @@ async fn run_software_until_ctrl_c(
     // broadcast. The software run has no HLS sinks, so its epoch cell has no
     // PDT consumer; the WS surface is identical to the full-pipeline path.
     let timing_cfg = config.timing.clone().unwrap_or_default();
-    let timing_task = multiview_cli::timing_status::spawn(
+    // DEV-C3: share the served control plane's sync-group runtime (when one is
+    // served) so the `timing.status` `groups` lane carries the weakest-member
+    // achieved tier + worst measured skew once a driver observes members.
+    let sync_runtime = running_persist
+        .as_ref()
+        .map(|p| Arc::clone(&p.state.sync_runtime));
+    let timing_task = multiview_cli::timing_status::spawn_with_runtime(
         Arc::clone(&publisher),
         engine.epoch_anchor_slot(),
         multiview_output::SharedEpoch::new(),
@@ -1133,6 +1148,7 @@ async fn run_software_until_ctrl_c(
             ptp_phc: timing_cfg.ptp_phc.clone(),
             ptp_utc_offset_ns: timing_cfg.ptp_utc_offset_ns(),
         },
+        sync_runtime,
         stop.clone(),
     );
 

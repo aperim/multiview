@@ -22,6 +22,7 @@ use crate::concurrency::IdempotencyStore;
 use crate::devices::cast::media::CastDelivery;
 use crate::devices::cast::store::CastSessionStore;
 use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
+use crate::devices::sync_runtime::SyncGroupRuntime;
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
@@ -80,6 +81,11 @@ pub struct SeededResources {
     /// The `sync-groups` store, one resource per `config.sync_groups`
     /// (presentation-sync groups, ADR-M008/M010).
     pub sync_groups: Arc<dyn ResourceRepository>,
+    /// The sync-group **runtime** registry, seeded from `config.sync_groups`:
+    /// the latest-wins achieved-tier (weakest member) + measured-skew + drift
+    /// projection backing `GET /sync-groups/{id}/status` and the `timing.status`
+    /// group skew lane (DEV-C3). Runtime state only — never persisted/exported.
+    pub sync_runtime: Arc<SyncGroupRuntime>,
     /// The device **status** registry, seeded with one `ADOPTING` runtime row
     /// per `config.devices` so a freshly-booted control plane answers
     /// `GET /devices/{id}/status` before any driver probe. Runtime state only —
@@ -209,6 +215,11 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
             },
         )?;
     }
+    // The sync-group runtime projection: seeded from the same config groups so
+    // `GET /sync-groups/{id}/status` and the `timing.status` group lane answer
+    // immediately (with no measurements yet → honest `none` tier). DEV-C3.
+    let sync_runtime = SyncGroupRuntime::new();
+    sync_runtime.seed(&config.sync_groups);
 
     let outputs = InMemoryOutputStore::new();
     for (index, output) in config.outputs.iter().enumerate() {
@@ -235,6 +246,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         probes: Arc::new(probes),
         devices: Arc::new(devices),
         sync_groups: Arc::new(sync_groups),
+        sync_runtime: Arc::new(sync_runtime),
         device_status: Arc::new(device_status),
         audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
         layouts: Arc::new(layouts),
@@ -320,6 +332,13 @@ pub struct AppState {
     /// presentation-sync groups, ADR-M008/M010). The body is a
     /// `multiview_config::SyncGroup`.
     pub sync_groups: Arc<dyn ResourceRepository>,
+    /// The sync-group **runtime** registry (runtime state, never
+    /// persisted/exported): the latest-wins achieved-tier (weakest member),
+    /// per-member measured-skew, and drift-alarm projection backing
+    /// `GET /sync-groups/{id}/status` and the `timing.status` group skew lane
+    /// (DEV-C3). Bounded, control-plane-only — it can never back-pressure the
+    /// engine (invariant #10).
+    pub sync_runtime: Arc<SyncGroupRuntime>,
     /// The latest-wins device **status** registry (runtime state, never
     /// persisted/exported): the conflated `device.status` lane's backing store
     /// and `GET /devices/{id}/status`'s cold-snapshot source. Bounded, control-
@@ -602,6 +621,7 @@ impl AppState {
             probes: Arc::new(InMemoryProbeStore::new()),
             devices: Arc::new(InMemoryDeviceStore::new()),
             sync_groups: Arc::new(InMemorySyncGroupStore::new()),
+            sync_runtime: Arc::new(SyncGroupRuntime::new()),
             device_status: Arc::new(DeviceStatusRegistry::new()),
             discovery: Arc::new(DiscoveryInventory::default()),
             discovery_browser: Arc::new(NullBrowser),
@@ -876,6 +896,14 @@ impl AppState {
         self
     }
 
+    /// Replace the sync-group runtime registry (e.g. to share one with the
+    /// `timing.status` producer / device pollers that feed it observations).
+    #[must_use]
+    pub fn with_sync_runtime(mut self, sync_runtime: Arc<SyncGroupRuntime>) -> Self {
+        self.sync_runtime = sync_runtime;
+        self
+    }
+
     /// Replace the device status registry (e.g. to share one with a driver
     /// poller / broadcaster).
     #[must_use]
@@ -964,6 +992,29 @@ impl AppState {
             .count()
     }
 
+    /// Boot-seed the sync-group presentation offsets (DEV-C3 / ADR-M010):
+    /// publish each configured member's `offset_ms` as a `device.sync`
+    /// `Joined { offset_ms }` Class-1 apply event so a member node trims its
+    /// presentation buffer at a frame boundary (the engine output cadence is
+    /// untouched). This is the control-plane side of the offset seam; the node
+    /// adds the trim to its `link_offset`. Published through the broadcaster's
+    /// non-blocking drop-oldest send (invariant #10). Called once at bind time,
+    /// off the engine hot loop. Returns the number of member offsets announced.
+    ///
+    /// The node-side transport that delivers the trim to a display node's
+    /// presentation discipline is the display-node driver (DEV-A4/A5); until it
+    /// lands for display nodes this announcement rides the existing `device.sync`
+    /// seam and the `/sync-groups/{id}/status` projection.
+    #[allow(clippy::must_use_candidate)] // count is informational at the call site.
+    pub fn announce_sync_offsets(&self) -> usize {
+        let broadcaster = self.poller_wiring().broadcaster;
+        let offsets = self.sync_runtime.member_offsets();
+        for (group, device, offset_ms) in &offsets {
+            let _seq = broadcaster.sync_member_offset(device, group, i64::from(*offset_ms));
+        }
+        offsets.len()
+    }
+
     /// Install the Cast delivery map (DEV-D2): the binary builds it from the
     /// validated `control.cast_media_base` × the DEV-D1 HLS mounts; tests
     /// inject a fixed map. Without one (the default), the cast-session routes
@@ -997,6 +1048,7 @@ impl AppState {
         self.probes = seeded.probes;
         self.devices = seeded.devices;
         self.sync_groups = seeded.sync_groups;
+        self.sync_runtime = seeded.sync_runtime;
         self.device_status = seeded.device_status;
         self.audio_routing = seeded.audio;
         self.repository = seeded.layouts;

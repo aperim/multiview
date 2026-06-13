@@ -700,6 +700,16 @@ fn device_router() -> Router<AppState> {
             "/sync-groups/{id}/measure",
             post(sync_groups::measure_sync_group),
         )
+        // DEV-C3: the read-only weakest-member status projection + the
+        // burnt-in-counter/flash test-pattern action.
+        .route(
+            "/sync-groups/{id}/status",
+            get(sync_groups::get_sync_group_status),
+        )
+        .route(
+            "/sync-groups/{id}/test-pattern",
+            post(sync_groups::test_pattern_sync_group),
+        )
 }
 /// Build the `/api/v1` resource + command routes (without the realtime or docs
 /// routes, which are wired by [`crate::router()`]).

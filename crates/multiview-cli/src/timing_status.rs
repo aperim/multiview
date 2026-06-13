@@ -108,6 +108,38 @@ pub fn publish_once<W: WallClockSampler, Q: NtpQuery>(
     stream_id: &str,
     link_offset_ns: i64,
 ) -> EpochStatus {
+    // The legacy single-program path carries no measured sync groups (the honest
+    // "none measured" — never a fabricated tier). The DEV-C3 wiring uses
+    // `publish_once_with_groups` to fan the runtime's measured group skews in.
+    publish_once_with_groups(
+        sampler,
+        publisher,
+        hls_epoch,
+        stream_id,
+        link_offset_ns,
+        &[],
+    )
+}
+
+/// Derive one epoch sample, publish it as `timing.status` **carrying the given
+/// per-sync-group achieved tier + worst measured skew** (DEV-C3), and mirror the
+/// epoch into the HLS-PDT cell. Returns the published snapshot.
+///
+/// `groups` is the [`SyncGroupRuntime::all_skews`] summary the control-plane
+/// runtime produces: each group's weakest-member achieved tier (never
+/// over-claimed) and worst measured member skew. Like the epoch it is conflated
+/// latest-wins and ring-excluded; the engine never produces or awaits it
+/// (invariant #10).
+///
+/// [`SyncGroupRuntime::all_skews`]: multiview_control::devices::sync_runtime::SyncGroupRuntime::all_skews
+pub fn publish_once_with_groups<W: WallClockSampler, Q: NtpQuery>(
+    sampler: &mut EpochSampler<W, Q>,
+    publisher: &EnginePublisher<EngineStateSnapshot, Event>,
+    hls_epoch: &SharedEpoch,
+    stream_id: &str,
+    link_offset_ns: i64,
+    groups: &[multiview_events::SyncGroupSkew],
+) -> EpochStatus {
     let status = sampler.sample_once();
     // One anchor, every surface: the HLS segmenter reads this cell at each
     // segment close (off the hot path), so PDT and the WS epoch agree. A
@@ -129,9 +161,9 @@ pub fn publish_once<W: WallClockSampler, Q: NtpQuery>(
         link_offset_ns,
         clock_source: status.source,
         clock_quality: status.quality,
-        // Sync-group skew measurement is DEV-C3; until then the honest value
-        // is "none measured", never a fabricated tier.
-        groups: vec![],
+        // The weakest-member achieved tier + worst measured skew per group, from
+        // the control-plane sync-group runtime (empty until a group is measured).
+        groups: groups.to_vec(),
     }));
     status
 }
@@ -141,6 +173,8 @@ pub fn publish_once<W: WallClockSampler, Q: NtpQuery>(
 /// period until `stop` is raised.
 ///
 /// The task self-stops within one period of the [`StopSignal`] being raised.
+/// This legacy entry point publishes no sync-group skew lane; the binary uses
+/// [`spawn_with_runtime`] to fan the control-plane runtime's group skews in.
 pub fn spawn(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     anchor: EpochAnchorSlot,
@@ -148,8 +182,35 @@ pub fn spawn(
     options: TimingStatusOptions,
     stop: StopSignal,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_with_runtime(publisher, anchor, hls_epoch, options, None, stop)
+}
+
+/// Spawn the ~1 Hz timing-status task, additionally fanning each sync group's
+/// **weakest-member** achieved tier + worst measured skew into the
+/// `timing.status` `groups` lane (DEV-C3) when a [`SyncGroupRuntime`] is
+/// supplied. The runtime is read (`all_skews`) each period off the engine
+/// (invariant #10); a `None` runtime publishes an empty group lane (honest:
+/// nothing measured).
+///
+/// [`SyncGroupRuntime`]: multiview_control::devices::sync_runtime::SyncGroupRuntime
+pub fn spawn_with_runtime(
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    anchor: EpochAnchorSlot,
+    hls_epoch: SharedEpoch,
+    options: TimingStatusOptions,
+    sync_runtime: Option<Arc<multiview_control::devices::sync_runtime::SyncGroupRuntime>>,
+    stop: StopSignal,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(&publisher, &anchor, &hls_epoch, &options, &stop).await;
+        run(
+            &publisher,
+            &anchor,
+            &hls_epoch,
+            &options,
+            sync_runtime.as_deref(),
+            &stop,
+        )
+        .await;
     })
 }
 
@@ -159,6 +220,7 @@ async fn run(
     anchor: &EpochAnchorSlot,
     hls_epoch: &SharedEpoch,
     options: &TimingStatusOptions,
+    sync_runtime: Option<&multiview_control::devices::sync_runtime::SyncGroupRuntime>,
     stop: &StopSignal,
 ) {
     let mut ptp = PtpLeg::open(options.ptp_phc.as_deref());
@@ -194,12 +256,19 @@ async fn run(
         // Drive the PTP leg first (one cheap PHC read per period under the
         // `ptp` feature; a no-op otherwise) so the selection sees fresh state.
         ptp.sample(anchor);
-        let _status = publish_once(
+        // Fan each sync group's weakest-member achieved tier + worst measured
+        // skew into the `groups` lane (a wait-free read of the control-plane
+        // runtime; empty when no runtime / nothing measured — invariant #10).
+        let groups = sync_runtime
+            .map(multiview_control::devices::sync_runtime::SyncGroupRuntime::all_skews)
+            .unwrap_or_default();
+        let _status = publish_once_with_groups(
             s,
             publisher,
             hls_epoch,
             &options.stream_id,
             options.link_offset_ns,
+            &groups,
         );
     }
 }

@@ -762,6 +762,9 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
         Event::DeviceMode(mode) => Some(mode.device_id.clone()),
         Event::DeviceError(error) => Some(error.device_id.clone()),
         Event::DeviceSync(sync) => Some(sync.device_id.clone()),
+        // A sync-group test pattern scopes by the group id (the resource it
+        // acts on), so an `ids` filter on a single group narrows it.
+        Event::SyncGroupTestPattern(tp) => Some(tp.group.clone()),
         // Cast-session membership events scope by the session id (the same id
         // the conflated `device.status` lane keys the session's state under).
         Event::CastSessionStarted(started) => Some(started.session_id.clone()),
@@ -815,6 +818,7 @@ pub fn topic_for_event(event: &Event) -> Topic {
         | Event::DeviceMode(_)
         | Event::DeviceError(_)
         | Event::DeviceSync(_)
+        | Event::SyncGroupTestPattern(_)
         | Event::DeviceDiscovered(_)
         | Event::CastSessionStarted(_)
         | Event::CastSessionRemoved(_)
