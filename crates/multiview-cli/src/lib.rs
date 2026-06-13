@@ -133,3 +133,14 @@ pub mod audio;
 /// samples per output tick (per-tile burn-in). Behind the `ffmpeg` feature.
 #[cfg(feature = "ffmpeg")]
 pub mod captions;
+
+/// WHIP **ingest** wiring (ADR-T014): the `WhipProvider` implementation over the
+/// `multiview-webrtc` native endpoint, the per-source publisher rendezvous
+/// registry, and the supervised `drive_webrtc` loop that decodes a publisher's
+/// depacketized H.264/Opus into the standard `TileStore`/`AudioStore` pipeline.
+/// Behind the off-by-default `webrtc-native` feature (the str0m endpoint +
+/// ffmpeg decode); the WHIP source tile rides `NO_SIGNAL` until a publisher
+/// arrives and the publisher can never pace/back-pressure the engine
+/// (invariants #1/#2/#10).
+#[cfg(feature = "webrtc-native")]
+pub mod webrtc_ingest;
