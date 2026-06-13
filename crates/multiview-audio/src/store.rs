@@ -67,6 +67,27 @@ impl RingSnapshot {
     }
 }
 
+/// Copy `src` interleaved samples into `dst` starting at frame offset
+/// `dst_frame` (in frames; `channels` samples per frame). Bounds-checked and
+/// panic-free: a copy that would run past `dst` is clamped (never indexes out of
+/// range), and a negative/oversized offset places nothing.
+fn copy_into(dst: &mut [f32], src: &[f32], dst_frame: i64, channels: usize) {
+    if channels == 0 || src.is_empty() {
+        return;
+    }
+    let Ok(dst_frame) = usize::try_from(dst_frame) else {
+        return; // a negative offset cannot be placed.
+    };
+    let dst_off = dst_frame.saturating_mul(channels);
+    let Some(region) = dst.get_mut(dst_off..) else {
+        return; // the offset is past the destination buffer.
+    };
+    let run = region.len().min(src.len());
+    if let (Some(d), Some(s)) = (region.get_mut(..run), src.get(..run)) {
+        d.copy_from_slice(s);
+    }
+}
+
 /// A bounded, lock-free, gap-free last-good audio store for one source.
 ///
 /// Construct with [`AudioStore::new`]; a decode thread feeds it with
@@ -208,6 +229,86 @@ impl AudioStore {
         self.window.store(std::sync::Arc::new(RingSnapshot {
             base_frame,
             samples: next,
+        }));
+        Ok(())
+    }
+
+    /// Write `block` at an **absolute frame index** `at` (the RTP-audio rebase
+    /// seam's store entry point — ADR-T013 §4 / ADR-0033).
+    ///
+    /// Unlike the append-only [`publish`](AudioStore::publish), this places the
+    /// block at a caller-chosen absolute index so a reordered packet lands at its
+    /// **true** frame and the rebaser's anchor maps RTP time straight onto the
+    /// store's absolute coordinate. An unwritten span between writes is
+    /// **silence** (gap-free by construction — the new window covers the union of
+    /// the old window and the placed block, with any hole left as zeroes), and a
+    /// frame older than the surviving bounded window is dropped (drop-oldest,
+    /// never grows — invariant #2/#5). The placed block **overwrites** whatever
+    /// occupied its frames (last write at an index wins). A negative `at` is
+    /// clamped to frame `0`.
+    ///
+    /// This is O(window) copy-on-write like [`publish`](AudioStore::publish) and
+    /// runs on the *sampled* ingest/decode thread, never the output clock — it is
+    /// non-blocking and gives the wait-free reader a stable snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::FormatMismatch`] if `block`'s format differs from the
+    /// store's working format.
+    pub fn publish_at(&self, at: i64, block: &AudioBlock) -> Result<()> {
+        if block.format() != self.format {
+            return Err(AudioError::FormatMismatch {
+                expected_rate: self.format.sample_rate(),
+                expected_channels: self.format.channel_count(),
+                actual_rate: block.format().sample_rate(),
+                actual_channels: block.format().channel_count(),
+            });
+        }
+        let channels = self.format.channel_count();
+        if channels == 0 {
+            return Ok(());
+        }
+        let incoming = block.interleaved();
+        let incoming_frames = i64::try_from(incoming.len() / channels).unwrap_or(i64::MAX);
+        if incoming_frames == 0 {
+            return Ok(());
+        }
+        let at = at.max(0);
+        let block_end = at.saturating_add(incoming_frames);
+
+        let current = self.window.load();
+        let old_head = current.head_frame(channels);
+        // The new window covers the union of the existing window and the placed
+        // block, so neither already-buffered frames nor the new block are lost
+        // and any hole between them is silence.
+        let new_base = current.base_frame.min(at);
+        let new_head = old_head.max(block_end);
+        let span_frames = usize::try_from(new_head.saturating_sub(new_base)).unwrap_or(0);
+        let mut merged = vec![0.0f32; span_frames.saturating_mul(channels)];
+
+        // Overlay the existing window first, then the new block (last write wins
+        // on overlap — a re-sent packet replaces the stale one at that index).
+        copy_into(
+            &mut merged,
+            &current.samples,
+            current.base_frame.saturating_sub(new_base),
+            channels,
+        );
+        copy_into(&mut merged, incoming, at.saturating_sub(new_base), channels);
+
+        // Drop-oldest past capacity (whole frames only), advancing the base.
+        let cap_samples = self.capacity_frames.saturating_mul(channels);
+        let mut base_frame = new_base;
+        let overflow_samples = merged.len().saturating_sub(cap_samples);
+        if overflow_samples > 0 {
+            let evicted_frames = i64::try_from(overflow_samples / channels).unwrap_or(i64::MAX);
+            merged.drain(0..overflow_samples);
+            base_frame = base_frame.saturating_add(evicted_frames);
+        }
+
+        self.window.store(std::sync::Arc::new(RingSnapshot {
+            base_frame,
+            samples: merged,
         }));
         Ok(())
     }
