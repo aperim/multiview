@@ -2401,6 +2401,15 @@ impl Pipeline {
                          connector-owning GPU(s) (ADR-0044 §3; never the merely-\
                          least-loaded GPU)"
                     );
+                } else if !self.display_plans.is_empty() {
+                    tracing::warn!(
+                        heads = self.display_plans.len(),
+                        "scanout affinity unresolved: display heads exist but no \
+                         connector→GPU ownership could be probed (unmatched connector \
+                         name or unmappable PCI id); admission falls back to least-load \
+                         placement, so a multi-GPU host may incur a scanout cross-copy \
+                         (ADR-0044 §3)"
+                    );
                 }
                 localities
             };
