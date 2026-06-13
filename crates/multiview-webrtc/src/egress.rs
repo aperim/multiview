@@ -130,6 +130,11 @@ impl EgressSink {
     /// / WHIP target. Returns `true` if an older sample was evicted (the consumer
     /// is lagging); `false` otherwise. A poisoned mutex silently drops the sample
     /// (the egress is best-effort and must never propagate a failure outward).
+    ///
+    /// `#[must_use]`: the returned lag flag is the only synchronous "egress
+    /// falling behind" signal at the push site; a caller that does not care binds
+    /// it to `_`.
+    #[must_use]
     pub fn push(&self, sample: EgressSample) -> bool {
         let Ok(mut ring) = self.inner.lock() else {
             return false;

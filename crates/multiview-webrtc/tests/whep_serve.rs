@@ -40,7 +40,7 @@ fn config_with_advertised() -> EndpointConfig {
         // An ephemeral port + a concrete advertised host so the answer carries a
         // reachable candidate (the unspecified bind addr alone is not a candidate).
         udp_port: 0,
-        advertised_addresses: vec!["[2001:db8::1]".parse().unwrap()],
+        advertised_addresses: vec!["2001:db8::1".parse().unwrap()],
         ..EndpointConfig::default()
     }
 }

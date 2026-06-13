@@ -24,10 +24,16 @@
 //! the consumer lanes. A wedged peer loses only its own session's media.
 
 mod ingest;
+mod whep_serve;
 mod whip_endpoint;
+mod whip_push;
 
 pub use ingest::{RtpRing, RtpRingEngine, MAX_INGRESS_RTP};
+pub use whep_serve::{WhepNegotiated, WhepServeEndpoint, WhepServeHandle};
 pub use whip_endpoint::{WhipEndpoint, WhipHandle, WhipNegotiated};
+pub use whip_push::{
+    PushBackoff, WhipPushAnswer, WhipPushClient, WhipPushOffer, WhipSignaller, MAX_REDIRECTS,
+};
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};

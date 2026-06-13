@@ -12,7 +12,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::as_conversions
 )]
 
 use multiview_webrtc::egress::{egress_feed, EgressMedia, EgressSample, MAX_EGRESS};
@@ -39,8 +40,9 @@ fn audio(ts: u32) -> EgressSample {
 fn feed_is_fifo_and_bounded_drop_oldest() {
     let (sink, feed) = egress_feed();
     // Push past the cap; the oldest are evicted, the newest survive in order.
-    for i in 0..(MAX_EGRESS as u32 + 50) {
-        sink.push(video(i, i == 0));
+    let count = u32::try_from(MAX_EGRESS).unwrap_or(u32::MAX) + 50;
+    for i in 0..count {
+        let _ = sink.push(video(i, i == 0));
     }
     assert!(feed.len() <= MAX_EGRESS, "feed must be bounded");
     assert_eq!(feed.dropped(), 50, "exactly the overflow was dropped");
@@ -52,8 +54,8 @@ fn feed_is_fifo_and_bounded_drop_oldest() {
 #[test]
 fn feed_preserves_keyframe_kind_and_timestamp() {
     let (sink, feed) = egress_feed();
-    sink.push(video(90_000, true));
-    sink.push(audio(48_000));
+    let _ = sink.push(video(90_000, true));
+    let _ = sink.push(audio(48_000));
     let v = feed.pop().expect("video sample");
     assert_eq!(v.media, EgressMedia::Video);
     assert!(v.keyframe, "the IDR flag survives the feed");
@@ -74,8 +76,8 @@ fn the_same_access_units_fan_to_two_independent_feeds() {
     let (sink_a, feed_a) = egress_feed();
     let (sink_b, feed_b) = egress_feed();
     let au = video(90_000, true);
-    sink_a.push(au.clone());
-    sink_b.push(au.clone());
+    let _ = sink_a.push(au.clone());
+    let _ = sink_b.push(au.clone());
     let a = feed_a.pop().expect("feed a");
     let b = feed_b.pop().expect("feed b");
     assert_eq!(a.data, b.data, "both feeds carry the identical access unit");
@@ -93,7 +95,7 @@ fn a_stalled_consumer_never_blocks_the_producer() {
     for i in 0..10_000u32 {
         // Each push is wait-free; a real test would time this, but the bounded
         // length below is the load-bearing isolation evidence.
-        sink.push(video(i, false));
+        let _ = sink.push(video(i, false));
     }
     assert!(
         feed.len() <= MAX_EGRESS,
@@ -105,7 +107,7 @@ fn a_stalled_consumer_never_blocks_the_producer() {
 #[test]
 fn close_then_drain_is_end_of_stream() {
     let (sink, feed) = egress_feed();
-    sink.push(video(1, true));
+    let _ = sink.push(video(1, true));
     sink.close();
     assert!(!feed.is_ended(), "not ended while a sample remains");
     assert!(feed.pop().is_some());
