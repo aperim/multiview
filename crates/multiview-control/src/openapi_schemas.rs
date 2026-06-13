@@ -1411,6 +1411,74 @@ pub struct SyncGroupResourceInputDoc {
     pub body: SyncGroupBodyDoc,
 }
 
+/// `OpenAPI` mirror of [`crate::devices::sync_runtime::SyncMemberStatus`]
+/// (DEV-C3, ADR-M010): one member's read-only runtime status inside a
+/// [`SyncGroupStatusDoc`]. Runtime telemetry only — never persisted/exported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SyncMemberStatusDoc {
+    /// The member device id.
+    pub device: String,
+    /// The configured per-member presentation offset trim (milliseconds).
+    pub offset_ms: u32,
+    /// The tier this member achieves right now (`frame-accurate` /
+    /// `bounded-skew` / `none`); absent until a clock quality is seen.
+    #[serde(default)]
+    pub achieved: Option<String>,
+    /// The member's measured presentation skew (milliseconds), where measured.
+    #[serde(default)]
+    pub measured_skew_ms: Option<f32>,
+    /// Whether this member's drift alarm is currently raised.
+    pub drift_alarm: bool,
+}
+
+/// `OpenAPI` mirror of [`crate::devices::sync_runtime::SyncGroupStatus`]
+/// (DEV-C3, ADR-M010): the read-only runtime status
+/// `GET /sync-groups/{id}/status` returns — the **weakest-member** achieved
+/// tier, per-member measured skew, and drift-alarm state. Derived telemetry
+/// only; never persisted or exported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SyncGroupStatusDoc {
+    /// The sync-group id.
+    pub group: String,
+    /// The configured drift-alarm threshold (milliseconds).
+    pub target_skew_ms: u32,
+    /// The tier the group actually achieves — the weakest member's, never
+    /// over-claimed (`frame-accurate` / `bounded-skew` / `none`).
+    pub achieved: String,
+    /// The single member that limits the tier, where exactly one member is the
+    /// weakest while others are strictly better.
+    #[serde(default)]
+    pub limited_by: Option<String>,
+    /// The worst measured member skew across the group (milliseconds).
+    #[serde(default)]
+    pub measured_skew_ms: Option<f32>,
+    /// Whether any member's drift alarm is currently raised.
+    pub drift_alarm: bool,
+    /// Each member's runtime status.
+    pub members: Vec<SyncMemberStatusDoc>,
+}
+
+/// The request body for `POST /api/v1/sync-groups/{id}/test-pattern` (DEV-C3):
+/// emit a burnt-in frame counter + binary flash on the group's members for
+/// visual sync verification. All fields optional; sensible defaults apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct SyncGroupTestPatternInputDoc {
+    /// How long the test pattern stays active (seconds, `1..=300`). Defaults to
+    /// 10 s.
+    #[serde(default)]
+    pub duration_s: Option<u32>,
+    /// Whether to burn in a per-frame counter (for OCR cross-comparison).
+    /// Defaults to `true`.
+    #[serde(default)]
+    pub frame_counter: Option<bool>,
+    /// The binary-flash period (milliseconds). Defaults to 1000 ms (1 Hz flash).
+    #[serde(default)]
+    pub flash_period_ms: Option<u32>,
+}
+
 /// `OpenAPI` mirror of [`multiview_events::DeviceStatus`] (ADR-M008 §2.1): the
 /// read-only latest-wins runtime status `GET /devices/{id}/status` returns.
 ///
