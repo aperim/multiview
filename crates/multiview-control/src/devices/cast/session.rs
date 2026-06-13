@@ -928,6 +928,13 @@ impl<C: CastConnector + 'static> CastSessionActor<C> {
                     "secret-updated is not a cast verb; ignored (CASTV2 has no sender auth)"
                 );
                 true
+            }
+            PollerControl::Reboot => {
+                tracing::debug!(
+                    device = %self.device_id,
+                    "reboot is not a cast verb; ignored (no reboot control over a cast receiver)"
+                );
+                true
             } // Exhaustive in this crate (`#[non_exhaustive]` only gates
               // downstream crates): a future control verb must decide its cast
               // behaviour here explicitly.
