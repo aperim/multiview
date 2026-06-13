@@ -301,3 +301,15 @@ pub fn put_json(
         .body(Body::from(serde_json::to_vec(body).unwrap()))
         .expect("request should build")
 }
+
+/// Build a `PUT` request with a Bearer token, a **required** `If-Match` value,
+/// and a JSON body (the optimistic-concurrency replace shape used by the
+/// device-detail and enrollment tests).
+pub fn put_json_if_match(
+    path: &str,
+    token: &str,
+    body: &serde_json::Value,
+    if_match: &str,
+) -> Request<Body> {
+    put_json(path, token, Some(if_match), body)
+}
