@@ -16,7 +16,15 @@
 //! so asserting `mean(Cr) − mean(Cb) > 60` on EACH store — and that the two
 //! stores' means agree — pins "live == startup behaviourally" at plane level.
 #![cfg(feature = "ffmpeg")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    // reason: the U/V plane-stat bindings are deliberately paired by channel
+    // (`live_cb`/`live_cr`, `startup_cb`/`startup_cr`) — the names mirror the
+    // Cb/Cr they hold; `similar_names` does not extend to integration tests.
+    clippy::similar_names
+)]
 
 use std::path::Path;
 use std::process::Command as OsCommand;
@@ -30,7 +38,9 @@ use multiview_cli::preview::program_slot;
 use multiview_compositor::pipeline::Nv12Image;
 use multiview_config::MultiviewConfig;
 use multiview_control::{command_bus, Command, EngineStateSnapshot, OperationId};
-use multiview_engine::{CompositorDrive, EnginePublisher, MonotonicTimeSource, StopSignal, TimeSource};
+use multiview_engine::{
+    CompositorDrive, EnginePublisher, MonotonicTimeSource, StopSignal, TimeSource,
+};
 use multiview_events::Event;
 
 /// Generate a solid RED clip (strong chroma asymmetry: Cb ≈ 90, Cr ≈ 240 in

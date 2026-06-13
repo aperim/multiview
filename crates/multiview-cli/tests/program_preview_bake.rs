@@ -7,7 +7,7 @@
 //! passes through host memory into the off-hot-path bake consumer
 //! (`StreamBaker`) before the single encode, so every encoded output (HLS /
 //! file / push) carries the baked overlays. The lie was the run's own
-//! **program preview slot** (the WebUI program monitor): the hot loop
+//! **program preview slot** (the `WebUI` program monitor): the hot loop
 //! published the PRE-bake canvas, so neither live-applied nor config-authored
 //! overlays ever appeared on the surface the operator verifies against.
 //!
@@ -141,7 +141,7 @@ fn wait_preview(
 }
 
 /// A live-applied analog clock must appear on the PROGRAM PREVIEW surface —
-/// the frame the WebUI program monitor serves must be the BAKED program, not
+/// the frame the `WebUI` program monitor serves must be the BAKED program, not
 /// the pre-bake canvas (Defect B: header + drain said `live`, the monitored
 /// program showed no clock).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
