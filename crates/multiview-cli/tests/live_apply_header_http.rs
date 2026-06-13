@@ -100,6 +100,8 @@ async fn header_for(capability: LiveSourceCapability) -> Option<String> {
         publisher,
         commands,
         multiview_control::no_preview(),
+        // No boot model: store-only fixture (ADR-W022).
+        None,
         multiview_control::LiveApplyCaps::default().with_sources(capability),
         async move {
             let _ = shutdown_rx.await;
