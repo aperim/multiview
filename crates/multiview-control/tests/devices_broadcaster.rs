@@ -200,22 +200,20 @@ async fn cast_session_membership_rides_the_lossless_devices_lane() {
     );
     let _s_removed = broadcaster.cast_session_removed("cast-session-1");
 
-    // The client saw the anchor; both membership events replay losslessly.
-    // (One `next_delta` per buffered frame: the already-seen anchor is
-    // skipped as `None`, mirroring `resume_after_gap_replays_lifecycle_
-    // losslessly` above — drain a bounded number of polls and assert on what
-    // was delivered.)
+    // The client had already observed the anchor (resume strictly after it),
+    // so the first poll skips it as `None`; the two membership events then
+    // replay losslessly in publish order — exactly the sequential model
+    // `resume_after_gap_replays_lifecycle_losslessly` pins above. Asserting
+    // the sequence (not just presence) proves started-before-removed ordering
+    // and the single skipped-anchor `None`.
     let mut session = SessionStream::new(sub, "sess-cast", Some(s_anchor));
-    let mut frames = Vec::new();
-    for _ in 0..8 {
-        if let Some(frame) = session.next_delta().await.unwrap() {
-            frames.push(frame);
-        }
-    }
 
-    let started = frames
-        .iter()
-        .find(|f| matches!(f.envelope.payload, Event::CastSessionStarted(_)))
+    assert_eq!(session.next_delta().await.unwrap(), None, "anchor skipped");
+
+    let started = session
+        .next_delta()
+        .await
+        .unwrap()
         .expect("cast.session.started replays after the gap");
     assert_eq!(started.envelope.topic, multiview_events::Topic::Devices);
     assert_eq!(started.envelope.id.as_deref(), Some("cast-session-1"));
@@ -229,10 +227,16 @@ async fn cast_session_membership_rides_the_lossless_devices_lane() {
         other => panic!("expected cast.session.started, got {other:?}"),
     }
 
-    let removed = frames
-        .iter()
-        .find(|f| matches!(f.envelope.payload, Event::CastSessionRemoved(_)))
+    let removed = session
+        .next_delta()
+        .await
+        .unwrap()
         .expect("cast.session.removed replays after the gap");
     assert_eq!(removed.envelope.topic, multiview_events::Topic::Devices);
     assert_eq!(removed.envelope.id.as_deref(), Some("cast-session-1"));
+    assert!(
+        matches!(removed.envelope.payload, Event::CastSessionRemoved(_)),
+        "expected cast.session.removed, got {:?}",
+        removed.envelope.payload
+    );
 }
