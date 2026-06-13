@@ -289,6 +289,128 @@ async fn set_mode_command_dispatches_convergence() {
     );
 }
 
+/// SAFETY (DEV-A4 fix 1): an operator `set-mode` while the device is NOT ONLINE
+/// (here: DEGRADED, with a cached session) records the intent but issues ZERO
+/// decode-table wire writes — it must NOT fire `converge_mode` through a session
+/// the device's current state has not validated. The un-gated code would issue a
+/// close+open `/streamplay` pair against a degraded device; the gate defers it.
+#[tokio::test]
+async fn set_mode_while_degraded_records_intent_and_issues_no_wire_writes() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    transport.push("venc", venc_encoder());
+    // One poll reports an unhealthy stream → DEGRADED (the channel is up, the
+    // session is cached, but the device is not ONLINE).
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({
+            "rsp": "succeed", "status": "00000",
+            "data": { "streams": [ { "healthy": false } ] }
+        })),
+    );
+    let mut poller = poller("dev-a", &transport, &broadcaster, &status, &drivers);
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    assert_eq!(poller.poll_step().await, PollerStep::Degraded);
+    let before = transport.request_count("streamplay");
+
+    // An operator set-mode arrives while DEGRADED.
+    poller
+        .handle_control(PollerControl::SetMode {
+            mode: "decoder".to_owned(),
+        })
+        .await;
+
+    // The intent was recorded (deferred to the next ONLINE pass)…
+    assert_eq!(
+        poller.desired_mode(),
+        Some("decoder"),
+        "set-mode records the desired mode even when not ONLINE"
+    );
+    // …but NO decode-table wire write was issued: convergence is ONLINE-gated, so
+    // a stray set-mode can never mutate decode through a non-validated session.
+    assert_eq!(
+        transport.request_count("streamplay"),
+        before,
+        "set-mode while DEGRADED issues ZERO decode-table wire writes (gated, deferred)"
+    );
+}
+
+/// SAFETY (DEV-A4 fix 1): an operator `set-mode` while the device is UNREACHABLE
+/// records the intent but issues ZERO wire writes — the channel is down, so the
+/// convergence must not be attempted (it is deferred to the next ONLINE pass).
+#[tokio::test]
+async fn set_mode_while_unreachable_records_intent_and_issues_no_wire_writes() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    transport.push("venc", venc_encoder());
+    // The poll drops the socket → UNREACHABLE.
+    transport.push("streamplay", ScriptedReply::socket_dropped());
+    let mut poller = poller("dev-a", &transport, &broadcaster, &status, &drivers);
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    assert_eq!(poller.poll_step().await, PollerStep::Unreachable);
+    let before = transport.request_count("streamplay");
+
+    poller
+        .handle_control(PollerControl::SetMode {
+            mode: "decoder".to_owned(),
+        })
+        .await;
+
+    assert_eq!(
+        poller.desired_mode(),
+        Some("decoder"),
+        "set-mode records the desired mode even when UNREACHABLE"
+    );
+    assert_eq!(
+        transport.request_count("streamplay"),
+        before,
+        "set-mode while UNREACHABLE issues ZERO wire writes (gated, deferred)"
+    );
+}
+
+/// SAFETY (DEV-A4 fix 1): an operator `set-mode` while AUTH_FAILED (the A3 auth
+/// breaker is OPEN, but a session is still cached from the earlier ONLINE pass)
+/// records the intent but issues ZERO wire writes — a set-mode must NEVER bypass
+/// the breaker to push decode-table writes through a session the device
+/// repudiated.
+#[tokio::test]
+async fn set_mode_while_auth_failed_records_intent_and_bypasses_no_breaker() {
+    let (_engine, broadcaster, status, drivers) = harness();
+    let transport = ScriptedTransport::new();
+    transport.push("system", login_ok());
+    transport.push("venc", venc_encoder());
+    // A poll comes back with a credential-rejection status → AUTH_FAILED (the
+    // breaker opens). A session is still cached from the successful adopt above.
+    transport.push(
+        "streamplay",
+        ScriptedReply::json(json!({ "rsp": "auth failed", "status": "00002" })),
+    );
+    let mut poller = poller("dev-a", &transport, &broadcaster, &status, &drivers);
+    assert_eq!(poller.adopt_step().await, PollerStep::Online);
+    assert_eq!(poller.poll_step().await, PollerStep::AuthFailed);
+    assert_eq!(status.state("dev-a"), Some(DeviceState::AuthFailed));
+    let before = transport.request_count("streamplay");
+
+    poller
+        .handle_control(PollerControl::SetMode {
+            mode: "decoder".to_owned(),
+        })
+        .await;
+
+    assert_eq!(
+        poller.desired_mode(),
+        Some("decoder"),
+        "set-mode records the desired mode even while AUTH_FAILED"
+    );
+    assert_eq!(
+        transport.request_count("streamplay"),
+        before,
+        "set-mode while AUTH_FAILED issues ZERO wire writes — the breaker is not bypassed"
+    );
+}
+
 /// A device adopted with `desired_mode` set re-converges onto that mode once
 /// adopt reaches ONLINE: the close-before-open `/streamplay` switch is issued
 /// without any operator `set-mode`, making the documented "re-converges

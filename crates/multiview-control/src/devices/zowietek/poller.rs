@@ -379,6 +379,16 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
         &self.device_id
     }
 
+    /// The mode this poller will converge the device onto on its next ONLINE
+    /// pass (the config-as-code `desired_mode`, updated by an operator
+    /// `set-mode`). `None` means no convergence is pending. A read-only
+    /// accessor so a caller (or test) can confirm an operator's recorded intent
+    /// without scraping the device.
+    #[must_use]
+    pub fn desired_mode(&self) -> Option<&str> {
+        self.desired_mode.as_deref()
+    }
+
     /// The latest conflated `device.status` snapshot the broadcaster published
     /// for this device (read from the shared status registry), if any. The same
     /// value `GET /devices/{id}/status` serves — a direct read-back so a caller
