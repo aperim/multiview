@@ -2353,20 +2353,25 @@ impl Pipeline {
         // (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get an
         // ELD-gated ALSA audio sink wired to their flip clock; the publishers
         // feed from the bake consumer below.
+        // DEV-C2: a node run threads its link offset here so each head gets a
+        // presentation plan (epoch + link offset + real mono/wall clock). A
+        // plain run passes `None` → undisciplined latest-wins per head. Bound to
+        // a local so `start_display_sinks` can borrow it (it only reads the plan
+        // per head, never consumes the option).
+        #[cfg(feature = "display-kms")]
+        let node_presentation =
+            self.node_link_offset_ns
+                .map(|link_offset_ns| NodePresentation {
+                    epoch: self.epoch.clone(),
+                    link_offset_ns,
+                });
         #[cfg(feature = "display-kms")]
         let started_displays = start_display_sinks(
             std::mem::take(&mut self.display_plans),
             self.cadence,
             display_audio_format(self.encode_cfg.audio.as_ref()),
             self.display_hotplug_poll,
-            // DEV-C2: a node run threads its link offset here so each head gets a
-            // presentation plan (epoch + link offset + real mono/wall clock). A
-            // plain run passes `None` → undisciplined latest-wins per head.
-            self.node_link_offset_ns
-                .map(|link_offset_ns| NodePresentation {
-                    epoch: self.epoch.clone(),
-                    link_offset_ns,
-                }),
+            node_presentation.as_ref(),
         )?;
         #[cfg(feature = "display-kms")]
         let display_publishers = started_displays.publishers;
@@ -5172,7 +5177,7 @@ fn start_display_sinks(
     cadence: Rational,
     audio_format: multiview_audio::AudioFormat,
     hotplug_poll: Duration,
-    node_presentation: Option<NodePresentation>,
+    node_presentation: Option<&NodePresentation>,
 ) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
     use multiview_output::display::present::RealtimePresentationClock;
@@ -5195,7 +5200,7 @@ fn start_display_sinks(
         // outbound epoch, the deployment link offset, and the real mono/wall
         // clock (the KMS flip-timestamp + epoch domains). A non-node run leaves
         // this `None` (undisciplined latest-wins).
-        let presentation = node_presentation.as_ref().map(|np| PresentationPlan {
+        let presentation = node_presentation.map(|np| PresentationPlan {
             epoch: np.epoch.clone(),
             link_offset_ns: np.link_offset_ns,
             clock: Box::new(RealtimePresentationClock::new()),
@@ -8413,6 +8418,12 @@ mod live_overlay_bake_tests {
         let tag = CanvasColor::default().output_tag();
         StreamItem {
             canvas: Arc::new(Nv12Image::solid(320, 180, 16, 128, 128, tag).expect("solid")),
+            // The epoch's media leg at 25 fps: 40 ms (= 40_000_000 ns) per tick,
+            // tick-0 = 0 — mirrors the real `frame.pts().as_nanos()` the hot
+            // loop carries for the display-head presentation tap.
+            output_pts_ns: i64::try_from(tick_index)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(40_000_000),
             tick_index,
             source_states: HashMap::new(),
             captions: HashMap::new(),
