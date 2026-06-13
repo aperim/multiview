@@ -343,31 +343,15 @@ async fn serve_control_plane(
 }
 
 /// Map the validated `[webrtc]` config section into the `multiview-webrtc`
-/// [`EndpointConfig`] the live WHEP egress endpoint binds (ADR-0048 §1: the cli
-/// reads the config doc; the webrtc crate never depends on `multiview-config`).
-/// Advertised addresses that don't parse as bare IPs are skipped (validation
-/// already accepted hostnames; only literal IPs are usable as candidates here).
+/// [`EndpointConfig`](multiview_webrtc::config::EndpointConfig) the live WHEP
+/// egress endpoint binds (ADR-0048 §1: the cli reads the config doc; the webrtc
+/// crate never depends on `multiview-config`). Delegates to the shared mapping so
+/// the WHEP egress endpoint carries the same `[webrtc]` knobs as WHIP ingest —
+/// including the STUN/TURN ICE servers (ADR-0048 §5.1) the in-driver TURN client
+/// allocates relays from, so a browser behind NAT can WHEP-play via TURN.
 #[cfg(feature = "webrtc-native")]
 fn webrtc_endpoint_config(config: &MultiviewConfig) -> multiview_webrtc::config::EndpointConfig {
-    let w = &config.webrtc;
-    let advertised_addresses = w
-        .advertised_addresses
-        .iter()
-        .filter_map(|a| a.parse::<std::net::IpAddr>().ok())
-        .collect();
-    multiview_webrtc::config::EndpointConfig {
-        udp_port: w.udp_port,
-        advertised_addresses,
-        max_sessions: w.max_sessions,
-        session_idle_timeout: w.session_idle_timeout.as_duration(),
-        tombstone_ttl: multiview_webrtc::config::DEFAULT_TOMBSTONE_TTL,
-        cors_allow_origins: w.cors_allow_origins.clone(),
-        // TURN/STUN ice-servers: the `EndpointConfig` carries them and the egress
-        // registers relay candidates (ADR-0048 §5.1); the `[webrtc]` config
-        // surface for ice-servers is a follow-on, so none are mapped yet (the
-        // self-hosted host + advertised candidates cover the default posture).
-        ice_servers: Vec::new(),
-    }
+    multiview_cli::webrtc_endpoint::endpoint_config_from(config)
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**

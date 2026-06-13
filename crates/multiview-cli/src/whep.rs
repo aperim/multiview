@@ -48,6 +48,7 @@ use multiview_preview::whep::transport::{
 use multiview_preview::whep::PreviewCodec;
 use multiview_webrtc::config::EndpointConfig;
 use multiview_webrtc::transport::WebRtcEndpoint;
+use multiview_webrtc::turn::TurnRelayDriver;
 use multiview_webrtc::whep_egress::WhepEgress;
 
 use crate::live_sources::SharedStores;
@@ -317,6 +318,12 @@ impl CliWhepProvider {
     #[must_use]
     pub fn spawn(config: EndpointConfig, program: ProgramSlot, stores: SharedStores) -> Self {
         let state = Arc::new(Mutex::new(DriverState::default()));
+        // Build the TURN relay driver from the configured ICE servers BEFORE the
+        // endpoint consumes `config` (the operator's NAT-traversal path, ADR-0048
+        // §5.1): one in-crate TURN client per configured TURN server, driven sans-
+        // IO inside the egress driver over the SAME UDP socket as the media. Empty
+        // when no TURN server is configured (host + advertised candidates only).
+        let turn = TurnRelayDriver::from_config(&config, Instant::now());
         let endpoint = match WebRtcEndpoint::bind(config) {
             Ok(ep) => ep,
             Err(err) => {
@@ -330,8 +337,10 @@ impl CliWhepProvider {
                 };
             }
         };
-        // Register the bound host candidate so the answer carries reachability,
-        // plus any TURN relay candidates (operator NAT-traversal, ADR-0048 §5.1).
+        // Register the bound host candidate so the answer carries reachability.
+        // TURN relay candidates are learned at runtime by the driver's TURN
+        // client(s) and published into the egress via `learn_relay` (ADR-0048
+        // §5.1), so a browser behind NAT can WHEP-play via the operator's relay.
         let host = endpoint
             .host_candidates()
             .ok()
@@ -340,7 +349,15 @@ impl CliWhepProvider {
             Some(addr) => WhepEgress::with_host_candidate(addr),
             None => WhepEgress::new(),
         });
-        spawn_driver(Arc::clone(&egress), Arc::clone(&state), endpoint);
+        // The local socket address relayed traffic egresses from (for the relay
+        // candidate's `raddr`); the bound host candidate, or the unspecified bind
+        // address as a fallback.
+        let local = host.unwrap_or_else(|| {
+            endpoint
+                .local_addr()
+                .unwrap_or_else(|_| std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)))
+        });
+        spawn_driver(Arc::clone(&egress), Arc::clone(&state), endpoint, turn, local);
         Self {
             egress,
             state,
@@ -425,46 +442,62 @@ impl WhepProvider for CliWhepProvider {
     }
 }
 
-/// Spawn the egress driver: own the shared UDP socket, pump every session's
-/// encode + egress at preview cadence, and fan inbound datagrams to the sessions.
-/// Never `.await`s a client; a stalled session loses only its own media.
-fn spawn_driver(egress: Arc<WhepEgress>, state: Arc<Mutex<DriverState>>, endpoint: WebRtcEndpoint) {
+/// Spawn the egress driver: own the shared UDP socket, run the configured TURN
+/// clients over it, pump every session's encode + egress at preview cadence, and
+/// fan inbound datagrams to the sessions. Never `.await`s a client; a stalled
+/// session loses only its own media (invariant #10).
+fn spawn_driver(
+    egress: Arc<WhepEgress>,
+    state: Arc<Mutex<DriverState>>,
+    endpoint: WebRtcEndpoint,
+    mut turn: TurnRelayDriver,
+    local: std::net::SocketAddr,
+) {
     std::thread::Builder::new()
         .name("whep-egress-driver".to_owned())
         .spawn(move || {
             let mut buf = [0u8; 2048];
             loop {
                 let now = Instant::now();
-                // 1. Drain inbound datagrams (non-blocking) and fan to sessions.
+                // 1. Drain inbound datagrams (non-blocking). A datagram from a
+                //    configured TURN server feeds its client (allocation/refresh);
+                //    any other datagram is media broadcast to the sessions.
                 loop {
                     match endpoint.recv_from(&mut buf) {
                         Ok((len, source)) => {
+                            let payload = buf.get(..len).unwrap_or(&[]);
+                            if turn.feed(source, payload, now) {
+                                continue;
+                            }
                             let dst = endpoint.local_addr().unwrap_or(source);
-                            let _ = egress.handle_datagram_broadcast(
-                                source,
-                                dst,
-                                buf.get(..len).unwrap_or(&[]),
-                                now,
-                            );
+                            let _ =
+                                egress.handle_datagram_broadcast(source, dst, payload, now);
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(_) => break,
                     }
                 }
-                // 2. Pump each live session's encode (sample → encode → feed).
+                // 2. Drive the TURN client(s): send their queued datagrams and
+                //    publish any newly-allocated relay into the egress so the next
+                //    negotiated session offers it as a relay candidate (the
+                //    operator's NAT-traversal path, ADR-0048 §5.1).
+                pump_turn_relays(&mut turn, egress.as_ref(), local, now, |payload, dst| {
+                    let _ = endpoint.send_to(payload, dst);
+                });
+                // 3. Pump each live session's encode (sample → encode → feed).
                 if let Ok(state) = state.lock() {
                     for session in state.sessions.values() {
                         session.media.pump_once();
                         let _ = &session.scope_label;
                     }
                 }
-                // 3. Drive every session's egress and send the outbound datagrams.
+                // 4. Drive every session's egress and send the outbound datagrams.
                 if let Ok(out) = egress.drive_all(now) {
                     for (dst, payload) in out {
                         let _ = endpoint.send_to(&payload, dst);
                     }
                 }
-                // 4. Park until the next session timer or the driver tick, whichever
+                // 5. Park until the next session timer or the driver tick, whichever
                 //    is sooner — never busy-spin (invariant #10: best-effort).
                 let wake = egress.next_wake(now);
                 let until = wake
@@ -474,6 +507,29 @@ fn spawn_driver(egress: Arc<WhepEgress>, state: Arc<Mutex<DriverState>>, endpoin
             }
         })
         .ok();
+}
+
+/// Drive the shared [`TurnRelayDriver`] one pass: send each queued TURN datagram
+/// via `send` and publish any newly-allocated relay into `egress` (with `local`
+/// as the address the relayed traffic egresses from), so every subsequently-
+/// negotiated WHEP session offers it as a relay candidate (ADR-0048 §5.1).
+///
+/// Pure over the `send` closure (the socket is the caller's) so the driver's TURN
+/// pump is offline-testable without binding a socket — mirroring the WHIP
+/// endpoint's `pump_turn`. A no-op when no TURN server is configured.
+fn pump_turn_relays<S: FnMut(&[u8], std::net::SocketAddr)>(
+    turn: &mut TurnRelayDriver,
+    egress: &WhepEgress,
+    local: std::net::SocketAddr,
+    now: Instant,
+    mut send: S,
+) {
+    while let Some((dst, payload)) = turn.poll_transmit(now) {
+        send(&payload, dst);
+    }
+    for relay in turn.take_new_relays() {
+        egress.learn_relay(relay, local);
+    }
 }
 
 /// Select the preview codec from a WHEP offer (H.264 preferred, then VP8),
@@ -595,4 +651,226 @@ fn copy_plane(
         d.copy_from_slice(s);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use std::net::SocketAddr;
+    use std::time::Instant;
+
+    use multiview_webrtc::config::{EndpointConfig, IceServer, TurnCredentials};
+    use multiview_webrtc::turn::message::{long_term_key, Attribute, Class, Method, StunMessage};
+    use multiview_webrtc::turn::TurnRelayDriver;
+    use multiview_webrtc::whep_egress::WhepEgress;
+
+    use super::pump_turn_relays;
+
+    /// A WHEP offer carrying a recvonly H.264 video m-line (str0m needs real ICE
+    /// credentials + a DTLS fingerprint + `setup:actpass` to answer).
+    const VIDEO_OFFER: &str = "v=0\r\n\
+o=- 1 2 IN IP6 ::1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP6 ::\r\n\
+a=ice-ufrag:tEsT\r\n\
+a=ice-pwd:abcdefghijklmnopqrstuvwx\r\n\
+a=ice-options:trickle\r\n\
+a=fingerprint:sha-256 \
+6F:8E:1A:2B:3C:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:\
+F8:09:1A:2B:3C:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=recvonly\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n";
+
+    /// A minimal, allocate-only fake TURN server (the long-term-credential 401
+    /// challenge + an authenticated Allocate success carrying XOR-RELAYED-ADDRESS).
+    /// Purpose-built for this wiring test; the full RFC 5766 surface (Refresh /
+    /// CreatePermission / ChannelBind / Data) is exercised by the `multiview-webrtc`
+    /// `fake_turn` fixture — here we only need the relay to be learned.
+    struct MiniTurnServer {
+        relay: SocketAddr,
+        username: String,
+        password: String,
+        realm: String,
+        nonce: String,
+        saw_auth: bool,
+    }
+
+    impl MiniTurnServer {
+        fn new(relay: SocketAddr, username: &str, password: &str, realm: &str) -> Self {
+            Self {
+                relay,
+                username: username.to_owned(),
+                password: password.to_owned(),
+                realm: realm.to_owned(),
+                nonce: "nonce-xyz".to_owned(),
+                saw_auth: false,
+            }
+        }
+
+        fn key(&self) -> Vec<u8> {
+            long_term_key(&self.username, &self.realm, &self.password)
+        }
+
+        fn handle(&mut self, datagram: &[u8]) -> Option<Vec<u8>> {
+            let msg = StunMessage::parse(datagram).expect("client sends valid STUN");
+            if msg.class() != Class::Request || msg.method() != Method::Allocate {
+                return None;
+            }
+            let authed = msg
+                .attributes()
+                .iter()
+                .any(|a| matches!(a, Attribute::Username(_)));
+            if !authed || !msg.verify_integrity(&self.key()) {
+                let mut reply = StunMessage::with_transaction(
+                    Class::Error,
+                    Method::Allocate,
+                    msg.transaction_id(),
+                );
+                reply.push(Attribute::ErrorCode {
+                    code: 401,
+                    reason: "Unauthorized".to_owned(),
+                });
+                reply.push(Attribute::Realm(self.realm.clone()));
+                reply.push(Attribute::Nonce(self.nonce.clone()));
+                return Some(reply.to_bytes(None));
+            }
+            self.saw_auth = true;
+            let mut reply =
+                StunMessage::with_transaction(Class::Success, Method::Allocate, msg.transaction_id());
+            reply.push(Attribute::XorRelayedAddress(self.relay));
+            reply.push(Attribute::Lifetime(600));
+            reply.push(Attribute::Username(self.username.clone()));
+            reply.push(Attribute::Realm(self.realm.clone()));
+            reply.push(Attribute::Nonce(self.nonce.clone()));
+            Some(reply.to_bytes(Some(&self.key())))
+        }
+    }
+
+    fn relay_candidate_count(candidates: &[String]) -> usize {
+        candidates.iter().filter(|c| c.contains("typ relay")).count()
+    }
+
+    #[test]
+    fn whep_driver_pump_runs_turn_and_publishes_the_relay_to_the_egress() {
+        // ITEM-1 of PR #141: the cli WHEP egress driver runs its configured TURN
+        // client over the SAME socket via `pump_turn_relays`, and a relay it
+        // allocates is published into the WhepEgress so the next negotiated
+        // session offers a `typ relay` candidate (browser-behind-NAT WHEP-play).
+        let now = Instant::now();
+        let server_addr: SocketAddr = "[2001:db8::1]:3478".parse().unwrap();
+        let relay_addr: SocketAddr = "[2001:db8::1]:49152".parse().unwrap();
+        let host: SocketAddr = "[2001:db8::abc]:8189".parse().unwrap();
+        let mut server = MiniTurnServer::new(relay_addr, "alice", "s3cret", "example.org");
+
+        let config = EndpointConfig {
+            ice_servers: vec![IceServer::turn(
+                server_addr,
+                TurnCredentials::long_term("alice", "s3cret"),
+            )],
+            ..EndpointConfig::default()
+        };
+        let mut turn = TurnRelayDriver::from_config(&config, now);
+        assert_eq!(turn.client_count(), 1, "the WHEP driver built a TURN client");
+        let egress = WhepEgress::with_host_candidate(host);
+
+        // Drive the pump in a shuttle: the closure captures the TURN datagrams and
+        // feeds them to the fake server, whose replies we feed back into the
+        // driver before the next pump (mirroring the live recv→feed loop).
+        let mut pending_replies: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..16 {
+            for reply in pending_replies.drain(..) {
+                assert!(
+                    turn.feed(server_addr, &reply, now),
+                    "the TURN-server reply is consumed by the driver"
+                );
+            }
+            pump_turn_relays(&mut turn, &egress, host, now, |payload, dst| {
+                assert_eq!(dst, server_addr);
+                if let Some(reply) = server.handle(payload) {
+                    pending_replies.push(reply);
+                }
+            });
+            // A relay learned ⇒ a subsequent session offers it; check early-exit.
+            let media = crate::whep::tests::dummy_media();
+            if let Ok(answer) = egress.accept_session(
+                VIDEO_OFFER,
+                multiview_preview::whep::PreviewCodec::H264,
+                media.as_ref(),
+            ) {
+                if relay_candidate_count(&answer.transport.candidates) >= 1 {
+                    assert!(server.saw_auth, "the Allocate was authenticated");
+                    return; // success
+                }
+            }
+        }
+        panic!("the WHEP driver never published the TURN relay to the egress");
+    }
+
+    #[test]
+    fn whep_driver_pump_is_a_noop_without_turn_and_never_blocks() {
+        // INVARIANT #10: with no TURN configured the pump sends nothing and
+        // publishes nothing — and it completes immediately (it never blocks the
+        // egress driver thread, so a slow/absent TURN server can't stall preview).
+        let now = Instant::now();
+        let host: SocketAddr = "[2001:db8::abc]:8189".parse().unwrap();
+        let mut turn = TurnRelayDriver::from_config(&EndpointConfig::default(), now);
+        assert!(turn.is_empty());
+        let egress = WhepEgress::with_host_candidate(host);
+
+        let started = Instant::now();
+        let mut sent = 0usize;
+        pump_turn_relays(&mut turn, &egress, host, now, |_p, _d| sent += 1);
+        assert_eq!(sent, 0, "no TURN server ⇒ no TURN datagrams");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "the pump never blocks"
+        );
+
+        let media = dummy_media();
+        let answer = egress
+            .accept_session(
+                VIDEO_OFFER,
+                multiview_preview::whep::PreviewCodec::H264,
+                media.as_ref(),
+            )
+            .expect("accept");
+        assert_eq!(
+            relay_candidate_count(&answer.transport.candidates),
+            0,
+            "no relay candidate without TURN"
+        );
+    }
+
+    /// A no-op preview media source for the egress `accept_session` in these
+    /// wiring tests (the relay candidate is what we assert, not media flow).
+    pub(super) fn dummy_media() -> std::sync::Arc<DummyMedia> {
+        std::sync::Arc::new(DummyMedia)
+    }
+
+    pub(super) struct DummyMedia;
+
+    impl multiview_preview::whep::transport::PreviewMediaSource for DummyMedia {
+        fn codec(&self) -> multiview_preview::whep::PreviewCodec {
+            multiview_preview::whep::PreviewCodec::H264
+        }
+        fn feed(&self) -> multiview_preview::whep::transport::SampleFeed {
+            multiview_preview::whep::transport::sample_feed(1).1
+        }
+        fn audio_feed(&self) -> Option<multiview_preview::whep::transport::SampleFeed> {
+            None
+        }
+    }
 }
