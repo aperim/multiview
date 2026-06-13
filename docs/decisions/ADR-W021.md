@@ -160,6 +160,39 @@ predicate and the same seam carries it — no new protocol.
   use), and removing the entry restores the bare-canvas pixels.
 - **Header truth both builds:** route tests with and without the injected capability.
 
+## Amendment — on-hardware validation of the GPU-composite path (2026-06-11)
+
+The first NVIDIA hardware run (`--features nvidia,web`, GPU/wgpu compositor + NVENC) surfaced an
+apparent contradiction: `POST /overlays` (clock, analog) returned `201` + `X-Multiview-Apply: live`
+and the drain logged `apply_overlay: overlay applied live … generation=1`, yet the program the
+operator monitored showed **no clock**.
+
+**Investigated as-built — where the bake consumer sits on the GPU pipeline.** The wgpu compositor
+is a synchronous submit+**readback**: every composited canvas returns to host memory as an
+`Nv12Image` before anything downstream touches it (`RunBackend::composite`). The hot loop hands
+that host frame to the off-clock bake consumer (`StreamBaker`, ADR-0025/0026), which rasterizes
+the overlay draw list (this ADR's working set included) and feeds the single encoder — NVENC and
+the software codecs alike. So the **encoded program (HLS / file / push) was always baked, on both
+backends**; frames already pass through host memory en route to the encoder, and the baker already
+runs at that point. No GPU-residency violation existed and no readback had to be added; the
+`renders` predicate and the `LiveApplyCaps` injection (full-pipeline + `overlay` ⇒ capability;
+software run / overlay-less build ⇒ none) were and remain truthful for the encoded program.
+
+**The defect: the run's own program-observation surfaces bypassed the baker.** The hot-loop
+projection published the **pre-bake** canvas into the live-preview slot (the WebUI program
+monitor — the surface the operator verified against) and into the DRM/KMS display-head mailboxes.
+On those surfaces no overlay — live-applied or config-authored — had **ever** rendered, on either
+backend; the GPU validation merely made it visible. The fix moves both feeds to the bake
+consumer (`ProgramTaps`): the preview slot and the display heads now receive the **same baked
+frame the encode consumes**, published wait-free off the hot path (invariants #1/#10 unchanged;
+under `DropOnOverload` the taps update with the frames that reach the consumer — the same frames
+the program carries). Pinned by `multiview-cli/tests/program_preview_bake.rs` (a live-applied
+analog clock must appear on the preview surface, end-to-end on a real run).
+
+The GPU overlay sub-pass (`GpuCompositor::composite_with_overlays`, ADR-0016 §4.1) remains built
+and tested but **unwired** by the run path — a future efficiency move of the bake itself onto the
+GPU, not a correctness gap.
+
 ## Consequences
 
 - Overlay add/edit/remove is Class-1 live on the real pipeline: stored, applied at the next frame

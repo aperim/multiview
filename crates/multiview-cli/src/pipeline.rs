@@ -2447,7 +2447,8 @@ impl Pipeline {
         let ts: Arc<dyn TimeSource> = time;
         // The engine's outbound publisher is supplied by the caller so the
         // control plane can share it (the live UI reads engine state + events);
-        // the same goes for the live-preview slot the projection fills.
+        // the same goes for the live-preview slot, which the BAKE CONSUMER
+        // fills with the baked program frame (`ProgramTaps`, ADR-W021).
         let preview = Arc::clone(preview);
 
         // Start streaming ingest BEFORE the clock loop: one decode thread per
@@ -2506,16 +2507,20 @@ impl Pipeline {
         // startup, before the output clock runs — and keep their handles alive
         // for the whole run (drop = stop + join, off the hot path). Each sink
         // owns its device on a dedicated thread; the engine side holds only
-        // wait-free mailbox publishers, fed in `state_of` exactly where the
-        // live-preview slot is filled. A startup failure (no such connector,
-        // no usable mode, modeset rejected) fails the run like any other
-        // misconfigured output; after startup the sinks can never fail the
-        // engine (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get
-        // an ELD-gated ALSA audio sink wired to their flip clock; the
-        // publishers feed from the bake consumer below.
+        // wait-free mailbox publishers, fed the BAKED program frame by the
+        // bake consumer alongside the live-preview slot (`ProgramTaps`,
+        // ADR-W021 — every program surface shows the program the outputs
+        // carry). A startup failure (no such connector, no usable mode,
+        // modeset rejected) fails the run like any other misconfigured
+        // output; after startup the sinks can never fail the engine
+        // (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get an
+        // ELD-gated ALSA audio sink wired to their flip clock; the publishers
+        // feed from the bake consumer below.
         // DEV-C2: a node run threads its link offset here so each head gets a
         // presentation plan (epoch + link offset + real mono/wall clock). A
-        // plain run leaves this `None` → undisciplined latest-wins per head.
+        // plain run passes `None` → undisciplined latest-wins per head. Bound to
+        // a local so `start_display_sinks` can borrow it (it only reads the plan
+        // per head, never consumes the option).
         #[cfg(feature = "display-kms")]
         let node_presentation = self
             .node_link_offset_ns
@@ -2575,7 +2580,19 @@ impl Pipeline {
         // The consumer owns a Send `BakeContext` and builds its own (non-Send)
         // overlay baker from it, plus the single `ProgramEncoder`; the bake +
         // encode math moved off the hot loop, never onto it.
+        //
+        // The consumer also owns the run's PROGRAM TAPS (ADR-W021 hw Defect B
+        // fix): the live-preview slot and the display-head mailboxes receive
+        // the BAKED frame — the same picture the encode consumes — so the
+        // program the operator monitors agrees with the program the outputs
+        // carry. Publishing from the consumer (not the hot loop) keeps both
+        // taps off the output clock (inv #1/#10).
         let bake_ctx = self.bake_context();
+        let taps = ProgramTaps {
+            preview: Arc::clone(&preview),
+            #[cfg(feature = "display-kms")]
+            displays: display_publishers,
+        };
         let (egress, hot_tx) = StreamEgress::spawn(
             bake_ctx,
             runners,
@@ -2584,6 +2601,7 @@ impl Pipeline {
             audio_bus,
             audio_loudnorm,
             display_audio,
+            taps,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -2697,9 +2715,9 @@ impl Pipeline {
         }
         let input_fragment = crate::control::input_inventories_fragment(&self.inventories);
         // (The DRM/KMS display heads — and their DEV-B4 audio sinks — were
-        // started above, before the egress spawn, so the bake consumer received
-        // the audio publishers; `display_publishers` feeds the video mailboxes
-        // in `state_of` below.)
+        // started above, before the egress spawn, so the bake consumer owns
+        // BOTH their feeds: the audio publishers via `DisplayAudioFeed` and
+        // the video mailboxes via `ProgramTaps` — baked frames, ADR-W021.)
         // The hot-loop projection runs once per tick. It SAMPLES the caption/fault
         // state (kept here on the hot loop — the bounded cue store holds only a
         // small live window, so it must be sampled now, not after the run), clones
@@ -2723,26 +2741,26 @@ impl Pipeline {
             if let Some(obs) = hot_tick_observer.as_ref() {
                 obs.fetch_add(1, Ordering::Release);
             }
-            // The composited canvas, cloned once into an `Arc` reused for BOTH
-            // the bake/encode fan-out AND the live-preview slot (a single wait-
-            // free swap; the control plane serves the latest still off it).
+            // The composited canvas, cloned once into an `Arc` for the
+            // bake/encode fan-out. The live-preview slot and the display-head
+            // mailboxes are fed the BAKED frame by the bake consumer
+            // (`ProgramTaps`, ADR-W021 hw Defect B fix) — the program surface
+            // the operator monitors is the program the outputs carry, never
+            // the pre-bake canvas.
             let canvas = Arc::new(frame.canvas.clone());
-            preview.store(Some(Arc::clone(&canvas)));
-            // The display heads ride the SAME pre-encode canvas `Arc` through
-            // their wait-free mailboxes (one atomic bump + one lock-free swap
-            // each — the engine never awaits a sink; ADR-0044, inv #1/#10).
-            // DEV-C2: stamp each publish with the frame's output-PTS (ns, tick-0
-            // = 0 — the epoch's media leg), so the node frame chooser can compute
-            // `wall_at(pts) + link_offset` deadlines. A non-node run ignores the
-            // pts (undisciplined latest-wins); carrying it is one extra `i64`.
-            #[cfg(feature = "display-kms")]
-            let display_pts_ns = frame.pts().as_nanos();
-            #[cfg(feature = "display-kms")]
-            for display in &display_publishers {
-                display.publish_at(CanvasFrame(Arc::clone(&canvas)), display_pts_ns);
-            }
+            // DEV-C2 × ADR-W021: the display heads' node presentation discipline
+            // needs each published frame stamped with its output-PTS (ns, tick-0
+            // = 0 — the epoch's media leg) so the pull-side frame chooser can
+            // compute `wall_at(pts) + link_offset` deadlines. The publish itself
+            // moved off the hot loop into the bake consumer (`ProgramTaps`, hw
+            // Defect B fix — the heads must show the BAKED program, not this
+            // pre-bake canvas), so the PTS rides the `StreamItem` to the
+            // consumer rather than being published here. A non-node run ignores
+            // the pts (undisciplined latest-wins); carrying it is one extra
+            // `i64`.
             let item = StreamItem {
                 canvas: Arc::clone(&canvas),
+                output_pts_ns: frame.pts().as_nanos(),
                 tick_index: frame.tick.index,
                 #[cfg(feature = "overlay")]
                 source_states: frame.source_states.clone(),
@@ -3210,6 +3228,12 @@ impl StreamBaker {
 struct StreamItem {
     /// The composited canvas the protected output core emitted this tick.
     canvas: Arc<Nv12Image>,
+    /// The frame's output-PTS in nanoseconds (tick-0 = 0 — the epoch's media
+    /// leg). Carried to the bake consumer so the display-head program tap can
+    /// stamp each baked publish for the node presentation frame chooser (DEV-C2
+    /// × ADR-W021). Always read by the consumer (passed to `ProgramTaps::publish`),
+    /// where a non-`display-kms` build discards it.
+    output_pts_ns: i64,
     /// The engine's tick index for this frame (drives the per-frame media time
     /// and the per-source meter timeline lookup in the consumer's bake).
     // reason: only the `overlay`-on baker reads this (per-frame pts + meter index);
@@ -3387,6 +3411,9 @@ impl StreamEgress {
     /// on. Dropping that sender (when the engine loop ends) closes the hot queue
     /// → the consumer drains, fans the remainder, drops the sink senders → each
     /// sink sees end-of-program and finalises → [`StreamEgress::join`] folds stats.
+    #[allow(clippy::too_many_arguments)]
+    // reason: the egress owns exactly one of each pipeline stage plus the
+    // program taps; a one-shot bundling struct would only rename the fields.
     fn spawn(
         ctx: BakeContext,
         runners: Vec<SinkRunner>,
@@ -3395,6 +3422,7 @@ impl StreamEgress {
         audio_bus: Option<multiview_audio::program::ProgramBus>,
         audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
         display_audio: DisplayAudioFeed,
+        taps: ProgramTaps,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -3453,6 +3481,7 @@ impl StreamEgress {
                     audio_bus,
                     audio_loudnorm,
                     display_audio,
+                    &taps,
                     &consumer_in_flight,
                 )
             })
@@ -3607,6 +3636,43 @@ struct DisplayAudioFeed {
     dedicated_bus: Option<multiview_audio::program::ProgramBus>,
 }
 
+/// The run's **program observation taps**, fed the BAKED frame by the bake
+/// consumer — the same picture the single encode consumes (ADR-W021 hw Defect
+/// B fix): the live-preview slot the `WebUI` program monitor serves, and the
+/// DRM/KMS display-head mailboxes (DEV-B1). Feeding them PRE-bake from the hot
+/// loop made every program surface the operator watches disagree with the
+/// encoded program (no overlays/chrome ever appeared there). Both publishes
+/// are wait-free (`ArcSwap` store / conflating mailbox swap) on the
+/// off-hot-path consumer thread — they can never pace the output clock
+/// (invariants #1 + #10).
+struct ProgramTaps {
+    /// The wait-free latest-frame slot the control plane's preview provider
+    /// reads (the `WebUI` program monitor).
+    preview: crate::preview::ProgramSlot,
+    /// The conflating video mailbox of every DRM/KMS display head (ADR-0044).
+    #[cfg(feature = "display-kms")]
+    displays: Vec<multiview_output::display::FramePublisher<CanvasFrame>>,
+}
+
+impl ProgramTaps {
+    /// Publish one baked program frame to every tap (wait-free on each).
+    ///
+    /// `output_pts_ns` is the frame's output-PTS (ns, tick-0 = 0 — the epoch's
+    /// media leg): the display heads are stamped with it via `publish_at` so the
+    /// node presentation frame chooser can compute `wall_at(pts) + link_offset`
+    /// deadlines (DEV-C2). The preview slot is a latest-wins still and does not
+    /// carry a pts; a non-`display-kms` build ignores it entirely.
+    fn publish(&self, frame: &Arc<Nv12Image>, output_pts_ns: i64) {
+        self.preview.store(Some(Arc::clone(frame)));
+        #[cfg(feature = "display-kms")]
+        for display in &self.displays {
+            display.publish_at(CanvasFrame(Arc::clone(frame)), output_pts_ns);
+        }
+        #[cfg(not(feature = "display-kms"))]
+        let _ = output_pts_ns;
+    }
+}
+
 /// Build the program-bus loudness normaliser (AUD-6) for the run's audio config.
 ///
 /// EBU R128 / ITU-R BS.1770 normalisation applies to the **program bus only**
@@ -3673,8 +3739,8 @@ fn drive_audio_for_item(
 /// encode fails.
 #[allow(clippy::too_many_arguments)]
 // reason: the consumer owns exactly one of each pipeline stage (baker, encoder,
-// audio bus, loudnorm, display feed); a one-shot bundling struct would only
-// rename the same eight things.
+// audio bus, loudnorm, display feed, program taps); a one-shot bundling struct
+// would only rename the same nine things.
 fn consumer_main(
     ctx: BakeContext,
     hot_rx: &Receiver<StreamItem>,
@@ -3683,6 +3749,7 @@ fn consumer_main(
     mut audio_bus: Option<multiview_audio::program::ProgramBus>,
     mut audio_loudnorm: Option<multiview_audio::LoudnormProcessor>,
     mut display_audio: DisplayAudioFeed,
+    taps: &ProgramTaps,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -3695,6 +3762,13 @@ fn consumer_main(
         // One frame left the queue.
         in_flight.fetch_sub(1, Ordering::AcqRel);
         let overlaid = baker.bake(&item)?;
+        // The program observation taps (preview slot + display heads) receive
+        // the SAME baked frame the encode consumes (ADR-W021 hw Defect B fix):
+        // what the operator monitors IS the program. The display heads are
+        // stamped with this frame's output-PTS for the node presentation frame
+        // chooser (DEV-C2). Wait-free publishes on this off-hot-path thread
+        // (inv #1/#10).
+        taps.publish(&overlaid, item.output_pts_ns);
         // Bridge once + encode once (invariant #7): the canvas is encoded a SINGLE
         // time here, never once per sink.
         let frame = nv12_to_decoded(&overlaid)?;
@@ -5210,9 +5284,11 @@ fn display_plan_of(output: &Output) -> Option<DisplayOutputPlan> {
     })
 }
 
-/// The display sinks' view of the composited program (feature `display-kms`):
-/// an `Arc` clone of the **same** pre-encode NV12 canvas the preview slot and
-/// the encode fan-out share — no extra pixel copy on the hot loop.
+/// The display sinks' view of the program (feature `display-kms`): an `Arc`
+/// clone of the **same baked** NV12 frame the encode consumes and the preview
+/// slot serves (`ProgramTaps`, ADR-W021 hw Defect B fix) — published off the
+/// hot path by the bake consumer, so every program surface agrees and no extra
+/// pixel copy lands on the output clock.
 #[cfg(feature = "display-kms")]
 #[derive(Debug)]
 struct CanvasFrame(Arc<Nv12Image>);
@@ -7046,6 +7122,15 @@ impl TileScaler {
     ) -> Result<Nv12Image, String> {
         let src = ScaleSpec::new(frame.format(), frame.width(), frame.height());
         let dst = ScaleSpec::new(Pixel::NV12, self.tile_w, self.tile_h);
+        if src == dst {
+            // Identity: the decoded frame already IS tile-sized NV12 (the
+            // runtime-add shape — an unbound source decodes at canvas
+            // geometry, ADR-W018 §4). Read the planes out directly: no
+            // libswscale no-op (which zeroes NV12 chroma on FFmpeg 7/8 —
+            // the hw Defect A) and no intermediate full-frame copy on this
+            // hot decode loop.
+            return video_to_nv12(frame, tag);
+        }
         let rebuild = match &self.scaler {
             Some(s) => s.source() != src || s.destination() != dst,
             None => true,
@@ -8555,6 +8640,12 @@ mod live_overlay_bake_tests {
         let tag = CanvasColor::default().output_tag();
         StreamItem {
             canvas: Arc::new(Nv12Image::solid(320, 180, 16, 128, 128, tag).expect("solid")),
+            // The epoch's media leg at 25 fps: 40 ms (= 40_000_000 ns) per tick,
+            // tick-0 = 0 — mirrors the real `frame.pts().as_nanos()` the hot
+            // loop carries for the display-head presentation tap.
+            output_pts_ns: i64::try_from(tick_index)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(40_000_000),
             tick_index,
             source_states: HashMap::new(),
             captions: HashMap::new(),
