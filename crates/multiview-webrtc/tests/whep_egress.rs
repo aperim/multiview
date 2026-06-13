@@ -485,3 +485,74 @@ fn negotiate_helper_builds_a_session() {
     let (egress, id, _ea, _peer, _pa) = negotiate(VIDEO_OFFER, &media);
     assert_eq!(egress.session_state(&id), Some(SessionState::Created));
 }
+
+/// Count the `a=candidate:` lines of `typ relay` in an answer's candidate list
+/// (str0m emits relay candidates with the `typ relay` token).
+fn relay_candidate_count(candidates: &[String]) -> usize {
+    candidates
+        .iter()
+        .filter(|c| c.contains("typ relay"))
+        .count()
+}
+
+#[test]
+fn learn_relay_offers_a_relay_candidate_on_the_next_session() {
+    // ITEM-1 (TURN-in-WHEP-driver): a relay the egress driver's in-crate TURN
+    // client allocates at runtime (after bind, asynchronously) is published into
+    // the egress via `learn_relay(relayed, local)` and MUST then be offered as a
+    // `typ relay` ICE candidate on every subsequently-negotiated session — so a
+    // browser behind NAT can WHEP-play via the operator's TURN relay. Mirrors the
+    // WHIP `learned_relays` path (ADR-0048 §5.1).
+    let host: SocketAddr = "[2001:db8::1]:50001".parse().unwrap();
+    let relayed: SocketAddr = "[2001:db8::99]:60000".parse().unwrap();
+    let egress = WhepEgress::with_host_candidate(host);
+
+    // Before any allocation, a session offers host-only (no relay candidate).
+    let media0 = FakeMediaSource::video_only(PreviewCodec::H264, 4);
+    let before = egress
+        .accept_session(VIDEO_OFFER, PreviewCodec::H264, &media0)
+        .expect("accept before relay learned");
+    assert_eq!(
+        relay_candidate_count(&before.transport.candidates),
+        0,
+        "no relay candidate is offered before a TURN allocation completes"
+    );
+
+    // The driver's TURN client completes an Allocate and publishes the relay
+    // (relayed addr + the local socket the relayed traffic egresses from).
+    egress.learn_relay(relayed, host);
+
+    let media1 = FakeMediaSource::video_only(PreviewCodec::H264, 4);
+    let after = egress
+        .accept_session(VIDEO_OFFER, PreviewCodec::H264, &media1)
+        .expect("accept after relay learned");
+    assert!(
+        relay_candidate_count(&after.transport.candidates) >= 1,
+        "a learned TURN relay is offered as a relay candidate on the next session \
+         (browser-behind-NAT WHEP-play path); candidates: {:?}",
+        after.transport.candidates
+    );
+}
+
+#[test]
+fn learn_relay_is_idempotent_and_de_duplicates() {
+    // A relay learned twice (e.g. a re-allocation or a `poll_output` + `feed`
+    // both surfacing it) is offered once, not twice — the driver publishes a relay
+    // it has not seen, mirroring WHIP's `learned_relays` de-dup.
+    let host: SocketAddr = "[2001:db8::1]:50001".parse().unwrap();
+    let relayed: SocketAddr = "[2001:db8::99]:60000".parse().unwrap();
+    let egress = WhepEgress::with_host_candidate(host);
+    egress.learn_relay(relayed, host);
+    egress.learn_relay(relayed, host);
+
+    let media = FakeMediaSource::video_only(PreviewCodec::H264, 4);
+    let answer = egress
+        .accept_session(VIDEO_OFFER, PreviewCodec::H264, &media)
+        .expect("accept");
+    assert_eq!(
+        relay_candidate_count(&answer.transport.candidates),
+        1,
+        "a relay learned twice is offered exactly once; candidates: {:?}",
+        answer.transport.candidates
+    );
+}
