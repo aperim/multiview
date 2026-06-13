@@ -151,3 +151,12 @@ pub mod captions;
 /// (invariants #1/#2/#10).
 #[cfg(feature = "webrtc-native")]
 pub mod webrtc_ingest;
+
+/// Shared `[webrtc]` config → `multiview_webrtc::config::EndpointConfig` mapping
+/// (ADR-0048 §1/§9): the dual-stack UDP port, advertised host candidates, session
+/// caps, CORS, and the STUN/TURN ICE servers (incl. the in-driver TURN client's
+/// credentials, ADR-0048 §5.1). Used by BOTH the WHIP ingest wiring
+/// ([`webrtc_ingest`]) and the WHEP egress preview wiring ([`whep`]) so the
+/// ICE/TURN mapping is defined once, never duplicated. Behind `webrtc-native`.
+#[cfg(feature = "webrtc-native")]
+pub mod webrtc_endpoint;
