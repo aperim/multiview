@@ -254,8 +254,11 @@ impl WhipProvider for CliWhipProvider {
 /// (ADR-0048 §9): the single dual-stack UDP port, the advertised host
 /// candidates, the session caps/GC horizons, the CORS allow-list, and the
 /// STUN/TURN ICE servers. `multiview-webrtc` never depends on
-/// `multiview-config`, so this lives in the cli.
-fn endpoint_config_from(config: &multiview_config::MultiviewConfig) -> EndpointConfig {
+/// `multiview-config`, so this lives in the cli. Shared by the WHIP **ingest**
+/// wiring here and the WHEP-serve / `whip_push` **output** wiring
+/// ([`crate::webrtc_outputs`]) so the `[webrtc]`→`EndpointConfig` mapping (and the
+/// live-TURN-in-driver config it carries) is factored, not duplicated.
+pub fn endpoint_config_from(config: &multiview_config::MultiviewConfig) -> EndpointConfig {
     let w = &config.webrtc;
     let advertised_addresses = w
         .advertised_addresses

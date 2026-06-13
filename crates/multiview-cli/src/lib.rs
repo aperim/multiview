@@ -144,3 +144,12 @@ pub mod captions;
 /// (invariants #1/#2/#10).
 #[cfg(feature = "webrtc-native")]
 pub mod webrtc_ingest;
+
+/// WHEP-serve + WHIP-push **output** wiring (ADR-0049): the program is encoded
+/// once (invariant #7) and a `webrtc` output WHEP-serves it to N browser viewers
+/// while a `whip_push` output publishes it to a remote WHIP ingest, both fed the
+/// same coded packets over a bounded drop-oldest egress feed (invariants #1/#10).
+/// Behind the off-by-default `webrtc-native` feature (the str0m endpoint + the
+/// reqwest WHIP signaller).
+#[cfg(feature = "webrtc-native")]
+pub mod webrtc_outputs;

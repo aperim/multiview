@@ -91,6 +91,7 @@ pub async fn bind_and_serve<F>(
     commands: CommandSender,
     preview: SharedPreview,
     whip: Option<multiview_control::SharedWhip>,
+    whep_output: Option<multiview_control::SharedWhepOutput>,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
     live_apply: multiview_control::LiveApplyCaps,
@@ -188,6 +189,13 @@ where
     // default `NoWhip` answers `503` (routes stay present + authz-enforced).
     if let Some(whip) = whip {
         state = state.with_whip(whip);
+    }
+    // The WHEP-serve output provider (ADR-0049): when the binary wired the native
+    // endpoint, install it so a `POST /api/v1/whep/{output}` serves the real
+    // encoded program to a browser viewer; otherwise the default `NoWhepOutput`
+    // answers `503` (routes stay present + authz-enforced).
+    if let Some(whep_output) = whep_output {
+        state = state.with_whep_output(whep_output);
     }
 
     // Install the real mDNS browser when the `discovery` feature is built, so
@@ -2590,6 +2598,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            None,
             None,
             None,
             None,

@@ -150,6 +150,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         None,
         None,
         None,
+        None,
         multiview_control::LiveApplyCaps::default(),
         async move {
             let _ = shutdown_rx.await;
