@@ -103,6 +103,25 @@ test("the cast panel lists the session and the sheet casts a manual address", as
   await expect(page.getByText("Casting started")).toBeVisible();
 });
 
+test("the session row shows the started-at readout once the LOAD was accepted (DEV-D3.1)", async ({
+  page,
+}) => {
+  // started_unix_ns is the LOAD-accept stamp in Unix-epoch wall nanoseconds;
+  // the panel ages it against wall time into an honest "started N … ago".
+  const startedUnixNs = (Date.now() - 45_000) * 1_000_000; // ~45 s ago
+  await page.route("**/api/v1/cast/sessions", (route) =>
+    route.fulfill({
+      json: [{ ...SESSIONS[0], started_unix_ns: startedUnixNs }],
+    }),
+  );
+
+  await page.goto("/devices");
+  const panel = page.getByTestId("cast-panel");
+  await expect(panel.getByText("Lounge TV")).toBeVisible();
+  // A real relative readout, text-only (never colour alone).
+  await expect(panel.getByText(/started.*ago/i)).toBeVisible();
+});
+
 test("save-as-device posts the promotion body from the session row", async ({
   page,
 }) => {

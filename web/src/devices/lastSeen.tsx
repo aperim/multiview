@@ -4,48 +4,15 @@
 // be aged against the engine clock reference the realtime stream maintains.
 // Without a reference (no stream yet) the cell shows an em dash with an
 // honest explanation — an age is never fabricated.
-import { useSyncExternalStore, type JSX } from 'react';
+import { type JSX } from 'react';
 import { Trans, useLingui } from '@lingui/react/macro';
 
 import { lastSeenAgeSeconds } from './api';
+import { useNowMs } from './useNowMs';
 import type { EngineClockRef } from '../realtime/useEngineEvents';
 
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3_600;
-const NOW_TICK_MS = 1_000;
-
-// A ticking wall-clock store so renders stay pure (react-hooks/purity):
-// `Date.now()` is read inside the interval, cached, and exposed as an
-// external-store snapshot. The interval only runs while cells are mounted.
-let cachedNowMs = Date.now();
-const nowListeners = new Set<() => void>();
-let nowTimer: ReturnType<typeof setInterval> | undefined;
-
-function subscribeNow(listener: () => void): () => void {
-  nowListeners.add(listener);
-  nowTimer ??= setInterval(() => {
-    cachedNowMs = Date.now();
-    for (const notify of nowListeners) {
-      notify();
-    }
-  }, NOW_TICK_MS);
-  return () => {
-    nowListeners.delete(listener);
-    if (nowListeners.size === 0 && nowTimer !== undefined) {
-      clearInterval(nowTimer);
-      nowTimer = undefined;
-    }
-  };
-}
-
-function readNowMs(): number {
-  return cachedNowMs;
-}
-
-/** The current wall time in ms, ticking once a second while subscribed. */
-function useNowMs(): number {
-  return useSyncExternalStore(subscribeNow, readNowMs, readNowMs);
-}
 
 /** A human-readable age for a computed last-seen interval. */
 export function LastSeenAge({ seconds }: { readonly seconds: number }): JSX.Element {
