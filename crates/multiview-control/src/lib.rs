@@ -140,8 +140,9 @@ pub use pending_actions::{
     DEFAULT_PENDING_ACTION_CAPACITY, PENDING_ACTION_KIND,
 };
 pub use preview::{
-    no_preview, no_whep, FocusCaps, GatedWhep, NoPreview, NoWhep, PreviewProvider, SharedPreview,
-    SharedWhep, WhepAnswer, WhepProvider, WhepReject, WhepScope,
+    no_preview, no_whep, FocusCaps, GatedWhep, NoPreview, NoWhep, PreviewCapabilities,
+    PreviewProvider, ProgramFidelity, ScopeCapabilities, ScopeCapability, SharedPreview, SharedWhep,
+    WhepAnswer, WhepProvider, WhepReject, WhepScope,
 };
 pub use problem::{Problem, PROBLEM_JSON};
 pub use realtime::{CorrKey, CorrRegistry, RealtimeFrame, SessionStream};
