@@ -84,12 +84,22 @@ use tokio::task::JoinHandle;
 // the `AppState`. Bundling them into a struct would only move the arity behind a
 // one-use builder without improving clarity.
 #[allow(clippy::too_many_arguments)]
+// reason: `whep` (WHEP preview egress, ADR-P006) and `whip` (WHIP ingest,
+// ADR-T014) are the canonical, externally-named WebRTC protocol terms — distinct
+// transports, not a typo-similar pair; renaming either to satisfy the lint would
+// obscure the spec mapping.
+#[allow(clippy::similar_names)]
 pub async fn bind_and_serve<F>(
     listen: &str,
     config: &MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    // The WHEP focus transport (ADR-P006), already cap-decorated. `None` keeps
+    // the default `NoWhep` (a pure build sheds every focus to the JPEG ladder).
+    whep: Option<multiview_control::SharedWhep>,
+    // The WHIP ingest provider (ADR-T014). `None` keeps the default `NoWhip`
+    // (every publish answers `503`; routes stay present + authz-enforced).
     whip: Option<multiview_control::SharedWhip>,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
@@ -172,7 +182,11 @@ where
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
     )
     .with_preview(preview)
-    .with_warning_store(warnings)
+    .with_warning_store(warnings);
+    if let Some(whep) = whep {
+        state = state.with_whep(whep);
+    }
+    let mut state = state
     .with_device_pollers(device_poller_registry(delivery.as_ref()))
     .with_auth_disabled(auth_disabled)
     .with_live_apply(live_apply)
@@ -2590,6 +2604,8 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            // whep: the default (no native transport) — a pure build path.
+            None,
             None,
             None,
             None,

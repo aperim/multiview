@@ -229,9 +229,10 @@ async fn software_run_serves_the_control_api_while_running() {
         Arc::clone(&publisher),
         commands,
         multiview_control::no_preview(),
-        None,
-        None,
-        None,
+        None, // whep
+        None, // whip
+        None, // licence
+        None, // mesh
         multiview_control::LiveApplyCaps::default(),
         async move {
             let _ = shutdown_rx.await;

@@ -61,11 +61,12 @@ multiview-audio = { workspace = true }
 multiview-overlay = { workspace = true }
 multiview-preview = { workspace = true }
 # The single native WebRTC transport endpoint (ADR-0048): WHIP ingest sources,
-# WHEP preview/output, and the whip_push client all mux on it. OPTIONAL, pulled
-# in ONLY by the `webrtc-native` feature (which also turns on the crate's own
-# `native` feature for the str0m ICE/DTLS/SRTP stack). The default + `webrtc`
-# (pure seams) builds never link it, so the default closure stays str0m-free and
-# `cargo deny`-clean (deny runs with `all-features = false`).
+# WHEP preview/output egress, and the whip_push client all mux on one str0m
+# owner. OPTIONAL, pulled in ONLY by the cli `webrtc-native` feature (which also
+# turns on the crate's own `native` feature: the real ICE/DTLS/SRTP stack + the
+# single dual-stack UDP socket). The default + `webrtc` (pure seams) builds never
+# link it and stay GPU/native-free; `cargo deny` scans the default build only
+# (`all-features = false`), so the str0m closure never enters the deny graph.
 multiview-webrtc = { workspace = true, optional = true }
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -184,20 +185,30 @@ default = ["software"]
 # Software-only reference path (always available).
 software = []
 
-# WebRTC pure seams (ADR-0048 §11): the `multiview-preview` + `multiview-input`
-# WebRTC seams (SDP negotiation, the Opus/H.264 depacketizers, the MediaEngine
-# pull) — both already exist and add NO native deps, so this stays in a
-# pure-Rust / `cargo deny`-clean build. It does NOT link str0m; the live
-# transport is `webrtc-native`.
+# WebRTC pure seams (ADR-0048 §11): the `multiview-preview` (WHEP preview egress:
+# SDP offer/answer + preview-encoder-selection logic + transport seam) and
+# `multiview-input` (WHIP ingest: SDP negotiation, the Opus/H.264 depacketizers,
+# the MediaEngine pull) WebRTC seams — both already exist and add NO native deps,
+# so this stays in a pure-Rust / `cargo deny`-clean build. On its own it serves
+# no live media (the control plane advertises `webrtc: false` and the SPA stays
+# on the JPEG ladder). It does NOT link str0m; the live transport is
+# `webrtc-native`.
 webrtc = ["multiview-preview/webrtc", "multiview-input/webrtc"]
 
-# WebRTC NATIVE transport (ADR-0048 §11, ADR-T014): the str0m ICE/DTLS/SRTP
-# endpoint (`multiview-webrtc/native`) that drives WHIP ingest sources and WHEP
-# preview/output. Pulls `ffmpeg` because the WHIP ingest path decodes the
-# depacketized H.264/Opus via `multiview-ffmpeg` into the standard NV12 /
-# AudioStore pipeline. OFF by default; str0m only ever rides behind this gate,
-# so the default closure stays str0m-free and deny-clean (deny scans default
-# features only).
+# WebRTC NATIVE transport (ADR-0048 §11, ADR-T014, ADR-P006): the single str0m
+# ICE/DTLS/SRTP endpoint (`multiview-webrtc/native`) that drives WHIP ingest
+# sources AND WHEP preview/output egress — wired into the control plane so a
+# browser can WHIP-publish or WHEP-play a live preview tap (program/input/output)
+# over real DTLS/SRTP with audio, TURN-enabled. Pulls `multiview-webrtc/native`
+# (the single dual-stack UDP socket + str0m owner) and implies `ffmpeg` (the WHIP
+# ingest path decodes depacketized H.264/Opus via `multiview-ffmpeg` into the
+# standard NV12 / AudioStore pipeline; the real preview H.264/VP8/Opus encoders
+# ride the same libav encode path). OFF by default: it links a native WebRTC
+# stack (str0m + an aws-lc-rs C/assembly crypto blob), so the baseline build
+# stays pure-Rust and CI-green. The cli itself adds NO `unsafe` and stays
+# `forbid(unsafe_code)`; all native code is owned by `multiview-webrtc` and
+# `multiview-ffmpeg`. `cargo deny` runs `all-features = false` so the str0m
+# closure never enters the default LGPL-clean graph.
 webrtc-native = [
     "webrtc",
     "dep:multiview-webrtc",
@@ -397,7 +408,8 @@ nvidia = [
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
     # WebRTC: the shipped deploy image serves WHIP ingest + WHEP preview/output
-    # over the single native str0m endpoint (ADR-0048 §11 / ADR-T014).
+    # egress over the single native str0m endpoint, over real DTLS/SRTP with
+    # audio, TURN-enabled (ADR-0048 §11 / ADR-T014 / ADR-P006).
     "webrtc-native",
     # Live local-mesh discovery (Conspect, ADR-0051 §6): the shipped deploy image
     # runs the real mDNS announce/browse loop.
@@ -418,7 +430,8 @@ apple = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
-    # WebRTC ingest/preview over the native str0m endpoint (ADR-0048 §11).
+    # WebRTC ingest + WHEP preview/output egress over the native str0m endpoint
+    # (ADR-0048 §11 / ADR-P006).
     "webrtc-native",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
@@ -445,7 +458,8 @@ linux-vaapi = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
-    # WebRTC ingest/preview over the native str0m endpoint (ADR-0048 §11).
+    # WebRTC ingest + WHEP preview/output egress over the native str0m endpoint
+    # (ADR-0048 §11 / ADR-P006).
     "webrtc-native",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
@@ -475,7 +489,9 @@ full = [
     "multiview-output/ndi",
     "multiview-control/embed-web",
     "multiview-control/openapi",
-    "multiview-preview/webrtc",
+    # Live WHEP preview egress over real DTLS/SRTP, with audio, TURN-enabled
+    # (ADR-P006) — supersedes the pure `multiview-preview/webrtc` seam in `full`.
+    "webrtc-native",
     # mDNS managed-device discovery (DEV-A5): pure-Rust, LGPL-clean, GPU-free.
     "multiview-control/discovery",
     # Managed-device live transport (DEV-A4): the `zowietek` driver poller's real

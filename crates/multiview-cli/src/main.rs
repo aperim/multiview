@@ -230,6 +230,13 @@ struct ControlPlaneWiring {
     /// `webrtc-native`.
     #[cfg(feature = "webrtc-native")]
     webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry,
+    /// The shared **program-audio preview tap** (ADR-P006 audio): the SAME
+    /// [`ProgramAudioSlot`](multiview_cli::preview::ProgramAudioSlot) the run also
+    /// hands the pipeline, so the live WHEP egress provider hears the post-loudnorm
+    /// program PCM. `None` ⇒ this run has no program audio (WHEP negotiates
+    /// video-only). Only under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    program_audio: Option<multiview_cli::preview::ProgramAudioSlot>,
 }
 
 /// Bring up the management control plane for a run (one wiring for BOTH run
@@ -247,6 +254,10 @@ struct ControlPlaneWiring {
 /// `expect_write` seam suppresses server-side writes). The hub shares the
 /// wiring's stop registry, so a live remove can tear down a startup producer
 /// (generator or ingest thread) too.
+// reason: `whep` (WHEP preview egress) and `whip` (WHIP ingest) are the canonical
+// WebRTC protocol names — distinct transports, not a typo-similar pair; renaming
+// either would obscure the spec mapping.
+#[allow(clippy::similar_names)]
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,
@@ -269,6 +280,8 @@ async fn serve_control_plane(
         mesh,
         #[cfg(feature = "webrtc-native")]
         webrtc_registry,
+        #[cfg(feature = "webrtc-native")]
+        program_audio,
     } = wiring;
     let (commands, command_rx) = command_bus(64);
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
@@ -276,6 +289,25 @@ async fn serve_control_plane(
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
     let hub =
         multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
+    // Live WHEP preview egress (ADR-P006), gated behind `webrtc-native`: the
+    // native str0m `WhepEgress` from `multiview-webrtc`, cap-decorated, sampling
+    // the SAME wait-free program slot + per-input stores as the JPEG path
+    // (read-only — invariant #10). `None` on a pure build (the SPA sheds to JPEG).
+    #[cfg(feature = "webrtc-native")]
+    let whep: Option<multiview_control::SharedWhep> = {
+        let endpoint_config = webrtc_endpoint_config(config);
+        let live = multiview_cli::whep::CliWhepProvider::spawn(
+            endpoint_config,
+            Arc::clone(&program_slot),
+            Arc::clone(&shared_stores),
+            program_audio,
+        );
+        let gated = multiview_control::GatedWhep::with_defaults(Arc::new(live));
+        let shared: multiview_control::SharedWhep = Arc::new(gated);
+        Some(shared)
+    };
+    #[cfg(not(feature = "webrtc-native"))]
+    let whep: Option<multiview_control::SharedWhep> = None;
     // The live-preview provider reads the program slot the run loop fills + the
     // shared per-input store map — read-only for control (invariant #10).
     let provider: multiview_control::SharedPreview = Arc::new(
@@ -299,6 +331,7 @@ async fn serve_control_plane(
         Arc::clone(publisher),
         commands,
         provider,
+        whep,
         whip,
         licence,
         mesh,
@@ -323,6 +356,18 @@ async fn serve_control_plane(
     Ok((handle, command_rx, hub, watch))
 }
 
+/// Map the validated `[webrtc]` config section into the `multiview-webrtc`
+/// [`EndpointConfig`](multiview_webrtc::config::EndpointConfig) the live WHEP
+/// egress endpoint binds (ADR-0048 §1: the cli reads the config doc; the webrtc
+/// crate never depends on `multiview-config`). Delegates to the shared mapping so
+/// the WHEP egress endpoint carries the same `[webrtc]` knobs as WHIP ingest —
+/// including the STUN/TURN ICE servers (ADR-0048 §5.1) the in-driver TURN client
+/// allocates relays from, so a browser behind NAT can WHEP-play via TURN.
+#[cfg(feature = "webrtc-native")]
+fn webrtc_endpoint_config(config: &MultiviewConfig) -> multiview_webrtc::config::EndpointConfig {
+    multiview_cli::webrtc_endpoint::endpoint_config_from(config)
+}
+
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
 /// serving the control plane, the embedded web UI, and the live program/input
 /// previews from the SAME run (when `[control]` is configured) — ingestion,
@@ -342,7 +387,7 @@ async fn serve_control_plane(
 // line-count lint is allowed here with justification (matching `bind_and_serve`).
 #[allow(clippy::too_many_lines)]
 async fn run_pipeline_until_ctrl_c(
-    pipeline: multiview_cli::pipeline::Pipeline,
+    mut pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
     config_path: &Path,
@@ -350,6 +395,22 @@ async fn run_pipeline_until_ctrl_c(
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let preview_slot = multiview_cli::preview::program_slot();
+    // The shared program-audio preview tap (ADR-P006 audio): wired ONLY when this
+    // run carries program audio AND a live WHEP egress can consume it
+    // (`webrtc-native`). The bake consumer pushes post-loudnorm program PCM into
+    // it; the WHEP provider drains it to Opus-encode + send to the peer. The cli
+    // shares the SAME slot here (the pipeline) and in the WHEP provider, so
+    // program audio reaches a WHEP peer when (and only when) it is configured. A
+    // preview tap off the bake-consumer thread — never the output clock (inv
+    // #1/#10). `None` (no audio / no WHEP build) means the consumer pushes
+    // nothing, byte-identical to today.
+    #[cfg(feature = "webrtc-native")]
+    let program_audio: Option<multiview_cli::preview::ProgramAudioSlot> =
+        pipeline.has_program_audio().then(|| {
+            let slot = multiview_cli::preview::ProgramAudioSlot::new();
+            pipeline.set_program_audio_preview(slot.clone());
+            slot
+        });
     // This program's cadence (the legacy single program's canvas fps) for the
     // engine `ProgramSet` member metadata.
     let cadence = pipeline.cadence();
@@ -393,6 +454,8 @@ async fn run_pipeline_until_ctrl_c(
                     mesh: Some(Arc::clone(&plane.mesh)),
                     #[cfg(feature = "webrtc-native")]
                     webrtc_registry: pipeline.webrtc_registry(),
+                    #[cfg(feature = "webrtc-native")]
+                    program_audio: program_audio.clone(),
                 },
                 shutdown_rx,
             )
@@ -701,6 +764,10 @@ async fn run_software_until_ctrl_c(
                     // total under the rare software+webrtc-native combination.
                     #[cfg(feature = "webrtc-native")]
                     webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry::new(),
+                    // The software run path has no bake stage, so no program-audio
+                    // PCM is produced — a WHEP peer on this path is video-only.
+                    #[cfg(feature = "webrtc-native")]
+                    program_audio: None,
                 },
                 shutdown_rx,
             )

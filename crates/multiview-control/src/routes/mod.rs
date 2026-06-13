@@ -864,6 +864,8 @@ pub fn api_router() -> Router<AppState> {
                 .put(tally::put_profile)
                 .delete(tally::delete_profile),
         )
+        // Preview transport capabilities (WHEP vs the JPEG ladder, ADR-P006).
+        .route("/preview/capabilities", get(preview::capabilities))
         // Live preview snapshots (program + per-input JPEG stills).
         .route("/preview/program.jpg", get(preview::program_jpeg))
         .route("/preview/inputs", get(preview::list_input_ids))

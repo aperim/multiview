@@ -4,8 +4,9 @@
 //!
 //! These exercise the **seam** with injected program frames + an in-memory fake
 //! transport — no GPU blit, no real H.264 encode, no socket. The live media
-//! egress (the native str0m H.264 path) lands behind the further `webrtc-native`
-//! gate (PRV-1b) and is intentionally not exercised here.
+//! egress (the native str0m H.264 path) lives in the `multiview-webrtc` crate's
+//! `native` WHEP egress transport (ADR-0048 / ADR-P006) and is intentionally not
+//! exercised here.
 //!
 //! What is asserted (the testable core of PRV-5 §Acceptance, program scope):
 //! * conditional tap — **0 subscribers performs no blit** (ADR-P003); the first

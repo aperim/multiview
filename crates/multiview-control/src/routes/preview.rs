@@ -33,6 +33,31 @@ fn jpeg_response(bytes: Vec<u8>) -> Response {
         .into_response()
 }
 
+/// `GET /api/v1/preview/capabilities` — what preview transports this build can
+/// serve, so the SPA picks WHEP vs the JPEG ladder before issuing an offer
+/// (ADR-P006 move 6, ADR-W020). Role: read.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/preview/capabilities",
+        tag = "preview",
+        responses(
+            (status = 200, description = "Preview transport capabilities.", body = crate::preview::PreviewCapabilities),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn capabilities(State(state): State<AppState>, principal: Principal) -> Response {
+    if let Err(err) = principal.role.require(Action::Read) {
+        return err.into_response();
+    }
+    Json(crate::preview::PreviewCapabilities::from_provider(
+        state.whep.as_ref(),
+    ))
+    .into_response()
+}
+
 /// `GET /api/v1/preview/program.jpg` — the latest composited program frame
 /// (role: read). `503` when no frame has been produced yet.
 pub(crate) async fn program_jpeg(State(state): State<AppState>, principal: Principal) -> Response {
@@ -90,7 +115,7 @@ fn whep_base_path(scope: &WhepScope) -> String {
 /// Map a [`WhepReject`] onto its RFC 9457 `application/problem+json` response.
 ///
 /// A `CapacityExceeded` carries the `fallback` transport hint as a non-standard
-/// problem member so the UI can degrade to the named transport (`ws-jpeg`,
+/// problem member so the UI can degrade to the named transport (`jpeg`,
 /// `llhls`) honestly rather than silently failing.
 fn whep_reject_response(scope: &WhepScope, reject: WhepReject) -> Response {
     let instance = whep_base_path(scope);
