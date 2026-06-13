@@ -344,9 +344,15 @@ fn video_egress_reaches_a_real_peer_over_the_shuttle() {
     let clock = Instant::now();
 
     // Connect.
-    let connected = pump_until(&egress, &id, egress_addr, &mut peer, peer_addr, clock, |_e, p| {
-        p.is_connected()
-    });
+    let connected = pump_until(
+        &egress,
+        &id,
+        egress_addr,
+        &mut peer,
+        peer_addr,
+        clock,
+        |_e, p| p.is_connected(),
+    );
     assert!(connected, "ICE+DTLS did not complete");
 
     // Push several video samples (a keyframe first) into the source; the egress
@@ -355,9 +361,15 @@ fn video_egress_reaches_a_real_peer_over_the_shuttle() {
     media.push_video(3000, false);
     media.push_video(6000, false);
 
-    let delivered = pump_until(&egress, &id, egress_addr, &mut peer, peer_addr, clock, |_e, p| {
-        p.received_media_count() > 0
-    });
+    let delivered = pump_until(
+        &egress,
+        &id,
+        egress_addr,
+        &mut peer,
+        peer_addr,
+        clock,
+        |_e, p| p.received_media_count() > 0,
+    );
     assert!(delivered, "no SRTP video reached the peer");
     assert!(peer.received_media_count() > 0);
 }
@@ -386,8 +398,15 @@ fn audio_egress_reaches_a_real_peer_when_opus_negotiated() {
 
     let clock = Instant::now();
     assert!(
-        pump_until(&egress, &id, egress_addr, &mut peer, peer_addr, clock, |_e, p| p
-            .is_connected()),
+        pump_until(
+            &egress,
+            &id,
+            egress_addr,
+            &mut peer,
+            peer_addr,
+            clock,
+            |_e, p| p.is_connected()
+        ),
         "must connect"
     );
 
@@ -395,9 +414,15 @@ fn audio_egress_reaches_a_real_peer_when_opus_negotiated() {
     media.push_audio(0);
     media.push_audio(960);
 
-    let delivered = pump_until(&egress, &id, egress_addr, &mut peer, peer_addr, clock, |_e, p| {
-        p.received_media_count() >= 2
-    });
+    let delivered = pump_until(
+        &egress,
+        &id,
+        egress_addr,
+        &mut peer,
+        peer_addr,
+        clock,
+        |_e, p| p.received_media_count() >= 2,
+    );
     assert!(delivered, "audio + video did not reach the peer");
 }
 

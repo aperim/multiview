@@ -283,11 +283,11 @@ impl WhepEgress {
             // that reachability path, never the session.
             let _ = session.add_relay_candidate(*relayed, *local);
         }
-        let sdp_answer = session.accept_offer(offer).map_err(|_| {
-            WhepError::MalformedOffer {
+        let sdp_answer = session
+            .accept_offer(offer)
+            .map_err(|_| WhepError::MalformedOffer {
                 reason: "str0m rejected the WHEP offer (no usable media / ICE / DTLS)",
-            }
-        })?;
+            })?;
         let attrs = parse_answer_attributes(&sdp_answer)?;
 
         let id = self.mint_id();
@@ -348,9 +348,12 @@ impl WhepEgress {
         id: &SessionId,
         now: Instant,
     ) -> Result<Vec<(SocketAddr, Vec<u8>)>, WhepError> {
-        let mut map = self.sessions.lock().map_err(|_| WhepError::MalformedOffer {
-            reason: "preview session map poisoned",
-        })?;
+        let mut map = self
+            .sessions
+            .lock()
+            .map_err(|_| WhepError::MalformedOffer {
+                reason: "preview session map poisoned",
+            })?;
         let Some(entry) = map.get_mut(id) else {
             return Ok(Vec::new());
         };
@@ -388,7 +391,12 @@ impl WhepEgress {
                     // A write fault disconnects this session only, never the
                     // engine; preview is best-effort.
                     if session
-                        .write_video_sample(&sample.data, sample.keyframe, sample.rtp_timestamp, now)
+                        .write_video_sample(
+                            &sample.data,
+                            sample.keyframe,
+                            sample.rtp_timestamp,
+                            now,
+                        )
                         .is_err()
                     {
                         break;
@@ -442,9 +450,12 @@ impl WhepEgress {
         payload: &[u8],
         now: Instant,
     ) -> Result<(), WhepError> {
-        let mut map = self.sessions.lock().map_err(|_| WhepError::MalformedOffer {
-            reason: "preview session map poisoned",
-        })?;
+        let mut map = self
+            .sessions
+            .lock()
+            .map_err(|_| WhepError::MalformedOffer {
+                reason: "preview session map poisoned",
+            })?;
         let Some(entry) = map.get_mut(id) else {
             return Ok(());
         };
@@ -472,6 +483,66 @@ impl WhepEgress {
             .unwrap_or(now)
     }
 
+    /// The ids of every tracked session (live + closed tombstones), for the
+    /// endpoint driver to iterate and pump.
+    #[must_use]
+    pub fn session_ids(&self) -> Vec<SessionId> {
+        self.sessions
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Feed one received datagram to **every** live session: str0m demuxes by ICE
+    /// ufrag and silently ignores a datagram not addressed to it, so the endpoint
+    /// driver (which owns the single shared socket) can fan an inbound datagram to
+    /// all sessions without learning the per-session peer mapping itself. The
+    /// earliest wake instant any session now wants is the driver's next park hint
+    /// (returned), so the driver never busy-spins.
+    ///
+    /// # Errors
+    ///
+    /// [`WhepError::MalformedOffer`] only if the bookkeeping mutex is poisoned.
+    pub fn handle_datagram_broadcast(
+        &self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+    ) -> Result<(), WhepError> {
+        for id in self.session_ids() {
+            self.handle_datagram(&id, source, destination, payload, now)?;
+        }
+        Ok(())
+    }
+
+    /// Drive every session's egress one step and return all outbound datagrams
+    /// (paired with the destination the driver sends each to). The endpoint driver
+    /// calls this on a tick / after a recv; a stalled session merely produces
+    /// nothing (invariant #10 — never blocks the others or the engine).
+    ///
+    /// # Errors
+    ///
+    /// [`WhepError::MalformedOffer`] only if the bookkeeping mutex is poisoned.
+    pub fn drive_all(&self, now: Instant) -> Result<Vec<(SocketAddr, Vec<u8>)>, WhepError> {
+        let mut out = Vec::new();
+        for id in self.session_ids() {
+            out.extend(self.drive_egress(&id, now)?);
+        }
+        Ok(out)
+    }
+
+    /// The earliest instant any tracked session wants to be polled (the driver's
+    /// park horizon). Returns `now + 1s` when there are no sessions.
+    #[must_use]
+    pub fn next_wake(&self, now: Instant) -> Instant {
+        self.session_ids()
+            .into_iter()
+            .map(|id| self.poll_timeout(&id, now))
+            .min()
+            .unwrap_or_else(|| now + std::time::Duration::from_secs(1))
+    }
+
     fn mint_id(&self) -> SessionId {
         let n = self.next_id.lock().map_or(0, |mut g| {
             *g = g.saturating_add(1);
@@ -488,7 +559,8 @@ impl WhepTransport for WhepEgress {
         codec: PreviewCodec,
         media: &dyn PreviewMediaSource,
     ) -> Result<TransportAnswer, WhepError> {
-        self.accept_session(offer, codec, media).map(|a| a.transport)
+        self.accept_session(offer, codec, media)
+            .map(|a| a.transport)
     }
 
     fn close(&self, id: &SessionId) -> Result<(), WhepError> {

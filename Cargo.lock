@@ -2953,6 +2953,7 @@ dependencies = [
  "multiview-overlay",
  "multiview-preview",
  "multiview-telemetry",
+ "multiview-webrtc",
  "serde",
  "serde_json",
  "tempfile",

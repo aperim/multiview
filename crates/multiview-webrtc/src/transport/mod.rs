@@ -568,6 +568,27 @@ impl WebRtcEndpoint {
         &self.config
     }
 
+    /// Receive one datagram from the shared media socket into `buf`, returning
+    /// `(len, source)`. Non-blocking (the socket is bound non-blocking): a
+    /// `WouldBlock` surfaces as [`std::io::ErrorKind::WouldBlock`] so the driver
+    /// can park on a timer instead of busy-spinning.
+    ///
+    /// # Errors
+    ///
+    /// The underlying [`std::net::UdpSocket::recv_from`] error (incl. `WouldBlock`).
+    pub fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf)
+    }
+
+    /// Send `payload` to `dst` over the shared media socket.
+    ///
+    /// # Errors
+    ///
+    /// The underlying [`std::net::UdpSocket::send_to`] error.
+    pub fn send_to(&self, payload: &[u8], dst: SocketAddr) -> std::io::Result<usize> {
+        self.socket.send_to(payload, dst)
+    }
+
     /// The gathered host candidate addresses, IPv6-first (ADR-0042): the bound
     /// socket's address plus any configured `advertised_addresses` (NAT 1:1 /
     /// Docker), with the bound port applied to bare advertised IPs.

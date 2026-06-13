@@ -75,6 +75,13 @@ pub mod outputs;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
+/// Live WHEP preview egress provider (ADR-P006), gated behind `webrtc-native`:
+/// wires the native `multiview-webrtc` `WhepEgress` into the control plane so a
+/// browser can WHEP-play a preview tap over real DTLS/SRTP, with audio, on all
+/// scopes. Strictly isolated (invariant #10): it samples wait-free taps and
+/// pushes into bounded drop-oldest feeds; the driver never awaits a client.
+#[cfg(feature = "webrtc-native")]
+pub mod whep;
 
 /// Build-capability gating for `[timing].ptp_phc` (DEV-C1 / ADR-M010): a
 /// configured PHC device must FAIL a non-`ptp` build at startup with a clear

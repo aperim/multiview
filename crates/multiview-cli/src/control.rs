@@ -90,6 +90,9 @@ pub async fn bind_and_serve<F>(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    // The WHEP focus transport (ADR-P006), already cap-decorated. `None` keeps
+    // the default `NoWhep` (a pure build sheds every focus to the JPEG ladder).
+    whep: Option<multiview_control::SharedWhep>,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
     live_apply: multiview_control::LiveApplyCaps,
@@ -171,7 +174,11 @@ where
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
     )
     .with_preview(preview)
-    .with_warning_store(warnings)
+    .with_warning_store(warnings);
+    if let Some(whep) = whep {
+        state = state.with_whep(whep);
+    }
+    let mut state = state
     .with_device_pollers(device_poller_registry(delivery.as_ref()))
     .with_auth_disabled(auth_disabled)
     .with_live_apply(live_apply)
@@ -2583,6 +2590,8 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            // whep: the default (no native transport) — a pure build path.
+            None,
             None,
             None,
             multiview_control::LiveApplyCaps::default(),

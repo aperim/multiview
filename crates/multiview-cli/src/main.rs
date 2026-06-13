@@ -268,6 +268,23 @@ async fn serve_control_plane(
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
     let hub =
         multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
+    // Live WHEP preview egress (ADR-P006), gated behind `webrtc-native`: the
+    // native str0m `WhepEgress` from `multiview-webrtc`, cap-decorated, sampling
+    // the SAME wait-free program slot + per-input stores as the JPEG path
+    // (read-only — invariant #10). `None` on a pure build (the SPA sheds to JPEG).
+    #[cfg(feature = "webrtc-native")]
+    let whep: Option<multiview_control::SharedWhep> = {
+        let endpoint_config = webrtc_endpoint_config(config);
+        let live = multiview_cli::whep::CliWhepProvider::spawn(
+            endpoint_config,
+            Arc::clone(&program_slot),
+            Arc::clone(&shared_stores),
+        );
+        let gated = multiview_control::GatedWhep::with_defaults(Arc::new(live));
+        Some(Arc::new(gated) as multiview_control::SharedWhep)
+    };
+    #[cfg(not(feature = "webrtc-native"))]
+    let whep: Option<multiview_control::SharedWhep> = None;
     // The live-preview provider reads the program slot the run loop fills + the
     // shared per-input store map — read-only for control (invariant #10).
     let provider: multiview_control::SharedPreview = Arc::new(
@@ -279,6 +296,7 @@ async fn serve_control_plane(
         Arc::clone(publisher),
         commands,
         provider,
+        whep,
         licence,
         mesh,
         live_apply,
@@ -300,6 +318,34 @@ async fn serve_control_plane(
         multiview_cli::config_watch::WatchOptions::default(),
     );
     Ok((handle, command_rx, hub, watch))
+}
+
+/// Map the validated `[webrtc]` config section into the `multiview-webrtc`
+/// [`EndpointConfig`] the live WHEP egress endpoint binds (ADR-0048 §1: the cli
+/// reads the config doc; the webrtc crate never depends on `multiview-config`).
+/// Advertised addresses that don't parse as bare IPs are skipped (validation
+/// already accepted hostnames; only literal IPs are usable as candidates here).
+#[cfg(feature = "webrtc-native")]
+fn webrtc_endpoint_config(config: &MultiviewConfig) -> multiview_webrtc::config::EndpointConfig {
+    let w = &config.webrtc;
+    let advertised_addresses = w
+        .advertised_addresses
+        .iter()
+        .filter_map(|a| a.parse::<std::net::IpAddr>().ok())
+        .collect();
+    multiview_webrtc::config::EndpointConfig {
+        udp_port: w.udp_port,
+        advertised_addresses,
+        max_sessions: w.max_sessions,
+        session_idle_timeout: w.session_idle_timeout.as_duration(),
+        tombstone_ttl: multiview_webrtc::config::DEFAULT_TOMBSTONE_TTL,
+        cors_allow_origins: w.cors_allow_origins.clone(),
+        // TURN/STUN ice-servers: the `EndpointConfig` carries them and the egress
+        // registers relay candidates (ADR-0048 §5.1); the `[webrtc]` config
+        // surface for ice-servers is a follow-on, so none are mapped yet (the
+        // self-hosted host + advertised candidates cover the default posture).
+        ice_servers: Vec::new(),
+    }
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
