@@ -3581,6 +3581,37 @@
         }
       }
     },
+    "/api/v1/preview/capabilities": {
+      "get": {
+        "tags": [
+          "preview"
+        ],
+        "summary": "`GET /api/v1/preview/capabilities` — what preview transports this build can\nserve, so the SPA picks WHEP vs the JPEG ladder before issuing an offer\n(ADR-P006 move 6, ADR-W020). Role: read.",
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "description": "Preview transport capabilities.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewCapabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/preview/inputs/{id}/whep": {
       "post": {
         "tags": [
@@ -10132,6 +10163,29 @@
           "apple"
         ]
       },
+      "PreviewCapabilities": {
+        "type": "object",
+        "description": "The `GET /api/v1/preview/capabilities` response (ADR-P006 move 6): what preview\ntransports this build can serve, so the SPA picks WHEP vs the JPEG ladder\n(ADR-W020) **before** issuing an offer.",
+        "required": [
+          "webrtc",
+          "scopes",
+          "fallback"
+        ],
+        "properties": {
+          "fallback": {
+            "type": "string",
+            "description": "The always-available fallback transport literal: `\"jpeg\"` (the one\nfallback literal everywhere — ADR-P006 move 6)."
+          },
+          "scopes": {
+            "$ref": "#/components/schemas/ScopeCapabilities",
+            "description": "Per-scope WHEP availability + the program fidelity label."
+          },
+          "webrtc": {
+            "type": "boolean",
+            "description": "Whether this build can serve WHEP/WebRTC at all (a native transport is\nwired). `false` on a pure / negotiation-only build."
+          }
+        }
+      },
       "ProbeBodyDoc": {
         "allOf": [
           {
@@ -10326,6 +10380,14 @@
             "description": "A URI reference identifying the problem type (here a `/problems/<slug>`)."
           }
         }
+      },
+      "ProgramFidelity": {
+        "type": "string",
+        "description": "The fidelity a **program** WHEP focus would carry (ADR-P005/P006). Serialized\nin the capabilities response so the SPA can label the program preview before\nit opens one.",
+        "enum": [
+          "real-encoded-output",
+          "pre-encode-canvas-approx"
+        ]
       },
       "RaiseTicketRequest": {
         "type": "object",
@@ -10877,6 +10939,53 @@
               "type": "string"
             },
             "description": "The service types being browsed (Cast + NDI, plus any configured\nzowietek-control type)."
+          }
+        }
+      },
+      "ScopeCapabilities": {
+        "type": "object",
+        "description": "The per-scope capability map.",
+        "required": [
+          "program",
+          "inputs",
+          "outputs"
+        ],
+        "properties": {
+          "inputs": {
+            "$ref": "#/components/schemas/ScopeCapability",
+            "description": "The per-input scope."
+          },
+          "outputs": {
+            "$ref": "#/components/schemas/ScopeCapability",
+            "description": "The per-output rendition scope."
+          },
+          "program": {
+            "$ref": "#/components/schemas/ScopeCapability",
+            "description": "The composited program canvas scope."
+          }
+        }
+      },
+      "ScopeCapability": {
+        "type": "object",
+        "description": "Per-scope WHEP availability (plus the program scope's fidelity label).",
+        "required": [
+          "whep"
+        ],
+        "properties": {
+          "fidelity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProgramFidelity",
+                "description": "The program scope's fidelity label (only present for the program scope)."
+              }
+            ]
+          },
+          "whep": {
+            "type": "boolean",
+            "description": "Whether a WHEP focus can be opened on this scope."
           }
         }
       },
