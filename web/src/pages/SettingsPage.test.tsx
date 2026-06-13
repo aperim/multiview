@@ -42,6 +42,10 @@ const BOOT_MODEL = {
 const server = setupServer(
   http.get("*/api/v1/config/watch-status", () => HttpResponse.json(ACTIVE_STATUS)),
   http.get("*/api/v1/config/boot-model", () => HttpResponse.json(BOOT_MODEL)),
+  // The Display Nodes card (DEV-B6) also mounts on this page; mock its reads
+  // with empty lists so its queries never hit an unhandled request.
+  http.get("*/api/v1/devices/enrollment-tokens", () => HttpResponse.json([])),
+  http.get("*/api/v1/devices/pairing-requests", () => HttpResponse.json([])),
 );
 
 beforeAll(() => {

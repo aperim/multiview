@@ -25,8 +25,24 @@ const WATCH_STATUS = {
 
 let tokens: Record<string, unknown>[] = [];
 
+// The boot-model card (ADR-W022) also mounts on this page; mock its read with a
+// benign "not modeled" snapshot so its query never hits an unhandled request.
+const BOOT_MODEL = {
+  modeled: false,
+  boot_path: null,
+  start: null,
+  resumed: false,
+  resume_fallback: null,
+  diverged_from_loaded: [],
+  diverged_from_boot_file: null,
+  boot_file_error: null,
+  active_path: null,
+  active_written_at_ms: null,
+};
+
 const server = setupServer(
   http.get('*/api/v1/config/watch-status', () => HttpResponse.json(WATCH_STATUS)),
+  http.get('*/api/v1/config/boot-model', () => HttpResponse.json(BOOT_MODEL)),
   http.get('*/api/v1/devices/enrollment-tokens', () => HttpResponse.json(tokens)),
   http.get('*/api/v1/devices/pairing-requests', () => HttpResponse.json([])),
 );
