@@ -218,6 +218,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/config/boot-model": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/config/boot-model` — the Boot/Loaded/Running model status
+         *     (ADR-W022 §7; role: read).
+         * @description Reports whether this run carries a boot model, the boot path and start
+         *     policy, whether the run resumed (+ the fallback reason), the per-section
+         *     divergence of Running from the Loaded snapshot and from the current boot
+         *     file, and the last `active.toml` write time.
+         */
+        get: operations["boot_model_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/config/export": {
         parameters: {
             query?: never;
@@ -237,6 +261,62 @@ export interface paths {
         get: operations["export_config"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/config/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/config/promote` — write the current Running document to the
+         *     BOOT file path, server-side (ADR-W022 §6; role: write; `Idempotency-Key`;
+         *     audited; UI-confirmed).
+         * @description Compose → validate → render TOML → announce the write through the
+         *     installed ADR-W020 watcher's `expect_write` suppression seam (this is the
+         *     seam's designed caller — the watcher adopts the write as its new baseline
+         *     without re-applying) → atomic write to the boot path → a config-versioning
+         *     commit (target `boot`) → audit. With no watcher installed there is nothing
+         *     to suppress and the step is skipped.
+         */
+        post: operations["promote_to_boot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/config/revert-to-start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/config/revert-to-start` — Running := Loaded, live
+         *     (ADR-W022 §5; role: write; `Idempotency-Key`; audited).
+         * @description Composes the current Running document, diffs it against the immutable
+         *     Loaded snapshot, and applies the diff through the ONE ADR-W020
+         *     diff→apply machinery ([`crate::config_watch::apply_document_diff`]) under
+         *     the requesting principal: synthetic source changes ride
+         *     `UpsertSource`/`RemoveSource` on the bounded bus, layout/cells ride the
+         *     shared resolve+solve+Class-1 gate, stores resync to the Loaded values, and
+         *     restart-only sections are reported honestly. The ADR-W020 watcher's file
+         *     baseline is deliberately untouched (it tracks the last applied FILE
+         *     content). An empty diff applies nothing and reports `reverted: false`.
+         */
+        post: operations["revert_to_start"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1516,6 +1596,50 @@ export interface components {
             color: components["schemas"]["TallyColorDoc"];
         };
         /**
+         * @description The `GET /api/v1/config/boot-model` body (ADR-W022 §7): the run's
+         *     Boot/Loaded/Running model and the per-section divergence the UI indicator
+         *     shows.
+         */
+        BootModelBody: {
+            /** @description The persisted Running state path (`<config-dir>/.multiview/active.toml`). */
+            active_path?: string | null;
+            /**
+             * Format: int64
+             * @description Unix milliseconds of the last successful `active.toml` write this run.
+             */
+            active_written_at_ms?: number | null;
+            /**
+             * @description Why the boot file could not be compared (unreadable / parse /
+             *     validation failure), when it could not.
+             */
+            boot_file_error?: string | null;
+            /** @description The boot config file path (the watch + promote target). */
+            boot_path?: string | null;
+            /**
+             * @description The section names where Running diverges from the **current boot
+             *     file** on disk; `null` when the file is unreadable/invalid (see
+             *     [`boot_file_error`](Self::boot_file_error)).
+             */
+            diverged_from_boot_file?: string[] | null;
+            /**
+             * @description The section names where Running diverges from the **Loaded** startup
+             *     snapshot (exact, computed by the pure `ConfigDiff`). Empty ⇒ in sync.
+             */
+            diverged_from_loaded: string[];
+            /**
+             * @description Whether this run carries a boot model (started from a config file with
+             *     a control plane). `false` ⇒ every other field is its honest empty
+             *     default and the revert/promote actions refuse with `409`.
+             */
+            modeled: boolean;
+            /** @description Why a `start = "resume"` run fell back to boot, if it did. */
+            resume_fallback?: string | null;
+            /** @description Whether this run started from a valid persisted `active.toml`. */
+            resumed: boolean;
+            /** @description The `[control] start` cold-start policy (`boot` | `resume`). */
+            start?: string | null;
+        };
+        /**
          * @description `OpenAPI` mirror of [`multiview_core::tally::BusSource`].
          *
          *     Serde-equivalent: internally tagged on `kind`, `snake_case` variant tags.
@@ -2378,6 +2502,29 @@ export interface components {
             /** @description A URI reference identifying the problem type (here a `/problems/<slug>`). */
             type: string;
         };
+        /** @description The `POST /api/v1/config/promote` response (ADR-W022 §6). */
+        PromoteBody: {
+            /**
+             * Format: int64
+             * @description The number of bytes written.
+             */
+            bytes?: number | null;
+            /** @description The operation id this promote is correlated under. */
+            operation_id: string;
+            /** @description The boot file path the Running document was written to. */
+            path?: string | null;
+            /**
+             * @description `true` when a replayed `Idempotency-Key` answered from the original
+             *     reservation: the file was NOT rewritten and `path`/`bytes`/`revision`
+             *     are absent (the original response carried them).
+             */
+            replayed: boolean;
+            /**
+             * Format: int64
+             * @description The committed `boot` config revision id.
+             */
+            revision?: number | null;
+        };
         /** @description An IS-04 **Receiver**: an ingress flow (a Multiview input). */
         Receiver: components["schemas"]["ResourceCore"] & {
             /** @description The id of the device this receiver belongs to. */
@@ -2469,6 +2616,38 @@ export interface components {
          * @enum {string}
          */
         ResourceType: "node" | "device" | "sender" | "receiver";
+        /** @description The `POST /api/v1/config/revert-to-start` response (ADR-W022 §5). */
+        RevertToStartBody: {
+            /** @description The operation id this revert is correlated under. */
+            operation_id: string;
+            /**
+             * @description `true` when a replayed `Idempotency-Key` answered from the original
+             *     reservation (nothing was re-applied; the other fields are this
+             *     replay's empty defaults, not a record of the original outcome).
+             */
+            replayed: boolean;
+            /** @description The sections that could not hot-revert and re-converge on restart. */
+            restart_only: string[];
+            /**
+             * @description Whether the revert FULLY applied (`false` ⇒ either Running already
+             *     equalled Loaded and nothing was enqueued, or — when
+             *     [`shed`](Self::shed) is non-zero — the revert applied only partially).
+             */
+            reverted: boolean;
+            /**
+             * Format: int32
+             * @description How many engine commands were shed on a full command bus (review M4):
+             *     `0` ⇒ every command landed; non-zero ⇒ the stores were reverted but
+             *     the engine may not reflect every change — retry the revert once the
+             *     bus drains (the `config-file-apply-incomplete` warning is raised).
+             */
+            shed: number;
+            /**
+             * @description Per-section applied/warned summary parts from the one apply machinery
+             *     (e.g. `sources: in_a changed`).
+             */
+            summary: string[];
+        };
         /**
          * Format: int64
          * @description A monotonic, per-target revision number (starts at 1).
@@ -3879,6 +4058,53 @@ export interface operations {
             };
         };
     };
+    boot_model_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The Boot/Loaded/Running model status with per-section divergence. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootModelBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The live stores do not compose into a valid Running document. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     export_config: {
         parameters: {
             query?: never;
@@ -3916,6 +4142,118 @@ export interface operations {
                 };
             };
             /** @description The stores do not compose into a valid configuration (detail names the violation). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    promote_to_boot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The Running document was written to the boot file and committed as a `boot` config revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromoteBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This run has no boot model (no config file); there is no boot file to promote to. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The live stores do not compose into a valid Running document. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    revert_to_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The revert was applied (or was an honest no-op) with a per-section summary. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevertToStartBody"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to write. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This run has no boot model (no config file); there is no start state to revert to. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The live stores do not compose into a valid Running document. */
             422: {
                 headers: {
                     [name: string]: unknown;

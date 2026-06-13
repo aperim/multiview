@@ -481,6 +481,24 @@ pub struct AppState {
     /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
     /// "not watched" state. Control-plane-only (invariant #10).
     pub config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
+    /// The Boot/Loaded/Running model (ADR-W022): the boot path, the immutable
+    /// Loaded snapshot, the cold-start policy, and the resume outcome. `None`
+    /// for store-only deployments (no config file), which honestly report
+    /// `modeled: false` and refuse revert/promote.
+    pub boot_model: Option<Arc<crate::boot_model::BootModel>>,
+    /// The ONE Running-changed choke-point signal (ADR-W022 §3): fired by
+    /// [`AppState::audit`] after every successful mutation; awaited by the
+    /// debounced `active.toml` persister. A one-permit coalescing
+    /// [`tokio::sync::Notify`] — it can never queue, grow, or block
+    /// (invariant #10).
+    pub running_changed: Arc<tokio::sync::Notify>,
+    /// The installed ADR-W020 config-file watch handle, shared between the
+    /// spawned watcher (which installs itself via
+    /// [`AppState::install_watch_handle`]) and the promote-to-boot route
+    /// (which calls its `expect_write` suppression seam through
+    /// [`crate::config_watch::expect_server_write`]). `None` until a watcher
+    /// is spawned (store-only deployments never install one).
+    watch_handle: Arc<std::sync::RwLock<Option<crate::config_watch::ConfigWatchHandle>>>,
     /// What the **running** engine can take live, per stored collection
     /// (ADR-W021): injected by the binary at wiring time so mutation routes
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
@@ -625,10 +643,47 @@ impl AppState {
             live_sources: LiveSourceCapability::synthetic_only(),
             // No watcher by default: the endpoint reports "not watched".
             config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
+            // No boot model by default: store-only deployments report
+            // `modeled: false` and refuse revert/promote (ADR-W022 §8).
+            boot_model: None,
+            running_changed: Arc::new(tokio::sync::Notify::new()),
+            watch_handle: Arc::new(std::sync::RwLock::new(None)),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W021).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
         }
+    }
+
+    /// Install the Boot/Loaded/Running model (ADR-W022). The binary builds it
+    /// from the resolved start config; tests build it directly.
+    #[must_use]
+    pub fn with_boot_model(mut self, boot_model: Arc<crate::boot_model::BootModel>) -> Self {
+        self.boot_model = Some(boot_model);
+        self
+    }
+
+    /// Install the spawned config-file watcher's handle into the shared slot
+    /// the promote-to-boot route reads. Called by
+    /// [`crate::config_watch::spawn`]; replaces any previous handle (a
+    /// re-spawned watcher supersedes the stopped one).
+    pub fn install_watch_handle(&self, handle: crate::config_watch::ConfigWatchHandle) {
+        let mut slot = match self.watch_handle.write() {
+            Ok(slot) => slot,
+            // A poisoned lock cannot corrupt this single-value slot; recover
+            // the guard so one panicked writer never wedges promote.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(handle);
+    }
+
+    /// The installed config-file watch handle, if a watcher was spawned.
+    #[must_use]
+    pub fn watch_handle(&self) -> Option<crate::config_watch::ConfigWatchHandle> {
+        let slot = match self.watch_handle.read() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.clone()
     }
 
     /// Declare which source kinds the running engine can apply live
@@ -728,6 +783,14 @@ impl AppState {
     /// Record a successful mutation in the audit log, stamped with the current
     /// acknowledgement clock. Convenience used by the mutating handlers so the
     /// who/what/when is captured in one call after the mutation succeeds.
+    ///
+    /// This is also the ONE Running-changed choke point (ADR-W022 §3): after
+    /// recording, it fires `running_changed` so the debounced `active.toml`
+    /// persister follows every successful mutation — current and future call
+    /// sites alike — by construction. The notify is one-permit coalescing
+    /// (never queues, never blocks — invariant #10); audit entries that do
+    /// not change the composed document at worst cost one identical rewrite
+    /// per debounce window (accepted over-approximation).
     pub fn audit(
         &self,
         actor: &str,
@@ -744,6 +807,7 @@ impl AppState {
             self.ack_now(),
             detail,
         );
+        self.running_changed.notify_one();
     }
 
     /// Replace the alarm store (e.g. to share one store with an ingest task or

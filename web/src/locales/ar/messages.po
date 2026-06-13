@@ -38,6 +38,11 @@ msgstr ""
 msgid "(opens in a new tab)"
 msgstr ""
 
+#. placeholder {0}: outcome.revision
+#: src/pages/SettingsPage.tsx:396
+msgid "(revision {0})"
+msgstr ""
+
 #. placeholder {0}: names.length
 #. placeholder {1}: editableCells(model).length
 #. placeholder {2}: sourceLabels.size
@@ -65,11 +70,11 @@ msgstr ""
 msgid "{desired} (desired)"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:27
+#: src/devices/lastSeen.tsx:60
 msgid "{hours} h ago"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:24
+#: src/devices/lastSeen.tsx:57
 msgid "{minutes} min ago"
 msgstr ""
 
@@ -79,7 +84,7 @@ msgstr ""
 msgid "{option} (custom — preserved)"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:20
+#: src/devices/lastSeen.tsx:53
 msgid "{seconds} s ago"
 msgstr ""
 
@@ -386,7 +391,7 @@ msgstr ""
 msgid "About adopting devices"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:186
+#: src/cast/CastPanel.tsx:152
 msgid "About casting"
 msgstr ""
 
@@ -477,7 +482,7 @@ msgstr ""
 #~ msgid "Accessible editing path: planned (Cells form + Inspector)"
 #~ msgstr ""
 
-#: src/pages/SettingsPage.tsx:263
+#: src/pages/SettingsPage.tsx:654
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
@@ -585,7 +590,7 @@ msgid "Addresses are presented IPv6-first; IPv4 results are explicitly labelled 
 msgstr ""
 
 #: src/auth/LoginPage.tsx:89
-#: src/pages/SettingsPage.tsx:209
+#: src/pages/SettingsPage.tsx:598
 msgid "admin.xxxxxxxx-xxxx-…"
 msgstr ""
 
@@ -785,7 +790,7 @@ msgstr ""
 msgid "API & realtime"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:189
+#: src/pages/SettingsPage.tsx:578
 msgid "API access"
 msgstr ""
 
@@ -798,25 +803,25 @@ msgstr ""
 msgid "API key"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:203
+#: src/pages/SettingsPage.tsx:592
 msgid "API token"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:136
-#: src/pages/SettingsPage.tsx:226
+#: src/pages/SettingsPage.tsx:525
+#: src/pages/SettingsPage.tsx:615
 msgid "API token cleared"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:136
+#: src/pages/SettingsPage.tsx:525
 msgid "API token saved"
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:182
-#: src/pages/SettingsPage.tsx:155
+#: src/pages/SettingsPage.tsx:544
 msgid "Appearance"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:148
+#: src/pages/SettingsPage.tsx:537
 msgid "Appearance and language preferences."
 msgstr ""
 
@@ -1031,6 +1036,10 @@ msgstr ""
 msgid "Blank renders UTC."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:268
+msgid "Boot configuration"
+msgstr ""
+
 #: src/layout/components/CellPropertiesPanel.tsx:261
 msgid "Border"
 msgstr ""
@@ -1112,6 +1121,8 @@ msgstr ""
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
+#: src/pages/SettingsPage.tsx:454
+#: src/pages/SettingsPage.tsx:497
 #: src/pages/TallyPage.tsx:432
 #: src/resources/CrudPage.tsx:381
 #: src/resources/CrudPage.tsx:426
@@ -1179,12 +1190,12 @@ msgstr ""
 msgid "Captions"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:165
+#: src/cast/CastPanel.tsx:131
 #: src/cast/CastStartDialog.tsx:219
 msgid "Cast"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:180
+#: src/cast/CastPanel.tsx:146
 msgid "Cast an HLS rendition the engine already serves to a Google Cast device. Sessions here are ephemeral — they are not part of the configuration until saved as a device — and playback runs seconds behind live."
 msgstr ""
 
@@ -1204,7 +1215,7 @@ msgstr ""
 msgid "Cast playback is Tier D on the sync ladder: seconds-class glass-to-glass latency, typically 6–30 s behind live. The Default Media Receiver buffers whole HLS segments before it plays, so the floor is several segment durations; LL-HLS does not auto-engage there, even when the rendition serves low-latency parts. This is inherent to casting, not a fault — use it for ambient monitoring on TVs, not for time-critical confidence monitoring, and never expect a cast device to join a synchronized wall (cast devices are excluded from sync groups)."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:92
+#: src/cast/CastPanel.tsx:59
 msgid "Cast stopped"
 msgstr ""
 
@@ -1220,7 +1231,7 @@ msgstr ""
 msgid "Cast to a device"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:174
+#: src/cast/CastPanel.tsx:140
 msgid "Cast to a device…"
 msgstr ""
 
@@ -1322,7 +1333,7 @@ msgstr ""
 msgid "Choose an input"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:158
+#: src/pages/SettingsPage.tsx:547
 msgid "Choose light, dark, or follow the system."
 msgstr ""
 
@@ -1346,7 +1357,7 @@ msgid "Clauses"
 msgstr ""
 
 #: src/devices/FromDevice.tsx:60
-#: src/pages/SettingsPage.tsx:229
+#: src/pages/SettingsPage.tsx:618
 msgid "Clear"
 msgstr ""
 
@@ -1477,7 +1488,7 @@ msgstr ""
 msgid "Config-as-code"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:240
+#: src/pages/SettingsPage.tsx:631
 msgid "Configuration export"
 msgstr ""
 
@@ -1485,7 +1496,7 @@ msgstr ""
 msgid "Configuration exported"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:60
+#: src/pages/SettingsPage.tsx:69
 msgid "Configuration file"
 msgstr ""
 
@@ -1618,7 +1629,7 @@ msgstr ""
 msgid "Could not load alarms:"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:190
+#: src/cast/CastPanel.tsx:156
 msgid "Could not load cast sessions:"
 msgstr ""
 
@@ -1679,7 +1690,11 @@ msgstr ""
 msgid "Could not load the audit log:"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:45
+#: src/pages/SettingsPage.tsx:188
+msgid "Could not load the boot configuration model."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:54
 msgid "Could not load the configuration file watch status."
 msgstr ""
 
@@ -1692,12 +1707,20 @@ msgstr ""
 msgid "Could not probe"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:250
+msgid "Could not promote to the boot configuration file"
+msgstr ""
+
 #: src/auth/LoginPage.tsx:53
 msgid "Could not reach the control plane. Is it running?"
 msgstr ""
 
 #: src/pages/DeviceDetailPage.tsx:896
 msgid "Could not reboot"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:223
+msgid "Could not revert to the start configuration"
 msgstr ""
 
 #: src/resources/CrudPage.tsx:282
@@ -1733,7 +1756,7 @@ msgstr ""
 msgid "Could not start the scan"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:99
+#: src/cast/CastPanel.tsx:66
 msgid "Could not stop the cast"
 msgstr ""
 
@@ -2037,6 +2060,14 @@ msgstr ""
 msgid "Different hardware can only achieve different sync quality, and Multiview reports the tier it MEASURES rather than the one a datasheet promises:"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:340
+msgid "Differs from the boot file:"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:325
+msgid "Differs from the startup snapshot:"
+msgstr ""
+
 #: src/pages/SimplePages.tsx:672
 #~ msgid "Disabled"
 #~ msgstr ""
@@ -2126,7 +2157,7 @@ msgstr ""
 msgid "Documentation"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:243
+#: src/pages/SettingsPage.tsx:634
 msgid "Download the current stores (sources, outputs, overlays, layouts, canvas) as multiview.toml. Stored UI edits take effect when Multiview restarts with this file; live actions (apply layout, swap, routing, salvos) act on the running engine immediately."
 msgstr ""
 
@@ -2493,7 +2524,7 @@ msgstr ""
 msgid "Exposed ports and roadmap"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:63
+#: src/pages/SettingsPage.tsx:72
 msgid "External edits to the boot configuration file hot-reload the parts that can apply live; an invalid file changes nothing and is reported here and on the health banner. Sections that cannot hot-apply stay listed until a restart."
 msgstr ""
 
@@ -2957,6 +2988,14 @@ msgstr ""
 msgid "In a multiview chain there are two transports in the path: the one each source arrives on, and the one the composed wall goes out on. Both choices matter, and they are independent — a wall of low-latency RTSP cameras served out over plain HLS is still tens of seconds behind for its viewers."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:345
+msgid "In sync with the boot file."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:330
+msgid "In sync with the startup snapshot."
+msgstr ""
+
 #: src/pages/docs/ApiPage.tsx:141
 msgid "In this UI, set your token under Settings, then API access. For a container, supply it as the <0>MULTIVIEW_CONTROL_TOKEN</0> environment variable — the presented token is <1>admin.<secret></1>. When that variable is unset, the server generates a token and logs it once at startup. The unauthenticated surface is just <2>/</2>, <3>/docs</3>, and <4>/api/v1/openapi.json</4>; every <5>/api/v1</5> data route requires the token."
 msgstr ""
@@ -3076,7 +3115,7 @@ msgstr ""
 
 #: src/components/LocaleSwitcher.tsx:35
 #: src/pages/AudioPage.tsx:422
-#: src/pages/SettingsPage.tsx:172
+#: src/pages/SettingsPage.tsx:561
 msgid "Language"
 msgstr ""
 
@@ -3084,11 +3123,11 @@ msgstr ""
 msgid "Language (route {row})"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:98
+#: src/pages/SettingsPage.tsx:107
 msgid "Last applied:"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:105
+#: src/pages/SettingsPage.tsx:114
 msgid "Last rejected:"
 msgstr ""
 
@@ -3345,11 +3384,12 @@ msgid "Loading tally state…"
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:67
-#: src/pages/SettingsPage.tsx:77
+#: src/pages/SettingsPage.tsx:86
+#: src/pages/SettingsPage.tsx:286
 msgid "Loading…"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:180
+#: src/pages/SettingsPage.tsx:569
 msgid "Locale"
 msgstr ""
 
@@ -3745,7 +3785,7 @@ msgstr ""
 msgid "Networks, VLANs, and the manual address"
 msgstr ""
 
-#: src/devices/lastSeen.tsx:48
+#: src/devices/lastSeen.tsx:81
 msgid "Never seen."
 msgstr ""
 
@@ -3800,7 +3840,7 @@ msgstr ""
 msgid "No audit entries match."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:195
+#: src/cast/CastPanel.tsx:161
 msgid "No cast sessions running."
 msgstr ""
 
@@ -3997,10 +4037,6 @@ msgstr ""
 msgid "Not probed yet."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:56
-msgid "not started yet"
-msgstr ""
-
 #: src/layout/components/CellPropertiesPanel.tsx:252
 msgid "Not static"
 msgstr ""
@@ -4013,7 +4049,7 @@ msgstr ""
 msgid "Not synchronized: cast pipelines buffer for multiple seconds under their own control. Cast devices are therefore never offered as sync-group members."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:87
+#: src/pages/SettingsPage.tsx:96
 msgid "Not watched"
 msgstr ""
 
@@ -4038,7 +4074,7 @@ msgstr ""
 msgid "Notice"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:260
+#: src/pages/SettingsPage.tsx:651
 msgid "Notifications"
 msgstr ""
 
@@ -4255,7 +4291,7 @@ msgstr ""
 msgid "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:192
+#: src/pages/SettingsPage.tsx:581
 msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
 msgstr ""
 
@@ -4396,8 +4432,24 @@ msgstr ""
 msgid "Program output never depends on this device: if it fails, bound sources ride the tile ladder and outputs ride their failover policy — the multiview keeps running."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:505
+msgid "Promote"
+msgstr ""
+
 #: src/cast/SaveAsDeviceDialog.tsx:104
 msgid "Promote this session to a managed cast device: it exports with the configuration and survives restarts. The TV keeps playing across the promotion."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:418
+msgid "Promote to boot"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:480
+msgid "Promote to boot?"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:384
+msgid "Promoted to the boot configuration file."
 msgstr ""
 
 #: src/pages/docs/concepts/TimingSyncPage.tsx:78
@@ -4581,7 +4633,7 @@ msgstr ""
 msgid "Replace the current cells?"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:139
+#: src/pages/SettingsPage.tsx:528
 msgid "Requests will be unauthenticated."
 msgstr ""
 
@@ -4620,13 +4672,41 @@ msgstr ""
 msgid "REST conventions"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:112
+#: src/pages/SettingsPage.tsx:121
 msgid "Restart pending:"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:376
+msgid "Restart required for:"
 msgstr ""
 
 #. placeholder {0}: accepted.note
 #: src/pages/DevicesPage.tsx:301
 msgid "Results stream in below as they are found. {0}"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:317
+msgid "Resume was requested but fell back to the boot file:"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:311
+msgid "Resumed"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:463
+msgid "Revert"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:409
+msgid "Revert to start"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:436
+msgid "Revert to start?"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:357
+msgid "Reverted to the start configuration."
 msgstr ""
 
 #: src/pages/docs/components.tsx:147
@@ -4712,6 +4792,10 @@ msgstr ""
 msgid "Running in containers"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:350
+msgid "Running state last persisted:"
+msgstr ""
+
 #: src/docs/registry.ts:736
 #: src/pages/docs/concepts/GlossaryPage.tsx:265
 msgid "Salvo"
@@ -4745,7 +4829,7 @@ msgid "Sample rate (Hz)"
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:398
-#: src/pages/SettingsPage.tsx:218
+#: src/pages/SettingsPage.tsx:607
 #: src/resources/CrudPage.tsx:384
 msgid "Save"
 msgstr ""
@@ -4755,12 +4839,12 @@ msgstr ""
 msgid "Save & apply to engine"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:129
+#: src/cast/CastPanel.tsx:95
 #: src/cast/SaveAsDeviceDialog.tsx:101
 msgid "Save as device"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:134
+#: src/cast/CastPanel.tsx:100
 msgid "Save as device…"
 msgstr ""
 
@@ -4856,7 +4940,7 @@ msgstr ""
 msgid "Seeding from a preset replaces every cell in this draft. Nothing is saved until you save the layout."
 msgstr ""
 
-#: src/devices/lastSeen.tsx:60
+#: src/devices/lastSeen.tsx:93
 msgid "seen (age unknown)"
 msgstr ""
 
@@ -4905,7 +4989,7 @@ msgid "Session name (optional)"
 msgstr ""
 
 #: src/app/navigation.tsx:53
-#: src/pages/SettingsPage.tsx:147
+#: src/pages/SettingsPage.tsx:536
 msgid "Settings"
 msgstr "الإعدادات"
 
@@ -4918,7 +5002,7 @@ msgstr ""
 msgid "Severity (X.733)"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:276
+#: src/pages/SettingsPage.tsx:667
 msgid "Show a test notification"
 msgstr ""
 
@@ -5024,8 +5108,9 @@ msgstr ""
 msgid "Start, stop, and swap actions accept an <0>Idempotency-Key</0> so a retried request is applied at most once."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:64
-msgid "started"
+#. placeholder {0}: model.start
+#: src/pages/SettingsPage.tsx:306
+msgid "start: {0}"
 msgstr ""
 
 #: src/pages/AlarmsPage.tsx:183
@@ -5045,11 +5130,11 @@ msgstr ""
 msgid "Stereo"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:142
+#: src/cast/CastPanel.tsx:108
 msgid "Stop"
 msgstr ""
 
-#: src/cast/CastPanel.tsx:139
+#: src/cast/CastPanel.tsx:105
 msgid "Stop cast"
 msgstr ""
 
@@ -5139,7 +5224,7 @@ msgstr ""
 msgid "Supports ZowieBox-class encoder/decoder appliances: probing, encoder/decoder mode convergence, stream enumeration for source binding, decode-slot binding for outputs, reboot, and temperature. Sync is bounded-skew only (see the sync guide)."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:175
+#: src/pages/SettingsPage.tsx:564
 msgid "Switch the interface language and text direction."
 msgstr ""
 
@@ -5242,7 +5327,7 @@ msgstr ""
 msgid "Temperature"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:271
+#: src/pages/SettingsPage.tsx:662
 msgid "Test notification"
 msgstr ""
 
@@ -5284,6 +5369,14 @@ msgstr ""
 
 #: src/pages/docs/ApiPage.tsx:133
 msgid "The API authenticates each request with a bearer token in the <0>Authorization</0> header. A coarse role (admin, operator, or viewer) gates what actions a token may take, and a per-object check confines a token to the resources it owns."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:284
+msgid "The boot configuration model is unavailable."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:335
+msgid "The boot file cannot be compared:"
 msgstr ""
 
 #: src/pages/docs/FeaturesPage.tsx:18
@@ -5334,11 +5427,11 @@ msgstr ""
 msgid "The device flashes its identify indicator."
 msgstr ""
 
-#: src/devices/lastSeen.tsx:58
+#: src/devices/lastSeen.tsx:91
 msgid "The device has answered, but without a live event stream its engine timestamp cannot be aged."
 msgstr ""
 
-#: src/devices/lastSeen.tsx:44
+#: src/devices/lastSeen.tsx:77
 msgid "The device has not answered yet."
 msgstr ""
 
@@ -5493,7 +5586,7 @@ msgstr ""
 msgid "The Real Time Streaming Protocol — the standard way IP cameras and encoders serve a live stream by URL (for example <0>rtsp://camera.local:8554/main</0>). The control channel negotiates the session and the media flows as RTP, over UDP or interleaved in TCP, with latency well under a second."
 msgstr ""
 
-#: src/cast/CastPanel.tsx:93
+#: src/cast/CastPanel.tsx:60
 msgid "The receiver app was stopped; the device returns to its idle screen."
 msgstr ""
 
@@ -5511,6 +5604,19 @@ msgstr ""
 
 #: src/docs/registry.ts:177
 msgid "The REST base, long-running operations, ETags, the WebSocket and SSE streams, and the live API playground."
+msgstr ""
+
+#. placeholder {0}: outcome.shed
+#: src/pages/SettingsPage.tsx:359
+msgid "The revert applied only partially: {0} engine command(s) could not be enqueued. Retry once the system settles."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:271
+msgid "The run started from the boot configuration file (its startup snapshot is the revert target) and persists the running state continuously. Revert to start re-applies the startup snapshot live; promote to boot rewrites the configuration file with the current running state."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:365
+msgid "The running state already matched the start configuration; nothing was applied."
 msgstr ""
 
 #: src/pages/docs/concepts/ColorPage.tsx:54
@@ -5580,7 +5686,7 @@ msgstr ""
 msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:140
+#: src/pages/SettingsPage.tsx:529
 msgid "The UI will authenticate with this token."
 msgstr ""
 
@@ -5597,7 +5703,7 @@ msgstr ""
 msgid "The vendor's stable handle (UUID / PCI bus id), never the index."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:75
+#: src/pages/SettingsPage.tsx:84
 msgid "The watch status is unavailable."
 msgstr ""
 
@@ -5613,7 +5719,7 @@ msgstr ""
 msgid "The zone must fit inside the frame: x, y at least 0, width and height above 0, and x+width / y+height at most 1."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:163
+#: src/pages/SettingsPage.tsx:552
 msgid "Theme"
 msgstr ""
 
@@ -5733,6 +5839,18 @@ msgstr ""
 msgid "This permanently removes the stored resource. The running engine is not affected until a new configuration is applied."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:439
+msgid "This re-applies the configuration the run started with, live: every change made since startup — from the UI, the API, or config-file edits — is undone. Sections that cannot apply live are reported and re-converge on restart."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:483
+msgid "This rewrites the boot configuration file on the server with the current running state, so the next start boots into it. A config revision is committed for rollback."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:291
+msgid "This run was not started from a configuration file, so there is no boot configuration to revert to or promote into."
+msgstr ""
+
 #: src/pages/PlaceholderPage.tsx:27
 msgid "This screen is part of an upcoming milestone."
 msgstr ""
@@ -5749,7 +5867,7 @@ msgstr ""
 msgid "This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:272
+#: src/pages/SettingsPage.tsx:663
 msgid "This toast is announced to assistive technology."
 msgstr ""
 
@@ -5985,7 +6103,7 @@ msgstr ""
 msgid "Watch / live / channel URL"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:85
+#: src/pages/SettingsPage.tsx:94
 msgid "Watching"
 msgstr ""
 

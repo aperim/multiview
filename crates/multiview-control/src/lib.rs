@@ -43,8 +43,15 @@ pub mod alarm_store;
 pub mod audio_routing;
 pub mod audit;
 pub mod auth;
+/// The Boot/Loaded/Running configuration model (ADR-W022): the immutable
+/// Loaded snapshot, the debounced atomic `active.toml` Running persister, and
+/// the cold-start resume loader.
+pub mod boot_model;
 pub mod command;
 pub mod concurrency;
+/// Config-file watch (ADR-W020) + the ONE document-diff apply machinery
+/// (ADR-W022 §2) shared by the watcher and the revert-to-start route.
+pub mod config_watch;
 pub mod devices;
 pub mod error;
 pub mod is07;

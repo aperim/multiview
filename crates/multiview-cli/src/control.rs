@@ -67,6 +67,11 @@ use tokio::task::JoinHandle;
 /// command bus, audit log, and watch-status slot the router serves (one set
 /// of stores, never a parallel copy).
 ///
+/// `boot_model` is the run's Boot/Loaded/Running model (ADR-W022) when the
+/// run was started from a config file: it backs `GET /api/v1/config/boot-model`
+/// and the revert-to-start/promote actions. `None` (store-only/test servers)
+/// honestly reports `modeled: false` and refuses the actions.
+///
 /// `live_apply` declares what the **running** engine can take live, per
 /// collection (ADR-W018 sources / ADR-W021 overlays): the caller — the binary,
 /// the only place that knows both the compiled features and the chosen run
@@ -81,12 +86,19 @@ use tokio::task::JoinHandle;
 /// Returns an I/O error from binding the `listen` address, or — wrapped as
 /// [`std::io::ErrorKind::InvalidData`] — a failure to seed the resource stores
 /// from `config` (not expected for a validated config).
+#[allow(clippy::too_many_arguments)]
+// reason: the one control-plane bring-up: each parameter is a distinct
+// run-owned handle (listener address, the booted config, the engine publisher,
+// the command bus, the preview provider, the ADR-W022 boot model, the run-path
+// live-apply capability, shutdown). Bundling them into a struct would only
+// move the arity for the two callers.
 pub async fn bind_and_serve<F>(
     listen: &str,
     config: &MultiviewConfig,
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    boot_model: Option<Arc<multiview_control::boot_model::BootModel>>,
     live_apply: multiview_control::LiveApplyCaps,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
@@ -180,6 +192,11 @@ where
     // zowietek-control service type (the vendor's type is unverified — only a
     // configured string is ever recognised) plus any extra DNS-SD types.
     .with_discovery_config(config.discovery.clone().unwrap_or_default());
+    if let Some(model) = boot_model {
+        // The Boot/Loaded/Running model (ADR-W022): backs the boot-model
+        // status endpoint and the revert-to-start/promote actions.
+        state = state.with_boot_model(model);
+    }
     if let Some(delivery) = delivery {
         state = state.with_cast_delivery(delivery);
     }
@@ -2580,6 +2597,8 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            // No boot model: this serve-only test runs store-only (ADR-W022).
+            None,
             // Default caps: synthetic-only sources, no overlay seam (honest
             // for this serve-only test).
             multiview_control::LiveApplyCaps::default(),

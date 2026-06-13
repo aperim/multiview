@@ -2,8 +2,12 @@
 // config file is being watched, the watched path, the last applied/rejected
 // loads, and any restart-pending sections — read from
 // GET /api/v1/config/watch-status.
+// Plus the "Boot configuration" card (ADR-W022): the Boot/Loaded/Running
+// divergence indicator and the confirm-gated revert-to-start / promote-to-boot
+// actions.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
@@ -22,8 +26,22 @@ const ACTIVE_STATUS = {
   restart_pending: ["canvas", "outputs"],
 };
 
+const BOOT_MODEL = {
+  modeled: true,
+  boot_path: "/etc/multiview/multiview.toml",
+  start: "boot",
+  resumed: false,
+  resume_fallback: null,
+  diverged_from_loaded: ["layout", "sources"],
+  diverged_from_boot_file: ["sources"],
+  boot_file_error: null,
+  active_path: "/etc/multiview/.multiview/active.toml",
+  active_written_at_ms: 1718000060000,
+};
+
 const server = setupServer(
   http.get("*/api/v1/config/watch-status", () => HttpResponse.json(ACTIVE_STATUS)),
+  http.get("*/api/v1/config/boot-model", () => HttpResponse.json(BOOT_MODEL)),
 );
 
 beforeAll(() => {
@@ -96,5 +114,158 @@ describe("SettingsPage configuration-file card", () => {
       await screen.findByRole("heading", { name: /configuration file/i }),
     ).toBeInTheDocument();
     expect(await screen.findByText(/not watched/i)).toBeInTheDocument();
+  });
+});
+
+describe("SettingsPage boot-configuration card (ADR-W022)", () => {
+  it("shows the per-section divergence and both actions", async () => {
+    renderSettings();
+    expect(
+      await screen.findByRole("heading", { name: /boot configuration/i }),
+    ).toBeInTheDocument();
+    // Divergence vs the startup (Loaded) snapshot names the sections…
+    expect(
+      await screen.findByText(/differs from the startup snapshot/i),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("layout, sources")).toBeInTheDocument();
+    // …and vs the boot file on disk.
+    expect(
+      await screen.findByText(/differs from the boot file/i),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /revert to start/i }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /promote to boot/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("revert-to-start is confirm-gated and posts the action", async () => {
+    let reverted = false;
+    server.use(
+      http.post("*/api/v1/config/revert-to-start", () => {
+        reverted = true;
+        return HttpResponse.json(
+          {
+            operation_id: "op-1",
+            replayed: false,
+            reverted: true,
+            shed: 0,
+            summary: ["sources: in_a changed"],
+            restart_only: [],
+          },
+          { status: 202 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(
+      await screen.findByRole("button", { name: /revert to start/i }),
+    );
+    // Nothing posted before the confirmation.
+    expect(reverted).toBe(false);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/revert to start/i);
+    await user.click(screen.getByRole("button", { name: /^revert$/i }));
+    expect(
+      await screen.findByText(/reverted to the start configuration/i),
+    ).toBeInTheDocument();
+    expect(reverted).toBe(true);
+  });
+
+  it("a partial (shed) revert is reported honestly, never as reverted", async () => {
+    // ADR-W022 review M4: a 202 with shed > 0 means the engine did NOT get
+    // every command — the card must say "partially", not claim the revert.
+    server.use(
+      http.post("*/api/v1/config/revert-to-start", () =>
+        HttpResponse.json(
+          {
+            operation_id: "op-2",
+            replayed: false,
+            reverted: false,
+            shed: 2,
+            summary: ["sources: in_a changed"],
+            restart_only: [],
+          },
+          { status: 202 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(
+      await screen.findByRole("button", { name: /revert to start/i }),
+    );
+    await screen.findByRole("dialog");
+    await user.click(screen.getByRole("button", { name: /^revert$/i }));
+    expect(
+      await screen.findByText(/applied only partially/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/reverted to the start configuration/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("promote-to-boot explains the file rewrite and posts after confirm", async () => {
+    let promoted = false;
+    server.use(
+      http.post("*/api/v1/config/promote", () => {
+        promoted = true;
+        return HttpResponse.json({
+          operation_id: "op-2",
+          replayed: false,
+          path: "/etc/multiview/multiview.toml",
+          bytes: 1234,
+          revision: 1,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(
+      await screen.findByRole("button", { name: /promote to boot/i }),
+    );
+    expect(promoted).toBe(false);
+    const dialog = await screen.findByRole("dialog");
+    // The confirmation must say it rewrites the configuration file.
+    expect(dialog).toHaveTextContent(/rewrites the boot configuration file/i);
+    await user.click(screen.getByRole("button", { name: /^promote$/i }));
+    expect(
+      await screen.findByText(/promoted to the boot configuration file/i),
+    ).toBeInTheDocument();
+    expect(promoted).toBe(true);
+  });
+
+  it("is honest when the run has no boot model", async () => {
+    server.use(
+      http.get("*/api/v1/config/boot-model", () =>
+        HttpResponse.json({
+          modeled: false,
+          boot_path: null,
+          start: null,
+          resumed: false,
+          resume_fallback: null,
+          diverged_from_loaded: [],
+          diverged_from_boot_file: null,
+          boot_file_error: null,
+          active_path: null,
+          active_written_at_ms: null,
+        }),
+      ),
+    );
+    renderSettings();
+    expect(
+      await screen.findByRole("heading", { name: /boot configuration/i }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(/not started from a configuration file/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /revert to start/i }),
+    ).not.toBeInTheDocument();
   });
 });
