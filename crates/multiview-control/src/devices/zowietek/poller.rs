@@ -501,21 +501,29 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
     pub async fn handle_control(&mut self, command: PollerControl) {
         match command {
             PollerControl::SetMode { mode } => {
-                // The operator's set-mode is the new desired mode: record it so
-                // every later adopt/reconnect pass re-converges onto the last
-                // operator intent (and a failed apply below is retried there).
+                // The operator's set-mode is the new desired mode: record it
+                // UNCONDITIONALLY so every later adopt/reconnect pass re-converges
+                // onto the last operator intent, even when we cannot apply it now.
                 self.desired_mode = Some(mode.clone());
-                // Run the close-before-open convergence; the driver declares the
-                // DEV-class impact and publishes the device.mode outcome. A
-                // failure is published as a device.mode Failed by the driver and
-                // surfaced here — re-converged on the next adopt/reconnect pass
-                // (the desired mode recorded above).
-                if let Err(err) = self.driver.converge_mode(&mode).await {
-                    tracing::warn!(
+                // ONLINE-gate the apply (DEV-A4 fix 1): only converge when the
+                // device is actually ONLINE and the A3 auth breaker is closed.
+                // The `desired_mode` path is already gated this way (it converges
+                // only after a step reaches ONLINE); the operator path must match,
+                // or a stray set-mode in DEGRADED/UNREACHABLE/AUTH_FAILED would
+                // push decode-table writes through a session the device's current
+                // state has not validated — in AUTH_FAILED bypassing the breaker
+                // entirely and risking a production decode unit. Off-ONLINE we
+                // record the intent (above) and defer: the next ONLINE adopt/
+                // reconnect pass converges it through `converge_desired_mode`.
+                if self.state() == DeviceState::Online && !self.breaker_open() {
+                    self.converge_desired_mode().await;
+                } else {
+                    tracing::info!(
                         device = %self.device_id,
                         mode = %mode,
-                        error = %err,
-                        "zowietek set-mode convergence failed; re-converges on the next adopt/reconnect pass"
+                        state = ?self.state(),
+                        "zowietek set-mode recorded but not applied (device not ONLINE / breaker open); \
+                         will converge on the next ONLINE pass"
                     );
                 }
             }
