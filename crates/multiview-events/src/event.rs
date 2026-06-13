@@ -655,7 +655,13 @@ pub struct DeviceStreamStatus {
 /// published tier table, collapsed to its honest wire vocabulary): never an
 /// aspirational claim. Kebab-case on the wire (managed-devices.md §2.1 uses
 /// `"bounded-skew"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// The variants are declared **best → worst** (`FrameAccurate < BoundedSkew <
+/// None`), so the derived [`Ord`] makes the group's achieved tier the *maximum*
+/// over its members — the weakest-member rule
+/// ([`weakest_achieved`](crate::sync_tier::weakest_achieved)). One unsynchronized
+/// member therefore drags the whole group to `None`: honesty over aspiration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum AchievedSync {

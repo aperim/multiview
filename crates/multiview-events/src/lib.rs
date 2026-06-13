@@ -36,6 +36,7 @@ pub mod event;
 pub mod ordering;
 pub mod seq;
 pub mod subscription;
+pub mod sync_tier;
 pub mod topic;
 
 pub use envelope::{Envelope, FrameKind, SchemaVersion};
