@@ -298,6 +298,7 @@ fn build_messages_data_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/AudioMeter" }
     }));
+    map.insert("AudioLoudness".to_owned(), audio_loudness_message());
     map.insert("SystemMetrics".to_owned(), system_metrics_message());
     map.insert("OutputStatus".to_owned(), json!({
         "name": "OutputStatus",
@@ -629,6 +630,7 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/TileState" },
         { "$ref": "#/components/schemas/TilesSnapshot" },
         { "$ref": "#/components/schemas/AudioMeter" },
+        { "$ref": "#/components/schemas/AudioLoudness" },
         { "$ref": "#/components/schemas/OutputStatus" },
         { "$ref": "#/components/schemas/Alert" },
         { "$ref": "#/components/schemas/HealthWarning" },
@@ -691,6 +693,7 @@ fn core_event_schemas() -> Value {
         "TileSnapshotEntry": tile_snapshot_entry_schema(),
         "TilesSnapshot": tiles_snapshot_schema(),
         "AudioMeter": audio_meter_schema(),
+        "AudioLoudness": audio_loudness_schema(),
         "SystemMetrics": system_metrics_schema(),
         "GpuMetrics": gpu_metrics_schema(),
         "GpuVendor": gpu_vendor_schema(),
@@ -866,6 +869,97 @@ fn audio_meter_schema() -> Value {
             "overflow": {
                 "type": "boolean",
                 "description": "Whether the meter pipeline overflowed (dropped windows)."
+            },
+            "sampled_hz": {
+                "type": "integer",
+                "format": "uint32",
+                "description": "Effective wire cadence (Hz)."
+            }
+        }
+    })
+}
+
+fn audio_loudness_message() -> Value {
+    json!({
+        "name": "AudioLoudness",
+        "title": "Program-bus EBU R128 loudness sample",
+        "summary": "Momentary/short-term/integrated LUFS + LRA + true-peak (dBTP) + compliance reference (numeric only).",
+        "description": concat!(
+            "Emitted on topic `audio.loudness` (AUD-8). A high-rate CONFLATED compliance lane ",
+            "(BS.1770-4 / EBU Tech 3341/3342, ADR-R006): the slow-cadence M/S/I/LRA/dBTP sample ",
+            "the loudness meter measures read-only off the audio bus, pushed at ~10 Hz and ",
+            "excluded from the lossless replay ring. A slow consumer can only lose its own samples ",
+            "— the engine never back-pressures (inv #10). BALLISTICS are applied client-side: the ",
+            "wire carries raw measured values; the browser meter applies the display decay/peak-hold. ",
+            "The compliance reference (`target_lufs`/`ceiling_dbtp`/`tolerance_lu`) rides every sample ",
+            "so the meter colours against the same target the program bus is normalised toward.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/AudioLoudness" }
+    })
+}
+
+fn audio_loudness_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of the `audio.loudness` event: a program-bus EBU R128 loudness sample ",
+            "(M/S/I LUFS, LRA, true-peak dBTP) plus the compliance reference. Numeric metadata ",
+            "only — never audio content. Conflated/sampled at ~10 Hz on the wire (high-rate lane); ",
+            "ballistics are applied client-side. The integrating fields are absent below the ",
+            "-70 LUFS absolute gate (no fabricated value).",
+        ),
+        "required": ["program", "target_lufs", "ceiling_dbtp", "tolerance_lu", "sampled_hz"],
+        "properties": {
+            "program": {
+                "type": "integer",
+                "format": "uint32",
+                "description": "Program/bus index this loudness sample is for."
+            },
+            "momentary": {
+                "type": "number",
+                "format": "float",
+                "description": "Momentary loudness (400 ms window), LUFS. Absent below the absolute gate."
+            },
+            "short_term": {
+                "type": "number",
+                "format": "float",
+                "description": "Short-term loudness (3 s window), LUFS. Absent below the absolute gate."
+            },
+            "integrated": {
+                "type": "number",
+                "format": "float",
+                "description": "Integrated (gated) loudness, LUFS. Absent until enough gated audio."
+            },
+            "lra": {
+                "type": "number",
+                "format": "float",
+                "description": "Loudness range (EBU Tech 3342), LU. Absent until enough gated audio."
+            },
+            "true_peak_dbtp": {
+                "type": "number",
+                "format": "float",
+                "description": "Maximum true-peak across channels (4x oversampled), dBTP. Absent when disabled."
+            },
+            "target_lufs": {
+                "type": "number",
+                "format": "float",
+                "description": "Normalisation target loudness, LUFS (compliance reference, e.g. -23 / -16)."
+            },
+            "ceiling_dbtp": {
+                "type": "number",
+                "format": "float",
+                "description": "True-peak ceiling, dBTP (compliance reference, e.g. -1.5)."
+            },
+            "tolerance_lu": {
+                "type": "number",
+                "format": "float",
+                "description": "Live convergence tolerance, LU (the in-spec band is target ± tolerance)."
+            },
+            "gain_db": {
+                "type": "number",
+                "format": "float",
+                "description": "Makeup gain the loudnorm processor is applying, dB. Absent when no normaliser is engaged."
             },
             "sampled_hz": {
                 "type": "integer",

@@ -29,6 +29,32 @@ export interface Alert {
 /** Severity of an operator alert. */
 export type AlertSeverity = "info" | "warning" | "critical";
 
+/** Data body of the `audio.loudness` event: a program-bus EBU R128 loudness sample (M/S/I LUFS, LRA, true-peak dBTP) plus the compliance reference. Numeric metadata only — never audio content. Conflated/sampled at ~10 Hz on the wire (high-rate lane); ballistics are applied client-side. The integrating fields are absent below the -70 LUFS absolute gate (no fabricated value). */
+export interface AudioLoudness {
+  /** True-peak ceiling, dBTP (compliance reference, e.g. -1.5). */
+  readonly ceiling_dbtp: number;
+  /** Makeup gain the loudnorm processor is applying, dB. Absent when no normaliser is engaged. */
+  readonly gain_db?: number;
+  /** Integrated (gated) loudness, LUFS. Absent until enough gated audio. */
+  readonly integrated?: number;
+  /** Loudness range (EBU Tech 3342), LU. Absent until enough gated audio. */
+  readonly lra?: number;
+  /** Momentary loudness (400 ms window), LUFS. Absent below the absolute gate. */
+  readonly momentary?: number;
+  /** Program/bus index this loudness sample is for. */
+  readonly program: number;
+  /** Effective wire cadence (Hz). */
+  readonly sampled_hz: number;
+  /** Short-term loudness (3 s window), LUFS. Absent below the absolute gate. */
+  readonly short_term?: number;
+  /** Normalisation target loudness, LUFS (compliance reference, e.g. -23 / -16). */
+  readonly target_lufs: number;
+  /** Live convergence tolerance, LU (the in-spec band is target ± tolerance). */
+  readonly tolerance_lu: number;
+  /** Maximum true-peak across channels (4x oversampled), dBTP. Absent when disabled. */
+  readonly true_peak_dbtp?: number;
+}
+
 /** Data body of the `audio.meter` event: a high-rate per-input/track peak/RMS/clip sample. This is numeric metadata only — never audio content. Conflated/sampled at 10–30 Hz on the wire (high-rate lane). */
 export interface AudioMeter {
   /** Whether any channel clipped in this window. */
