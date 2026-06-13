@@ -20,6 +20,7 @@ use crate::schema::Fps;
 
 /// Per-head output geometry and the layout name rendered on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct HeadConfig {
     /// Stable head id, unique within the wall.
@@ -71,6 +72,7 @@ pub struct WallBezel {
 /// A multi-head video wall: a `cols × rows` grid of heads with bezel
 /// compensation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct WallConfig {
     /// Wall name.
