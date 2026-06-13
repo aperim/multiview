@@ -22,12 +22,6 @@ use std::time::Instant;
 use crate::config::{EndpointConfig, IceServerKind};
 use crate::turn::{TurnClient, TurnEvent, TurnOutput};
 
-/// The number of queued transmits drained from one client per
-/// [`TurnRelayDriver::poll_transmit`] internal pass — bounded so a misbehaving
-/// client can never spin the caller's loop (the client serializes one request at
-/// a time, so this ceiling is ample).
-const MAX_TRANSMITS_PER_CLIENT: usize = 8;
-
 /// A driven TURN client wrapping the shared sans-IO [`TurnClient`].
 struct DrivenClient {
     client: TurnClient,
@@ -113,28 +107,24 @@ impl TurnRelayDriver {
     /// reached via a `poll_output`-driven transition.
     #[must_use]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<(SocketAddr, Vec<u8>)> {
+        // One `poll_output` per client per call: the caller drives this in a
+        // `while let Some(..)`, so a client with several queued requests is fully
+        // flushed across successive calls (the client serializes one request at a
+        // time anyway). After each poll, harvest any relay the transition reached.
         for driven in &mut self.clients {
-            for _ in 0..MAX_TRANSMITS_PER_CLIENT {
-                match driven.client.poll_output(now) {
-                    TurnOutput::Transmit {
-                        destination,
-                        payload,
-                    } => {
-                        Self::harvest(
-                            &mut self.pending_relays,
-                            &mut self.known_relays,
-                            driven.client.relay(),
-                        );
-                        return Some((destination, payload));
-                    }
-                    TurnOutput::Timeout(_) | TurnOutput::Idle => break,
-                }
-            }
+            let out = driven.client.poll_output(now);
             Self::harvest(
                 &mut self.pending_relays,
                 &mut self.known_relays,
                 driven.client.relay(),
             );
+            if let TurnOutput::Transmit {
+                destination,
+                payload,
+            } = out
+            {
+                return Some((destination, payload));
+            }
         }
         None
     }

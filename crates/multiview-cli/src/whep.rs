@@ -706,7 +706,9 @@ where
     }
     while let Some(block) = tap.pop() {
         for session_tap in &session_taps {
-            session_tap.push(block.clone());
+            // Drop-oldest into each session's ring; the eviction flag is the
+            // "consumer behind" signal we intentionally ignore here (inv #10).
+            let _ = session_tap.push(block.clone());
         }
     }
 }
@@ -899,8 +901,8 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
     /// A minimal, allocate-only fake TURN server (the long-term-credential 401
     /// challenge + an authenticated Allocate success carrying XOR-RELAYED-ADDRESS).
     /// Purpose-built for this wiring test; the full RFC 5766 surface (Refresh /
-    /// CreatePermission / ChannelBind / Data) is exercised by the `multiview-webrtc`
-    /// `fake_turn` fixture — here we only need the relay to be learned.
+    /// `CreatePermission` / `ChannelBind` / Data) is exercised by the
+    /// `multiview-webrtc` `fake_turn` fixture — here we only need the relay learned.
     struct MiniTurnServer {
         relay: SocketAddr,
         username: String,
@@ -1102,8 +1104,8 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
 
         // Feed several 20 ms blocks (>1 so libopus surely emits at least one
         // packet) and pump.
-        for i in 0..10 {
-            tap.push(pcm_block(0.05 + (i as f32) * 0.01));
+        for _ in 0..10 {
+            let _ = tap.push(pcm_block(0.1));
         }
         media.pump_once();
 
@@ -1160,13 +1162,13 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
         let shared = ProgramAudioSlot::new();
         let a = ProgramAudioSlot::new();
         let b = ProgramAudioSlot::new();
-        let sessions = vec![
+        let sessions = [
             audio_session(a.clone()),
             audio_session(b.clone()),
             video_only_session(),
         ];
         for _ in 0..3 {
-            shared.push(pcm_block(0.1));
+            let _ = shared.push(pcm_block(0.1));
         }
         fan_program_audio(Some(&shared), sessions.iter());
         assert!(shared.is_empty(), "the shared tap is drained once per pass");
@@ -1181,9 +1183,9 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
         // it empty while a video-only session is connected).
         let shared = ProgramAudioSlot::new();
         for _ in 0..5 {
-            shared.push(pcm_block(0.2));
+            let _ = shared.push(pcm_block(0.2));
         }
-        let sessions = vec![video_only_session()];
+        let sessions = [video_only_session()];
         fan_program_audio(Some(&shared), sessions.iter());
         assert!(
             shared.is_empty(),
@@ -1203,7 +1205,7 @@ a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
         let _held_feed = media.audio_feed();
         let started = std::time::Instant::now();
         for _ in 0..2_000 {
-            tap.push(pcm_block(0.1));
+            let _ = tap.push(pcm_block(0.1));
             media.pump_once();
         }
         assert!(

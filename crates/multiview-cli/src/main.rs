@@ -254,6 +254,10 @@ struct ControlPlaneWiring {
 /// `expect_write` seam suppresses server-side writes). The hub shares the
 /// wiring's stop registry, so a live remove can tear down a startup producer
 /// (generator or ingest thread) too.
+// reason: `whep` (WHEP preview egress) and `whip` (WHIP ingest) are the canonical
+// WebRTC protocol names — distinct transports, not a typo-similar pair; renaming
+// either would obscure the spec mapping.
+#[allow(clippy::similar_names)]
 async fn serve_control_plane(
     listen: &str,
     config: &MultiviewConfig,

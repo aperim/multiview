@@ -72,7 +72,9 @@ impl ProgramAudioSlot {
     /// Push one emitted program block, evicting the oldest if the ring is full
     /// (drop-oldest). Non-blocking; a poisoned lock is a no-op (the tap is
     /// best-effort — losing a preview block never affects the program). Returns
-    /// `true` if a block was evicted (the consumer is behind).
+    /// `true` if a block was evicted (the consumer is behind) — a "the consumer is
+    /// falling behind" signal a caller that does not care can bind to `_`.
+    #[must_use]
     pub fn push(&self, block: AudioBlock) -> bool {
         let Ok(mut ring) = self.ring.lock() else {
             return false;
@@ -190,15 +192,24 @@ mod tests {
         assert!(slot.is_empty());
         assert!(slot.pop().is_none(), "empty slot yields None");
 
+        // Exactly-representable f32 sentinels so the FIFO-order assertion is a
+        // bit-exact comparison (no float-equality lint trip).
+        let (first, second) = (0.25_f32, 0.5_f32);
         assert!(
-            !slot.push(block(fmt, 0.1, 960)),
+            !slot.push(block(fmt, first, 960)),
             "first push evicts nothing"
         );
-        assert!(!slot.push(block(fmt, 0.2, 960)));
+        assert!(!slot.push(block(fmt, second, 960)));
         assert_eq!(slot.len(), 2);
-        // FIFO order: oldest out first.
-        assert_eq!(slot.pop().unwrap().interleaved()[0], 0.1);
-        assert_eq!(slot.pop().unwrap().interleaved()[0], 0.2);
+        // FIFO order: oldest out first (bit-exact for the exact sentinels).
+        assert_eq!(
+            slot.pop().unwrap().interleaved()[0].to_bits(),
+            first.to_bits()
+        );
+        assert_eq!(
+            slot.pop().unwrap().interleaved()[0].to_bits(),
+            second.to_bits()
+        );
         assert!(slot.is_empty());
     }
 
@@ -211,10 +222,8 @@ mod tests {
         let slot = ProgramAudioSlot::new();
         let started = std::time::Instant::now();
         let mut evicted_any = false;
-        for i in 0..10_000u32 {
-            // value encodes the push index so we can prove the SURVIVORS are newest.
-            let v = (i % 1000) as f32 / 1000.0;
-            if slot.push(block(fmt, v, 480)) {
+        for _ in 0..10_000u32 {
+            if slot.push(block(fmt, 0.25, 480)) {
                 evicted_any = true;
             }
         }

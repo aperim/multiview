@@ -84,6 +84,11 @@ use tokio::task::JoinHandle;
 // the `AppState`. Bundling them into a struct would only move the arity behind a
 // one-use builder without improving clarity.
 #[allow(clippy::too_many_arguments)]
+// reason: `whep` (WHEP preview egress, ADR-P006) and `whip` (WHIP ingest,
+// ADR-T014) are the canonical, externally-named WebRTC protocol terms — distinct
+// transports, not a typo-similar pair; renaming either to satisfy the lint would
+// obscure the spec mapping.
+#[allow(clippy::similar_names)]
 pub async fn bind_and_serve<F>(
     listen: &str,
     config: &MultiviewConfig,

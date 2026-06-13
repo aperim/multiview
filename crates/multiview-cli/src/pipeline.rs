@@ -3457,7 +3457,9 @@ fn consumer_main(
             // the engine (invariants #1/#10). `None` (no WHEP egress wired) is a
             // no-op, so a build/run without WHEP egress is byte-identical.
             if let Some(slot) = program_audio_preview.as_ref() {
-                slot.push(block.clone());
+                // The eviction flag is the "WHEP consumer behind" signal we
+                // intentionally ignore here (drop-oldest; inv #10).
+                let _ = slot.push(block.clone());
             }
             let audio_packets = encoder
                 .encode_audio_interleaved(block.interleaved(), block.frame_count())
