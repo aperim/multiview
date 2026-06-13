@@ -35,7 +35,8 @@ use multiview_config::DeviceDriver;
 use multiview_engine::EnginePublisher;
 use multiview_events::{
     CastSessionRemoved, CastSessionStarted, DeviceAdopted, DeviceError, DeviceMode, DeviceRemoved,
-    DeviceState, DeviceStatus, Event, ImpactClass, ModePhase,
+    DeviceState, DeviceStatus, DeviceSync, Event, ImpactClass, ModePhase, SyncChange,
+    SyncGroupTestPattern,
 };
 
 use super::registry::DeviceStatusRegistry;
@@ -180,6 +181,51 @@ impl DeviceBroadcaster {
             code: None,
             message: message.to_owned(),
         }))
+    }
+
+    /// Publish `device.sync` carrying a drift-alarm threshold crossing (DEV-C3):
+    /// a member's measured skew moved past (`exceeded = true`, after the dwell)
+    /// or back inside (`exceeded = false`) the group's target. The drift
+    /// roll-up/hysteresis lives in the sync-group runtime; this is the publish.
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn sync_drift(
+        &self,
+        device_id: &str,
+        group: &str,
+        measured_skew_ms: f32,
+        target_skew_ms: u32,
+        exceeded: bool,
+    ) -> u64 {
+        self.engine.publish_event(Event::DeviceSync(DeviceSync {
+            device_id: device_id.to_owned(),
+            group: group.to_owned(),
+            change: SyncChange::Drift {
+                measured_skew_ms,
+                target_skew_ms,
+                exceeded,
+            },
+        }))
+    }
+
+    /// Publish `sync.test-pattern` (lossless lifecycle, DEV-C3): the group's
+    /// member devices should render a burnt-in frame counter + binary flash for
+    /// `duration_ms` so the displays can be photographed/OCR'd for frame-accuracy
+    /// verification. A pure publish — the engine program output is untouched.
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn sync_test_pattern(
+        &self,
+        group: &str,
+        duration_ms: u32,
+        frame_counter: bool,
+        flash_period_ms: u32,
+    ) -> u64 {
+        self.engine
+            .publish_event(Event::SyncGroupTestPattern(SyncGroupTestPattern {
+                group: group.to_owned(),
+                duration_ms,
+                frame_counter,
+                flash_period_ms,
+            }))
     }
 
     /// Publish `cast.session.started` (lossless lifecycle, DEV-D3.1): an

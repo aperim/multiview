@@ -288,3 +288,136 @@ pub(crate) async fn measure_sync_group(
     };
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
+
+/// The default test-pattern duration (10 s) when the request omits it.
+const DEFAULT_TEST_PATTERN_DURATION_S: u32 = 10;
+/// The inclusive ceiling on the test-pattern duration (5 min) — beyond it the
+/// value is a typo, not an operator intent.
+const MAX_TEST_PATTERN_DURATION_S: u32 = 300;
+/// The default binary-flash period (1 Hz) when the request omits it.
+const DEFAULT_FLASH_PERIOD_MS: u32 = 1_000;
+
+/// `GET /api/v1/sync-groups/{id}/status` — the read-only runtime status of a
+/// sync group (role: read): the **weakest-member** achieved tier (never
+/// over-claimed), per-member measured skew, and drift-alarm state.
+///
+/// Reads the latest-wins [`SyncGroupRuntime`](crate::devices::sync_runtime::SyncGroupRuntime)
+/// (never persisted/exported). A freshly-seeded group with no measurements yet
+/// honestly reports the `none` tier. `404` when the id is not a configured group.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/sync-groups/{id}/status",
+        tag = "sync-groups",
+        params(("id" = String, Path, description = "Sync-group id.")),
+        responses(
+            (status = 200, description = "The group's runtime status (weakest-member tier, per-member skew, drift state).", body = crate::openapi_schemas::SyncGroupStatusDoc),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read this group.", body = crate::problem::Problem),
+            (status = 404, description = "No sync group with that id.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn get_sync_group_status(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ControlResult<Json<crate::devices::sync_runtime::SyncGroupStatus>> {
+    principal.role.require(Action::Read)?;
+    crate::auth::authorize_object(&principal, &id)?;
+    let status = state
+        .sync_runtime
+        .status(&id)
+        .ok_or_else(|| ControlError::NotFound {
+            kind: SYNC_GROUP_KIND,
+            id: id.clone(),
+        })?;
+    Ok(Json(status))
+}
+
+/// `POST /api/v1/sync-groups/{id}/test-pattern` — emit a burnt-in frame counter
+/// + binary flash on the group's members for visual sync verification (role:
+/// write; `202` + operation id).
+///
+/// Publishes a `sync.test-pattern` lifecycle event the member nodes consume to
+/// drive their overlay machinery (the existing `Identify` flash + a frame
+/// counter); the engine program output is untouched (invariant #1/#10). The
+/// request body is optional — sensible defaults apply.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/sync-groups/{id}/test-pattern",
+        tag = "sync-groups",
+        params(("id" = String, Path, description = "Sync-group id.")),
+        request_body = crate::openapi_schemas::SyncGroupTestPatternInputDoc,
+        responses(
+            (status = 202, description = "Test pattern accepted; the members render it.", body = crate::routes::AcceptedBody),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 404, description = "No sync group with that id.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn test_pattern_sync_group(
+    State(state): State<AppState>,
+    principal: Principal,
+    idem: IdempotencyKey,
+    Path(id): Path<String>,
+    body: Option<Json<crate::openapi_schemas::SyncGroupTestPatternInputDoc>>,
+) -> ControlResult<Response> {
+    principal.role.require(Action::Write)?;
+    crate::auth::authorize_object(&principal, &id)?;
+    // Fail fast on an unknown group before reserving an idempotency key — the
+    // runtime knows every configured group.
+    if state.sync_runtime.status(&id).is_none() {
+        return Err(ControlError::NotFound {
+            kind: SYNC_GROUP_KIND,
+            id: id.clone(),
+        });
+    }
+    let input = body.map(|Json(input)| input);
+    let seconds = input
+        .as_ref()
+        .and_then(|i| i.duration_s)
+        .unwrap_or(DEFAULT_TEST_PATTERN_DURATION_S)
+        .clamp(1, MAX_TEST_PATTERN_DURATION_S);
+    let frame_counter = input.as_ref().and_then(|i| i.frame_counter).unwrap_or(true);
+    let flash_period_ms = input
+        .as_ref()
+        .and_then(|i| i.flash_period_ms)
+        .unwrap_or(DEFAULT_FLASH_PERIOD_MS);
+    let duration_ms = seconds.saturating_mul(1_000);
+
+    let op = match state.idempotency.reserve(idem.0.as_deref()) {
+        Reservation::Fresh(op) | Reservation::Replay(op) => op,
+    };
+    // Publish through the canonical device broadcaster (control-plane only,
+    // non-blocking drop-oldest; the engine never awaits this — invariant #10).
+    let _seq = state.poller_wiring().broadcaster.sync_test_pattern(
+        &id,
+        duration_ms,
+        frame_counter,
+        flash_period_ms,
+    );
+    state.audit(
+        &principal.key_id,
+        AuditAction::Command,
+        SYNC_GROUP_KIND,
+        &id,
+        Some(serde_json::json!({
+            "action": "test-pattern",
+            "duration_ms": duration_ms,
+            "frame_counter": frame_counter,
+            "flash_period_ms": flash_period_ms,
+        })),
+    );
+    let body = crate::routes::AcceptedBody {
+        operation_id: op.to_string(),
+        kind: "test-pattern".to_owned(),
+        applied_live: None,
+        carried_only: None,
+    };
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+}

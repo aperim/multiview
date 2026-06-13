@@ -35,7 +35,7 @@ use super::sync_drift::{DriftHysteresis, DriftMonitor, DriftTransition};
 
 /// One member's read-only runtime status inside a [`SyncGroupStatus`].
 ///
-/// The OpenAPI schema is the separate [`SyncGroupStatusDoc`] mirror in
+/// The `OpenAPI` schema is the separate [`SyncGroupStatusDoc`] mirror in
 /// [`crate::openapi_schemas`] (enum fields render as strings there), so this
 /// wire type carries no utoipa derive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +72,7 @@ impl SyncMemberStatus {
 /// `GET /sync-groups/{id}/status` and the `device.sync` / `timing.status`
 /// telemetry. Derived state only; never persisted.
 ///
-/// The OpenAPI schema is the separate [`SyncGroupStatusDoc`] mirror in
+/// The `OpenAPI` schema is the separate [`SyncGroupStatusDoc`] mirror in
 /// [`crate::openapi_schemas`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncGroupStatus {

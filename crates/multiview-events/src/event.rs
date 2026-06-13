@@ -942,6 +942,31 @@ pub struct DeviceSync {
     pub change: SyncChange,
 }
 
+/// A sync-group **test pattern** was triggered — the `data` body of
+/// `sync.test-pattern` (lossless low-rate lifecycle lane on the `devices`
+/// topic, DEV-C3 / ADR-M010).
+///
+/// The operator asked the group's member devices to render a burnt-in
+/// frame-index counter + a binary flash for the configured duration, so the
+/// displays can be photographed/OCR'd to confirm they present the same frame
+/// index (frame-accuracy acceptance). This is a control-plane lifecycle event
+/// the member nodes consume to drive their existing overlay machinery (the
+/// `Identify` flash + a frame counter); the engine program output is untouched
+/// (invariant #1/#10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncGroupTestPattern {
+    /// The sync group whose members display the test pattern.
+    pub group: String,
+    /// How long the test pattern stays active (milliseconds).
+    pub duration_ms: u32,
+    /// Whether a per-frame burnt-in counter is rendered (for OCR
+    /// cross-comparison across displays).
+    pub frame_counter: bool,
+    /// The binary-flash period (milliseconds): on for the first half, off for
+    /// the second, so a fast-shutter photo captures the flash phase.
+    pub flash_period_ms: u32,
+}
+
 /// The address family of a discovery result. IPv6-first (ADR-0042): IPv4
 /// results are explicitly labelled **legacy** on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1194,6 +1219,10 @@ pub enum Event {
     /// (lossless lifecycle lane).
     #[serde(rename = "device.sync")]
     DeviceSync(DeviceSync),
+    /// A sync-group test pattern (burnt-in frame counter + flash) was triggered
+    /// for visual sync verification (lossless lifecycle lane, DEV-C3).
+    #[serde(rename = "sync.test-pattern")]
+    SyncGroupTestPattern(SyncGroupTestPattern),
     /// An untrusted discovery row streamed while a scan operation runs,
     /// correlated via the envelope `corr` (lossless lifecycle lane).
     #[serde(rename = "device.discovered")]
@@ -1256,6 +1285,7 @@ impl Event {
             Self::DeviceMode(_) => "device.mode",
             Self::DeviceError(_) => "device.error",
             Self::DeviceSync(_) => "device.sync",
+            Self::SyncGroupTestPattern(_) => "sync.test-pattern",
             Self::DeviceDiscovered(_) => "device.discovered",
             Self::CastSessionStarted(_) => "cast.session.started",
             Self::CastSessionRemoved(_) => "cast.session.removed",

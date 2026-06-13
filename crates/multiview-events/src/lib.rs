@@ -48,8 +48,9 @@ pub use event::{
     DeviceStatus, DeviceStreamRole, DeviceStreamStatus, DeviceSync, DeviceSyncSummary, Event,
     GpuMetrics, GpuVendor, HealthWarning, ImpactClass, InputConnection, InputStreams, JobProgress,
     LifecycleState, ModePhase, OutputRunState, OutputStatus, SalvoEvent, SalvoPhase,
-    SyncCapability, SyncChange, SyncGroupSkew, SystemMetrics, TallyEvent, TallyTarget,
-    TileSnapshotEntry, TileState, TilesSnapshot, TimingStatus, WarningCode, WarningSeverity,
+    SyncCapability, SyncChange, SyncGroupSkew, SyncGroupTestPattern, SystemMetrics, TallyEvent,
+    TallyTarget, TileSnapshotEntry, TileState, TilesSnapshot, TimingStatus, WarningCode,
+    WarningSeverity,
 };
 pub use ordering::{Accepted, TopicCursor};
 pub use seq::{Seq, SeqCounter};
