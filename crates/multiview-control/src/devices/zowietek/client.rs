@@ -758,10 +758,18 @@ mod scripted {
         /// close-before-open assertion).
         #[must_use]
         pub fn streamplay_request_order(&self) -> Vec<ScriptedRequest> {
+            self.requests_for("streamplay")
+        }
+
+        /// Every recorded request to `module`, in issue order — for asserting a
+        /// specific request appeared even amid concurrent poll traffic (the
+        /// last-request snapshot can be raced by a steady poll loop).
+        #[must_use]
+        pub fn requests_for(&self, module: &str) -> Vec<ScriptedRequest> {
             self.lock()
                 .requests
                 .iter()
-                .filter(|r| r.module == "streamplay")
+                .filter(|r| r.module == module)
                 .cloned()
                 .collect()
         }

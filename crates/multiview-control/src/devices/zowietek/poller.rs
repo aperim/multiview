@@ -535,8 +535,18 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
             }
             PollerControl::SecretUpdated => self.secret_updated(),
             PollerControl::Reboot => {
-                // RED placeholder (DEV-A4 fix 2): not yet wired to the transport.
-                tracing::debug!(device = %self.device_id, "reboot received (not yet wired)");
+                // Reboot is fire-and-forget (DEV-A4 fix 2): the device drops the
+                // socket with no HTTP response, so a success and the expected
+                // drop both return Ok and we ride UNREACHABLE→reconnect from the
+                // next poll. A device that refuses (non-success status) logs the
+                // error — the poller keeps running either way (never crashes).
+                if let Err(err) = self.driver.reboot().await {
+                    tracing::warn!(
+                        device = %self.device_id,
+                        error = %err,
+                        "zowietek reboot was refused by the device (no reboot issued)"
+                    );
+                }
             }
             PollerControl::SetVolume { percent } => {
                 // A receiver-volume verb (the cast driver's, DEV-D2): the

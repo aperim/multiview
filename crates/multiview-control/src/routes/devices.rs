@@ -24,8 +24,11 @@
 //! * `POST /api/v1/devices/{id}/{probe|set-mode|reboot|identify|test-pattern}` —
 //!   the bare-verb device actions (ADR-W017). `probe` is synchronous (`200`);
 //!   `set-mode`/`reboot` are long-running (`202` + operation id; `set-mode`
-//!   declares its DEV-class impact before apply); `identify`/`test-pattern` are
-//!   fire-and-forget (`204`).
+//!   declares its DEV-class impact before apply and dispatches a fail-safe
+//!   convergence; `reboot` dispatches a fire-and-forget reboot to the device's
+//!   poller). `identify`/`test-pattern` have no grounded vendor opt on this build
+//!   (no ZowieTek SDK) and **honestly return `501 Not Implemented`** rather than
+//!   a fake `204` (DEV-A4 fix 2).
 //! * `GET /api/v1/devices/{id}/source-candidates` and `/output-targets` — the
 //!   declared stream-binding projections (ADR-M009): honestly empty until a
 //!   driver enumerates, never fabricated live telemetry.
@@ -35,11 +38,12 @@
 //! logs in, probes, enumerates the three facets (so `source-candidates` /
 //! `output-targets` return real data at runtime), polls status, and drives the
 //! device lifecycle — all isolated from the engine (invariant #10). `set-mode`
-//! dispatches its convergence to that poller; `reboot` mints an operation id and
-//! `202`s (its live transport lands with the management facet). When no live
-//! poller is running (the default build's no-op factory, or a non-`zowietek`
-//! device), the projection routes stay honestly empty and the long-running
-//! actions still `202`. Errors are RFC 9457 problem documents.
+//! dispatches its (fail-safe, index-scoped) convergence to that poller; `reboot`
+//! mints an operation id, `202`s, and dispatches a fire-and-forget reboot to the
+//! poller's live transport. When no live poller is running (the default build's
+//! no-op factory, or a non-`zowietek` device), the projection routes stay
+//! honestly empty and the long-running actions still `202` (with nothing to
+//! dispatch to). Errors are RFC 9457 problem documents.
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -574,7 +578,14 @@ pub(crate) async fn set_mode(
 /// `POST /api/v1/devices/{id}/reboot` — reboot the device (role: write; `202`).
 ///
 /// A long-running management verb (ADR-W017): the operation id is minted and
-/// `202`'d; the outcome arrives on the realtime stream once the driver lands.
+/// `202`'d, then the route **dispatches** `PollerControl::Reboot` to the device's
+/// running driver poller (DEV-A4), which issues the **fire-and-forget** reboot to
+/// the device — the box drops the socket with no HTTP response, so the poller
+/// rides `UNREACHABLE`→reconnect and re-probes on return (managed-devices.md
+/// §3.1). The dispatch is non-blocking `try_send`, so it never back-pressures the
+/// engine (invariant #10). When no live poller is running (the default build's
+/// no-op factory, or a device whose driver was not spawned), the `202` is still
+/// returned but nothing applies the reboot — there is no live transport to drive.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -583,7 +594,7 @@ pub(crate) async fn set_mode(
         tag = "devices",
         params(("id" = String, Path, description = "Device id to reboot.")),
         responses(
-            (status = 202, description = "Reboot accepted; outcome on the realtime stream.", body = crate::routes::AcceptedBody),
+            (status = 202, description = "Reboot accepted; the driver issues the fire-and-forget reboot and the device rides UNREACHABLE→reconnect.", body = crate::routes::AcceptedBody),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to reboot.", body = crate::problem::Problem),
             (status = 404, description = "No device with that id.", body = crate::problem::Problem),
@@ -607,6 +618,19 @@ pub(crate) async fn reboot_device(
         &id,
         Some(serde_json::json!({ "action": "reboot" })),
     );
+    // Dispatch the reboot to the device's running poller (DEV-A4 fix 2): the
+    // actor issues the fire-and-forget reboot to the live transport. Non-blocking
+    // `try_send` — the route never awaits the actor (invariant #10).
+    let dispatched = state
+        .device_pollers
+        .dispatch(&id, crate::devices::PollerControl::Reboot);
+    if !dispatched {
+        tracing::debug!(
+            device = %id,
+            "reboot: no running poller to dispatch to (no live driver on this build/device); \
+             the 202 is returned but no reboot is issued"
+        );
+    }
     let body = crate::routes::AcceptedBody {
         operation_id: op.to_string(),
         kind: "reboot".to_owned(),
@@ -616,8 +640,14 @@ pub(crate) async fn reboot_device(
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
-/// `POST /api/v1/devices/{id}/identify` — flash the device's identify indicator
-/// (role: write; fire-and-forget `204`).
+/// `POST /api/v1/devices/{id}/identify` — flash the device's identify indicator.
+///
+/// **Not implemented on this build (`501`)** — DEV-A4 fix 2. The `zowietek`
+/// driver has no grounded vendor opt for an identify indicator (no ZowieTek SDK
+/// is present in this repo to ground one), so the route refuses honestly with an
+/// `application/problem+json` rather than return a fake `204` that never reaches
+/// the device. It re-enables to a wired verb once the firmware opt is grounded
+/// against the vendor SDK (managed-devices.md §3).
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -626,10 +656,10 @@ pub(crate) async fn reboot_device(
         tag = "devices",
         params(("id" = String, Path, description = "Device id to identify.")),
         responses(
-            (status = 204, description = "Identify acknowledged."),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to identify.", body = crate::problem::Problem),
             (status = 404, description = "No device with that id.", body = crate::problem::Problem),
+            (status = 501, description = "Identify is not implemented by this driver/firmware build (no grounded vendor opt).", body = crate::problem::Problem),
         ),
     )
 )]
@@ -638,11 +668,16 @@ pub(crate) async fn identify_device(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    fire_and_forget(&state, &principal, &id, "identify")
+    reject_ungrounded_verb(&state, &principal, &id, "identify")
 }
 
 /// `POST /api/v1/devices/{id}/test-pattern` — display a test pattern on the
-/// device (role: write; fire-and-forget `204`).
+/// device.
+///
+/// **Not implemented on this build (`501`)** — DEV-A4 fix 2. Same disposition as
+/// `identify`: no grounded vendor opt for a test pattern on this build (no
+/// ZowieTek SDK), so the route refuses honestly with `application/problem+json`
+/// rather than ship a fake `204`. Wired once the firmware opt is grounded.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -651,10 +686,10 @@ pub(crate) async fn identify_device(
         tag = "devices",
         params(("id" = String, Path, description = "Device id.")),
         responses(
-            (status = 204, description = "Test-pattern acknowledged."),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized.", body = crate::problem::Problem),
             (status = 404, description = "No device with that id.", body = crate::problem::Problem),
+            (status = 501, description = "Test-pattern is not implemented by this driver/firmware build (no grounded vendor opt).", body = crate::problem::Problem),
         ),
     )
 )]
@@ -663,13 +698,19 @@ pub(crate) async fn test_pattern(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    fire_and_forget(&state, &principal, &id, "test-pattern")
+    reject_ungrounded_verb(&state, &principal, &id, "test-pattern")
 }
 
-/// Acknowledge a fire-and-forget device verb (`identify` / `test-pattern`):
-/// require write + per-object authz, confirm the device exists, audit the
-/// action, and return `204`.
-fn fire_and_forget(
+/// Honestly refuse a device verb whose vendor protocol is not grounded on this
+/// build (DEV-A4 fix 2): require write + per-object authz, confirm the device
+/// exists (so an unknown id is still a clean `404`, and an unauthorized caller a
+/// `403`), then return `501 Not Implemented` as `application/problem+json` — the
+/// verb is **not** acknowledged with a fake success, and no wire call is made.
+///
+/// No audit record is written: the action did not happen, so there is nothing to
+/// audit (recording a "command" that never reached the device would be the same
+/// dishonesty in the audit log).
+fn reject_ungrounded_verb(
     state: &AppState,
     principal: &Principal,
     id: &str,
@@ -678,14 +719,11 @@ fn fire_and_forget(
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(principal, id)?;
     require_device(state, id)?;
-    state.audit(
-        &principal.key_id,
-        AuditAction::Command,
-        DEVICE_KIND,
-        id,
-        Some(serde_json::json!({ "action": action })),
-    );
-    Ok(StatusCode::NO_CONTENT)
+    Err(ControlError::Unsupported(format!(
+        "device verb {action:?} is not implemented by this driver/firmware build: no grounded \
+         vendor opt is available (no vendor SDK present); it is refused rather than acknowledged \
+         without reaching the device"
+    )))
 }
 
 /// Mint (or replay, by `Idempotency-Key`) an operation id for a long-running

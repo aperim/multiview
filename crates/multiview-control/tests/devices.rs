@@ -447,6 +447,25 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
     // route's start_device_poller).
     seed_device(&h, "dev-foyer").await;
 
+    // Wait (bounded) for the poller to reach ONLINE — i.e. a session is
+    // established — before issuing the reboot, so the reboot's fire-and-forget
+    // write is attempted (a reboot before adopt completes is a clean no-op, since
+    // there is no session yet).
+    let mut online = false;
+    for _ in 0..200 {
+        let st = send(
+            &h.router,
+            get("/api/v1/devices/dev-foyer/status", OPERATOR_TOKEN),
+        )
+        .await;
+        if body_json(st).await["state"] == "ONLINE" {
+            online = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(online, "the spawned poller reached ONLINE before reboot");
+
     let resp = send(
         &h.router,
         post_if_match("/api/v1/devices/dev-foyer/reboot", OPERATOR_TOKEN, None),
@@ -455,15 +474,15 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "reboot is accepted (202)");
 
     // The dispatch is async over the poller's control channel; wait (bounded)
-    // for the reboot write to actually reach the device's `system` module.
+    // for a reboot write to actually reach the device's `system` module. Scan ALL
+    // recorded `system` requests (not just the last) so a concurrent poll loop
+    // cannot race the snapshot.
     let mut sent = false;
     for _ in 0..200 {
         if transport
-            .last_request()
-            .is_some_and(|r| {
-                r.module == "system"
-                    && r.body.get("opt").and_then(serde_json::Value::as_str) == Some("reboot")
-            })
+            .requests_for("system")
+            .iter()
+            .any(|r| r.body.get("opt").and_then(serde_json::Value::as_str) == Some("reboot"))
         {
             sent = true;
             break;
@@ -472,8 +491,8 @@ async fn reboot_route_dispatches_a_real_reboot_to_the_device() {
     }
     assert!(
         sent,
-        "the reboot route drove a real /system reboot write to the device, last = {:?}",
-        transport.last_request()
+        "the reboot route drove a real /system reboot write to the device; system reqs = {:?}",
+        transport.requests_for("system")
     );
 }
 
