@@ -2989,6 +2989,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "subtle",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
