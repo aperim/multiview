@@ -83,7 +83,7 @@ Default features build a **pure-Rust, LGPL-clean, no-native-deps** check (CI gre
 - **Codec backends (per stage, auto-negotiated at runtime):** `cuda` (NVDEC/NVENC), `videotoolbox`, `vaapi`, `qsv`, `software` (always on).
 - **Compositor backends:** `wgpu` (default, cross-platform), `metal`, `cuda`.
 - **Media engine:** `ffmpeg` (links libav for demux/decode/encode).
-- **RIST transport:** `rist` (Reliable Internet Stream Transport — VSF TR-06 — input + output; **off by default**; permissive/LGPL-clean: librist is BSD-2-Clause, see §7). Tier-0 single-link rides the FFmpeg `rist://` protocol; the same flag gates the deferred `multiview-rist-sys` FFI leaf for stats + bonding ([ADR-0060](../decisions/ADR-0060.md)).
+- **RIST transport:** `rist` (Reliable Internet Stream Transport — VSF TR-06 — input + output; **off by default**; permissive/LGPL-clean: librist is BSD-2-Clause, see §7). Tier-0 single-link rides the FFmpeg `rist://` protocol; the same flag gates the deferred `multiview-rist-sys` FFI leaf for stats + bonding ([ADR-0095](../decisions/ADR-0095.md)).
 - **Codecs licensing:** `gpl-codecs` (x264/x265 → makes the build GPL; **off by default**).
 - **NDI:** `ndi` (proprietary SDK; **off by default**, runtime-loaded; see §7).
 - **Subtitles:** `libass`.

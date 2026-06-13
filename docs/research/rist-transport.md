@@ -2,7 +2,7 @@
 > implementation. Produced by a verification-hardened multi-agent research workflow
 > (2026-06-13). Canonical crate/API naming lives in
 > [docs/architecture/conventions.md](../architecture/conventions.md). The decision derived
-> from this brief is [ADR-0060](../decisions/ADR-0060.md). Cross-links:
+> from this brief is [ADR-0095](../decisions/ADR-0095.md). Cross-links:
 > [streaming-gotchas](streaming-gotchas.md) (the timing/robustness runbook this transport
 > must obey), [srt-transport](srt-transport.md) (the **sibling** transport whose tiered seam
 > this brief deliberately mirrors), [efficiency](efficiency.md) (the per-stage budget).
