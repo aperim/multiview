@@ -34,7 +34,13 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::media::{Direction, Frequency, MediaKind as Str0mMediaKind, MediaTime, Mid};
+use str0m::media::{Frequency, MediaKind as Str0mMediaKind, MediaTime, Mid};
+
+/// The SDP media direction (`sendonly` / `recvonly` / `sendrecv`), re-exported
+/// from str0m so callers select an offer's direction without depending on str0m
+/// directly (a WHEP viewer offers [`Direction::RecvOnly`]; the `whip_push` client
+/// offers [`Direction::SendOnly`]).
+pub use str0m::media::Direction;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
@@ -43,6 +49,9 @@ use crate::error::{Result, WebRtcError};
 
 /// The 90 kHz RTP clock for video (ADR-0048 codec matrix; invariant #3 rationals).
 const VIDEO_CLOCK_HZ: Frequency = Frequency::NINETY_KHZ;
+
+/// The 48 kHz RTP clock for Opus audio (RFC 7587; ADR-0049 §6).
+const AUDIO_CLOCK_HZ: Frequency = Frequency::FORTY_EIGHT_KHZ;
 
 /// The kind of media a session carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +120,37 @@ impl SessionConfig {
             enable_vp8: false,
             enable_opus: true,
             rtp_mode: true,
+        }
+    }
+
+    /// A WHEP **output serve** session (ADR-0049 §5.1): the program is the **real
+    /// encoded H.264 rendition** + the shared Opus rendition, so only those
+    /// codecs are answered (no VP8 — the program is never re-encoded to VP8). The
+    /// viewer's browser is the offerer; this end is the **answerer** and only
+    /// *sends*, sample-writing the already-encoded program AUs
+    /// ([`Session::write_video_sample_at`]). **Sample mode** (`rtp_mode = false`):
+    /// str0m packetizes our samples into SRTP for the viewer.
+    #[must_use]
+    pub fn serve() -> Self {
+        Self {
+            enable_h264: true,
+            enable_vp8: false,
+            enable_opus: true,
+            rtp_mode: false,
+        }
+    }
+
+    /// A `whip_push` **client** session (ADR-0049 §5.2): Multiview is the
+    /// **offerer**, publishing the program sendonly to a remote WHIP ingest —
+    /// H.264 + Opus only, no VP8 (the program rendition is H.264). **Sample
+    /// mode**: str0m packetizes our program AUs into SRTP for the remote.
+    #[must_use]
+    pub fn push() -> Self {
+        Self {
+            enable_h264: true,
+            enable_vp8: false,
+            enable_opus: true,
+            rtp_mode: false,
         }
     }
 }
@@ -292,17 +332,35 @@ impl Session {
         Ok(())
     }
 
-    /// Create an SDP offer adding the given sendonly media, returning the offer
-    /// SDP string. The matching pending offer is stashed for
+    /// Create an SDP offer adding the given **sendonly** media, returning the
+    /// offer SDP string — the `whip_push` client's offer (Multiview sends the
+    /// program; ADR-0049 §5.2). The matching pending offer is stashed for
     /// [`Session::accept_answer`].
     ///
     /// # Errors
     ///
     /// [`WebRtcError::Transport`] if the change set produced no offer.
     pub fn create_offer(&mut self, kinds: &[MediaKind]) -> Result<String> {
+        self.create_offer_with_direction(kinds, Direction::SendOnly)
+    }
+
+    /// Create an SDP offer adding the given media in `direction`, returning the
+    /// offer SDP string. A WHEP **viewer** offers [`Direction::RecvOnly`] (it
+    /// receives the program); the `whip_push` client offers
+    /// [`Direction::SendOnly`] (it sends). The matching pending offer is stashed
+    /// for [`Session::accept_answer`].
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if the change set produced no offer.
+    pub fn create_offer_with_direction(
+        &mut self,
+        kinds: &[MediaKind],
+        direction: Direction,
+    ) -> Result<String> {
         let mut change = self.rtc.sdp_api();
         for kind in kinds {
-            let mid = change.add_media(kind.to_str0m(), Direction::SendOnly, None, None, None);
+            let mid = change.add_media(kind.to_str0m(), direction, None, None, None);
             self.media.push((mid, *kind));
         }
         let (offer, pending) = change
@@ -436,21 +494,70 @@ impl Session {
     }
 
     /// Write one encoded video sample (an access unit) into the first video
-    /// media; str0m packetizes it into SRTP. `keyframe` marks an IDR.
+    /// media at RTP timestamp **0**; str0m packetizes it into SRTP. `keyframe`
+    /// marks an IDR. Retained for the single-sample handshake tests; the program
+    /// egress uses [`Session::write_video_sample_at`] to carry the real
+    /// tick-derived 90 kHz timestamp (invariant #3).
     ///
     /// # Errors
     ///
     /// [`WebRtcError::Transport`] if there is no video media, no negotiated
     /// payload type, or the write fails.
     pub fn write_video_sample(&mut self, data: &[u8], keyframe: bool, now: Instant) -> Result<()> {
+        self.write_video_sample_at(data, keyframe, 0, now)
+    }
+
+    /// Write one encoded video sample at the given **90 kHz RTP timestamp**
+    /// (`rtp_ts`), derived from the program output tick counter (invariant #3 —
+    /// raw input PTS never reaches a viewer). str0m packetizes the access unit
+    /// into SRTP for every negotiated viewer. `keyframe` marks an IDR (str0m
+    /// tags the RTP for a decodable seam).
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if there is no video media, no negotiated
+    /// payload type, or the write fails.
+    pub fn write_video_sample_at(
+        &mut self,
+        data: &[u8],
+        keyframe: bool,
+        rtp_ts: u32,
+        now: Instant,
+    ) -> Result<()> {
+        self.write_sample_at(MediaKind::Video, data, keyframe, rtp_ts, VIDEO_CLOCK_HZ, now)
+    }
+
+    /// Write one encoded Opus audio frame at the given **48 kHz RTP timestamp**
+    /// (`rtp_ts`), derived from the program audio sample counter (invariant #3).
+    /// str0m packetizes it into SRTP for every negotiated viewer.
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if there is no audio media, no negotiated
+    /// payload type, or the write fails.
+    pub fn write_audio_sample_at(&mut self, data: &[u8], rtp_ts: u32, now: Instant) -> Result<()> {
+        self.write_sample_at(MediaKind::Audio, data, false, rtp_ts, AUDIO_CLOCK_HZ, now)
+    }
+
+    /// Shared sample-write: address the first media of `kind`, look up its
+    /// negotiated payload type, and write `data` at `rtp_ts` in `clock`, then
+    /// drive so str0m packetizes it into outbound SRTP now.
+    fn write_sample_at(
+        &mut self,
+        kind: MediaKind,
+        data: &[u8],
+        keyframe: bool,
+        rtp_ts: u32,
+        clock: Frequency,
+        now: Instant,
+    ) -> Result<()> {
         let mid = self
             .media
             .iter()
-            .find(|(_, k)| *k == MediaKind::Video)
+            .find(|(_, k)| *k == kind)
             .map(|(mid, _)| *mid)
-            .ok_or_else(|| WebRtcError::Transport("no video media to write".to_owned()))?;
-        // RTP timestamp advances 90 kHz; for the offline test one sample is fine.
-        let rtp_time = MediaTime::new(0, VIDEO_CLOCK_HZ);
+            .ok_or_else(|| WebRtcError::Transport("no media to write".to_owned()))?;
+        let rtp_time = MediaTime::new(u64::from(rtp_ts), clock);
         let pt = self
             .rtc
             .media(mid)
@@ -459,7 +566,7 @@ impl Session {
         let writer = self
             .rtc
             .writer(mid)
-            .ok_or_else(|| WebRtcError::Transport("no writer for video mid".to_owned()))?;
+            .ok_or_else(|| WebRtcError::Transport("no writer for mid".to_owned()))?;
         let _ = keyframe;
         writer
             .write(pt, now, rtp_time, data.to_vec())

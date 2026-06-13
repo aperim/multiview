@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use multiview_webrtc::egress::{EgressMedia, EgressSample};
-use multiview_webrtc::transport::{MediaKind, Session, SessionConfig};
+use multiview_webrtc::transport::{Direction, MediaKind, Session, SessionConfig};
 
 const SERVER_ADDR: &str = "[::1]:41001";
 const VIEWER_ADDR: &str = "[::1]:41002";
@@ -78,7 +78,11 @@ fn whep_serve_sample_write_reaches_the_viewer() {
     let mut server = Session::new(&SessionConfig::serve(), now);
     viewer.add_host_candidate(viewer_addr).unwrap();
     server.add_host_candidate(server_addr).unwrap();
-    let offer = viewer.create_offer(&[MediaKind::Video]).unwrap();
+    // A WHEP viewer offers RECVONLY (it receives the program); the server answers
+    // sendonly and sample-writes into the negotiated mid.
+    let offer = viewer
+        .create_offer_with_direction(&[MediaKind::Video], Direction::RecvOnly)
+        .unwrap();
     let answer = server.accept_offer(&offer).unwrap();
     viewer.accept_answer(&answer).unwrap();
 
@@ -122,7 +126,7 @@ fn whep_serve_answer_is_sendonly_and_passive() {
     viewer.add_host_candidate(viewer_addr).unwrap();
     server.add_host_candidate(server_addr).unwrap();
     let offer = viewer
-        .create_offer(&[MediaKind::Video, MediaKind::Audio])
+        .create_offer_with_direction(&[MediaKind::Video, MediaKind::Audio], Direction::RecvOnly)
         .unwrap();
     let answer = server.accept_offer(&offer).unwrap();
     assert!(answer.contains("a=group:BUNDLE"), "answer:\n{answer}");
@@ -191,12 +195,14 @@ fn one_access_unit_serves_two_viewers() {
     let s2: SocketAddr = "[::1]:42003".parse().unwrap();
     let v2: SocketAddr = "[::1]:42004".parse().unwrap();
 
-    let mut connect = |s_addr: SocketAddr, v_addr: SocketAddr| {
+    let connect = |s_addr: SocketAddr, v_addr: SocketAddr| {
         let mut viewer = Session::new(&SessionConfig::default(), now);
         let mut server = Session::new(&SessionConfig::serve(), now);
         viewer.add_host_candidate(v_addr).unwrap();
         server.add_host_candidate(s_addr).unwrap();
-        let offer = viewer.create_offer(&[MediaKind::Video]).unwrap();
+        let offer = viewer
+            .create_offer_with_direction(&[MediaKind::Video], Direction::RecvOnly)
+            .unwrap();
         let answer = server.accept_offer(&offer).unwrap();
         viewer.accept_answer(&answer).unwrap();
         assert!(pump_until(&mut server, s_addr, &mut viewer, v_addr, now, |s, v| s
