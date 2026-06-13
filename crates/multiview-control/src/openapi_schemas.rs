@@ -1563,3 +1563,270 @@ pub struct DeviceStatusDoc {
     #[serde(default)]
     pub last_seen_ts: Option<i64>,
 }
+
+// ---------------------------------------------------------------------------
+// Conspect entitlement plane (CONSPECT-1, ADR-0050) — the licence resource the
+// `GET /api/v1/licence` endpoint renders. These mirror the
+// `multiview_licence` types field-for-field and tag-for-tag; the real handler
+// serialises the real `multiview_licence::LicenceStatusView`. A round-trip test
+// (`tests/licence.rs`) pins the two shapes together so they cannot drift.
+// ---------------------------------------------------------------------------
+
+/// `OpenAPI` mirror of [`multiview_licence::LeaseSource`].
+///
+/// Serde-equivalent: a unit enum rendered `snake_case` (`online`/`relay`/`file`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LeaseSourceDoc {
+    /// Granted by a direct heartbeat to the licence server (35-day term).
+    Online,
+    /// Granted via an end-to-end-signed mesh relay (a fresh online-equivalent grant).
+    Relay,
+    /// Provisioned from a signed offline lease file (90-day hard term).
+    File,
+}
+
+/// `OpenAPI` mirror of [`multiview_licence::HardwareClass`].
+///
+/// Serde-equivalent: a unit enum rendered `snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HardwareClassDoc {
+    /// A standard single-host deployment.
+    Standard,
+    /// A datacenter-class host.
+    Datacenter,
+    /// An edge / appliance-class host.
+    Edge,
+}
+
+/// `OpenAPI` mirror of [`multiview_licence::GpuLimit`].
+///
+/// Serde-equivalent: adjacently tagged on `kind`, value under `value`,
+/// `snake_case` tags (`{"kind":"unlimited"}` / `{"kind":"limited","value":2}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GpuLimitDoc {
+    /// No GPU cap — the `over_gpu` reason can never fire.
+    Unlimited,
+    /// At most this many GPUs may be in use before the `over_gpu` reason fires.
+    Limited(u32),
+}
+
+/// `OpenAPI` mirror of [`multiview_licence::LadderState`] (the seven conditions).
+///
+/// Serde-equivalent: a unit enum rendered `snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LadderStateDoc {
+    /// Lease valid, within term.
+    Compliant,
+    /// Past expiry, within the grace window.
+    Grace,
+    /// Past grace, before the hard bound (config-locked, data only).
+    LapsedSoft,
+    /// Past the hard bound (watermark + config-lock, data only).
+    LapsedHard,
+    /// An evaluation/trial grant within its period.
+    Evaluation,
+    /// The licensed and detected hardware classes disagree.
+    ClassMismatch,
+    /// More GPUs are in use than the entitlement allows.
+    OverGpu,
+}
+
+/// `OpenAPI` mirror of [`multiview_licence::EnforcementLevel`].
+///
+/// Serde-equivalent: a unit enum rendered `kebab-case`. Every level keeps a
+/// running program **on air** (ADR-0050 §6.3, invariant #1) — enforcement is
+/// data the surface renders, never a control-flow decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum EnforcementLevelDoc {
+    /// Lease valid — clean canvas, on air.
+    Active,
+    /// A warning the operator should act on — clean canvas, on air.
+    Warning,
+    /// Hot-reconfiguration denied; the running scene keeps playing — on air.
+    ConfigLocked,
+    /// Corner watermark stamped; reconfiguration denied — on air.
+    Watermark,
+    /// Creating a **new** engine instance is refused; running instances keep playing.
+    BlockNewInstance,
+    /// The heartbeat client was compiled out; reported honestly.
+    UnlicensedBuild,
+}
+
+/// `OpenAPI` mirror of [`multiview_licence::Lease`] (the dated entitlement
+/// bounds, ADR-0050 §4).
+///
+/// Serde-equivalent: the dated fields are RFC 3339 date-time strings (how
+/// `chrono`'s `DateTime<Utc>` serialises), the day counts are integers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LeaseDoc {
+    /// The opaque lease serial (server-issued; not a hardware identifier).
+    pub serial: String,
+    /// Where this grant came from (drives the term).
+    pub source: LeaseSourceDoc,
+    /// When the lease was granted (RFC 3339).
+    pub granted_at: String,
+    /// When the lease term expires (RFC 3339).
+    pub expires_at: String,
+    /// The number of grace days that follow expiry.
+    pub grace_days: i64,
+    /// The end of the grace window (RFC 3339).
+    pub grace_until: String,
+    /// The absolute hard bound from grant (RFC 3339).
+    pub hard_at: String,
+    /// When the next heartbeat is due (RFC 3339).
+    pub next_contact_due: String,
+}
+
+/// `OpenAPI` mirror of `multiview_licence::HardwareClassView` (the
+/// licensed-vs-detected class pair).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareClassViewDoc {
+    /// The class the entitlement is licensed for.
+    pub licensed: HardwareClassDoc,
+    /// The class detected on the machine (a mismatch is a ladder reason).
+    pub detected: HardwareClassDoc,
+}
+
+/// `OpenAPI` mirror of [`multiview_licence::LicenceStatusView`] — the computed
+/// licence resource `GET /api/v1/licence` renders.
+///
+/// Serde-equivalent to the real view. The `state`/`enforcement` are **computed**
+/// (the ladder, off the hot loop); every value keeps a running program on air.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LicenceStatusDoc {
+    /// The opaque commercial tier (rendered, never computed).
+    pub tier: String,
+    /// The computed ladder state (the seven conditions).
+    pub state: LadderStateDoc,
+    /// The canonical enforcement level derived from the state.
+    pub enforcement: EnforcementLevelDoc,
+    /// The licensed-vs-detected hardware class.
+    pub hardware_class: HardwareClassViewDoc,
+    /// The GPU allowance carried by the entitlement.
+    pub gpu_limit: GpuLimitDoc,
+    /// The number of GPUs currently in use (informs the `over_gpu` reason only).
+    pub gpus_in_use: u32,
+    /// Whether the engine should deny hot-reconfiguration (derived, S2).
+    pub config_locked: bool,
+    /// Whether the engine should stamp a corner watermark (derived, S3).
+    pub watermark: bool,
+    /// Whether the startup gate should refuse a new engine instance (S1).
+    pub blocks_new_instances: bool,
+    /// The dated lease this status reflects.
+    pub lease: LeaseDoc,
+    /// Machine-readable reason codes the UI renders.
+    pub reasons: Vec<String>,
+}
+
+/// `OpenAPI` body of a successful `POST /api/v1/licence/lease` install: the
+/// installed lease's serial + its `valid_to` (the lease's `expires_at`, RFC
+/// 3339). Mirrors the [`crate::routes::licence::LeaseInstalled`] handler shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseInstalledDoc {
+    /// The serial of the lease that was verified + installed.
+    pub serial: String,
+    /// The instant the installed lease term expires (RFC 3339).
+    pub valid_to: String,
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::DiscoveryMode`] (Conspect, ADR-0051 §2).
+///
+/// Serde-equivalent: a unit enum rendered `snake_case`. There is exactly **one**
+/// value — `always_on` — and no way to set any other: discovery runs whenever the
+/// account plane runs (the spec's *locked* row, no off switch exists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryModeDoc {
+    /// Discovery is always on (the only value).
+    AlwaysOn,
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::MeshRole`] (Conspect, ADR-0051 §4).
+///
+/// Serde-equivalent: **internally tagged** on `kind` (`direct`/`relay`/`leaf`,
+/// kebab) — never untagged (conventions §5). The `leaf` variant carries the `via`
+/// peer (a salted-digest hex id) it leafs its heartbeat through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MeshRoleDoc {
+    /// Own internet path; not relaying for neighbours.
+    Direct,
+    /// Online and opted-in to relay an offline neighbour's heartbeat.
+    Relay,
+    /// Offline; leafing through an adopted relaying neighbour.
+    Leaf {
+        /// The peer this machine relays its heartbeat through (salted-digest hex
+        /// id — never a raw identifier).
+        via: String,
+    },
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::MeshStatus`] — the always-on mesh
+/// discovery + relay summary `GET /api/v1/mesh/status` (and the `PUT
+/// /api/v1/mesh/relay` reply) renders.
+///
+/// Serde-equivalent to the real status (pinned byte-for-byte by a round-trip test
+/// in `tests/mesh.rs`). The mesh crate carries no `utoipa` dependency, so this
+/// module owns the `OpenAPI` contract. Discovery is always-on (no off switch);
+/// `via` is present only when the role is `leaf`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct MeshStatusDoc {
+    /// Discovery is always-on (the only value; no off switch exists).
+    pub discovery: DiscoveryModeDoc,
+    /// Whether this machine relays neighbours' heartbeats (the opt-in toggle).
+    pub relay_enabled: bool,
+    /// The computed mesh role (`direct`/`relay`/`leaf`).
+    pub role: MeshRoleDoc,
+    /// The peer this machine leafs through, present only when the role is `leaf`
+    /// (a salted-digest hex id).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub via: Option<String>,
+    /// How many peers are in the untrusted discovered-peer inventory.
+    pub peers_count: usize,
+}
+
+/// `OpenAPI` mirror of [`multiview_mesh::Peer`] — a single entry in the untrusted
+/// discovered-peer inventory `GET /api/v1/mesh/peers` returns.
+///
+/// Serde-equivalent to the real peer. The `key` is the salted-digest **hex** id
+/// (64 chars, never a raw identifier — brief §8); `name` is present only once the
+/// operator has confirm-adopted + named the peer; `last_seen` is whole seconds;
+/// `relaying_for_us` is an operator-set adoption flag, never auto (the peer is
+/// **untrusted** until explicitly confirm-adopted — ADR-0041 doctrine).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct MeshPeerDoc {
+    /// The peer's salted-digest id (64-char lowercase hex; never a raw identifier).
+    pub key: String,
+    /// An operator-assigned name, present only once the peer is adopted + named.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    /// Whether the peer advertised itself as claimed (observed from the announce).
+    pub claimed: bool,
+    /// The whole-seconds monotonic instant the peer was last seen.
+    pub last_seen: u64,
+    /// Whether THIS machine relays for the peer — set only by explicit operator
+    /// confirm-adopt, never by observation (untrusted inventory).
+    pub relaying_for_us: bool,
+}

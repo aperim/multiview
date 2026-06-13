@@ -18,18 +18,22 @@ use crate::auth::{Action, Principal};
 use crate::command::{Command, OperationId};
 use crate::concurrency::{IdempotencyKey, IfMatch, Reservation};
 use crate::error::{ControlError, ControlResult};
-#[cfg(feature = "openapi")]
 use crate::problem::Problem;
 use crate::repository::{Layout, LayoutInput, VersionedLayout, LAYOUT_KIND};
 use crate::state::AppState;
 
+pub mod account;
 pub mod alarms;
 pub mod audio;
 pub mod audit;
+pub mod cast_sessions;
 pub mod config;
 pub mod devices;
+pub mod discovery;
 pub mod health;
 pub mod inputs;
+pub mod licence;
+pub mod mesh;
 pub mod outputs;
 pub mod overlays;
 pub mod preview;
@@ -37,8 +41,10 @@ pub mod probes;
 pub mod routing;
 pub mod salvos;
 pub mod sources;
+pub mod support;
 pub mod sync_groups;
 pub mod tally;
+pub mod telemetry;
 
 /// A `202 Accepted` body returned for an asynchronously-applied command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,13 +385,45 @@ pub(crate) fn submit_accepted_body(
     }
 }
 
+/// The exact operator/portal copy the Conspect startup gate (S1) refuses a NEW
+/// program-output start with at the `block-new-instance` rung (ADR-0050 §5/§6.2).
+/// **Verbatim** — the cli's `BLOCK_NEW_INSTANCE_REASON` and the portal show the
+/// same words; the trailing clause is the never-off-air promise.
+const BLOCK_NEW_INSTANCE_REASON: &str =
+    "Lease expired — new engine instances won't start; running ones untouched";
+
 /// `POST /api/v1/commands/start` — start program output (role: write; 202).
+///
+/// Gated by the Conspect startup gate (S1, ADR-0050 §5): when the entitlement
+/// ladder is at the `block-new-instance` rung, a NEW start is refused with a
+/// `409 lease_expired` RFC-9457 problem carrying [`BLOCK_NEW_INSTANCE_REASON`].
+/// A **running** program is never touched — `stop` and every operational command
+/// stay reachable; this blocks only a *new* start (the never-off-air promise).
+/// The gate is a lock-free read of the entitlement store off the engine hot loop.
 async fn cmd_start(
     State(state): State<AppState>,
     principal: Principal,
     idem: IdempotencyKey,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
+    // S1 startup gate: refuse a NEW start at the block-new-instance rung (the
+    // lock fires only on positive evidence of a lapsed lease — an unlicensed /
+    // compliant machine starts normally, fail-toward-leniency).
+    let blocked = state
+        .licence
+        .store
+        .status()
+        .is_some_and(|status| status.blocks_new_instances);
+    if blocked {
+        return Ok(Problem::new(
+            StatusCode::CONFLICT.as_u16(),
+            "lease_expired",
+            "Lease expired (new starts blocked)",
+        )
+        .with_detail(BLOCK_NEW_INSTANCE_REASON)
+        .with_instance("/settings/licence")
+        .into_response());
+    }
     submit_accepted(&state, &idem, |op| Command::Start { op })
 }
 
@@ -489,27 +527,18 @@ pub(crate) async fn cmd_apply_layout(
                 )),
                 other => other,
             })?;
-        let document = multiview_config::LayoutDocument::from_body(&versioned.layout.body)
-            .map_err(|e| {
-                ControlError::Validation(format!(
-                    "stored layout {:?} does not parse as a {{canvas, layout, cells}} \
-                     document: {e}",
-                    req.layout
-                ))
-            })?;
-        let solved = document.solve_named(&req.layout).map_err(|e| {
-            ControlError::Validation(format!(
-                "stored layout {:?} does not solve: {e}",
-                req.layout
-            ))
-        })?;
-        require_class1_canvas(&state, &req.layout, &document)?;
+        // The ONE resolve machinery (parse + solve + Class-1 pinned-canvas
+        // gate), shared with the config-file watcher (ADR-W019/W020). A `None`
+        // running canvas fails closed there.
+        let resolved = crate::command::resolve_layout_document(
+            &req.layout,
+            &versioned.layout.body,
+            state.running_canvas.as_ref(),
+        )?;
         Ok(Command::ApplyLayout {
             op,
             layout: req.layout,
-            document: Some(Box::new(crate::command::ResolvedLayout::new(
-                solved, document,
-            ))),
+            document: Some(Box::new(resolved)),
         })
     })?;
     // State honestly which per-cell property classes land on screen at the
@@ -535,44 +564,6 @@ pub(crate) async fn cmd_apply_layout(
         Some(serde_json::json!({ "command": "apply_layout" })),
     );
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
-}
-
-/// ADR-R004 / ADR-W019 Class-1 gate: output geometry + cadence are **pinned**
-/// for the life of the session, so a stored layout authored for a different
-/// canvas cannot apply live (it is a Class-2 parallel-output migration, not
-/// built yet) — refuse it with `422` here, before any `202`.
-///
-/// The comparison is against [`AppState::running_canvas`] — the **immutable**
-/// snapshot captured from the loaded config at seed time — never the mutable
-/// layouts repository (whose working-layout body any operator `PUT` can
-/// rewrite). When no snapshot was seeded the gate **fails closed** (422): a
-/// document-carrying apply must never ride a 202 into a silent drain hold.
-/// Cadence equality is by value (`Fps`/`Rational` cross-multiply in `i128`),
-/// so a non-reduced `50/2` matches a running `25/1`. The engine's
-/// frame-boundary drain keeps its own backstop against the live drive's
-/// canvas.
-fn require_class1_canvas(
-    state: &AppState,
-    id: &str,
-    document: &multiview_config::LayoutDocument,
-) -> ControlResult<()> {
-    let Some(running) = state.running_canvas.as_ref() else {
-        return Err(ControlError::Validation(format!(
-            "layout {id:?} cannot be applied live: the running canvas is unknown to the \
-             control plane (no pinned-canvas snapshot was seeded), so the Class-1 gate \
-             fails closed (ADR-W019)"
-        )));
-    };
-    let new = &document.canvas;
-    if running != new {
-        return Err(ControlError::Validation(format!(
-            "layout {id:?} was authored for canvas {}x{}@{} but the running session's canvas \
-             is pinned at {}x{}@{} — a Class-2 change (output geometry/cadence cannot change \
-             live; ADR-R004)",
-            new.width, new.height, new.fps, running.width, running.height, running.fps
-        )));
-    }
-    Ok(())
 }
 
 impl axum::extract::FromRequestParts<AppState> for Principal {
@@ -666,9 +657,18 @@ fn resource_router() -> Router<AppState> {
                 .put(probes::update_probe)
                 .delete(probes::delete_probe),
         )
-        // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
-        // plus the read-only runtime status snapshot, the bare-verb actions
-        // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+        .merge(device_router())
+}
+
+/// Build the managed-devices surface (ADR-M008/M009/M011/W017): the device
+/// registry CRUD + status + bare-verb actions + stream-binding projections,
+/// ephemeral Cast sessions, mDNS discovery, and presentation-sync groups.
+/// Split from [`resource_router`] so each stays a readable size.
+fn device_router() -> Router<AppState> {
+    // Managed-devices CRUD (ADR-M008): the config-as-code device registry,
+    // plus the read-only runtime status snapshot, the bare-verb actions
+    // (ADR-W017), and the declared stream-binding projections (ADR-M009).
+    Router::new()
         .route("/devices", get(devices::list_devices))
         .route(
             "/devices/{id}",
@@ -694,6 +694,35 @@ fn resource_router() -> Router<AppState> {
             "/devices/{id}/output-targets",
             get(devices::output_targets),
         )
+        // Ephemeral Cast sessions (DEV-D2, ADR-M011): start/list/stop an
+        // ad-hoc cast of a served HLS rendition, save-as-device promotion,
+        // and the receiver-namespace volume verb. Runtime-only — never part
+        // of the devices store, never exported.
+        .route(
+            "/cast/sessions",
+            get(cast_sessions::list_cast_sessions).post(cast_sessions::start_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}",
+            get(cast_sessions::get_cast_session).delete(cast_sessions::stop_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/save",
+            post(cast_sessions::save_cast_session),
+        )
+        .route(
+            "/cast/sessions/{id}/volume",
+            post(cast_sessions::set_cast_volume),
+        )
+        // mDNS device discovery (ADR-M008 §6 / ADR-0041): kick a time-bounded
+        // browse (202 + device.discovered events) and read the untrusted
+        // inventory. Discovery never creates a device — confirm-adopt is the
+        // separate POST /devices/{id} referencing a discovered address.
+        .route(
+            "/discovery/devices/scan",
+            post(discovery::scan_devices),
+        )
+        .route("/discovery/devices", get(discovery::list_discovered))
         // Presentation-sync-groups CRUD (ADR-M008/M010) + the measure action.
         .route("/sync-groups", get(sync_groups::list_sync_groups))
         .route(
@@ -709,11 +738,93 @@ fn resource_router() -> Router<AppState> {
         )
 }
 
+/// Build the Conspect **account / licensing / telemetry** sub-router: the local
+/// entitlement plane, the local mesh, the telemetry pipe (consent + schema), the
+/// diagnostics snapshot, the account-side audit + pending-actions, and the local
+/// support surface. Split out of [`api_router`] so each stays under the
+/// `too_many_lines` lint, mirroring [`resource_router`]; all control-plane only,
+/// off the engine hot loop (invariant #10).
+///
+/// **Two-pipe separation (ADR-0052 §1):** the licensing heartbeat-status lives
+/// under `/licensing/`; the telemetry consent + schema live under `/telemetry/`.
+/// They are deliberately distinct paths and are **never** co-mingled.
+fn conspect_router() -> Router<AppState> {
+    Router::new()
+        // Local licence (Conspect, CONSPECT-1 / ADR-0050): the computed licence
+        // resource (enforcement is DATA → always 200), the lease install path
+        // (verify + install a presented signed binding), and the salted CBOR
+        // challenge export. All-local: no licence-server calls; never off air.
+        .route("/licence", get(licence::get_licence))
+        .route("/licence/lease", post(licence::install_lease))
+        .route("/licence/challenge", get(licence::get_challenge))
+        // The read-only heartbeat-status surface (Conspect Hook 4, ADR-0050 §3):
+        // the honest local heartbeat status (transport + last/next contact +
+        // payload fields). The spec mandates NO mutating endpoint — `get` only.
+        // This is the LICENSING pipe — under `/licensing/`, never `/telemetry/`.
+        .route(
+            "/licensing/heartbeat-status",
+            get(licence::get_heartbeat_status),
+        )
+        // Local mesh (Conspect, CONSPECT-3a / ADR-0051): the always-on discovery
+        // + relay status (GET, never an off switch — the spec's locked row), the
+        // relay opt-in toggle (a real persisted PUT), and the untrusted
+        // discovered-peer inventory (GET). Control-plane only; no engine handle
+        // (invariant #10). There is intentionally NO route that disables discovery.
+        .route("/mesh/status", get(mesh::get_status))
+        .route("/mesh/relay", axum::routing::put(mesh::set_relay))
+        .route("/mesh/peers", get(mesh::list_peers))
+        // Telemetry pipe (Conspect, ADR-0052): the opt-in daily-pipe consent
+        // (GET + PUT, off by default, last-writer-wins) and the published schema
+        // (sent + never-sent). Deliberately under `/telemetry/`, never co-mingled
+        // with the licensing heartbeat under `/licensing/` (two-pipe separation).
+        // Consent gates NO local route. Control-plane only (invariant #10).
+        .route(
+            "/telemetry/consent",
+            get(telemetry::get_consent).put(telemetry::set_consent),
+        )
+        .route("/telemetry/schema", get(telemetry::get_schema))
+        // Diagnostics snapshot (Conspect, spec §4.2 / ADR-0053): the one-button
+        // support bundle (logs + engine state, never media) — POST assembles →
+        // 202 {snapshot_id}; GET reads it back by id. Composed by the shared #111
+        // context-pack composer from the consent-independent local retention
+        // buffer + redacted config. Control-plane only (inv #10).
+        .route("/diagnostics/snapshot", post(telemetry::request_snapshot))
+        .route("/diagnostics/{id}", get(telemetry::get_snapshot))
+        // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
+        .route("/account/audit", get(account::list_account_audit))
+        // Pending remote-actions strip + local cancel (local always wins).
+        .route("/actions/pending", get(account::list_pending_actions))
+        .route("/actions/{id}/cancel", post(account::cancel_action))
+        // Local support surface (Conspect §10/§11): tier-derived entitlement
+        // routing, the local ticket store (CS-xxxx, machine-context auto-attach,
+        // reply/close), the previewable redacted media-free context-pack
+        // composer, and local approve/deny of inbound egress data requests.
+        .route("/support/entitlement", get(support::get_entitlement))
+        .route(
+            "/support/tickets",
+            get(support::list_tickets).post(support::raise_ticket),
+        )
+        .route("/support/tickets/{id}", get(support::get_ticket))
+        .route("/support/tickets/{id}/reply", post(support::reply_ticket))
+        .route("/support/tickets/{id}/close", post(support::close_ticket))
+        .route("/support/bundle", post(support::compose))
+        .route("/support/bundle/{id}", get(support::get_bundle))
+        .route(
+            "/support/data-request/{id}/approve",
+            post(support::approve_data_request),
+        )
+        .route(
+            "/support/data-request/{id}/deny",
+            post(support::deny_data_request),
+        )
+}
+
 /// Build the `/api/v1` resource + command routes (without the realtime or docs
 /// routes, which are wired by [`crate::router()`]).
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .merge(resource_router())
+        .merge(conspect_router())
         .route("/commands/start", post(cmd_start))
         .route("/commands/stop", post(cmd_stop))
         .route("/commands/swap", post(cmd_swap))
@@ -734,6 +845,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/salvos/{id}/arm", post(salvos::arm_salvo))
         .route("/salvos/{id}/take", post(salvos::take_salvo))
         .route("/salvos/{id}/cancel", post(salvos::cancel_salvo))
+        // Salvo parity (Conspect §11): fire a named salvo through the bus → 202.
+        .route("/salvos/{id}/fire", post(account::fire_salvo))
         // Per-stream crosspoint routing (RT-11): classify (plan) + apply (take).
         .route("/routing/plan", post(routing::plan_route))
         .route("/routing/{kind}/take", post(routing::take_route))
@@ -773,8 +886,14 @@ pub fn api_router() -> Router<AppState> {
         )
         // Read-only change audit log.
         .route("/audit", get(audit::list_audit))
+        // (The Conspect account / licensing / telemetry / support routes are
+        // merged from `conspect_router()` above.)
         // Config-as-code export: the live stores rendered as multiview.toml.
         .route("/config/export", get(config::export_config))
+        // The config-file watch status (ADR-W020): read-only, honest
+        // "not watched" default. A static segment, so it never collides with
+        // the `{target}` capture below (axum prefers static matches).
+        .route("/config/watch-status", get(config::watch_status))
         // Config versioning: history + commit, single revision, diff, rollback.
         .route(
             "/config/{target}",

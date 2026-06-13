@@ -122,7 +122,11 @@ pub struct VersionedResource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ResourceInput {
-    /// Human-friendly name.
+    /// Human-friendly name. Optional on the wire: a create/update that omits it
+    /// (e.g. a programmatic seed that only carries the typed `body`) defaults to
+    /// an empty name rather than failing deserialization — the display name is a
+    /// label, never load-bearing, and callers that care always supply one.
+    #[serde(default)]
     pub name: String,
     /// The opaque resource document.
     pub body: serde_json::Value,

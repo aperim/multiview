@@ -22,18 +22,48 @@
 //! can back-pressure the engine — the same proof shape as the alarms and tally
 //! producers.
 //!
-//! In this slice there is **no real device I/O** — the driver actors are
-//! DEV-A4/A5. The state machine, the status registry, and the broadcaster are
-//! real and complete; the projection endpoints return the honestly-declared
-//! candidate shape (empty until a driver enumerates), never fabricated live
-//! telemetry.
+//! The DEV-A4 [`zowietek`] driver is the first real driver actor: a
+//! control-plane poller that drives the state machine, status registry, and
+//! broadcaster from a live (feature-gated) device, and mirrors its enumerated
+//! facets into the [`DeviceDriverRegistry`] the projection endpoints read. With
+//! a driver adopted, `GET /devices/{id}/source-candidates` and `/output-targets`
+//! return the driver's real enumerated candidates; without one they stay
+//! honestly empty. The discovery driver actor is DEV-A5.
+//!
+//! The DEV-D2 [`cast`] driver (ADR-M011) is the second: a Google Cast session
+//! actor over the same registry/factory/tombstone machinery, pointing a Cast
+//! device at an HLS rendition the engine already serves — pure control plane,
+//! the media graph untouched. Multiple driver factories compose through the
+//! [`CompositePollerFactory`] (first managing member wins).
+//!
+//! mDNS/DNS-SD **discovery** ([`discovery`], DEV-A5) is real and complete too:
+//! a bounded, TTL-expiring, **untrusted** inventory of services found on the
+//! LAN, requiring explicit confirm-adopt (ADR-0041) — discovery never creates
+//! a device.
 
 pub mod broadcaster;
+pub mod cast;
+pub mod discovery;
+pub mod driver_registry;
 pub mod projection;
 pub mod registry;
 pub mod state_machine;
+pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;
+pub use discovery::{
+    DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
+    DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,
+};
+pub use driver_registry::DeviceDriverRegistry;
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;
 pub use state_machine::{DeviceLifecycle, LifecycleEvent};
+pub use zowietek::poller::{PollerConfig, PollerControl, PollerHandle, PollerStep, ZowietekPoller};
+#[cfg(feature = "zowietek")]
+pub use zowietek::runtime::ReqwestPollerFactory;
+pub use zowietek::runtime::{
+    CompositePollerFactory, DevicePollerFactory, DevicePollerRegistry, NoPollerFactory,
+    PollerWiring,
+};
+pub use zowietek::{ModeConvergence, WorkMode, ZowietekDriver};

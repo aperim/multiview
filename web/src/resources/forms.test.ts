@@ -10,6 +10,9 @@ import {
   emptyOutputForm,
   emptyOverlayForm,
   emptySourceForm,
+  isKnownTimezone,
+  isValidLocalDateTime,
+  isValidTimeOfDay,
   isValidUrl,
   OUTPUT_RUNNABLE,
   outputFormFromRecord,
@@ -23,6 +26,7 @@ import {
   validateSourceForm,
   withOverlayKind,
   withSourceKind,
+  withTimerTargetType,
 } from './forms';
 import type { OutputFormState, OverlayFormState, SourceFormState } from './forms';
 
@@ -332,6 +336,366 @@ describe('withSourceKind', () => {
     expect(body).not.toHaveProperty('url');
     expect(body).not.toHaveProperty('rtsp');
     expect(typeof body.color).toBe('string');
+  });
+});
+
+// --- Clock + Timer synthetic sources (SYN-CLOCK-UI, ADR-0047) ----------------
+
+describe('clock source (ADR-0047 metadata + dual face)', () => {
+  it('writes the dual face, IANA timezone, label, and the metadata toggles', () => {
+    const body = sourceFormToBody(
+      sourceForm({
+        kind: 'clock',
+        clockFace: 'dual',
+        clockTwelveHour: true,
+        clockTimezone: 'Australia/Sydney',
+        clockLabel: 'Sydney',
+        clockShowOffset: true,
+        clockShowReference: true,
+        clockNumerals: true,
+      }),
+    );
+    expect(body).toMatchObject({
+      kind: 'clock',
+      face: 'dual',
+      twelve_hour: true,
+      timezone: 'Australia/Sydney',
+      label: 'Sydney',
+      show_offset: true,
+      show_reference: true,
+      numerals: true,
+    });
+    // IANA mode wins over the fixed offset: the offset is omitted entirely.
+    expect(body).not.toHaveProperty('tz_offset_minutes');
+  });
+
+  it('falls back to the fixed offset when no IANA zone is set', () => {
+    const body = sourceFormToBody(
+      sourceForm({ kind: 'clock', clockTimezone: '', clockTzMinutes: '600' }),
+    );
+    expect(body.tz_offset_minutes).toBe(600);
+    expect(body).not.toHaveProperty('timezone');
+  });
+
+  it('omits the optional label but always writes the boolean toggles', () => {
+    const body = sourceFormToBody(sourceForm({ kind: 'clock', clockLabel: '   ' }));
+    expect(body).not.toHaveProperty('label');
+    expect(body.show_offset).toBe(false);
+    expect(body.show_reference).toBe(false);
+    expect(body.numerals).toBe(false);
+  });
+
+  it('round-trips a stored clock body exactly (IANA + metadata)', () => {
+    const record = {
+      id: 'syd',
+      name: 'Sydney',
+      body: {
+        id: 'syd',
+        kind: 'clock',
+        face: 'dual',
+        twelve_hour: true,
+        timezone: 'Australia/Sydney',
+        label: 'Sydney',
+        show_offset: true,
+        show_reference: false,
+        numerals: true,
+      },
+    };
+    const form = defined(sourceFormFromRecord(record));
+    expect(form.clockFace).toBe('dual');
+    expect(form.clockTwelveHour).toBe(true);
+    expect(form.clockTimezone).toBe('Australia/Sydney');
+    expect(form.clockLabel).toBe('Sydney');
+    expect(form.clockShowOffset).toBe(true);
+    expect(form.clockShowReference).toBe(false);
+    expect(form.clockNumerals).toBe(true);
+    // The body the form re-emits keeps the same managed shape.
+    expect(sourceFormToBody(form)).toMatchObject({
+      kind: 'clock',
+      face: 'dual',
+      twelve_hour: true,
+      timezone: 'Australia/Sydney',
+      label: 'Sydney',
+      show_offset: true,
+      show_reference: false,
+      numerals: true,
+    });
+  });
+
+  it('validates an unknown IANA zone but accepts a known one / a fixed offset', () => {
+    expect(
+      validateSourceForm(sourceForm({ kind: 'clock', clockTimezone: 'Mars/Olympus' }), true)
+        .clockTimezone,
+    ).toBe('timezone');
+    expect(
+      validateSourceForm(sourceForm({ kind: 'clock', clockTimezone: 'UTC' }), true).clockTimezone,
+    ).toBeUndefined();
+    // With a zone set, the fixed offset is not range-checked (it is ignored).
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'clock', clockTimezone: 'UTC', clockTzMinutes: '9999' }),
+        true,
+      ).clockTzMinutes,
+    ).toBeUndefined();
+  });
+});
+
+describe('timer source (ADR-0047)', () => {
+  it('writes a time-of-day target with the tagged `target` discriminator', () => {
+    const body = sourceFormToBody(
+      sourceForm({
+        kind: 'timer',
+        timerTargetType: 'time_of_day',
+        timerAt: '14:30:00',
+        timerTimezone: 'Australia/Sydney',
+        timerRecurDaily: true,
+        timerDirection: 'down',
+        timerOnTarget: 'recur',
+        timerFormat: 'mm_ss',
+        timerLabel: 'ON AIR IN',
+        timerOverrunPrefix: 'OVER ',
+        timerOverrunBadge: false,
+      }),
+    );
+    expect(body).toMatchObject({
+      kind: 'timer',
+      target: 'time_of_day',
+      at: '14:30:00',
+      timezone: 'Australia/Sydney',
+      recur_daily: true,
+      direction: 'down',
+      on_target: 'recur',
+      format: 'mm_ss',
+      label: 'ON AIR IN',
+      overrun_prefix: 'OVER ',
+      overrun_badge: false,
+    });
+    expect(body).not.toHaveProperty('tz_offset_minutes');
+  });
+
+  it('writes a date+time target and omits the time-of-day-only recur_daily', () => {
+    const body = sourceFormToBody(
+      sourceForm({
+        kind: 'timer',
+        timerTargetType: 'date_time',
+        timerAt: '2026-07-01T09:00:00',
+        timerTimezone: '',
+        timerTzMinutes: '600',
+        timerDirection: 'up',
+        timerOnTarget: 'continue',
+        timerFormat: 'hh_mm_ss_ff',
+      }),
+    );
+    expect(body).toMatchObject({
+      kind: 'timer',
+      target: 'date_time',
+      at: '2026-07-01T09:00:00',
+      tz_offset_minutes: 600,
+      direction: 'up',
+      on_target: 'continue',
+      format: 'hh_mm_ss_ff',
+    });
+    // recur_daily is a time_of_day-only field — never on a date_time body.
+    expect(body).not.toHaveProperty('recur_daily');
+    expect(body).not.toHaveProperty('timezone');
+  });
+
+  it('uses the schema defaults on a fresh timer form, badge on by default', () => {
+    const body = sourceFormToBody(sourceForm({ kind: 'timer', timerAt: '00:00:00' }));
+    expect(body).toMatchObject({
+      kind: 'timer',
+      target: 'time_of_day',
+      direction: 'down',
+      on_target: 'hold',
+      format: 'd_hh_mm_ss',
+      overrun_badge: true,
+    });
+    expect(body).not.toHaveProperty('label');
+    expect(body).not.toHaveProperty('overrun_prefix');
+  });
+
+  it('round-trips a stored time-of-day timer body exactly', () => {
+    const record = {
+      id: 'onair',
+      name: 'On air in',
+      body: {
+        id: 'onair',
+        kind: 'timer',
+        target: 'time_of_day',
+        at: '14:30:00',
+        timezone: 'Australia/Sydney',
+        recur_daily: true,
+        direction: 'down',
+        on_target: 'recur',
+        format: 'mm_ss',
+        label: 'ON AIR IN',
+        overrun_prefix: 'OVER ',
+        overrun_badge: false,
+      },
+    };
+    const form = defined(sourceFormFromRecord(record));
+    expect(form.kind).toBe('timer');
+    expect(form.timerTargetType).toBe('time_of_day');
+    expect(form.timerAt).toBe('14:30:00');
+    expect(form.timerTimezone).toBe('Australia/Sydney');
+    expect(form.timerRecurDaily).toBe(true);
+    expect(form.timerDirection).toBe('down');
+    expect(form.timerOnTarget).toBe('recur');
+    expect(form.timerFormat).toBe('mm_ss');
+    expect(form.timerLabel).toBe('ON AIR IN');
+    expect(form.timerOverrunPrefix).toBe('OVER ');
+    expect(form.timerOverrunBadge).toBe(false);
+    // The re-emitted body is byte-shape stable for the managed keys.
+    expect(sourceFormToBody(form)).toMatchObject({
+      kind: 'timer',
+      target: 'time_of_day',
+      at: '14:30:00',
+      timezone: 'Australia/Sydney',
+      recur_daily: true,
+      direction: 'down',
+      on_target: 'recur',
+      format: 'mm_ss',
+      label: 'ON AIR IN',
+      overrun_prefix: 'OVER ',
+      overrun_badge: false,
+    });
+  });
+
+  it('round-trips a stored date+time timer body exactly (fixed offset)', () => {
+    const record = {
+      id: 'launch',
+      name: 'Launch',
+      body: {
+        id: 'launch',
+        kind: 'timer',
+        target: 'date_time',
+        at: '2026-07-01T09:00:00',
+        tz_offset_minutes: 600,
+        direction: 'down',
+        on_target: 'zero_then_up',
+        format: 'auto',
+      },
+    };
+    const form = defined(sourceFormFromRecord(record));
+    expect(form.timerTargetType).toBe('date_time');
+    expect(form.timerAt).toBe('2026-07-01T09:00:00');
+    expect(form.timerTimezone).toBe('');
+    expect(form.timerTzMinutes).toBe('600');
+    expect(form.timerOnTarget).toBe('zero_then_up');
+    expect(form.timerFormat).toBe('auto');
+    // Absent overrun_badge in a stored body means "draw it" (schema default true).
+    expect(form.timerOverrunBadge).toBe(true);
+  });
+
+  it('treats an absent overrun_badge as the schema default (true)', () => {
+    const form = defined(
+      sourceFormFromRecord({
+        id: 't',
+        name: 'T',
+        body: { id: 't', kind: 'timer', target: 'time_of_day', at: '00:00:00' },
+      }),
+    );
+    expect(form.timerOverrunBadge).toBe(true);
+  });
+
+  it('validates the `at` string per target type', () => {
+    expect(
+      validateSourceForm(sourceForm({ kind: 'timer', timerAt: '' }), true).timerAt,
+    ).toBe('required');
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'timer', timerTargetType: 'time_of_day', timerAt: '25:00:00' }),
+        true,
+      ).timerAt,
+    ).toBe('time-of-day');
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'timer', timerTargetType: 'time_of_day', timerAt: '14:30:00' }),
+        true,
+      ).timerAt,
+    ).toBeUndefined();
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'timer', timerTargetType: 'date_time', timerAt: '2026-02-30T09:00:00' }),
+        true,
+      ).timerAt,
+    ).toBe('date-time');
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'timer', timerTargetType: 'date_time', timerAt: '2026-07-01T09:00:00' }),
+        true,
+      ).timerAt,
+    ).toBeUndefined();
+  });
+
+  it('validates the timer timezone (mirrors the clock)', () => {
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'timer', timerAt: '14:30:00', timerTimezone: 'Mars/Olympus' }),
+        true,
+      ).timerTimezone,
+    ).toBe('timezone');
+    expect(
+      validateSourceForm(
+        sourceForm({ kind: 'timer', timerAt: '14:30:00', timerTimezone: 'UTC' }),
+        true,
+      ).timerTimezone,
+    ).toBeUndefined();
+  });
+});
+
+describe('withTimerTargetType', () => {
+  it('drops the recur policy + recur_daily when switching to a date+time target', () => {
+    const tod = sourceForm({
+      kind: 'timer',
+      timerTargetType: 'time_of_day',
+      timerAt: '14:30:00',
+      timerRecurDaily: true,
+      timerOnTarget: 'recur',
+    });
+    const dt = withTimerTargetType(tod, 'date_time');
+    expect(dt.timerTargetType).toBe('date_time');
+    expect(dt.timerAt).toBe('');
+    expect(dt.timerRecurDaily).toBe(false);
+    expect(dt.timerOnTarget).toBe('hold');
+  });
+
+  it('keeps a non-recur policy when switching target type', () => {
+    const tod = sourceForm({
+      kind: 'timer',
+      timerTargetType: 'time_of_day',
+      timerOnTarget: 'continue',
+    });
+    expect(withTimerTargetType(tod, 'date_time').timerOnTarget).toBe('continue');
+  });
+
+  it('is a no-op when the target type is unchanged', () => {
+    const form = sourceForm({ kind: 'timer', timerTargetType: 'time_of_day', timerAt: '14:30:00' });
+    expect(withTimerTargetType(form, 'time_of_day')).toBe(form);
+  });
+});
+
+describe('timezone / time validators', () => {
+  it('isKnownTimezone accepts UTC and rejects garbage when a tz db is present', () => {
+    expect(isKnownTimezone('UTC')).toBe(true);
+    expect(isKnownTimezone('Mars/Olympus')).toBe(false);
+    expect(isKnownTimezone('')).toBe(false);
+  });
+
+  it('isValidTimeOfDay enforces HH:MM:SS 24-hour', () => {
+    expect(isValidTimeOfDay('00:00:00')).toBe(true);
+    expect(isValidTimeOfDay('23:59:59')).toBe(true);
+    expect(isValidTimeOfDay('24:00:00')).toBe(false);
+    expect(isValidTimeOfDay('14:60:00')).toBe(false);
+    expect(isValidTimeOfDay('14:30')).toBe(false);
+  });
+
+  it('isValidLocalDateTime enforces a real calendar date+time', () => {
+    expect(isValidLocalDateTime('2026-07-01T09:00:00')).toBe(true);
+    expect(isValidLocalDateTime('2026-07-01 09:00:00')).toBe(true);
+    expect(isValidLocalDateTime('2026-02-30T09:00:00')).toBe(false);
+    expect(isValidLocalDateTime('2026-13-01T09:00:00')).toBe(false);
+    expect(isValidLocalDateTime('2026-07-01T09:00')).toBe(false);
   });
 });
 

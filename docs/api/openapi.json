@@ -13,6 +13,211 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/account/audit": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`GET /api/v1/account/audit` — the append-only account audit log, paginated\n(role: read).",
+        "description": "Returns `{entries, next_cursor}`: entries oldest-first within the page,\nresumable via `?cursor=next_cursor`, optionally `?filter=<kind>`. There is no\nmutating verb on this resource — the log is append-only by construction.",
+        "operationId": "list_account_audit",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Resume strictly after this `seq` cursor (from a previous `next_cursor`).\nAbsent fetches from the beginning of the log.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "description": "Restrict the listing to a single action kind (`kebab-case` slug).",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/AccountAuditKind"
+                }
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of entries to return (clamped to\n[`MAX_AUDIT_PAGE_LIMIT`]; defaults to [`DEFAULT_AUDIT_PAGE_LIMIT`]).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of account-audit entries (oldest-first) + the resume cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountAuditPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/actions/pending": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`GET /api/v1/actions/pending` — the pending remote-actions strip (role: read).",
+        "description": "Returns the actions awaiting local execution or cancellation, oldest-first.\nAn action that has executed or been cancelled drops out of this list.",
+        "operationId": "list_pending_actions",
+        "responses": {
+          "200": {
+            "description": "The pending remote actions (oldest-first).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PendingAction"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/actions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`POST /api/v1/actions/{id}/cancel` — cancel a pending action locally (role:\nwrite).",
+        "description": "**Local always wins:** a pending action the operator cancels here is\ncancelled, and any later (portal-fed) execution attempt is refused. An action\nthat has **already executed** answers `410 Gone` `already_executed` — the\ntruthful \"too late\", never a fake success. An unknown id is `404`. The cancel\nis recorded in the append-only account audit store.",
+        "operationId": "cancel_action",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The action id to cancel.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The action was pending and is now cancelled (local wins).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelledBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to cancel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No action with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The action has already executed — too late to cancel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/alarms": {
       "get": {
         "tags": [
@@ -357,6 +562,412 @@
         }
       }
     },
+    "/api/v1/cast/sessions": {
+      "get": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`GET /api/v1/cast/sessions` — list the live ephemeral sessions (role: read).",
+        "operationId": "list_cast_sessions",
+        "responses": {
+          "200": {
+            "description": "All live ephemeral sessions, id-sorted, each with its live lifecycle state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CastSessionDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`POST /api/v1/cast/sessions` — start an ad-hoc cast session (role: write).",
+        "description": "Resolves the rendition, spawns the supervised session actor through the\nshared poller registry, and records the ephemeral session. The actor\nCONNECTs → `LAUNCH`es the Default Media Receiver (`CC1AD845`) → `LOAD`s the\ndevice-reachable HLS URL, then supervises the session (ADR-M011).",
+        "operationId": "start_cast_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartCastSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The started ephemeral session (runtime-only; never exported).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CastSessionDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to start a session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No castable rendition (control.cast_media_base unset / no HLS output) or no live cast driver in this build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The address is not a valid host[:port], or the named output is not a served HLS rendition.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cast/sessions/{id}": {
+      "get": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`GET /api/v1/cast/sessions/{id}` — fetch one session (role: read).",
+        "operationId": "get_cast_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session, with its live lifecycle state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CastSessionDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`DELETE /api/v1/cast/sessions/{id}` — stop a session (role: write; `204`).",
+        "description": "Dispatches the voluntary [`PollerControl::StopCast`] teardown (the actor\n`STOP`s the receiver app — what actually clears the TV — then exits), joins\nit gracefully (abort after the grace window), drops the runtime\nstatus/record, and **clears the registry tombstone**: session ids are\nUUID-fresh and never reused, so clearing after the deterministic stop keeps\nthe tombstone set bounded under churning sessions.",
+        "operationId": "stop_cast_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The session was stopped and forgotten."
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to stop this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cast/sessions/{id}/save": {
+      "post": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`POST /api/v1/cast/sessions/{id}/save` — promote an ephemeral session to a\nnormal `Device{driver: cast}` registry entry (role: write; `201`).",
+        "description": "The promoted device carries the session's address and rendition assignment\nand **does** export (desired state). One actor remains, keyed by the device\nid: the ephemeral actor is stopped (a plain abort — **no** receiver `STOP`,\nso the TV keeps playing across the promotion) and the device's supervised\nactor takes over through the same registry.",
+        "operationId": "save_cast_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id to promote.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveCastSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The promoted device (ETag in the response header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write devices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A device with that id already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The promoted device document does not validate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cast/sessions/{id}/volume": {
+      "post": {
+        "tags": [
+          "cast"
+        ],
+        "summary": "`POST /api/v1/cast/sessions/{id}/volume` — set the receiver volume\n(role: write; `202` + operation id).",
+        "description": "Dispatches a receiver-namespace `SET_VOLUME` to the running session actor\n— non-blocking `try_send`, never awaited (invariant #10).",
+        "operationId": "set_cast_volume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cast session id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CastVolumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Volume change accepted; applied by the session actor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to control this session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "level_percent is out of range (0–100).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/commands/apply-layout": {
       "post": {
         "tags": [
@@ -470,6 +1081,48 @@
           },
           "422": {
             "description": "The stores do not compose into a valid configuration (detail names the violation).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/watch-status": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`GET /api/v1/config/watch-status` — the config-file watch status\n(ADR-W020; role: read).",
+        "description": "Reports whether this process watches its boot config file for external\nedits, the watched path, the last applied/rejected loads, and the\nrestart-pending section names. A store-only deployment (no watcher)\nhonestly reports `active: false`.",
+        "operationId": "watch_status",
+        "responses": {
+          "200": {
+            "description": "The config-file watch status: active flag, watched path, last applied/rejected loads, restart-pending sections.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchStatusBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
             "content": {
               "application/json": {
                 "schema": {
@@ -681,7 +1334,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}` — adopt/create a device (role: write).",
-        "description": "Validates the body against `multiview_config::Device` (`422` on an invalid\ndocument) and seeds the runtime status registry in `ADOPTING` so\n`GET /devices/{id}/status` answers immediately — the first probe lands with\nthe driver actors (DEV-A4/A5).",
+        "description": "Validates the body against `multiview_config::Device` (`422` on an invalid\ndocument), seeds the runtime status registry in `ADOPTING` so\n`GET /devices/{id}/status` answers immediately, and **starts the device's\nsupervised driver poller** (DEV-A4) — which performs the first probe and\ndrives the device to `ONLINE`/`AUTH_FAILED`/`UNREACHABLE`. The poller is a\nno-op for devices the factory does not manage (the default build / a\nnon-`zowietek` driver).",
         "operationId": "create_device",
         "parameters": [
           {
@@ -882,8 +1535,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "`GET /api/v1/devices/{id}/output-targets` — the declared output-binding\nprojection (ADR-M009 facet (b)).",
-        "description": "Honestly empty until a driver enumerates decode slots (no live driver in this\nslice): never fabricated live telemetry.",
+        "summary": "`GET /api/v1/devices/{id}/output-targets` — the output-binding projection\n(ADR-M009 facet (b)).",
+        "description": "Returns the device's running driver's enumerated targets (DEV-A4: a\ndecoder-mode `zowietek` box's decode-table slots). Honestly empty until a\ndriver has enumerated — and on a build/device with no live driver — never\nfabricated live telemetry.",
         "operationId": "output_targets",
         "parameters": [
           {
@@ -949,7 +1602,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}/probe` — re-probe the device now (role: write).",
-        "description": "A synchronous management verb (ADR-W017): in this slice (no driver actor) it\nconfirms the device exists and acknowledges the probe request (`200`). The\nreal probe round-trip lands with the driver actors (DEV-A4/A5).",
+        "description": "A synchronous management verb (ADR-W017): it confirms the device exists and\nacknowledges the probe request (`200`). The device's supervised driver poller\n(DEV-A4) is already probing on its own ≤1 Hz cadence and re-probing on\nreconnect, so the latest status is read via `GET /devices/{id}/status`; this\nverb is the operator's explicit \"I looked\" acknowledgement.",
         "operationId": "probe_device",
         "parameters": [
           {
@@ -1068,7 +1721,7 @@
           "devices"
         ],
         "summary": "`POST /api/v1/devices/{id}/set-mode` — converge the device to a mode\n(role: write; `202` + operation id + declared DEV-class impact).",
-        "description": "The device-side impact is **declared in the body before apply** (ADR-M009):\nthe device restarts its pipeline; bound sources ride the tile ladder to\n`NO_SIGNAL` during the switch; no Multiview output is interrupted. In this\nslice the operation id is minted and `202`'d; the `device.mode` outcome\narrives on the realtime stream once the driver actor lands.",
+        "description": "The device-side impact is **declared in the body before apply** (ADR-M009):\nthe device restarts its pipeline; bound sources ride the tile ladder to\n`NO_SIGNAL` during the switch; no Multiview output is interrupted. The route\nmints the operation id, `202`s, and **dispatches** the convergence to the\ndevice's running driver poller (DEV-A4), which records the requested mode as\nits desired mode, runs `plan_mode_convergence` → `converge_mode`\n(close-before-open), and publishes the `device.mode` outcome on the realtime\nstream; a failed apply is re-converged on the poller's next adopt/reconnect\npass. When no live poller is running (the default build / a device with no\nspawned driver), the `202` still declares the impact but nothing applies the\nchange: the device's configured `desired_mode` is what a later-spawned\npoller converges onto when its adopt/reconnect reaches `ONLINE`.",
         "operationId": "set_mode",
         "parameters": [
           {
@@ -1140,8 +1793,8 @@
         "tags": [
           "devices"
         ],
-        "summary": "`GET /api/v1/devices/{id}/source-candidates` — the declared source-binding\nprojection (ADR-M009 facet (a)).",
-        "description": "Honestly empty until a driver enumerates streams (no live driver in this\nslice): never fabricated live telemetry.",
+        "summary": "`GET /api/v1/devices/{id}/source-candidates` — the source-binding projection\n(ADR-M009 facet (a)).",
+        "description": "Returns the device's running driver's enumerated candidates (DEV-A4: a\n`zowietek` device's served RTSP mounts). Honestly empty until a driver has\nenumerated — and on a build/device with no live driver — never fabricated\nlive telemetry.",
         "operationId": "source_candidates",
         "parameters": [
           {
@@ -1308,6 +1961,198 @@
           },
           "404": {
             "description": "No device with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/snapshot": {
+      "post": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`POST /api/v1/diagnostics/snapshot` — assemble the §4.2 one-button support\nbundle (role: write).",
+        "description": "Returns `202 {snapshot_id}`; the assembled bundle is then readable at\n`GET /api/v1/diagnostics/{id}`. The bundle is logs + engine state (the local\nretention buffer), **never** media (ADR-0053, brief §8). Assembly is\nsynchronous (the buffer is in-memory) but the contract is `202 + id` so a\nfuture asynchronous/large-bundle composer is a non-breaking change. A\n`ContextPackExport`-adjacent action is **not** recorded here: the bundle stays\non the machine (no egress) until an explicit operator-approved data request,\nwhich is the audited egress gate, not this assemble step.",
+        "operationId": "request_snapshot",
+        "responses": {
+          "202": {
+            "description": "Snapshot assembled; read it back by id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/{id}": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`GET /api/v1/diagnostics/{id}` — the assembled diagnostics snapshot (role:\nread).",
+        "description": "`200` with the bundle when the id is known; `404` (RFC 9457 problem) when not.",
+        "operationId": "get_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The diagnostics snapshot id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The assembled diagnostics snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No snapshot with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/discovery/devices": {
+      "get": {
+        "tags": [
+          "discovery"
+        ],
+        "summary": "`GET /api/v1/discovery/devices` — the current untrusted inventory snapshot\n(role: read).",
+        "description": "Returns the discovered services found by the most recent scans, AAAA-first\nwith IPv4 labelled legacy, stale (TTL-expired) rows purged on read. These are\n**hints**, not devices: adopting one is the separate `POST /devices/{id}`\nconfirm-adopt referencing a discovered address (ADR-0041).",
+        "operationId": "list_discovered",
+        "responses": {
+          "200": {
+            "description": "The untrusted discovery inventory (hints requiring explicit confirm-adopt; never devices).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DiscoveredService"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read discovery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/discovery/devices/scan": {
+      "post": {
+        "tags": [
+          "discovery"
+        ],
+        "summary": "`POST /api/v1/discovery/devices/scan` — kick a time-bounded mDNS browse\n(role: write; `202` + operation id).",
+        "description": "The browse runs on a bounded control-plane task: it asks the injected browser\nfor services within a time budget, classifies each into the **untrusted\ninventory** (AAAA-first, TTL-stamped), and publishes a `device.discovered`\nevent per service, correlated to this operation id via the envelope `corr`\n(ADR-RT007). It never creates a device (ADR-0041).\n\nScans are **single-flight** (one in-flight browse — concurrent `mdns-sd`\nbrowses corrupt each other's listeners/queriers, and one browse at a time is\nthe ADR-M008 rate limit): a request that arrives while a scan runs\n**attaches** to it and is answered with the *running* scan's operation id.\nA retried `Idempotency-Key` returns the original operation id without\nre-executing the browse (the canonical replay semantics).",
+        "operationId": "scan_devices",
+        "responses": {
+          "202": {
+            "description": "Scan accepted (or attached to the single-flight running scan, or replayed by Idempotency-Key — the operation id names the scan that actually runs); discovered rows stream as device.discovered events correlated via corr and land in the untrusted inventory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to scan.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1738,6 +2583,355 @@
           },
           "412": {
             "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/licence": {
+      "get": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`GET /api/v1/licence` — the computed licence resource (role: read).",
+        "description": "Always `200` (enforcement is **data**, never an error path): a `licensed:true`\nresource with the computed ladder `state`/`enforcement` when a lease is\ninstalled, a `licensed:false` resource otherwise.",
+        "operationId": "get_licence",
+        "responses": {
+          "200": {
+            "description": "The computed licence resource (enforcement is data; always 200).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LicenceResource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/licence/challenge": {
+      "get": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`GET /api/v1/licence/challenge` — the `<host>.challenge` export as an\n`application/cbor` attachment (role: read).",
+        "description": "The challenge carries **only** salted digests + monotonic counters — never a\nraw serial, MAC, or hostname (data minimisation, brief §3/§8). The digests +\ncounters are sourced from the entitlement plane; CONSPECT-1 renders the\nmachine's current installed-lease count and an empty salted-digest set when\nthe cli has not yet supplied a salted machine fingerprint (the cli wiring is\nCONSPECT-10). The body is canonical CBOR a portal consumes byte-for-byte.",
+        "operationId": "get_challenge",
+        "responses": {
+          "200": {
+            "description": "The salted challenge export (CBOR attachment).",
+            "content": {
+              "application/cbor": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/licence/lease": {
+      "post": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`POST /api/v1/licence/lease` — verify + install a presented signed lease\nbinding (CBOR body; role: write).",
+        "description": "Returns `200 {lease, valid_to}` on success, or an RFC 9457 problem on\nrejection: `signature_invalid` (422), `fingerprint_mismatch` (409),\n`lease_stale` (409). A binding that is not well-formed CBOR is a `422`\n`malformed_binding` (bad-inputs-are-the-purpose). When no issuer key has been\npinned, the install is refused with a `409` `no_pinned_key`. A rejection never\ndegrades the machine — the previously-installed (or empty) state stays put\n(fail toward leniency).",
+        "operationId": "install_lease",
+        "requestBody": {
+          "description": "The signed lease binding, canonical CBOR.",
+          "content": {
+            "application/cbor": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Lease verified + installed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeaseInstalled"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to install.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Fingerprint mismatch, stale grant, or no pinned key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The binding body exceeds the size cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed CBOR or an invalid signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/licensing/heartbeat-status": {
+      "get": {
+        "tags": [
+          "licence"
+        ],
+        "summary": "`GET /api/v1/licensing/heartbeat-status` — the read-only heartbeat status\n(role: read).",
+        "description": "Always `200` (it is a data report, never an error path): the honest local\nheartbeat status (transport + last/next contact + payload fields). With no\nlease installed it reports `transport: \"none\"` and null contact instants. The\nspec mandates **no** mutating endpoint exists for the heartbeat — this is\nread-only, and the router wires only `GET`.",
+        "operationId": "get_heartbeat_status",
+        "responses": {
+          "200": {
+            "description": "The honest local heartbeat status (read-only; no mutating endpoint exists).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeartbeatStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mesh/peers": {
+      "get": {
+        "tags": [
+          "mesh"
+        ],
+        "summary": "`GET /api/v1/mesh/peers` — the untrusted discovered-peer inventory (role:\nread).",
+        "description": "Each peer is a salted-digest id, an optional name (only once adopted), a\n`claimed` flag, `last_seen` (seconds), and `relaying_for_us`. A peer is\n**never** auto-trusted; relaying is an explicit operator confirm-adopt\n(ADR-0041 doctrine). The ids are pure hex — never a raw identifier (brief §8).",
+        "operationId": "list_peers",
+        "responses": {
+          "200": {
+            "description": "The untrusted discovered-peer inventory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MeshPeerDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mesh/relay": {
+      "put": {
+        "tags": [
+          "mesh"
+        ],
+        "summary": "`PUT /api/v1/mesh/relay` — opt this machine in/out of relaying neighbours\n(role: write).",
+        "description": "A real, persisted toggle: the new state is written to the shared mesh state\nand the updated status is returned. Discovery is unaffected (always-on) — this\ntoggles only the **relay** opt-in (brief §9.2). Every successful toggle is\nrecorded in **both** trails: the change-audit log and — as an\nactor-attributed [`AccountAuditKind::RelayToggle`](crate::account_audit::AccountAuditKind::RelayToggle)\nentry — the append-only account-audit store (the spec's relay opt-in/out row,\nbrief §10/§11).",
+        "operationId": "set_relay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelaySetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relay opt-in updated; the new mesh status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeshStatusDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to toggle relay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mesh/status": {
+      "get": {
+        "tags": [
+          "mesh"
+        ],
+        "summary": "`GET /api/v1/mesh/status` — the always-on discovery + relay summary (role:\nread).",
+        "description": "Always `200`: discovery is always-on, so this is a pure data report —\n`{discovery, relay_enabled, role, via?, peers_count}`.",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "description": "The always-on mesh discovery + relay status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeshStatusDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2202,7 +3396,7 @@
         },
         "responses": {
           "200": {
-            "description": "The replaced overlay (new ETag in the response header).",
+            "description": "The replaced overlay (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the edit was applied at a frame boundary and the running picture visibly follows it — the renderer draws the new document, or it drew the previous one (editing a rendered face away makes it vanish, itself a live change); `restart` otherwise (ADR-W022).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2282,7 +3476,7 @@
         },
         "responses": {
           "201": {
-            "description": "The created overlay (ETag in the response header).",
+            "description": "The created overlay (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine's renderer draws the document (e.g. an analog-face clock on an overlay-rendering build) and it was applied at a frame boundary; `restart` otherwise — non-rendering kinds are stored losslessly and mirrored to the engine with a warning, never lied about (ADR-W022).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2342,7 +3536,7 @@
         ],
         "responses": {
           "204": {
-            "description": "The overlay was deleted."
+            "description": "The overlay was deleted. X-Multiview-Apply: `live` when the running renderer drew the document (its face disappears at the next frame boundary), `restart` otherwise (ADR-W022)."
           },
           "401": {
             "description": "Missing or invalid credentials.",
@@ -3603,6 +4797,79 @@
         }
       }
     },
+    "/api/v1/salvos/{id}/fire": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "`POST /api/v1/salvos/{id}/fire` — fire a named salvo through the command bus\n(role: write) → `202 {action_id, queued_at}`.",
+        "description": "The named salvo must exist (else `404 salvo_unknown`). On success a `Salvo`\npending action is queued, the engine `TakeSalvo` command is submitted to the\nbounded bus (a full bus sheds to `503`, never blocking the engine), the action\nis marked executed, and the fire is recorded in the account audit store. The\naction id is the pending-action id (the operator can correlate it on the\nstrip + the audit trail).",
+        "operationId": "fire_salvo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The named salvo to fire.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Fire queued + submitted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FiredBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to fire.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No salvo with that name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/salvos/{id}/take": {
       "post": {
         "tags": [
@@ -4005,6 +5272,603 @@
           },
           "412": {
             "description": "If-Match precondition failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/bundle": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/bundle` — compose a previewable, redacted, media-free\ncontext-pack (role: write; entitled tiers only). Composing performs **no\nconsent check** (§7.2): consent governs the daily outbound pipe, not a\ndeliberate operator attachment. Every compose lands a `bundle-compose`\naccount-audit entry. → `202 {bundle_id}`; read the preview at\n`GET /support/bundle/{bundle_id}`.",
+        "operationId": "compose",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The bundle was composed; read the preview by id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BundleAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/bundle/{id}": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/bundle/{id}` — read a composed bundle's preview (role:\nread; entitled tiers only). Unknown/evicted id → `404`. The preview lists\nevery redaction and carries no media.",
+        "operationId": "get_bundle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The composed bundle id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The composed bundle preview (redacted, media-free).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bundle"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No bundle with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/data-request/{id}/approve": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/data-request/{id}/approve` — approve an inbound egress\nrequest **locally** (role: write). **Nothing leaves without this yes:** the\nrequest transitions to `approved` and egress is gated on that state. An\nalready-expired request is `410 request_expired` (and stays expired). Unknown\nid → `404`. Lands a `data-request-approve` account-audit entry.",
+        "operationId": "approve_data_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The DR-xxxx data-request id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request was approved locally.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataRequestActioned"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to approve.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The request window elapsed — too late to approve.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/data-request/{id}/deny": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/data-request/{id}/deny` — deny an inbound egress request\nlocally (role: write). Nothing leaves. Symmetric to approve.",
+        "operationId": "deny_data_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The DR-xxxx data-request id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request was denied locally.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataRequestActioned"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to deny.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The request window elapsed — too late to deny.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/entitlement": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/entitlement` — the tier-derived support routing (role:\nread). Always `200`: the free tier gets `eligible:false` + the community\nroute + the one quiet line, an eligible tier gets its support queue + SLA.",
+        "operationId": "get_entitlement",
+        "responses": {
+          "200": {
+            "description": "The tier-derived support entitlement + route (always 200).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportEntitlement"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/tickets` — list local ticket summaries newest-first\n(role: read; entitled tiers only).",
+        "operationId": "list_tickets",
+        "responses": {
+          "200": {
+            "description": "Local ticket summaries (newest-first).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TicketSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/tickets` — raise a local ticket (role: write; entitled\ntiers only → else `403 not_entitled`). The store mints the `CS-xxxx` id, seeds\nthe thread with the opening body, and auto-attaches the machine context\n(§7.1). Every raise lands a `ticket` account-audit entry. → `201 Created`.",
+        "operationId": "raise_ticket",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RaiseTicketRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The ticket was raised; the full thread is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets/{id}": {
+      "get": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`GET /api/v1/support/tickets/{id}` — fetch one ticket (full thread) (role:\nread; entitled tiers only). Unknown id → `404`.",
+        "operationId": "get_ticket",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The CS-xxxx ticket id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ticket with its full thread + machine context.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ticket with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets/{id}/close": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/tickets/{id}/close` — close a ticket locally (role:\nwrite; entitled tiers only). Idempotent (re-closing an already-closed ticket\nis still `200`). Unknown id → `404`. → `200`.",
+        "operationId": "close_ticket",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The CS-xxxx ticket id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ticket is closed (idempotent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ticket with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/support/tickets/{id}/reply": {
+      "post": {
+        "tags": [
+          "support"
+        ],
+        "summary": "`POST /api/v1/support/tickets/{id}/reply` — append a reply to a ticket's\nthread (role: write; entitled tiers only). A reply to a **closed** ticket is\n`409 ticket_closed` (pinned). Unknown id → `404`. Each reply lands a `ticket`\naccount-audit entry. → `200` with the updated thread.",
+        "operationId": "reply_ticket",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The CS-xxxx ticket id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The reply appended; the updated thread is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ticket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized, or the free tier is not entitled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ticket with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The ticket is closed — replies are refused.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4711,6 +6575,140 @@
         }
       }
     },
+    "/api/v1/telemetry/consent": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`GET /api/v1/telemetry/consent` — the recorded telemetry-consent document\n(role: read).",
+        "description": "Always `200`: a data report. Off by default (opt-in, incl. the free tier).",
+        "operationId": "get_consent",
+        "responses": {
+          "200": {
+            "description": "The recorded telemetry-consent document (off by default).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentResource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`PUT /api/v1/telemetry/consent` — set telemetry consent (role: write).",
+        "description": "Recorded on the machine under last-writer-wins by timestamp: a machine-UI\nwrite is the `local` actor, stamped from the acknowledgement clock. A\nsuccessful change writes a\n[`AccountAuditKind::ConsentChange`](crate::account_audit::AccountAuditKind::ConsentChange)\nentry to the account-side append-only audit store (#106) and the change-audit\nlog. The detail carries only the new boolean — never a raw identifier (data\nminimisation, brief §8).\n\nReturns the updated consent resource. Because the local clock is monotonic the\nmachine-UI write always advances the timestamp, so it always applies; the LWW\nguard exists for the portal mirror's later, out-of-order writes (pinned by the\n`ConsentState` unit + integration LWW tests).",
+        "operationId": "set_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentSetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Consent updated; the new consent document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentResource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/telemetry/schema": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "`GET /api/v1/telemetry/schema` — the published daily-pipe telemetry schema\n(role: read).",
+        "description": "A static, versioned report of exactly what the daily pipe sends when consented\nand — load-bearing — what it NEVER sends. Served from the versioned consts so\nthe never-sent guarantee is a single source of truth pinned by test.",
+        "operationId": "get_schema",
+        "responses": {
+          "200": {
+            "description": "The published daily-pipe telemetry schema (sent + never-sent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetrySchema"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
       "patch": {
         "tags": [
@@ -4964,6 +6962,86 @@
           "operation_id": {
             "type": "string",
             "description": "The operation id correlating this command's eventual outcome on the\nrealtime stream."
+          }
+        }
+      },
+      "AccountAuditEntry": {
+        "type": "object",
+        "description": "One immutable account-audit entry: who did what, and when.\n\nThe four spec fields (brief §11: `{at, actor, kind, detail}`) plus a\nmonotonic `seq` cursor the store assigns on append so pagination is stable\nand resumable even when two entries share an `at` timestamp.",
+        "required": [
+          "seq",
+          "at_nanos",
+          "actor",
+          "kind"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "description": "The authenticated principal that performed the action (its key id), or a\nwell-known system actor for machine-originated events — the **actor**."
+          },
+          "at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the action was recorded — the\n**when** (`at`)."
+          },
+          "detail": {
+            "description": "An optional structured detail (e.g. the lease serial, the salvo name, the\naction id). Never contains secrets or raw identifiers (brief §8)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AccountAuditKind",
+            "description": "The kind of account action — the **kind**."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The monotonic sequence number the store assigned on append — the stable\npagination cursor. Strictly increasing; never reused.",
+            "minimum": 0
+          }
+        }
+      },
+      "AccountAuditKind": {
+        "type": "string",
+        "description": "The kind of account-side action an [`AccountAuditEntry`] records.\n\nEach variant names a distinct auditable account action from ADR-0053 §4 +\nthe brief §10. Serialised `kebab-case` so the slug is stable across the\nmachine and the portal. `#[non_exhaustive]` so a future account action adds a\nvariant without breaking the wire contract.",
+        "enum": [
+          "claim",
+          "transfer",
+          "lease-grant",
+          "lease-install",
+          "enforcement-change",
+          "consent-change",
+          "relay-toggle",
+          "context-pack-export",
+          "ticket",
+          "bundle-compose",
+          "data-request-approve",
+          "data-request-deny",
+          "action-requested",
+          "action-cancelled",
+          "action-executed"
+        ]
+      },
+      "AccountAuditPage": {
+        "type": "object",
+        "description": "A page of account-audit entries plus the cursor to resume from.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountAuditEntry"
+            },
+            "description": "The entries in this page, oldest-first within the page (ascending `seq`)."
+          },
+          "next_cursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The cursor to pass as `?cursor=` to fetch the next page, or `None` when\nthis page reached the end of the log. Opaque to clients (the `seq` of the\nlast returned entry).",
+            "minimum": 0
           }
         }
       },
@@ -5430,6 +7508,115 @@
           }
         }
       },
+      "Bundle": {
+        "type": "object",
+        "description": "One composed support bundle: the echoed request, the redacted/diagnostic\nsections, and the list of every redaction the config pass made. **Carries no\nmedia** by construction — there is no field that could hold a frame/picture.",
+        "required": [
+          "bundle_id",
+          "window",
+          "composed_at_nanos",
+          "redactions"
+        ],
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "description": "The bundle id (the read-back key)."
+          },
+          "composed_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline instant (nanoseconds) the bundle was composed."
+          },
+          "config": {
+            "description": "The redacted config sections, present iff `config` was requested. A JSON\nobject keyed by resource collection (`sources`/`outputs`/…); every secret\nhas been removed and every URL masked."
+          },
+          "diagnostics": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Diagnostics",
+                "description": "The utilisation/metrics summary, present iff `metrics` or `diagnostics`\nwas requested."
+              }
+            ]
+          },
+          "incidents": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            },
+            "description": "The incident markers in the window, present iff `incidents` (or\n`diagnostics`) was requested."
+          },
+          "redactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Redaction"
+            },
+            "description": "Every redaction the config pass made (the masking the operator sees).\nEmpty when nothing was masked; never omitted (the surface is uniform)."
+          },
+          "window": {
+            "type": "string",
+            "description": "The reporting window token the bundle was composed over."
+          }
+        }
+      },
+      "BundleAccepted": {
+        "type": "object",
+        "description": "The `202` body of a successful compose: the id to read the preview back under.",
+        "required": [
+          "bundle_id"
+        ],
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "description": "The composed bundle's id (read the preview at `GET .../bundle/{bundle_id}`)."
+          }
+        }
+      },
+      "BundleInclude": {
+        "type": "string",
+        "description": "Which diagnostic section a bundle includes. Serialised `lowercase` so the slug\nis stable across the machine and the (later) portal sync. `#[non_exhaustive]`\nso a future section is additive.",
+        "enum": [
+          "diagnostics",
+          "metrics",
+          "config",
+          "incidents"
+        ]
+      },
+      "BundleRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/support/bundle` request body: the reporting `window` and the\nsections to `include`.",
+        "required": [
+          "window",
+          "include"
+        ],
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BundleInclude"
+            },
+            "description": "The sections to include (deduplicated by the composer)."
+          },
+          "window": {
+            "$ref": "#/components/schemas/BundleWindow",
+            "description": "The reporting window (`1h` / `24h` / `7d`)."
+          }
+        }
+      },
+      "BundleWindow": {
+        "type": "string",
+        "description": "The time window a bundle reports over (spec §7.2). Serialised as the operator-\nfacing token (`1h` / `24h` / `7d`). `#[non_exhaustive]` so a future window is\nadditive.",
+        "enum": [
+          "1h",
+          "24h",
+          "7d"
+        ]
+      },
       "BusSourceDoc": {
         "oneOf": [
           {
@@ -5508,6 +7695,19 @@
           }
         ],
         "description": "`OpenAPI` mirror of [`multiview_core::tally::BusSource`].\n\nSerde-equivalent: internally tagged on `kind`, `snake_case` variant tags."
+      },
+      "CancelledBody": {
+        "type": "object",
+        "description": "The `200` body of a successful cancel.",
+        "required": [
+          "cancelled"
+        ],
+        "properties": {
+          "cancelled": {
+            "type": "boolean",
+            "description": "Always `true` on the `200` path — the action is cancelled."
+          }
+        }
       },
       "CaptionSelectorDoc": {
         "oneOf": [
@@ -5625,6 +7825,61 @@
           }
         ],
         "description": "`OpenAPI` mirror of `multiview_config::CaptionSelector` (tagged by `mode`)."
+      },
+      "CastSessionDoc": {
+        "type": "object",
+        "description": "One ephemeral cast session as the API serves it: the descriptive record\nplus the live lifecycle state.",
+        "required": [
+          "id",
+          "address",
+          "output",
+          "media_url",
+          "state"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The device authority dialled (`host[:port]`, IPv6 bracketed)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The runtime session id (`cast-session-…`, UUID-fresh per start)."
+          },
+          "media_url": {
+            "type": "string",
+            "description": "The resolved device-reachable media URL the session LOADs."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator-facing name, if given."
+          },
+          "output": {
+            "type": "string",
+            "description": "The output id whose rendition the session casts."
+          },
+          "state": {
+            "type": "string",
+            "description": "The session's live lifecycle state (the DEV-A3 wire vocabulary, e.g.\n`ADOPTING`/`ONLINE`/`DEGRADED`), read from the latest-wins status\nregistry."
+          }
+        }
+      },
+      "CastVolumeRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/cast/sessions/{id}/volume` request body.",
+        "required": [
+          "level_percent"
+        ],
+        "properties": {
+          "level_percent": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The desired receiver volume as an integer percent (0–100); the actor\nmaps it to the protocol's unit `level`.",
+            "minimum": 0
+          }
+        }
       },
       "ChannelMap": {
         "type": "object",
@@ -5851,12 +8106,114 @@
           }
         }
       },
+      "ConsentActor": {
+        "type": "string",
+        "description": "Who recorded a telemetry-consent change.\n\nThe local machine UI/API or the (later, O1-gated) portal mirror. Serialised\nlower-case so the slug is stable across the machine and the portal.\n`#[non_exhaustive]` so a future actor is additive on the wire.",
+        "enum": [
+          "local",
+          "portal"
+        ]
+      },
+      "ConsentResource": {
+        "type": "object",
+        "description": "The `GET /api/v1/telemetry/consent` body: the recorded consent document\n(ADR-0052 §2). `enabled` is the outbound-daily-pipe consent (off by default);\n`changed_at` is the RFC 3339 instant it was last written (absent when never\nwritten); `actor` is who wrote it (`local` | `portal`).",
+        "required": [
+          "enabled",
+          "actor"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ConsentActor",
+            "description": "Who wrote the record: `local` (the machine UI/API) or `portal`."
+          },
+          "changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the record was last written (RFC 3339); `None` when never written\n(the opt-in default)."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the outbound daily telemetry pipe is consented (default `false`)."
+          }
+        }
+      },
+      "ConsentSetRequest": {
+        "type": "object",
+        "description": "The `PUT /api/v1/telemetry/consent` request body: the new consent state.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether to consent to the outbound daily telemetry pipe."
+          }
+        },
+        "additionalProperties": false
+      },
       "DataKindDoc": {
         "type": "string",
         "description": "`OpenAPI` mirror of [`multiview_core::stream::DataKind`].",
         "enum": [
           "scte35",
           "klv"
+        ]
+      },
+      "DataRequest": {
+        "type": "object",
+        "description": "One inbound data request awaiting **local approval**: support (or the licence\nserver, over the later transport) asks for additional data; nothing leaves\nuntil the operator approves it here (ADR-0053 §3).",
+        "required": [
+          "request_id",
+          "what",
+          "requested_at_nanos",
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "description": "An optional structured detail (e.g. the ticket the request relates to).\nNever the requested data."
+          },
+          "request_id": {
+            "type": "string",
+            "description": "The request id (the `DR-xxxx` / portal correlation key when synced)."
+          },
+          "requested_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the request was recorded."
+          },
+          "state": {
+            "$ref": "#/components/schemas/DataRequestState",
+            "description": "The lifecycle state."
+          },
+          "what": {
+            "type": "string",
+            "description": "A human-readable description of what is being requested (never the data\nitself — this is the *ask*, not the payload)."
+          }
+        }
+      },
+      "DataRequestActioned": {
+        "type": "object",
+        "description": "The `200` body of a data-request approve/deny: the request's new terminal\nstate.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/DataRequestState",
+            "description": "The new state slug (`approved` / `denied`)."
+          }
+        }
+      },
+      "DataRequestState": {
+        "type": "string",
+        "description": "The lifecycle state of an inbound data request. Approve/deny are one-way; an\nelapsed (un-actioned) request is `Expired` (`410 request_expired`).",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "expired"
         ]
       },
       "DetectionZoneDoc": {
@@ -6101,6 +8458,190 @@
           }
         }
       },
+      "Diagnostics": {
+        "type": "object",
+        "description": "The utilisation/diagnostics summary a bundle carries over its window.",
+        "required": [
+          "samples",
+          "cpu_p0",
+          "cpu_p50",
+          "cpu_p95",
+          "cpu_p100",
+          "shed_events",
+          "reconnects"
+        ],
+        "properties": {
+          "cpu_p0": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction floor (p0) over the window."
+          },
+          "cpu_p100": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction ceiling (p100) over the window."
+          },
+          "cpu_p50": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction median (p50) over the window."
+          },
+          "cpu_p95": {
+            "type": "number",
+            "format": "double",
+            "description": "CPU busy-fraction 95th percentile over the window."
+          },
+          "reconnects": {
+            "type": "integer",
+            "description": "The number of per-input reconnects recorded in the window.",
+            "minimum": 0
+          },
+          "samples": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total utilisation samples folded across the window.",
+            "minimum": 0
+          },
+          "shed_events": {
+            "type": "integer",
+            "description": "The number of shed-load events recorded in the window.",
+            "minimum": 0
+          }
+        }
+      },
+      "DiagnosticsSnapshot": {
+        "type": "object",
+        "description": "The assembled diagnostics snapshot bundle (`GET /api/v1/diagnostics/{id}`).\n\nThe `diagnostics` section is the **shared** [`crate::support_bundle::Bundle`]\nthe #111 context-pack composer produces — utilisation percentiles + shed/\nreconnect counts, incident markers, and the redacted config — so this snapshot\nand the support-ticket context-pack draw their diagnostics from one source of\ntruth (the consent-independent retention store + the config redactor). Logs +\nengine state, **never** media, raw identifiers, or secrets (brief §8).",
+        "required": [
+          "snapshot_id",
+          "status",
+          "assembled_at_unix_seconds",
+          "diagnostics"
+        ],
+        "properties": {
+          "assembled_at_unix_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The Unix second the snapshot was assembled.",
+            "minimum": 0
+          },
+          "diagnostics": {
+            "$ref": "#/components/schemas/Bundle",
+            "description": "The redacted diagnostics bundle (the shared #111 composer output): logs +\nengine state, never media."
+          },
+          "snapshot_id": {
+            "type": "string",
+            "description": "The snapshot id."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SnapshotStatus",
+            "description": "The lifecycle status (`ready` when readable)."
+          }
+        }
+      },
+      "DiscoveredEndpoint": {
+        "type": "object",
+        "description": "One resolved management endpoint of a discovered service: a presentation-\nready address and its family. IPv6 is the lead family (ADR-0042); IPv4 is\nlabelled [`AddressFamily::Ipv4Legacy`]. IPv6 literals are bracketed so the\n`host:port` form is URL-safe.",
+        "required": [
+          "address",
+          "family"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The `host:port` management address (IPv6 literals bracketed)."
+          },
+          "family": {
+            "type": "string",
+            "description": "The address family — `ipv6` (lead) or `ipv4-legacy`. The shared\n[`AddressFamily`] enum carries no `ToSchema`, so the schema models the\nwire string directly (the same `ipv6` / `ipv4-legacy` tokens serde emits).",
+            "example": "ipv6"
+          }
+        }
+      },
+      "DiscoveredService": {
+        "type": "object",
+        "description": "One **untrusted** discovery-inventory row: a classified, AAAA-first service\nrequiring explicit confirm-adopt (ADR-0041). It carries **no registry id** —\nit is not a device.",
+        "required": [
+          "key",
+          "driver_kind",
+          "service_type",
+          "name",
+          "host",
+          "port",
+          "endpoints",
+          "primary_address",
+          "txt",
+          "last_seen_unix_ns"
+        ],
+        "properties": {
+          "driver_kind": {
+            "$ref": "#/components/schemas/DiscoveryDriverKind",
+            "description": "The inferred driver family."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveredEndpoint"
+            },
+            "description": "The management endpoints, **AAAA-first** (IPv6 lead, IPv4 legacy)."
+          },
+          "host": {
+            "type": "string",
+            "description": "The advertised host (`*.local.`), informational."
+          },
+          "key": {
+            "type": "string",
+            "description": "The dedup key (driver kind + instance name + service type). Two sightings\nof the same service share a key and the newer replaces the older."
+          },
+          "last_seen_unix_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When this row was last seen (Unix nanoseconds), informational for the UI."
+          },
+          "name": {
+            "type": "string",
+            "description": "The advertised instance/service name."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The mDNS-advertised port.",
+            "minimum": 0
+          },
+          "primary_address": {
+            "type": "string",
+            "description": "The primary management address — the first (IPv6, if any) endpoint's\n`host:port`. This is the address an operator references when confirming\nadoption via `POST /devices/{id}`."
+          },
+          "service_type": {
+            "type": "string",
+            "description": "The DNS-SD service type browsed."
+          },
+          "txt": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TxtRecord"
+            },
+            "description": "The decoded TXT records (advertised metadata), key-sorted."
+          }
+        }
+      },
+      "DiscoveryDriverKind": {
+        "type": "string",
+        "description": "The inferred driver family of a discovered service, from its service type\n(and the operator-configured zowietek-control type, if any).\n\nA **closed** `#[non_exhaustive]` enum: a new discoverable family is a new\nvariant plus a wired browse type, never an open registry. `Unknown` is the\nhonest catch-all — a service we browsed but cannot classify is reported as\nsuch, never guessed into a family.",
+        "enum": [
+          "cast",
+          "ndi-source",
+          "zowietek-control",
+          "unknown"
+        ]
+      },
+      "DiscoveryModeDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_mesh::DiscoveryMode`] (Conspect, ADR-0051 §2).\n\nSerde-equivalent: a unit enum rendered `snake_case`. There is exactly **one**\nvalue — `always_on` — and no way to set any other: discovery runs whenever the\naccount plane runs (the spec's *locked* row, no off switch exists).",
+        "enum": [
+          "always_on"
+        ]
+      },
       "DocumentDiff": {
         "type": "object",
         "description": "The added / removed / changed top-level keys between two documents.\n\nA pragmatic, UI-facing structural diff over JSON objects: it reports which\ntop-level keys were added, removed, or whose value changed. Non-object\ndocuments (or a type change at the root) are reported as a single synthetic\n`<root>` change so the diff is always total.",
@@ -6156,6 +8697,116 @@
         },
         "additionalProperties": false
       },
+      "EnforcementLevelDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::EnforcementLevel`].\n\nSerde-equivalent: a unit enum rendered `kebab-case`. Every level keeps a\nrunning program **on air** (ADR-0050 §6.3, invariant #1) — enforcement is\ndata the surface renders, never a control-flow decision.",
+        "enum": [
+          "active",
+          "warning",
+          "config-locked",
+          "watermark",
+          "block-new-instance",
+          "unlicensed-build"
+        ]
+      },
+      "FiredBody": {
+        "type": "object",
+        "description": "The `202` body of a successful salvo fire.",
+        "required": [
+          "action_id",
+          "queued_at_nanos"
+        ],
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "description": "The queued action id (also the pending-action + audit correlation id)."
+          },
+          "queued_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds, from the ack-clock) the fire\nwas queued — the audit entry and the pending action share this instant."
+          }
+        }
+      },
+      "FirstLine": {
+        "type": "string",
+        "description": "The first-line support route a tier maps to (spec §11): a real support queue\nfor eligible tiers, or the community channel for the free tier.",
+        "enum": [
+          "partner",
+          "conspect",
+          "community"
+        ]
+      },
+      "GpuLimitDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No GPU cap — the `over_gpu` reason can never fire.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unlimited"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "At most this many GPUs may be in use before the `over_gpu` reason fires.",
+            "required": [
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "limited"
+                ]
+              },
+              "value": {
+                "type": "integer",
+                "format": "int32",
+                "description": "At most this many GPUs may be in use before the `over_gpu` reason fires.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_licence::GpuLimit`].\n\nSerde-equivalent: adjacently tagged on `kind`, value under `value`,\n`snake_case` tags (`{\"kind\":\"unlimited\"}` / `{\"kind\":\"limited\",\"value\":2}`)."
+      },
+      "HardwareClassDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::HardwareClass`].\n\nSerde-equivalent: a unit enum rendered `snake_case`.",
+        "enum": [
+          "standard",
+          "datacenter",
+          "edge"
+        ]
+      },
+      "HardwareClassViewDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_licence::HardwareClassView` (the\nlicensed-vs-detected class pair).",
+        "required": [
+          "licensed",
+          "detected"
+        ],
+        "properties": {
+          "detected": {
+            "$ref": "#/components/schemas/HardwareClassDoc",
+            "description": "The class detected on the machine (a mismatch is a ladder reason)."
+          },
+          "licensed": {
+            "$ref": "#/components/schemas/HardwareClassDoc",
+            "description": "The class the entitlement is licensed for."
+          }
+        },
+        "additionalProperties": false
+      },
       "HealthWarningDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).\n\nThe body of `GET /api/v1/health`: an actionable health warning carrying a\nstable `code` + a `remediation`. A round-trip test (`tests/health.rs`) pins\nthis shape to the real `multiview_events::HealthWarning` so they cannot drift.",
@@ -6197,6 +8848,66 @@
           "subsystem": {
             "type": "string",
             "description": "The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`)."
+          }
+        }
+      },
+      "HeartbeatStatus": {
+        "type": "object",
+        "description": "The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).\n\nWith no licence-server client yet (blocked on the external wire-protocol doc,\nbrief §14 O1), this reports **honestly from local state**: the transport the\nactive lease arrived over, the lease install instant as `last_at`, the lease's\n`next_contact_due` as `next_due`, and the exhaustive payload-field list. There\nis **no** mutating endpoint for the heartbeat (the spec mandates none) — the\n`POST /api/v1/account/licence/heartbeat` force-now action is a later,\nfeature-gated item (brief §11 #4), not this read surface.",
+        "required": [
+          "transport",
+          "payload_fields"
+        ],
+        "properties": {
+          "last_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The instant this machine last accepted a lease (the install instant), RFC\n3339; `None` when no lease is installed (no heartbeat yet — honest)."
+          },
+          "next_due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the next licensing contact is due (the active lease's\n`next_contact_due`), RFC 3339; `None` when no lease is installed."
+          },
+          "payload_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The exhaustive list of fields a heartbeat payload carries\n([`HEARTBEAT_PAYLOAD_FIELDS`]) — reported, never raw identifiers (§8)."
+          },
+          "transport": {
+            "type": "string",
+            "description": "The transport the active lease arrived over: `\"direct\"` (online server\ncontact), `\"relay\"` (mesh relay), or `\"file\"` (a dropped offline lease).\n`\"none\"` when no lease is installed."
+          }
+        }
+      },
+      "Incident": {
+        "type": "object",
+        "description": "One incident marker in a bundle (a diagnostic event — never media).",
+        "required": [
+          "at_unix_seconds",
+          "kind",
+          "subject"
+        ],
+        "properties": {
+          "at_unix_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The Unix second the incident was recorded.",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "The incident class label (`input_flap` / `encoder_saturation` /\n`clock_holdover`)."
+          },
+          "subject": {
+            "type": "string",
+            "description": "What the incident applied to (input id, `program`, `system`, …)."
           }
         }
       },
@@ -6261,6 +8972,19 @@
           }
         }
       },
+      "LadderStateDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::LadderState`] (the seven conditions).\n\nSerde-equivalent: a unit enum rendered `snake_case`.",
+        "enum": [
+          "compliant",
+          "grace",
+          "lapsed_soft",
+          "lapsed_hard",
+          "evaluation",
+          "class_mismatch",
+          "over_gpu"
+        ]
+      },
       "Layout": {
         "type": "object",
         "description": "A persisted layout resource.\n\nThe `body` is the opaque, validated layout document the editor produces; the\ncontrol plane stores and version-stamps it without interpreting its\ninternals here. (Engine-side validation against `multiview-config` happens\nbefore a layout is applied.)",
@@ -6299,6 +9023,195 @@
             "description": "Human-friendly name."
           }
         }
+      },
+      "LeaseDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_licence::Lease`] (the dated entitlement\nbounds, ADR-0050 §4).\n\nSerde-equivalent: the dated fields are RFC 3339 date-time strings (how\n`chrono`'s `DateTime<Utc>` serialises), the day counts are integers.",
+        "required": [
+          "serial",
+          "source",
+          "granted_at",
+          "expires_at",
+          "grace_days",
+          "grace_until",
+          "hard_at",
+          "next_contact_due"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "description": "When the lease term expires (RFC 3339)."
+          },
+          "grace_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The number of grace days that follow expiry."
+          },
+          "grace_until": {
+            "type": "string",
+            "description": "The end of the grace window (RFC 3339)."
+          },
+          "granted_at": {
+            "type": "string",
+            "description": "When the lease was granted (RFC 3339)."
+          },
+          "hard_at": {
+            "type": "string",
+            "description": "The absolute hard bound from grant (RFC 3339)."
+          },
+          "next_contact_due": {
+            "type": "string",
+            "description": "When the next heartbeat is due (RFC 3339)."
+          },
+          "serial": {
+            "type": "string",
+            "description": "The opaque lease serial (server-issued; not a hardware identifier)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/LeaseSourceDoc",
+            "description": "Where this grant came from (drives the term)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LeaseInstalled": {
+        "type": "object",
+        "description": "The `200` body of a successful `POST /api/v1/licence/lease` install: the\ninstalled lease's serial and its `valid_to` (the lease term expiry, RFC 3339).",
+        "required": [
+          "serial",
+          "valid_to"
+        ],
+        "properties": {
+          "serial": {
+            "type": "string",
+            "description": "The serial of the lease that was verified + installed."
+          },
+          "valid_to": {
+            "type": "string",
+            "description": "The instant the installed lease term expires (RFC 3339)."
+          }
+        }
+      },
+      "LeaseInstalledDoc": {
+        "type": "object",
+        "description": "`OpenAPI` body of a successful `POST /api/v1/licence/lease` install: the\ninstalled lease's serial + its `valid_to` (the lease's `expires_at`, RFC\n3339). Mirrors the [`crate::routes::licence::LeaseInstalled`] handler shape.",
+        "required": [
+          "serial",
+          "valid_to"
+        ],
+        "properties": {
+          "serial": {
+            "type": "string",
+            "description": "The serial of the lease that was verified + installed."
+          },
+          "valid_to": {
+            "type": "string",
+            "description": "The instant the installed lease term expires (RFC 3339)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LeaseSourceDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_licence::LeaseSource`].\n\nSerde-equivalent: a unit enum rendered `snake_case` (`online`/`relay`/`file`).",
+        "enum": [
+          "online",
+          "relay",
+          "file"
+        ]
+      },
+      "LicenceResource": {
+        "type": "object",
+        "description": "The computed licence resource rendered at `GET /api/v1/licence`.\n\nA single shape that always serialises (never `5xx`): `licensed` is `true` with\nthe full computed `status` when a verified lease is installed, and `false`\nwith `status: null` when none is — an honest \"unlicensed\" data report rather\nthan an error. The control plane, the chrome banner, and the portals all read\nthe same computed `status.enforcement` level; there is no second opinion.",
+        "required": [
+          "licensed"
+        ],
+        "properties": {
+          "licensed": {
+            "type": "boolean",
+            "description": "Whether a verified lease is currently installed."
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LicenceStatusDoc",
+                "description": "The computed licence status when a lease is installed; `None` otherwise."
+              }
+            ]
+          }
+        }
+      },
+      "LicenceStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_licence::LicenceStatusView`] — the computed\nlicence resource `GET /api/v1/licence` renders.\n\nSerde-equivalent to the real view. The `state`/`enforcement` are **computed**\n(the ladder, off the hot loop); every value keeps a running program on air.",
+        "required": [
+          "tier",
+          "state",
+          "enforcement",
+          "hardware_class",
+          "gpu_limit",
+          "gpus_in_use",
+          "config_locked",
+          "watermark",
+          "blocks_new_instances",
+          "lease",
+          "reasons"
+        ],
+        "properties": {
+          "blocks_new_instances": {
+            "type": "boolean",
+            "description": "Whether the startup gate should refuse a new engine instance (S1)."
+          },
+          "config_locked": {
+            "type": "boolean",
+            "description": "Whether the engine should deny hot-reconfiguration (derived, S2)."
+          },
+          "enforcement": {
+            "$ref": "#/components/schemas/EnforcementLevelDoc",
+            "description": "The canonical enforcement level derived from the state."
+          },
+          "gpu_limit": {
+            "$ref": "#/components/schemas/GpuLimitDoc",
+            "description": "The GPU allowance carried by the entitlement."
+          },
+          "gpus_in_use": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The number of GPUs currently in use (informs the `over_gpu` reason only).",
+            "minimum": 0
+          },
+          "hardware_class": {
+            "$ref": "#/components/schemas/HardwareClassViewDoc",
+            "description": "The licensed-vs-detected hardware class."
+          },
+          "lease": {
+            "$ref": "#/components/schemas/LeaseDoc",
+            "description": "The dated lease this status reflects."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Machine-readable reason codes the UI renders."
+          },
+          "state": {
+            "$ref": "#/components/schemas/LadderStateDoc",
+            "description": "The computed ladder state (the seven conditions)."
+          },
+          "tier": {
+            "type": "string",
+            "description": "The opaque commercial tier (rendered, never computed)."
+          },
+          "watermark": {
+            "type": "boolean",
+            "description": "Whether the engine should stamp a corner watermark (derived, S3)."
+          }
+        },
+        "additionalProperties": false
       },
       "LoudnessTargetDoc": {
         "oneOf": [
@@ -6367,6 +9280,136 @@
           "audio",
           "data"
         ]
+      },
+      "MeshPeerDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_mesh::Peer`] — a single entry in the untrusted\ndiscovered-peer inventory `GET /api/v1/mesh/peers` returns.\n\nSerde-equivalent to the real peer. The `key` is the salted-digest **hex** id\n(64 chars, never a raw identifier — brief §8); `name` is present only once the\noperator has confirm-adopted + named the peer; `last_seen` is whole seconds;\n`relaying_for_us` is an operator-set adoption flag, never auto (the peer is\n**untrusted** until explicitly confirm-adopted — ADR-0041 doctrine).",
+        "required": [
+          "key",
+          "claimed",
+          "last_seen",
+          "relaying_for_us"
+        ],
+        "properties": {
+          "claimed": {
+            "type": "boolean",
+            "description": "Whether the peer advertised itself as claimed (observed from the announce)."
+          },
+          "key": {
+            "type": "string",
+            "description": "The peer's salted-digest id (64-char lowercase hex; never a raw identifier)."
+          },
+          "last_seen": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The whole-seconds monotonic instant the peer was last seen.",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An operator-assigned name, present only once the peer is adopted + named."
+          },
+          "relaying_for_us": {
+            "type": "boolean",
+            "description": "Whether THIS machine relays for the peer — set only by explicit operator\nconfirm-adopt, never by observation (untrusted inventory)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MeshRoleDoc": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Own internet path; not relaying for neighbours.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "direct"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Online and opted-in to relay an offline neighbour's heartbeat.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "relay"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Offline; leafing through an adopted relaying neighbour.",
+            "required": [
+              "via",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "leaf"
+                ]
+              },
+              "via": {
+                "type": "string",
+                "description": "The peer this machine relays its heartbeat through (salted-digest hex\nid — never a raw identifier)."
+              }
+            }
+          }
+        ],
+        "description": "`OpenAPI` mirror of [`multiview_mesh::MeshRole`] (Conspect, ADR-0051 §4).\n\nSerde-equivalent: **internally tagged** on `kind` (`direct`/`relay`/`leaf`,\nkebab) — never untagged (conventions §5). The `leaf` variant carries the `via`\npeer (a salted-digest hex id) it leafs its heartbeat through."
+      },
+      "MeshStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_mesh::MeshStatus`] — the always-on mesh\ndiscovery + relay summary `GET /api/v1/mesh/status` (and the `PUT\n/api/v1/mesh/relay` reply) renders.\n\nSerde-equivalent to the real status (pinned byte-for-byte by a round-trip test\nin `tests/mesh.rs`). The mesh crate carries no `utoipa` dependency, so this\nmodule owns the `OpenAPI` contract. Discovery is always-on (no off switch);\n`via` is present only when the role is `leaf`.",
+        "required": [
+          "discovery",
+          "relay_enabled",
+          "role",
+          "peers_count"
+        ],
+        "properties": {
+          "discovery": {
+            "$ref": "#/components/schemas/DiscoveryModeDoc",
+            "description": "Discovery is always-on (the only value; no off switch exists)."
+          },
+          "peers_count": {
+            "type": "integer",
+            "description": "How many peers are in the untrusted discovered-peer inventory.",
+            "minimum": 0
+          },
+          "relay_enabled": {
+            "type": "boolean",
+            "description": "Whether this machine relays neighbours' heartbeats (the opt-in toggle)."
+          },
+          "role": {
+            "$ref": "#/components/schemas/MeshRoleDoc",
+            "description": "The computed mesh role (`direct`/`relay`/`leaf`)."
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The peer this machine leafs through, present only when the role is `leaf`\n(a salted-digest hex id)."
+          }
+        },
+        "additionalProperties": false
       },
       "NmosAccess": {
         "type": "string",
@@ -7012,6 +10055,61 @@
           }
         }
       },
+      "PendingAction": {
+        "type": "object",
+        "description": "One queued remote action.",
+        "required": [
+          "action_id",
+          "kind",
+          "requested_by",
+          "requested_at_nanos",
+          "state"
+        ],
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "description": "The opaque, unique action id (a UUID) the cancel/execute paths address."
+          },
+          "detail": {
+            "description": "An optional structured detail (e.g. the salvo name a `salvo` action\nfires). Never contains secrets."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PendingActionKind",
+            "description": "The kind of action."
+          },
+          "requested_at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the action was queued."
+          },
+          "requested_by": {
+            "type": "string",
+            "description": "The principal (or portal/system actor) that requested the action."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PendingActionState",
+            "description": "The action's lifecycle state."
+          }
+        }
+      },
+      "PendingActionKind": {
+        "type": "string",
+        "description": "The kind of remote action queued for local approval/execution.\n\nSerialised `kebab-case` so the slug is stable across the machine and the\nportal. `#[non_exhaustive]` so a future action kind adds a variant without\nbreaking the wire contract.",
+        "enum": [
+          "restart",
+          "reboot",
+          "salvo"
+        ]
+      },
+      "PendingActionState": {
+        "type": "string",
+        "description": "The lifecycle state of a queued action.\n\nAn action is `Pending` until it is either `Executed` (it ran) or `Cancelled`\n(the operator cancelled it locally first). Both terminal states are immutable\nonce reached — the local cancel cannot be undone by a later execution, and an\nexecuted action cannot be retroactively cancelled (local-always-wins applies\nonly *before* execution).",
+        "enum": [
+          "pending",
+          "executed",
+          "cancelled"
+        ]
+      },
       "PerceivedSeverityDoc": {
         "type": "string",
         "description": "`OpenAPI` mirror of [`multiview_core::alarm::PerceivedSeverity`] (X.733).\n\nSerde-equivalent: a unit enum rendered as its `PascalCase` variant name.",
@@ -7229,6 +10327,36 @@
           }
         }
       },
+      "RaiseTicketRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/support/tickets` request body.",
+        "required": [
+          "subject",
+          "body",
+          "severity"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Attachment ids the operator references (recorded on the opening update's\ncontext; the deliberate-attachment path is the bundle composer). Optional."
+          },
+          "body": {
+            "type": "string",
+            "description": "The opening body (seeds the append-only thread)."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/TicketSeverity",
+            "description": "The declared severity."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The operator-supplied subject line."
+          }
+        }
+      },
       "Receiver": {
         "allOf": [
           {
@@ -7289,6 +10417,32 @@
           }
         }
       },
+      "Redaction": {
+        "type": "object",
+        "description": "What a single redaction removed/masked, surfaced in the preview so the\noperator sees exactly what was taken out (never the value itself).",
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The dotted path of the redacted field (e.g. `cam-1.auth.secret_ref`). A\nlocation, never the value."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/RedactionReason",
+            "description": "Why it was redacted: `secret` (a reference-only secret, removed) or `url`\n(a transport URL, masked)."
+          }
+        }
+      },
+      "RedactionReason": {
+        "type": "string",
+        "description": "Why a field was redacted from a bundle.",
+        "enum": [
+          "secret",
+          "url"
+        ]
+      },
       "Registration": {
         "type": "object",
         "description": "An IS-04 **registration request**: the `{type, data}` body posted to a\nRegistry's `POST /x-nmos/registration/v1.3/resource`.\n\nThe `data` is the resource JSON for the declared `type`. Modelled internally\ntagged on `type` (never `untagged`) so it round-trips robustly. The payload\nis the raw resource JSON value so this one type carries any resource kind.",
@@ -7304,6 +10458,33 @@
           "type": {
             "$ref": "#/components/schemas/ResourceType",
             "description": "The kind of resource being registered."
+          }
+        }
+      },
+      "RelaySetRequest": {
+        "type": "object",
+        "description": "The `PUT /api/v1/mesh/relay` request body: the relay opt-in state.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this machine should relay neighbours' heartbeats (brief §9.2)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplyRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/support/tickets/{id}/reply` request body.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The reply text to append to the thread."
           }
         }
       },
@@ -7373,7 +10554,6 @@
         "type": "object",
         "description": "The fields a create/update accepts (the id is supplied separately on create\nand immutable on update).",
         "required": [
-          "name",
           "body"
         ],
         "properties": {
@@ -7382,7 +10562,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Human-friendly name."
+            "description": "Human-friendly name. Optional on the wire: a create/update that omits it\n(e.g. a programmatic seed that only carries the typed `body`) defaults to\nan empty name rather than failing deserialization — the display name is a\nlabel, never load-bearing, and callers that care always supply one."
           }
         }
       },
@@ -7647,6 +10827,59 @@
           }
         }
       },
+      "SaveCastSessionRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/cast/sessions/{id}/save` request body.",
+        "required": [
+          "device_id"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The device id to register the promoted device under."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The promoted device's display name (defaults to the session's name)."
+          }
+        }
+      },
+      "ScanAccepted": {
+        "type": "object",
+        "description": "The `202 Accepted` body for a scan: the operation id correlating the scan and\nthe human-readable scope of what is browsed.",
+        "required": [
+          "operation_id",
+          "service_types",
+          "budget_ms",
+          "note"
+        ],
+        "properties": {
+          "budget_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The scan time budget in milliseconds (the browse is always time-bounded).",
+            "minimum": 0
+          },
+          "note": {
+            "type": "string",
+            "description": "A reminder that discovery is **untrusted**: rows require explicit\nconfirm-adopt and discovery never creates a device (ADR-0041)."
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id of the scan that actually runs — freshly started,\nattached-to (single-flight), or replayed (`Idempotency-Key`). The\n`device.discovered` rows it produces stream on the realtime `devices`\ntopic while it runs, each echoing this id as the envelope `corr`."
+          },
+          "service_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The service types being browsed (Cast + NDI, plus any configured\nzowietek-control type)."
+          }
+        }
+      },
       "Sender": {
         "allOf": [
           {
@@ -7722,6 +10955,26 @@
             "description": "The desired converged work mode (driver vocabulary, e.g. `encoder`)."
           }
         }
+      },
+      "SnapshotAccepted": {
+        "type": "object",
+        "description": "The `202 Accepted` body of `POST /api/v1/diagnostics/snapshot`: the id to read\nthe assembled bundle back with.",
+        "required": [
+          "snapshot_id"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "description": "The id of the assembled diagnostics snapshot."
+          }
+        }
+      },
+      "SnapshotStatus": {
+        "type": "string",
+        "description": "The lifecycle status of a diagnostics snapshot.\n\nSnapshots are assembled synchronously on request (the local retention buffer\nis in-memory), so a returned bundle is always `Ready`; the status is modelled\nexplicitly so the §4.2 one-button flow and the SPA can render a stable shape,\nand so a future asynchronous composer (large bundles, attachment export) can\nadd a `Pending` arm without a breaking change. `#[non_exhaustive]`.",
+        "enum": [
+          "ready"
+        ]
       },
       "SourceAuthDoc": {
         "type": "object",
@@ -8302,6 +11555,33 @@
           }
         }
       },
+      "StartCastSessionRequest": {
+        "type": "object",
+        "description": "The `POST /api/v1/cast/sessions` request body.",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The device authority to dial: `host[:port]`, IPv6 bracketed\n(`[2001:db8::20]:8009`); the CASTV2 port 8009 is the default when\nomitted (Cast **groups** advertise non-default ports — give the\nadvertised one)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An operator-facing name for the session (e.g. the room/TV name)."
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The output id whose HLS rendition to cast. Omitted: the **first\ndeclared** rendition is cast (every HLS output is a rendition of the\nprogram canvas)."
+          }
+        }
+      },
       "StreamDescriptorDoc": {
         "allOf": [
           {
@@ -8704,6 +11984,47 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_config::routing::StreamSelector`] (RT-4).\n\nSerde-equivalent: internally tagged on `by`, `snake_case` tags — never\n`untagged` (ADR-0010). Picks **which** elementary stream of a kind a\n[`StreamRefDoc`] addresses."
       },
+      "SupportEntitlement": {
+        "type": "object",
+        "description": "The full entitlement-routing answer the `GET /support/entitlement` endpoint\nreturns: whether the machine is eligible for entitled support, the route, and\nthe SLA token (a quiet line for the free tier).",
+        "required": [
+          "eligible",
+          "route",
+          "sla"
+        ],
+        "properties": {
+          "eligible": {
+            "type": "boolean",
+            "description": "Whether the machine is eligible for an entitled support queue (false →\ncommunity only)."
+          },
+          "route": {
+            "$ref": "#/components/schemas/SupportRoute",
+            "description": "The tier-derived route."
+          },
+          "sla": {
+            "type": "string",
+            "description": "The SLA token (e.g. `standard`, or the free tier's `community-best-effort`\none-line note). Always present so the surface is uniform."
+          }
+        }
+      },
+      "SupportRoute": {
+        "type": "object",
+        "description": "The tier-derived support route the entitlement endpoint renders + a ticket is\nraised against.",
+        "required": [
+          "to",
+          "first_line"
+        ],
+        "properties": {
+          "first_line": {
+            "$ref": "#/components/schemas/FirstLine",
+            "description": "The first-line owner."
+          },
+          "to": {
+            "type": "string",
+            "description": "The destination queue label (a stable slug the portal shares)."
+          }
+        }
+      },
       "SwapRequest": {
         "type": "object",
         "description": "The body of a `POST /commands/swap` request.",
@@ -8978,6 +12299,219 @@
           "generated"
         ]
       },
+      "TelemetrySchema": {
+        "type": "object",
+        "description": "The `GET /api/v1/telemetry/schema` body: the published daily-pipe schema.",
+        "required": [
+          "version",
+          "sent",
+          "never_sent"
+        ],
+        "properties": {
+          "never_sent": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The exhaustive list of categories that are NEVER sent."
+          },
+          "sent": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The exhaustive list of categories sent when consented."
+          },
+          "version": {
+            "type": "string",
+            "description": "The schema version (stable across machine + portal)."
+          }
+        }
+      },
+      "Ticket": {
+        "type": "object",
+        "description": "A ticket: a `CS-xxxx` id, the subject + severity, the auto-attached machine\ncontext, an append-only update thread (opening body first), and the route +\nstate. The portal sync mirrors this local resource over the later transport.",
+        "required": [
+          "ticket_id",
+          "subject",
+          "severity",
+          "state",
+          "route",
+          "context",
+          "updates"
+        ],
+        "properties": {
+          "context": {
+            "$ref": "#/components/schemas/TicketContext",
+            "description": "The auto-attached machine context (§7.1)."
+          },
+          "route": {
+            "$ref": "#/components/schemas/SupportRoute",
+            "description": "The tier-derived support route this ticket was raised against."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/TicketSeverity",
+            "description": "The declared severity."
+          },
+          "state": {
+            "$ref": "#/components/schemas/TicketState",
+            "description": "The lifecycle state (`open` → `closed`)."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The operator-supplied subject line."
+          },
+          "ticket_id": {
+            "type": "string",
+            "description": "The `CS-xxxx` ticket id (the portal correlation key)."
+          },
+          "updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TicketUpdate"
+            },
+            "description": "The append-only thread: the opening body, then every reply."
+          }
+        }
+      },
+      "TicketContext": {
+        "type": "object",
+        "description": "The auto-attached machine context every ticket carries (§7.1): identity,\nversion, entitlement, ladder state, and the fingerprint score. **Reported,\nnever raw** — it carries the opaque tier + the salted fingerprint **score**\n(a number), never raw serials/MACs (brief §8).",
+        "required": [
+          "app_version",
+          "entitlement",
+          "enforcement"
+        ],
+        "properties": {
+          "app_version": {
+            "type": "string",
+            "description": "The application version (the build identity), always reported."
+          },
+          "enforcement": {
+            "$ref": "#/components/schemas/TicketEnforcement",
+            "description": "The enforcement-ladder summary (the computed level), reported as data."
+          },
+          "entitlement": {
+            "$ref": "#/components/schemas/TicketEntitlement",
+            "description": "The entitlement summary (the opaque tier + whether a lease is licensed)."
+          },
+          "fingerprint_score": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The salted hardware-fingerprint **score** (0–100, brief §2.3/§8) of the\nactive lease, or `None` when no lease is installed. A number, never raw.",
+            "minimum": 0
+          }
+        }
+      },
+      "TicketEnforcement": {
+        "type": "object",
+        "description": "The enforcement summary auto-attached to a ticket — the computed ladder level\n(data, never control flow; brief §6).",
+        "required": [
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "type": "string",
+            "description": "The canonical enforcement level slug (e.g. `active`, `unlicensed`)."
+          }
+        }
+      },
+      "TicketEntitlement": {
+        "type": "object",
+        "description": "The entitlement summary auto-attached to a ticket — the opaque tier + the\nlicensed flag (rendered, never computed; brief §1, O7).",
+        "required": [
+          "licensed",
+          "tier"
+        ],
+        "properties": {
+          "licensed": {
+            "type": "boolean",
+            "description": "Whether a verified lease is installed."
+          },
+          "tier": {
+            "type": "string",
+            "description": "The opaque commercial tier (rendered), or `none` when unlicensed."
+          }
+        }
+      },
+      "TicketSeverity": {
+        "type": "string",
+        "description": "The operator-declared severity of a ticket (spec §11): `question`,\n`degraded`, `blocking`. Serialised `lowercase` so the slug is stable across\nthe machine and the portal.\n\nThis is a **closed** set the spec pins to exactly these three levels (§11) —\ndeliberately **not** `#[non_exhaustive]` so a consumer (and the contract test)\ncan match it exhaustively. A new severity would be a contract change, not an\nadditive one.",
+        "enum": [
+          "question",
+          "degraded",
+          "blocking"
+        ]
+      },
+      "TicketState": {
+        "type": "string",
+        "description": "The lifecycle state of a ticket. Local lifecycle is fully functional: an\noperator can `close` a ticket they opened; a closed ticket refuses replies.",
+        "enum": [
+          "open",
+          "closed"
+        ]
+      },
+      "TicketSummary": {
+        "type": "object",
+        "description": "A ticket summary for the list surface (the thread is omitted to keep the\nlisting light; fetch a single ticket for the full thread).",
+        "required": [
+          "ticket_id",
+          "subject",
+          "severity",
+          "state",
+          "updates"
+        ],
+        "properties": {
+          "severity": {
+            "$ref": "#/components/schemas/TicketSeverity",
+            "description": "The declared severity."
+          },
+          "state": {
+            "$ref": "#/components/schemas/TicketState",
+            "description": "The lifecycle state."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The subject line."
+          },
+          "ticket_id": {
+            "type": "string",
+            "description": "The `CS-xxxx` ticket id."
+          },
+          "updates": {
+            "type": "integer",
+            "description": "The number of updates on the thread.",
+            "minimum": 0
+          }
+        }
+      },
+      "TicketUpdate": {
+        "type": "object",
+        "description": "One immutable update on a ticket's append-only thread (the opening body or a\nreply): who wrote it, when, and the text.",
+        "required": [
+          "author",
+          "at_nanos",
+          "body"
+        ],
+        "properties": {
+          "at_nanos": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The media-timeline timestamp (nanoseconds) the update was recorded."
+          },
+          "author": {
+            "type": "string",
+            "description": "The authenticated principal that wrote this update (its key id), or a\nwell-known support actor when the portal-fed sync lands later."
+          },
+          "body": {
+            "type": "string",
+            "description": "The update text."
+          }
+        }
+      },
       "TimerDirectionDoc": {
         "type": "string",
         "description": "`OpenAPI` mirror of `multiview_config::timer::TimerDirection`.",
@@ -9116,6 +12650,24 @@
           }
         }
       },
+      "TxtRecord": {
+        "type": "object",
+        "description": "One advertised TXT key/value record (serializable, sortable).",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The TXT key."
+          },
+          "value": {
+            "type": "string",
+            "description": "The TXT value (decoded as UTF-8 by the browser)."
+          }
+        }
+      },
       "UmdRecallDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::UmdRecall`].",
@@ -9157,6 +12709,82 @@
           "warning",
           "critical"
         ]
+      },
+      "WatchStamp": {
+        "type": "object",
+        "description": "One recorded watch event: when it happened and what it was.",
+        "required": [
+          "at_ms",
+          "detail"
+        ],
+        "properties": {
+          "at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the load was applied/rejected, as Unix milliseconds (UTC)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What happened: an applied-change summary, or the rejection reason."
+          }
+        }
+      },
+      "WatchStatusBody": {
+        "type": "object",
+        "description": "The body of `GET /api/v1/config/watch-status`.",
+        "required": [
+          "active",
+          "applied_count",
+          "restart_pending"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether a config-file watcher is running for this process."
+          },
+          "applied_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many file changes have been successfully applied since start.",
+            "minimum": 0
+          },
+          "last_applied": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WatchStamp",
+                "description": "The most recent successfully applied load, if any."
+              }
+            ]
+          },
+          "last_rejected": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WatchStamp",
+                "description": "The most recent rejected (invalid) load, if any."
+              }
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The watched config file path (absent when no watcher was ever\nstarted; kept after a stop so the status names what *was* watched)."
+          },
+          "restart_pending": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Section names changed on disk that only apply on restart (sorted,\ndeduplicated; latched until restart — ADR-W020)."
+          }
+        }
       }
     }
   },
@@ -9190,6 +12818,14 @@
       "description": "Managed-device registry CRUD + status + bare-verb actions + stream-binding projections (ADR-M008/M009/W017)"
     },
     {
+      "name": "cast",
+      "description": "Ephemeral Google Cast sessions of a served HLS rendition + save-as-device promotion (ADR-M011). Google Cast and Chromecast are trademarks of Google LLC."
+    },
+    {
+      "name": "discovery",
+      "description": "mDNS device discovery: scan + the untrusted inventory requiring explicit confirm-adopt (ADR-M008 §6 / ADR-0041)"
+    },
+    {
       "name": "sync-groups",
       "description": "Presentation-sync-group CRUD + skew measurement (ADR-M008/M010)"
     },
@@ -9210,6 +12846,18 @@
       "description": "Health warnings: active capability mismatches + remediation (read-only)"
     },
     {
+      "name": "licence",
+      "description": "Local licence (Conspect): the computed licence resource + ladder (enforcement is data), lease install, and the salted challenge export. All-local; never off air."
+    },
+    {
+      "name": "mesh",
+      "description": "Local mesh (Conspect): always-on mDNS discovery status (no off switch), the relay opt-in toggle, and the untrusted discovered-peer inventory. Control-plane only; never back-pressures the engine."
+    },
+    {
+      "name": "telemetry",
+      "description": "Telemetry pipe (Conspect): the opt-in daily-pipe consent (off by default, last-writer-wins), the published schema (sent + never-sent), and the §4.2 diagnostics snapshot (logs + engine state, never media). DISTINCT from the licensing heartbeat (under /licensing) — the two pipes are never co-mingled. Consent gates no local route; control-plane only."
+    },
+    {
       "name": "salvos",
       "description": "Salvo definitions + arm/take/cancel"
     },
@@ -9224,6 +12872,14 @@
     {
       "name": "audit",
       "description": "Read-only change audit log (who/what/when)"
+    },
+    {
+      "name": "account",
+      "description": "Account-side (Conspect): append-only audit (cursor-paginated), pending remote-actions strip + local-wins cancel, and named-salvo fire. Locally drivable now; portal-fed over the heartbeat/relay transport later."
+    },
+    {
+      "name": "support",
+      "description": "Local support (Conspect): tier-derived entitlement routing (free → community), the local CS-xxxx ticket store with auto-attached machine context (§7.1), the previewable redacted media-free context-pack composer (consent-independent, §7.2), and local approve/deny of inbound egress data requests (nothing leaves without a local yes). Local lifecycle fully functional; portal sync rides the later transport."
     },
     {
       "name": "preview",

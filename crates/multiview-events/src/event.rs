@@ -323,6 +323,21 @@ pub enum WarningCode {
     /// loader/ICD. **Latched** (a build-time fact; raised once, cleared on
     /// reconfigure/restart — it cannot flap).
     GpuPresentNoVulkanAdapter,
+    /// The watched boot config file changed on disk but the new document does
+    /// not parse/validate, so NOTHING was applied — the run keeps the
+    /// last-good configuration (ADR-W020). Remediation: fix the file; the
+    /// next valid write applies and clears this warning.
+    ConfigFileInvalid,
+    /// The watched boot config file changed sections that cannot hot-apply
+    /// (e.g. canvas geometry — Class-2 — or outputs/control), so the running
+    /// process differs from the file until a restart (ADR-W020). **Latched**
+    /// until restart; the message names the pending sections.
+    ConfigFileRequiresRestart,
+    /// A valid config-file change was only PARTIALLY applied: one or more
+    /// engine commands were shed on a full command bus (ADR-W020 review M1).
+    /// The watcher retries the whole (idempotent) apply on its next poll and
+    /// clears this warning when the apply completes.
+    ConfigFileApplyIncomplete,
 }
 
 /// An actionable health warning — a richer *sibling* of [`Alert`].
@@ -372,6 +387,9 @@ impl WarningCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GpuPresentNoVulkanAdapter => "gpu-present-no-vulkan-adapter",
+            Self::ConfigFileInvalid => "config-file-invalid",
+            Self::ConfigFileRequiresRestart => "config-file-requires-restart",
+            Self::ConfigFileApplyIncomplete => "config-file-apply-incomplete",
         }
     }
 }
@@ -979,6 +997,104 @@ pub struct TimingStatus {
     pub groups: Vec<SyncGroupSkew>,
 }
 
+/// Why the resource-adaptive controller shed load rather than holding or
+/// migrating the pipeline (invariant #9).
+///
+/// The wire mirror of the engine's `multiview_engine::placement::ShedReason`
+/// (and `multiview_telemetry::placement::SuppressReason` / the retention store's
+/// `ShedReason`) carried on the realtime stream so the consent-independent
+/// retention store can record *why* a shed happened (§7.2 support diagnostics).
+/// Serialised **`snake_case`** (the stable label the UI + retention store key
+/// on); `#[non_exhaustive]` so a future reason is an additive, non-breaking
+/// change (ADR-RT002/RT003: additive, versioned, never breaking).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ShedReason {
+    /// The overloaded pipeline is pinned to its device and may not migrate, so
+    /// the only relief is the cheap local degradation ladder.
+    Pinned,
+    /// The pipeline feeds a local display sink whose framebuffer must live on
+    /// the connector-owning GPU (ADR-0044 §3), so composite may not migrate off
+    /// it — the only relief is a local shed.
+    DisplayBound,
+    /// No materially-better home exists (the whole host is loaded), so a
+    /// migration would not cure the imbalance — shed locally.
+    NoBetterHome,
+    /// A better home exists but the anti-storm gate (cooldown / per-GPU budget)
+    /// forbids moving this tick, so shed locally to hold quality.
+    AntiStorm,
+    /// The encode/egress stage could not keep up at the output cadence, so a
+    /// composited frame was shed (drop-on-overload) rather than blocking the
+    /// output clock (invariants #1 + #10) — the real live shed today.
+    EncoderOverload,
+}
+
+impl ShedReason {
+    /// The stable, lower-case wire label for this reason (matches the
+    /// `#[serde(rename_all)]`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pinned => "pinned",
+            Self::DisplayBound => "display_bound",
+            Self::NoBetterHome => "no_better_home",
+            Self::AntiStorm => "anti_storm",
+            Self::EncoderOverload => "encoder_overload",
+        }
+    }
+}
+
+/// What a shed-load decision applied to — the scope of a [`ShedLoad`] event.
+///
+/// Serialised **tagged** (`#[serde(tag = "kind")]`) per repo conventions; never
+/// `untagged`. `#[non_exhaustive]` so finer scopes can be added later without a
+/// breaking wire change.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ShedScope {
+    /// The shed touched the whole-program encode/egress path (the
+    /// drop-on-overload egress shed): a composited canvas frame was dropped.
+    Program,
+    /// The shed degraded a specific input/tile (the cheapest-impact-first
+    /// tile-by-tile shedding of the degradation ladder).
+    Input {
+        /// The configured input/source id the shed degraded.
+        id: String,
+    },
+    /// The shed degraded a shared resource (e.g. a preview/encode pool) rather
+    /// than the program output or a single input.
+    Shared,
+}
+
+/// A resource-adaptive **shed-load** decision — the engine relieved sustained
+/// overload by shedding work rather than blocking the output clock (invariant
+/// #9). Carried on topic [`crate::topic::Topic::Alerts`] (the lossless
+/// degradation-signal lane, sibling to [`HealthWarning`]) and emitted through
+/// the same drop-oldest publisher as every other engine event (invariant #10) —
+/// the engine never blocks on it.
+///
+/// This is the live producer the consent-independent retention store's
+/// shed-load category (`record_shed_at`) consumes (ADR-0052 §3,
+/// conspect-account-architecture §7.2): timestamp comes from the envelope `ts`
+/// / the feed's wall clock, `reason`/`scope` say *what* was shed and *why*, and
+/// `level`/`dropped` quantify it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShedLoad {
+    /// Why load was shed rather than held or migrated.
+    pub reason: ShedReason,
+    /// What the shed applied to (program / a specific input / a shared resource).
+    pub scope: ShedScope,
+    /// The degradation-ladder level after the shed (`0` = full quality); higher
+    /// means more aggressive shedding.
+    pub level: u32,
+    /// The cumulative count of frames/units shed under this condition at the
+    /// time of the event (monotonic for a sustained overload; `0` when the shed
+    /// is a ladder move that dropped nothing yet).
+    pub dropped: u64,
+}
+
 /// The discriminated payload of every frame: control frames and data events.
 ///
 /// Internally tagged on `t` with the body under `data` (ADR-RT002). The
@@ -1061,6 +1177,12 @@ pub enum Event {
     /// warning has `active = false`. Mirrors `alert.cleared`.
     #[serde(rename = "health.warning.cleared")]
     HealthWarningCleared(HealthWarning),
+    /// A resource-adaptive shed-load decision (topic `alerts`): the engine
+    /// relieved sustained overload by shedding work rather than blocking the
+    /// output clock (invariant #9). A discrete, lossless degradation-signal
+    /// event the consent-independent retention store records (§7.2).
+    #[serde(rename = "shed.load")]
+    ShedLoad(ShedLoad),
     /// Input source connection change (topic `inputs`).
     #[serde(rename = "input.connection")]
     InputConnection(InputConnection),
@@ -1160,6 +1282,7 @@ impl Event {
             Self::AlertCleared(_) => "alert.cleared",
             Self::HealthWarningRaised(_) => "health.warning.raised",
             Self::HealthWarningCleared(_) => "health.warning.cleared",
+            Self::ShedLoad(_) => "shed.load",
             Self::InputConnection(_) => "input.connection",
             Self::InputStreams(_) => "input.streams",
             Self::JobProgress(_) => "job.progress",
@@ -1194,9 +1317,12 @@ impl Event {
     /// map that stays valid when stale), while the device lifecycle events on
     /// the same topic stay lossless in the ring. The existing conflated lanes
     /// (`audio.meter`, `system.metrics`) answer `true` here too, so this
-    /// predicate is the single per-event source of truth for conflation. No
-    /// production consumer consults it yet: the pump's Devices handling lands
-    /// with the producers in DEV-A3.
+    /// predicate is the single per-event source of truth for conflation. The
+    /// control session pump consults it in production
+    /// (`multiview-control/src/realtime.rs`: ring exclusion is
+    /// `topic.is_high_rate() || event.is_conflated()`), and the
+    /// `timing.status` producer (`multiview-cli/src/timing_status.rs`)
+    /// publishes through that rule at ~1 Hz.
     #[must_use]
     pub const fn is_conflated(&self) -> bool {
         matches!(

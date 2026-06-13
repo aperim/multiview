@@ -392,6 +392,16 @@
         "summary": "A salvo was armed, taken, or cancelled (topic `tally`).",
         "title": "Salvo arm/take lifecycle"
       },
+      "ShedLoad": {
+        "contentType": "application/json",
+        "description": "A discrete, lossless degradation-signal event (invariant #9): the engine relieved sustained overload by shedding work rather than blocking the output clock (invariants #1 + #10). The `reason` says why a shed was chosen over hold/migrate; `scope` says what was shed (program / a specific input / a shared resource); `level` is the degradation-ladder rung after the shed and `dropped` the cumulative frames/units shed. The consent-independent retention store records these for the §7.2 support bundle (ADR-0052).",
+        "name": "ShedLoad",
+        "payload": {
+          "$ref": "#/components/schemas/ShedLoad"
+        },
+        "summary": "The engine shed work to relieve sustained overload (shed.load on topic `alerts`).",
+        "title": "Resource-adaptive shed-load decision"
+      },
       "Subscribe": {
         "contentType": "application/json",
         "name": "Subscribe",
@@ -1328,6 +1338,99 @@
         ],
         "type": "object"
       },
+      "ShedLoad": {
+        "description": "Data body of the `shed.load` event: a resource-adaptive shed-load decision (invariant #9). The consent-independent retention store records these for the §7.2 support bundle (ADR-0052).",
+        "properties": {
+          "dropped": {
+            "description": "Cumulative frames/units shed under this condition at the time of the event.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "level": {
+            "description": "The degradation-ladder level after the shed (0 = full quality).",
+            "format": "uint32",
+            "type": "integer"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ShedReason"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ShedScope"
+          }
+        },
+        "required": [
+          "reason",
+          "scope",
+          "level",
+          "dropped"
+        ],
+        "type": "object"
+      },
+      "ShedReason": {
+        "description": "Why the resource-adaptive controller shed load rather than holding or migrating the pipeline (invariant #9). Mirrors the engine's `ShedReason`; additive + non-exhaustive (ADR-RT002/RT003).",
+        "enum": [
+          "pinned",
+          "display_bound",
+          "no_better_home",
+          "anti_storm",
+          "encoder_overload"
+        ],
+        "type": "string"
+      },
+      "ShedScope": {
+        "description": "What a shed-load decision applied to (tagged by `kind`).",
+        "discriminator": "kind",
+        "oneOf": [
+          {
+            "description": "The shed touched the whole-program encode/egress path (a composited frame was dropped).",
+            "properties": {
+              "kind": {
+                "const": "program",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The shed degraded a specific input/tile (cheapest-impact-first ladder).",
+            "properties": {
+              "id": {
+                "description": "The configured input/source id the shed degraded.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "input",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The shed degraded a shared resource (e.g. a preview/encode pool).",
+            "properties": {
+              "kind": {
+                "const": "shared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ],
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
       "Subscribe": {
         "description": "Data body of `$subscribe` (client→server): subscribe to topics.",
         "properties": {
@@ -1785,7 +1888,10 @@
       "WarningCode": {
         "description": "Stable catalog code of a health warning (kebab-case). `#[non_exhaustive]`: the catalog grows over time, so a client must treat an unknown code as a forward-compatible warning, not an error.",
         "enum": [
-          "gpu-present-no-vulkan-adapter"
+          "gpu-present-no-vulkan-adapter",
+          "config-file-invalid",
+          "config-file-requires-restart",
+          "config-file-apply-incomplete"
         ],
         "type": "string"
       },

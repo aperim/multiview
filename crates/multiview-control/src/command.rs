@@ -104,6 +104,61 @@ impl ResolvedLayout {
     }
 }
 
+/// Resolve + solve a stored `{canvas, layout, cells}` body into the
+/// [`ResolvedLayout`] a [`Command::ApplyLayout`] carries, enforcing the
+/// ADR-W019 Class-1 pinned-canvas gate.
+///
+/// The **one** resolve machinery with two triggers (ADR-W020): the
+/// `POST /commands/apply-layout` route calls this with the repository body,
+/// and the config-file watcher calls it with the file's
+/// `{canvas, layout, cells}` — both off the render thread, so the engine's
+/// frame-boundary drain only ever swaps a pre-solved artifact.
+///
+/// The gate compares against `running_canvas` — the immutable pinned-canvas
+/// snapshot captured at seed time (ADR-W019 MAJOR-1); [`None`] **fails
+/// closed**: without a known running canvas no document-carrying apply may be
+/// built. Cadence equality is by value (`Fps`/`Rational` cross-multiply), so
+/// a non-reduced `50/2` matches a running `25/1`.
+///
+/// # Errors
+///
+/// [`ControlError::Validation`](crate::error::ControlError::Validation) when
+/// the body does not parse as a layout document, does not solve, was authored
+/// for a different canvas (Class-2, ADR-R004), or the running canvas is
+/// unknown (the gate fails closed).
+pub fn resolve_layout_document(
+    id: &str,
+    body: &serde_json::Value,
+    running_canvas: Option<&multiview_config::LayoutCanvas>,
+) -> Result<ResolvedLayout, crate::error::ControlError> {
+    use crate::error::ControlError;
+    let document = multiview_config::LayoutDocument::from_body(body).map_err(|e| {
+        ControlError::Validation(format!(
+            "stored layout {id:?} does not parse as a {{canvas, layout, cells}} document: {e}"
+        ))
+    })?;
+    let solved = document.solve_named(id).map_err(|e| {
+        ControlError::Validation(format!("stored layout {id:?} does not solve: {e}"))
+    })?;
+    let Some(running) = running_canvas else {
+        return Err(ControlError::Validation(format!(
+            "layout {id:?} cannot be applied live: the running canvas is unknown to the \
+             control plane (no pinned-canvas snapshot was seeded), so the Class-1 gate \
+             fails closed (ADR-W019)"
+        )));
+    };
+    let new = &document.canvas;
+    if running != new {
+        return Err(ControlError::Validation(format!(
+            "layout {id:?} was authored for canvas {}x{}@{} but the running session's canvas \
+             is pinned at {}x{}@{} — a Class-2 change (output geometry/cadence cannot change \
+             live; ADR-R004)",
+            new.width, new.height, new.fps, running.width, running.height, running.fps
+        )));
+    }
+    Ok(ResolvedLayout::new(solved, document))
+}
+
 /// A control-plane command destined for the engine.
 ///
 /// These are the management mutations that must be applied on the data plane
@@ -252,6 +307,31 @@ pub enum Command {
         /// The source id to remove.
         id: String,
     },
+    /// Create **or replace** a managed overlay document on the **running**
+    /// engine (ADR-W022 live apply, invariant #11). Carries the full,
+    /// already-validated (ADR-W015) config document; the engine drain upserts
+    /// it by id into the working overlay set at a frame boundary and publishes
+    /// the set through a lock-free slot the bake consumer re-derives from —
+    /// pure data mutation, no rasterization, no I/O. Kinds the running build
+    /// does not render are mirrored + warned (never lied about); the route's
+    /// `X-Multiview-Apply` header already declared `restart` for them.
+    UpsertOverlay {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The validated overlay document to apply (boxed: the document's
+        /// verbatim params map is larger than the other command variants).
+        overlay: Box<multiview_config::Overlay>,
+    },
+    /// Remove a managed overlay document from the **running** engine
+    /// (ADR-W022): the drain drops it from the working overlay set at a frame
+    /// boundary and republishes the set; a rendered face disappears on the
+    /// next baked frame. Removing an unknown id is a logged no-op.
+    RemoveOverlay {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The overlay id to remove.
+        id: String,
+    },
     /// Force (or clear) a manual tally override on a tile/element, taking
     /// precedence over the arbitrated bus state until released. A `color` of
     /// [`None`] clears the override and returns the element to arbitration.
@@ -282,6 +362,8 @@ impl Command {
             | Self::CancelSalvo { op, .. }
             | Self::UpsertSource { op, .. }
             | Self::RemoveSource { op, .. }
+            | Self::UpsertOverlay { op, .. }
+            | Self::RemoveOverlay { op, .. }
             | Self::SetTallyOverride { op, .. } => op,
         }
     }
@@ -302,6 +384,8 @@ impl Command {
             Self::CancelSalvo { .. } => "cancel_salvo",
             Self::UpsertSource { .. } => "upsert_source",
             Self::RemoveSource { .. } => "remove_source",
+            Self::UpsertOverlay { .. } => "upsert_overlay",
+            Self::RemoveOverlay { .. } => "remove_overlay",
             Self::SetTallyOverride { .. } => "set_tally_override",
         }
     }

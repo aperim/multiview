@@ -76,12 +76,14 @@
 //!
 //! [ADR-0044]: https://github.com/aperim/multiview/blob/main/docs/decisions/ADR-0044.md
 
+pub mod audio;
 pub mod canvas;
 pub mod device;
 pub mod flip;
 pub mod mailbox;
 pub mod mode;
 pub mod sink;
+pub mod strategy;
 
 /// The real drm-rs + gbm KMS backend (feature `display-kms`). Everything that
 /// touches an ioctl lives here; its hardware paths are exercised only on
@@ -89,7 +91,7 @@ pub mod sink;
 #[cfg(feature = "display-kms")]
 pub mod kms;
 
-pub use canvas::{nv12_to_xrgb, CanvasError, DisplayCanvas};
+pub use canvas::{nv12_to_xrgb, CanvasError, DisplayCanvas, DmabufImage, DmabufPlane};
 pub use device::{
     ConnectorDesc, ConnectorSelector, DisplayError, FlipEvent, HeadSetup, KmsBackend, SubmitError,
 };
@@ -100,3 +102,7 @@ pub use mode::{
     SelectedMode,
 };
 pub use sink::{DisplaySink, DisplaySinkConfig, DisplaySinkHandle, DisplayStats, StatsSnapshot};
+pub use strategy::{
+    parse_in_formats_blob, plane_supports_nv12, select_buffer_strategy, BufferStrategy,
+    CanvasDelivery, DrmFormat, PlaneFormatCaps, ScanoutCaps,
+};

@@ -4,7 +4,7 @@
 > [docs/decisions](../decisions/): [ADR-0048](../decisions/ADR-0048.md) (endpoint),
 > [ADR-T014](../decisions/ADR-T014.md) (WHIP ingest), [ADR-0049](../decisions/ADR-0049.md)
 > (WebRTC outputs), [ADR-P006](../decisions/ADR-P006.md) (WHEP preview completion),
-> [ADR-W020](../decisions/ADR-W020.md) (SPA player & management).
+> [ADR-W023](../decisions/ADR-W023.md) (SPA player & management).
 
 ---
 
@@ -41,7 +41,7 @@ Five pillars, shipped together (no "core now, wiring later"):
    honest fidelity labels.
 4. **SPA**: a `<WhepPlayer>` component for program/input/output/layout-editor previews with
    automatic fallback to the existing JPEG-poll path; forms for the new source/output kinds;
-   in-app docs; a capabilities probe ([ADR-W020](../decisions/ADR-W020.md)).
+   in-app docs; a capabilities probe ([ADR-W023](../decisions/ADR-W023.md)).
 5. **Docs/process**: this brief; the five ADRs above; conventions §3/§4 updates (crate row +
    canonical features); capability-matrix and work-schedule updates.
 
@@ -450,7 +450,7 @@ build** can encode (H.264 preferred, else VP8) — never a hard-coded assumption
   (`crates/multiview-preview/src/focus.rs`) with tracing — preview WebRTC rides the existing
   topmost (cheapest-to-shed) preview rungs, shed before any program lever moves (invariant #9).
 
-### 7.4 Control surface & SPA (summary — [ADR-W020](../decisions/ADR-W020.md))
+### 7.4 Control surface & SPA (summary — [ADR-W023](../decisions/ADR-W023.md))
 
 `GET /api/v1/preview/capabilities` reports
 `{ webrtc, scopes: { program: { whep, fidelity }, inputs: { whep }, outputs: { whep } },
@@ -586,4 +586,4 @@ tool.
 | [ADR-T014](../decisions/ADR-T014.md) | WHIP ingest: endpoint semantics, auth, source-kind schema, media path, PLI policy + OBS profile, lifecycle, apply classification (§4, §6.2) |
 | [ADR-0049](../decisions/ADR-0049.md) | WebRTC program outputs: `Output::Webrtc` + `Output::WhipPush`, encode-once fan, B-frame validation, force-IDR seam, the Opus program rendition, viewer caps, push redirect/reconnect, never-shed status (§5, §6.1) |
 | [ADR-P006](../decisions/ADR-P006.md) | WHEP preview completion: native-transport relocation, encoder ladder, audio in the seam, scopes, fidelity labels, capabilities endpoint, PRV-4b glue, answer-SDP policy (§7) |
-| [ADR-W020](../decisions/ADR-W020.md) | SPA: `<WhepPlayer>`, fallback ladder + badge, capabilities probe, forms for the new kinds, docs/i18n/test strategy, JPEG endpoints entering OpenAPI (§7.4) |
+| [ADR-W023](../decisions/ADR-W023.md) | SPA: `<WhepPlayer>`, fallback ladder + badge, capabilities probe, forms for the new kinds, docs/i18n/test strategy, JPEG endpoints entering OpenAPI (§7.4) |

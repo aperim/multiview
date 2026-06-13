@@ -339,6 +339,33 @@ export interface SetRate {
   readonly topic: string;
 }
 
+/** Data body of the `shed.load` event: a resource-adaptive shed-load decision (invariant #9). The consent-independent retention store records these for the §7.2 support bundle (ADR-0052). */
+export interface ShedLoad {
+  /** Cumulative frames/units shed under this condition at the time of the event. */
+  readonly dropped: number;
+  /** The degradation-ladder level after the shed (0 = full quality). */
+  readonly level: number;
+  readonly reason: ShedReason;
+  readonly scope: ShedScope;
+}
+
+/** Why the resource-adaptive controller shed load rather than holding or migrating the pipeline (invariant #9). Mirrors the engine's `ShedReason`; additive + non-exhaustive (ADR-RT002/RT003). */
+export type ShedReason = "pinned" | "display_bound" | "no_better_home" | "anti_storm" | "encoder_overload";
+
+/** What a shed-load decision applied to (tagged by `kind`). */
+export type ShedScope =
+  | {
+  readonly kind: "program";
+}
+  | {
+  /** The configured input/source id the shed degraded. */
+  readonly id: string;
+  readonly kind: "input";
+}
+  | {
+  readonly kind: "shared";
+};
+
 /** Data body of `$subscribe` (client→server): subscribe to topics. */
 export interface Subscribe {
   /** Optional resource-id allowlist. */
@@ -497,7 +524,7 @@ export interface WallClockRef {
 }
 
 /** Stable catalog code of a health warning (kebab-case). `#[non_exhaustive]`: the catalog grows over time, so a client must treat an unknown code as a forward-compatible warning, not an error. */
-export type WarningCode = "gpu-present-no-vulkan-adapter";
+export type WarningCode = "gpu-present-no-vulkan-adapter" | "config-file-invalid" | "config-file-requires-restart" | "config-file-apply-incomplete";
 
 /** Severity of a health warning (sibling of AlertSeverity). */
 export type WarningSeverity = "info" | "warning" | "critical";

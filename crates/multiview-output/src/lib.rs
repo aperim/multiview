@@ -53,9 +53,21 @@
 /// device seam; only `display::kms` (the real ioctl backend, feature
 /// `display-kms`) touches hardware.
 pub mod display;
+
+/// DEV-C1 / ADR-M010 — the shared **outbound presentation epoch** cell: the
+/// per-program `WallClockRef` (output-PTS ns ↔ disciplined wall ns) the
+/// engine-side sampler publishes and the HLS PDT / RTCP SR egress consumers
+/// read. Pure Rust, always compiled.
+pub mod epoch;
 pub mod error;
 pub mod fanout;
 pub mod hls;
+
+/// DEV-C1 / ADR-M010 — RTCP **Sender Report** building stamped from the same
+/// outbound epoch: exact integer NTP/RTP field math + the 28-byte wire form +
+/// the [`rtcp::SrStamper`] seam the RTSP serving layer consumes. Pure Rust,
+/// always compiled.
+pub mod rtcp;
 
 /// GP-6 — the per-stream monotonic clamp+offset packet re-stamp (ADR-0030 §4
 /// "Re-stamp rule (#3 for the copy path)"). The COPY-path invariant-#3
@@ -103,8 +115,10 @@ pub mod guarded;
 #[cfg(feature = "ndi")]
 pub mod ndi;
 
+pub use epoch::SharedEpoch;
 pub use error::{Error, Result};
 pub use restamp::RestampAccumulator;
+pub use rtcp::{rtp_timestamp_at, NtpTimestamp, SenderReport, SrStamper};
 pub use rtsp::{RtspPublishError, RtspPublishTarget};
 pub use rtsp_server::{
     units_to_nanos, BoundedPacketQueue, RtspCapsError, RtspCodec, RtspMount, RtspMountError,

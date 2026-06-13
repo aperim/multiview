@@ -10,7 +10,13 @@
 // `as`-casts.
 
 /** The resource collections the SPA manages (the REST path segment). */
-export type ResourceKind = 'sources' | 'outputs' | 'overlays' | 'probes';
+export type ResourceKind =
+  | 'sources'
+  | 'outputs'
+  | 'overlays'
+  | 'probes'
+  | 'devices'
+  | 'sync-groups';
 
 /**
  * A persisted resource record, exactly as the control plane returns it: a stable
@@ -42,6 +48,7 @@ export type SourceKind =
   | 'bars'
   | 'solid'
   | 'clock'
+  | 'timer'
   | 'rtsp'
   | 'hls'
   | 'youtube'
@@ -63,6 +70,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'bars',
   'solid',
   'clock',
+  'timer',
   'rtsp',
   'hls',
   'youtube',
@@ -96,8 +104,8 @@ export interface SourceView {
   /**
    * The configured locator for display — the kind's key field: `url` for the
    * network kinds, the source `name` for NDI, the `path` for file. Absent for
-   * the synthetic kinds (`bars`/`solid`/`clock`, and the legacy `test` alias),
-   * which carry no locator.
+   * the synthetic kinds (`bars`/`solid`/`clock`/`timer`, and the legacy `test`
+   * alias), which carry no locator.
    */
   readonly locator: string | undefined;
 }

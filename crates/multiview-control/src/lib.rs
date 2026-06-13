@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod account_audit;
 pub mod alarm_ingest;
 pub mod alarm_store;
 pub mod audio_routing;
@@ -45,12 +46,15 @@ pub mod audit;
 pub mod auth;
 pub mod command;
 pub mod concurrency;
+pub mod config_lock;
 pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
+pub mod live_apply;
 pub mod nmos;
 pub mod notify;
+pub mod pending_actions;
 pub mod preview;
 pub mod problem;
 pub mod realtime;
@@ -61,12 +65,16 @@ pub mod routes;
 pub mod routing;
 pub mod salvo_store;
 pub mod state;
+pub mod support_bundle;
+pub mod support_store;
 pub mod tally_ingest;
 pub mod tally_state;
+pub mod telemetry_consent;
 pub(crate) mod typed_resources;
 pub mod versioning;
 pub mod warning_ingest;
 pub mod warning_store;
+pub mod watch_status;
 
 #[cfg(feature = "embed-web")]
 pub mod spa;
@@ -83,6 +91,10 @@ pub mod sqlite;
 use axum::routing::get;
 use axum::Router;
 
+pub use account_audit::{
+    AccountAuditEntry, AccountAuditKind, AccountAuditPage, AccountAuditRepository,
+    AccountAuditStore, InMemoryAccountAudit, ACCOUNT_AUDIT_KIND, DEFAULT_ACCOUNT_AUDIT_CAPACITY,
+};
 pub use alarm_ingest::{alarm_transition, ingest_step, run_alarm_ingest, IngestStep};
 pub use alarm_store::{
     AlarmFilter, AlarmRepository, InMemoryAlarmStore, VersionedAlarm, ALARM_KIND,
@@ -96,12 +108,13 @@ pub use auth::{
     authorize_object, authorize_output, provision_admin_keys, Action, ApiKeyStore, Principal, Role,
 };
 pub use command::{
-    command_bus, Command, CommandReceiver, CommandSender, OperationId, ResolvedLayout, SubmitError,
+    command_bus, resolve_layout_document, Command, CommandReceiver, CommandSender, OperationId,
+    ResolvedLayout, SubmitError,
 };
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use devices::{
-    DeviceBroadcaster, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent, OutputTarget,
-    SourceCandidate,
+    DeviceBroadcaster, DeviceDriverRegistry, DeviceLifecycle, DeviceStatusRegistry, LifecycleEvent,
+    ModeConvergence, OutputTarget, SourceCandidate, WorkMode, ZowietekDriver,
 };
 pub use error::{ControlError, ControlResult};
 pub use is07::{
@@ -109,6 +122,7 @@ pub use is07::{
     Is07EventType, Is07Message, Is07Payload, Is07Subscription, Is07Timing,
 };
 pub use jwt::{JwtError, JwtValidator, SignatureAlgorithm};
+pub use live_apply::{LiveApplyCaps, OverlayLiveCapability};
 pub use nmos::is04::{Device, MediaFormat, Node, Receiver, Registration, ResourceCore, Sender};
 pub use nmos::is05::{
     parse_sdp_transport, Activation, ActivationMode, ConnectionRequest, ConnectionState,
@@ -120,6 +134,11 @@ pub use nmos::{nmos_router, NmosRegistry, NMOS_RECEIVER_KIND};
 pub use notify::email::{EmailEnvelope, EmailMessage};
 pub use notify::webhook::{WebhookPayload, WebhookRequest};
 pub use notify::{AlarmTransitionKind, Destination, RoutingRule, SeverityRouter};
+pub use pending_actions::{
+    CancelOutcome, ExecuteOutcome, InMemoryPendingActions, PendingAction, PendingActionKind,
+    PendingActionRepository, PendingActionState, PendingActionStore,
+    DEFAULT_PENDING_ACTION_CAPACITY, PENDING_ACTION_KIND,
+};
 pub use preview::{
     no_preview, no_whep, FocusCaps, GatedWhep, NoPreview, NoWhep, PreviewProvider, SharedPreview,
     SharedWhep, WhepAnswer, WhepProvider, WhepReject, WhepScope,
@@ -139,11 +158,27 @@ pub use router::{
 };
 pub use routing::{classify, DestinationProfile, RouteClass, RoutePlan, RouteRequest, RouteTarget};
 pub use salvo_store::{InMemorySalvoStore, SalvoRepository, VersionedSalvo, SALVO_KIND};
-pub use state::{seed_resources, AckClock, AppState, EngineStateSnapshot, SeededResources};
+pub use state::{
+    seed_resources, AckClock, AppState, EngineStateSnapshot, LicenceState, SeededResources,
+};
+pub use support_bundle::{
+    compose_bundle, redact_config, Bundle, BundleInclude, BundleRepository, BundleRequest,
+    BundleStore, BundleWindow, ConfigSources, InMemoryBundles, Redaction, RedactionReason,
+};
+pub use support_store::{
+    support_entitlement, support_route, CloseOutcome, DataRequest, DataRequestOutcome,
+    DataRequestRepository, DataRequestState, DataRequestStore, FirstLine, InMemoryDataRequests,
+    InMemoryTickets, NewTicket, ReplyOutcome, SupportEntitlement, SupportRoute, Ticket,
+    TicketContext, TicketRepository, TicketSeverity, TicketState, TicketStore, TicketSummary,
+};
 pub use tally_ingest::{run_tally_ingest, tally_ingest_step, TallyIngestStep};
 pub use tally_state::{
     tally_observation, target_key, InMemoryProfileStore, OverrideRegistry, TallyEntry, TallyMirror,
     TallyProfileRepository, VersionedProfile, TALLY_PROFILE_KIND,
+};
+pub use telemetry_consent::{
+    ConsentActor, ConsentRecord, ConsentState, DiagnosticsSnapshotStore, SnapshotStatus,
+    DEFAULT_SNAPSHOT_CAPACITY,
 };
 pub use versioning::{
     diff_documents, ConfigRevision, ConfigVersionStore, DocumentDiff, InMemoryConfigVersionStore,
@@ -154,6 +189,7 @@ pub use warning_ingest::{
     CompositeMismatchView, WarningIngestStep,
 };
 pub use warning_store::{InMemoryWarningStore, WarningFilter, WarningRepository, WARNING_KIND};
+pub use watch_status::{ConfigWatchStatus, WatchStamp, WatchStatusBody};
 
 /// Build the complete control-plane [`Router`] for the given [`AppState`].
 ///
@@ -170,7 +206,18 @@ pub fn router(state: AppState) -> Router {
         .route("/events", get(realtime::sse_handler))
         // Unauthenticated auth-mode discovery: the SPA reads this before it has a
         // token, to decide whether to show a login gate (and to validate a key).
-        .route("/auth/status", get(realtime::auth_status_handler));
+        .route("/auth/status", get(realtime::auth_status_handler))
+        // The Conspect config-lock interceptor (S2 backend, ADR-0050 §5): one
+        // additive guard over the whole `/api/v1` surface that refuses
+        // *configuration* mutations with a `409 config_locked` problem when the
+        // entitlement ladder is locked. Reads + operational continuity + the
+        // licence recovery path pass through. It is wait-free (a lock-free store
+        // read) and holds no engine handle — a locked config never stops a running
+        // program (invariant #1/#10).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            config_lock::config_lock_guard,
+        ));
 
     let app = Router::new()
         .nest("/api/v1", api)
