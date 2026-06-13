@@ -246,6 +246,88 @@ pub struct WebrtcConfig {
         skip_serializing_if = "is_default_cors_allow_origins"
     )]
     pub cors_allow_origins: Vec<String>,
+    /// The STUN + TURN servers the endpoint uses for NAT traversal (ADR-0048
+    /// §5.1 — the operator's in-crate TURN client). Each entry is a `stun:` /
+    /// `turn:` / `turns:` URL plus, for TURN, the credentials (long-term
+    /// `username`/`password` or coturn-style ephemeral REST `username` +
+    /// `static_auth_secret`). The cli maps these onto the crate's plain
+    /// `EndpointConfig` ICE-server list. Default empty (host candidates +
+    /// `advertised_addresses` only — the self-hosted / port-forwarded case).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice_servers: Vec<IceServerConfig>,
+}
+
+/// Whether an [`IceServerConfig`] entry is a STUN (binding-only) or a TURN
+/// (relay) server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IceServerKindConfig {
+    /// STUN binding only (server-reflexive discovery).
+    Stun,
+    /// TURN relay allocation (RFC 5766 / RFC 8656).
+    Turn,
+}
+
+/// One configured ICE server (`stun:` / `turn:` / `turns:`), with optional TURN
+/// credentials (ADR-0048 §5.1).
+///
+/// The `password` and `static_auth_secret` field names are caught by the
+/// control-plane config redactor (`multiview-control::redact_config` drops any
+/// key containing `password`/`secret`/…), so the secret never leaks on export.
+/// The `username` is not a secret (matching coturn's posture).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct IceServerConfig {
+    /// STUN or TURN.
+    pub kind: IceServerKindConfig,
+    /// The server URL (e.g. `stun:[2001:db8::53]:3478`,
+    /// `turn:[2001:db8::55]:3478`). IPv6 literals are bracketed (ADR-0042).
+    pub url: String,
+    /// TURN long-term username, or the `name` part of an ephemeral-REST
+    /// username. Required (with credentials) for a TURN server, ignored for STUN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// TURN long-term cleartext password (RFC 5766 §4). A **secret** — the field
+    /// name is redactor-caught. `None` when using ephemeral REST credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// The coturn `use-auth-secret` shared secret for ephemeral REST credentials
+    /// (`draft-uberti-behave-turn-rest-00`). A **secret** — the field name is
+    /// redactor-caught. `None` for static long-term credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_auth_secret: Option<String>,
+    /// The TURN realm, if pre-known (otherwise learned from the server's `401`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm: Option<String>,
+}
+
+impl IceServerConfig {
+    /// Validate this ICE-server entry: a non-empty URL, and — for TURN — usable
+    /// credentials (a `password` or a `static_auth_secret`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] naming the violated rule.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.url.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "webrtc.ice_servers entry has an empty url (e.g. \"stun:[2001:db8::53]:3478\")"
+                    .to_owned(),
+            ));
+        }
+        if self.kind == IceServerKindConfig::Turn
+            && self.password.is_none()
+            && self.static_auth_secret.is_none()
+        {
+            return Err(ConfigError::Validation(format!(
+                "webrtc.ice_servers TURN server {:?} requires credentials \
+                 (a password, or a static_auth_secret for ephemeral REST)",
+                self.url
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for WebrtcConfig {
@@ -259,6 +341,7 @@ impl Default for WebrtcConfig {
             max_sessions: DEFAULT_MAX_SESSIONS,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT,
             cors_allow_origins: default_cors_allow_origins(),
+            ice_servers: Vec::new(),
         }
     }
 }
@@ -312,6 +395,9 @@ impl WebrtcConfig {
                         .to_owned(),
                 ));
             }
+        }
+        for server in &self.ice_servers {
+            server.validate()?;
         }
         Ok(())
     }

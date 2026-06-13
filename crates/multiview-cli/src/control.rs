@@ -93,6 +93,9 @@ pub async fn bind_and_serve<F>(
     // The WHEP focus transport (ADR-P006), already cap-decorated. `None` keeps
     // the default `NoWhep` (a pure build sheds every focus to the JPEG ladder).
     whep: Option<multiview_control::SharedWhep>,
+    // The WHIP ingest provider (ADR-T014). `None` keeps the default `NoWhip`
+    // (every publish answers `503`; routes stay present + authz-enforced).
+    whip: Option<multiview_control::SharedWhip>,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
     live_apply: multiview_control::LiveApplyCaps,
@@ -188,6 +191,12 @@ where
     .with_discovery_config(config.discovery.clone().unwrap_or_default());
     if let Some(delivery) = delivery {
         state = state.with_cast_delivery(delivery);
+    }
+    // The WHIP ingest provider (ADR-T014): when the binary wired the native
+    // endpoint, install it so a publish negotiates a real session; otherwise the
+    // default `NoWhip` answers `503` (routes stay present + authz-enforced).
+    if let Some(whip) = whip {
+        state = state.with_whip(whip);
     }
 
     // Install the real mDNS browser when the `discovery` feature is built, so
@@ -2591,6 +2600,7 @@ input_id = "in_b"
             commands,
             multiview_control::no_preview(),
             // whep: the default (no native transport) — a pure build path.
+            None,
             None,
             None,
             None,

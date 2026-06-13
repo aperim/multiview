@@ -60,12 +60,13 @@ multiview-output = { workspace = true }
 multiview-audio = { workspace = true }
 multiview-overlay = { workspace = true }
 multiview-preview = { workspace = true }
-# The single native WebRTC transport endpoint (ADR-0048): WHEP preview egress +
-# WHIP ingest + WebRTC outputs share one str0m owner. OPTIONAL, pulled in ONLY by
-# the cli `webrtc-native` feature (which also turns on the crate's `native`
-# feature: the real ICE/DTLS/SRTP stack + the single dual-stack UDP socket). The
-# default and pure builds never link it and stay GPU/native-free; cargo-deny
-# scans the default build only, so the str0m closure never enters the deny graph.
+# The single native WebRTC transport endpoint (ADR-0048): WHIP ingest sources,
+# WHEP preview/output egress, and the whip_push client all mux on one str0m
+# owner. OPTIONAL, pulled in ONLY by the cli `webrtc-native` feature (which also
+# turns on the crate's own `native` feature: the real ICE/DTLS/SRTP stack + the
+# single dual-stack UDP socket). The default + `webrtc` (pure seams) builds never
+# link it and stay GPU/native-free; `cargo deny` scans the default build only
+# (`all-features = false`), so the str0m closure never enters the deny graph.
 multiview-webrtc = { workspace = true, optional = true }
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -164,6 +165,14 @@ required-features = ["ffmpeg", "overlay"]
 name = "incontainer_text_ingest"
 required-features = ["ffmpeg", "overlay"]
 
+# WHIP ingest end-to-end (ADR-T014): synthetic RTP -> the per-session ring ->
+# RtpRingEngine -> WebRtcProducer -> typed MediaEvents, plus the isolation
+# invariants (bounded drop-oldest; a dropped publisher ends the stream so the
+# tile rides NO_SIGNAL without stalling other tiles). Needs `webrtc-native`.
+[[test]]
+name = "whip_ingest"
+required-features = ["webrtc-native"]
+
 # Feature presets for the `multiview` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented
@@ -176,23 +185,29 @@ default = ["software"]
 # Software-only reference path (always available).
 software = []
 
-# The pure WHEP/WebRTC focus *seam* (no native stack): the SDP offer/answer +
-# preview-encoder-selection logic and the transport seam in `multiview-preview`.
-# GPU/native-free, so it stays CI-lintable; on its own it serves no live media
-# (the control plane advertises `webrtc: false` and the SPA stays on the JPEG
-# ladder). Turned into a live transport by `webrtc-native`.
-webrtc = ["multiview-preview/webrtc"]
+# WebRTC pure seams (ADR-0048 §11): the `multiview-preview` (WHEP preview egress:
+# SDP offer/answer + preview-encoder-selection logic + transport seam) and
+# `multiview-input` (WHIP ingest: SDP negotiation, the Opus/H.264 depacketizers,
+# the MediaEngine pull) WebRTC seams — both already exist and add NO native deps,
+# so this stays in a pure-Rust / `cargo deny`-clean build. On its own it serves
+# no live media (the control plane advertises `webrtc: false` and the SPA stays
+# on the JPEG ladder). It does NOT link str0m; the live transport is
+# `webrtc-native`.
+webrtc = ["multiview-preview/webrtc", "multiview-input/webrtc"]
 
-# Live WHEP preview egress (ADR-P006 / ADR-0048): wire the native str0m
-# ICE/DTLS/SRTP `WhepEgress` from `multiview-webrtc` into the control plane so a
-# browser can WHEP-play a live preview tap (program/input/output) over real
-# DTLS/SRTP with audio, TURN-enabled. Pulls `multiview-webrtc/native` (the single
-# dual-stack UDP socket + str0m owner) and implies `ffmpeg` (the real preview
-# H.264/VP8/Opus encoders ride the libav encode path). OFF by default: it links a
-# native WebRTC stack (str0m + an aws-lc-rs C/assembly crypto blob), so the
-# baseline build stays pure-Rust and CI-green. The cli itself adds NO `unsafe`
-# and stays `forbid(unsafe_code)`; all native code is owned by `multiview-webrtc`
-# and `multiview-ffmpeg`. `cargo deny` runs `all-features = false` so the str0m
+# WebRTC NATIVE transport (ADR-0048 §11, ADR-T014, ADR-P006): the single str0m
+# ICE/DTLS/SRTP endpoint (`multiview-webrtc/native`) that drives WHIP ingest
+# sources AND WHEP preview/output egress — wired into the control plane so a
+# browser can WHIP-publish or WHEP-play a live preview tap (program/input/output)
+# over real DTLS/SRTP with audio, TURN-enabled. Pulls `multiview-webrtc/native`
+# (the single dual-stack UDP socket + str0m owner) and implies `ffmpeg` (the WHIP
+# ingest path decodes depacketized H.264/Opus via `multiview-ffmpeg` into the
+# standard NV12 / AudioStore pipeline; the real preview H.264/VP8/Opus encoders
+# ride the same libav encode path). OFF by default: it links a native WebRTC
+# stack (str0m + an aws-lc-rs C/assembly crypto blob), so the baseline build
+# stays pure-Rust and CI-green. The cli itself adds NO `unsafe` and stays
+# `forbid(unsafe_code)`; all native code is owned by `multiview-webrtc` and
+# `multiview-ffmpeg`. `cargo deny` runs `all-features = false` so the str0m
 # closure never enters the default LGPL-clean graph.
 webrtc-native = [
     "webrtc",
@@ -392,13 +407,13 @@ nvidia = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
+    # WebRTC: the shipped deploy image serves WHIP ingest + WHEP preview/output
+    # egress over the single native str0m endpoint, over real DTLS/SRTP with
+    # audio, TURN-enabled (ADR-0048 §11 / ADR-T014 / ADR-P006).
+    "webrtc-native",
     # Live local-mesh discovery (Conspect, ADR-0051 §6): the shipped deploy image
     # runs the real mDNS announce/browse loop.
     "mesh-mdns",
-    # Live WHEP preview egress over real DTLS/SRTP (ADR-P006): the shipped deploy
-    # image can WHEP-play a preview tap (program/input/output) with audio, TURN-
-    # enabled.
-    "webrtc-native",
 ]
 
 # Apple Silicon / Intel macOS: VideoToolbox codecs + Metal compositor + FFmpeg.
@@ -415,10 +430,11 @@ apple = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
+    # WebRTC ingest + WHEP preview/output egress over the native str0m endpoint
+    # (ADR-0048 §11 / ADR-P006).
+    "webrtc-native",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
-    # Live WHEP preview egress (ADR-P006).
-    "webrtc-native",
 ]
 
 # Linux VAAPI/QSV: VAAPI + QuickSync codecs + wgpu compositor + FFmpeg.
@@ -442,10 +458,11 @@ linux-vaapi = [
     "multiview-input/ffmpeg",
     "multiview-output/ffmpeg",
     "multiview-audio/ffmpeg",
+    # WebRTC ingest + WHEP preview/output egress over the native str0m endpoint
+    # (ADR-0048 §11 / ADR-P006).
+    "webrtc-native",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
-    # Live WHEP preview egress (ADR-P006).
-    "webrtc-native",
 ]
 
 # Everything non-GPL: all codec backends, every compositor backend, FFmpeg,

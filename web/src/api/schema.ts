@@ -1778,6 +1778,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/whip/{source_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/whip/{source_id}` — publish: an SDP offer in, `201` + answer
+         *     SDP + `Location` out (RFC 9725).
+         */
+        post: operations["whip_publish"];
+        delete?: never;
+        /**
+         * `OPTIONS /api/v1/whip/{source_id}` — CORS preflight; advertises
+         *     `Accept-Post: application/sdp`. Unauthenticated by browser construction.
+         */
+        options: operations["whip_options"];
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/whip/{source_id}/sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/whip/{source_id}/sessions/{session_id}` — tear the session
+         *     down. `200` (idempotent within the tombstone window), `404` for an unknown id.
+         */
+        delete: operations["whip_delete"];
+        options?: never;
+        head?: never;
+        /**
+         * `PATCH /api/v1/whip/{source_id}/sessions/{session_id}` — **`405`** (vanilla
+         *     ICE; trickle / ICE restart unimplemented, ADR-T014 §2). `Allow: DELETE,
+         *     OPTIONS`.
+         */
+        patch: operations["whip_patch"];
+        trace?: never;
+    };
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
         parameters: {
             query?: never;
@@ -10226,6 +10275,191 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Problem"];
                 };
+            };
+        };
+    };
+    whip_publish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc source id to publish to. */
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        /** @description SDP offer */
+        requestBody: {
+            content: {
+                "application/sdp": string;
+            };
+        };
+        responses: {
+            /** @description Session created; SDP answer in the body, Location at the session resource. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/sdp": unknown;
+                };
+            };
+            /** @description Malformed SDP offer. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Missing credentials (the source token or a Write API key). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A credential lacking publish rights. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The offer shares no supported codec (H.264 + Opus). */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A publisher already holds this source. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not application/sdp. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No ingest transport available to admit the publisher. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    whip_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc source id. */
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Preflight; Accept-Post: application/sdp. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    whip_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc source id. */
+                source_id: string;
+                /** @description The WHIP session id from the publish Location. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session released (idempotent within the tombstone window). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A credential lacking rights. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such live/known session. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    whip_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc source id. */
+                source_id: string;
+                /** @description The WHIP session id. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trickle ICE / ICE restart are not supported (vanilla ICE). */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -976,6 +976,13 @@ pub struct Pipeline {
     /// thread per plan; the threads publish into [`Self::stores`] as frames
     /// arrive (never buffered ahead of the clock — the BUG-2 fix).
     ingest_plans: Vec<IngestPlan>,
+    /// The shared WHIP publisher rendezvous (ADR-T014): the control plane's
+    /// `WhipProvider` writes a negotiated publisher into it and each webrtc
+    /// source's `drive_webrtc` loop reads. Exposed to the run wiring via
+    /// [`Self::webrtc_registry`] so the same registry backs the provider. Only
+    /// under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    webrtc_registry: crate::webrtc_ingest::WhipRegistry,
     /// Per-source last-good **audio** stores (AUD-2), keyed by source id. Shared
     /// (`Arc`) between each source's audio decode thread (writer) and the
     /// [`ProgramBus`](multiview_audio::program::ProgramBus) the bake consumer
@@ -1104,6 +1111,19 @@ struct IngestPlan {
     /// and decode opens libav's default CUDA device (today's behaviour). Consumed
     /// by [`open_and_stream`] → [`StreamVideoDecoder::new_preferring_hw`].
     cuda_ordinal: Option<String>,
+    /// The shared WHIP publisher rendezvous (ADR-T014), present only for a
+    /// `webrtc` source under `webrtc-native`: [`drive_webrtc`] samples this
+    /// registry for the source's connected publisher (the negotiated RTP ring).
+    /// `None` for every other source kind / build.
+    #[cfg(feature = "webrtc-native")]
+    webrtc_registry: Option<crate::webrtc_ingest::WhipRegistry>,
+    /// The source's `AudioStore` for a `webrtc` source's de-embedded Opus
+    /// (ADR-T014 §5): WHIP video + audio arrive on one RTP flow, so the WHIP
+    /// drive loop publishes the decoded 48 kHz PCM here directly (unlike file/URL
+    /// sources, whose audio is a separate decode thread). `None` when audio is
+    /// off / not a webrtc source. Only under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    webrtc_audio_store: Option<Arc<multiview_audio::store::AudioStore>>,
 }
 
 /// The in-container subtitle decode route stashed on an [`IngestPlan`]: which
@@ -1253,6 +1273,26 @@ impl Pipeline {
             }
         }
 
+        // WHIP ingest wiring (ADR-T014, `webrtc-native`): one shared publisher
+        // rendezvous registry the control plane's WhipProvider writes to and each
+        // webrtc source's `drive_webrtc` loop reads from. Stamp it (and, for an
+        // audio-accepting source, a freshly-built AudioStore that joins the
+        // program bus below) onto every webrtc ingest plan — the peer of the
+        // `cuda_ordinal` stamping. Without the feature this is absent.
+        #[cfg(feature = "webrtc-native")]
+        let webrtc_registry = crate::webrtc_ingest::WhipRegistry::new();
+        #[cfg(feature = "webrtc-native")]
+        for plan in &mut ingest_plans {
+            if let SourceLocation::Webrtc { audio } = &plan.location {
+                plan.webrtc_registry = Some(webrtc_registry.clone());
+                if *audio {
+                    let store = crate::audio::new_store();
+                    audio_stores.insert(plan.id.clone(), Arc::clone(&store));
+                    plan.webrtc_audio_store = Some(store);
+                }
+            }
+        }
+
         let nosignal_card =
             Nv12Image::solid(config.canvas.width, config.canvas.height, 16, 128, 128, tag)
                 .map_err(|e| PipelineError::Engine(e.to_string()))?;
@@ -1358,6 +1398,8 @@ impl Pipeline {
             stores,
             stop_registry: crate::live_sources::stop_registry(),
             ingest_plans,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry,
             audio_stores,
             audio_ingest_plans,
             tone_ingest_plans,
@@ -1490,6 +1532,16 @@ impl Pipeline {
     #[must_use]
     pub fn stop_registry(&self) -> crate::live_sources::StopRegistry {
         Arc::clone(&self.stop_registry)
+    }
+
+    /// The shared WHIP publisher rendezvous registry (ADR-T014). The run wiring
+    /// hands this to the control plane's `WhipProvider` so a `POST` rendezvous'd
+    /// publisher reaches the matching webrtc source's `drive_webrtc` loop. Only
+    /// under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    #[must_use]
+    pub fn webrtc_registry(&self) -> crate::webrtc_ingest::WhipRegistry {
+        self.webrtc_registry.clone()
     }
 
     /// The resolved concrete encoder name.
@@ -5385,6 +5437,22 @@ fn ingest_plan_for(
                 reason: "NDI ingest requires the `ndi` feature (off by default)".to_owned(),
             })
         }
+        // A WHIP ingest (`kind = "webrtc"`) source: Multiview is the server, so
+        // there is nothing to dial — `live` so the drive loop runs forever
+        // (waiting for / ingesting publishers). The decode happens off the render
+        // thread in `drive_webrtc` (ADR-T014). Only under `webrtc-native`.
+        #[cfg(feature = "webrtc-native")]
+        SourceKind::Webrtc { audio, .. } => (SourceLocation::Webrtc { audio: *audio }, true),
+        // With `webrtc-native` OFF the str0m endpoint is not built, so a webrtc
+        // source is an honest typed refusal (never a silent skip).
+        #[cfg(not(feature = "webrtc-native"))]
+        SourceKind::Webrtc { .. } => {
+            return Err(PipelineError::Ingest {
+                id: source.id.clone(),
+                reason: "WHIP ingest requires the `webrtc-native` feature (off by default)"
+                    .to_owned(),
+            })
+        }
         // `SourceKind` is `#[non_exhaustive]`; a future kind is unsupported here
         // until explicitly wired (never silently mishandled).
         _ => {
@@ -5413,6 +5481,12 @@ fn ingest_plan_for(
         // plan before the ingest threads spawn. `None` is the default-device /
         // GPU-free path, in lockstep with the compositor's `None`.
         cuda_ordinal: None,
+        // The WHIP publisher rendezvous + audio store are stamped after build
+        // (the registry/store are owned by the run wiring), like `cuda_ordinal`.
+        #[cfg(feature = "webrtc-native")]
+        webrtc_registry: None,
+        #[cfg(feature = "webrtc-native")]
+        webrtc_audio_store: None,
     })
 }
 
@@ -5661,6 +5735,19 @@ enum SourceLocation {
         /// The NDI source name bound by the config.
         name: String,
     },
+    /// A **WHIP ingest** (`kind = "webrtc"`) contribution source (ADR-T014):
+    /// Multiview is the server, so there is nothing to dial — a publisher
+    /// (browser / OBS) `POST`s to the derived endpoint and the negotiated RTP
+    /// ring is rendezvous'd to this source's drive loop via the shared
+    /// [`WhipRegistry`](crate::webrtc_ingest::WhipRegistry). The drive loop
+    /// ([`drive_webrtc`]) waits for a publisher, decodes its depacketized
+    /// H.264/Opus into the standard `TileStore`/`AudioStore`, and rides
+    /// `NO_SIGNAL` between publishers. Only wired under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    Webrtc {
+        /// Whether the publisher's Opus audio is accepted (from the source kind).
+        audio: bool,
+    },
 }
 
 /// The total budget the startup **prime-wait** ([`wait_for_prime`]) spends
@@ -5798,6 +5885,10 @@ fn ingest_open_options(location: &SourceLocation) -> ffmpeg::Dictionary<'static>
         // libav input and gets no libav options.
         #[cfg(feature = "ndi")]
         SourceLocation::Ndi { .. } => false,
+        // WHIP ingest never opens a libav input (str0m surfaces RTP; the drive
+        // loop decodes per-packet), so it gets no libav open options.
+        #[cfg(feature = "webrtc-native")]
+        SourceLocation::Webrtc { .. } => false,
         SourceLocation::Path(_) | SourceLocation::Synthetic(_) => false,
     };
     if is_network {
@@ -5846,6 +5937,9 @@ fn is_hls_location(location: &SourceLocation) -> bool {
         SourceLocation::Path(p) => p.to_str().unwrap_or(""),
         #[cfg(feature = "ndi")]
         SourceLocation::Ndi { .. } => return false,
+        // WHIP ingest opens no libav input, so it is never an HLS master.
+        #[cfg(feature = "webrtc-native")]
+        SourceLocation::Webrtc { .. } => return false,
         SourceLocation::Synthetic(_) => return false,
     };
     // An `.m3u8` (with or without a query string) is an HLS playlist.
@@ -5970,6 +6064,18 @@ fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
             plan.cadence,
             stop,
         );
+        return;
+    }
+    // WHIP ingest (ADR-T014): Multiview is the server, so there is nothing to
+    // dial. Route it to its own supervised drive loop, which waits for a
+    // publisher (rendezvous'd via the WhipRegistry), decodes its depacketized
+    // H.264/Opus into the last-good store, and rides NO_SIGNAL between
+    // publishers. It only writes the lock-free store — it never paces or stalls
+    // the output clock nor back-pressures the engine (inv #1/#2/#10). Only under
+    // `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    if let SourceLocation::Webrtc { audio } = &plan.location {
+        drive_webrtc(plan, *audio, stop);
         return;
     }
     // NDI ingest is a host-memory receive that bypasses libav: route it to its own
@@ -6175,6 +6281,268 @@ fn connect_ndi_receiver(
     Err(status)
 }
 
+/// Drive a WHIP ingest source (ADR-T014): wait for a publisher, decode its
+/// depacketized H.264/Opus into the last-good store, ride `NO_SIGNAL` between
+/// publishers.
+///
+/// Multiview is the WHIP **server**, so there is nothing to dial. The supervised
+/// loop samples the [`WhipRegistry`](crate::webrtc_ingest::WhipRegistry) for this
+/// source's connected publisher (rendezvous'd by the `WhipProvider` on a `POST`);
+/// when one appears it builds the pure `WebRtcProducer` over the publisher's
+/// drop-oldest RTP ring and pumps it until the publisher goes (the ring ends) —
+/// then loops back to waiting (the tile rides STALE → `NO_SIGNAL` via the store
+/// policy; a `webrtc` source is never RECONNECTING — there is nothing to dial).
+/// It only ever *writes* the lock-free store, so it can neither pace nor stall
+/// the output clock (invariant #1) nor back-pressure the engine (invariant #10);
+/// the publisher's RTP ring is bounded drop-oldest (invariant #2/#5).
+#[cfg(feature = "webrtc-native")]
+fn drive_webrtc(plan: &IngestPlan, _audio: bool, stop: &AtomicBool) {
+    use multiview_input::webrtc::transport::WebRtcProducer;
+    use multiview_webrtc::transport::RtpRingEngine;
+
+    let Some(registry) = plan.webrtc_registry.clone() else {
+        // No registry wired (should not happen for a webrtc plan) — degrade the
+        // tile honestly rather than spin.
+        tracing::warn!(source = %plan.id, "webrtc source has no publisher registry; tile degrades");
+        return;
+    };
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        // Sample for a connected publisher. A quiet wait (no publisher) naps and
+        // re-checks — it never extends the startup prime-wait nor spins.
+        let Some(publisher) = registry.take(&plan.id) else {
+            sleep_interruptible(Duration::from_millis(50), stop);
+            continue;
+        };
+        tracing::info!(source = %plan.id, "webrtc publisher connected; ingesting");
+        let negotiated = publisher.negotiated_session();
+        let engine: Box<dyn multiview_input::webrtc::transport::MediaEngine + Send> =
+            Box::new(RtpRingEngine::new(publisher.ring.clone()));
+        let mut producer = WebRtcProducer::new(engine, &negotiated);
+        drive_webrtc_producer(plan, &mut producer, &publisher.ring, stop);
+        tracing::info!(source = %plan.id, "webrtc publisher disconnected; tile holds last-good → NO_SIGNAL");
+    }
+}
+
+/// Pump a [`WebRtcProducer`] into the source's `TileStore` (video) and
+/// `AudioStore` (Opus), until the publisher's ring ends or `stop` is raised.
+///
+/// Video access units feed a `multiview-ffmpeg` [`H264PacketDecoder`] →
+/// NV12 (SPS geometry, VUI colour) → scaled to the tile → normalized PTS
+/// (`PtsNormalizer`, `WrapBits::Rtp32`) → published into the last-good store.
+/// Opus frames feed an `OpusDecoder` → 48 kHz stereo PCM → the ADR-T013
+/// [`RtpAudioRebaser`] → `AudioStore::publish_at`. Every hand-off is sampled,
+/// never pacing (inv #1/#10); a decode error on one unit is logged and the unit
+/// dropped (the tile holds last-good — bad inputs are the product, inv #2).
+#[cfg(feature = "webrtc-native")]
+#[allow(clippy::too_many_lines)]
+// reason: a straight-line per-event pump (lazy-build the H.264/Opus decoders,
+// route each MediaEvent to its decode→publish helper) whose value is reading it
+// top-to-bottom in one place, matching `ingest_loop`/`consumer_main`. Splitting
+// it would scatter the session lifecycle across helpers without improving clarity.
+fn drive_webrtc_producer(
+    plan: &IngestPlan,
+    producer: &mut multiview_input::webrtc::transport::WebRtcProducer,
+    ring: &multiview_webrtc::transport::RtpRing,
+    stop: &AtomicBool,
+) {
+    use multiview_input::webrtc::route::MediaEvent;
+    use multiview_input::webrtc::transport::VIDEO_CLOCK_RATE;
+
+    let tag = CanvasColor::default().output_tag();
+    // The packet-fed H.264 decoder: geometry/colour come from the bitstream
+    // (SPS/VUI), never declared — the ADR-T014 fix. Built lazily on the first
+    // video unit so a video-less (audio-only) publisher allocates none.
+    let video_tb = Rational::new(1, i64::from(VIDEO_CLOCK_RATE));
+    let mut decoder: Option<multiview_ffmpeg::H264PacketDecoder> = None;
+    let mut to_tile = TileScaler::new(plan.tile_w, plan.tile_h);
+    // The video PTS normalizer (invariant #3): the 32-bit RTP wrap is unwrapped,
+    // re-anchored on the depacketizer's discontinuity flag, monotonic-guarded.
+    let mut normalizer = multiview_input::normalize::PtsNormalizer::new(
+        multiview_input::normalize::WrapBits::Rtp32,
+        video_tb,
+        plan.cadence,
+    );
+    let start = Instant::now();
+
+    // Audio: the Opus decoder + the shared ADR-T013 rebaser onto the store's
+    // absolute frame index. Built lazily on the first audio unit; only when the
+    // source carries an AudioStore (audio = true).
+    let mut opus: Option<multiview_ffmpeg::OpusDecoder> = None;
+    let mut rebaser = multiview_input::rtp_audio::RtpAudioRebaser::new(
+        multiview_ffmpeg::OPUS_SAMPLE_RATE,
+        multiview_ffmpeg::OPUS_SAMPLE_RATE,
+    );
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        // Publisher gone (ring closed + drained): end this session.
+        if ring.is_ended() {
+            return;
+        }
+        let event = match producer.next_event() {
+            Ok(Some(event)) => event,
+            // Nothing ready this poll: nap briefly and re-check (never spin).
+            Ok(None) => {
+                sleep_interruptible(Duration::from_millis(5), stop);
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(source = %plan.id, error = %err, "webrtc producer faulted");
+                return;
+            }
+        };
+        match event {
+            MediaEvent::VideoAccessUnit(unit) => {
+                let dec = match decoder.as_mut() {
+                    Some(d) => d,
+                    None => match multiview_ffmpeg::H264PacketDecoder::new(video_tb) {
+                        Ok(d) => decoder.insert(d),
+                        Err(err) => {
+                            tracing::warn!(source = %plan.id, error = %err, "h264 decoder open failed");
+                            return;
+                        }
+                    },
+                };
+                if unit.discontinuity {
+                    normalizer.mark_discontinuity();
+                }
+                // Feed the access unit; a structurally-corrupt AU is a recoverable
+                // condition — log (rate-limited by the libav bridge) and ride
+                // last-good (inv #2).
+                if let Err(err) = dec.push(&unit.data, unit.raw_pts) {
+                    tracing::debug!(source = %plan.id, error = %err, "h264 push dropped an access unit");
+                    continue;
+                }
+                publish_webrtc_video(plan, dec, &mut to_tile, &mut normalizer, tag, start, stop);
+            }
+            MediaEvent::AudioFrame(unit) => {
+                let Some(store) = plan.webrtc_audio_store.as_ref() else {
+                    continue; // audio = false / no store: drop (answered inactive).
+                };
+                let dec = match opus.as_mut() {
+                    Some(d) => d,
+                    None => {
+                        match multiview_ffmpeg::OpusDecoder::new(Rational::new(
+                            1,
+                            i64::from(multiview_ffmpeg::OPUS_SAMPLE_RATE),
+                        )) {
+                            Ok(d) => opus.insert(d),
+                            Err(err) => {
+                                tracing::warn!(source = %plan.id, error = %err, "opus decoder open failed");
+                                continue;
+                            }
+                        }
+                    }
+                };
+                publish_webrtc_audio(plan, &unit, dec, &mut rebaser, store);
+            }
+            // `MediaEvent` is `#[non_exhaustive]`: a future media kind we do not
+            // decode is sampled away (never an error, never a stall — inv #1/#2).
+            _ => {}
+        }
+    }
+}
+
+/// Drain the H.264 decoder, scaling + normalizing each decoded NV12 frame and
+/// publishing it into the last-good store. Never paces the engine.
+#[cfg(feature = "webrtc-native")]
+fn publish_webrtc_video(
+    plan: &IngestPlan,
+    decoder: &mut multiview_ffmpeg::H264PacketDecoder,
+    to_tile: &mut TileScaler,
+    normalizer: &mut multiview_input::normalize::PtsNormalizer,
+    tag: multiview_core::color::ColorInfo,
+    start: Instant,
+    stop: &AtomicBool,
+) {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        match decoder.receive_frame() {
+            Ok(Some(picture)) => {
+                let Ok(image) = to_tile.convert(&picture.frame, tag) else {
+                    tracing::debug!(source = %plan.id, "webrtc tile scale dropped a frame");
+                    continue;
+                };
+                // Normalize the verbatim 32-bit RTP PTS onto the unified ns
+                // timeline (anchored to the source's ingest start). A frame with
+                // no usable PTS falls back to the decoder's own rescaled time.
+                let pts = timeline_pts(normalizer, picture.raw_pts, picture.meta.pts);
+                // Stamp publish with the source-relative instant; the OUTPUT clock
+                // paces emission, never this stamp (inputs are sampled, inv #1).
+                let _ = start;
+                plan.store.publish(image, pts);
+            }
+            Ok(None) => return, // decoder needs more input.
+            Err(err) => {
+                tracing::debug!(source = %plan.id, error = %err, "webrtc video decode error");
+                return;
+            }
+        }
+    }
+}
+
+/// Decode one Opus frame and publish the 48 kHz PCM into the source's
+/// `AudioStore` at the rebased absolute frame index (ADR-T013). Never paces.
+#[cfg(feature = "webrtc-native")]
+fn publish_webrtc_audio(
+    plan: &IngestPlan,
+    unit: &multiview_input::webrtc::route::MediaUnit,
+    decoder: &mut multiview_ffmpeg::OpusDecoder,
+    rebaser: &mut multiview_input::rtp_audio::RtpAudioRebaser,
+    store: &multiview_audio::store::AudioStore,
+) {
+    // The rebaser maps the packet's RTP timestamp to the store's absolute frame.
+    // The Opus RTP clock has no SSRC surfaced at this seam, so a single logical
+    // stream is assumed (a real SSRC change re-anchors via the discontinuity
+    // flag the depacketizer raises).
+    let raw_ts = u32::try_from(unit.raw_pts.unwrap_or(0) & i64::from(u32::MAX)).unwrap_or(0);
+    let anchor = rebaser.rebase(raw_ts, 0, unit.discontinuity);
+    if let Err(err) = decoder.push(&unit.data, unit.raw_pts) {
+        tracing::debug!(source = %plan.id, error = %err, "opus push dropped a frame");
+        return;
+    }
+    let mut frame = anchor.store_frame;
+    loop {
+        match decoder.receive_block() {
+            Ok(Some(samples)) => {
+                let Some(block) = webrtc_audio_block(&samples) else {
+                    continue;
+                };
+                let frames = i64::try_from(block.frame_count()).unwrap_or(0);
+                if let Err(err) = store.publish_at(frame, &block) {
+                    tracing::debug!(source = %plan.id, error = %err, "webrtc audio publish rejected");
+                    return;
+                }
+                frame = frame.saturating_add(frames);
+            }
+            Ok(None) => return,
+            Err(err) => {
+                tracing::debug!(source = %plan.id, error = %err, "webrtc audio decode error");
+                return;
+            }
+        }
+    }
+}
+
+/// Bridge a decoded 48 kHz stereo interleaved-`f32` Opus block into the
+/// canonical [`AudioBlock`] the `AudioStore` consumes. Returns `None`
+/// (panic-free) on a degenerate shape.
+#[cfg(feature = "webrtc-native")]
+fn webrtc_audio_block(
+    samples: &multiview_ffmpeg::AudioSamplesF32,
+) -> Option<multiview_audio::format::AudioBlock> {
+    use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
+    let format = AudioFormat::new(samples.rate, ChannelLayout::Stereo);
+    AudioBlock::from_interleaved(format, samples.interleaved.clone()).ok()
+}
+
 /// Map one decoded frame onto the timeline the store is stamped with.
 ///
 /// Routes the frame's **raw** source-tick PTS through the per-input
@@ -6236,6 +6604,11 @@ fn resolve_youtube_master(watch_url: &str) -> Result<String, String> {
 /// Uses `ffmpeg-next`'s safe `Input`/`Parameters` value types only to bridge the
 /// container's stream parameters into `multiview-ffmpeg`'s safe `StreamVideoDecoder`
 /// (which `multiview-ffmpeg`'s `Demuxer` does not yet surface). No `unsafe`, no FFI.
+#[allow(clippy::too_many_lines)]
+// reason: the cohesive run-path open-and-stream routine (open + variant-pin +
+// decoder build + caption-route build + the packet/frame pump) read top-to-bottom
+// in one place; the feature-gated guarded-unreachable arms (synthetic/ndi/webrtc
+// never reach here) tip the count without changing the linear flow.
 fn open_and_stream(
     plan: &IngestPlan,
     tag: multiview_core::color::ColorInfo,
@@ -6304,6 +6677,13 @@ fn open_and_stream(
         #[cfg(feature = "ndi")]
         SourceLocation::Ndi { .. } => {
             return Err("ndi source has no libav media to open".to_owned())
+        }
+        // Unreachable: `ingest_loop` routes WHIP sources to `drive_webrtc` (str0m
+        // surfaces RTP; the drive loop decodes per-packet) before reaching
+        // `open_and_stream`. Guarded so the match stays exhaustive.
+        #[cfg(feature = "webrtc-native")]
+        SourceLocation::Webrtc { .. } => {
+            return Err("webrtc source has no libav media to open".to_owned())
         }
     };
 

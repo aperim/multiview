@@ -333,6 +333,254 @@ fn endpoint_config_rejects_turn_without_credentials() {
 }
 
 #[test]
+fn rtp_mode_ingest_surfaces_raw_rtp_packets_for_the_pure_depacketizer() {
+    // ADR-T014 §4: WHIP ingest runs an RTP-mode answerer so str0m decrypts SRTP
+    // and surfaces RAW RTP packets — the existing pure, keyframe-gated
+    // `H264Depacketizer` is the canonical depacketization path, NOT str0m's
+    // sample API. The answerer must therefore expose per-packet seq / timestamp /
+    // marker / payload-type / payload (the fields `multiview_input`'s `RtpFrame`
+    // carries), driven entirely over the in-memory shuttle.
+    let now = Instant::now();
+    let a_addr: SocketAddr = OFFERER_ADDR.parse().unwrap();
+    let b_addr: SocketAddr = ANSWERER_ADDR.parse().unwrap();
+    // The publisher (offerer) is a normal sample-mode sender; the ingest answerer
+    // is RTP-mode (recvonly from our side — we never write media to it).
+    let mut a = Session::new(&SessionConfig::default(), now);
+    let mut b = Session::new(&SessionConfig::ingest(), now);
+    a.add_host_candidate(a_addr).unwrap();
+    b.add_host_candidate(b_addr).unwrap();
+    let offer = a.create_offer(&[MediaKind::Video]).unwrap();
+    let answer = b.accept_offer(&offer).unwrap();
+    a.accept_answer(&answer).unwrap();
+    assert!(
+        pump_until(&mut a, a_addr, &mut b, b_addr, now, |a, b| a.is_connected()
+            && b.is_connected()),
+        "must connect first"
+    );
+
+    // The publisher writes one IDR access unit large enough to span several RTP
+    // packets (so we see real RFC 6184 FU-A fragmentation, marker on the last).
+    let mut payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
+    payload.extend(std::iter::repeat_n(0xABu8, 4000));
+    a.write_video_sample(&payload, true, now).unwrap();
+
+    let delivered = pump_until(&mut a, a_addr, &mut b, b_addr, now, |_a, b| {
+        b.received_rtp_count() > 0
+    });
+    assert!(
+        delivered,
+        "no raw RTP surfaced on the RTP-mode ingest session"
+    );
+
+    let pkt = b.take_received_rtp().expect("a raw RTP packet is buffered");
+    assert!(
+        !pkt.payload.is_empty(),
+        "the RTP packet carries payload bytes"
+    );
+    // A negotiated dynamic PT for H.264 (96..=127 is the dynamic range).
+    assert!(pkt.payload_type >= 96, "a negotiated dynamic H.264 PT");
+    // The 90 kHz video RTP timestamp is surfaced verbatim (a 32-bit value).
+    let _ = pkt.timestamp;
+    let _ = pkt.marker;
+    let _ = pkt.sequence;
+}
+
+#[test]
+fn rtp_mode_ingest_received_ring_is_bounded_drop_oldest() {
+    // Inv #10 / safety-rule 5: the per-session received-RTP ring is bounded and
+    // drop-oldest — a slow ingest consumer can never grow it without bound. We
+    // assert the buffered count never exceeds the cap even under a burst that far
+    // exceeds it.
+    let now = Instant::now();
+    let a_addr: SocketAddr = OFFERER_ADDR.parse().unwrap();
+    let b_addr: SocketAddr = ANSWERER_ADDR.parse().unwrap();
+    let mut a = Session::new(&SessionConfig::default(), now);
+    let mut b = Session::new(&SessionConfig::ingest(), now);
+    a.add_host_candidate(a_addr).unwrap();
+    b.add_host_candidate(b_addr).unwrap();
+    let offer = a.create_offer(&[MediaKind::Video]).unwrap();
+    let answer = b.accept_offer(&offer).unwrap();
+    a.accept_answer(&answer).unwrap();
+    assert!(
+        pump_until(&mut a, a_addr, &mut b, b_addr, now, |a, b| a.is_connected()
+            && b.is_connected()),
+        "must connect first"
+    );
+
+    // Write many large access units WITHOUT ever draining the ingest ring, so it
+    // is forced far past its cap if drop-oldest were not enforced. The full
+    // shuttle (`pump_until`, which advances the virtual clock + feeds timeouts so
+    // str0m actually packetizes and sends) runs after each write; `b` never has
+    // `take_received_rtp` called, so its ring only ever grows by arrival.
+    let mut clock = now;
+    for i in 0..200u32 {
+        let mut payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
+        payload.extend(std::iter::repeat_n(0xCDu8, 4000));
+        a.write_video_sample(&payload, true, clock).unwrap();
+        clock += Duration::from_millis(5);
+        // Pump until this write's packets have all reached b (or a bounded number
+        // of shuttle iterations elapse), never draining b's ring.
+        let before = b.received_rtp_count();
+        pump_until(&mut a, a_addr, &mut b, b_addr, clock, |_a, b| {
+            b.received_rtp_count() > before
+        });
+        assert!(
+            b.buffered_rtp() <= multiview_webrtc::transport::MAX_RECEIVED_RTP,
+            "the received-RTP ring grew past its cap on write {i} ({} > {})",
+            b.buffered_rtp(),
+            multiview_webrtc::transport::MAX_RECEIVED_RTP
+        );
+    }
+    assert!(b.received_rtp_count() > 0, "media did flow (sanity)");
+}
+
+#[test]
+fn ingest_session_can_request_a_keyframe_pli() {
+    // ADR-T014 §7: the ingest (RTP-mode answerer) session sends PLI toward the
+    // publisher's video stream to pull a fresh IDR. The answerer records the
+    // negotiated video mid from the answer SDP, so `request_video_keyframe`
+    // finds a video stream and queues the RTCP feedback — proven by the offerer
+    // surfacing a coalesced keyframe request after the shuttle delivers it.
+    let now = Instant::now();
+    let a_addr: SocketAddr = OFFERER_ADDR.parse().unwrap();
+    let b_addr: SocketAddr = ANSWERER_ADDR.parse().unwrap();
+    let mut a = Session::new(&SessionConfig::default(), now);
+    let mut b = Session::new(&SessionConfig::ingest(), now);
+    a.add_host_candidate(a_addr).unwrap();
+    b.add_host_candidate(b_addr).unwrap();
+    let offer = a.create_offer(&[MediaKind::Video]).unwrap();
+    let answer = b.accept_offer(&offer).unwrap();
+    a.accept_answer(&answer).unwrap();
+    assert!(
+        pump_until(&mut a, a_addr, &mut b, b_addr, now, |a, b| a.is_connected()
+            && b.is_connected()),
+        "must connect first"
+    );
+
+    // Before any media, the publisher has not been asked for a keyframe.
+    assert!(!a.take_keyframe_request(), "no PLI yet");
+    // The ingest answerer requests a keyframe; the offerer (publisher) must see a
+    // coalesced keyframe request once the RTCP PLI is shuttled to it.
+    assert!(
+        b.request_video_keyframe(now),
+        "the ingest session found a video stream to PLI"
+    );
+    let asked = pump_until(&mut a, a_addr, &mut b, b_addr, now, |a, _b| {
+        a.take_keyframe_request()
+    });
+    assert!(
+        asked,
+        "the publisher received the PLI as a keyframe request"
+    );
+}
+
+#[test]
+fn whip_endpoint_negotiates_answers_one_publisher_and_releases() {
+    // The WHIP control provider's path through the live endpoint, driven OFFLINE
+    // (the socket loop is never spawned — negotiation gathers candidates, accepts
+    // the offer, and registers the session synchronously). Proves: a first
+    // publisher gets an answer + a session id + an RTP ring; a SECOND publisher
+    // on the same source is a 409; release frees the slot for a re-POST.
+    use multiview_webrtc::config::EndpointConfig;
+    use multiview_webrtc::error::WebRtcError;
+    use multiview_webrtc::transport::{Session, SessionConfig, WhipEndpoint};
+
+    // A publisher offer (a normal sendonly browser/OBS-shaped offer).
+    let now = Instant::now();
+    let mut publisher = Session::new(&SessionConfig::default(), now);
+    publisher
+        .add_host_candidate("[::1]:50000".parse().unwrap())
+        .unwrap();
+    let offer = publisher
+        .create_offer(&[MediaKind::Video, MediaKind::Audio])
+        .unwrap();
+
+    // Bind the endpoint on an ephemeral port (the bind itself is local, no live
+    // peer); do NOT spawn `run` — we exercise the handle's negotiation logic.
+    let cfg = EndpointConfig {
+        udp_port: 0,
+        // A concrete advertised address — the unspecified `[::]` bind addr is
+        // never a valid ICE candidate (str0m rejects it).
+        advertised_addresses: vec!["::1".parse().unwrap()],
+        ..EndpointConfig::default()
+    };
+    let (_endpoint, handle) = WhipEndpoint::bind(cfg).expect("bind ephemeral endpoint");
+
+    let first = handle
+        .negotiate("cam-1", &offer, true)
+        .expect("first publisher negotiates an answer");
+    assert!(
+        first.answer_sdp.contains("a=group:BUNDLE"),
+        "the answer is str0m's own complete SDP"
+    );
+    assert!(
+        !first.session_id.as_str().is_empty(),
+        "a session id was minted"
+    );
+    assert_eq!(handle.live_publisher_count(), 1);
+
+    // A second publisher on the SAME source is a 409 conflict (one per source).
+    let second = handle.negotiate("cam-1", &offer, true);
+    assert!(
+        matches!(second, Err(WebRtcError::PublisherConflict(_))),
+        "a second publisher on a live source is a conflict, got {second:?}"
+    );
+
+    // A DIFFERENT source negotiates independently (outside the viewer pool).
+    let other = handle.negotiate("cam-2", &offer, true);
+    assert!(
+        other.is_ok(),
+        "a different source is admitted independently"
+    );
+    assert_eq!(handle.live_publisher_count(), 2);
+
+    // Release frees the slot; the source can be re-POSTed.
+    assert!(
+        handle.release("cam-1", first.session_id.as_str()),
+        "release finds the live session"
+    );
+    assert!(
+        !handle.release("cam-1", first.session_id.as_str()),
+        "releasing again is idempotent-false (already freed)"
+    );
+    let reposted = handle.negotiate("cam-1", &offer, true);
+    assert!(reposted.is_ok(), "the freed source accepts a new publisher");
+}
+
+#[test]
+fn whip_endpoint_audio_false_answers_without_opus() {
+    // `audio = false` (ADR-T014 §5) answers the audio m-line inactive: the
+    // answer carries no Opus rtpmap, so the publisher's audio is not received.
+    use multiview_webrtc::config::EndpointConfig;
+    use multiview_webrtc::transport::{Session, SessionConfig, WhipEndpoint};
+
+    let now = Instant::now();
+    let mut publisher = Session::new(&SessionConfig::default(), now);
+    publisher
+        .add_host_candidate("[::1]:50010".parse().unwrap())
+        .unwrap();
+    let offer = publisher
+        .create_offer(&[MediaKind::Video, MediaKind::Audio])
+        .unwrap();
+
+    let (_endpoint, handle) = WhipEndpoint::bind(EndpointConfig {
+        udp_port: 0,
+        advertised_addresses: vec!["::1".parse().unwrap()],
+        ..EndpointConfig::default()
+    })
+    .expect("bind");
+    let negotiated = handle
+        .negotiate("vid-only", &offer, false)
+        .expect("audio-false negotiates");
+    // No Opus answered when audio is disabled (the ingest session disables Opus).
+    assert!(
+        !negotiated.answer_sdp.to_ascii_lowercase().contains("opus"),
+        "audio=false must not answer Opus:\n{}",
+        negotiated.answer_sdp
+    );
+}
+
+#[test]
 #[ignore = "live network: binds a real dual-stack UDP socket; hardware-gated"]
 fn endpoint_binds_dual_stack_socket() {
     use multiview_webrtc::config::EndpointConfig;

@@ -89,7 +89,7 @@ pub use timer::{
 };
 pub use timing::{TimingConfig, MAX_LINK_OFFSET_MS, MAX_PTP_UTC_OFFSET_S};
 pub use wall::{HeadConfig, WallBezel, WallConfig};
-pub use webrtc::{DurationString, WebrtcConfig};
+pub use webrtc::{DurationString, IceServerConfig, IceServerKindConfig, WebrtcConfig};
 
 /// The management control-plane listener.
 ///

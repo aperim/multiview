@@ -152,6 +152,13 @@ impl TurnClient {
         self.state.clone()
     }
 
+    /// The TURN server transport address this client allocates against — the
+    /// endpoint driver routes datagrams from this address into the client.
+    #[must_use]
+    pub fn server_addr(&self) -> SocketAddr {
+        self.server
+    }
+
     /// The learned relay address, if allocated.
     #[must_use]
     pub fn relay(&self) -> Option<SocketAddr> {

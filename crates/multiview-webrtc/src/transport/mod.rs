@@ -23,6 +23,12 @@
 //! (UDP send is non-blocking); media crosses bounded drop-oldest rings owned by
 //! the consumer lanes. A wedged peer loses only its own session's media.
 
+mod ingest;
+mod whip_endpoint;
+
+pub use ingest::{RtpRing, RtpRingEngine, MAX_INGRESS_RTP};
+pub use whip_endpoint::{WhipEndpoint, WhipHandle, WhipNegotiated};
+
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -63,6 +69,12 @@ impl MediaKind {
 
 /// Per-session knobs. Defaults match a self-hosted full-ICE answerer.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent codec/mode toggles (per-codec enable + RTP-vs-sample mode), \
+              not a state machine — a builder or enum would obscure the 1:1 mapping \
+              onto str0m's RtcConfig setters"
+)]
 pub struct SessionConfig {
     /// Whether the session offers/answers H.264 video (default `true`).
     pub enable_h264: bool,
@@ -70,6 +82,14 @@ pub struct SessionConfig {
     pub enable_vp8: bool,
     /// Whether the session offers/answers Opus audio (default `true`).
     pub enable_opus: bool,
+    /// **RTP mode** (default `false`): str0m decrypts SRTP and surfaces RAW RTP
+    /// packets ([`Event::RtpPacket`]) instead of reassembled samples
+    /// ([`Event::MediaData`]). WHIP **ingest** uses this so the decrypted RTP
+    /// feeds the existing pure, keyframe-gated `H264Depacketizer` /
+    /// `OpusDepacketizer` (`multiview_input`) — the one canonical depacketization
+    /// contract, never str0m's sample API (ADR-T014 §4). WHEP **egress** leaves
+    /// it `false` and writes samples via [`Session::write_video_sample`].
+    pub rtp_mode: bool,
 }
 
 impl Default for SessionConfig {
@@ -78,6 +98,23 @@ impl Default for SessionConfig {
             enable_h264: true,
             enable_vp8: true,
             enable_opus: true,
+            rtp_mode: false,
+        }
+    }
+}
+
+impl SessionConfig {
+    /// A WHIP **ingest** session: H.264 + Opus only (the codecs Multiview
+    /// answers, ADR-T014 §2), no VP8, in **RTP mode** so decrypted SRTP surfaces
+    /// as raw RTP packets for the pure depacketizers. The publisher is the
+    /// offerer; this end only *receives*.
+    #[must_use]
+    pub fn ingest() -> Self {
+        Self {
+            enable_h264: true,
+            enable_vp8: false,
+            enable_opus: true,
+            rtp_mode: true,
         }
     }
 }
@@ -103,10 +140,17 @@ pub struct Session {
     outbound: VecDeque<(SocketAddr, Vec<u8>)>,
     /// The next wake instant from the last drive pass.
     next_timeout: Option<Instant>,
-    /// Decrypted media frames surfaced by the engine, oldest first (bounded).
+    /// Decrypted media frames surfaced by the engine, oldest first (bounded) —
+    /// **sample mode** only (`Event::MediaData`, the WHEP egress path).
     received: VecDeque<ReceivedMedia>,
     /// Total decrypted media frames ever surfaced (monotonic; for assertions).
     received_total: u64,
+    /// Decrypted **raw RTP** packets surfaced by the engine, oldest first
+    /// (bounded drop-oldest) — **RTP mode** only (`Event::RtpPacket`, the WHIP
+    /// ingest path). A slow ingest consumer drops oldest, never grows (inv #10).
+    received_rtp: VecDeque<ReceivedRtp>,
+    /// Total raw RTP packets ever surfaced (monotonic; for assertions/telemetry).
+    received_rtp_total: u64,
     /// Pending keyframe requests (PLI/FIR) from the remote peer, coalesced.
     keyframe_requested: bool,
 }
@@ -124,6 +168,37 @@ pub struct ReceivedMedia {
 /// (drop-oldest, invariant #10 — a slow consumer never grows memory).
 const MAX_RECEIVED_BUFFER: usize = 256;
 
+/// The bound on buffered raw RTP packets (RTP-mode ingest) before the oldest is
+/// dropped. A WHIP ingest session pulls packets cooperatively; this ring lets a
+/// burst absorb without unbounded growth — drop-oldest, never grows
+/// (invariant #10 / safety-rule 5). Sized to hold a few large access units'
+/// worth of MTU-sized packets.
+pub const MAX_RECEIVED_RTP: usize = 1024;
+
+/// One decrypted **raw RTP** packet surfaced from the remote peer in RTP mode.
+///
+/// Carries exactly the fields `multiview_input`'s `RtpFrame` needs to feed the
+/// pure depacketizers: the negotiated payload type, the 16-bit sequence number,
+/// the 32-bit RTP media timestamp, the marker bit (last packet of an access
+/// unit for H.264/RFC 6184), the synchronization source, and the decrypted
+/// payload (header-free codec bytes). The crate never exposes the wire/crypto —
+/// only this typed, post-decrypt packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedRtp {
+    /// The negotiated RTP payload type.
+    pub payload_type: u8,
+    /// The 16-bit RTP sequence number (reorder / loss detection).
+    pub sequence: u16,
+    /// The 32-bit RTP media timestamp (90 kHz video / 48 kHz audio).
+    pub timestamp: u32,
+    /// The RTP marker bit (last packet of an access unit for H.264).
+    pub marker: bool,
+    /// The synchronization source (a change is a timeline break downstream).
+    pub ssrc: u32,
+    /// The decrypted, header-free RTP payload (codec bytes).
+    pub payload: Vec<u8>,
+}
+
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
@@ -131,6 +206,8 @@ impl std::fmt::Debug for Session {
             .field("media", &self.media)
             .field("received_buffered", &self.received.len())
             .field("received_total", &self.received_total)
+            .field("received_rtp_buffered", &self.received_rtp.len())
+            .field("received_rtp_total", &self.received_rtp_total)
             .finish_non_exhaustive()
     }
 }
@@ -142,6 +219,7 @@ impl Session {
     pub fn new(config: &SessionConfig, now: Instant) -> Self {
         let rtc = Rtc::builder()
             .set_ice_lite(false)
+            .set_rtp_mode(config.rtp_mode)
             .clear_codecs()
             .enable_h264(config.enable_h264)
             .enable_vp8(config.enable_vp8)
@@ -156,6 +234,8 @@ impl Session {
             next_timeout: None,
             received: VecDeque::new(),
             received_total: 0,
+            received_rtp: VecDeque::new(),
+            received_rtp_total: 0,
             keyframe_requested: false,
         }
     }
@@ -276,17 +356,14 @@ impl Session {
             .accept_offer(offer)
             .map_err(|e| WebRtcError::Transport(format!("accept_offer: {e}")))?;
         let answer_sdp = answer.to_sdp_string();
-        // Record the negotiated (mid, kind) pairs so the answerer can also *send*
-        // media (the WHEP egress server answers a recvonly offer with sendonly
-        // media and writes into these mids). str0m exposes `media(mid)` but no
-        // public media iterator, so the negotiated mids + kinds are recovered from
-        // the answer SDP's m-sections (each `m=<kind> ...` + its `a=mid:<mid>`).
-        for (mid, kind) in parse_answer_media(&answer_sdp) {
-            // Don't double-record a mid already tracked (e.g. a re-negotiation).
-            if !self.media.iter().any(|(existing, _)| *existing == mid) {
-                self.media.push((mid, kind));
-            }
-        }
+        // Record the negotiated `(mid, kind)` pairs from the answer so the
+        // answerer can address each stream by mid: the ingest side requests a
+        // video keyframe (PLI via `request_video_keyframe`), and the WHEP egress
+        // server (which answers a recvonly offer with sendonly media) looks up
+        // the `Writer` for each mid it must drive. The answerer does not
+        // `add_media`, so str0m exposes `media(mid)` but no public iterator — the
+        // mids + kinds are recovered from the answer SDP's m-sections.
+        self.record_answer_media(&answer_sdp);
         Ok(answer_sdp)
     }
 
@@ -484,6 +561,28 @@ impl Session {
         self.received_total
     }
 
+    /// Pop the oldest decrypted **raw RTP** packet (RTP-mode ingest). This is the
+    /// WHIP ingest pull: the consumer drains it into `multiview_input`'s
+    /// `RtpFrame` ring / `MediaEngine` seam. Returns `None` when nothing is
+    /// buffered (the producer holds last-good — never blocks; inv #1/#10).
+    #[must_use]
+    pub fn take_received_rtp(&mut self) -> Option<ReceivedRtp> {
+        self.received_rtp.pop_front()
+    }
+
+    /// Count of raw RTP packets ever surfaced (monotonic; telemetry/assertions).
+    #[must_use]
+    pub fn received_rtp_count(&self) -> u64 {
+        self.received_rtp_total
+    }
+
+    /// The number of raw RTP packets currently buffered (never exceeds
+    /// [`MAX_RECEIVED_RTP`]). For the bounded-ring assertion / telemetry.
+    #[must_use]
+    pub fn buffered_rtp(&self) -> usize {
+        self.received_rtp.len()
+    }
+
     /// Take (and clear) the coalesced keyframe-request flag — the consumer maps
     /// this to a rate-limited force-IDR toward its encoder (ADR-0048 §10).
     #[must_use]
@@ -491,10 +590,70 @@ impl Session {
         std::mem::take(&mut self.keyframe_requested)
     }
 
+    /// Send a **PLI** (Picture Loss Indication) toward the publisher's video
+    /// stream, asking it for a fresh IDR (ADR-T014 §7). The caller rate-limits
+    /// this (≥ 2 s floor) and only sends it while the keyframe gate is closed; a
+    /// browser publisher answers a PLI with an IDR within a frame or two (OBS
+    /// ignores it — recovery there is bounded by its own keyframe interval).
+    /// `now` advances the engine so the RTCP is queued for the next transmit.
+    ///
+    /// Returns `true` if a video stream was found and a PLI queued, `false` when
+    /// no video stream is negotiated yet.
+    pub fn request_video_keyframe(&mut self, now: Instant) -> bool {
+        let Some(mid) = self
+            .media
+            .iter()
+            .find(|(_, k)| *k == MediaKind::Video)
+            .map(|(mid, _)| *mid)
+        else {
+            return false;
+        };
+        let mut api = self.rtc.direct_api();
+        let Some(stream) = api.stream_rx_by_mid(mid, None) else {
+            return false;
+        };
+        stream.request_keyframe(str0m::media::KeyframeRequestKind::Pli);
+        // Drive so the RTCP feedback is queued into the outbound datagrams.
+        self.drive(now);
+        true
+    }
+
     /// Disconnect the session (releases the `Rtc`).
     pub fn disconnect(&mut self) {
         self.rtc.disconnect();
         self.connected = false;
+    }
+
+    /// Record the negotiated media `(mid, kind)` pairs from an answer SDP so the
+    /// answerer (ingest) side can address a stream by mid (e.g. video PLI). Walks
+    /// the SDP: each `m=<kind> …` line followed by its `a=mid:<value>`. Best-effort
+    /// and panic-free — a section without a parseable mid is skipped.
+    fn record_answer_media(&mut self, sdp: &str) {
+        let mut pending_kind: Option<MediaKind> = None;
+        for line in sdp.lines() {
+            if let Some(rest) = line.strip_prefix("m=") {
+                pending_kind = if rest.starts_with("video") {
+                    Some(MediaKind::Video)
+                } else if rest.starts_with("audio") {
+                    Some(MediaKind::Audio)
+                } else {
+                    None
+                };
+            } else if let (Some(kind), Some(value)) = (pending_kind, line.strip_prefix("a=mid:")) {
+                let trimmed = value.trim();
+                // `Mid` is a bounded 16-byte string id; an over-long token is not
+                // a valid mid (skip it rather than truncate).
+                if !trimmed.is_empty() && trimmed.len() <= 16 {
+                    let mid = Mid::from(trimmed);
+                    // Don't double-record a mid already tracked (e.g. a
+                    // re-negotiation, or a WHEP egress that pre-registered mids).
+                    if !self.media.iter().any(|(existing, _)| *existing == mid) {
+                        self.media.push((mid, kind));
+                    }
+                }
+                pending_kind = None;
+            }
+        }
     }
 
     fn absorb_event(&mut self, event: Event) {
@@ -508,6 +667,27 @@ impl Session {
                 self.received.push_back(ReceivedMedia {
                     payload_type: *data.pt,
                     data: data.data,
+                });
+            }
+            Event::RtpPacket(packet) => {
+                // RTP-mode ingest: surface the decrypted raw RTP packet for the
+                // pure depacketizer chain. The header carries pt/seq/ts/marker/
+                // ssrc; the 32-bit RTP timestamp is the low 32 bits of str0m's
+                // extended (ROC-free) media time numerator.
+                let header = &packet.header;
+                let timestamp =
+                    u32::try_from(packet.time.numer() & u64::from(u32::MAX)).unwrap_or(0);
+                self.received_rtp_total = self.received_rtp_total.saturating_add(1);
+                if self.received_rtp.len() >= MAX_RECEIVED_RTP {
+                    let _ = self.received_rtp.pop_front();
+                }
+                self.received_rtp.push_back(ReceivedRtp {
+                    payload_type: *header.payload_type,
+                    sequence: header.sequence_number,
+                    timestamp,
+                    marker: header.marker,
+                    ssrc: *header.ssrc,
+                    payload: packet.payload,
                 });
             }
             Event::KeyframeRequest(_) => self.keyframe_requested = true,
@@ -606,6 +786,14 @@ impl WebRtcEndpoint {
         out.sort_by_key(|a| u8::from(a.is_ipv4()));
         Ok(out)
     }
+
+    /// Consume the endpoint, returning the bound dual-stack socket so the driver
+    /// loop can adopt it as an async socket (the single-socket model — the
+    /// `WhipEndpoint` driver owns the socket from here, ADR-0048 §4/§7).
+    #[must_use]
+    pub fn into_socket(self) -> std::net::UdpSocket {
+        self.socket
+    }
 }
 
 /// Bind a UDP socket dual-stack (`IPV6_V6ONLY=false`) at `addr` (ADR-0042). The
@@ -639,29 +827,3 @@ pub const fn dual_stack_unspecified() -> IpAddr {
     IpAddr::V6(Ipv6Addr::UNSPECIFIED)
 }
 
-/// Recover the negotiated `(Mid, MediaKind)` pairs from an answer SDP.
-///
-/// Each `m=<kind> ...` section is followed by its `a=mid:<mid>` attribute; this
-/// pairs the kind (video/audio) with the mid str0m assigned, so the answerer can
-/// look up a [`Writer`](str0m::media::Writer) for a sendonly media it must drive.
-fn parse_answer_media(answer_sdp: &str) -> Vec<(Mid, MediaKind)> {
-    let mut out = Vec::new();
-    let mut pending_kind: Option<MediaKind> = None;
-    for raw in answer_sdp.lines() {
-        let line = raw.trim();
-        if let Some(rest) = line.strip_prefix("m=") {
-            pending_kind = if rest.starts_with("video") {
-                Some(MediaKind::Video)
-            } else if rest.starts_with("audio") {
-                Some(MediaKind::Audio)
-            } else {
-                None
-            };
-        } else if let Some(mid_str) = line.strip_prefix("a=mid:") {
-            if let Some(kind) = pending_kind.take() {
-                out.push((Mid::from(mid_str.trim()), kind));
-            }
-        }
-    }
-    out
-}
