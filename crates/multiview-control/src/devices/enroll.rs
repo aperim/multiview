@@ -77,6 +77,15 @@ pub const HEARTBEAT_FRESHNESS_SECS: u64 = 300;
 /// `429` rather than growing the table without bound.
 pub const MAX_PENDING_PAIRINGS: usize = 32;
 
+/// How long an uncompleted screen pairing lives before it is reclaimed (ten
+/// minutes). A pairing is an interactive, in-the-room act — the operator reads
+/// a six-character code off the node's screen and types it into the SPA — so a
+/// window measured in minutes is ample, while a window this short stops an
+/// abandoned or vanished node (a mis-flashed appliance, a LAN actor that showed
+/// a code then left) from permanently wedging the bounded pending table with
+/// `429`. Past this TTL the entry is evicted (and is no longer completable).
+pub const PAIRING_TTL_SECS: u64 = 600;
+
 /// The pairing-code alphabet: upper-case letters and digits with the visually
 /// ambiguous `0`/`O`/`1`/`I` removed, since the code is read off a screen and
 /// typed by an operator (WCAG-honest legibility, managed-devices §9).
@@ -1009,5 +1018,106 @@ mod tests {
         assert!(h
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    /// A controllable millisecond clock for the eviction tests: the returned
+    /// `AtomicU64` is advanced to cross the pairing TTL deterministically.
+    fn fake_clock(start_ms: u64) -> (std::sync::Arc<std::sync::atomic::AtomicU64>, MillisClock) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let cell = std::sync::Arc::new(AtomicU64::new(start_ms));
+        let read = std::sync::Arc::clone(&cell);
+        let clock: MillisClock = std::sync::Arc::new(move || read.load(Ordering::Relaxed));
+        (cell, clock)
+    }
+
+    /// A well-formed token-less enroll request for a distinct key seeded by `n`
+    /// (the screen-pairing path: no token → a pending slot).
+    fn pairing_request(n: u8) -> EnrollRequest {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[n; 32]);
+        let public_key = BASE64.encode(signing.verifying_key().to_bytes());
+        EnrollRequest {
+            token: None,
+            public_key,
+            model: "test-model".to_owned(),
+            node_name: format!("node-{n}"),
+            heads: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_full_pending_table_reclaims_expired_entries_before_429() {
+        use std::sync::atomic::Ordering;
+        let (clock_cell, clock) = fake_clock(1_000_000_000_000);
+        let state = NodeEnrollState::with_clock(clock);
+
+        // Fill the pending table to its cap with abandoned (never-completed)
+        // pairings — distinct keys, each takes a slot.
+        for n in 0..MAX_PENDING_PAIRINGS {
+            let seed = u8::try_from(n).unwrap();
+            assert!(
+                matches!(
+                    state.enroll(&pairing_request(seed)),
+                    Ok(EnrollOutcome::Pairing { .. })
+                ),
+                "abandoned pairing {n} should take a slot"
+            );
+        }
+
+        // Advance the clock just past the pairing TTL: every pending entry is
+        // now stale.
+        clock_cell.fetch_add((PAIRING_TTL_SECS + 1) * 1_000, Ordering::Relaxed);
+
+        // A brand-new node enrolls. The stale entries are reclaimed, so it gets
+        // a pairing code rather than being permanently wedged behind a 429.
+        let outcome = state.enroll(&pairing_request(250));
+        assert!(
+            matches!(outcome, Ok(EnrollOutcome::Pairing { .. })),
+            "a new pairing must succeed once the stale entries are reclaimed, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_table_of_fresh_entries_still_sheds_with_429() {
+        let (_clock_cell, clock) = fake_clock(1_000_000_000_000);
+        let state = NodeEnrollState::with_clock(clock);
+
+        // Fill the table to the cap and never advance the clock: nothing is
+        // expired, so the bound still holds (invariant #10 — bounded memory).
+        for n in 0..MAX_PENDING_PAIRINGS {
+            let seed = u8::try_from(n).unwrap();
+            assert!(matches!(
+                state.enroll(&pairing_request(seed)),
+                Ok(EnrollOutcome::Pairing { .. })
+            ));
+        }
+
+        let outcome = state.enroll(&pairing_request(250));
+        assert_eq!(
+            outcome,
+            Err(EnrollError::PairingTableFull),
+            "a full table of non-expired entries must still shed the 33rd with 429"
+        );
+    }
+
+    #[test]
+    fn an_expired_pending_entry_cannot_complete_pairing() {
+        use std::sync::atomic::Ordering;
+        let (clock_cell, clock) = fake_clock(1_000_000_000_000);
+        let state = NodeEnrollState::with_clock(clock);
+
+        let Ok(EnrollOutcome::Pairing { pairing_code, .. }) = state.enroll(&pairing_request(1))
+        else {
+            panic!("the first enroll should pend with a code");
+        };
+
+        // The node walks away; the operator only reads the code off the screen
+        // after the TTL lapses. The expired entry is gone, not merely evictable.
+        clock_cell.fetch_add((PAIRING_TTL_SECS + 1) * 1_000, Ordering::Relaxed);
+
+        assert_eq!(
+            state.complete_pairing(&pairing_code, Some("node-x"), None),
+            PairCompletion::NotFound,
+            "an expired pending pairing must not be completable"
+        );
     }
 }
