@@ -114,6 +114,16 @@ Two as-built notes on the level-2 spawn:
   a freshly added source is typically unbound until the follow-up route, so it decodes at canvas
   size, exactly like an unbound startup source (decode-at-display-resolution is an efficiency
   lever; the compositor scales either way).
+  *Hardware-validation note (2026-06-11):* this geometry made runtime adds the first real
+  exerciser of the **identity** tile-scale (decoded size == tile size ⇒ an NV12→NV12 same-geometry
+  swscale request), and libswscale's no-op converter on FFmpeg 7/8 copies the luma plane but
+  leaves the interleaved NV12 chroma plane zeroed — the live-added tile rendered saturated
+  green/magenta while bound startup sources (a real resize) were correct. Fixed in
+  `multiview-ffmpeg::Scaler::run` (an identity request is now a deep plane copy, never
+  `sws_scale`) plus a direct read-out in the CLI's `TileScaler`; pinned by
+  `scale_resample::identity_nv12_to_nv12_preserves_the_chroma_plane` and the end-to-end
+  `live_decode_chroma` U/V-statistics parity test (live-added decode == startup decode of the
+  same clip).
 - **Registration pattern (decided):** the drain registers the store and bindings immediately at
   the frame boundary and the tile rides `NO_SIGNAL → LIVE` as the hub-spawned ingest comes up —
   the same pattern the synthetic flow shipped with. No "hub reports ready" handshake exists or is
