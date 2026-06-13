@@ -369,6 +369,8 @@ fn start_mock_sink() -> StartedMockSink {
             forced_mode: None,
             engine_cadence: Some(Rational::new(60, 1)),
             poll_interval: Duration::from_millis(1),
+            // DEV-B5 hotplug re-probe behaviour, undisciplined sink (no plan).
+            presentation: None,
         },
     )
     .expect("startup succeeds");

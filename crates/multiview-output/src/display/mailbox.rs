@@ -19,11 +19,15 @@ use std::sync::Arc;
 
 use multiview_framestore::LatestSlot;
 
-/// A frame with its publish sequence stamped alongside (one allocation per
-/// publish; the payload itself is typically an `Arc`'d canvas clone).
+/// A frame with its publish sequence **and presentation timestamp** stamped
+/// alongside (one allocation per publish; the payload itself is typically an
+/// `Arc`'d canvas clone). The pts travels INSIDE the slot value so a reader can
+/// never observe frame *N* paired with sequence/pts *N+1* (the DEV-C2 frame
+/// chooser depends on the pts being coherent with the frame it chooses).
 #[derive(Debug)]
 struct Stamped<F> {
     seq: u64,
+    pts_ns: i64,
     frame: F,
 }
 
@@ -38,6 +42,15 @@ impl<F> MailboxFrame<F> {
     #[must_use]
     pub fn sequence(&self) -> u64 {
         self.0.seq
+    }
+
+    /// The presentation timestamp (output-PTS ns) stamped atomically with this
+    /// frame. `0` for frames published through the pts-less [`FramePublisher::publish`]
+    /// (the DEV-B1 undisciplined sink path). The DEV-C2 frame chooser reads it
+    /// to compute the frame's `wall_at(pts) + link_offset` deadline.
+    #[must_use]
+    pub fn pts_ns(&self) -> i64 {
+        self.0.pts_ns
     }
 }
 
@@ -72,14 +85,29 @@ impl<F> Clone for FramePublisher<F> {
 }
 
 impl<F> FramePublisher<F> {
-    /// Publish `frame`, overwriting any unconsumed previous frame (newest
-    /// wins). Returns the sequence number assigned to this publish.
+    /// Publish `frame` with no presentation timestamp (pts `0`), overwriting any
+    /// unconsumed previous frame (newest wins). Returns the sequence number
+    /// assigned to this publish.
+    ///
+    /// The engine-agnostic mailbox primitive the DEV-B1 undisciplined sink uses;
+    /// the DEV-C2 node path publishes the canvas pts via [`Self::publish_at`].
     ///
     /// Wait-free: one atomic counter bump + one lock-free `Arc` swap. Never
     /// blocks, regardless of the sink thread's state.
     pub fn publish(&self, frame: F) -> u64 {
+        self.publish_at(frame, 0)
+    }
+
+    /// Publish `frame` stamped with its presentation timestamp `pts_ns`
+    /// (output-PTS ns), overwriting any unconsumed previous frame (newest wins).
+    /// Returns the sequence number assigned to this publish.
+    ///
+    /// The pts is stamped **atomically with the frame** (inside the one slot
+    /// value), so the DEV-C2 frame chooser never pairs a frame with another
+    /// frame's pts. Wait-free, exactly like [`Self::publish`].
+    pub fn publish_at(&self, frame: F, pts_ns: i64) -> u64 {
         let seq = self.counter.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        self.slot.publish(Stamped { seq, frame });
+        self.slot.publish(Stamped { seq, pts_ns, frame });
         seq
     }
 }

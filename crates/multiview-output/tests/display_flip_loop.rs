@@ -253,6 +253,9 @@ fn sink_config(connector: ConnectorSelector) -> DisplaySinkConfig {
         forced_mode: None,
         engine_cadence: Some(Rational::new(60, 1)),
         poll_interval: Duration::from_millis(1),
+        // DEV-B1 undisciplined latest-wins (no node presentation plan): these
+        // tests pin the EBUSY/conflation/no-new-frame flip-loop behaviour.
+        presentation: None,
     }
 }
 

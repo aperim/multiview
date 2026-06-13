@@ -1369,6 +1369,13 @@ pub struct Pipeline {
     /// seeds; the timing-status task binds to it lazily (lock-free load —
     /// publishing/reading can never block the engine, inv #1/#10).
     epoch_anchor: crate::timing_status::EpochAnchorSlot,
+    /// The node presentation link offset (DEV-C2 / ADR-0045): the fixed
+    /// per-deployment receiver-side delay (ns) the pull-side frame chooser adds
+    /// to `wall_at(pts)` when choosing the frame for a vblank. `Some` only on a
+    /// `multiview node` run ([`Pipeline::set_node_presentation`]); `None` (the
+    /// default) leaves every display output on the DEV-B1 undisciplined
+    /// latest-wins loop — presentation discipline is node-only (ADR-0045).
+    node_link_offset_ns: Option<i64>,
 }
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
@@ -1714,6 +1721,9 @@ impl Pipeline {
             overlay_apply: crate::live_overlays::overlay_apply_slot(config.overlays.clone()),
             epoch,
             epoch_anchor: crate::timing_status::anchor_slot(),
+            // A plain `multiview run` never disciplines a display output; the
+            // node runner opts in via `set_node_presentation`.
+            node_link_offset_ns: None,
         })
     }
 
@@ -1831,6 +1841,30 @@ impl Pipeline {
     #[must_use]
     pub fn display_hotplug_poll(&self) -> Duration {
         self.display_hotplug_poll
+    }
+
+    /// Enable DEV-C2 node presentation discipline for this run's display heads:
+    /// the pull-side frame chooser presents the frame whose
+    /// `wall_at(pts) + link_offset` is nearest the predicted next vblank
+    /// (repeat-if-early, drop-if-late), consuming the node document's
+    /// `timing.link_offset_ms` (ADR-0045 / display-out §8). Called by the
+    /// `multiview node` runner; a plain `multiview run` never calls it, so its
+    /// display outputs stay on the DEV-B1 undisciplined latest-wins loop —
+    /// presentation discipline (and its fixed link-offset latency) is node-only.
+    ///
+    /// The epoch source is the run's local outbound presentation epoch (the same
+    /// `SharedEpoch` the timing-status task writes) — a real, self-contained
+    /// source for a single node. A future controller WS-client (DEV-B6) fills the
+    /// SAME epoch seam with the central controller's epoch; nothing else changes.
+    /// On a lost feed the node keeps the last epoch and free-runs (inv #1/#10).
+    pub fn set_node_presentation(&mut self, link_offset_ns: i64) {
+        self.node_link_offset_ns = Some(link_offset_ns);
+    }
+
+    /// The node presentation link offset currently configured, if any.
+    #[must_use]
+    pub fn node_link_offset_ns(&self) -> Option<i64> {
+        self.node_link_offset_ns
     }
 
     /// Run the engine for exactly `max_ticks` ticks under the realtime pacer,
@@ -2322,6 +2356,14 @@ impl Pipeline {
             self.cadence,
             display_audio_format(self.encode_cfg.audio.as_ref()),
             self.display_hotplug_poll,
+            // DEV-C2: a node run threads its link offset here so each head gets a
+            // presentation plan (epoch + link offset + real mono/wall clock). A
+            // plain run passes `None` → undisciplined latest-wins per head.
+            self.node_link_offset_ns
+                .map(|link_offset_ns| NodePresentation {
+                    epoch: self.epoch.clone(),
+                    link_offset_ns,
+                }),
         )?;
         #[cfg(feature = "display-kms")]
         let display_publishers = started_displays.publishers;
@@ -2500,9 +2542,15 @@ impl Pipeline {
             // The display heads ride the SAME pre-encode canvas `Arc` through
             // their wait-free mailboxes (one atomic bump + one lock-free swap
             // each — the engine never awaits a sink; ADR-0044, inv #1/#10).
+            // DEV-C2: stamp each publish with the frame's output-PTS (ns, tick-0
+            // = 0 — the epoch's media leg), so the node frame chooser can compute
+            // `wall_at(pts) + link_offset` deadlines. A non-node run ignores the
+            // pts (undisciplined latest-wins); carrying it is one extra `i64`.
+            #[cfg(feature = "display-kms")]
+            let display_pts_ns = frame.pts().as_nanos();
             #[cfg(feature = "display-kms")]
             for display in &display_publishers {
-                display.publish(CanvasFrame(Arc::clone(&canvas)));
+                display.publish_at(CanvasFrame(Arc::clone(&canvas)), display_pts_ns);
             }
             let item = StreamItem {
                 canvas: Arc::clone(&canvas),
@@ -4885,6 +4933,20 @@ struct BuiltOutputs {
     display: Vec<DisplayOutputPlan>,
 }
 
+/// The run-level node presentation inputs (feature `display-kms`, DEV-C2): the
+/// shared outbound epoch every head reads and the deployment's fixed link
+/// offset. `start_display_sinks` clones one [`PresentationPlan`] per head from
+/// it (each head gets its own real mono/wall clock). `Some` only on a
+/// `multiview node` run.
+#[cfg(feature = "display-kms")]
+struct NodePresentation {
+    /// The shared outbound presentation epoch (read-only on the node; the same
+    /// cell the timing-status task writes, or a future controller WS-client).
+    epoch: multiview_output::SharedEpoch,
+    /// The fixed per-deployment receiver-side delay (ns) added to `wall_at(pts)`.
+    link_offset_ns: i64,
+}
+
 /// One configured display head (feature `display-kms`): everything
 /// [`start_display_sinks`] needs to open the device and light the connector.
 #[cfg(feature = "display-kms")]
@@ -5036,9 +5098,11 @@ fn start_display_sinks(
     cadence: Rational,
     audio_format: multiview_audio::AudioFormat,
     hotplug_poll: Duration,
+    node_presentation: Option<NodePresentation>,
 ) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
-    use multiview_output::display::{DisplaySink, DisplaySinkConfig};
+    use multiview_output::display::present::RealtimePresentationClock;
+    use multiview_output::display::{DisplaySink, DisplaySinkConfig, PresentationPlan};
     let mut started = StartedDisplaySinks {
         handles: Vec::with_capacity(plans.len()),
         publishers: Vec::with_capacity(plans.len()),
@@ -5053,6 +5117,15 @@ fn start_display_sinks(
                 reason: format!("{}: {e}", plan.output_id),
             }
         })?;
+        // DEV-C2: one presentation plan per head on a node run — the shared
+        // outbound epoch, the deployment link offset, and the real mono/wall
+        // clock (the KMS flip-timestamp + epoch domains). A non-node run leaves
+        // this `None` (undisciplined latest-wins).
+        let presentation = node_presentation.as_ref().map(|np| PresentationPlan {
+            epoch: np.epoch.clone(),
+            link_offset_ns: np.link_offset_ns,
+            clock: Box::new(RealtimePresentationClock::new()),
+        });
         let (handle, publisher) = DisplaySink::start::<CanvasFrame, _>(
             device,
             DisplaySinkConfig {
@@ -5065,6 +5138,7 @@ fn start_display_sinks(
                 // an idle pipe notices a fresh mailbox frame; well under one
                 // frame period at any broadcast cadence.
                 poll_interval: Duration::from_millis(4),
+                presentation,
             },
         )
         .map_err(|e| PipelineError::Output {
