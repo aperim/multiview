@@ -105,6 +105,46 @@ fn publish_once_emits_a_correct_timing_status_and_mirrors_the_hls_epoch() {
 }
 
 #[test]
+fn publish_once_with_groups_carries_the_weakest_member_skew_lane() {
+    // DEV-C3: the timing producer fans the sync-group runtime's per-group
+    // achieved tier + worst measured skew (weakest member) into the
+    // `timing.status` `groups` lane, conflated latest-wins like the epoch.
+    use multiview_events::{AchievedSync, SyncGroupSkew};
+
+    let publisher: EnginePublisher<EngineStateSnapshot, Event> = EnginePublisher::new(8);
+    let mut sub = publisher.subscribe();
+    let hls_epoch = SharedEpoch::new();
+    let mut s = sampler(0, 1_781_049_600_000_000_000);
+
+    let groups = vec![
+        SyncGroupSkew {
+            group: "foyer".to_owned(),
+            achieved: AchievedSync::None,
+            measured_skew_ms: None,
+        },
+        SyncGroupSkew {
+            group: "wall".to_owned(),
+            achieved: AchievedSync::BoundedSkew,
+            measured_skew_ms: Some(180.5),
+        },
+    ];
+    let _ =
+        timing_status::publish_once_with_groups(&mut s, &publisher, &hls_epoch, "main", 0, &groups);
+
+    let evt = sub.try_recv().expect("one published event");
+    let Event::TimingStatus(ts) = &*evt.event else {
+        panic!("expected timing.status, got {:?}", evt.event);
+    };
+    assert_eq!(ts.groups.len(), 2);
+    assert_eq!(ts.groups[0].group, "foyer");
+    assert_eq!(ts.groups[1].group, "wall");
+    assert_eq!(ts.groups[1].achieved, AchievedSync::BoundedSkew);
+    assert_eq!(ts.groups[1].measured_skew_ms, Some(180.5));
+    // Still conflated telemetry.
+    assert!(evt.event.is_conflated());
+}
+
+#[test]
 fn a_build_without_an_ntp_reading_publishes_a_non_locked_quality_by_default() {
     // Review finding 3: a non-`ntp` build has no kernel discipline read at
     // all (`SysNtpQuery` yields `None`), so the EPOCH path's default config
