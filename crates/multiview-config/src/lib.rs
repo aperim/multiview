@@ -61,7 +61,10 @@ pub use audio::{
     AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
     TrackCapacity, TrackDelivery, PROGRAM_TRACK,
 };
-pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
+pub use device::{
+    Device, DeviceAuth, DeviceDisplay, DeviceDriver, DeviceEnrollment, DisplayAssign,
+    ReconnectPolicy,
+};
 pub use diff::{ConfigDiff, SourceChange};
 pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;

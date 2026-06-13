@@ -30,6 +30,7 @@ pub mod cast_sessions;
 pub mod config;
 pub mod devices;
 pub mod discovery;
+pub mod enroll;
 pub mod health;
 pub mod inputs;
 pub mod outputs;
@@ -634,6 +635,26 @@ fn device_router() -> Router<AppState> {
     // (ADR-W017), and the declared stream-binding projections (ADR-M009).
     Router::new()
         .route("/devices", get(devices::list_devices))
+        // Display-node enrollment & pairing (DEV-B6, ADR-0045 / managed-devices
+        // §9). The static segments precede the `/devices/{id}` capture (axum
+        // prefers static matches), so `enroll`/`pair`/`enrollment-tokens`/
+        // `pairing-requests` never collide with a device id. The node-facing
+        // `enroll`/`heartbeat` are unauthenticated by Bearer (node-authenticated
+        // by token/keypair); the operator surfaces require admin/write.
+        .route(
+            "/devices/enrollment-tokens",
+            get(enroll::list_enrollment_tokens).post(enroll::mint_enrollment_token),
+        )
+        .route(
+            "/devices/enrollment-tokens/{id}",
+            axum::routing::delete(enroll::revoke_enrollment_token),
+        )
+        .route("/devices/enroll", post(enroll::enroll_node))
+        .route("/devices/pair", post(enroll::pair_node))
+        .route(
+            "/devices/pairing-requests",
+            get(enroll::list_pairing_requests),
+        )
         .route(
             "/devices/{id}",
             get(devices::get_device)
@@ -642,6 +663,11 @@ fn device_router() -> Router<AppState> {
                 .delete(devices::delete_device),
         )
         .route("/devices/{id}/status", get(devices::get_device_status))
+        .route("/devices/{id}/heartbeat", post(enroll::heartbeat))
+        .route(
+            "/devices/{id}/display-heads",
+            get(enroll::display_heads),
+        )
         .route("/devices/{id}/probe", post(devices::probe_device))
         .route("/devices/{id}/set-mode", post(devices::set_mode))
         .route("/devices/{id}/reboot", post(devices::reboot_device))

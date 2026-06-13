@@ -45,12 +45,18 @@ pub mod broadcaster;
 pub mod cast;
 pub mod discovery;
 pub mod driver_registry;
+pub mod enroll;
 pub mod projection;
 pub mod registry;
 pub mod state_machine;
 pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;
+pub use enroll::{
+    canonical_message, DisplayHead, EnrollError, EnrollOutcome, EnrollRequest, MintedToken,
+    NodeEnrollState, PairCompletion, PairRequest, PairingRequestSummary, TokenState, TokenSummary,
+    VerifiedHeartbeat,
+};
 pub use discovery::{
     DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
     DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,

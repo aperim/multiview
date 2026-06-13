@@ -72,6 +72,12 @@ pub enum ControlError {
     #[error("engine command bus at capacity; request shed")]
     EngineBusy,
 
+    /// A bounded control-plane table is full and the request is shed rather than
+    /// growing it without bound (invariant #10) — e.g. the pending-pairing table
+    /// at its cap (DEV-B6). The client should retry later (`429`).
+    #[error("too many requests: {0}")]
+    TooManyRequests(String),
+
     /// A persistence/repository fault.
     #[error("repository error: {0}")]
     Repository(String),
@@ -114,6 +120,9 @@ impl ControlError {
             }
             Self::EngineBusy => Problem::new(503, "engine-busy", "Engine command bus at capacity")
                 .with_detail("the control command queue is full; retry shortly"),
+            Self::TooManyRequests(msg) => {
+                Problem::new(429, "too-many-requests", "Too many requests").with_detail(msg)
+            }
             Self::Repository(msg) => {
                 Problem::new(500, "repository", "Internal repository error").with_detail(msg)
             }

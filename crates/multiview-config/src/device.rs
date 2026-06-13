@@ -179,6 +179,20 @@ pub struct DeviceDisplay {
     pub assign: DisplayAssign,
 }
 
+/// The enrolled-keypair identity bound to a `displaynode` device (DEV-B6,
+/// ADR-0045): the node authenticates every heartbeat with this keypair — there
+/// is no password, nothing to rotate. Config-as-code durable state: a config
+/// export emits the **public** key (never a secret), so re-importing a saved
+/// config rebinds the same node without a re-enroll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DeviceEnrollment {
+    /// The node's Ed25519 public key, standard base64 of the 32 raw bytes (the
+    /// heartbeat verifier). Only ever the public half — never a private key.
+    pub public_key: String,
+}
+
 /// A managed device: operator-adopted hardware as declarative desired state
 /// (ADR-M008). Applying a config performs idempotent adoption + convergence;
 /// the registry the control plane keeps at runtime is seeded from these
@@ -227,6 +241,12 @@ pub struct Device {
     /// the device has no display assignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<DeviceDisplay>,
+    /// The enrolled-keypair identity bound to a `displaynode` device (DEV-B6,
+    /// ADR-0045). Present on a node that enrolled against this controller;
+    /// absent for `zowietek`/`cast` devices (which authenticate by address +
+    /// credential, not a node keypair).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment: Option<DeviceEnrollment>,
 }
 
 impl Device {
@@ -297,6 +317,15 @@ impl Device {
             reconnect
                 .validate()
                 .map_err(|e| ConfigError::Validation(format!("device {:?}: {e}", self.id)))?;
+        }
+        if let Some(enrollment) = &self.enrollment {
+            if enrollment.public_key.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "device {:?}: enrollment.public_key must not be empty (it binds the node's \
+                     keypair identity)",
+                    self.id
+                )));
+            }
         }
         if let Some(display) = &self.display {
             match &display.assign {
