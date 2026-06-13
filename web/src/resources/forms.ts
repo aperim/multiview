@@ -63,7 +63,8 @@ export type FormErrorCode =
   | 'program-bus-muted'
   | 'rational-fps'
   | 'members-required'
-  | 'duplicate-member';
+  | 'duplicate-member'
+  | 'cast-authority';
 
 /** Per-field validation errors keyed by form-state field name. */
 export type FieldErrors<Field extends string> = Partial<Record<Field, FormErrorCode>>;

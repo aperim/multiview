@@ -80,6 +80,11 @@ pub mod audio;
 pub mod canvas;
 pub mod device;
 pub mod flip;
+/// Connector hotplug detection (DEV-B5 / ADR-0045): kernel netlink uevent
+/// parsing + debounce + the monitor thread that fans re-probe requests to
+/// the sinks, with the rootless `force_probe` polling fallback. Pure and
+/// CI-tested; the real netlink socket lives in [`kms`].
+pub mod hotplug;
 pub mod mailbox;
 pub mod mode;
 pub mod sink;

@@ -51,6 +51,13 @@ pub enum Command {
     /// sources, and run. In `--software` mode this drives the FFmpeg-free output
     /// clock for `--ticks` ticks (or until Ctrl-C) and reports cadence/frames.
     Run(RunArgs),
+    /// Run as a display node (ADR-0045): one supervised ingest (RTSP/SRT/HLS/
+    /// MPEG-TS) → hardware decode → single-source full-canvas composite → the
+    /// local DRM/KMS display head(s) (+ optional ALSA HDMI audio), reusing the
+    /// unchanged ingest pacer/jitter/reconnect and the framestore tile ladder
+    /// (last-good, then the configured local slate). Requires a build with the
+    /// `display-kms` + `ffmpeg` features; fails with a clear error otherwise.
+    Node(NodeArgs),
 }
 
 /// Arguments for `multiview validate`.
@@ -122,15 +129,57 @@ impl RunArgs {
     /// zero). Returns [`None`] for an unbounded run (neither bound supplied).
     #[must_use]
     pub fn tick_budget(&self, cadence: multiview_core::time::Rational) -> Option<u64> {
-        if let Some(ticks) = self.ticks {
-            return Some(ticks);
-        }
-        let secs = self.duration?;
-        // ticks = secs * fps = secs * num / den, exact integer arithmetic on
-        // i128 to avoid any float fps (invariant #3), clamped into u64.
-        let num = i128::from(cadence.num);
-        let den = i128::from(cadence.den).max(1);
-        let ticks = (i128::from(secs).saturating_mul(num)) / den;
-        Some(u64::try_from(ticks.max(0)).unwrap_or(u64::MAX))
+        resolve_tick_budget(self.ticks, self.duration, cadence)
     }
+}
+
+/// Arguments for `multiview node` (ADR-0045 / DEV-B5).
+#[derive(Debug, Args)]
+#[non_exhaustive]
+pub struct NodeArgs {
+    /// Path to the node TOML configuration document (one ingest, one or more
+    /// display heads — see `multiview_config::node::NodeConfig`).
+    #[arg(value_name = "CONFIG")]
+    pub config: PathBuf,
+
+    /// Stop after this many output ticks (frames) — a bounded diagnostic/soak
+    /// run. Omit to run as the daemon (until Ctrl-C / SIGTERM).
+    #[arg(long, value_name = "N")]
+    pub ticks: Option<u64>,
+
+    /// Stop after this many seconds of output (converted to an exact whole
+    /// number of ticks at the canvas cadence). If both are given, `--ticks`
+    /// wins.
+    #[arg(long, value_name = "SECS")]
+    pub duration: Option<u64>,
+}
+
+impl NodeArgs {
+    /// Resolve the bounded tick budget from `--ticks` / `--duration` at the
+    /// given canvas `cadence` — the same exact-integer math as
+    /// [`RunArgs::tick_budget`] (never float fps).
+    #[must_use]
+    pub fn tick_budget(&self, cadence: multiview_core::time::Rational) -> Option<u64> {
+        resolve_tick_budget(self.ticks, self.duration, cadence)
+    }
+}
+
+/// The one tick-budget resolution shared by `run` and `node`: `--ticks` wins;
+/// otherwise `--duration` seconds is converted to an exact whole number of
+/// ticks (`secs * num / den`, i128 integer arithmetic — invariant #3, never a
+/// float fps), rounded toward zero and clamped into `u64`. [`None`] = an
+/// unbounded run.
+fn resolve_tick_budget(
+    ticks: Option<u64>,
+    duration: Option<u64>,
+    cadence: multiview_core::time::Rational,
+) -> Option<u64> {
+    if let Some(ticks) = ticks {
+        return Some(ticks);
+    }
+    let secs = duration?;
+    let num = i128::from(cadence.num);
+    let den = i128::from(cadence.den).max(1);
+    let budget = (i128::from(secs).saturating_mul(num)) / den;
+    Some(u64::try_from(budget.max(0)).unwrap_or(u64::MAX))
 }

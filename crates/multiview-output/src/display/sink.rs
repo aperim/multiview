@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use super::canvas::DisplayCanvas;
 use super::device::{ConnectorSelector, DisplayError, HeadSetup, KmsBackend, SubmitError};
+use super::hotplug::ReprobeFlag;
 use super::mailbox::{frame_mailbox, FramePublisher, FrameReader};
 use super::mode::{select_mode, ForcedMode, ModeRequest, SelectedMode};
 use super::FlipDriver;
@@ -56,6 +57,10 @@ pub struct DisplayStats {
     submit_errors: AtomicU64,
     /// Nanoseconds of the most recent kernel flip timestamp.
     last_flip_ns: AtomicU64,
+    /// Hotplug-triggered connector re-probes performed (DEV-B5).
+    reprobes: AtomicU64,
+    /// Re-light modesets applied after a disconnect→reconnect (DEV-B5).
+    relights: AtomicU64,
 }
 
 /// One coherent read of the sink counters.
@@ -72,6 +77,10 @@ pub struct StatsSnapshot {
     pub submit_errors: u64,
     /// The most recent kernel flip timestamp, in nanoseconds.
     pub last_flip_ns: u64,
+    /// Hotplug-triggered connector re-probes performed.
+    pub reprobes: u64,
+    /// Re-light modesets applied after a disconnect→reconnect.
+    pub relights: u64,
 }
 
 impl DisplayStats {
@@ -84,6 +93,8 @@ impl DisplayStats {
             busy_conflations: self.busy_conflations.load(Ordering::Relaxed),
             submit_errors: self.submit_errors.load(Ordering::Relaxed),
             last_flip_ns: self.last_flip_ns.load(Ordering::Relaxed),
+            reprobes: self.reprobes.load(Ordering::Relaxed),
+            relights: self.relights.load(Ordering::Relaxed),
         }
     }
 }
@@ -100,6 +111,7 @@ pub struct DisplaySinkHandle {
     head: HeadSetup,
     stats: Arc<DisplayStats>,
     stop: Arc<AtomicBool>,
+    reprobe: ReprobeFlag,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -114,6 +126,15 @@ impl DisplaySinkHandle {
     #[must_use]
     pub fn stats(&self) -> Arc<DisplayStats> {
         Arc::clone(&self.stats)
+    }
+
+    /// The sink's hotplug re-probe request flag (DEV-B5): the hotplug
+    /// monitor (or any caller) requests; the flip-loop thread — the device's
+    /// owner — performs the probe between flips, and re-validates +
+    /// re-lights the head after a disconnect→reconnect.
+    #[must_use]
+    pub fn reprobe_flag(&self) -> ReprobeFlag {
+        self.reprobe.clone()
     }
 
     /// Stop the flip loop and join the thread (bounded by the loop's
@@ -224,13 +245,20 @@ impl DisplaySink {
         let (publisher, reader) = frame_mailbox::<F>();
         let stats = Arc::new(DisplayStats::default());
         let stop = Arc::new(AtomicBool::new(false));
+        let reprobe = ReprobeFlag::new();
         let thread = {
             let stats = Arc::clone(&stats);
             let stop = Arc::clone(&stop);
+            let reprobe = reprobe.clone();
+            let head = setup.clone();
             let poll = poll_interval;
             std::thread::Builder::new()
                 .name(format!("display-{}", setup.connector))
-                .spawn(move || flip_loop(backend, &reader, &stop, &stats, poll, &output_id))
+                .spawn(move || {
+                    flip_loop(
+                        backend, &reader, &stop, &stats, poll, &output_id, &head, &reprobe,
+                    );
+                })
                 .map_err(|e| DisplayError::Device(format!("spawning the sink thread: {e}")))?
         };
         Ok((
@@ -238,6 +266,7 @@ impl DisplaySink {
                 head: setup,
                 stats,
                 stop,
+                reprobe,
                 thread: Some(thread),
             },
             publisher,
@@ -250,6 +279,17 @@ impl DisplaySink {
 /// `atomic_commit(NONBLOCK | PAGE_FLIP_EVENT)`. `EBUSY` = conflation; device
 /// errors are counted and the last-good framebuffer stays on glass; nothing
 /// here can reach back into the engine.
+///
+/// Hotplug (DEV-B5): between flips the loop also consumes its [`ReprobeFlag`]
+/// — when requested it probes the connectors (the userspace probe IS the
+/// `force_probe`), and on a disconnect→reconnect transition re-validates
+/// (`TEST_ONLY`) and re-applies the committed modeset to re-light the head
+/// (DP link retraining / HDMI re-handshake). Probe and re-light failures are
+/// counted and logged; the loop never exits over them.
+#[allow(clippy::too_many_arguments)]
+// reason: the loop is the move-target of the one sink thread; every argument
+// is one owned/shared piece of the sink's state, and bundling them into a
+// struct would only relocate the same eight names.
 fn flip_loop<F, B>(
     mut backend: B,
     reader: &FrameReader<F>,
@@ -257,12 +297,20 @@ fn flip_loop<F, B>(
     stats: &DisplayStats,
     poll_interval: Duration,
     output_id: &str,
+    head: &HeadSetup,
+    reprobe: &ReprobeFlag,
 ) where
     F: DisplayCanvas + Send + Sync,
     B: KmsBackend,
 {
     let mut driver = FlipDriver::new();
+    // Startup proved the connector connected (a disconnected head fails
+    // `DisplaySink::start`); reprobe transitions are tracked against that.
+    let mut connected = true;
     while !stop.load(Ordering::Acquire) {
+        if reprobe.take() {
+            handle_reprobe(&mut backend, head, &mut connected, stats, output_id);
+        }
         match backend.wait_events(poll_interval) {
             Ok(events) => {
                 for event in events {
@@ -303,5 +351,88 @@ fn flip_loop<F, B>(
                 );
             }
         }
+    }
+}
+
+/// One hotplug-triggered re-probe on the flip-loop thread (DEV-B5): probe the
+/// connectors, track the bound connector's connected state, and on a
+/// disconnect→reconnect transition re-validate (`TEST_ONLY`) then re-apply
+/// the committed modeset to re-light the head. Every failure is logged and
+/// counted; none ends the loop (the engine never participates — invariants
+/// #1 + #10).
+fn handle_reprobe<B: KmsBackend>(
+    backend: &mut B,
+    head: &HeadSetup,
+    connected: &mut bool,
+    stats: &DisplayStats,
+    output_id: &str,
+) {
+    stats.reprobes.fetch_add(1, Ordering::Relaxed);
+    let connectors = match backend.probe_connectors() {
+        Ok(connectors) => connectors,
+        Err(e) => {
+            tracing::warn!(
+                output = %output_id,
+                connector = %head.connector,
+                error = %e,
+                "hotplug re-probe failed; keeping the current state"
+            );
+            return;
+        }
+    };
+    let now_connected = connectors
+        .iter()
+        .find(|c| c.name == head.connector)
+        .is_some_and(|c| c.connected);
+    match (*connected, now_connected) {
+        (true, false) => {
+            *connected = false;
+            tracing::warn!(
+                output = %output_id,
+                connector = %head.connector,
+                "display disconnected; holding the last framebuffer (KMS keeps scanning it \
+                 out; the head re-lights on reconnect)"
+            );
+        }
+        (false, true) => {
+            // Re-light with the COMMITTED setup: TEST_ONLY first (the
+            // attached sink may have changed and might reject the timing),
+            // then the one re-light modeset. A failure leaves the head dark
+            // until the next hotplug event retries.
+            if let Err(e) = backend.validate_setup(head) {
+                tracing::warn!(
+                    output = %output_id,
+                    connector = %head.connector,
+                    error = %e,
+                    "reconnected display rejected the committed mode (TEST_ONLY); leaving \
+                     the head dark — reconfigure the output for the new sink"
+                );
+                return;
+            }
+            match backend.apply_modeset(head) {
+                Ok(()) => {
+                    *connected = true;
+                    stats.relights.fetch_add(1, Ordering::Relaxed);
+                    tracing::info!(
+                        output = %output_id,
+                        connector = %head.connector,
+                        mode = %head.mode.describe(),
+                        "display reconnected: head re-lit with the committed mode"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        output = %output_id,
+                        connector = %head.connector,
+                        error = %e,
+                        "re-light modeset failed; the next hotplug event retries"
+                    );
+                }
+            }
+        }
+        // No transition: nothing to do (the probe itself refreshed the
+        // kernel's connector state, which is the point of force_probe
+        // polling).
+        (true, true) | (false, false) => {}
     }
 }

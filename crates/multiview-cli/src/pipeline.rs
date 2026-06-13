@@ -1314,6 +1314,16 @@ pub struct Pipeline {
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
     nosignal_card: Nv12Image,
+    /// The per-cell `on_loss` failover-slate policy (ADR-0027 / ADR-0030), in
+    /// config-cell order — exactly `solve_layout`'s core-cell order, the same
+    /// mapping the control drain's `set_cell_slates` uses. Captured at build
+    /// time and attached to the [`CompositorDrive`] by `drive_streaming`
+    /// itself, so a **control-less** run (`multiview node`, a control-free
+    /// `multiview run`, `run_for`) composites the configured slate for a down
+    /// cell — not the default `nosignal_card` (the DEV-B5 F1 fix). Empty for
+    /// a document with no explicit cells (the drive then keeps its
+    /// `nosignal_card` fallback, byte-identical to before).
+    cell_slates: Vec<multiview_config::FailoverSlate>,
     /// The canvas background shown where no tile covers.
     background: LinearRgba,
     /// The resolved concrete encoder (name + fed pixel format).
@@ -1330,6 +1340,14 @@ pub struct Pipeline {
     /// (and started) once at stream start; the sinks live for the run.
     #[cfg(feature = "display-kms")]
     display_plans: Vec<DisplayOutputPlan>,
+    /// The connector-hotplug `force_probe` polling cadence (DEV-B5 /
+    /// ADR-0045) used when the kernel netlink uevent group is unavailable
+    /// (rootless containers); with kernel uevents the watcher is
+    /// event-driven and this is unused. Default 5 s; the node document's
+    /// `hotplug.poll_secs` threads in via
+    /// [`Pipeline::set_display_hotplug_poll`].
+    #[cfg(feature = "display-kms")]
+    display_hotplug_poll: Duration,
     /// Per-input elementary-stream inventories, keyed (and id-sorted) by source
     /// id (RT-3, ADR-0034 §9). Probed **once at build time** — off the
     /// output-clock thread — from each path-backed source's demuxer (the
@@ -1552,6 +1570,13 @@ impl Pipeline {
             Nv12Image::solid(config.canvas.width, config.canvas.height, 16, 128, 128, tag)
                 .map_err(|e| PipelineError::Engine(e.to_string()))?;
 
+        // Capture each explicit cell's `on_loss` policy in config-cell order
+        // (== the solved layout's core-cell order, the order `set_cell_slates`
+        // expects). The run path hands this to the drive directly so the
+        // policy holds with or without a control plane (DEV-B5 F1).
+        let cell_slates: Vec<multiview_config::FailoverSlate> =
+            config.cells.iter().map(|c| c.on_loss).collect();
+
         // Resolve the encoder from the first output that names a codec (file/HLS
         // share one encode — invariant #7). Default to MPEG-2 if none names one.
         let codec_token = config
@@ -1664,12 +1689,15 @@ impl Pipeline {
             caption_plans,
             canvas_color,
             nosignal_card,
+            cell_slates,
             background: LinearRgba::opaque(0.02, 0.02, 0.05),
             encoder,
             encode_cfg: cfg,
             outputs,
             #[cfg(feature = "display-kms")]
             display_plans: built.display,
+            #[cfg(feature = "display-kms")]
+            display_hotplug_poll: DEFAULT_DISPLAY_HOTPLUG_POLL,
             #[cfg(feature = "overlay")]
             subtitles: None,
             #[cfg(feature = "overlay")]
@@ -1787,6 +1815,22 @@ impl Pipeline {
     /// kbps (the canonical program format).
     pub fn enable_program_audio(&mut self) {
         self.encode_cfg.audio = Some(multiview_output::AudioEncodeConfig::aac(48_000, 2, 128_000));
+    }
+
+    /// Set the connector-hotplug `force_probe` polling cadence (DEV-B5 /
+    /// ADR-0045) used when kernel netlink uevents are unavailable (rootless
+    /// containers). The node run threads its `hotplug.poll_secs` in here;
+    /// `multiview run` keeps the 5 s default.
+    #[cfg(feature = "display-kms")]
+    pub fn set_display_hotplug_poll(&mut self, interval: Duration) {
+        self.display_hotplug_poll = interval;
+    }
+
+    /// The connector-hotplug polling-fallback cadence currently configured.
+    #[cfg(feature = "display-kms")]
+    #[must_use]
+    pub fn display_hotplug_poll(&self) -> Duration {
+        self.display_hotplug_poll
     }
 
     /// Run the engine for exactly `max_ticks` ticks under the realtime pacer,
@@ -2134,7 +2178,13 @@ impl Pipeline {
             self.canvas_color,
             self.background,
         )
-        .map_err(|e| PipelineError::Engine(e.to_string()))?;
+        .map_err(|e| PipelineError::Engine(e.to_string()))?
+        // Attach the per-cell `on_loss` policy HERE, on the run path itself,
+        // so every run — `multiview node`, a control-less `multiview run`,
+        // and the bounded `run_for` — composites the configured slate for a
+        // down cell (DEV-B5 F1). The control drain's one-shot
+        // `set_cell_slates` re-sets the same mapping (idempotent).
+        .with_cell_slates(self.cell_slates.clone());
         // Under the opt-in `gpu` feature the run PREFERS the wgpu GPU
         // compositor. The device is chosen LOAD-AWARE at admission (ADR-0035
         // Tier-1, decide-once): poll NVML ONCE, score every visible GPU, and pin
@@ -2271,6 +2321,7 @@ impl Pipeline {
             std::mem::take(&mut self.display_plans),
             self.cadence,
             display_audio_format(self.encode_cfg.audio.as_ref()),
+            self.display_hotplug_poll,
         )?;
         #[cfg(feature = "display-kms")]
         let display_publishers = started_displays.publishers;
@@ -2280,6 +2331,10 @@ impl Pipeline {
         let _display_handles = started_displays.handles;
         #[cfg(feature = "display-kms")]
         let _display_audio_handles = started_displays.audio_handles;
+        // The hotplug watcher lives for the run too; drop = stop + join (it
+        // only ever sets the sinks' re-probe flags — DEV-B5).
+        #[cfg(feature = "display-kms")]
+        let _display_hotplug = started_displays.hotplug;
         #[cfg(feature = "display-kms")]
         let display_audio_publishers = started_displays.audio_publishers;
         #[cfg(not(feature = "display-kms"))]
@@ -4930,6 +4985,10 @@ struct StartedDisplaySinks {
     audio_handles: Vec<multiview_output::display::audio::DisplayAudioSink>,
     /// The matching bounded drop-oldest audio FIFO publishers.
     audio_publishers: Vec<multiview_output::display::audio::DisplayAudioPublisher>,
+    /// The hotplug watcher (DEV-B5): kernel netlink uevents where available,
+    /// `force_probe` polling otherwise; it only sets the sinks' re-probe
+    /// flags. `None` when no head started.
+    hotplug: Option<multiview_output::display::hotplug::HotplugMonitor>,
 }
 
 /// The display-audio FIFO depth in frames (per channel): ~170 ms @ 48 kHz.
@@ -4937,6 +4996,17 @@ struct StartedDisplaySinks {
 /// wedged/slow device (drop-oldest — the engine-side push never blocks).
 #[cfg(feature = "display-kms")]
 const DISPLAY_AUDIO_FIFO_FRAMES: usize = 8_192;
+
+/// The default connector-hotplug `force_probe` polling cadence (DEV-B5):
+/// inside the brief's 2–5 s recommendation; the kernel itself polls non-HPD
+/// connectors at 10 s.
+#[cfg(feature = "display-kms")]
+const DEFAULT_DISPLAY_HOTPLUG_POLL: Duration = Duration::from_secs(5);
+
+/// The hotplug burst-debounce window: a replug emits several drm uevents
+/// within milliseconds; one re-probe covers them (re-probing is idempotent).
+#[cfg(feature = "display-kms")]
+const DISPLAY_HOTPLUG_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Open and light every configured display head (feature `display-kms`):
 /// scan `/dev/dri` for the connector-owning card, probe + select the mode
@@ -4965,6 +5035,7 @@ fn start_display_sinks(
     plans: Vec<DisplayOutputPlan>,
     cadence: Rational,
     audio_format: multiview_audio::AudioFormat,
+    hotplug_poll: Duration,
 ) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
     use multiview_output::display::{DisplaySink, DisplaySinkConfig};
@@ -4973,6 +5044,7 @@ fn start_display_sinks(
         publishers: Vec::with_capacity(plans.len()),
         audio_handles: Vec::new(),
         audio_publishers: Vec::new(),
+        hotplug: None,
     };
     for plan in plans {
         let device = KmsDisplayDevice::open_for_connector(&plan.connector).map_err(|e| {
@@ -5005,7 +5077,49 @@ fn start_display_sinks(
         started.handles.push(handle);
         started.publishers.push(publisher);
     }
+    started.hotplug = start_display_hotplug(&started.handles, hotplug_poll);
     Ok(started)
+}
+
+/// Start the connector-hotplug watcher for the run's lit heads (DEV-B5 /
+/// ADR-0045): the kernel netlink uevent group where available (bare metal,
+/// rootful containers), `force_probe` polling at `hotplug_poll` otherwise
+/// (rootless containers — kernel uevents are not delivered to a
+/// user-namespace-owned netns). The watcher only sets each sink's re-probe
+/// flag; the flip-loop threads (the device owners) do the probing and any
+/// disconnect→reconnect re-light. Returns [`None`] when no head is lit.
+#[cfg(feature = "display-kms")]
+fn start_display_hotplug(
+    handles: &[multiview_output::display::DisplaySinkHandle],
+    hotplug_poll: Duration,
+) -> Option<multiview_output::display::hotplug::HotplugMonitor> {
+    use multiview_output::display::hotplug::{select_mode, HotplugMode, HotplugMonitor};
+    use multiview_output::display::kms::KernelUeventSocket;
+    if handles.is_empty() {
+        return None;
+    }
+    let flags = handles
+        .iter()
+        .map(multiview_output::display::DisplaySinkHandle::reprobe_flag)
+        .collect();
+    let (mode, fallback_reason) = select_mode(KernelUeventSocket::open(), hotplug_poll);
+    match (&mode, fallback_reason) {
+        (HotplugMode::Netlink(_), _) => {
+            tracing::info!(
+                heads = handles.len(),
+                "display hotplug: kernel netlink uevent listener active"
+            );
+        }
+        (HotplugMode::Polling(interval), reason) => {
+            tracing::info!(
+                heads = handles.len(),
+                poll_secs = interval.as_secs(),
+                reason = reason.as_deref().unwrap_or("unknown"),
+                "display hotplug: kernel uevents unavailable; using force_probe polling"
+            );
+        }
+    }
+    Some(HotplugMonitor::start(mode, flags, DISPLAY_HOTPLUG_DEBOUNCE))
 }
 
 /// Start the DEV-B4 ALSA audio sink for one lit head, appending its handle +

@@ -92,6 +92,13 @@ export const router = createBrowserRouter([
             }),
           },
           {
+            path: "casting",
+            lazy: async () => ({
+              Component: (await import("../pages/docs/CastingHelpPage"))
+                .CastingHelpPage,
+            }),
+          },
+          {
             path: "display-nodes",
             lazy: async () => ({
               Component: (await import("../pages/docs/DisplayNodesHelpPage"))

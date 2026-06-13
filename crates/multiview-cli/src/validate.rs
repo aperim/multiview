@@ -10,6 +10,7 @@
 //! report's status.
 use std::path::{Path, PathBuf};
 
+use multiview_config::node::NodeConfig;
 use multiview_config::MultiviewConfig;
 
 /// The outcome of validating one configuration document.
@@ -75,12 +76,16 @@ impl ValidationReport {
 
 /// Load and validate the configuration document at `path`.
 ///
-/// Reads the file, parses it as TOML into a [`MultiviewConfig`], and runs
-/// [`MultiviewConfig::validate`] (unique ids, cell↔source bindings, output codecs,
-/// grid solve, and the solved [`multiview_core::layout::Layout`]'s structural
-/// check). Every failure mode — unreadable file, malformed TOML, a violated
-/// invariant — is captured in the returned [`ValidationReport`] rather than
-/// surfaced as an error, so the caller can print one consistent report.
+/// Detects the document shape first: a top-level `[ingest]` table marks a
+/// **node** document (DEV-B5 / ADR-0045), validated through the node schema
+/// (including its lowering into a runnable engine document); anything else is
+/// an engine document, parsed into a [`MultiviewConfig`] and run through
+/// [`MultiviewConfig::validate`] (unique ids, cell↔source bindings, output
+/// codecs, grid solve, and the solved [`multiview_core::layout::Layout`]'s
+/// structural check). Every failure mode — unreadable file, malformed TOML, a
+/// violated invariant — is captured in the returned [`ValidationReport`]
+/// rather than surfaced as an error, so the caller can print one consistent
+/// report.
 ///
 /// # Errors
 ///
@@ -99,6 +104,10 @@ pub fn validate_config(path: &Path) -> anyhow::Result<ValidationReport> {
             });
         }
     };
+
+    if multiview_config::node::is_node_document(&text) {
+        return Ok(validate_node_document(path, &text));
+    }
 
     let config = match MultiviewConfig::load_from_toml(&text) {
         Ok(config) => config,
@@ -125,6 +134,48 @@ pub fn validate_config(path: &Path) -> anyhow::Result<ValidationReport> {
                 reason: err.to_string(),
             },
         }),
+    }
+}
+
+/// Validate a **node** document (DEV-B5): parse → node validation → lowering
+/// into the runnable engine document (itself validated by the lowering), and
+/// summarize what the node would present.
+fn validate_node_document(path: &Path, text: &str) -> ValidationReport {
+    let node = match NodeConfig::load_from_toml(text) {
+        Ok(node) => node,
+        Err(err) => {
+            return ValidationReport {
+                path: path.to_path_buf(),
+                status: ValidationStatus::Invalid {
+                    reason: format!("parse (node document): {err}"),
+                },
+            };
+        }
+    };
+    match node.to_multiview_config() {
+        Ok(lowered) => {
+            let cadence = lowered.canvas.fps.rational();
+            ValidationReport {
+                path: path.to_path_buf(),
+                status: ValidationStatus::Ok {
+                    summary: format!(
+                        "display node: {} ingest, {} head(s); presents {}x{} @ {}/{} fps",
+                        node.ingest.kind_name(),
+                        node.displays.len(),
+                        lowered.canvas.width,
+                        lowered.canvas.height,
+                        cadence.num,
+                        cadence.den,
+                    ),
+                },
+            }
+        }
+        Err(err) => ValidationReport {
+            path: path.to_path_buf(),
+            status: ValidationStatus::Invalid {
+                reason: err.to_string(),
+            },
+        },
     }
 }
 
