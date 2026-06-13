@@ -487,14 +487,28 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
             // Already converged: no restart, no event.
             return Ok(());
         };
+        // FAIL-SAFE gate (DEV-A4 fix 3): a real switch needs a concrete, grounded
+        // decode-table index to scope its stop/start to. Without one we REFUSE —
+        // before publishing `mode_started`, before touching the session, before
+        // any wire write — so we can never issue a global, un-indexed stop that
+        // would halt all decode on a production unit. The poller keeps the desire
+        // recorded and re-converges once a grounded index exists.
+        let Some(index) = index else {
+            return Err(ZowietekClientError::ConvergenceUngrounded {
+                device: self.device_id.clone(),
+                desired: to.clone(),
+            });
+        };
+        // Resolve the session BEFORE declaring the impact, so a missing session
+        // does not leave a dangling `mode_started` with no terminal event.
+        let session = self.session_clone()?;
         // Declare the DEV-class impact at the start (instant-apply doctrine).
         self.broadcaster.mode_started(&self.device_id, to);
-        let session = self.session_clone()?;
-        // Close-before-open: stop the current pipeline, THEN start the target.
-        // The vendor decode table is the only documented lever (see the type
-        // doc); the close must precede the open. A failure of either step
-        // publishes a `device.mode` Failed so the operator sees the convergence
-        // did not complete (the driver re-converges on the next pass).
+        // Close-before-open: stop the current pipeline, THEN start the target —
+        // both scoped to the grounded decode index (never a global `data=Null`).
+        // The close must precede the open. A failure of either step publishes a
+        // `device.mode` Failed so the operator sees the convergence did not
+        // complete (the driver re-converges on the next pass).
         if let Err(err) = self.apply_mode_switch(&session, to, index).await {
             self.broadcaster.mode_failed(&self.device_id, to);
             return Err(err);
@@ -509,14 +523,22 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
     // ---- Internals ---------------------------------------------------------
 
     /// Apply the close-before-open switch on the decode table: stop the current
-    /// pipeline, then start the target. The close precedes the open.
+    /// pipeline, then start the target — both scoped to `index`. The close
+    /// precedes the open.
+    ///
+    /// Every `streamplay` body names the concrete decode-table `index`; the stop
+    /// is therefore **slot-scoped**, never the global `data=Null` form that would
+    /// stop all decode on the device (DEV-A4 fix 3). NOTE: the exact `streamplay`
+    /// stop/start payload shape remains an OPEN protocol-grounding item
+    /// (managed-devices.md §3.3) — it must be validated against the vendor SDK on
+    /// a spare decode index before the poller is wired to supply a live index.
     async fn apply_mode_switch(
         &self,
         session: &ZowietekSession,
         to: &str,
-        index: Option<DecodeIndex>,
+        index: DecodeIndex,
     ) -> Result<(), ZowietekClientError> {
-        let _ = index;
+        let idx = index.get();
         self.client
             .request(
                 session,
@@ -524,7 +546,7 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
                 "streamplay",
                 "streamplay",
                 "stop",
-                Value::Null,
+                serde_json::json!({ "index": idx }),
             )
             .await?;
         self.client
@@ -534,7 +556,7 @@ impl<T: ZowietekTransport> ZowietekDriver<T> {
                 "streamplay",
                 "streamplay",
                 "start",
-                serde_json::json!({ "mode": to }),
+                serde_json::json!({ "index": idx, "mode": to }),
             )
             .await?;
         Ok(())
