@@ -362,7 +362,7 @@ fn rtp_mode_ingest_surfaces_raw_rtp_packets_for_the_pure_depacketizer() {
     // packets (so we see real RFC 6184 FU-A fragmentation, marker on the last).
     let mut payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     payload.extend(std::iter::repeat_n(0xABu8, 4000));
-    a.write_video_sample(&payload, true, now).unwrap();
+    a.write_video_sample(&payload, true, 0, now).unwrap();
 
     let delivered = pump_until(&mut a, a_addr, &mut b, b_addr, now, |_a, b| {
         b.received_rtp_count() > 0
@@ -416,7 +416,9 @@ fn rtp_mode_ingest_received_ring_is_bounded_drop_oldest() {
     for i in 0..200u32 {
         let mut payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
         payload.extend(std::iter::repeat_n(0xCDu8, 4000));
-        a.write_video_sample(&payload, true, clock).unwrap();
+        // One 90 kHz RTP tick per ~5 ms write (i * 450); monotonic re-stamp.
+        a.write_video_sample(&payload, true, i.saturating_mul(450), clock)
+            .unwrap();
         clock += Duration::from_millis(5);
         // Pump until this write's packets have all reached b (or a bounded number
         // of shuttle iterations elapse), never draining b's ring.

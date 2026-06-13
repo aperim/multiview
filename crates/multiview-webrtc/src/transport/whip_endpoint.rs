@@ -28,11 +28,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::config::{EndpointConfig, IceServerKind};
+use crate::config::EndpointConfig;
 use crate::error::{Result, WebRtcError};
 use crate::session::{SessionId, SessionRole, SessionTable};
 use crate::transport::{RtpRing, Session, SessionConfig, WebRtcEndpoint};
-use crate::turn::TurnClient;
+use crate::turn::TurnRelayDriver;
 
 /// The maximum UDP datagram the recv loop reads (a generous MTU ceiling; WebRTC
 /// packets are well under this).
@@ -65,40 +65,6 @@ enum Command {
 /// PLI rate-limit floor (ADR-T014 §7): at most one PLI per this interval per
 /// session while the keyframe gate is closed.
 const PLI_FLOOR: Duration = Duration::from_secs(2);
-
-/// One configured TURN server's allocation client, driven sans-IO over the
-/// shared socket by the endpoint loop (ADR-0048 §5.1).
-struct TurnDriver {
-    client: TurnClient,
-}
-
-/// Build a [`TurnClient`] per configured TURN server (ADR-0048 §5.1). The
-/// per-allocation credential is resolved `now` (ephemeral REST derives a
-/// time-limited username/password; long-term uses the static pair). STUN
-/// servers need no client here (str0m's server-reflexive candidates are gathered
-/// from the bound/advertised addresses). Empty when no TURN server is
-/// configured — the common self-hosted / port-forwarded case.
-fn build_turn_clients(config: &EndpointConfig, now: Instant) -> Vec<TurnDriver> {
-    // A wall-clock seconds value for the ephemeral-REST expiry derivation. The
-    // monotonic `now` is the driver's tick clock; the REST username's expiry is a
-    // unix time, so use the system clock here (a credential-derivation detail —
-    // not a media-timeline clock, so this is not invariant-#3 territory).
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let _ = now;
-    config
-        .ice_servers
-        .iter()
-        .filter(|s| s.kind == IceServerKind::Turn)
-        .filter_map(|server| {
-            let credential = server.credentials.as_ref()?.resolve(now_unix);
-            Some(TurnDriver {
-                client: TurnClient::new(server.addr, credential),
-            })
-        })
-        .collect()
-}
 
 /// A handle the WHIP control provider uses to negotiate and release ingest
 /// sessions against the running [`WhipEndpoint`]. Cheap to clone (an `Arc` of
@@ -413,7 +379,7 @@ impl WhipEndpoint {
         // negotiations offer it as a relay candidate (the operator's hard
         // NAT-traversal requirement, live in the driver — not just crate-level).
         let now0 = Instant::now();
-        let mut turn_clients = build_turn_clients(self.endpoint.config(), now0);
+        let mut turn = TurnRelayDriver::from_config(self.endpoint.config(), now0);
         let std_socket = self.endpoint.into_socket();
         std_socket
             .set_nonblocking(true)
@@ -458,12 +424,12 @@ impl WhipEndpoint {
                             // A datagram from a TURN server feeds its client; any
                             // other datagram is media routed to the session that
                             // accepts it.
-                            if !Self::feed_turn(&mut turn_clients, src, payload, now, &self.shared) {
+                            if !turn.feed(src, payload, now) {
                                 Self::route_datagram(&mut sessions, src, local_addr, payload, now);
                             }
                         }
                     }
-                    Self::pump_turn(&socket, &mut turn_clients, now, &self.shared).await;
+                    Self::pump_turn(&socket, &mut turn, now, &self.shared).await;
                     Self::pump_outbound(&socket, &mut sessions, now).await;
                 }
                 // The idle tick: advance timers, drain RTP, drive TURN, GC.
@@ -475,7 +441,7 @@ impl WhipEndpoint {
                         s.ring.drain_from(&mut s.session);
                         Self::maybe_pli(s, now);
                     }
-                    Self::pump_turn(&socket, &mut turn_clients, now, &self.shared).await;
+                    Self::pump_turn(&socket, &mut turn, now, &self.shared).await;
                     Self::pump_outbound(&socket, &mut sessions, now).await;
                     Self::reap(&mut sessions, &self.shared);
                 }
@@ -523,71 +489,25 @@ impl WhipEndpoint {
         }
     }
 
-    /// Feed a datagram that came **from a configured TURN server** into its
-    /// client (allocation / refresh / relayed-data handling). Returns `true` if a
-    /// TURN client owned `src` (the datagram was consumed); `false` means it was
-    /// not from a TURN server and should be routed to a session as media. On a
-    /// successful `Allocate` the learned relay is published for future
-    /// negotiations.
-    fn feed_turn(
-        clients: &mut [TurnDriver],
-        src: SocketAddr,
-        payload: &[u8],
-        now: Instant,
-        shared: &WhipShared,
-    ) -> bool {
-        for driver in clients.iter_mut() {
-            if driver.client.server_addr() != src {
-                continue;
-            }
-            match driver.client.handle_input(payload, now) {
-                Ok(Some(crate::turn::TurnEvent::Allocated(relay))) => {
-                    if let Ok(mut relays) = shared.learned_relays.lock() {
-                        if !relays.contains(&relay) {
-                            relays.push(relay);
-                        }
-                    }
-                }
-                // Permission/Data events are not load-bearing for offering the
-                // relay candidate (str0m drives relayed connectivity once the
-                // candidate is in the answer); a parse/server error is logged at
-                // a low level and the allocation simply retries/expires.
-                Ok(_) => {}
-                Err(_e) => {}
-            }
-            return true;
-        }
-        false
-    }
-
-    /// Drive every TURN client's sans-IO output: send any queued datagram to its
-    /// TURN server (allocate/refresh/retransmit). Non-blocking; a send error is
-    /// dropped (the client retransmits). Also harvests a relay learned from a
-    /// `poll_output`-driven state transition.
+    /// Drive the shared TURN relay driver's sans-IO output: send each queued
+    /// datagram to its TURN server (allocate/refresh/retransmit) and publish any
+    /// relay it harvested into `shared.learned_relays` for future negotiations.
+    /// Non-blocking; a send error is dropped (the client retransmits).
     async fn pump_turn(
         socket: &tokio::net::UdpSocket,
-        clients: &mut [TurnDriver],
+        turn: &mut TurnRelayDriver,
         now: Instant,
         shared: &WhipShared,
     ) {
-        for driver in clients.iter_mut() {
-            // Drain queued transmits (bounded: the client serializes one request
-            // at a time, so this is a short loop).
-            for _ in 0..8 {
-                match driver.client.poll_output(now) {
-                    crate::turn::TurnOutput::Transmit {
-                        destination,
-                        payload,
-                    } => {
-                        let _ = socket.send_to(&payload, destination).await;
-                    }
-                    // Nothing more to send right now.
-                    crate::turn::TurnOutput::Timeout(_) | crate::turn::TurnOutput::Idle => break,
-                }
-            }
-            // Publish a relay that became available since the last pass.
-            if let Some(relay) = driver.client.relay() {
-                if let Ok(mut relays) = shared.learned_relays.lock() {
+        while let Some((destination, payload)) = turn.poll_transmit(now) {
+            let _ = socket.send_to(&payload, destination).await;
+        }
+        // Publish any relay learned since the last pass (the driver de-dups, so
+        // each relay is handed out once).
+        let new_relays = turn.take_new_relays();
+        if !new_relays.is_empty() {
+            if let Ok(mut relays) = shared.learned_relays.lock() {
+                for relay in new_relays {
                     if !relays.contains(&relay) {
                         relays.push(relay);
                     }
@@ -640,13 +560,15 @@ mod tests {
 
     use std::time::Instant;
 
-    use super::build_turn_clients;
     use crate::config::{EndpointConfig, IceServer, TurnCredentials};
+    use crate::turn::TurnRelayDriver;
 
     #[test]
-    fn turn_clients_built_per_turn_server_stun_skipped() {
-        // A STUN server needs no client (str0m gathers srflx from bound/advertised
-        // addresses); a TURN server yields one driven client, pointed at its addr.
+    fn turn_driver_built_per_turn_server_stun_skipped() {
+        // The WHIP endpoint drives its TURN clients through the shared
+        // `TurnRelayDriver`: a STUN server needs no client (str0m gathers srflx
+        // from bound/advertised addresses); a TURN server yields one driven
+        // client.
         let config = EndpointConfig {
             ice_servers: vec![
                 IceServer::stun("[2001:db8::53]:3478".parse().unwrap()),
@@ -657,21 +579,16 @@ mod tests {
             ],
             ..EndpointConfig::default()
         };
-        let clients = build_turn_clients(&config, Instant::now());
-        assert_eq!(clients.len(), 1, "one client for the one TURN server");
-        assert_eq!(
-            clients[0].client.server_addr(),
-            "[2001:db8::55]:3478".parse().unwrap(),
-            "the client is pointed at the configured TURN server"
-        );
+        let driver = TurnRelayDriver::from_config(&config, Instant::now());
+        assert_eq!(driver.client_count(), 1, "one client for the one TURN server");
     }
 
     #[test]
-    fn no_turn_servers_yields_no_clients() {
+    fn no_turn_servers_yields_an_empty_driver() {
         let config = EndpointConfig {
             ice_servers: vec![IceServer::stun("[2001:db8::53]:3478".parse().unwrap())],
             ..EndpointConfig::default()
         };
-        assert!(build_turn_clients(&config, Instant::now()).is_empty());
+        assert!(TurnRelayDriver::from_config(&config, Instant::now()).is_empty());
     }
 }
