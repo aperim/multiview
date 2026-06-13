@@ -164,6 +164,14 @@ required-features = ["ffmpeg", "overlay"]
 name = "incontainer_text_ingest"
 required-features = ["ffmpeg", "overlay"]
 
+# WHIP ingest end-to-end (ADR-T014): synthetic RTP -> the per-session ring ->
+# RtpRingEngine -> WebRtcProducer -> typed MediaEvents, plus the isolation
+# invariants (bounded drop-oldest; a dropped publisher ends the stream so the
+# tile rides NO_SIGNAL without stalling other tiles). Needs `webrtc-native`.
+[[test]]
+name = "whip_ingest"
+required-features = ["webrtc-native"]
+
 # Feature presets for the `multiview` binary. The DEFAULT build is `software`:
 # pure Rust, no native libs, no GPU — the CI-green baseline. The hardware
 # presets aggregate the owning sub-crates' feature flags exactly as documented
