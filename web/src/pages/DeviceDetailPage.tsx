@@ -19,6 +19,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Activity,
   KeyRound,
+  Monitor,
   MonitorPlay,
   Power,
   RadioTower,
@@ -33,12 +34,20 @@ import {
   setDeviceMode,
   testPatternDevice,
   toDeviceView,
+  toDisplayAssignView,
+  withDisplayAssign,
 } from '../devices/api';
-import type { OutputTargetView, SourceCandidateView } from '../devices/api';
+import type {
+  DisplayAssignKind,
+  DisplayAssignView,
+  OutputTargetView,
+  SourceCandidateView,
+} from '../devices/api';
 import { DeviceStateBadge } from '../devices/DeviceStateBadge';
 import { LastSeenCell } from '../devices/lastSeen';
 import {
   useDeviceStatuses,
+  useDisplayHeads,
   useEngineClockRef,
   useOutputTargets,
   useSourceCandidates,
@@ -75,6 +84,8 @@ import { HelpLink } from '../components/HelpLink';
 import { PageHeader } from '../components/PageHeader';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
 import {
   Dialog,
   DialogContent,
@@ -234,7 +245,14 @@ function targetOutputKind(kind: string): OutputKind {
 }
 
 /** The §9 tab ids; `?tab=` deep links (e.g. the list's stream column) validate against this set. */
-const DETAIL_TABS = ['overview', 'streams', 'sync', 'maintenance', 'events'] as const;
+const DETAIL_TABS = [
+  'overview',
+  'streams',
+  'display',
+  'sync',
+  'maintenance',
+  'events',
+] as const;
 
 /** A device-detail tab id. */
 type DetailTab = (typeof DETAIL_TABS)[number];
@@ -242,6 +260,229 @@ type DetailTab = (typeof DETAIL_TABS)[number];
 /** The initial tab for a `?tab=` query value; unknown/absent falls back to Overview. */
 function detailTabFromParam(param: string | null): DetailTab {
   return DETAIL_TABS.find((tab) => tab === param) ?? 'overview';
+}
+
+/** Render a head's refresh rate (millihertz → whole Hz; exact, never a float fps). */
+function formatRefreshHz(refreshMillihertz: number): string {
+  // 60_000 mHz → "60", 59_940 mHz → "59.94"; trailing zeros trimmed.
+  const hz = refreshMillihertz / 1000;
+  return Number.isInteger(hz) ? String(hz) : hz.toFixed(2).replace(/\.?0+$/, '');
+}
+
+/**
+ * The Display tab for a display node (managed-devices.md §9, ADR-M009 facet (c)):
+ * the node's reported scanout heads and the head-assignment editor writing the
+ * device record's `display.assign` (Program / a named Output / a Wall head). The
+ * write merges into the existing body, so the enrollment key is never clobbered.
+ */
+function DisplayTab({
+  deviceId,
+  device,
+  recordBody,
+}: {
+  readonly deviceId: string;
+  readonly device: DeviceView;
+  readonly recordBody: Record<string, unknown>;
+}): JSX.Element {
+  const { t } = useLingui();
+  const heads = useDisplayHeads(deviceId);
+  const saveDevice = useSaveResource('devices');
+  const stored = toDisplayAssignView(recordBody);
+  const [assign, setAssign] = useState<DisplayAssignView>(stored);
+
+  if (device.driver !== 'displaynode') {
+    return (
+      <p className="max-w-prose py-4 text-sm text-muted-foreground">
+        <Trans>
+          This is not a display node. Scanout heads and head assignment apply
+          only to enrolled Multiview display-node appliances.
+        </Trans>
+      </p>
+    );
+  }
+
+  const setKind = (kind: DisplayAssignKind): void => {
+    setAssign((current) => ({ kind, ref: kind === current.kind ? current.ref : '' }));
+  };
+
+  const saveAssignment = (): void => {
+    const nextBody = withDisplayAssign(recordBody, assign);
+    saveDevice.mutate(
+      {
+        id: deviceId,
+        create: false,
+        input: { name: device.name, body: nextBody },
+      },
+      {
+        onSuccess: (): void => {
+          toast({
+            title: t`Assignment saved`,
+            description: t`The display node converges to its new scanout assignment; Multiview program output is unaffected.`,
+          });
+        },
+        onError: (error): void => {
+          toast({
+            title: t`Could not save the assignment`,
+            description: error instanceof Error ? error.message : String(error),
+            variant: 'destructive',
+          });
+        },
+      },
+    );
+  };
+
+  const refNeeded = assign.kind === 'output' || assign.kind === 'wall_head';
+
+  return (
+    <div className="flex flex-col gap-6 py-4">
+      <section aria-labelledby="display-heads">
+        <h2 id="display-heads" className="mb-2 text-sm font-semibold">
+          <Trans>Scanout heads</Trans>
+        </h2>
+        <p className="mb-2 max-w-prose text-sm text-muted-foreground">
+          <Trans>
+            The physical outputs the node reports (EDID-derived where present),
+            refreshed on every heartbeat.
+          </Trans>
+        </p>
+        {(heads.data ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            <Trans>
+              No heads reported yet — they appear once the node enrolls and
+              heartbeats its EDID-derived outputs.
+            </Trans>
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {(heads.data ?? []).map((head) => (
+              <li
+                key={head.id}
+                className="flex flex-wrap items-center gap-2 rounded-md border p-2 text-sm"
+              >
+                <span className="font-medium" dir="ltr">
+                  {head.connector}
+                </span>
+                <Badge variant="outline">{`${String(head.width)}×${String(head.height)}`}</Badge>
+                <span className="text-xs text-muted-foreground">
+                  {`${formatRefreshHz(head.refreshMillihertz)} Hz`}
+                </span>
+                {head.connected ? (
+                  <Badge variant="live">
+                    <span>
+                      <Trans>connected</Trans>
+                    </span>
+                  </Badge>
+                ) : (
+                  <Badge variant="stale">
+                    <span>
+                      <Trans>no sink</Trans>
+                    </span>
+                  </Badge>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section aria-labelledby="display-assign">
+        <h2 id="display-assign" className="mb-2 text-sm font-semibold">
+          <Trans>Head assignment</Trans>
+        </h2>
+        <p className="mb-3 max-w-prose text-sm text-muted-foreground">
+          <Trans>
+            What this node scans out: the program canvas, a named output
+            rendition, or a specific wall head. Saving updates the stored
+            desired state; the node converges without interrupting Multiview
+            program output.
+          </Trans>
+        </p>
+        <fieldset className="flex flex-col gap-2 text-sm">
+          <legend className="sr-only">
+            <Trans>Scanout assignment</Trans>
+          </legend>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="display-assign"
+              value="none"
+              checked={assign.kind === 'none'}
+              onChange={(): void => {
+                setKind('none');
+              }}
+            />
+            <Trans>Unassigned</Trans>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="display-assign"
+              value="program"
+              checked={assign.kind === 'program'}
+              onChange={(): void => {
+                setKind('program');
+              }}
+            />
+            <Trans>Program canvas</Trans>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="display-assign"
+              value="output"
+              checked={assign.kind === 'output'}
+              onChange={(): void => {
+                setKind('output');
+              }}
+            />
+            <Trans>A named output</Trans>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="display-assign"
+              value="wall_head"
+              checked={assign.kind === 'wall_head'}
+              onChange={(): void => {
+                setKind('wall_head');
+              }}
+            />
+            <Trans>A wall head</Trans>
+          </label>
+        </fieldset>
+
+        {refNeeded ? (
+          <div className="mt-3 flex max-w-sm flex-col gap-1.5">
+            <Label htmlFor="display-assign-ref">
+              {assign.kind === 'output' ? (
+                <Trans>Output id</Trans>
+              ) : (
+                <Trans>Wall head id</Trans>
+              )}
+            </Label>
+            <Input
+              id="display-assign-ref"
+              value={assign.ref}
+              placeholder={assign.kind === 'output' ? t`e.g. out-foyer` : t`e.g. head-0`}
+              onChange={(event): void => {
+                const next = event.target.value;
+                setAssign((current) => ({ ...current, ref: next }));
+              }}
+            />
+          </div>
+        ) : null}
+
+        <div className="mt-4">
+          <Button
+            onClick={saveAssignment}
+            disabled={saveDevice.isPending || (refNeeded && assign.ref.trim() === '')}
+          >
+            <Trans>Save assignment</Trans>
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 /** Device detail with the §9 tabs. */
@@ -441,6 +682,10 @@ export function DeviceDetailPage(): JSX.Element {
           </TabsTrigger>
           <TabsTrigger value="streams">
             <Trans>Streams</Trans>
+          </TabsTrigger>
+          <TabsTrigger value="display">
+            <Monitor aria-hidden="true" className="size-3.5" />
+            <Trans>Display</Trans>
           </TabsTrigger>
           <TabsTrigger value="sync">
             <Trans>Sync</Trans>
@@ -669,6 +914,14 @@ export function DeviceDetailPage(): JSX.Element {
               )}
             </section>
           </div>
+        </TabsContent>
+
+        <TabsContent value="display">
+          <DisplayTab
+            deviceId={deviceId}
+            device={device}
+            recordBody={record.data.record.body}
+          />
         </TabsContent>
 
         <TabsContent value="sync">

@@ -359,6 +359,128 @@ export async function listOutputTargets(
   return targets;
 }
 
+/**
+ * One physical scanout head a display node reports (ADR-M009 facet (c)):
+ * EDID-derived where present. `refreshMillihertz` is the exact rate in
+ * millihertz (`60_000` is 60.000 Hz — never a float, invariant #3); the UI
+ * divides by 1000 to display Hz.
+ */
+export interface DisplayHeadView {
+  readonly id: string;
+  readonly connector: string;
+  readonly width: number;
+  readonly height: number;
+  readonly refreshMillihertz: number;
+  readonly connected: boolean;
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/** `GET /api/v1/devices/{id}/display-heads` — the node's reported scanout heads. */
+export async function listDisplayHeads(
+  deviceId: string,
+  options: RequestOptions = {},
+): Promise<DisplayHeadView[]> {
+  const rows = await getJsonArray(
+    `/api/v1/devices/${encodeURIComponent(deviceId)}/display-heads`,
+    options,
+  );
+  const heads: DisplayHeadView[] = [];
+  for (const raw of rows) {
+    if (typeof raw.id === 'string' && typeof raw.connector === 'string') {
+      heads.push({
+        id: raw.id,
+        connector: raw.connector,
+        width: numberOrZero(raw.width),
+        height: numberOrZero(raw.height),
+        refreshMillihertz: numberOrZero(raw.refresh_millihertz),
+        connected: raw.connected === true,
+      });
+    }
+  }
+  return heads;
+}
+
+// --- display assignment (the device record's `display.assign`, DEV-B6) ----------
+
+/**
+ * Which sink a display node scans out: the program canvas, a named Output, a
+ * specific wall head, or nothing yet. Mirrors the externally-tagged
+ * `display.assign` body union (`{ program: true }` / `{ output: "out-id" }` /
+ * `{ wall_head: "head-id" }`); `none` is the absent/unrecognized fold.
+ */
+export type DisplayAssignKind = 'none' | 'program' | 'output' | 'wall_head';
+
+/** A display node's current scanout assignment, projected from the device body. */
+export interface DisplayAssignView {
+  readonly kind: DisplayAssignKind;
+  /** The referenced output / wall-head id (empty for `program` and `none`). */
+  readonly ref: string;
+}
+
+/**
+ * Project the device record body's `display.assign` into a {@link DisplayAssignView}.
+ * An absent or unrecognized assignment folds to `none` (never invented), so the
+ * editor opens on an honest "unassigned" state.
+ */
+export function toDisplayAssignView(body: Record<string, unknown>): DisplayAssignView {
+  const display = body.display;
+  if (!isRecord(display)) {
+    return { kind: 'none', ref: '' };
+  }
+  const assign = display.assign;
+  if (!isRecord(assign)) {
+    return { kind: 'none', ref: '' };
+  }
+  if (assign.program === true) {
+    return { kind: 'program', ref: '' };
+  }
+  if (typeof assign.output === 'string') {
+    return { kind: 'output', ref: assign.output };
+  }
+  if (typeof assign.wall_head === 'string') {
+    return { kind: 'wall_head', ref: assign.wall_head };
+  }
+  return { kind: 'none', ref: '' };
+}
+
+/**
+ * Build the next device record body that applies `assignment` to the existing
+ * `body` — merging into `display`, never clobbering sibling keys
+ * (`enrollment.public_key`, `driver`). `none` removes the `assign` key so the
+ * node returns to unassigned. The wire shape is the externally-tagged union.
+ */
+export function withDisplayAssign(
+  body: Record<string, unknown>,
+  assignment: DisplayAssignView,
+): Record<string, unknown> {
+  const existingDisplay = isRecord(body.display) ? body.display : {};
+  let assign: Record<string, unknown> | undefined;
+  switch (assignment.kind) {
+    case 'program':
+      assign = { program: true };
+      break;
+    case 'output':
+      assign = { output: assignment.ref };
+      break;
+    case 'wall_head':
+      assign = { wall_head: assignment.ref };
+      break;
+    case 'none':
+      assign = undefined;
+      break;
+  }
+  const nextDisplay: Record<string, unknown> = { ...existingDisplay };
+  if (assign === undefined) {
+    delete nextDisplay.assign;
+  } else {
+    nextDisplay.assign = assign;
+  }
+  return { ...body, display: nextDisplay };
+}
+
 // --- discovery (untrusted inventory, ADR-0041) -------------------------------------
 
 /** One resolved endpoint of a discovered service (IPv6 lead, IPv4 legacy). */

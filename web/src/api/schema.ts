@@ -284,6 +284,115 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/devices/enroll` — a node enrolls (unauthenticated by Bearer:
+         *     node-authenticated by token/keypair).
+         * @description With a valid one-time token (and a well-formed key) the node is enrolled and
+         *     a `displaynode` device is created ONLINE (`200`). Without a usable token the
+         *     node is told to pair: `202` with a stable six-character code (the same code
+         *     on every re-poll) until the operator completes `POST /devices/pair`.
+         */
+        post: operations["enroll_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/enrollment-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/devices/enrollment-tokens` — list enrollment tokens
+         *     (role: administer). Metadata only — the secret never appears.
+         */
+        get: operations["list_enrollment_tokens"];
+        put?: never;
+        /**
+         * `POST /api/v1/devices/enrollment-tokens` — mint a one-time enrollment token
+         *     (role: administer). Returns the bearer token **once** (one-time display); only
+         *     its hash is retained.
+         */
+        post: operations["mint_enrollment_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/enrollment-tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/devices/enrollment-tokens/{id}` — revoke an enrollment token
+         *     (role: administer; `204`, `404` when unknown).
+         */
+        delete: operations["revoke_enrollment_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/devices/pair` — the operator completes a screen pairing
+         *     (role: write). The code is read off the node's attached display.
+         */
+        post: operations["pair_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/pairing-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/devices/pairing-requests` — the pending screen pairings
+         *     (role: administer). Model/name metadata only — never the code or the key.
+         */
+        get: operations["list_pairing_requests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/devices/{id}": {
         parameters: {
             query?: never;
@@ -314,6 +423,50 @@ export interface paths {
          *     partially applied — a refused delete leaves the device intact.
          */
         delete: operations["delete_device"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/display-heads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/devices/{id}/display-heads` — the node's reported scanout heads
+         *     (ADR-M009 facet (c)); role: read. `404` when the device is not an enrolled
+         *     node (or unknown).
+         */
+        get: operations["display_heads"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/devices/{id}/heartbeat` — a node proves liveness with a
+         *     keypair-signed heartbeat (unauthenticated by Bearer: node-authenticated by
+         *     the Ed25519 signature over the canonical message). On success it answers with
+         *     the node's current display assignment and refreshes the display-head
+         *     projection. Any verification failure is `401` (never a `500`).
+         */
+        post: operations["heartbeat"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1900,6 +2053,35 @@ export interface components {
          */
         DiscoveryDriverKind: "cast" | "ndi-source" | "zowietek-control" | "unknown";
         /**
+         * @description One display head a node reported (the ADR-M009 facet (c) projection): a
+         *     physical scanout output, EDID-derived where present. Reported at enrollment
+         *     and re-reported on every heartbeat; read by `GET /devices/{id}/display-heads`.
+         */
+        DisplayHead: {
+            /** @description Whether a sink is currently connected to this head. */
+            connected: boolean;
+            /** @description The KMS connector name driving this head (`HDMI-A-1`, `DP-1`, …). */
+            connector: string;
+            /**
+             * Format: int32
+             * @description Head height in pixels.
+             */
+            height: number;
+            /** @description A stable head id within the node (node-assigned, e.g. `head-0`). */
+            id: string;
+            /**
+             * Format: int32
+             * @description Head refresh rate in millihertz (exact: `60_000` is 60.000 Hz — never a
+             *     float, invariant #3).
+             */
+            refresh_millihertz: number;
+            /**
+             * Format: int32
+             * @description Head width in pixels.
+             */
+            width: number;
+        };
+        /**
          * @description The added / removed / changed top-level keys between two documents.
          *
          *     A pragmatic, UI-facing structural diff over JSON objects: it reports which
@@ -1931,6 +2113,49 @@ export interface components {
              */
             up_ms: number;
         };
+        /** @description The body a node submits to `POST /devices/enroll`. */
+        EnrollRequest: {
+            /** @description The node's EDID-derived display heads. */
+            heads?: components["schemas"]["DisplayHead"][];
+            /** @description The node's hardware model (operator-facing metadata). */
+            model?: string;
+            /** @description The node's human-friendly name (becomes the device display name). */
+            node_name?: string;
+            /** @description The node's Ed25519 public key (standard base64 of the 32 raw bytes). */
+            public_key: string;
+            /**
+             * @description The one-time enrollment token (`<id>.<secret>`), or absent for the
+             *     screen-pairing path.
+             */
+            token?: string | null;
+        };
+        /**
+         * @description The `200`/`202` body of `POST /devices/enroll`.
+         *
+         *     A flat document discriminated by [`status`](EnrollResponse::status)
+         *     (`"enrolled"` or `"pairing"`) — never a serde `untagged` enum (the project
+         *     bans `untagged`). The `enrolled` arm carries `device_id`/`heartbeat_secs`;
+         *     the `pairing` arm carries `pairing_code`/`retry_secs`; the irrelevant fields
+         *     are elided.
+         */
+        EnrollResponse: {
+            /** @description The device id the node is bound to (`enrolled` only). */
+            device_id?: string | null;
+            /**
+             * Format: int64
+             * @description The heartbeat cadence the node should keep, seconds (`enrolled` only).
+             */
+            heartbeat_secs?: number | null;
+            /** @description The six-character pairing code to display (`pairing` only). */
+            pairing_code?: string | null;
+            /**
+             * Format: int64
+             * @description How long to wait before the next poll, seconds (`pairing` only).
+             */
+            retry_secs?: number | null;
+            /** @description `"enrolled"` (the node is bound) or `"pairing"` (the node must pair). */
+            status: string;
+        };
         /**
          * @description `OpenAPI` mirror of [`multiview_events::HealthWarning`] (SA-0).
          *
@@ -1956,6 +2181,33 @@ export interface components {
             since: number;
             /** @description The affected subsystem (e.g. `compositor`, `decode`, `encode`, `gpu`). */
             subsystem: string;
+        };
+        /** @description The body a node signs and submits to `POST /devices/{id}/heartbeat`. */
+        HeartbeatBody: {
+            /** @description The node's current display heads (the refreshed projection). */
+            heads?: components["schemas"]["DisplayHead"][];
+            /**
+             * Format: float
+             * @description The node's reported temperature (°C), if it measures one.
+             */
+            temperature_c?: number | null;
+        };
+        /**
+         * @description The `200` body of a signed heartbeat: the node's current display assignment
+         *     and the cadence to keep.
+         */
+        HeartbeatResponse: {
+            /**
+             * @description The node's current display assignment (the `display.assign` value:
+             *     `{ "program": true }` / `{ "output": "out-…" }` / `{ "wall_head": "head-…" }`),
+             *     or `null` when the node is unassigned.
+             */
+            assignment: unknown;
+            /**
+             * Format: int64
+             * @description The heartbeat cadence the node should keep (seconds).
+             */
+            heartbeat_secs: number;
         };
         /** @description `OpenAPI` mirror of [`multiview_config::IndexCell`]. */
         IndexCellDoc: {
@@ -2060,6 +2312,35 @@ export interface components {
          * @enum {string}
          */
         MediaFormat: "video" | "audio" | "data";
+        /** @description The `POST /api/v1/devices/enrollment-tokens` request body (an optional TTL). */
+        MintTokenRequest: {
+            /**
+             * Format: int64
+             * @description The token's time-to-live in seconds (defaults to one hour; bounded to
+             *     `[60, 604800]`). A value outside the range is `422`.
+             */
+            ttl_secs?: number | null;
+        };
+        /** @description The one-time mint response: the **only** time the bearer secret is shown. */
+        MintedToken: {
+            /**
+             * Format: int64
+             * @description When it was minted (epoch seconds).
+             */
+            created_epoch_s: number;
+            /**
+             * Format: int64
+             * @description When it expires (epoch seconds).
+             */
+            expires_epoch_s: number;
+            /**
+             * @description The bearer token in `<token_id>.<secret>` form — shown once, never stored
+             *     (only its hash is). The operator copies it into the node now or never.
+             */
+            token: string;
+            /** @description The token id (`enr-…`). */
+            token_id: string;
+        };
         /**
          * @description The NMOS access level granted for one API (the `x-nmos-api` value vocabulary).
          * @enum {string}
@@ -2269,6 +2550,40 @@ export interface components {
             color: components["schemas"]["TallyColorDoc"];
             /** @description The tally target the override applies to. */
             target: components["schemas"]["TallyTargetDoc"];
+        };
+        /** @description The body an operator submits to `POST /devices/pair`. */
+        PairRequest: {
+            /** @description The six-character code read off the node's screen (case-insensitive). */
+            code: string;
+            /** @description The device id to assign the paired node (generated when omitted). */
+            device_id?: string | null;
+            /** @description An optional display name override for the paired device. */
+            display_name?: string | null;
+        };
+        /** @description The `201` body of `POST /devices/pair`. */
+        PairResponse: {
+            /** @description The device id the node was bound to. */
+            device_id: string;
+        };
+        /**
+         * @description One operator-facing pending-pairing row — model/name metadata only, never the
+         *     code (the code stays on the node's screen) or the key.
+         */
+        PairingRequestSummary: {
+            /**
+             * Format: int64
+             * @description When the request first pended (epoch seconds).
+             */
+            created_epoch_s: number;
+            /**
+             * @description A stable handle for this pending request (the public-key fingerprint),
+             *     so the operator can disambiguate two unnamed nodes.
+             */
+            fingerprint: string;
+            /** @description The node's reported model. */
+            model: string;
+            /** @description The node's reported name. */
+            node_name: string;
         };
         /**
          * @description `OpenAPI` mirror of [`multiview_core::alarm::PerceivedSeverity`] (X.733).
@@ -3127,6 +3442,31 @@ export interface components {
          * @enum {string}
          */
         TcSourceKindDoc: "ltc" | "vitc" | "atc_rp188" | "generated";
+        /**
+         * @description The lifecycle state of a minted enrollment token, as the admin list reports
+         *     it. `#[non_exhaustive]` so a future state does not break the wire enum.
+         * @enum {string}
+         */
+        TokenState: "pending" | "used" | "revoked" | "expired";
+        /** @description The admin-facing metadata for one enrollment token — never the secret. */
+        TokenSummary: {
+            /**
+             * Format: int64
+             * @description When it was minted (epoch seconds).
+             */
+            created_epoch_s: number;
+            /**
+             * Format: int64
+             * @description When it expires (epoch seconds).
+             */
+            expires_epoch_s: number;
+            /** @description The token's current lifecycle state. */
+            state: components["schemas"]["TokenState"];
+            /** @description The token id (`enr-…`). */
+            token_id: string;
+            /** @description The device id that redeemed it, when `state == used`. */
+            used_by?: string | null;
+        };
         /**
          * @description One leg's RTP transport parameters (IS-05 supports up to two legs for
          *     ST 2022-7 redundancy; this models one).
@@ -3993,6 +4333,301 @@ export interface operations {
             };
         };
     };
+    enroll_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrollRequest"];
+            };
+        };
+        responses: {
+            /** @description Enrolled: the node is bound to a device and should heartbeat. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollResponse"];
+                };
+            };
+            /** @description Pairing: show the code (and QR) and re-poll. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollResponse"];
+                };
+            };
+            /** @description The enrollment token was rejected (unknown/expired/revoked/used). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is malformed (e.g. a bad public key). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many display nodes are pairing at once; retry shortly. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_enrollment_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All enrollment tokens, id-sorted (metadata only). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenSummary"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to list enrollment tokens. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    mint_enrollment_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MintTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The minted token (shown once — the secret is never stored or re-displayed). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MintedToken"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to mint enrollment tokens. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description ttl_secs is out of range. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    revoke_enrollment_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Enrollment token id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The token was revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to revoke enrollment tokens. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No enrollment token with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    pair_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PairRequest"];
+            };
+        };
+        responses: {
+            /** @description Pairing completed: the node is bound to the (operator-chosen) device id; the node's next poll flips to enrolled. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PairResponse"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to complete pairing. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No pending pairing carries that code. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The requested device id already exists. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_pairing_requests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending pairing requests (metadata only — the code stays on the node's screen). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PairingRequestSummary"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to list pairing requests. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_device: {
         parameters: {
             query?: never;
@@ -4226,6 +4861,101 @@ export interface operations {
             };
             /** @description If-Match precondition failed. */
             412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    display_heads: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The enrolled device id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The node's reported display heads. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DisplayHead"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read this device. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No enrolled node with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    heartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The enrolled device id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HeartbeatBody"];
+            };
+        };
+        responses: {
+            /** @description Heartbeat accepted; the current assignment is returned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeartbeatResponse"];
+                };
+            };
+            /** @description Heartbeat verification failed (unknown device, wrong key, stale or replayed timestamp). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Malformed heartbeat body. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

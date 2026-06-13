@@ -30,7 +30,7 @@ msgid "({rawCellCount} absolutely-placed cell(s) ride along unchanged — edit t
 msgstr ""
 
 #. placeholder {0}: device.desiredMode
-#: src/pages/DeviceDetailPage.tsx:475
+#: src/pages/DeviceDetailPage.tsx:720
 msgid "(desired: {0})"
 msgstr ""
 
@@ -289,6 +289,10 @@ msgstr ""
 msgid "A named factory arrangement: <0>2x2</0>, <1>3x3</1>, <2>1+5</2>, or <3>pip</3>."
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:438
+msgid "A named output"
+msgstr ""
+
 #: src/pages/docs/concepts/GlossaryPage.tsx:290
 msgid "A named set of display devices that should present together, with a per-member offset trim and a drift-alarm threshold. The group claims only its weakest member's sync tier, and the achieved tier is measured — never assumed. Cast devices can never be members."
 msgstr ""
@@ -299,6 +303,10 @@ msgstr ""
 
 #: src/pages/docs/DisplayNodesHelpPage.tsx:59
 msgid "A node inherits the product's output doctrine: if its feed stops, it holds the last good frame, then shows its local slate — it never blanks mid-show because of a network blip, and the multiview program itself is never affected by a node's fate."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:420
+msgid "A node with no token shows a six-character code on its screen. Type it here to complete pairing."
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:209
@@ -382,6 +390,10 @@ msgstr ""
 msgid "A video stream does not just carry pixel values — it carries an agreement about what those values <0>mean</0>. Three standards cover almost everything: <1>BT.601</1> (standard definition), <2>BT.709</2> (high definition — the default assumption for most content today), and <3>BT.2020</3> (ultra-HD and HDR, with a much wider color gamut). Each defines its own recipe for turning the YUV numbers in the stream back into red, green, and blue."
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:450
+msgid "A wall head"
+msgstr ""
+
 #: src/pages/DevicesPage.tsx:343
 msgid "About adopting devices"
 msgstr ""
@@ -404,6 +416,7 @@ msgid "About device states"
 msgstr ""
 
 #: src/pages/docs/SyncHelpPage.tsx:94
+#: src/pages/SettingsPage.tsx:283
 msgid "About display nodes"
 msgstr ""
 
@@ -412,7 +425,7 @@ msgstr ""
 msgid "About layouts"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:414
+#: src/pages/DeviceDetailPage.tsx:655
 #: src/pages/DevicesPage.tsx:139
 #: src/pages/DevicesPage.tsx:656
 #: src/pages/docs/DevicesAdoptHelpPage.tsx:86
@@ -452,7 +465,7 @@ msgstr ""
 msgid "About synchronized output"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:738
+#: src/pages/DeviceDetailPage.tsx:991
 msgid "About synchronized output and tiers"
 msgstr ""
 
@@ -477,11 +490,11 @@ msgstr ""
 #~ msgid "Accessible editing path: planned (Cells form + Inspector)"
 #~ msgstr ""
 
-#: src/pages/SettingsPage.tsx:263
+#: src/pages/SettingsPage.tsx:628
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:713
+#: src/pages/DeviceDetailPage.tsx:966
 msgid "achieved tier not measured yet"
 msgstr ""
 
@@ -509,6 +522,7 @@ msgstr ""
 #: src/pages/OutputsPage.tsx:547
 #: src/pages/OverlaysPage.tsx:194
 #: src/pages/ProbesPage.tsx:452
+#: src/pages/SettingsPage.tsx:373
 #: src/pages/SourcesPage.tsx:488
 #: src/pages/SyncGroupsPage.tsx:295
 #: src/pages/TallyPage.tsx:367
@@ -585,7 +599,7 @@ msgid "Addresses are presented IPv6-first; IPv4 results are explicitly labelled 
 msgstr ""
 
 #: src/auth/LoginPage.tsx:89
-#: src/pages/SettingsPage.tsx:209
+#: src/pages/SettingsPage.tsx:572
 msgid "admin.xxxxxxxx-xxxx-…"
 msgstr ""
 
@@ -615,7 +629,7 @@ msgid "Adopt…"
 msgstr ""
 
 #. placeholder {0}: entry.event.driver
-#: src/pages/DeviceDetailPage.tsx:843
+#: src/pages/DeviceDetailPage.tsx:1096
 msgid "adopted (driver {0})"
 msgstr ""
 
@@ -650,7 +664,7 @@ msgstr ""
 msgid "Advertise the canvas as an NDI source by <0>name</0>."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1173
+#: src/pages/DeviceDetailPage.tsx:1426
 msgid "Advertised NDI name"
 msgstr ""
 
@@ -702,7 +716,7 @@ msgstr ""
 msgid "All configured salvos."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:420
+#: src/pages/DeviceDetailPage.tsx:661
 msgid "All devices"
 msgstr ""
 
@@ -732,11 +746,11 @@ msgstr ""
 msgid "An NDI service is added as an NDI source, not adopted."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:392
+#: src/pages/DeviceDetailPage.tsx:633
 msgid "An ordinary managed output was created carrying device_ref {deviceId}; the driver points the device's decode slot at it."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:361
+#: src/pages/DeviceDetailPage.tsx:602
 msgid "An ordinary managed source was created carrying device_ref {deviceId}."
 msgstr ""
 
@@ -785,7 +799,7 @@ msgstr ""
 msgid "API & realtime"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:189
+#: src/pages/SettingsPage.tsx:552
 msgid "API access"
 msgstr ""
 
@@ -798,25 +812,25 @@ msgstr ""
 msgid "API key"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:203
+#: src/pages/SettingsPage.tsx:566
 msgid "API token"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:136
-#: src/pages/SettingsPage.tsx:226
+#: src/pages/SettingsPage.tsx:499
+#: src/pages/SettingsPage.tsx:589
 msgid "API token cleared"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:136
+#: src/pages/SettingsPage.tsx:499
 msgid "API token saved"
 msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:182
-#: src/pages/SettingsPage.tsx:155
+#: src/pages/SettingsPage.tsx:518
 msgid "Appearance"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:148
+#: src/pages/SettingsPage.tsx:511
 msgid "Appearance and language preferences."
 msgstr ""
 
@@ -840,8 +854,8 @@ msgstr ""
 msgid "Apply layout to engine"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:955
-#: src/pages/DeviceDetailPage.tsx:968
+#: src/pages/DeviceDetailPage.tsx:1208
+#: src/pages/DeviceDetailPage.tsx:1221
 msgid "Apply mode"
 msgstr ""
 
@@ -884,6 +898,10 @@ msgstr ""
 #. placeholder {0}: name.trim()
 #: src/layout/components/AreaMatrixEditor.tsx:159
 msgid "Assigned the selection to area \"{0}\"."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:319
+msgid "Assignment saved"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:90
@@ -957,6 +975,10 @@ msgstr ""
 msgid "Available"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:437
+msgid "awaiting the on-screen code"
+msgstr ""
+
 #: src/pages/NotFoundPage.tsx:19
 msgid "Back to dashboard"
 msgstr ""
@@ -977,31 +999,31 @@ msgstr ""
 msgid "Being plain TCP, RTMP has no loss-recovery tuning: on a poor link it buffers and falls behind rather than dropping. Latency is typically a few seconds."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:649
+#: src/pages/DeviceDetailPage.tsx:894
 msgid "Bind as output"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:663
+#: src/pages/DeviceDetailPage.tsx:908
 msgid "Bind as output…"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:591
+#: src/pages/DeviceDetailPage.tsx:836
 msgid "Bind as source"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:607
+#: src/pages/DeviceDetailPage.tsx:852
 msgid "Bind as source…"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1097
+#: src/pages/DeviceDetailPage.tsx:1350
 msgid "Bind decode slot to an output"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:986
+#: src/pages/DeviceDetailPage.tsx:1239
 msgid "Bind device stream as a source"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:549
+#: src/pages/DeviceDetailPage.tsx:794
 msgid "Bindable streams"
 msgstr ""
 
@@ -1055,6 +1077,11 @@ msgstr ""
 msgid "Bound to device"
 msgstr ""
 
+#. placeholder {0}: result.device_id
+#: src/pages/SettingsPage.tsx:255
+msgid "Bound to device {0}."
+msgstr ""
+
 #: src/pages/SyncGroupsPage.tsx:48
 msgid "Bounded skew"
 msgstr ""
@@ -1096,6 +1123,11 @@ msgstr ""
 msgid "Bus"
 msgstr ""
 
+#. placeholder {0}: token.usedBy
+#: src/pages/SettingsPage.tsx:386
+msgid "by {0}"
+msgstr ""
+
 #: src/pages/AudioPage.tsx:214
 msgid "Camera 1"
 msgstr ""
@@ -1104,10 +1136,10 @@ msgstr ""
 #: src/cast/SaveAsDeviceDialog.tsx:143
 #: src/layout/components/GridLayoutEditor.tsx:867
 #: src/layout/components/LayoutEditor.tsx:432
-#: src/pages/DeviceDetailPage.tsx:884
-#: src/pages/DeviceDetailPage.tsx:952
-#: src/pages/DeviceDetailPage.tsx:1074
-#: src/pages/DeviceDetailPage.tsx:1193
+#: src/pages/DeviceDetailPage.tsx:1137
+#: src/pages/DeviceDetailPage.tsx:1205
+#: src/pages/DeviceDetailPage.tsx:1327
+#: src/pages/DeviceDetailPage.tsx:1446
 #: src/pages/LayoutsPage.tsx:310
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
@@ -1167,7 +1199,7 @@ msgstr ""
 msgid "Canvas width in pixels."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:489
+#: src/pages/DeviceDetailPage.tsx:734
 msgid "Capabilities"
 msgstr ""
 
@@ -1196,7 +1228,7 @@ msgstr ""
 msgid "Cast devices are never offered: they cannot join a synchronized canvas (Tier D). The group claims the weakest member's tier — never more."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:678
+#: src/pages/DeviceDetailPage.tsx:931
 msgid "Cast devices never join a synchronized canvas (their latency is multiple seconds and uncontrolled). Use a display node or a vendor decoder for synchronized walls."
 msgstr ""
 
@@ -1274,7 +1306,7 @@ msgstr ""
 msgid "Centre y (px)"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:911
+#: src/pages/DeviceDetailPage.tsx:1164
 msgid "Change device mode"
 msgstr ""
 
@@ -1282,7 +1314,7 @@ msgstr ""
 msgid "Change log, newest first."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:788
+#: src/pages/DeviceDetailPage.tsx:1041
 msgid "Change mode…"
 msgstr ""
 
@@ -1302,7 +1334,7 @@ msgstr ""
 msgid "Changing an output's codec today is a configuration change, not a live switch: stored edits take effect by exporting the config and restarting the engine (the API marks these resources <0>apply: restart</0>). The codec token is also only lightly checked at present — if the build cannot encode the requested codec, the pipeline logs a warning and falls back to MPEG-2 rather than failing the run. So choose a codec your build and transport are known to carry (classic RTMP, for example, carries H.264 only), and verify the output really uses it — for example with <1>ffprobe</1>."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:914
+#: src/pages/DeviceDetailPage.tsx:1167
 msgid "Changing the mode restarts the device's own pipeline: its bound sources ride the tile ladder until it returns. No Multiview program output is interrupted."
 msgstr ""
 
@@ -1322,7 +1354,7 @@ msgstr ""
 msgid "Choose an input"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:158
+#: src/pages/SettingsPage.tsx:521
 msgid "Choose light, dark, or follow the system."
 msgstr ""
 
@@ -1346,7 +1378,7 @@ msgid "Clauses"
 msgstr ""
 
 #: src/devices/FromDevice.tsx:60
-#: src/pages/SettingsPage.tsx:229
+#: src/pages/SettingsPage.tsx:592
 msgid "Clear"
 msgstr ""
 
@@ -1477,7 +1509,7 @@ msgstr ""
 msgid "Config-as-code"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:240
+#: src/pages/SettingsPage.tsx:605
 msgid "Configuration export"
 msgstr ""
 
@@ -1485,7 +1517,7 @@ msgstr ""
 msgid "Configuration exported"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:60
+#: src/pages/SettingsPage.tsx:81
 msgid "Configuration file"
 msgstr ""
 
@@ -1515,6 +1547,10 @@ msgstr ""
 
 #: src/pages/SyncGroupsPage.tsx:331
 msgid "Configured sync groups."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:372
+msgid "connected"
 msgstr ""
 
 #: src/components/ConnectionStatus.tsx:29
@@ -1558,6 +1594,14 @@ msgstr ""
 msgid "Converted to free-form (not yet saved). Save to keep the absolute placement."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:340
+msgid "Copy"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:319
+msgid "Copy this token into the node now — it is shown once and never again."
+msgstr ""
+
 #: src/layout/components/CellPropertiesPanel.tsx:195
 msgid "Corner radius (px)"
 msgstr ""
@@ -1574,16 +1618,20 @@ msgstr ""
 msgid "Could not apply layout"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:396
+#: src/pages/DeviceDetailPage.tsx:637
 msgid "Could not bind the output"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:365
+#: src/pages/DeviceDetailPage.tsx:606
 msgid "Could not bind the source"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:964
+#: src/pages/DeviceDetailPage.tsx:1217
 msgid "Could not change the mode"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:233
+msgid "Could not copy the token"
 msgstr ""
 
 #: src/resources/CrudPage.tsx:282
@@ -1610,7 +1658,7 @@ msgstr ""
 msgid "Could not export configuration"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:759
+#: src/pages/DeviceDetailPage.tsx:1012
 msgid "Could not identify"
 msgstr ""
 
@@ -1622,7 +1670,7 @@ msgstr ""
 msgid "Could not load cast sessions:"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:325
+#: src/pages/DeviceDetailPage.tsx:566
 msgid "Could not load device:"
 msgstr ""
 
@@ -1679,16 +1727,24 @@ msgstr ""
 msgid "Could not load the audit log:"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:45
+#: src/pages/SettingsPage.tsx:66
 msgid "Could not load the configuration file watch status."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:729
+#: src/pages/DeviceDetailPage.tsx:982
 #: src/pages/SyncGroupsPage.tsx:221
 msgid "Could not measure"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:308
+#: src/pages/SettingsPage.tsx:215
+msgid "Could not mint a token"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:262
+msgid "Could not pair the node"
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:549
 msgid "Could not probe"
 msgstr ""
 
@@ -1696,8 +1752,12 @@ msgstr ""
 msgid "Could not reach the control plane. Is it running?"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:896
+#: src/pages/DeviceDetailPage.tsx:1149
 msgid "Could not reboot"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:242
+msgid "Could not revoke the token"
 msgstr ""
 
 #: src/resources/CrudPage.tsx:282
@@ -1713,6 +1773,10 @@ msgstr ""
 msgid "Could not save salvo"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:325
+msgid "Could not save the assignment"
+msgstr ""
+
 #: src/pages/AudioPage.tsx:500
 msgid "Could not save the audio routing:"
 msgstr ""
@@ -1721,7 +1785,7 @@ msgstr ""
 msgid "Could not save the device"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:774
+#: src/pages/DeviceDetailPage.tsx:1027
 msgid "Could not show the test pattern"
 msgstr ""
 
@@ -1756,8 +1820,8 @@ msgstr ""
 msgid "CPU utilisation trend: ours over host total"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1077
-#: src/pages/DeviceDetailPage.tsx:1196
+#: src/pages/DeviceDetailPage.tsx:1330
+#: src/pages/DeviceDetailPage.tsx:1449
 #: src/resources/CrudPage.tsx:384
 msgid "Create"
 msgstr ""
@@ -1774,11 +1838,11 @@ msgstr ""
 msgid "Created"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1100
+#: src/pages/DeviceDetailPage.tsx:1353
 msgid "Creates an ordinary managed output bound to this device via device_ref; the driver points the decode slot at it."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:996
+#: src/pages/DeviceDetailPage.tsx:1249
 msgid "Creates an ordinary managed source bound to this device via device_ref."
 msgstr ""
 
@@ -1806,7 +1870,7 @@ msgstr ""
 msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:941
+#: src/pages/DeviceDetailPage.tsx:1194
 msgid "Current mode: {currentMode}"
 msgstr ""
 
@@ -1839,11 +1903,11 @@ msgstr ""
 msgid "Decode capacity is budgeted in megapixels per second — many small tiles can be cheaper than a few full-resolution ones."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:620
+#: src/pages/DeviceDetailPage.tsx:865
 msgid "Decode slots the device offers. Binding one creates an ordinary managed Output carrying device_ref; the driver points the slot at the rendition."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:617
+#: src/pages/DeviceDetailPage.tsx:862
 msgid "Decode targets"
 msgstr ""
 
@@ -1863,7 +1927,7 @@ msgstr ""
 msgid "Decoding compressed video and recompressing it into a different codec, resolution, or bitrate. Each transcode costs quality (a new lossy generation), latency, and compute, so well-designed systems transcode once and reuse the result everywhere."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:518
+#: src/pages/DeviceDetailPage.tsx:763
 msgid "decoding stalled (device-reported) — program output is unaffected"
 msgstr ""
 
@@ -1893,6 +1957,10 @@ msgstr ""
 
 #: src/pages/docs/ContainerPage.tsx:43
 msgid "Default software image. Also carries the VAAPI userspace and Mesa or Intel drivers, so it can use an Intel or AMD render node when one is passed through."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:301
+msgid "default: 3600"
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:215
@@ -1983,7 +2051,7 @@ msgstr ""
 msgid "Destination"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1158
+#: src/pages/DeviceDetailPage.tsx:1411
 #: src/pages/OutputsPage.tsx:233
 #: src/pages/OutputsPage.tsx:247
 msgid "Destination URL"
@@ -2009,7 +2077,7 @@ msgstr ""
 msgid "Device sleep or IP change: cast devices nap and DHCP moves them. A saved device is re-resolved by its mDNS identity (UUID), not a remembered address, where discovery can see it; across VLANs, keep the manual address current. An unreachable device rides UNREACHABLE with supervised reconnect and backoff — exactly like an input."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:499
+#: src/pages/DeviceDetailPage.tsx:744
 msgid "Device-reported streams"
 msgstr ""
 
@@ -2086,6 +2154,10 @@ msgstr ""
 msgid "Discrete track name (route {row})"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:688
+msgid "Display"
+msgstr ""
+
 #: src/pages/SalvosPage.tsx:357
 msgid "Display name"
 msgstr ""
@@ -2099,6 +2171,10 @@ msgstr ""
 #: src/pages/docs/DisplayNodesHelpPage.tsx:16
 #: src/pages/docs/SyncHelpPage.tsx:42
 msgid "Display nodes"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:275
+msgid "Display Nodes"
 msgstr ""
 
 #: src/docs/registry.ts:60
@@ -2126,7 +2202,11 @@ msgstr ""
 msgid "Documentation"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:243
+#: src/pages/SettingsPage.tsx:347
+msgid "Done"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:608
 msgid "Download the current stores (sources, outputs, overlays, layouts, canvas) as multiview.toml. Stored UI edits take effect when Multiview restarts with this file; live actions (apply layout, swap, routing, salvos) act on the running engine immediately."
 msgstr ""
 
@@ -2142,7 +2222,7 @@ msgstr ""
 msgid "Drift-alarm threshold, 1–10000 ms: a member drifting past this raises a warning alarm."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:458
+#: src/pages/DeviceDetailPage.tsx:703
 #: src/pages/DevicesPage.tsx:135
 #: src/pages/DevicesPage.tsx:538
 msgid "Driver"
@@ -2178,6 +2258,10 @@ msgstr ""
 msgid "DVB teletext page"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:451
+msgid "e.g. 7QK2M9"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:524
 msgid "e.g. black-cam-1"
 msgstr ""
@@ -2206,6 +2290,10 @@ msgstr ""
 msgid "e.g. dev-lounge-tv"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:466
+msgid "e.g. head-0"
+msgstr ""
+
 #: src/pages/SyncGroupsPage.tsx:383
 msgid "e.g. lobby-wall"
 msgstr ""
@@ -2219,7 +2307,8 @@ msgstr ""
 msgid "e.g. Main wall"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1120
+#: src/pages/DeviceDetailPage.tsx:466
+#: src/pages/DeviceDetailPage.tsx:1373
 msgid "e.g. out-foyer"
 msgstr ""
 
@@ -2231,7 +2320,7 @@ msgstr ""
 msgid "e.g. solid"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1017
+#: src/pages/DeviceDetailPage.tsx:1270
 msgid "e.g. src-foyer-main"
 msgstr ""
 
@@ -2378,9 +2467,21 @@ msgstr ""
 msgid "Engine default (reclock to house)"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:278
+msgid "Enroll Multiview display-node appliances. Mint a one-time token and present it to the node, or complete the on-screen pairing — then bind the node to a head assignment from its device page."
+msgstr ""
+
 #: src/docs/registry.ts:366
 #: src/pages/docs/DisplayNodesHelpPage.tsx:41
 msgid "Enrollment"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:327
+msgid "Enrollment token"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:290
+msgid "Enrollment tokens"
 msgstr ""
 
 #: src/resources/FormControls.tsx:39
@@ -2397,6 +2498,10 @@ msgstr ""
 
 #: src/resources/FormControls.tsx:61
 msgid "Enter a number (decimals allowed, e.g. -23.5)."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:203
+msgid "Enter a positive number of seconds, or leave it blank for the default."
 msgstr ""
 
 #: src/layout/components/AreaMatrixEditor.tsx:165
@@ -2436,7 +2541,7 @@ msgstr ""
 msgid "Errors"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:452
+#: src/pages/DeviceDetailPage.tsx:697
 msgid "Events"
 msgstr ""
 
@@ -2476,6 +2581,10 @@ msgstr ""
 msgid "Example sync group"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:369
+msgid "Expires"
+msgstr ""
+
 #: src/pages/OutputsPage.tsx:427
 msgid "Explicit track list"
 msgstr ""
@@ -2493,7 +2602,7 @@ msgstr ""
 msgid "Exposed ports and roadmap"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:63
+#: src/pages/SettingsPage.tsx:84
 msgid "External edits to the boot configuration file hot-reload the parts that can apply live; an invalid file changes nothing and is reported here and on the health banner. Sections that cannot hot-apply stay listed until a restart."
 msgstr ""
 
@@ -2557,6 +2666,10 @@ msgstr ""
 #: src/layout/components/GridLayoutEditor.tsx:446
 #: src/layout/components/LayoutEditor.tsx:306
 msgid "Fix these before saving:"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:471
+msgid "Flash the Multiview node image, point it at this controller's URL, and present the minted token (or complete screen pairing). The node image is distributed with the release."
 msgstr ""
 
 #: src/pages/TallyPage.tsx:285
@@ -2812,12 +2925,16 @@ msgstr ""
 msgid "HDR (high dynamic range) streams use a different brightness curve — PQ or HLG instead of the SDR gamma — and usually the BT.2020 gamut, letting them represent far brighter highlights and deeper shadow detail. An HDR tile dropped onto an SDR canvas without conversion looks dim and grey (its values are being read with the wrong curve), and an SDR tile pushed through an HDR curve blows out."
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:390
+msgid "Head assignment"
+msgstr ""
+
 #: src/docs/registry.ts:75
 #: src/pages/docs/ContainerPage.tsx:149
 msgid "Healthcheck"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:513
+#: src/pages/DeviceDetailPage.tsx:758
 #: src/pages/DevicesPage.tsx:463
 msgid "healthy"
 msgstr ""
@@ -2921,8 +3038,8 @@ msgstr ""
 msgid "Idempotency"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1014
-#: src/pages/DeviceDetailPage.tsx:1117
+#: src/pages/DeviceDetailPage.tsx:1267
+#: src/pages/DeviceDetailPage.tsx:1370
 #: src/pages/DevicesPage.tsx:114
 #: src/pages/LayoutsPage.tsx:70
 #: src/pages/OutputsPage.tsx:620
@@ -2936,11 +3053,11 @@ msgstr ""
 msgid "Identifier"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:762
+#: src/pages/DeviceDetailPage.tsx:1015
 msgid "Identify"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:755
+#: src/pages/DeviceDetailPage.tsx:1008
 msgid "Identify requested"
 msgstr ""
 
@@ -3022,6 +3139,10 @@ msgstr ""
 msgid "Internet / unmanaged links"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:202
+msgid "Invalid lifetime"
+msgstr ""
+
 #: src/pages/docs/concepts/TransportsPage.tsx:250
 msgid "IP cameras, fixed encoders"
 msgstr ""
@@ -3076,7 +3197,7 @@ msgstr ""
 
 #: src/components/LocaleSwitcher.tsx:35
 #: src/pages/AudioPage.tsx:422
-#: src/pages/SettingsPage.tsx:172
+#: src/pages/SettingsPage.tsx:535
 msgid "Language"
 msgstr ""
 
@@ -3084,15 +3205,15 @@ msgstr ""
 msgid "Language (route {row})"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:98
+#: src/pages/SettingsPage.tsx:119
 msgid "Last applied:"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:105
+#: src/pages/SettingsPage.tsx:126
 msgid "Last rejected:"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:486
+#: src/pages/DeviceDetailPage.tsx:731
 #: src/pages/DevicesPage.tsx:610
 msgid "Last seen"
 msgstr ""
@@ -3208,6 +3329,10 @@ msgstr ""
 msgid "Lifecycle states"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:296
+msgid "Lifetime (seconds, optional)"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:164
 msgid "Limit detection to a zone (default: the full frame)"
 msgstr ""
@@ -3292,7 +3417,7 @@ msgstr ""
 msgid "Loading canvas…"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:318
+#: src/pages/DeviceDetailPage.tsx:559
 msgid "Loading device…"
 msgstr ""
 
@@ -3345,11 +3470,11 @@ msgid "Loading tally state…"
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:67
-#: src/pages/SettingsPage.tsx:77
+#: src/pages/SettingsPage.tsx:98
 msgid "Loading…"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:180
+#: src/pages/SettingsPage.tsx:543
 msgid "Locale"
 msgstr ""
 
@@ -3365,7 +3490,7 @@ msgstr ""
 msgid "Locking every device's frame timing to one shared reference signal so all frames start at the same instant across a facility. Classically an analog black-burst or tri-level signal; in IP facilities PTP carries the same role. Genlock aligns <0>phase</0>; timecode merely labels frames."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:802
+#: src/pages/DeviceDetailPage.tsx:1055
 msgid "Long-running actions are accepted with an operation id and their outcome arrives on the realtime stream — watch the Events tab. None of them can interrupt Multiview program output."
 msgstr ""
 
@@ -3401,7 +3526,7 @@ msgstr ""
 msgid "Magazine-addressed page, 100–899."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:449
+#: src/pages/DeviceDetailPage.tsx:694
 msgid "Maintenance"
 msgstr ""
 
@@ -3414,7 +3539,7 @@ msgstr ""
 msgid "Manage overlay layers and subtitles."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:688
+#: src/pages/DeviceDetailPage.tsx:941
 msgid "Manage sync groups"
 msgstr ""
 
@@ -3436,7 +3561,7 @@ msgstr ""
 msgid "Managed facility LAN"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:461
+#: src/pages/DeviceDetailPage.tsx:706
 #: src/pages/DevicesPage.tsx:146
 msgid "Management address"
 msgstr ""
@@ -3461,11 +3586,11 @@ msgstr ""
 msgid "Measure"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:732
+#: src/pages/DeviceDetailPage.tsx:985
 msgid "Measure now"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:720
+#: src/pages/DeviceDetailPage.tsx:973
 #: src/pages/SyncGroupsPage.tsx:283
 msgid "Measure skew"
 msgstr ""
@@ -3479,7 +3604,7 @@ msgstr ""
 msgid "Measured, never assumed"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:725
+#: src/pages/DeviceDetailPage.tsx:978
 #: src/pages/SyncGroupsPage.tsx:215
 msgid "Measurement running"
 msgstr ""
@@ -3515,6 +3640,10 @@ msgstr ""
 msgid "Minor"
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:310
+msgid "Mint token"
+msgstr ""
+
 #. placeholder {0}: cell.area
 #: src/layout/components/GridLayoutEditor.tsx:499
 msgid "missing area: {0}"
@@ -3525,7 +3654,7 @@ msgstr ""
 msgid "MLDv2"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:471
+#: src/pages/DeviceDetailPage.tsx:716
 #: src/pages/DevicesPage.tsx:569
 #: src/pages/OutputsPage.tsx:303
 msgid "Mode"
@@ -3533,11 +3662,11 @@ msgstr ""
 
 #. placeholder {0}: entry.event.mode
 #. placeholder {1}: entry.event.phase
-#: src/pages/DeviceDetailPage.tsx:832
+#: src/pages/DeviceDetailPage.tsx:1085
 msgid "mode {0} — {1}"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:960
+#: src/pages/DeviceDetailPage.tsx:1213
 msgid "Mode change accepted"
 msgstr ""
 
@@ -3566,7 +3695,7 @@ msgstr ""
 msgid "Mount a config file and an output directory, then point the binary at the config. The current binary composites, encodes, and writes HLS or file output to disk."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1142
+#: src/pages/DeviceDetailPage.tsx:1395
 #: src/pages/OutputsPage.tsx:117
 msgid "Mount point"
 msgstr ""
@@ -3675,8 +3804,8 @@ msgid "Mute on the program mix (route {row})"
 msgstr ""
 
 #: src/cast/SaveAsDeviceDialog.tsx:136
-#: src/pages/DeviceDetailPage.tsx:1025
-#: src/pages/DeviceDetailPage.tsx:1128
+#: src/pages/DeviceDetailPage.tsx:1278
+#: src/pages/DeviceDetailPage.tsx:1381
 #: src/pages/DevicesPage.tsx:126
 #: src/pages/DevicesPage.tsx:526
 #: src/pages/LayoutsPage.tsx:61
@@ -3719,7 +3848,7 @@ msgstr ""
 msgid "NDI (Network Device Interface) is a production-LAN video transport: senders announce themselves on the network, receivers discover them by name, and video flows with very low latency (around a frame) at high bitrates using NDI's own lightweight codec. There are no URLs to manage — a source is selected by its advertised name."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1039
+#: src/pages/DeviceDetailPage.tsx:1292
 #: src/pages/SourcesPage.tsx:158
 msgid "NDI source name"
 msgstr ""
@@ -3812,7 +3941,7 @@ msgstr ""
 msgid "No compiled-in driver recognises this service."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:816
+#: src/pages/DeviceDetailPage.tsx:1069
 msgid "No device events seen in this session yet — lifecycle changes (adopt, mode, errors) stream in live while the app is open."
 msgstr ""
 
@@ -3822,6 +3951,10 @@ msgstr ""
 
 #: src/layout/components/SourcePalette.tsx:185
 msgid "No drop target."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:356
+msgid "No enrollment tokens."
 msgstr ""
 
 #: src/pages/DashboardPage.tsx:123
@@ -3838,6 +3971,10 @@ msgstr ""
 
 #: src/pages/SystemPage.tsx:350
 msgid "No GPUs are reported on this host."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:350
+msgid "No heads reported yet — they appear once the node enrolls and heartbeats its EDID-derived outputs."
 msgstr ""
 
 #: src/cast/CastStartDialog.tsx:191
@@ -3920,6 +4057,10 @@ msgstr ""
 msgid "NO SIGNAL"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:378
+msgid "no sink"
+msgstr ""
+
 #: src/layout/components/CellsForm.tsx:386
 #: src/layout/components/GridLayoutEditor.tsx:686
 msgid "No source"
@@ -3945,6 +4086,18 @@ msgstr ""
 msgid "No temperature reported."
 msgstr ""
 
+#: src/pages/SettingsPage.tsx:468
+msgid "Node appliance"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:479
+msgid "Node image (with the release)"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:254
+msgid "Node paired"
+msgstr ""
+
 #: src/pages/docs/DisplayNodesHelpPage.tsx:43
 msgid "Nodes enrol with a keypair identity: the node proves itself with its key, not with a network address, so a node keeps its identity across DHCP changes and re-images. That is why the management address is optional for the <0>displaynode</0> driver — an enrolled node finds the controller and authenticates itself. After a network loss the node reconnects with its enrolled identity, re-pulls its stream, and re-converges its sync offset before un-muting its output."
 msgstr ""
@@ -3957,7 +4110,7 @@ msgstr ""
 msgid "None (local)"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:465
+#: src/pages/DeviceDetailPage.tsx:710
 msgid "none (located by enrolled identity)"
 msgstr ""
 
@@ -3969,7 +4122,7 @@ msgstr ""
 msgid "None needed"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:686
+#: src/pages/DeviceDetailPage.tsx:939
 msgid "Not a member of any sync group."
 msgstr ""
 
@@ -3993,7 +4146,7 @@ msgstr ""
 msgid "Not in the running engine — no live state. Synthetic, network and file sources join a running full engine when saved; NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:189
+#: src/pages/DeviceDetailPage.tsx:200
 msgid "Not probed yet."
 msgstr ""
 
@@ -4009,7 +4162,7 @@ msgstr ""
 msgid "Not synchronized: cast pipelines buffer for multiple seconds under their own control. Cast devices are therefore never offered as sync-group members."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:87
+#: src/pages/SettingsPage.tsx:108
 msgid "Not watched"
 msgstr ""
 
@@ -4018,7 +4171,7 @@ msgid "Not yet runnable in this build"
 msgstr ""
 
 #: src/devices/FromDevice.tsx:235
-#: src/pages/DeviceDetailPage.tsx:628
+#: src/pages/DeviceDetailPage.tsx:873
 msgid "Nothing enumerated yet — decode slots appear once the driver reads the device's decode table."
 msgstr ""
 
@@ -4026,7 +4179,7 @@ msgstr ""
 msgid "Nothing enumerated yet — streams appear once the device's driver has probed it."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:560
+#: src/pages/DeviceDetailPage.tsx:805
 msgid "Nothing enumerated yet — the list fills in once the device's driver has probed it."
 msgstr ""
 
@@ -4034,7 +4187,7 @@ msgstr ""
 msgid "Notice"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:260
+#: src/pages/SettingsPage.tsx:625
 msgid "Notifications"
 msgstr ""
 
@@ -4134,12 +4287,12 @@ msgid "Operation {0}; the measured skew arrives on the realtime stream."
 msgstr ""
 
 #. placeholder {0}: accepted.operation_id
-#: src/pages/DeviceDetailPage.tsx:893
+#: src/pages/DeviceDetailPage.tsx:1146
 msgid "Operation {0}; the outcome arrives on the realtime stream."
 msgstr ""
 
 #. placeholder {0}: accepted.operation_id
-#: src/pages/DeviceDetailPage.tsx:726
+#: src/pages/DeviceDetailPage.tsx:979
 msgid "Operation {0}; the result arrives on the realtime stream."
 msgstr ""
 
@@ -4178,12 +4331,16 @@ msgstr ""
 msgid "Ours of host total"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:391
+#: src/pages/DeviceDetailPage.tsx:632
 msgid "Output bound"
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:81
 msgid "Output cadence as a <0>\"num/den\"</0> rational string, for example <1>\"30000/1001\"</1> for exact NTSC 29.97. A bare float is rejected on purpose, because frame rates must be exact."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:458
+msgid "Output id"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:142
@@ -4235,12 +4392,20 @@ msgid "Override the detected colour metadata"
 msgstr ""
 
 #: src/docs/registry.ts:20
-#: src/pages/DeviceDetailPage.tsx:440
+#: src/pages/DeviceDetailPage.tsx:681
 msgid "Overview"
 msgstr ""
 
 #: src/pages/NotFoundPage.tsx:14
 msgid "Page not found"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:460
+msgid "Pair"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:446
+msgid "Pairing code"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:181
@@ -4251,7 +4416,11 @@ msgstr ""
 msgid "Pass through the host render node and add the container user to the group that owns it. The render group id varies by host — look it up with <0>getent group render</0>."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:192
+#: src/pages/SettingsPage.tsx:230
+msgid "Paste it into the node now — it is shown only once."
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:555
 msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
 msgstr ""
 
@@ -4337,12 +4506,12 @@ msgstr ""
 msgid "Priority must be a whole number (higher is shed last)."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:137
-#: src/pages/DeviceDetailPage.tsx:747
+#: src/pages/DeviceDetailPage.tsx:148
+#: src/pages/DeviceDetailPage.tsx:1000
 msgid "Probe now"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:304
+#: src/pages/DeviceDetailPage.tsx:545
 msgid "Probe requested"
 msgstr ""
 
@@ -4371,6 +4540,10 @@ msgstr ""
 msgid "Program bus only"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:426
+msgid "Program canvas"
+msgstr ""
+
 #: src/pages/AudioPage.tsx:410
 msgid "Program mix"
 msgstr ""
@@ -4388,7 +4561,7 @@ msgstr ""
 msgid "Program output is unaffected by ALL of these: a cast session is control-plane only and can never stall or pace the engine."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:98
+#: src/pages/DeviceDetailPage.tsx:109
 msgid "Program output never depends on this device: if it fails, bound sources ride the tile ladder and outputs ride their failover policy — the multiview keeps running."
 msgstr ""
 
@@ -4441,19 +4614,19 @@ msgstr ""
 msgid "Realtime streams"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:900
+#: src/pages/DeviceDetailPage.tsx:1153
 msgid "Reboot"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:892
+#: src/pages/DeviceDetailPage.tsx:1145
 msgid "Reboot accepted"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:867
+#: src/pages/DeviceDetailPage.tsx:1120
 msgid "Reboot this device?"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:798
+#: src/pages/DeviceDetailPage.tsx:1051
 msgid "Reboot…"
 msgstr ""
 
@@ -4532,7 +4705,7 @@ msgstr ""
 msgid "Remove row"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:848
+#: src/pages/DeviceDetailPage.tsx:1101
 msgid "removed from the registry"
 msgstr ""
 
@@ -4577,7 +4750,7 @@ msgstr ""
 msgid "Replace the current cells?"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:139
+#: src/pages/SettingsPage.tsx:502
 msgid "Requests will be unauthenticated."
 msgstr ""
 
@@ -4616,13 +4789,21 @@ msgstr ""
 msgid "REST conventions"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:112
+#: src/pages/SettingsPage.tsx:133
 msgid "Restart pending:"
 msgstr ""
 
 #. placeholder {0}: accepted.note
 #: src/pages/DevicesPage.tsx:301
 msgid "Results stream in below as they are found. {0}"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:403
+msgid "Revoke"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:398
+msgid "Revoke token"
 msgstr ""
 
 #: src/pages/docs/components.tsx:147
@@ -4741,7 +4922,7 @@ msgid "Sample rate (Hz)"
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:398
-#: src/pages/SettingsPage.tsx:218
+#: src/pages/SettingsPage.tsx:581
 #: src/resources/CrudPage.tsx:384
 msgid "Save"
 msgstr ""
@@ -4758,6 +4939,10 @@ msgstr ""
 
 #: src/cast/CastPanel.tsx:100
 msgid "Save as device…"
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:480
+msgid "Save assignment"
 msgstr ""
 
 #: src/pages/AudioPage.tsx:487
@@ -4820,8 +5005,20 @@ msgstr ""
 msgid "Scan the canvas out to a local HDMI/DisplayPort screen by KMS <0>connector</0> (a <1>display-kms</1> build), with an optional exact <2>mode</2> override or a <3>forced_mode</3> for screens that report no EDID. The refresh is an exact rational like <4>\"60000/1001\"</4>, never a decimal."
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:402
+msgid "Scanout assignment"
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:340
+msgid "Scanout heads"
+msgstr ""
+
 #: src/pages/AlarmsPage.tsx:219
 msgid "Scope"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:417
+msgid "Screen pairing"
 msgstr ""
 
 #: src/pages/docs/DocsSearch.tsx:99
@@ -4901,7 +5098,7 @@ msgid "Session name (optional)"
 msgstr ""
 
 #: src/app/navigation.tsx:53
-#: src/pages/SettingsPage.tsx:147
+#: src/pages/SettingsPage.tsx:510
 msgid "Settings"
 msgstr "الإعدادات"
 
@@ -4914,7 +5111,7 @@ msgstr ""
 msgid "Severity (X.733)"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:276
+#: src/pages/SettingsPage.tsx:641
 msgid "Show a test notification"
 msgstr ""
 
@@ -4948,7 +5145,7 @@ msgstr ""
 msgid "Source"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:360
+#: src/pages/DeviceDetailPage.tsx:601
 msgid "Source bound"
 msgstr ""
 
@@ -4960,7 +5157,7 @@ msgstr ""
 msgid "source id"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:1053
+#: src/pages/DeviceDetailPage.tsx:1306
 #: src/pages/SourcesPage.tsx:128
 msgid "Source URL"
 msgstr ""
@@ -5022,6 +5219,7 @@ msgstr ""
 
 #: src/pages/AlarmsPage.tsx:183
 #: src/pages/DevicesPage.tsx:545
+#: src/pages/SettingsPage.tsx:366
 msgid "State"
 msgstr ""
 
@@ -5087,11 +5285,11 @@ msgstr ""
 msgid "Stream"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:443
+#: src/pages/DeviceDetailPage.tsx:684
 msgid "Streams"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:552
+#: src/pages/DeviceDetailPage.tsx:797
 msgid "Streams the device serves. Binding one creates an ordinary managed Source carrying device_ref — the engine ingest path is untouched."
 msgstr ""
 
@@ -5131,11 +5329,11 @@ msgstr ""
 msgid "Supports ZowieBox-class encoder/decoder appliances: probing, encoder/decoder mode convergence, stream enumeration for source binding, decode-slot binding for outputs, reboot, and temperature. Sync is bounded-skew only (see the sync guide)."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:175
+#: src/pages/SettingsPage.tsx:538
 msgid "Switch the interface language and text direction."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:446
+#: src/pages/DeviceDetailPage.tsx:691
 msgid "Sync"
 msgstr ""
 
@@ -5209,7 +5407,7 @@ msgstr ""
 msgid "Target"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:923
+#: src/pages/DeviceDetailPage.tsx:1176
 msgid "Target mode"
 msgstr ""
 
@@ -5229,20 +5427,20 @@ msgstr ""
 msgid "Teletext page"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:479
+#: src/pages/DeviceDetailPage.tsx:724
 #: src/pages/DevicesPage.tsx:588
 msgid "Temperature"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:271
+#: src/pages/SettingsPage.tsx:636
 msgid "Test notification"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:777
+#: src/pages/DeviceDetailPage.tsx:1030
 msgid "Test pattern"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:770
+#: src/pages/DeviceDetailPage.tsx:1023
 msgid "Test pattern requested"
 msgstr ""
 
@@ -5322,7 +5520,7 @@ msgstr ""
 msgid "The default image encodes <0>mpeg2video</0>, which plays in VLC and ffplay. For browser playback, switch to the GPL image and an H.264 codec (see the config section)."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:756
+#: src/pages/DeviceDetailPage.tsx:1009
 msgid "The device flashes its identify indicator."
 msgstr ""
 
@@ -5339,7 +5537,7 @@ msgstr ""
 msgid "The device is loading {0}. Playback runs seconds behind live (Tier D)."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:128
+#: src/pages/DeviceDetailPage.tsx:139
 msgid "The device is unreachable. The control plane keeps trying to reconnect with backoff and jitter, and re-converges the desired state when the device answers — no action is required. Last seen:"
 msgstr ""
 
@@ -5348,7 +5546,7 @@ msgid "The device page shows live state, streams to bind as sources, decode slot
 msgstr ""
 
 #. placeholder {0}: device.id
-#: src/pages/DeviceDetailPage.tsx:150
+#: src/pages/DeviceDetailPage.tsx:161
 msgid "The device rejected its credentials ({0}). There are no blind retries — probing is paused until the credentials secret reference is updated, and the next probe fires automatically when it changes."
 msgstr ""
 
@@ -5356,15 +5554,15 @@ msgstr ""
 msgid "The device rejected its credentials. Distinct from UNREACHABLE: there are no blind retries — probing pauses until the credentials secret reference is updated, then resumes automatically."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:542
+#: src/pages/DeviceDetailPage.tsx:787
 msgid "The device reports no active streams."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:870
+#: src/pages/DeviceDetailPage.tsx:1123
 msgid "The device restarts and is unreachable while it boots. Bound sources ride the tile ladder; Multiview program output is not interrupted."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:771
+#: src/pages/DeviceDetailPage.tsx:1024
 msgid "The device shows its test pattern."
 msgstr ""
 
@@ -5372,11 +5570,15 @@ msgstr ""
 msgid "The device stopped answering. The control plane reconnects with backoff and jitter (exactly like input reconnect), raises the configured offline alarm after a dwell, and re-converges the desired state when the device returns. \"Probe now\" overrides a parked backoff."
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:320
+msgid "The display node converges to its new scanout assignment; Multiview program output is unaffected."
+msgstr ""
+
 #: src/pages/docs/ConfigPage.tsx:376
 msgid "The document is validated as a whole: source and cell ids must be unique, every <0>input_id</0> must resolve to a declared source, every grid cell must reference an existing area, and the cadence must be a usable rational. Because TOML and JSON encode the same model, a config can be authored by hand and exported as JSON over the API, or vice versa."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:305
+#: src/pages/DeviceDetailPage.tsx:546
 msgid "The driver probes on its own cadence; the latest status shows here as it lands."
 msgstr ""
 
@@ -5471,6 +5673,10 @@ msgstr ""
 
 #: src/docs/registry.ts:468
 msgid "The output clock, genlock, PTP, and wall-clock time — how frames are paced and aligned."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:343
+msgid "The physical outputs the node reports (EDID-derived where present), refreshed on every heartbeat."
 msgstr ""
 
 #: src/pages/docs/ComposePage.tsx:22
@@ -5572,7 +5778,7 @@ msgstr ""
 msgid "The UI subscribes to engine events for tile states, operation results, alarms, and telemetry. These streams are strictly best-effort: they can drop or conflate events under load and are physically incapable of slowing the engine, so a client must tolerate gaps and reconcile against the REST state."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:140
+#: src/pages/SettingsPage.tsx:503
 msgid "The UI will authenticate with this token."
 msgstr ""
 
@@ -5580,7 +5786,7 @@ msgstr ""
 msgid "The unauthenticated surface is just <0>/</0>, <1>/docs</1>, and <2>/api/v1/openapi.json</2>; every <3>/api/v1</3> data route requires the token. The image must be built with the <4>web</4> feature for the UI to be embedded (the published image is)."
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:990
+#: src/pages/DeviceDetailPage.tsx:1243
 msgid "The vendor does not document this mount, so the URL is operator-supplied and unverified — enter the stream URL the device serves."
 msgstr ""
 
@@ -5589,7 +5795,7 @@ msgstr ""
 msgid "The vendor's stable handle (UUID / PCI bus id), never the index."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:75
+#: src/pages/SettingsPage.tsx:96
 msgid "The watch status is unavailable."
 msgstr ""
 
@@ -5605,7 +5811,7 @@ msgstr ""
 msgid "The zone must fit inside the frame: x, y at least 0, width and height above 0, and x+width / y+height at most 1."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:163
+#: src/pages/SettingsPage.tsx:526
 msgid "Theme"
 msgstr ""
 
@@ -5671,6 +5877,10 @@ msgstr ""
 
 #: src/pages/docs/concepts/ResiliencePage.tsx:90
 msgid "This is also why one bad source can never take down the wall: the disturbance is contained to that tile's rectangle. The output keeps emitting a complete, valid frame every tick regardless — even if every source died at once, the canvas would show slates and a still-ticking clock, not stop."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:296
+msgid "This is not a display node. Scanout heads and head assignment apply only to enrolled Multiview display-node appliances."
 msgstr ""
 
 #: src/pages/docs/concepts/ColorPage.tsx:78
@@ -5741,7 +5951,7 @@ msgstr ""
 msgid "This source is not part of the running engine, so it has no live state. Synthetic, network and file sources join a running full engine when saved (the save response header confirms); NDI, YouTube and AES67 sources join after a config export + restart."
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:272
+#: src/pages/SettingsPage.tsx:637
 msgid "This toast is announced to assistive technology."
 msgstr ""
 
@@ -5784,6 +5994,18 @@ msgstr ""
 
 #: src/pages/AudioPage.tsx:425
 msgid "Title"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:229
+msgid "Token copied"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:363
+msgid "Token id"
+msgstr ""
+
+#: src/pages/SettingsPage.tsx:239
+msgid "Token revoked"
 msgstr ""
 
 #: src/layout/components/CellsForm.tsx:380
@@ -5856,6 +6078,10 @@ msgstr ""
 msgid "Unacknowledged"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:414
+msgid "Unassigned"
+msgstr ""
+
 #: src/pages/DevicesPage.tsx:469
 msgid "unhealthy"
 msgstr ""
@@ -5868,7 +6094,7 @@ msgstr ""
 msgid "UNREACHABLE"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:583
+#: src/pages/DeviceDetailPage.tsx:828
 msgid "unverified"
 msgstr ""
 
@@ -5876,7 +6102,7 @@ msgstr ""
 msgid "unverified — supply the URL yourself"
 msgstr ""
 
-#: src/pages/DeviceDetailPage.tsx:159
+#: src/pages/DeviceDetailPage.tsx:170
 msgid "Update credentials"
 msgstr ""
 
@@ -5954,6 +6180,10 @@ msgstr ""
 msgid "Waiting for the first metrics sample…"
 msgstr ""
 
+#: src/pages/DeviceDetailPage.tsx:460
+msgid "Wall head id"
+msgstr ""
+
 #: src/pages/SourcesPage.tsx:418
 msgid "Wall-clock handling"
 msgstr ""
@@ -5977,7 +6207,7 @@ msgstr ""
 msgid "Watch / live / channel URL"
 msgstr ""
 
-#: src/pages/SettingsPage.tsx:85
+#: src/pages/SettingsPage.tsx:106
 msgid "Watching"
 msgstr ""
 
@@ -6020,6 +6250,10 @@ msgstr ""
 
 #: src/pages/docs/concepts/ResiliencePage.tsx:18
 msgid "What the LIVE, STALE, RECONNECTING, and NO SIGNAL badges mean, and why the output never stalls on a bad input."
+msgstr ""
+
+#: src/pages/DeviceDetailPage.tsx:393
+msgid "What this node scans out: the program canvas, a named output rendition, or a specific wall head. Saving updates the stored desired state; the node converges without interrupting Multiview program output."
 msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:18

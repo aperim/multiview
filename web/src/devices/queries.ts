@@ -12,6 +12,7 @@ import type { UseQueryResult } from '@tanstack/react-query';
 import {
   fetchDeviceStatus,
   listDiscovered,
+  listDisplayHeads,
   listOutputTargets,
   listSourceCandidates,
   toDeviceView,
@@ -19,6 +20,7 @@ import {
 } from './api';
 import type {
   DiscoveredServiceView,
+  DisplayHeadView,
   OutputTargetView,
   SourceCandidateView,
 } from './api';
@@ -140,6 +142,18 @@ export function useOutputTargets(
     queryKey: ['devices', 'output-targets', deviceId ?? ''],
     queryFn: async (): Promise<readonly OutputTargetView[]> =>
       deviceId === undefined ? [] : listOutputTargets(deviceId),
+    enabled: deviceId !== undefined,
+  });
+}
+
+/** The display node's reported scanout heads (ADR-M009 facet (c)). */
+export function useDisplayHeads(
+  deviceId: string | undefined,
+): UseQueryResult<readonly DisplayHeadView[]> {
+  return useQuery<readonly DisplayHeadView[]>({
+    queryKey: ['devices', 'display-heads', deviceId ?? ''],
+    queryFn: async (): Promise<readonly DisplayHeadView[]> =>
+      deviceId === undefined ? [] : listDisplayHeads(deviceId),
     enabled: deviceId !== undefined,
   });
 }
