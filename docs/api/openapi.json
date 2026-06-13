@@ -5120,6 +5120,142 @@
         }
       }
     },
+    "/api/v1/sync-groups/{id}/status": {
+      "get": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`GET /api/v1/sync-groups/{id}/status` — the read-only runtime status of a\nsync group (role: read): the **weakest-member** achieved tier (never\nover-claimed), per-member measured skew, and drift-alarm state.",
+        "description": "Reads the latest-wins [`SyncGroupRuntime`](crate::devices::sync_runtime::SyncGroupRuntime)\n(never persisted/exported). A freshly-seeded group with no measurements yet\nhonestly reports the `none` tier. `404` when the id is not a configured group.",
+        "operationId": "get_sync_group_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group's runtime status (weakest-member tier, per-member skew, drift state).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncGroupStatusDoc"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read this group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No sync group with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sync-groups/{id}/test-pattern": {
+      "post": {
+        "tags": [
+          "sync-groups"
+        ],
+        "summary": "`POST /api/v1/sync-groups/{id}/test-pattern` — emit a burnt-in frame counter\n+ binary flash on the group's members for visual sync verification (role:\nwrite; `202` + operation id).",
+        "description": "Publishes a `sync.test-pattern` lifecycle event the member nodes consume to\ndrive their overlay machinery (the existing `Identify` flash + a frame\ncounter); the engine program output is untouched (invariant #1/#10). The\nrequest body is optional — sensible defaults apply.",
+        "operationId": "test_pattern_sync_group",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sync-group id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncGroupTestPatternInputDoc"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Test pattern accepted; the members render it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No sync group with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tally": {
       "get": {
         "tags": [
@@ -9809,6 +9945,90 @@
           }
         }
       },
+      "SyncGroupStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`crate::devices::sync_runtime::SyncGroupStatus`]\n(DEV-C3, ADR-M010): the read-only runtime status\n`GET /sync-groups/{id}/status` returns — the **weakest-member** achieved\ntier, per-member measured skew, and drift-alarm state. Derived telemetry\nonly; never persisted or exported.",
+        "required": [
+          "group",
+          "target_skew_ms",
+          "achieved",
+          "drift_alarm",
+          "members"
+        ],
+        "properties": {
+          "achieved": {
+            "type": "string",
+            "description": "The tier the group actually achieves — the weakest member's, never\nover-claimed (`frame-accurate` / `bounded-skew` / `none`)."
+          },
+          "drift_alarm": {
+            "type": "boolean",
+            "description": "Whether any member's drift alarm is currently raised."
+          },
+          "group": {
+            "type": "string",
+            "description": "The sync-group id."
+          },
+          "limited_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The single member that limits the tier, where exactly one member is the\nweakest while others are strictly better."
+          },
+          "measured_skew_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "The worst measured member skew across the group (milliseconds)."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SyncMemberStatusDoc"
+            },
+            "description": "Each member's runtime status."
+          },
+          "target_skew_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The configured drift-alarm threshold (milliseconds).",
+            "minimum": 0
+          }
+        }
+      },
+      "SyncGroupTestPatternInputDoc": {
+        "type": "object",
+        "description": "The request body for `POST /api/v1/sync-groups/{id}/test-pattern` (DEV-C3):\nemit a burnt-in frame counter + binary flash on the group's members for\nvisual sync verification. All fields optional; sensible defaults apply.",
+        "properties": {
+          "duration_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long the test pattern stays active (seconds, `1..=300`). Defaults to\n10 s.",
+            "minimum": 0
+          },
+          "flash_period_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The binary-flash period (milliseconds). Defaults to 1000 ms (1 Hz flash).",
+            "minimum": 0
+          },
+          "frame_counter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to burn in a per-frame counter (for OCR cross-comparison).\nDefaults to `true`."
+          }
+        }
+      },
       "SyncMemberDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of one sync-group member (`{ device, offset_ms }`).",
@@ -9824,6 +10044,46 @@
             "type": "integer",
             "format": "int64",
             "description": "The per-member presentation offset trim in milliseconds (defaults to 0)."
+          }
+        }
+      },
+      "SyncMemberStatusDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`crate::devices::sync_runtime::SyncMemberStatus`]\n(DEV-C3, ADR-M010): one member's read-only runtime status inside a\n[`SyncGroupStatusDoc`]. Runtime telemetry only — never persisted/exported.",
+        "required": [
+          "device",
+          "offset_ms",
+          "drift_alarm"
+        ],
+        "properties": {
+          "achieved": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The tier this member achieves right now (`frame-accurate` /\n`bounded-skew` / `none`); absent until a clock quality is seen."
+          },
+          "device": {
+            "type": "string",
+            "description": "The member device id."
+          },
+          "drift_alarm": {
+            "type": "boolean",
+            "description": "Whether this member's drift alarm is currently raised."
+          },
+          "measured_skew_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "The member's measured presentation skew (milliseconds), where measured."
+          },
+          "offset_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The configured per-member presentation offset trim (milliseconds).",
+            "minimum": 0
           }
         }
       },

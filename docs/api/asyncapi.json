@@ -250,6 +250,9 @@
                   "$ref": "#/components/schemas/DeviceSync"
                 },
                 {
+                  "$ref": "#/components/schemas/SyncGroupTestPattern"
+                },
+                {
                   "$ref": "#/components/schemas/DeviceDiscovered"
                 },
                 {
@@ -426,6 +429,15 @@
         },
         "summary": "Client requests subscription to one or more topics.",
         "title": "$subscribe control frame (client to server)"
+      },
+      "SyncGroupTestPattern": {
+        "contentType": "application/json",
+        "name": "SyncGroupTestPattern",
+        "payload": {
+          "$ref": "#/components/schemas/SyncGroupTestPattern"
+        },
+        "summary": "A burnt-in frame counter + binary flash was triggered on a sync group's members for visual sync verification (sync.test-pattern on topic `devices`; lossless lifecycle lane).",
+        "title": "Sync-group test pattern triggered"
       },
       "SystemMetrics": {
         "contentType": "application/json",
@@ -1565,6 +1577,38 @@
         "required": [
           "group",
           "achieved"
+        ],
+        "type": "object"
+      },
+      "SyncGroupTestPattern": {
+        "description": "Data body of `sync.test-pattern` (DEV-C3 / ADR-M010): the group's member devices should render a burnt-in frame-index counter + a binary flash for the configured duration so the displays can be photographed/OCR'd to confirm they present the same frame index (frame-accuracy acceptance). A control-plane lifecycle event the nodes consume to drive their overlay machinery; the engine program output is untouched.",
+        "properties": {
+          "duration_ms": {
+            "description": "How long the test pattern stays active (ms).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "flash_period_ms": {
+            "description": "Binary-flash period (ms): on for the first half, off for the second.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frame_counter": {
+            "description": "Whether a per-frame burnt-in counter is rendered (for OCR cross-comparison across displays).",
+            "type": "boolean"
+          },
+          "group": {
+            "description": "The sync group whose members display the test pattern.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "group",
+          "duration_ms",
+          "frame_counter",
+          "flash_period_ms"
         ],
         "type": "object"
       },
