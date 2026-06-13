@@ -120,6 +120,33 @@ fn openapi_document_builds_as_3_1_and_lists_routes() {
             verb.to_uppercase()
         );
     }
+
+    // The WHIP ingest routes (ADR-T014) are documented + enumerated.
+    assert_whip_routes(paths, &routes);
+}
+
+/// Assert the WHIP ingest routes (ADR-T014): publish, teardown, the 405 PATCH,
+/// and the OPTIONS preflight are documented with the right verb, and the primary
+/// verbs are enumerated in the REST surface.
+fn assert_whip_routes(paths: &serde_json::Value, routes: &[&str]) {
+    for (verb, path) in [
+        ("post", "/api/v1/whip/{source_id}"),
+        ("delete", "/api/v1/whip/{source_id}/sessions/{session_id}"),
+        ("patch", "/api/v1/whip/{source_id}/sessions/{session_id}"),
+        ("options", "/api/v1/whip/{source_id}"),
+    ] {
+        assert!(
+            paths.get(path).and_then(|p| p.get(verb)).is_some(),
+            "{} {path} documented in the OpenAPI spec",
+            verb.to_uppercase()
+        );
+    }
+    for expected in [
+        "/api/v1/whip/{source_id}",
+        "/api/v1/whip/{source_id}/sessions/{session_id}",
+    ] {
+        assert!(routes.contains(&expected), "WHIP route {expected} listed");
+    }
 }
 
 #[test]
