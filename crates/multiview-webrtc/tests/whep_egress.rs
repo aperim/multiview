@@ -476,7 +476,7 @@ fn close_releases_the_session_and_keeps_a_queryable_tombstone() {
     assert!(out.is_empty(), "a closed session emits no datagrams");
 }
 
-/// The accept-side wiring helper exists to keep the negotiate() shape honest even
+/// The accept-side wiring helper exists to keep the `negotiate` shape honest even
 /// though the per-test handshakes build their own peers; reference it so an unused
 /// warning never masks a real one.
 #[test]

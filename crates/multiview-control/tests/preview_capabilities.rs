@@ -1,5 +1,5 @@
 //! `GET /api/v1/preview/capabilities` (ADR-P006 move 6): the SPA reads this to
-//! pick its transport (WHEP → JPEG ladder, ADR-W020) **before** POSTing an offer,
+//! pick its transport (WHEP → JPEG ladder, ADR-W020) **before** issuing an offer,
 //! so it never discovers WHEP absence by failing a POST.
 //!
 //! The shape (ADR-P006):

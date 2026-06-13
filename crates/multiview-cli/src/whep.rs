@@ -90,17 +90,24 @@ impl PreviewVideoEncoder {
     }
 
     /// The scaled (longest-edge-capped, even) preview dimensions for `image`.
+    ///
+    /// Integer-only scaling (the workspace bans silent `as` conversions): scale
+    /// each dimension by `PREVIEW_LONGEST_EDGE / longest` using `u64` math, then
+    /// floor to an even value (NV12 chroma) with a floor of 2.
     fn target_dims(image: &Nv12Image) -> (u32, u32) {
         let (w, h) = (image.width().max(2), image.height().max(2));
         let longest = w.max(h);
         if longest <= PREVIEW_LONGEST_EDGE {
             return (w & !1, h & !1);
         }
-        // Scale down preserving aspect; clamp to even dimensions (NV12 chroma).
-        let scale = f64::from(PREVIEW_LONGEST_EDGE) / f64::from(longest);
-        let sw = ((f64::from(w) * scale) as u32).max(2) & !1;
-        let sh = ((f64::from(h) * scale) as u32).max(2) & !1;
-        (sw, sh)
+        let cap = u64::from(PREVIEW_LONGEST_EDGE);
+        let long64 = u64::from(longest).max(1);
+        let scale = |v: u32| -> u32 {
+            let scaled = u64::from(v).saturating_mul(cap) / long64;
+            let clamped = u32::try_from(scaled).unwrap_or(PREVIEW_LONGEST_EDGE);
+            (clamped.max(2)) & !1
+        };
+        (scale(w), scale(h))
     }
 
     /// Encode one NV12 frame into an [`EncodedSample`] (or `None` if the encoder
@@ -381,7 +388,7 @@ impl WhepProvider for CliWhepProvider {
         let answer = self
             .egress
             .accept_session(offer, codec, media.as_ref())
-            .map_err(map_whep_error)?;
+            .map_err(|e| map_whep_error(&e))?;
         let session_id = answer.transport.session_id.as_str().to_owned();
         // Keep the media source alive + pumped by the driver for the session's life.
         if let Ok(mut state) = self.state.lock() {
@@ -410,7 +417,7 @@ impl WhepProvider for CliWhepProvider {
     }
 
     fn active_sessions(&self) -> usize {
-        self.state.lock().map(|s| s.sessions.len()).unwrap_or(0)
+        self.state.lock().map_or(0, |s| s.sessions.len())
     }
 
     fn webrtc_available(&self) -> bool {
@@ -452,13 +459,10 @@ fn spawn_driver(egress: Arc<WhepEgress>, state: Arc<Mutex<DriverState>>, endpoin
                     }
                 }
                 // 3. Drive every session's egress and send the outbound datagrams.
-                match egress.drive_all(now) {
-                    Ok(out) => {
-                        for (dst, payload) in out {
-                            let _ = endpoint.send_to(&payload, dst);
-                        }
+                if let Ok(out) = egress.drive_all(now) {
+                    for (dst, payload) in out {
+                        let _ = endpoint.send_to(&payload, dst);
                     }
-                    Err(_) => {}
                 }
                 // 4. Park until the next session timer or the driver tick, whichever
                 //    is sooner — never busy-spin (invariant #10: best-effort).
@@ -537,11 +541,11 @@ fn offer_has_opus(offer: &str) -> bool {
 }
 
 /// Map a transport [`WhepError`] onto the control-plane [`WhepReject`].
-fn map_whep_error(err: multiview_preview::whep::WhepError) -> WhepReject {
+fn map_whep_error(err: &multiview_preview::whep::WhepError) -> WhepReject {
     use multiview_preview::whep::WhepError;
     match err {
         WhepError::NoSupportedCodec => WhepReject::UnsupportedCodec,
-        WhepError::MalformedOffer { reason } => WhepReject::Malformed(reason.to_owned()),
+        WhepError::MalformedOffer { reason } => WhepReject::Malformed((*reason).to_owned()),
         // Access/lifecycle faults (and any future variant) shed honestly to JPEG —
         // a preview-only refusal that never reflects or affects the engine.
         WhepError::AccessDenied { .. } | WhepError::IllegalTransition { .. } | _ => {

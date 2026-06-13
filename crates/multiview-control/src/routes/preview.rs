@@ -34,7 +34,7 @@ fn jpeg_response(bytes: Vec<u8>) -> Response {
 }
 
 /// `GET /api/v1/preview/capabilities` — what preview transports this build can
-/// serve, so the SPA picks WHEP vs the JPEG ladder before POSTing an offer
+/// serve, so the SPA picks WHEP vs the JPEG ladder before issuing an offer
 /// (ADR-P006 move 6, ADR-W020). Role: read.
 #[cfg_attr(
     feature = "openapi",

@@ -166,7 +166,7 @@ pub trait WhepProvider: Send + Sync {
     /// Whether this build can actually serve WHEP (a native ICE/DTLS/SRTP
     /// transport is wired). The `GET /api/v1/preview/capabilities` endpoint
     /// surfaces this so the SPA picks its transport (WHEP → JPEG ladder, ADR-W020)
-    /// **before** POSTing an offer (ADR-P006 move 6). The default is `false`: a
+    /// **before** issuing an offer (ADR-P006 move 6). The default is `false`: a
     /// negotiation-only / pure build advertises no WebRTC and the SPA stays on the
     /// always-available JPEG ladder.
     fn webrtc_available(&self) -> bool {
@@ -226,7 +226,7 @@ pub struct ScopeCapabilities {
 
 /// The `GET /api/v1/preview/capabilities` response (ADR-P006 move 6): what preview
 /// transports this build can serve, so the SPA picks WHEP vs the JPEG ladder
-/// (ADR-W020) **before** POSTing an offer.
+/// (ADR-W020) **before** issuing an offer.
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PreviewCapabilities {

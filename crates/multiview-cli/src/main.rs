@@ -281,7 +281,8 @@ async fn serve_control_plane(
             Arc::clone(&shared_stores),
         );
         let gated = multiview_control::GatedWhep::with_defaults(Arc::new(live));
-        Some(Arc::new(gated) as multiview_control::SharedWhep)
+        let shared: multiview_control::SharedWhep = Arc::new(gated);
+        Some(shared)
     };
     #[cfg(not(feature = "webrtc-native"))]
     let whep: Option<multiview_control::SharedWhep> = None;
