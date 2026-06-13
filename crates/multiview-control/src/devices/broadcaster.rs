@@ -207,6 +207,21 @@ impl DeviceBroadcaster {
         }))
     }
 
+    /// Publish `device.sync` carrying a member's presentation-offset trim
+    /// (DEV-C3): the member `device_id` joined `group` with `offset_ms` of
+    /// AES67-link-offset trim. A member node consumes this to trim its
+    /// presentation buffer at a frame boundary (Class-1 apply; the engine output
+    /// cadence is untouched — ADR-M010). This is the control-plane side of the
+    /// offset seam; the node adds the trim to its `link_offset`.
+    #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
+    pub fn sync_member_offset(&self, device_id: &str, group: &str, offset_ms: i64) -> u64 {
+        self.engine.publish_event(Event::DeviceSync(DeviceSync {
+            device_id: device_id.to_owned(),
+            group: group.to_owned(),
+            change: SyncChange::Joined { offset_ms },
+        }))
+    }
+
     /// Publish `sync.test-pattern` (lossless lifecycle, DEV-C3): the group's
     /// member devices should render a burnt-in frame counter + binary flash for
     /// `duration_ms` so the displays can be photographed/OCR'd for frame-accuracy
@@ -316,5 +331,46 @@ mod tests {
         b.status("dev-a", DeviceState::Online);
         b.status("dev-a", DeviceState::Degraded);
         assert_eq!(b.registry().state("dev-a"), Some(DeviceState::Degraded));
+    }
+
+    #[test]
+    fn sync_member_offset_publishes_a_joined_change_with_the_trim() {
+        use multiview_events::SyncChange;
+        let (engine, b) = broadcaster();
+        let mut sub = engine.subscribe();
+        b.sync_member_offset("node-left", "lobby-wall", 120);
+        let evt = sub.try_recv().expect("a device.sync event");
+        match &*evt.event {
+            Event::DeviceSync(sync) => {
+                assert_eq!(sync.device_id, "node-left");
+                assert_eq!(sync.group, "lobby-wall");
+                assert_eq!(sync.change, SyncChange::Joined { offset_ms: 120 });
+            }
+            other => panic!("expected device.sync, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_drift_publishes_a_threshold_crossing() {
+        use multiview_events::SyncChange;
+        let (engine, b) = broadcaster();
+        let mut sub = engine.subscribe();
+        b.sync_drift("node-left", "lobby-wall", 180.5, 50, true);
+        let evt = sub.try_recv().expect("a device.sync event");
+        match &*evt.event {
+            Event::DeviceSync(sync) => match &sync.change {
+                SyncChange::Drift {
+                    measured_skew_ms,
+                    target_skew_ms,
+                    exceeded,
+                } => {
+                    assert!((measured_skew_ms - 180.5).abs() < f32::EPSILON);
+                    assert_eq!(*target_skew_ms, 50);
+                    assert!(*exceeded);
+                }
+                other => panic!("expected a drift change, got {other:?}"),
+            },
+            other => panic!("expected device.sync, got {other:?}"),
+        }
     }
 }

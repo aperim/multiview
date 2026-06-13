@@ -318,4 +318,32 @@ impl SyncGroupRuntime {
         out.sort_by(|a, b| a.group.cmp(&b.group));
         out
     }
+
+    /// Every member's configured presentation trim as `(group, device,
+    /// offset_ms)`, id-sorted by group then member config order.
+    ///
+    /// The binary publishes each of these as a `device.sync` `Joined { offset_ms
+    /// }` Class-1 apply event when the group membership is applied, so a member
+    /// node trims its presentation buffer at a frame boundary (the engine output
+    /// cadence is untouched — ADR-M010). This is the control-plane side of the
+    /// offset seam; the node-side consumer adds the trim to its `link_offset`.
+    #[must_use]
+    pub fn member_offsets(&self) -> Vec<(String, String, u32)> {
+        let guard = self.lock();
+        let mut group_ids: Vec<&String> = guard.keys().collect();
+        group_ids.sort();
+        let mut out = Vec::new();
+        for group_id in group_ids {
+            if let Some(group) = guard.get(group_id) {
+                for member in &group.members {
+                    out.push((
+                        group_id.clone(),
+                        member.status.device.clone(),
+                        member.status.offset_ms,
+                    ));
+                }
+            }
+        }
+        out
+    }
 }

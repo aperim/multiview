@@ -234,6 +234,18 @@ where
         tracing::info!(spawned, "DEV-A4: spawned supervised device poller(s)");
     }
 
+    // DEV-C3 (ADR-M010): announce each sync-group member's presentation offset
+    // trim as a `device.sync` Class-1 apply event so a member node trims its
+    // presentation buffer at a frame boundary (the engine output cadence is
+    // untouched). Off the engine hot loop, non-blocking drop-oldest (inv #10).
+    let announced = state.announce_sync_offsets();
+    if announced > 0 {
+        tracing::info!(
+            announced,
+            "DEV-C3: announced sync-group member offset trims"
+        );
+    }
+
     // Mount each configured HLS/LL-HLS output's delivery surface under
     // `/hls/{output-id}/` (DEV-D1): the ADR-0032 §6 router serving that
     // output's playlist/segment/init files with the Cache-Control tiers,

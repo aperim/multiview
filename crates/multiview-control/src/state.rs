@@ -992,6 +992,29 @@ impl AppState {
             .count()
     }
 
+    /// Boot-seed the sync-group presentation offsets (DEV-C3 / ADR-M010):
+    /// publish each configured member's `offset_ms` as a `device.sync`
+    /// `Joined { offset_ms }` Class-1 apply event so a member node trims its
+    /// presentation buffer at a frame boundary (the engine output cadence is
+    /// untouched). This is the control-plane side of the offset seam; the node
+    /// adds the trim to its `link_offset`. Published through the broadcaster's
+    /// non-blocking drop-oldest send (invariant #10). Called once at bind time,
+    /// off the engine hot loop. Returns the number of member offsets announced.
+    ///
+    /// The node-side transport that delivers the trim to a display node's
+    /// presentation discipline is the display-node driver (DEV-A4/A5); until it
+    /// lands for display nodes this announcement rides the existing `device.sync`
+    /// seam and the `/sync-groups/{id}/status` projection.
+    #[allow(clippy::must_use_candidate)] // count is informational at the call site.
+    pub fn announce_sync_offsets(&self) -> usize {
+        let broadcaster = self.poller_wiring().broadcaster;
+        let offsets = self.sync_runtime.member_offsets();
+        for (group, device, offset_ms) in &offsets {
+            let _seq = broadcaster.sync_member_offset(device, group, i64::from(*offset_ms));
+        }
+        offsets.len()
+    }
+
     /// Install the Cast delivery map (DEV-D2): the binary builds it from the
     /// validated `control.cast_media_base` × the DEV-D1 HLS mounts; tests
     /// inject a fixed map. Without one (the default), the cast-session routes

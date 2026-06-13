@@ -157,6 +157,52 @@ async fn test_pattern_of_unknown_group_is_404() {
 }
 
 #[tokio::test]
+async fn announce_sync_offsets_publishes_class1_member_trims() {
+    // DEV-C3: each configured member's offset_ms is announced as a `device.sync`
+    // Joined{offset_ms} event so a member node trims its presentation buffer at
+    // a frame boundary (Class-1; engine cadence untouched). Built once at bind.
+    use multiview_control::devices::sync_runtime::SyncGroupRuntime;
+    use multiview_events::SyncChange;
+
+    let rt = Arc::new(SyncGroupRuntime::new());
+    let group: multiview_config::SyncGroup = serde_json::from_value(json!({
+        "id": "lobby-wall",
+        "mode": "auto",
+        "target_skew_ms": 50,
+        "members": [
+            { "device": "node-left", "offset_ms": 0 },
+            { "device": "node-right", "offset_ms": 120 }
+        ]
+    }))
+    .unwrap();
+    rt.seed(std::slice::from_ref(&group));
+    let h = harness_with(move |state| state.with_sync_runtime(Arc::clone(&rt)));
+    let mut sub = h.engine.subscribe();
+
+    let announced = h.state.announce_sync_offsets();
+    assert_eq!(announced, 2);
+
+    let mut offsets: Vec<(String, i64)> = Vec::new();
+    for _ in 0..16 {
+        match sub.try_recv() {
+            Ok(evt) => {
+                if let Event::DeviceSync(sync) = &*evt.event {
+                    if let SyncChange::Joined { offset_ms } = sync.change {
+                        offsets.push((sync.device_id.clone(), offset_ms));
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    offsets.sort();
+    assert_eq!(
+        offsets,
+        vec![("node-left".to_owned(), 0), ("node-right".to_owned(), 120),]
+    );
+}
+
+#[tokio::test]
 async fn test_pattern_requires_write_role() {
     let rt = runtime_with_one_freerun_member();
     let h = harness_with(move |state| state.with_sync_runtime(Arc::clone(&rt)));

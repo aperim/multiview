@@ -300,3 +300,25 @@ fn all_skews_summarises_every_group_for_timing_status() {
     assert_eq!(skews[0].achieved, AchievedSync::None);
     assert!(skews[0].measured_skew_ms.is_none());
 }
+
+/// `member_offsets` enumerates every (group, device, `offset_ms`) so the binary
+/// can publish each member's presentation trim to its node as a Class-1 apply
+/// event when the group membership is applied. Stable order: group id then
+/// member config order.
+#[test]
+fn member_offsets_enumerates_every_member_trim() {
+    let rt = SyncGroupRuntime::new();
+    rt.seed(&[
+        group("wall", 50, &[("node-l", 0), ("node-r", 120)]),
+        group("foyer", 80, &[("node-f", 250)]),
+    ]);
+    let offsets = rt.member_offsets();
+    assert_eq!(
+        offsets,
+        vec![
+            ("foyer".to_owned(), "node-f".to_owned(), 250),
+            ("wall".to_owned(), "node-l".to_owned(), 0),
+            ("wall".to_owned(), "node-r".to_owned(), 120),
+        ]
+    );
+}
