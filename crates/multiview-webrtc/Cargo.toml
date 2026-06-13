@@ -43,6 +43,12 @@ base64 = "0.22.1"
 # primitives. The default + pure builds never link it; cargo-deny scans the
 # default build only (`all-features = false`), so the gate stays clean.
 str0m = { version = "=0.16.2", default-features = false, features = ["rust-crypto"], optional = true }
+# The dual-stack UDP socket bind (`[::]`, `IPV6_V6ONLY=false`; ADR-0042/§4) — the
+# std `UdpSocket` cannot set `IPV6_V6ONLY`. `socket2` (`MIT OR Apache-2.0`,
+# allowlisted, already in the workspace graph transitively via tokio/hyper) gives
+# the one syscall we need; OPTIONAL, pulled in ONLY by `native`, so the default
+# build never links it.
+socket2 = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net"] }
@@ -54,7 +60,7 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "net"] }
 # that links str0m sits behind this gate, so the default build stays pure-Rust
 # and deny-clean. `tokio/net` provides the UDP socket the driver and the TURN
 # client own.
-"native" = ["dep:str0m", "tokio/net"]
+"native" = ["dep:str0m", "dep:socket2", "tokio/net"]
 
 [lints]
 workspace = true

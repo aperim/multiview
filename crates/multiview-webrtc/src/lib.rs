@@ -41,5 +41,8 @@ pub mod session;
 pub mod signalling;
 pub mod turn;
 
+#[cfg(feature = "native")]
+pub mod transport;
+
 pub use config::{EndpointConfig, IceServer, IceServerKind, TurnCredentials};
 pub use error::{Result, TurnError, WebRtcError};
