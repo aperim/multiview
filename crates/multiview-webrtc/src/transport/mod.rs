@@ -38,6 +38,10 @@ use crate::error::{Result, WebRtcError};
 /// The 90 kHz RTP clock for video (ADR-0048 codec matrix; invariant #3 rationals).
 const VIDEO_CLOCK_HZ: Frequency = Frequency::NINETY_KHZ;
 
+/// The 48 kHz RTP clock for Opus audio (RFC 7587; ADR-P006). Opus always rides a
+/// 48 kHz RTP clock regardless of the internal sample rate.
+const AUDIO_CLOCK_HZ: Frequency = Frequency::FORTY_EIGHT_KHZ;
+
 /// The kind of media a session carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -351,21 +355,70 @@ impl Session {
     }
 
     /// Write one encoded video sample (an access unit) into the first video
-    /// media; str0m packetizes it into SRTP. `keyframe` marks an IDR.
+    /// media; str0m packetizes it into SRTP.
+    ///
+    /// `rtp_timestamp` is the sample's presentation time in **90 kHz** RTP units
+    /// (invariant #3: exact rationals, never float fps) — every distinct sample
+    /// carries its own advancing timestamp, never a pinned 0. `keyframe` records
+    /// that the access unit begins an IDR; str0m's H.264/VP8 packetizers derive
+    /// the actual keyframe marking from the NAL/VP8 payload itself, so the flag is
+    /// informational at this seam (the egress loop uses it to gate first-packet
+    /// delivery on a sync point).
     ///
     /// # Errors
     ///
     /// [`WebRtcError::Transport`] if there is no video media, no negotiated
     /// payload type, or the write fails.
-    pub fn write_video_sample(&mut self, data: &[u8], keyframe: bool, now: Instant) -> Result<()> {
+    pub fn write_video_sample(
+        &mut self,
+        data: &[u8],
+        keyframe: bool,
+        rtp_timestamp: u32,
+        now: Instant,
+    ) -> Result<()> {
+        let _ = keyframe;
+        self.write_sample(MediaKind::Video, data, u64::from(rtp_timestamp), now)
+    }
+
+    /// Write one encoded **Opus** audio frame into the first audio media; str0m
+    /// packetizes it into SRTP. `rtp_timestamp` is in **48 kHz** RTP units (RFC
+    /// 7587 fixes the Opus RTP clock at 48 kHz regardless of the internal sample
+    /// rate; ADR-P006).
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if there is no audio media, no negotiated
+    /// payload type, or the write fails.
+    pub fn write_audio_sample(
+        &mut self,
+        data: &[u8],
+        rtp_timestamp: u32,
+        now: Instant,
+    ) -> Result<()> {
+        self.write_sample(MediaKind::Audio, data, u64::from(rtp_timestamp), now)
+    }
+
+    /// Common write path for both media kinds: resolve the mid + negotiated PT,
+    /// re-stamp the RTP time on the kind's clock, hand the access unit to str0m's
+    /// sample-mode writer, and drive one packetization pass.
+    fn write_sample(
+        &mut self,
+        kind: MediaKind,
+        data: &[u8],
+        rtp_timestamp: u64,
+        now: Instant,
+    ) -> Result<()> {
         let mid = self
             .media
             .iter()
-            .find(|(_, k)| *k == MediaKind::Video)
+            .find(|(_, k)| *k == kind)
             .map(|(mid, _)| *mid)
-            .ok_or_else(|| WebRtcError::Transport("no video media to write".to_owned()))?;
-        // RTP timestamp advances 90 kHz; for the offline test one sample is fine.
-        let rtp_time = MediaTime::new(0, VIDEO_CLOCK_HZ);
+            .ok_or_else(|| WebRtcError::Transport(format!("no {kind:?} media to write")))?;
+        let clock = match kind {
+            MediaKind::Video => VIDEO_CLOCK_HZ,
+            MediaKind::Audio => AUDIO_CLOCK_HZ,
+        };
+        let rtp_time = MediaTime::new(rtp_timestamp, clock);
         let pt = self
             .rtc
             .media(mid)
@@ -374,8 +427,7 @@ impl Session {
         let writer = self
             .rtc
             .writer(mid)
-            .ok_or_else(|| WebRtcError::Transport("no writer for video mid".to_owned()))?;
-        let _ = keyframe;
+            .ok_or_else(|| WebRtcError::Transport("no writer for mid".to_owned()))?;
         writer
             .write(pt, now, rtp_time, data.to_vec())
             .map_err(|e| WebRtcError::Transport(format!("write: {e}")))?;

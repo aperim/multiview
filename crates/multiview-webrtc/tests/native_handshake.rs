@@ -130,7 +130,7 @@ fn srtp_rtp_media_flows_offerer_to_answerer() {
     // parameter-set NAL.
     let mut payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     payload.extend(std::iter::repeat_n(0xABu8, 1200));
-    a.write_video_sample(&payload, true, now).unwrap();
+    a.write_video_sample(&payload, true, 0, now).unwrap();
 
     let delivered = pump_until(&mut a, a_addr, &mut b, b_addr, now, |_a, b| {
         b.received_media_count() > 0
@@ -147,6 +147,75 @@ fn srtp_rtp_media_flows_offerer_to_answerer() {
         .take_received_media()
         .expect("a decrypted frame is buffered");
     assert!(!frame.data.is_empty(), "the decrypted frame carries bytes");
+}
+
+#[test]
+fn video_samples_carry_advancing_rtp_timestamps() {
+    // ADR-P006: preview egress re-stamps each access unit at the negotiated
+    // payload type on the 90 kHz clock with the sample's own RTP timestamp — not
+    // a constant 0. Two distinct-timestamp samples must both reach the answerer.
+    let (mut a, a_addr, mut b, b_addr) = offerer_answerer();
+    let now = Instant::now();
+    a.add_host_candidate(a_addr).unwrap();
+    b.add_host_candidate(b_addr).unwrap();
+    let offer = a.create_offer(&[MediaKind::Video]).unwrap();
+    let answer = b.accept_offer(&offer).unwrap();
+    a.accept_answer(&answer).unwrap();
+    assert!(
+        pump_until(&mut a, a_addr, &mut b, b_addr, now, |a, b| a.is_connected()
+            && b.is_connected()),
+        "must connect first"
+    );
+
+    // Two complete IDR access units at two distinct 90 kHz timestamps.
+    let mut au0 = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
+    au0.extend(std::iter::repeat_n(0xABu8, 1200));
+    let mut au1 = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
+    au1.extend(std::iter::repeat_n(0xCDu8, 1200));
+    // rtp_ts in 90 kHz units: 0 and 3000 (≈ 33 ms apart).
+    a.write_video_sample(&au0, true, 0, now).unwrap();
+    let delivered_first = pump_until(&mut a, a_addr, &mut b, b_addr, now, |_a, b| {
+        b.received_media_count() >= 1
+    });
+    assert!(delivered_first, "first sample must arrive");
+    a.write_video_sample(&au1, false, 3000, now).unwrap();
+    let delivered_second = pump_until(&mut a, a_addr, &mut b, b_addr, now, |_a, b| {
+        b.received_media_count() >= 2
+    });
+    assert!(
+        delivered_second,
+        "a second sample at a distinct timestamp must also arrive (the RTP \
+         timestamp advanced, not pinned to 0)"
+    );
+}
+
+#[test]
+fn audio_opus_samples_flow_to_the_answerer() {
+    // ADR-P006: preview carries Opus audio alongside video. An audio sample
+    // written to the Opus media must reach the answerer as decrypted media.
+    let (mut a, a_addr, mut b, b_addr) = offerer_answerer();
+    let now = Instant::now();
+    a.add_host_candidate(a_addr).unwrap();
+    b.add_host_candidate(b_addr).unwrap();
+    let offer = a
+        .create_offer(&[MediaKind::Video, MediaKind::Audio])
+        .unwrap();
+    let answer = b.accept_offer(&offer).unwrap();
+    a.accept_answer(&answer).unwrap();
+    assert!(
+        pump_until(&mut a, a_addr, &mut b, b_addr, now, |a, b| a.is_connected()
+            && b.is_connected()),
+        "must connect first"
+    );
+
+    // A 20 ms Opus frame is 960 samples at the 48 kHz RTP clock.
+    let opus_frame = vec![0xF8u8; 80];
+    a.write_audio_sample(&opus_frame, 0, now).unwrap();
+    a.write_audio_sample(&opus_frame, 960, now).unwrap();
+    let delivered = pump_until(&mut a, a_addr, &mut b, b_addr, now, |_a, b| {
+        b.received_media_count() >= 1
+    });
+    assert!(delivered, "Opus audio media did not reach the answerer");
 }
 
 #[test]
