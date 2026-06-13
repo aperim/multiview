@@ -535,6 +535,12 @@ pub struct AppState {
     /// a focus session is a best-effort preview consumer that can never
     /// back-pressure the engine.
     pub whep: crate::preview::SharedWhep,
+    /// The WHIP ingest transport seam (RFC 9725 WebRTC contribution sources).
+    /// The default ([`NoWhip`](crate::whip::NoWhip)) refuses every publish with
+    /// an honest `503`; the binary swaps in a `multiview-webrtc`-backed provider.
+    /// Isolation-safe (invariant #10): a WHIP publisher is an ingest source that
+    /// can never back-pressure the engine.
+    pub whip: crate::whip::SharedWhip,
     /// Whether authentication is **disabled** (every request runs as a local
     /// admin). Off by default — the control plane requires a verified API key.
     /// An operator turns this on **explicitly** (config/env) for a trusted/local
@@ -690,6 +696,7 @@ impl AppState {
             ack_clock: Arc::new(system_ack_clock),
             preview: crate::preview::no_preview(),
             whep: crate::preview::no_whep(),
+            whip: crate::whip::no_whip(),
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
@@ -801,6 +808,14 @@ impl AppState {
     #[must_use]
     pub fn with_whep(mut self, whep: crate::preview::SharedWhep) -> Self {
         self.whep = whep;
+        self
+    }
+
+    /// Replace the WHIP ingest transport provider (the binary wires a
+    /// `multiview-webrtc`-backed one; the default refuses every publish `503`).
+    #[must_use]
+    pub fn with_whip(mut self, whip: crate::whip::SharedWhip) -> Self {
+        self.whip = whip;
         self
     }
 

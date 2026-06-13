@@ -90,6 +90,7 @@ pub async fn bind_and_serve<F>(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     commands: CommandSender,
     preview: SharedPreview,
+    whip: Option<multiview_control::SharedWhip>,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
     live_apply: multiview_control::LiveApplyCaps,
@@ -181,6 +182,12 @@ where
     .with_discovery_config(config.discovery.clone().unwrap_or_default());
     if let Some(delivery) = delivery {
         state = state.with_cast_delivery(delivery);
+    }
+    // The WHIP ingest provider (ADR-T014): when the binary wired the native
+    // endpoint, install it so a publish negotiates a real session; otherwise the
+    // default `NoWhip` answers `503` (routes stay present + authz-enforced).
+    if let Some(whip) = whip {
+        state = state.with_whip(whip);
     }
 
     // Install the real mDNS browser when the `discovery` feature is built, so
@@ -2583,6 +2590,7 @@ input_id = "in_b"
             publisher,
             commands,
             multiview_control::no_preview(),
+            None,
             None,
             None,
             multiview_control::LiveApplyCaps::default(),

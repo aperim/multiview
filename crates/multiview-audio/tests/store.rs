@@ -254,3 +254,114 @@ fn seek_to_live_edge_parks_at_the_write_head() {
         "seek_to_live_edge must park the cursor at the write head (frame {total})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `publish_at` — the absolute-frame-index write (ADR-T013 §4 / ADR-0033). The
+// RTP-audio rebaser maps an RTP timestamp to an absolute store frame and writes
+// there; a late (reordered) packet lands at its TRUE index, and an unwritten
+// span between writes silence-fills (gap-free by construction). Bounded:
+// drop-oldest past capacity, never grows.
+
+/// A block published at an absolute frame index reads back at exactly that
+/// index — the writer no longer just appends, it can place at an anchor.
+#[test]
+fn publish_at_places_block_at_absolute_frame() {
+    let store = AudioStore::new(stereo(), 48_000);
+    // Anchor the first audio at absolute frame 1000 (the rebaser's anchor).
+    store.publish_at(1000, &ramp(0, 50)).unwrap();
+    // Seek the reader to the anchor and read the placed block back verbatim.
+    store.seek_to(1000);
+    let out = store.read(50);
+    assert_eq!(out.frame_count(), 50);
+    for (i, &v) in out.interleaved().iter().enumerate() {
+        assert_eq!(v, i as f32, "sample {i} did not land at the anchor frame");
+    }
+}
+
+/// The span between the anchor and a later absolute write silence-fills — a gap
+/// in absolute frame space is never a short read or a splice (gap-free).
+#[test]
+fn publish_at_gap_silence_fills_between_writes() {
+    let store = AudioStore::new(stereo(), 48_000);
+    store.publish_at(0, &ramp(0, 10)).unwrap(); // frames [0,10)
+    store.publish_at(30, &ramp(1000, 10)).unwrap(); // frames [30,40); [10,30) is a hole
+    store.seek_to(0);
+    let out = store.read(40);
+    let s = out.interleaved();
+    // [0,10) is the first ramp.
+    for (i, &v) in s.iter().take(20).enumerate() {
+        assert_eq!(v, i as f32, "leading block sample {i}");
+    }
+    // [10,30) (samples 20..60) is the silence-filled hole.
+    assert!(
+        s[20..60].iter().all(|&v| v == 0.0),
+        "the inter-write hole must silence-fill, never splice"
+    );
+    // [30,40) (samples 60..80) is the second ramp (started at 1000).
+    for (k, &v) in s[60..80].iter().enumerate() {
+        assert_eq!(v, (1000 + k) as f32, "trailing block sample {k}");
+    }
+}
+
+/// A late (reordered) packet writes to its TRUE absolute index behind the head
+/// without disturbing already-written later frames — absolute placement, not
+/// append (ADR-T013 §4 reorder-by-index).
+#[test]
+fn publish_at_reordered_packet_lands_behind_head() {
+    let store = AudioStore::new(stereo(), 48_000);
+    // The "later" packet arrives first (frames [20,30)).
+    store.publish_at(20, &ramp(2000, 10)).unwrap();
+    // The "earlier" packet arrives late and fills [0,10) at its true index.
+    store.publish_at(0, &ramp(0, 10)).unwrap();
+    store.seek_to(0);
+    let out = store.read(30);
+    let s = out.interleaved();
+    for (i, &v) in s.iter().take(20).enumerate() {
+        assert_eq!(v, i as f32, "the late earlier packet must land at frame 0");
+    }
+    // [10,20) is the still-unwritten hole -> silence.
+    assert!(s[20..40].iter().all(|&v| v == 0.0), "hole stays silence");
+    for (k, &v) in s[40..60].iter().enumerate() {
+        assert_eq!(
+            v,
+            (2000 + k) as f32,
+            "the earlier-arrived later packet survives"
+        );
+    }
+}
+
+/// `publish_at` is bounded: writing far past capacity drops the oldest frames
+/// (never grows) exactly like the append `publish`.
+#[test]
+fn publish_at_is_bounded_drop_oldest() {
+    let cap = 1_000usize;
+    let store = AudioStore::new(stereo(), cap);
+    // Place 5x capacity of contiguous blocks at advancing absolute indices.
+    let chunk = 250usize;
+    let total = cap * 5;
+    let mut frame = 0usize;
+    while frame < total {
+        store
+            .publish_at(i64::try_from(frame).unwrap(), &ramp(frame * 2, chunk))
+            .unwrap();
+        frame += chunk;
+    }
+    assert!(
+        store.buffered_frames() <= cap,
+        "publish_at must drop-oldest past capacity (buffered {} > cap {cap})",
+        store.buffered_frames()
+    );
+}
+
+/// A format mismatch is rejected (the same contract as `publish`).
+#[test]
+fn publish_at_rejects_format_mismatch() {
+    let store = AudioStore::new(stereo(), 48_000);
+    let mono =
+        AudioBlock::from_interleaved(AudioFormat::new(FS, ChannelLayout::Mono), vec![0.0; 10])
+            .unwrap();
+    assert!(
+        store.publish_at(0, &mono).is_err(),
+        "a format mismatch must be rejected, never silently written"
+    );
+}

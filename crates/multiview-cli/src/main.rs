@@ -224,6 +224,12 @@ struct ControlPlaneWiring {
     /// discovery. `None` ⇒ an empty, relay-declined default. Control-plane only
     /// (invariant #10).
     mesh: Option<Arc<multiview_mesh::MeshState>>,
+    /// The shared WHIP publisher rendezvous (ADR-T014): the pipeline's registry,
+    /// so the control plane's `WhipProvider` rendezvous a `POST`ed publisher to
+    /// the matching webrtc source's `drive_webrtc` loop. Only under
+    /// `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry,
 }
 
 /// Bring up the management control plane for a run (one wiring for BOTH run
@@ -261,6 +267,8 @@ async fn serve_control_plane(
         live_apply,
         licence,
         mesh,
+        #[cfg(feature = "webrtc-native")]
+        webrtc_registry,
     } = wiring;
     let (commands, command_rx) = command_bus(64);
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
@@ -273,12 +281,25 @@ async fn serve_control_plane(
     let provider: multiview_control::SharedPreview = Arc::new(
         multiview_cli::preview::CliPreviewProvider::new(program_slot, shared_stores),
     );
+    // WHIP ingest (ADR-T014, `webrtc-native`): bind the single native str0m
+    // endpoint, spawn its driver task, and build the `WhipProvider` over the
+    // shared publisher registry — so a `POST /api/v1/whip/{source}` rendezvous a
+    // publisher to that source's `drive_webrtc` loop. The endpoint runs on its
+    // own tokio task and can never back-pressure the engine (inv #10). Without
+    // the feature the default `NoWhip` answers every publish `503` (the routes
+    // stay present + authz-enforced).
+    #[cfg(feature = "webrtc-native")]
+    let whip: Option<multiview_control::SharedWhip> =
+        multiview_cli::webrtc_ingest::build_whip_provider(config, webrtc_registry);
+    #[cfg(not(feature = "webrtc-native"))]
+    let whip: Option<multiview_control::SharedWhip> = None;
     let (addr, handle, state) = control::bind_and_serve(
         listen,
         config,
         Arc::clone(publisher),
         commands,
         provider,
+        whip,
         licence,
         mesh,
         live_apply,
@@ -370,6 +391,8 @@ async fn run_pipeline_until_ctrl_c(
                         plane.pinned.clone(),
                     )),
                     mesh: Some(Arc::clone(&plane.mesh)),
+                    #[cfg(feature = "webrtc-native")]
+                    webrtc_registry: pipeline.webrtc_registry(),
                 },
                 shutdown_rx,
             )
@@ -670,6 +693,14 @@ async fn run_software_until_ctrl_c(
                         plane.pinned.clone(),
                     )),
                     mesh: Some(Arc::clone(&plane.mesh)),
+                    // The software run path has no ingest pipeline, so no webrtc
+                    // source drive loop reads this registry — an empty one keeps
+                    // the WhipProvider present (publishes ride NO_SIGNAL on a
+                    // run with no webrtc tile). `webrtc-native` ⊃ `ffmpeg`, so in
+                    // practice the pipeline path is taken; this keeps the struct
+                    // total under the rare software+webrtc-native combination.
+                    #[cfg(feature = "webrtc-native")]
+                    webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry::new(),
                 },
                 shutdown_rx,
             )

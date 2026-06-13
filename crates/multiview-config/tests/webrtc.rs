@@ -720,3 +720,63 @@ audio = {{ mode = "tracks", tracks = ["talent", "crew"] }}
         "error should explain the track capability, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `[webrtc].ice_servers` — STUN + TURN (ADR-0048 §5.1, ADR-T013/T014 NAT path)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn webrtc_ice_servers_stun_and_turn_roundtrip() {
+    use multiview_config::{IceServerConfig, IceServerKindConfig};
+    // IPv6-first STUN + a coturn-style ephemeral-REST TURN server. The
+    // `static_auth_secret` field name is caught by the control-plane redactor.
+    let doc = format!(
+        "{BASE}\n[webrtc]\n\
+[[webrtc.ice_servers]]\nkind = \"stun\"\nurl = \"stun:[2001:db8::53]:3478\"\n\
+[[webrtc.ice_servers]]\nkind = \"turn\"\nurl = \"turn:[2001:db8::55]:3478\"\n\
+username = \"multiview\"\nstatic_auth_secret = \"shared-secret\"\n"
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parses ice_servers");
+    cfg.validate().expect("ice_servers validate");
+    assert_eq!(cfg.webrtc.ice_servers.len(), 2);
+    let stun = &cfg.webrtc.ice_servers[0];
+    assert_eq!(stun.kind, IceServerKindConfig::Stun);
+    assert_eq!(stun.url, "stun:[2001:db8::53]:3478");
+    let turn = &cfg.webrtc.ice_servers[1];
+    assert_eq!(turn.kind, IceServerKindConfig::Turn);
+    assert_eq!(turn.username.as_deref(), Some("multiview"));
+    assert_eq!(turn.static_auth_secret.as_deref(), Some("shared-secret"));
+
+    // Round-trips preserve the document (the secret is plaintext in config, like
+    // the rtmp/srt stream keys — the redactor strips it on export).
+    let _: IceServerConfig = turn.clone();
+    let from_toml =
+        MultiviewConfig::load_from_toml(&cfg.to_toml().expect("to_toml")).expect("re-parse");
+    assert_eq!(cfg, from_toml, "TOML round-trip with ice_servers");
+}
+
+#[test]
+fn webrtc_turn_without_credentials_rejected() {
+    let doc = format!(
+        "{BASE}\n[webrtc]\n[[webrtc.ice_servers]]\nkind = \"turn\"\n\
+url = \"turn:[2001:db8::55]:3478\"\n"
+    );
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parses structurally");
+    let err = cfg
+        .validate()
+        .expect_err("a TURN server without credentials must fail");
+    assert!(
+        err.to_string().contains("credential") || err.to_string().contains("TURN"),
+        "error should explain the missing TURN credential, got: {err}"
+    );
+}
+
+#[test]
+fn webrtc_ice_server_empty_url_rejected() {
+    let doc = format!("{BASE}\n[webrtc]\n[[webrtc.ice_servers]]\nkind = \"stun\"\nurl = \"\"\n");
+    let cfg = MultiviewConfig::load_from_toml(&doc).expect("parses structurally");
+    assert!(
+        cfg.validate().is_err(),
+        "an empty ICE-server URL must fail validation"
+    );
+}

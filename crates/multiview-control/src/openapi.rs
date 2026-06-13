@@ -150,6 +150,10 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::preview::input_whep_close,
         crate::routes::preview::output_whep_open,
         crate::routes::preview::output_whep_close,
+        crate::routes::whip::whip_publish,
+        crate::routes::whip::whip_delete,
+        crate::routes::whip::whip_patch,
+        crate::routes::whip::whip_options,
         crate::nmos::get_self,
         crate::nmos::list_devices,
         crate::nmos::list_senders,
@@ -519,6 +523,11 @@ const REST_ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/v1/preview/inputs/{id}/whep/{session_id}"),
     ("POST", "/api/v1/preview/outputs/{id}/whep"),
     ("DELETE", "/api/v1/preview/outputs/{id}/whep/{session_id}"),
+    // WHIP ingest (RFC 9725 / ADR-T014): publish to a source-derived endpoint;
+    // DELETE the session resource to tear it down (PATCH is 405, OPTIONS is the
+    // CORS preflight — documented via utoipa, not enumerated as primary verbs).
+    ("POST", "/api/v1/whip/{source_id}"),
+    ("DELETE", "/api/v1/whip/{source_id}/sessions/{session_id}"),
     ("GET", "/api/v1/audit"),
     // Account-side append-only audit (Conspect §10/§11): cursor-paginated.
     ("GET", "/api/v1/account/audit"),

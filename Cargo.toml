@@ -90,6 +90,7 @@ multiview-licence = { path = "crates/multiview-licence" }
 multiview-mesh = { path = "crates/multiview-mesh" }
 multiview-control = { path = "crates/multiview-control" }
 multiview-preview = { path = "crates/multiview-preview" }
+multiview-webrtc = { path = "crates/multiview-webrtc" }
 multiview-telemetry = { path = "crates/multiview-telemetry" }
 multiview-ntpsys = { path = "crates/multiview-ntpsys" }
 multiview-i915pmu = { path = "crates/multiview-i915pmu" }
