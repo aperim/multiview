@@ -2359,12 +2359,12 @@ impl Pipeline {
         // a local so `start_display_sinks` can borrow it (it only reads the plan
         // per head, never consumes the option).
         #[cfg(feature = "display-kms")]
-        let node_presentation =
-            self.node_link_offset_ns
-                .map(|link_offset_ns| NodePresentation {
-                    epoch: self.epoch.clone(),
-                    link_offset_ns,
-                });
+        let node_presentation = self
+            .node_link_offset_ns
+            .map(|link_offset_ns| NodePresentation {
+                epoch: self.epoch.clone(),
+                link_offset_ns,
+            });
         #[cfg(feature = "display-kms")]
         let started_displays = start_display_sinks(
             std::mem::take(&mut self.display_plans),
