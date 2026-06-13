@@ -478,11 +478,16 @@ type LiveIslandSlot = Arc<arc_swap::ArcSwapOption<LiveIsland>>;
 /// integration test (the real sink-handle bundle needs hardware; this generic
 /// seam proves the worker stays free over *any* blocking-`Drop` bundle).
 pub async fn teardown_blocking_off_worker<T: Send + 'static>(handles: T, what: &'static str) {
-    let _ = what;
-    // INTENTIONALLY BUGGY (RED): drop the bundle directly on the async worker so
-    // its blocking stop/join runs on this Tokio worker thread. Replaced by the
-    // spawn_blocking fix once the failing test is committed.
-    drop(handles);
+    // Move the bundle onto the blocking pool so its blocking stop/join runs on a
+    // thread that may block, then await the join so teardown still completes
+    // before the run returns. The engine is already stopped here, so the await
+    // neither paces nor back-pressures any data-plane path (inv #1/#10) — it only
+    // keeps the worker free while the (bounded) device teardown runs.
+    if let Err(err) = tokio::task::spawn_blocking(move || drop(handles)).await {
+        // A panic inside the bundle's `Drop` is confined to the blocking task and
+        // surfaced here, never unwound across the await.
+        tracing::error!(what, error = %err, "display-sink teardown task failed to join");
+    }
 }
 
 /// The **scanout-locality set** for the run's configured display heads (DEV-B2,
@@ -516,12 +521,36 @@ pub fn scanout_localities(
     device_ids: &[multiview_hal::DeviceId],
     selectors: &[multiview_output::display::ConnectorSelector],
 ) -> Vec<multiview_hal::DeviceId> {
-    // UNWIRED (RED): the pre-fix behaviour the audit found — admission ignores
-    // scanout affinity (the probe + `with_sink_locality` had zero callers), so
-    // no connector resolves to its owning GPU. Replaced by the real resolution
-    // once the failing tests are committed.
-    let _ = (probe, device_ids, selectors);
-    Vec::new()
+    use multiview_hal::ConnectorId;
+    use multiview_output::display::ConnectorSelector;
+    if selectors.is_empty() {
+        return Vec::new();
+    }
+    // Reconcile the host's DRM cards against the canonical device set (the same
+    // `DeviceId`s admission scores), so a connector's owning device is the exact
+    // placement key — never a re-derived identity (ADR-0044 §3).
+    let inventory = probe.enumerate(device_ids);
+    let mut connectors: Vec<ConnectorId> = Vec::with_capacity(selectors.len());
+    for selector in selectors {
+        match selector {
+            ConnectorSelector::Name(name) => connectors.push(ConnectorId::new(name.clone())),
+            ConnectorSelector::Auto => {
+                // The sink opens the first card (card-sort order) with a
+                // connected connector; mirror that by taking the first connected
+                // connector the inventory lists. Its owner is the GPU the `Auto`
+                // sink will scan out from.
+                if let Some(first) = inventory.connected_connectors().next() {
+                    connectors.push(first.clone());
+                }
+            }
+            // `ConnectorSelector` is `#[non_exhaustive]`: a future selector this
+            // build does not understand contributes NO locality — empty = no
+            // constraint = the load-only pick, never a wrong pin (the safe
+            // default: degrade to today's behaviour, never mis-place).
+            _ => {}
+        }
+    }
+    inventory.locality_for(&connectors)
 }
 
 /// Choose the GPU to host the whole pipeline island at **admission** — the
@@ -537,6 +566,14 @@ pub fn scanout_localities(
 /// [`multiview_hal::select_device`] for the least-contended GPU that can host the
 /// whole `decode → composite → encode` island. It **never blocks or `.await`s**
 /// on the data plane (inv #1).
+///
+/// `display_localities` is the scanout-affinity constraint (DEV-B2, ADR-0044 §3):
+/// the connector-owning GPU(s) of the run's display heads, resolved by
+/// [`scanout_localities`]. Empty (no display head, or no `display-kms`) leaves
+/// the load-only pick unchanged; non-empty makes the placement
+/// connector-affine — [`multiview_hal::select_device`]'s Stage-0 gate then admits
+/// only a connector-owning GPU, so the compositor lives where the framebuffer
+/// scans out, never on the merely-least-loaded GPU.
 ///
 /// Returns an [`AdmissionPick`] carrying the chosen device's wgpu compositor
 /// target AND its CUDA decode/encode ordinal — both off the SAME selection, so
@@ -923,6 +960,7 @@ mod admission_target_tests {
             Rational::new(30, 1),
             4,
             true, // opens an NVENC session
+            &[],  // no display heads → no scanout-affinity constraint
         );
         assert!(
             pick.wgpu_target.is_none(),
@@ -952,6 +990,7 @@ mod admission_target_tests {
             Rational::new(30, 1),
             4,
             true, // opens an NVENC session
+            &[],  // no display heads → no scanout-affinity constraint
         );
 
         let target = pick
@@ -2474,35 +2513,41 @@ impl Pipeline {
         // engine (invariants #1 + #10). Audio-enabled heads (DEV-B4) also get
         // an ELD-gated ALSA audio sink wired to their flip clock; the
         // publishers feed from the bake consumer below.
+        // DEV-C2: a node run threads its link offset here so each head gets a
+        // presentation plan (epoch + link offset + real mono/wall clock). A
+        // plain run leaves this `None` → undisciplined latest-wins per head.
+        #[cfg(feature = "display-kms")]
+        let node_presentation = self
+            .node_link_offset_ns
+            .map(|link_offset_ns| NodePresentation {
+                epoch: self.epoch.clone(),
+                link_offset_ns,
+            });
         #[cfg(feature = "display-kms")]
         let started_displays = start_display_sinks(
             std::mem::take(&mut self.display_plans),
             self.cadence,
             display_audio_format(self.encode_cfg.audio.as_ref()),
             self.display_hotplug_poll,
-            // DEV-C2: a node run threads its link offset here so each head gets a
-            // presentation plan (epoch + link offset + real mono/wall clock). A
-            // plain run passes `None` → undisciplined latest-wins per head.
-            self.node_link_offset_ns
-                .map(|link_offset_ns| NodePresentation {
-                    epoch: self.epoch.clone(),
-                    link_offset_ns,
-                }),
+            node_presentation.as_ref(),
         )?;
         #[cfg(feature = "display-kms")]
         let display_publishers = started_displays.publishers;
-        // Keep the video + audio sink threads alive for the whole run; dropping
-        // the handles at end of run stops + joins them (off the hot path).
-        #[cfg(feature = "display-kms")]
-        let _display_handles = started_displays.handles;
-        #[cfg(feature = "display-kms")]
-        let _display_audio_handles = started_displays.audio_handles;
-        // The hotplug watcher lives for the run too; drop = stop + join (it
-        // only ever sets the sinks' re-probe flags — DEV-B5).
-        #[cfg(feature = "display-kms")]
-        let _display_hotplug = started_displays.hotplug;
         #[cfg(feature = "display-kms")]
         let display_audio_publishers = started_displays.audio_publishers;
+        // Keep the video + audio sink threads (and the hotplug watcher) alive for
+        // the whole run in ONE owned bundle. Each handle's `Drop` does a BLOCKING
+        // stop + thread-join (the audio sink sleeps up to its 500 ms detach
+        // bound; the video sink + hotplug monitor join their threads). DEV-B4
+        // audit: that blocking teardown must NOT run on this async worker — at
+        // end of run the bundle is handed to `spawn_blocking` (see below), never
+        // dropped on the worker thread executing `drive_streaming`.
+        #[cfg(feature = "display-kms")]
+        let display_teardown = DisplayTeardownBundle {
+            handles: started_displays.handles,
+            audio_handles: started_displays.audio_handles,
+            hotplug: started_displays.hotplug,
+        };
         #[cfg(not(feature = "display-kms"))]
         let display_audio_publishers: Vec<
             multiview_output::display::audio::DisplayAudioPublisher,
@@ -2555,12 +2600,32 @@ impl Pipeline {
         // source to bracket its wall reads on the SAME timeline tick 0 is
         // seeded on; clone the handle before the program takes ownership.
         let ts_for_anchor = Arc::clone(&ts);
-        let mut program =
-            MultiviewProgram::new(&self.program_spec, clock, drive, ts, pacer, stop.clone())
-                .map_err(|e| PipelineError::Program {
+        let mut program = match MultiviewProgram::new(
+            &self.program_spec,
+            clock,
+            drive,
+            ts,
+            pacer,
+            stop.clone(),
+        ) {
+            Ok(program) => program,
+            Err(e) => {
+                // Startup-assembly failure (spec/cadence mismatch). The display
+                // sinks are already lit; tear them down OFF the async worker
+                // before propagating, so even this error path never runs the
+                // bundle's blocking `Drop` on the worker (DEV-B4).
+                #[cfg(feature = "display-kms")]
+                teardown_blocking_off_worker(
+                    display_teardown,
+                    "display-sinks (program-init error)",
+                )
+                .await;
+                return Err(PipelineError::Program {
                     program: self.program_spec.id.clone(),
                     reason: e.to_string(),
-                })?;
+                });
+            }
+        };
         // Publish the run's epoch anchor (tick-0 seed + monotonic source) into
         // the shared slot — a single lock-free store the off-hot-path
         // timing-status task reads to derive the outbound presentation epoch.
@@ -2779,6 +2844,17 @@ impl Pipeline {
         // Dropping the program here only releases the engine's own resources
         // (its wrapped `EngineRuntime` = clock + drive + time source + pacer).
         drop(program);
+
+        // The engine has stopped: tear the lit display sinks down (DEV-B4 audit).
+        // Each handle's `Drop` does a BLOCKING stop + thread-join; running that on
+        // this Tokio worker thread inside the async fn is the no-blocking-in-async
+        // guardrail violation the audit found. Hand the whole bundle to
+        // `spawn_blocking` and await it — teardown still completes before the run
+        // returns, but the worker stays free (inv #1/#10: the engine is already
+        // stopped, so this neither paces nor back-pressures any data-plane path).
+        // Done BEFORE the egress `?` propagations so it runs on every exit path.
+        #[cfg(feature = "display-kms")]
+        teardown_blocking_off_worker(display_teardown, "display-sinks").await;
 
         // Join the bake consumer + sink threads FIRST — folding their outcome and
         // writing the trailers (the sinks' own `run()` finalisation) — BEFORE
@@ -5177,6 +5253,31 @@ struct StartedDisplaySinks {
     hotplug: Option<multiview_output::display::hotplug::HotplugMonitor>,
 }
 
+/// The run's lit display-sink **handles** in one owned, `Send` bundle (DEV-B4
+/// audit): the video flip loops, the ELD-gated audio sinks, and the hotplug
+/// watcher. Every one of these owns a thread whose `Drop` does a **blocking**
+/// stop + join (the audio sink sleeps up to its 500 ms detach bound; the video
+/// sink + hotplug monitor `JoinHandle::join`). The bundle is kept alive for the
+/// whole run and torn down at the end via
+/// [`teardown_blocking_off_worker`] — `spawn_blocking`, never a `Drop` on the
+/// async worker executing `drive_streaming` (no blocking in async). The mailbox
+/// / FIFO **publishers** are deliberately NOT here: they are consumed by the hot
+/// loop / bake consumer and their `Drop` is non-blocking.
+///
+/// The fields are RAII guards: they are never field-accessed — their whole
+/// purpose is to keep the threads alive for the run and run their blocking
+/// `Drop` on teardown (off the worker, via [`teardown_blocking_off_worker`]).
+#[cfg(feature = "display-kms")]
+#[allow(dead_code)]
+// reason: RAII guards — never field-read. They are kept alive for the whole run
+// and their blocking `Drop` (stop + thread-join) IS the teardown, run off the
+// async worker via `teardown_blocking_off_worker` (DEV-B4).
+struct DisplayTeardownBundle {
+    handles: Vec<multiview_output::display::DisplaySinkHandle>,
+    audio_handles: Vec<multiview_output::display::audio::DisplayAudioSink>,
+    hotplug: Option<multiview_output::display::hotplug::HotplugMonitor>,
+}
+
 /// The display-audio FIFO depth in frames (per channel): ~170 ms @ 48 kHz.
 /// Bounds the worst-case added audio latency AND the drop point under a
 /// wedged/slow device (drop-oldest — the engine-side push never blocks).
@@ -5222,7 +5323,7 @@ fn start_display_sinks(
     cadence: Rational,
     audio_format: multiview_audio::AudioFormat,
     hotplug_poll: Duration,
-    node_presentation: Option<NodePresentation>,
+    node_presentation: Option<&NodePresentation>,
 ) -> Result<StartedDisplaySinks, PipelineError> {
     use multiview_output::display::kms::KmsDisplayDevice;
     use multiview_output::display::present::RealtimePresentationClock;
@@ -5245,7 +5346,7 @@ fn start_display_sinks(
         // outbound epoch, the deployment link offset, and the real mono/wall
         // clock (the KMS flip-timestamp + epoch domains). A non-node run leaves
         // this `None` (undisciplined latest-wins).
-        let presentation = node_presentation.as_ref().map(|np| PresentationPlan {
+        let presentation = node_presentation.map(|np| PresentationPlan {
             epoch: np.epoch.clone(),
             link_offset_ns: np.link_offset_ns,
             clock: Box::new(RealtimePresentationClock::new()),
@@ -8602,4 +8703,3 @@ mod live_overlay_bake_tests {
         );
     }
 }
-
