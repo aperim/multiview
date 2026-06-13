@@ -100,7 +100,17 @@ test("the cast panel lists the session and the sheet casts a manual address", as
   await expect
     .poll(() => startBody, { message: "the start body should have been posted" })
     .toEqual({ address: "[fd00::30]:8009", name: "Bedroom", output: "out-hls" });
-  await expect(page.getByText("Casting started")).toBeVisible();
+  // Scope to the toast notifications region: Radix Toast mirrors a toast's title
+  // into a body-level off-screen `role="status"` aria-live announce span (for
+  // screen readers) for a brief window after it mounts, so an unscoped
+  // getByText("Casting started") transiently resolves to BOTH the visible title
+  // and that 1px announce mirror — a strict-mode ambiguity. Both come from the
+  // SAME single toast() call (verified in a real browser: the SPA notifies the
+  // operator exactly once), so this scopes to the VISIBLE toast viewport rather
+  // than weakening the assertion — a confirmation IS still required to show.
+  await expect(
+    page.getByRole("region").getByText("Casting started"),
+  ).toBeVisible();
 });
 
 test("the session row shows the started-at readout once the LOAD was accepted (DEV-D3.1)", async ({
@@ -155,5 +165,11 @@ test("save-as-device posts the promotion body from the session row", async ({
   await expect
     .poll(() => saveBody, { message: "the save body should have been posted" })
     .toEqual({ device_id: "tv-lounge", display_name: "Lounge TV" });
-  await expect(page.getByText("Saved as device")).toBeVisible();
+  // Scope to the toast notifications region for the same reason as the start
+  // flow above: the Radix off-screen aria-live announce mirror makes an
+  // unscoped getByText transiently ambiguous; the visible confirmation toast is
+  // still asserted.
+  await expect(
+    page.getByRole("region").getByText("Saved as device"),
+  ).toBeVisible();
 });

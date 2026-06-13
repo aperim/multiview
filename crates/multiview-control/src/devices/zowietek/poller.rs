@@ -217,6 +217,12 @@ pub enum PollerControl {
     /// The operator updated the stored credential (`secret_ref`): re-arm a probe
     /// out of `AUTH_FAILED` (drives the lifecycle breaker closed).
     SecretUpdated,
+    /// Reboot the device (the `reboot` route's dispatch, DEV-A4 fix 2): the
+    /// actor issues the **fire-and-forget** reboot to the live transport and
+    /// rides the expected socket drop into `UNREACHABLE`→reconnect (the device
+    /// returns no HTTP response when it reboots — managed-devices.md §3.1). A
+    /// driver with no reboot verb (the cast actor) logs and drops it.
+    Reboot,
     /// Set the device's audio volume to `percent` (0–100) — the Cast driver's
     /// receiver-namespace `SET_VOLUME` (DEV-D2, ADR-M011). Carried as an
     /// integer percent so the command stays `Eq`-comparable (no float here);
@@ -379,6 +385,16 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
         &self.device_id
     }
 
+    /// The mode this poller will converge the device onto on its next ONLINE
+    /// pass (the config-as-code `desired_mode`, updated by an operator
+    /// `set-mode`). `None` means no convergence is pending. A read-only
+    /// accessor so a caller (or test) can confirm an operator's recorded intent
+    /// without scraping the device.
+    #[must_use]
+    pub fn desired_mode(&self) -> Option<&str> {
+        self.desired_mode.as_deref()
+    }
+
     /// The latest conflated `device.status` snapshot the broadcaster published
     /// for this device (read from the shared status registry), if any. The same
     /// value `GET /devices/{id}/status` serves — a direct read-back so a caller
@@ -491,25 +507,47 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
     pub async fn handle_control(&mut self, command: PollerControl) {
         match command {
             PollerControl::SetMode { mode } => {
-                // The operator's set-mode is the new desired mode: record it so
-                // every later adopt/reconnect pass re-converges onto the last
-                // operator intent (and a failed apply below is retried there).
+                // The operator's set-mode is the new desired mode: record it
+                // UNCONDITIONALLY so every later adopt/reconnect pass re-converges
+                // onto the last operator intent, even when we cannot apply it now.
                 self.desired_mode = Some(mode.clone());
-                // Run the close-before-open convergence; the driver declares the
-                // DEV-class impact and publishes the device.mode outcome. A
-                // failure is published as a device.mode Failed by the driver and
-                // surfaced here — re-converged on the next adopt/reconnect pass
-                // (the desired mode recorded above).
-                if let Err(err) = self.driver.converge_mode(&mode).await {
-                    tracing::warn!(
+                // ONLINE-gate the apply (DEV-A4 fix 1): only converge when the
+                // device is actually ONLINE and the A3 auth breaker is closed.
+                // The `desired_mode` path is already gated this way (it converges
+                // only after a step reaches ONLINE); the operator path must match,
+                // or a stray set-mode in DEGRADED/UNREACHABLE/AUTH_FAILED would
+                // push decode-table writes through a session the device's current
+                // state has not validated — in AUTH_FAILED bypassing the breaker
+                // entirely and risking a production decode unit. Off-ONLINE we
+                // record the intent (above) and defer: the next ONLINE adopt/
+                // reconnect pass converges it through `converge_desired_mode`.
+                if self.state() == DeviceState::Online && !self.breaker_open() {
+                    self.converge_desired_mode().await;
+                } else {
+                    tracing::info!(
                         device = %self.device_id,
                         mode = %mode,
-                        error = %err,
-                        "zowietek set-mode convergence failed; re-converges on the next adopt/reconnect pass"
+                        state = ?self.state(),
+                        "zowietek set-mode recorded but not applied (device not ONLINE / breaker open); \
+                         will converge on the next ONLINE pass"
                     );
                 }
             }
             PollerControl::SecretUpdated => self.secret_updated(),
+            PollerControl::Reboot => {
+                // Reboot is fire-and-forget (DEV-A4 fix 2): the device drops the
+                // socket with no HTTP response, so a success and the expected
+                // drop both return Ok and we ride UNREACHABLE→reconnect from the
+                // next poll. A device that refuses (non-success status) logs the
+                // error — the poller keeps running either way (never crashes).
+                if let Err(err) = self.driver.reboot().await {
+                    tracing::warn!(
+                        device = %self.device_id,
+                        error = %err,
+                        "zowietek reboot was refused by the device (no reboot issued)"
+                    );
+                }
+            }
             PollerControl::SetVolume { percent } => {
                 // A receiver-volume verb (the cast driver's, DEV-D2): the
                 // zowietek management API has no volume control, so the
@@ -541,13 +579,22 @@ impl<T: ZowietekTransport> ZowietekPoller<T> {
         let Some(desired) = self.desired_mode.clone() else {
             return;
         };
-        if let Err(err) = self.driver.converge_mode(&desired).await {
+        // Resolve a concrete, grounded decode-table index to scope the switch to
+        // (DEV-A4 fix 3). The mode-switch `streamplay` opts are an OPEN
+        // protocol-grounding item (managed-devices.md §3.3): until they are
+        // validated against the vendor SDK on a spare decode index, no grounded
+        // index is available and this is `None`, so `converge_mode` REFUSES
+        // (records the desire, issues no wire write) rather than fire a global
+        // stop that would halt all decode on a production unit.
+        let index = self.driver.convergence_index();
+        if let Err(err) = self.driver.converge_mode(&desired, index).await {
             tracing::warn!(
                 device = %self.device_id,
                 mode = %desired,
                 error = %err,
-                "zowietek desired_mode convergence failed after coming ONLINE; \
-                 re-converges on the next adopt/reconnect pass"
+                "zowietek desired_mode convergence deferred/failed; \
+                 re-converges on the next adopt/reconnect pass once a grounded \
+                 decode-table index is available"
             );
         }
     }
