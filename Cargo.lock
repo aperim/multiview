@@ -3266,7 +3266,6 @@ dependencies = [
  "multiview-engine",
  "multiview-events",
  "sha2",
- "str0m",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

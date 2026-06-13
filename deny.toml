@@ -37,8 +37,8 @@ private = { ignore = true }
 # The `gpl-codecs` feature (x264/x265) intentionally makes a build GPL — that is
 # opt-in and NOT covered by this allowlist; see docs/architecture/conventions.md §7.
 #
-# The off-by-default `webrtc-native` feature (multiview-preview, PRV-1b) pulls
-# `str0m` (the native ICE/DTLS/SRTP WebRTC stack — `MIT OR Apache-2.0`) and its
+# The off-by-default `native` feature (multiview-webrtc; cli `webrtc-native`)
+# pulls `str0m` (the native ICE/DTLS/SRTP WebRTC stack — `MIT OR Apache-2.0`) and its
 # sans-IO crypto closure (`str0m-rust-crypto`, `dimpl`, the RustCrypto crates,
 # and `aws-lc-rs`/`aws-lc-sys` for the elliptic-curve / DTLS-cert primitives).
 # Every crate in that closure resolves to a license already on this allowlist —

@@ -26,11 +26,13 @@
 //! socket-free and pulls **no** native dependency, so even the `webrtc`-feature
 //! build stays pure Rust, green, and deny-clean. A *native* (`str0m`)
 //! implementation of the seam — the part that needs real UDP/STUN + DTLS
-//! certificates — lives in [`native`] behind the *further* off-by-default
-//! `webrtc-native` gate (str0m is sans-IO, so its SDP offer→answer negotiation is
-//! still socket-free and CI-tested; only the live DTLS-SRTP egress needs a
-//! socket). A `MediaMTX`-sidecar republisher is the other option (brief's
-//! "Sidecar reuse" note).
+//! certificates — lives in the **`multiview-webrtc`** crate behind its `native`
+//! feature (`multiview_webrtc::whep_egress::WhepEgress`, ADR-0048 / ADR-P006):
+//! exactly one str0m owner per process, shared with WHIP ingest and the WebRTC
+//! outputs. str0m is sans-IO, so its SDP offer→answer negotiation + SRTP egress
+//! are CI-tested over an in-memory shuttle; only the live browser-play leg needs
+//! a real socket/peer. A `MediaMTX`-sidecar republisher is the other option
+//! (brief's "Sidecar reuse" note).
 //!
 //! ## Isolation (invariant #10)
 //!
@@ -42,8 +44,6 @@ use std::fmt::Write as _;
 
 use crate::token::AccessScope;
 
-#[cfg(feature = "webrtc-native")]
-pub mod native;
 pub mod program;
 pub mod transport;
 
