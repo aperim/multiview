@@ -270,9 +270,12 @@ fn spawn_stop_on_signal(stop: StopSignal) -> tokio::task::JoinHandle<()> {
 /// `--ticks`/`--duration` bound the run (diagnostics/soak); otherwise the
 /// node runs as the daemon until Ctrl-C/SIGTERM.
 ///
-/// Until DEV-C2 lands the epoch + link-offset frame chooser, presentation
-/// rides the display sink's existing repeat/drop reconciliation; the node
-/// document's `timing.link_offset_ms` is recorded but not yet consumed.
+/// Presentation runs the DEV-C2 pull-side discipline: each head presents the
+/// frame whose `wall_at(pts) + link_offset` is nearest the predicted next
+/// vblank (repeat-if-early, drop-if-late), consuming the node document's
+/// `timing.link_offset_ms` against the run's local outbound presentation epoch
+/// (a future controller WS-client fills the same seam); a lost feed free-runs
+/// on the held epoch so the heads never falter (inv #1/#10).
 #[cfg(all(feature = "ffmpeg", feature = "display-kms"))]
 async fn run_node(args: NodeArgs) -> anyhow::Result<ExitCode> {
     use multiview_cli::pipeline::Pipeline;
