@@ -13,14 +13,17 @@
 //!   (role: write).
 //!
 //! Every successful commit/rollback is recorded in the change audit log.
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditAction;
 use crate::auth::{Action, Principal};
-use crate::error::ControlResult;
+use crate::concurrency::{IdempotencyKey, Reservation};
+use crate::error::{ControlError, ControlResult};
 use crate::state::AppState;
 use crate::versioning::{ConfigRevision, DocumentDiff, RevisionId, CONFIG_REVISION_KIND};
 
@@ -173,20 +176,7 @@ pub(crate) async fn export_config(
 
     principal.role.require(Action::Read)?;
 
-    let document = compose_export_document(&state)?;
-    let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(document)
-        .map_err(|err| {
-            let path = err.path().to_string();
-            crate::error::ControlError::Validation(format!(
-                "stored resources do not compose into a valid configuration at `{path}`: {}",
-                err.into_inner()
-            ))
-        })?;
-    config.validate().map_err(|err| {
-        crate::error::ControlError::Validation(format!(
-            "composed configuration failed validation: {err}"
-        ))
-    })?;
+    let (_document, config) = compose_running_config(&state)?;
     let toml = config.to_toml().map_err(|err| {
         crate::error::ControlError::Repository(format!("TOML render failed: {err}"))
     })?;
@@ -203,6 +193,34 @@ pub(crate) async fn export_config(
         toml,
     )
         .into_response())
+}
+
+/// Compose the CURRENT Running configuration (ADR-W015/W022): the export JSON
+/// document plus its deserialized + validated [`MultiviewConfig`].
+///
+/// This is the ONE Running composition: the export route renders it as TOML,
+/// the `active.toml` persister writes it, the revert route diffs it against
+/// Loaded, the promote route writes it to the boot file, and the boot-model
+/// status endpoint reports its divergence — all the same document by
+/// construction.
+pub(crate) fn compose_running_config(
+    state: &AppState,
+) -> ControlResult<(serde_json::Value, multiview_config::MultiviewConfig)> {
+    let document = compose_export_document(state)?;
+    let config: multiview_config::MultiviewConfig =
+        serde_path_to_error::deserialize(document.clone()).map_err(|err| {
+            let path = err.path().to_string();
+            crate::error::ControlError::Validation(format!(
+                "stored resources do not compose into a valid configuration at `{path}`: {}",
+                err.into_inner()
+            ))
+        })?;
+    config.validate().map_err(|err| {
+        crate::error::ControlError::Validation(format!(
+            "composed configuration failed validation: {err}"
+        ))
+    })?;
+    Ok((document, config))
 }
 
 /// Compose the export JSON document: the loaded base configuration (when one
@@ -358,4 +376,497 @@ pub(crate) async fn watch_status(
 ) -> ControlResult<Json<crate::watch_status::WatchStatusBody>> {
     principal.role.require(Action::Read)?;
     Ok(Json(state.config_watch.snapshot()))
+}
+
+/// The `GET /api/v1/config/boot-model` body (ADR-W022 §7): the run's
+/// Boot/Loaded/Running model and the per-section divergence the UI indicator
+/// shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BootModelBody {
+    /// Whether this run carries a boot model (started from a config file with
+    /// a control plane). `false` ⇒ every other field is its honest empty
+    /// default and the revert/promote actions refuse with `409`.
+    pub modeled: bool,
+    /// The boot config file path (the watch + promote target).
+    pub boot_path: Option<String>,
+    /// The `[control] start` cold-start policy (`boot` | `resume`).
+    pub start: Option<String>,
+    /// Whether this run started from a valid persisted `active.toml`.
+    pub resumed: bool,
+    /// Why a `start = "resume"` run fell back to boot, if it did.
+    pub resume_fallback: Option<String>,
+    /// The section names where Running diverges from the **Loaded** startup
+    /// snapshot (exact, computed by the pure `ConfigDiff`). Empty ⇒ in sync.
+    pub diverged_from_loaded: Vec<String>,
+    /// The section names where Running diverges from the **current boot
+    /// file** on disk; `null` when the file is unreadable/invalid (see
+    /// [`boot_file_error`](Self::boot_file_error)).
+    pub diverged_from_boot_file: Option<Vec<String>>,
+    /// Why the boot file could not be compared (unreadable / parse /
+    /// validation failure), when it could not.
+    pub boot_file_error: Option<String>,
+    /// The persisted Running state path (`<config-dir>/.multiview/active.toml`).
+    pub active_path: Option<String>,
+    /// Unix milliseconds of the last successful `active.toml` write this run.
+    pub active_written_at_ms: Option<i64>,
+}
+
+impl BootModelBody {
+    /// The honest body for a run without a boot model.
+    fn unmodeled() -> Self {
+        Self {
+            modeled: false,
+            boot_path: None,
+            start: None,
+            resumed: false,
+            resume_fallback: None,
+            diverged_from_loaded: Vec::new(),
+            diverged_from_boot_file: None,
+            boot_file_error: None,
+            active_path: None,
+            active_written_at_ms: None,
+        }
+    }
+}
+
+/// The section names a [`multiview_config::ConfigDiff`] touches, sorted —
+/// the per-section divergence surface (exact and actionable, chosen over an
+/// unreliable change count — ADR-W022 §7).
+fn diverged_sections(diff: &multiview_config::ConfigDiff) -> Vec<String> {
+    let mut sections = std::collections::BTreeSet::new();
+    if !diff.sources.is_empty() {
+        sections.insert("sources");
+    }
+    if diff.canvas_signal_changed || diff.canvas_cosmetic_changed {
+        sections.insert("canvas");
+    }
+    if diff.layout_changed {
+        sections.insert("layout");
+    }
+    for section in &diff.changed_sections {
+        sections.insert(section);
+    }
+    sections.into_iter().map(str::to_owned).collect()
+}
+
+/// The `[control] start` policy as its wire token.
+fn start_token(start: multiview_config::StartMode) -> &'static str {
+    match start {
+        multiview_config::StartMode::Boot => "boot",
+        multiview_config::StartMode::Resume => "resume",
+    }
+}
+
+/// `GET /api/v1/config/boot-model` — the Boot/Loaded/Running model status
+/// (ADR-W022 §7; role: read).
+///
+/// Reports whether this run carries a boot model, the boot path and start
+/// policy, whether the run resumed (+ the fallback reason), the per-section
+/// divergence of Running from the Loaded snapshot and from the current boot
+/// file, and the last `active.toml` write time.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/api/v1/config/boot-model",
+        tag = "config",
+        responses(
+            (status = 200, description = "The Boot/Loaded/Running model status with per-section divergence.", body = BootModelBody),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Authenticated but not authorized to read.", body = crate::problem::Problem),
+            (status = 422, description = "The live stores do not compose into a valid Running document.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn boot_model_status(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> ControlResult<Json<BootModelBody>> {
+    principal.role.require(Action::Read)?;
+    let Some(model) = state.boot_model.clone() else {
+        return Ok(Json(BootModelBody::unmodeled()));
+    };
+    let (_document, running) = compose_running_config(&state)?;
+    let loaded_diff = multiview_config::ConfigDiff::between(&running, model.loaded());
+    // The boot FILE may have been hand-edited (or broken) since start; an
+    // unreadable/invalid file is reported, never an error — the indicator
+    // stays available.
+    let (file_divergence, boot_file_error) = match read_validated_config(model.boot_path()).await {
+        Ok(boot_file) => {
+            let diff = multiview_config::ConfigDiff::between(&running, &boot_file);
+            (Some(diverged_sections(&diff)), None)
+        }
+        Err(reason) => (None, Some(reason)),
+    };
+    Ok(Json(BootModelBody {
+        modeled: true,
+        boot_path: Some(model.boot_path().display().to_string()),
+        start: Some(start_token(model.start()).to_owned()),
+        resumed: model.resumed(),
+        resume_fallback: model.resume_fallback().map(str::to_owned),
+        diverged_from_loaded: diverged_sections(&loaded_diff),
+        diverged_from_boot_file: file_divergence,
+        boot_file_error,
+        active_path: Some(model.active_path().display().to_string()),
+        active_written_at_ms: model.active_written_ms(),
+    }))
+}
+
+/// Read + parse + validate a config file, with a human-readable reason on any
+/// failure (the boot-model status comparison path). The read rides
+/// `tokio::fs` so the route handler never parks the control-plane reactor on
+/// file I/O (review m1); parse + validate are CPU-cheap and run in place.
+async fn read_validated_config(
+    path: &std::path::Path,
+) -> Result<multiview_config::MultiviewConfig, String> {
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("the file cannot be read: {e}"))?;
+    let config = multiview_config::MultiviewConfig::load_from_toml(&text)
+        .map_err(|e| format!("the document does not parse: {e}"))?;
+    config
+        .validate()
+        .map_err(|e| format!("the document does not validate: {e}"))?;
+    Ok(config)
+}
+
+/// The `POST /api/v1/config/revert-to-start` response (ADR-W022 §5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RevertToStartBody {
+    /// The operation id this revert is correlated under.
+    pub operation_id: String,
+    /// `true` when a replayed `Idempotency-Key` answered from the original
+    /// reservation (nothing was re-applied; the other fields are this
+    /// replay's empty defaults, not a record of the original outcome).
+    pub replayed: bool,
+    /// Whether the revert FULLY applied (`false` ⇒ either Running already
+    /// equalled Loaded and nothing was enqueued, or — when
+    /// [`shed`](Self::shed) is non-zero — the revert applied only partially).
+    pub reverted: bool,
+    /// How many engine commands were shed on a full command bus (review M4):
+    /// `0` ⇒ every command landed; non-zero ⇒ the stores were reverted but
+    /// the engine may not reflect every change — retry the revert once the
+    /// bus drains (the `config-file-apply-incomplete` warning is raised).
+    pub shed: u32,
+    /// Per-section applied/warned summary parts from the one apply machinery
+    /// (e.g. `sources: in_a changed`).
+    pub summary: Vec<String>,
+    /// The sections that could not hot-revert and re-converge on restart.
+    pub restart_only: Vec<String>,
+}
+
+/// `POST /api/v1/config/revert-to-start` — Running := Loaded, live
+/// (ADR-W022 §5; role: write; `Idempotency-Key`; audited).
+///
+/// Composes the current Running document, diffs it against the immutable
+/// Loaded snapshot, and applies the diff through the ONE ADR-W020
+/// diff→apply machinery ([`crate::config_watch::apply_document_diff`]) under
+/// the requesting principal: synthetic source changes ride
+/// `UpsertSource`/`RemoveSource` on the bounded bus, layout/cells ride the
+/// shared resolve+solve+Class-1 gate, stores resync to the Loaded values, and
+/// restart-only sections are reported honestly. The ADR-W020 watcher's file
+/// baseline is deliberately untouched (it tracks the last applied FILE
+/// content). An empty diff applies nothing and reports `reverted: false`.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/config/revert-to-start",
+        tag = "config",
+        responses(
+            (status = 202, description = "The revert was applied (or was an honest no-op) with a per-section summary.", body = RevertToStartBody),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 409, description = "This run has no boot model (no config file); there is no start state to revert to.", body = crate::problem::Problem),
+            (status = 422, description = "The live stores do not compose into a valid Running document.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn revert_to_start(
+    State(state): State<AppState>,
+    principal: Principal,
+    idem: IdempotencyKey,
+) -> ControlResult<(StatusCode, Json<RevertToStartBody>)> {
+    principal.role.require(Action::Write)?;
+    let Some(model) = state.boot_model.clone() else {
+        return Err(ControlError::Conflict(
+            "this run has no boot configuration model (it was not started from a config \
+             file), so there is no start state to revert to"
+                .to_owned(),
+        ));
+    };
+    let op = match state.idempotency.reserve(idem.0.as_deref()) {
+        Reservation::Replay(op) => {
+            // The original request already applied (or honestly no-op'd);
+            // answer with its id without re-running anything.
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(RevertToStartBody {
+                    operation_id: op.to_string(),
+                    replayed: true,
+                    reverted: false,
+                    shed: 0,
+                    summary: Vec::new(),
+                    restart_only: Vec::new(),
+                }),
+            ));
+        }
+        Reservation::Fresh(op) => op,
+    };
+    let (_document, running) = match compose_running_config(&state) {
+        Ok(composed) => composed,
+        Err(refusal) => {
+            // Nothing was applied: release the reservation so a corrected
+            // retry with the same key actually runs.
+            state.idempotency.release(idem.0.as_deref(), &op);
+            return Err(refusal);
+        }
+    };
+    let diff = multiview_config::ConfigDiff::between(&running, model.loaded());
+    if diff.is_empty() {
+        // Running already equals Loaded. A previously shed revert's warning
+        // clears too: any interim edits that re-converged the stores rode the
+        // bus themselves, so the engine converged with them.
+        clear_revert_incomplete_if_latched(&state, &model);
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(RevertToStartBody {
+                operation_id: op.to_string(),
+                replayed: false,
+                reverted: false,
+                shed: 0,
+                summary: Vec::new(),
+                restart_only: Vec::new(),
+            }),
+        ));
+    }
+    // The ONE apply machinery (ADR-W020/W022), audited under the principal.
+    let outcome =
+        crate::config_watch::apply_document_diff(&state, &principal.key_id, &diff, model.loaded());
+    let restart_only: Vec<String> = outcome.restart.iter().cloned().collect();
+    // Review M4: never claim a full revert while engine command(s) were shed
+    // on a full bus — and (unlike the file watcher) nothing retries a revert,
+    // so a shed revert must apply NOTHING durable: roll the stores back to
+    // the pre-revert Running document so a retry's diff(running, loaded) is
+    // non-empty again and re-runs the whole (idempotent) revert. Surface it
+    // on the same `config-file-apply-incomplete` warning path the watcher
+    // uses, with revert-specific remediation; the latch on the boot model
+    // lets a later completed revert clear exactly this instance.
+    if outcome.shed > 0 {
+        crate::config_watch::resync_all_stores(&state, &principal.key_id, &running);
+        model.note_revert_incomplete();
+        state
+            .engine
+            .publish_event(multiview_events::Event::HealthWarningRaised(
+                revert_incomplete_warning(outcome.shed, state.ack_now().as_nanos(), true),
+            ));
+    } else {
+        clear_revert_incomplete_if_latched(&state, &model);
+    }
+    state.audit(
+        &principal.key_id,
+        AuditAction::Command,
+        "config",
+        "revert-to-start",
+        Some(serde_json::json!({
+            "summary": outcome.parts,
+            "restart_only": restart_only,
+            "shed": outcome.shed,
+        })),
+    );
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RevertToStartBody {
+            operation_id: op.to_string(),
+            replayed: false,
+            reverted: outcome.shed == 0,
+            shed: outcome.shed,
+            summary: outcome.parts,
+            restart_only,
+        }),
+    ))
+}
+
+/// Build the revert-specific `config-file-apply-incomplete` warning (raise
+/// and clear share the shape; the warning store coalesces on the code).
+fn revert_incomplete_warning(
+    shed: u32,
+    since: i64,
+    active: bool,
+) -> multiview_events::HealthWarning {
+    multiview_events::HealthWarning {
+        code: multiview_events::WarningCode::ConfigFileApplyIncomplete,
+        severity: multiview_events::WarningSeverity::Warning,
+        subsystem: "config".to_owned(),
+        message: format!(
+            "revert-to-start applied only PARTIALLY: {shed} engine command(s) were shed on a \
+             full command bus; nothing durable was applied (the stores keep the running \
+             state)."
+        ),
+        remediation: "Retry the revert once the command bus drains — a shed revert leaves the \
+                      running state untouched, so the retry re-runs the whole revert."
+            .to_owned(),
+        since,
+        active,
+    }
+}
+
+/// Clear the revert-raised `config-file-apply-incomplete` warning when a
+/// revert COMPLETES and a previous shed revert had latched it on the boot
+/// model. The latch is revert-scoped: the watcher's own instance of the
+/// same warning code is never touched from here.
+fn clear_revert_incomplete_if_latched(state: &AppState, model: &crate::boot_model::BootModel) {
+    if model.take_revert_incomplete() {
+        state
+            .engine
+            .publish_event(multiview_events::Event::HealthWarningCleared(
+                revert_incomplete_warning(0, state.ack_now().as_nanos(), false),
+            ));
+    }
+}
+
+/// The `POST /api/v1/config/promote` response (ADR-W022 §6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PromoteBody {
+    /// The operation id this promote is correlated under.
+    pub operation_id: String,
+    /// `true` when a replayed `Idempotency-Key` answered from the original
+    /// reservation: the file was NOT rewritten and `path`/`bytes`/`revision`
+    /// are absent (the original response carried them).
+    pub replayed: bool,
+    /// The boot file path the Running document was written to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The number of bytes written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// The committed `boot` config revision id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+}
+
+/// `POST /api/v1/config/promote` — write the current Running document to the
+/// BOOT file path, server-side (ADR-W022 §6; role: write; `Idempotency-Key`;
+/// audited; UI-confirmed).
+///
+/// Compose → validate → render TOML → announce the write through the
+/// installed ADR-W020 watcher's `expect_write` suppression seam (this is the
+/// seam's designed caller — the watcher adopts the write as its new baseline
+/// without re-applying) → atomic write to the boot path → a config-versioning
+/// commit (target `boot`) → audit. With no watcher installed there is nothing
+/// to suppress and the step is skipped.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/config/promote",
+        tag = "config",
+        responses(
+            (status = 200, description = "The Running document was written to the boot file and committed as a `boot` config revision.", body = PromoteBody),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
+            (status = 409, description = "This run has no boot model (no config file); there is no boot file to promote to.", body = crate::problem::Problem),
+            (status = 422, description = "The live stores do not compose into a valid Running document.", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub(crate) async fn promote_to_boot(
+    State(state): State<AppState>,
+    principal: Principal,
+    idem: IdempotencyKey,
+) -> ControlResult<Json<PromoteBody>> {
+    principal.role.require(Action::Write)?;
+    let Some(model) = state.boot_model.clone() else {
+        return Err(ControlError::Conflict(
+            "this run has no boot configuration model (it was not started from a config \
+             file), so there is no boot file to promote to"
+                .to_owned(),
+        ));
+    };
+    let op = match state.idempotency.reserve(idem.0.as_deref()) {
+        Reservation::Replay(op) => {
+            // The original promote already wrote + committed; a replay must
+            // not rewrite the file or commit another revision.
+            return Ok(Json(PromoteBody {
+                operation_id: op.to_string(),
+                replayed: true,
+                path: None,
+                bytes: None,
+                revision: None,
+            }));
+        }
+        Reservation::Fresh(op) => op,
+    };
+    let release_and = |refusal: ControlError| {
+        state.idempotency.release(idem.0.as_deref(), &op);
+        refusal
+    };
+    let (document, running) = compose_running_config(&state).map_err(&release_and)?;
+    let toml = running
+        .to_toml()
+        .map_err(|e| release_and(ControlError::Repository(format!("TOML render failed: {e}"))))?;
+    // Announce the server-side write BEFORE writing (ADR-W020 §7 ordering):
+    // the watcher adopts the next settled change as its baseline instead of
+    // re-applying it. One thin seam, carrying the exact content written.
+    let watch_handle = state.watch_handle();
+    if let Some(handle) = watch_handle.as_ref() {
+        crate::config_watch::expect_server_write(handle, &toml);
+    }
+    // The write rides the blocking pool under the model's write lock
+    // (reviews m1 + M2): it never parks the reactor and never interleaves
+    // with another boot-model file write on a deterministic temp name.
+    if let Err(error) = crate::boot_model::write_boot_file(Arc::clone(&model), toml.clone()).await {
+        // Review B1 (3): the announced content never landed — release the
+        // banked token so it cannot eat a later REAL external edit that
+        // happens to carry the same content.
+        if let Some(handle) = watch_handle.as_ref() {
+            let _ = handle.release_write(&toml);
+        }
+        tracing::warn!(
+            path = %model.boot_path().display(),
+            error = %error,
+            "promote: the boot-file write failed; the announced expect token was \
+             released and file watching continues unaffected"
+        );
+        return Err(release_and(ControlError::Repository(format!(
+            "writing the boot file {}: {error}",
+            model.boot_path().display()
+        ))));
+    }
+    // The write landed: confirm it (review B1 (2)) so the token is drained
+    // if a different settled content supersedes this write before it ever
+    // settles — a stale token must never eat a later real edit restoring
+    // the same bytes.
+    if let Some(handle) = watch_handle.as_ref() {
+        crate::config_watch::confirm_server_write(handle, &toml);
+    }
+    let revision = state
+        .config_versions
+        .commit(
+            "boot",
+            document,
+            &principal.key_id,
+            "promote running configuration to boot",
+        )
+        .map_err(&release_and)?;
+    state.audit(
+        &principal.key_id,
+        AuditAction::Command,
+        "config",
+        "promote",
+        Some(serde_json::json!({
+            "path": model.boot_path().display().to_string(),
+            "revision": revision.revision.get(),
+        })),
+    );
+    Ok(Json(PromoteBody {
+        operation_id: op.to_string(),
+        replayed: false,
+        path: Some(model.boot_path().display().to_string()),
+        bytes: Some(u64::try_from(toml.len()).unwrap_or(u64::MAX)),
+        revision: Some(revision.revision.get()),
+    }))
 }
