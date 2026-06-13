@@ -1069,3 +1069,81 @@ async fn inbound_device_ping_is_answered_with_pong() {
         sent_types(&sent)
     );
 }
+
+#[tokio::test]
+async fn the_load_accepted_hook_fires_at_the_first_active_media_status() {
+    // DEV-D3.1: the session's started-at stamp must mark the moment the cast
+    // became REAL — the receiver accepted our LOAD and created a media
+    // session — never the REST accept (which would lie about failed loads)
+    // and never the bare LOAD dispatch.
+    let (_engine, b) = broadcaster();
+    let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe = Arc::clone(&fired);
+    let (channel, _sent) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+        ScriptedInbound::Frame(media_status("PLAYING", None)),
+    ]);
+    let connector = ScriptedConnector::new(vec![channel]);
+    let mut actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "[2001:db8::20]:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    )
+    .with_load_accepted_hook(Arc::new(move || {
+        probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+
+    // Establishment merely DISPATCHES the LOAD: not yet accepted.
+    assert_eq!(actor.connect_step().await, PollerStep::Online);
+    assert_eq!(
+        fired.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "LOAD dispatched is not LOAD accepted — no stamp yet"
+    );
+
+    // The first MEDIA_STATUS attributing an ACTIVE media session to our LOAD
+    // is the accept point (the receiver created the session; the TV shows it).
+    assert_eq!(actor.pump_step().await, PollerStep::Online);
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Later statuses for the already-adopted session never re-fire it.
+    assert_eq!(actor.pump_step().await, PollerStep::Online);
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_rejected_load_never_fires_the_load_accepted_hook() {
+    let (_engine, b) = broadcaster();
+    let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe = Arc::clone(&fired);
+    let (channel, _sent) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(load_failed()),
+    ]);
+    let connector = ScriptedConnector::new(vec![channel]);
+    let mut actor = CastSessionActor::new(
+        "cast-1",
+        connector,
+        "[2001:db8::20]:8009",
+        media(),
+        b,
+        CastSessionConfig::default(),
+    )
+    .with_load_accepted_hook(Arc::new(move || {
+        probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+
+    assert_eq!(actor.connect_step().await, PollerStep::Online);
+    // The receiver rejected the LOAD: the session degrades and the hook must
+    // never fire — a session whose TV stayed blank never "started".
+    assert_eq!(actor.pump_step().await, PollerStep::Degraded);
+    assert_eq!(
+        fired.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a rejected LOAD must not stamp a start"
+    );
+}

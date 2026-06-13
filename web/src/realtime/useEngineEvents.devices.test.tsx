@@ -293,6 +293,46 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
+  it('cast.session.started invalidates the cast-sessions list (membership changed)', () => {
+    // DEV-D3.1: a session-list membership change must refresh the list
+    // immediately rather than waiting for the 15 s REST re-poll.
+    const { socket, unmount } = start();
+    client.setQueryData(['cast', 'sessions'], []);
+    act(() => {
+      socket.emit(
+        frame(
+          1,
+          'cast.session.started',
+          {
+            session_id: 'cast-session-1',
+            address: '[fd00::20]:8009',
+            output: 'hls-out',
+          },
+          { id: 'cast-session-1' },
+        ),
+      );
+    });
+    expect(client.getQueryState(['cast', 'sessions'])?.isInvalidated).toBe(true);
+    unmount();
+  });
+
+  it('cast.session.removed invalidates the cast-sessions list', () => {
+    const { socket, unmount } = start();
+    client.setQueryData(['cast', 'sessions'], []);
+    act(() => {
+      socket.emit(
+        frame(
+          1,
+          'cast.session.removed',
+          { session_id: 'cast-session-1' },
+          { id: 'cast-session-1' },
+        ),
+      );
+    });
+    expect(client.getQueryState(['cast', 'sessions'])?.isInvalidated).toBe(true);
+    unmount();
+  });
+
   it("a new scan's rows prune previous scans' discovered rows", () => {
     const { socket, unmount } = start();
     act(() => {

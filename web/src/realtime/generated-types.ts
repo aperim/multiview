@@ -45,6 +45,24 @@ export interface AudioMeter {
   readonly track: number;
 }
 
+/** Data body of `cast.session.removed`: an ephemeral cast session was removed — stopped (the receiver STOP that clears the TV) or promoted to a saved device (playback continues under the promoted device id). */
+export interface CastSessionRemoved {
+  /** The runtime session id that was removed. */
+  readonly session_id: string;
+}
+
+/** Data body of `cast.session.started`: an ephemeral cast session was started (session-list membership changed). The session's live state rides the conflated `device.status` lane keyed by the same session id. */
+export interface CastSessionStarted {
+  /** The device authority dialled (`host[:port]`, IPv6 bracketed). */
+  readonly address: string;
+  /** The operator-facing name, if given. */
+  readonly name?: string;
+  /** The output id whose HLS rendition the session casts. */
+  readonly output: string;
+  /** The runtime session id (`cast-session-…`, UUID-fresh per start). */
+  readonly session_id: string;
+}
+
 /** Data body of `device.adopted`: a device was adopted into the registry. */
 export interface DeviceAdopted {
   /** The registry device id. */

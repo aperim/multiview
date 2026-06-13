@@ -17,8 +17,13 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use multiview_control::devices::cast::media::{CastDelivery, CastMediaTarget, HlsSegmentFormat};
+use multiview_control::devices::cast::protocol::{
+    CastFrame, NS_MEDIA, NS_RECEIVER, PLATFORM_RECEIVER_ID, SENDER_ID,
+};
 use multiview_control::devices::cast::runtime::CastSessionFactory;
-use multiview_control::devices::cast::session::{CastSessionConfig, ScriptedConnector};
+use multiview_control::devices::cast::session::{
+    CastSessionConfig, ScriptedChannel, ScriptedConnector, ScriptedInbound,
+};
 use multiview_control::devices::DevicePollerRegistry;
 use support::{
     body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN, OPERATOR_TOKEN,
@@ -437,6 +442,10 @@ async fn stop_clears_the_tombstone_so_session_ids_stay_bounded() {
     let wiring = PollerWiring {
         broadcaster: DeviceBroadcaster::new(engine, Arc::new(DeviceStatusRegistry::new())),
         drivers: Arc::new(DeviceDriverRegistry::new()),
+        cast_sessions: std::sync::Arc::new(
+            multiview_control::devices::cast::store::CastSessionStore::new(),
+        ),
+        clock: std::sync::Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
     };
     assert!(
         registry_probe.start(&dev, &wiring),
@@ -548,4 +557,259 @@ async fn ephemeral_sessions_never_reach_the_config_export() {
         !text.contains(&id),
         "the session id never appears anywhere in the export"
     );
+}
+
+// ---------------------------------------------------------------------------
+// DEV-D3.1: session started-at + membership lifecycle events.
+// ---------------------------------------------------------------------------
+
+/// An inbound frame from the device (scripted-channel test vocabulary,
+/// mirroring the `cast_session.rs` builders).
+fn from_device(namespace: &str, payload: &serde_json::Value) -> CastFrame {
+    CastFrame {
+        namespace: namespace.to_owned(),
+        source: PLATFORM_RECEIVER_ID.to_owned(),
+        destination: SENDER_ID.to_owned(),
+        payload: payload.to_string(),
+    }
+}
+
+/// A `RECEIVER_STATUS` carrying the launched Default Media Receiver.
+fn receiver_status_with_app() -> CastFrame {
+    from_device(
+        NS_RECEIVER,
+        &serde_json::json!({
+            "type": "RECEIVER_STATUS",
+            "requestId": 0,
+            "status": { "applications": [{
+                "appId": "CC1AD845",
+                "sessionId": "s-1",
+                "transportId": "t-1",
+                "displayName": "Default Media Receiver"
+            }] }
+        }),
+    )
+}
+
+/// A `MEDIA_STATUS` with one active (PLAYING) media session.
+fn media_status_playing() -> CastFrame {
+    from_device(
+        NS_MEDIA,
+        &serde_json::json!({
+            "type": "MEDIA_STATUS",
+            "requestId": 0,
+            "status": [{ "mediaSessionId": 1, "playerState": "PLAYING" }]
+        }),
+    )
+}
+
+#[tokio::test]
+async fn start_and_stop_publish_cast_session_lifecycle_events() {
+    // Gap 2 (DEV-D3.1): session-list MEMBERSHIP changes must ride the lossless
+    // devices lane immediately — never only the SPA's 15 s REST re-poll.
+    let h = cast_harness();
+    let mut events = h.engine.subscribe();
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &start_body(Some("out-b")),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    let mut started = None;
+    while let Ok(envelope) = events.try_recv() {
+        if let multiview_events::Event::CastSessionStarted(s) = &*envelope.event {
+            started = Some(s.clone());
+        }
+    }
+    let started = started.expect("POST published cast.session.started");
+    assert_eq!(started.session_id, id);
+    assert_eq!(started.name.as_deref(), Some("Lounge TV"));
+    assert_eq!(started.address, "[2001:db8::20]:8009");
+    assert_eq!(started.output, "out-b");
+
+    let resp = send(
+        &h.router,
+        delete_if_match(&format!("/api/v1/cast/sessions/{id}"), OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let mut removed = false;
+    while let Ok(envelope) = events.try_recv() {
+        if let multiview_events::Event::CastSessionRemoved(r) = &*envelope.event {
+            removed = removed || r.session_id == id;
+        }
+    }
+    assert!(removed, "DELETE published cast.session.removed");
+}
+
+#[tokio::test]
+async fn save_promotion_publishes_cast_session_removed() {
+    // The save-as-device promotion retires the EPHEMERAL record (playback
+    // continues under the device id): membership changed, so the removal
+    // event rides the lane here too.
+    let h = cast_harness();
+    let mut events = h.engine.subscribe();
+
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    let resp = send(
+        &h.router,
+        post_json(
+            &format!("/api/v1/cast/sessions/{id}/save"),
+            OPERATOR_TOKEN,
+            &serde_json::json!({ "device_id": "dev-save-events" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let mut removed = false;
+    while let Ok(envelope) = events.try_recv() {
+        if let multiview_events::Event::CastSessionRemoved(r) = &*envelope.event {
+            removed = removed || r.session_id == id;
+        }
+    }
+    assert!(
+        removed,
+        "save published cast.session.removed for the session id"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_start_publishes_no_lifecycle_event() {
+    // The no-live-driver 409 records nothing — and must announce nothing.
+    let h = harness_with(|state| state.with_cast_delivery(delivery()));
+    let mut events = h.engine.subscribe();
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    while let Ok(envelope) = events.try_recv() {
+        assert!(
+            !matches!(
+                &*envelope.event,
+                multiview_events::Event::CastSessionStarted(_)
+            ),
+            "a refused start must not announce a session"
+        );
+    }
+}
+
+#[tokio::test]
+async fn started_unix_ns_is_absent_until_the_receiver_accepts_the_load() {
+    // Gap 1 (DEV-D3.1): the served doc carries the start stamp ONLY once the
+    // receiver accepted the LOAD. This harness's connector refuses every
+    // connect, so no LOAD is ever accepted — the field must stay absent
+    // (stamping at REST-accept time would lie about failed loads).
+    let h = cast_harness();
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+    assert!(
+        created.get("started_unix_ns").is_none(),
+        "no stamp before the LOAD is accepted: {created}"
+    );
+
+    let resp = send(
+        &h.router,
+        get(&format!("/api/v1/cast/sessions/{id}"), VIEWER_TOKEN),
+    )
+    .await;
+    let doc = body_json(resp).await;
+    assert!(
+        doc.get("started_unix_ns").is_none(),
+        "GET mirrors the absent stamp: {doc}"
+    );
+}
+
+#[tokio::test]
+async fn started_unix_ns_appears_once_the_receiver_accepts_the_load() {
+    // A full scripted establishment: connect → CONNECT → LAUNCH →
+    // RECEIVER_STATUS → CONNECT → LOAD → MEDIA_STATUS(PLAYING). The accept
+    // point stamps the session record from the control plane's injectable
+    // clock (the same `AckClock` the audit log stamps with, Unix
+    // nanoseconds), and the REST docs expose it as `started_unix_ns`.
+    const NOW_UNIX_NS: i64 = 1_765_000_000_123_456_789;
+    let (channel, _sent) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status_playing()),
+        ScriptedInbound::Hang,
+    ]);
+    let factory = CastSessionFactory::new(
+        Arc::new(ScriptedConnector::new(vec![channel])),
+        delivery(),
+        CastSessionConfig::test_fast(),
+    );
+    let registry = Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)));
+    let h = harness_with(move |state| {
+        state
+            .with_device_pollers(registry)
+            .with_cast_delivery(delivery())
+            .with_ack_clock(Arc::new(|| {
+                multiview_core::time::MediaTime::from_nanos(NOW_UNIX_NS)
+            }))
+    });
+
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    // The supervised actor establishes asynchronously (test_fast cadences):
+    // poll the GET until the accept-point stamp lands.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stamped = loop {
+        let resp = send(
+            &h.router,
+            get(&format!("/api/v1/cast/sessions/{id}"), VIEWER_TOKEN),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let doc = body_json(resp).await;
+        if let Some(value) = doc
+            .get("started_unix_ns")
+            .and_then(serde_json::Value::as_i64)
+        {
+            break value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the LOAD-accept stamp never landed: {doc}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(
+        stamped, NOW_UNIX_NS,
+        "the stamp is the injectable control-plane clock at the accept point"
+    );
+
+    // The list view carries the same stamp.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", VIEWER_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert_eq!(list[0]["started_unix_ns"].as_i64(), Some(NOW_UNIX_NS));
 }

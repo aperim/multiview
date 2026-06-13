@@ -943,6 +943,8 @@ impl AppState {
                 Arc::clone(&self.device_status),
             ),
             drivers: Arc::clone(&self.device_drivers),
+            cast_sessions: Arc::clone(&self.cast_sessions),
+            clock: Arc::clone(&self.ack_clock),
         }
     }
 
