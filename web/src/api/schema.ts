@@ -857,6 +857,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /api/v1/logs` — recent buffered structured log records (role: read). */
+        get: operations["list_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mesh/peers": {
         parameters: {
             query?: never;
@@ -3199,6 +3216,62 @@ export interface components {
             /** @description Whether the engine should stamp a corner watermark (derived, S3). */
             watermark: boolean;
         };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_telemetry::LogLevel`] (ADR-0060): the five
+         *     `tracing` severities. Serde-equivalent: a unit enum rendered lowercase.
+         * @enum {string}
+         */
+        LogLevelDoc: "trace" | "debug" | "info" | "warn" | "error";
+        /**
+         * @description `OpenAPI` mirror of [`multiview_telemetry::LogRecord`] — one structured
+         *     record in the `GET /api/v1/logs` tail (ADR-0060 §2.3).
+         *
+         *     Serde-equivalent field-for-field to the real record: the optional resource
+         *     attribution (`run_id` / `resource_kind` / `resource_id` / `label`), the libav
+         *     `component` / `repeated`, and the always-present `seq` / `timestamp_ms` /
+         *     `level` / `target` / `message`. Optionals are omitted when absent — an
+         *     unattributed line carries no `resource_id` (honesty over a wrong id, §3.3).
+         */
+        LogRecordDoc: {
+            /** @description The libav component class (`hevc`, `hls`), for bridge records. */
+            component?: string | null;
+            /** @description The resource's human label, if the span carried one. */
+            label?: string | null;
+            /** @description The record's severity. */
+            level: components["schemas"]["LogLevelDoc"];
+            /** @description The rendered event message. */
+            message: string;
+            /**
+             * Format: int64
+             * @description The coalesced suppressed-repeat count, when a bridge record flushes a
+             *     summary.
+             */
+            repeated?: number | null;
+            /** @description The stable config resource id this record is attributed to, if any. */
+            resource_id?: string | null;
+            resource_kind?: null | components["schemas"]["LogResourceKindDoc"];
+            /** @description The process run id, when configured. */
+            run_id?: string | null;
+            /**
+             * Format: int64
+             * @description Monotonic capture sequence number (the cursor for the `since` filter).
+             */
+            seq: number;
+            /** @description The `tracing` target (e.g. `libav`, `multiview_engine`). */
+            target: string;
+            /**
+             * Format: int64
+             * @description Wall-clock capture time, milliseconds since the Unix epoch.
+             */
+            timestamp_ms: number;
+        };
+        /**
+         * @description `OpenAPI` mirror of [`multiview_telemetry::LogResourceKind`] (ADR-0060 §2.2):
+         *     the resource a log record is attributed to. Serde-equivalent: a unit enum
+         *     rendered `snake_case`.
+         * @enum {string}
+         */
+        LogResourceKindDoc: "source" | "output" | "layout" | "program" | "device";
         /**
          * @description `OpenAPI` mirror of `multiview_config::LoudnessTarget` (tagged by `kind`,
          *     `snake_case`).
@@ -7093,6 +7166,70 @@ export interface operations {
             };
             /** @description Authenticated but not authorized to read. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_logs: {
+        parameters: {
+            query?: {
+                /** @description Keep only records attributed to this stable config resource id. */
+                resource_id?: string | null;
+                /**
+                 * @description Keep only records of this resource kind (`source`/`output`/`layout`/
+                 *     `program`/`device`).
+                 */
+                kind?: string | null;
+                /**
+                 * @description Keep only records at or above this severity (`trace`/`debug`/`info`/
+                 *     `warn`/`error`).
+                 */
+                level?: string | null;
+                /** @description Keep only records with a `seq` strictly greater than this cursor. */
+                since?: number | null;
+                /** @description Return at most this many of the most-recent matching records. */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Matching log records, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogRecordDoc"][];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Authenticated but not authorized to read. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unrecognised level or kind filter. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
