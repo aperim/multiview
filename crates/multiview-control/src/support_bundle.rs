@@ -344,6 +344,96 @@ fn redact_at(path: &str, value: &serde_json::Value, out: &mut Vec<Redaction>) ->
     }
 }
 
+// ── The config-export redactor ───────────────────────────────────────────────
+
+/// The sentinel a secret value is replaced with in an **exported** config-as-code
+/// document (`GET /api/v1/config/export`).
+///
+/// Distinct from the support-bundle [`REDACTED_TOKEN`] by design. A support bundle
+/// *drops* secret-bearing keys (the diagnostic pack never needs them); an exported
+/// config must stay a **structurally valid** [`multiview_config::MultiviewConfig`]
+/// so it round-trips — a TURN server still needs a non-empty credential field — so
+/// the export *replaces the value in place* with this clearly-marked placeholder
+/// instead of removing the key. The operator restores the real secret (or re-points
+/// a `secret_ref`) before the exported file is used to run; the placeholder never
+/// silently authenticates and never carries a real secret.
+pub const EXPORT_REDACTED_SENTINEL: &str = "<redacted>";
+
+/// Whether an object **key** names a value that, for config-as-code export, is a
+/// **reference-only** secret pointer rather than an inline cleartext secret — a
+/// `secret_ref` (e.g. `op://Servers/cam/credentials`, [`multiview_config`]'s
+/// documented "never plaintext" indirection). The reference is *not* a secret and
+/// is exactly what a reimport needs, so the export **keeps** it: redacting it would
+/// break config-as-code (and would not improve security — the pointer is not the
+/// secret it resolves to).
+fn key_is_secret_reference(key: &str) -> bool {
+    key.eq_ignore_ascii_case("secret_ref")
+}
+
+/// Redact every **inline cleartext** secret in a config-as-code document **for
+/// export**, replacing the scalar value in place with [`EXPORT_REDACTED_SENTINEL`]
+/// so the document stays structurally valid (and re-importable) while no plaintext
+/// secret ever leaves the process.
+///
+/// A redacted field is one whose object key [`key_is_secret`] classifies (the same
+/// policy the support-bundle redactor uses — `password`, `static_auth_secret`,
+/// `token`, `secret`, `auth`, `api_key`/`apikey`, `credential`, `passphrase`, bare
+/// `key`) **and** whose value is a scalar (string/number/bool) — i.e. an inline
+/// cleartext secret. Unlike the support-bundle pass this:
+///
+/// * **keeps the key + the value's place** (replacing only the scalar), so a TURN
+///   server still has a non-empty `password`/`static_auth_secret` and passes
+///   validation, round-tripping as a clearly-marked placeholder;
+/// * **recurses into structured holders** — a secret-named *object*/*array* (e.g. a
+///   source's `auth = { secret_ref = "op://…" }`) keeps its shape so the document
+///   re-imports, and its scalar leaves are still scrubbed by the same rule; and
+/// * **preserves a `secret_ref` pointer** ([`key_is_secret_reference`]) — the
+///   `op://…` reference is the intended config-as-code secret mechanism, not a
+///   leak; and
+/// * **does not mask transport URLs** — a config-as-code document needs its
+///   `url`/`endpoint` hosts to be reimportable (a stream key embedded in an `rtmp`/
+///   `srt` URL is a documented residue of the inline-secret posture, masked only in
+///   the diagnostic support bundle, never here).
+///
+/// The walk is total over arbitrary nesting (objects + arrays), so a deeply-nested
+/// or adversarial document is fully scrubbed. Returns the redacted document.
+#[must_use]
+pub fn redact_config_for_export(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut redacted = serde_json::Map::with_capacity(map.len());
+            for (key, child) in map {
+                let is_inline_secret = key_is_secret(key)
+                    && !key_is_secret_reference(key)
+                    && !matches!(
+                        child,
+                        serde_json::Value::Object(_)
+                            | serde_json::Value::Array(_)
+                            | serde_json::Value::Null
+                    );
+                if is_inline_secret {
+                    // An inline cleartext secret (a scalar under a secret-named
+                    // key): replace the value, keep the key.
+                    redacted.insert(
+                        key.clone(),
+                        serde_json::Value::String(EXPORT_REDACTED_SENTINEL.to_owned()),
+                    );
+                } else {
+                    // A non-secret key, a `secret_ref` pointer, or a structured
+                    // holder under a secret-named key: recurse so the shape survives
+                    // and any nested inline secret is still scrubbed.
+                    redacted.insert(key.clone(), redact_config_for_export(child));
+                }
+            }
+            serde_json::Value::Object(redacted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_config_for_export).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 // ── The bundle store ────────────────────────────────────────────────────────
 
 /// Mint a fresh bundle id (an uppercased short hex of a v4 UUID, `SB-` prefixed
@@ -554,9 +644,9 @@ mod tests {
     )]
 
     use super::{
-        compose_bundle, key_is_secret, key_is_url, redact_config, value_looks_like_url, Bundle,
-        BundleInclude, BundleRequest, BundleStore, BundleWindow, ConfigSources, InMemoryBundles,
-        RedactionReason, REDACTED_TOKEN,
+        compose_bundle, key_is_secret, key_is_url, redact_config, redact_config_for_export,
+        value_looks_like_url, Bundle, BundleInclude, BundleRequest, BundleStore, BundleWindow,
+        ConfigSources, InMemoryBundles, RedactionReason, EXPORT_REDACTED_SENTINEL, REDACTED_TOKEN,
     };
     use crate::resource_store::{
         InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore,
@@ -712,6 +802,84 @@ mod tests {
         assert!(!serialized.contains("rtsp://camera.example/stream"));
         assert!(!serialized.contains("op://Servers/cam/credentials"));
         assert!(!bundle.redactions.is_empty(), "the masking is surfaced");
+    }
+
+    #[test]
+    fn export_redactor_masks_inline_secrets_keeps_structure_and_refs() {
+        let doc = serde_json::json!({
+            "webrtc": {
+                "ice_servers": [
+                    { "kind": "turn", "url": "turn:[2001:db8::55]:3478",
+                      "username": "pub", "password": "PLAINTEXT-TURN-PW" },
+                    { "kind": "turn", "url": "turns:[2001:db8::56]:5349",
+                      "username": "eph", "static_auth_secret": "PLAINTEXT-REST-SECRET" }
+                ]
+            },
+            "sources": [
+                { "id": "whip-cam", "kind": "webrtc", "token": "PLAINTEXT-BEARER" },
+                { "id": "cam-2", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam2",
+                  "auth": { "secret_ref": "op://Servers/cam/credentials" } }
+            ]
+        });
+        let out = redact_config_for_export(&doc);
+        let serialized = serde_json::to_string(&out).unwrap();
+
+        // No inline cleartext secret survives.
+        assert!(!serialized.contains("PLAINTEXT-TURN-PW"));
+        assert!(!serialized.contains("PLAINTEXT-REST-SECRET"));
+        assert!(!serialized.contains("PLAINTEXT-BEARER"));
+        // The sentinel marks each redaction in place.
+        assert_eq!(
+            out["webrtc"]["ice_servers"][0]["password"],
+            serde_json::json!(EXPORT_REDACTED_SENTINEL)
+        );
+        assert_eq!(
+            out["webrtc"]["ice_servers"][1]["static_auth_secret"],
+            serde_json::json!(EXPORT_REDACTED_SENTINEL)
+        );
+        assert_eq!(
+            out["sources"][0]["token"],
+            serde_json::json!(EXPORT_REDACTED_SENTINEL)
+        );
+        // Structure is preserved: the TURN server keeps a non-empty url/username.
+        assert_eq!(
+            out["webrtc"]["ice_servers"][0]["url"],
+            serde_json::json!("turn:[2001:db8::55]:3478")
+        );
+        // A transport URL is NOT masked (config-as-code needs the host).
+        assert_eq!(
+            out["sources"][1]["url"],
+            serde_json::json!("rtsp://[2001:db8::1]/cam2")
+        );
+        // A `secret_ref` pointer is preserved (a reference, not a leak), and its
+        // holding `auth` object keeps its shape so the config re-imports.
+        assert_eq!(
+            out["sources"][1]["auth"]["secret_ref"],
+            serde_json::json!("op://Servers/cam/credentials")
+        );
+    }
+
+    #[test]
+    fn export_redactor_scrubs_nested_inline_secrets_under_a_structured_holder() {
+        // A secret-named *object* (`auth`) carrying an inline cleartext `password`
+        // keeps its shape but loses the plaintext — no nesting hides a leak.
+        let doc = serde_json::json!({
+            "auth": { "username": "u", "password": "DEEP-PLAINTEXT" },
+            "list": [ { "token": "ALSO-PLAINTEXT" } ]
+        });
+        let out = redact_config_for_export(&doc);
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(!serialized.contains("DEEP-PLAINTEXT"));
+        assert!(!serialized.contains("ALSO-PLAINTEXT"));
+        assert_eq!(out["auth"]["username"], serde_json::json!("u"));
+        assert_eq!(
+            out["auth"]["password"],
+            serde_json::json!(EXPORT_REDACTED_SENTINEL)
+        );
+        assert_eq!(
+            out["list"][0]["token"],
+            serde_json::json!(EXPORT_REDACTED_SENTINEL)
+        );
     }
 
     #[test]
