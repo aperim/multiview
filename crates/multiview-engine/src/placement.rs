@@ -107,6 +107,26 @@ pub struct MigrationPlan {
     pub idr_aligned: bool,
 }
 
+impl MigrationPlan {
+    /// Build a migration plan from `from` → `to` with the modelled `gain`.
+    ///
+    /// `idr_aligned` is always `true` by construction (Multiview pins the output
+    /// GOP + drives `forceIDR`, so the cutover boundary is an IDR boundary). The
+    /// controller builds plans internally; this constructor lets the
+    /// make-before-break executor ([`crate::migration`]) and tests build one
+    /// without the controller (the struct is `#[non_exhaustive]`, so an
+    /// out-of-module struct literal is impossible).
+    #[must_use]
+    pub const fn new(from: DeviceId, to: DeviceId, gain: f32) -> Self {
+        Self {
+            from,
+            to,
+            gain,
+            idr_aligned: true,
+        }
+    }
+}
+
 /// The action the placement controller proposes for one control tick.
 ///
 /// The controller never executes anything — it returns one of these for the

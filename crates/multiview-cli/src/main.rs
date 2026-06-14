@@ -545,6 +545,32 @@ async fn run_pipeline_until_ctrl_c(
         None,
     );
 
+    // GPU-5c: the live adaptive-placement execution loop. On a MULTI-GPU host it
+    // polls per-GPU load (the `LoadPoller → arc_swap` snapshot), observes the
+    // `PlacementController` one control tick (recording the placement counters),
+    // and emits a `ShedLoad` when a sustained overload cannot be cured by
+    // migrating — activating GPU-5b's inert controller. It runs entirely off the
+    // output clock (a 1 Hz control task) so it can never stall the engine (inv
+    // #1/#10); `spawn` returns `None` (and runs nothing) on a single-GPU/no-GPU
+    // host, where there is no migration target. The placement counters register
+    // against a run-local registry; the make-before-break crosspoint is the
+    // engine RT-12 bridge the coordinator drives.
+    let placement_metrics_registry = multiview_telemetry::metrics::MetricsRegistry::new();
+    let placement_task = multiview_cli::placement::spawn(
+        config,
+        multiview_cli::placement::PlacementInputs {
+            load_source: multiview_cli::system_metrics::default_load_source(),
+            canvas: pipeline.canvas_resolution(),
+            cadence,
+            tile_count: pipeline.tile_count(),
+            opens_encode_session: pipeline.opens_encode_session(),
+        },
+        Arc::clone(&publisher),
+        &placement_metrics_registry,
+        multiview_engine::OutputCrosspoint::new(),
+        stop.clone(),
+    );
+
     // CONSPECT engine-seam S5 (ADR-0052 §3): the consent-independent local-metrics
     // retention feed for the real libav pipeline.
     let (retention_store, retention_task) = spawn_metrics_retention(&publisher);
@@ -601,6 +627,7 @@ async fn run_pipeline_until_ctrl_c(
     // The pipeline loop returned; tear down every run tenant in one call.
     shutdown_run_tenants(RunTenants {
         metrics_task,
+        placement_task,
         timing_task,
         retention_task,
         retention_store,
@@ -879,6 +906,9 @@ async fn run_software_until_ctrl_c(
     // The engine loop returned; tear down every run tenant in one call.
     shutdown_run_tenants(RunTenants {
         metrics_task,
+        // The software (FFmpeg-free) run drives no GPU pipeline, so there is no
+        // adaptive placement to execute.
+        placement_task: None,
         timing_task,
         retention_task,
         retention_store,
@@ -938,6 +968,10 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
 struct RunTenants {
     /// The ~1.3 Hz system-metrics poller (self-stops on the `StopSignal` too).
     metrics_task: tokio::task::JoinHandle<()>,
+    /// The GPU-5c adaptive-placement execution loop (multi-GPU hosts only;
+    /// `None` when fewer than two GPUs are visible). Self-stops on the
+    /// `StopSignal`.
+    placement_task: Option<tokio::task::JoinHandle<()>>,
     /// The ~1 Hz presentation-epoch / `timing.status` publisher.
     timing_task: tokio::task::JoinHandle<()>,
     /// The CONSPECT S5 consent-independent local-metrics retention feed.
@@ -964,6 +998,7 @@ struct RunTenants {
 async fn shutdown_run_tenants(tenants: RunTenants) {
     let RunTenants {
         metrics_task,
+        placement_task,
         timing_task,
         retention_task,
         retention_store,
@@ -974,6 +1009,9 @@ async fn shutdown_run_tenants(tenants: RunTenants) {
         signal,
     } = tenants;
     metrics_task.abort();
+    if let Some(task) = placement_task {
+        task.abort();
+    }
     timing_task.abort();
     retention_task.abort();
     log_retention_summary(&retention_store);

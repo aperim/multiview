@@ -78,6 +78,30 @@ pub enum RouteIntent {
         /// The source elementary stream feeding the layer.
         source: StreamRef,
     },
+    /// Re-point an output **sink** from one program's rendition to another's —
+    /// the **RT-12 `output ← program` crosspoint** (ADR-R010 §2 SWAP). This is
+    /// the cross-`Program` cutover the make-before-break migration primitive
+    /// drives at a frame/IDR boundary: the same `Arc<dyn PacketSink>` (its
+    /// identity, bounded buffer, and connection kept) is re-keyed from `from`'s
+    /// rendition to `to`'s.
+    ///
+    /// Unlike the intra-`Program` `Video`/`Audio`/`Subtitle` intents, this is
+    /// **not** applied by [`RouteApplier`] (which drives the `CompositorDrive` /
+    /// program bus / subtitle layers): the output cutover is driven by the
+    /// [`crate::migration::OutputCrosspoint`] over the shared
+    /// [`multiview_output::fanout::PacketRouter`], on the control plane, off the
+    /// data plane. The variant exists as the typed RT-12 seam (the
+    /// `#[non_exhaustive]` note above) so CTL-6 can later submit it over the
+    /// command bus; its execution path is the crosspoint, never `RouteApplier`.
+    Output {
+        /// The output sink to re-point (its stable id; identity is preserved
+        /// across the move).
+        sink_id: String,
+        /// The rendition the sink is moving **off** (the OLD program's).
+        from: String,
+        /// The rendition the sink is moving **to** (the NEW program's).
+        to: String,
+    },
 }
 
 impl RouteIntent {
