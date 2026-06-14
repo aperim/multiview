@@ -72,6 +72,11 @@ pub mod metrics_retention;
 /// never be silently skipped. Always compiled, so the default build tests the
 /// rejection path and a `display-kms` build tests the acceptance path.
 pub mod outputs;
+/// The live adaptive-placement execution loop (GPU-5c): the off-hot-path
+/// `LoadPoller → arc_swap` poll + `PlacementController` observe/dispatch loop
+/// that activates GPU-5b's inert controller, records the placement counters,
+/// emits `ShedLoad`, and drives the engine make-before-break crosspoint.
+pub mod placement;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
