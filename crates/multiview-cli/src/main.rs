@@ -65,11 +65,14 @@ async fn main() -> ExitCode {
 /// Initialize the structured `tracing` subscriber (stderr, env-overridable via
 /// `RUST_LOG`, defaulting to `info`) **with** the resource-scoped log capture
 /// layer (ADR-0060): every emitted event — ours and the libav bridge's — is
-/// mirrored into a bounded drop-oldest [`LogRing`] the control plane serves over
-/// `GET /api/v1/logs`. The ring is stashed in the process-global [`log_ring`]
-/// slot so `control::bind_and_serve` wires the same `Arc` into the `AppState`.
+/// mirrored into a bounded drop-oldest `LogRing` the control plane serves over
+/// `GET /api/v1/logs`. The ring is published into the library's process-global
+/// slot ([`multiview_cli::set_log_ring`]) so `control::bind_and_serve` wires the
+/// same `Arc` into the `AppState`.
 fn init_tracing() -> anyhow::Result<()> {
-    let ring = std::sync::Arc::new(multiview_telemetry::LogRing::new(LOG_RING_CAPACITY));
+    let ring = Arc::new(multiview_telemetry::LogRing::new(
+        multiview_cli::LOG_RING_CAPACITY,
+    ));
     // A per-process run id groups a process lifetime's records across restarts.
     let run_id = format!(
         "run-{}",
@@ -80,28 +83,11 @@ fn init_tracing() -> anyhow::Result<()> {
     SubscriberBuilder::new()
         .with_default_level("info")
         .with_env(true)
-        .try_init_with_capture(std::sync::Arc::clone(&ring), run_id)
+        .try_init_with_capture(Arc::clone(&ring), run_id)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     // Publish the ring for the control plane (set-once; ignore a redundant set).
-    let _ = LOG_RING.set(ring);
+    let _ = multiview_cli::set_log_ring(ring);
     Ok(())
-}
-
-/// Default capacity of the process log-tail ring (ADR-0060 §4.4).
-const LOG_RING_CAPACITY: usize = 2000;
-
-/// The process-global log-tail ring, set once by [`init_tracing`] and read by
-/// the control-plane wiring ([`log_ring`]). A `OnceLock` so the singleton is
-/// established at startup before any subcommand runs.
-static LOG_RING: std::sync::OnceLock<std::sync::Arc<multiview_telemetry::LogRing>> =
-    std::sync::OnceLock::new();
-
-/// The process log-tail ring the capture layer feeds, if logging was initialized.
-/// `control::bind_and_serve` wires this into the `AppState` so `GET /api/v1/logs`
-/// serves live captured records.
-#[must_use]
-pub fn log_ring() -> Option<std::sync::Arc<multiview_telemetry::LogRing>> {
-    LOG_RING.get().map(std::sync::Arc::clone)
 }
 
 /// Dispatch a parsed [`Cli`] to its subcommand, returning the process exit code.

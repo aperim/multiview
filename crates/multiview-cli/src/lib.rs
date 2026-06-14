@@ -33,6 +33,36 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Default capacity of the process log-tail ring (ADR-0060 §4.4): the last
+/// ~2000 structured records are retained for `GET /api/v1/logs`, drop-oldest.
+pub const LOG_RING_CAPACITY: usize = 2000;
+
+/// The process-global log-tail ring, set once by the binary's `init_tracing`
+/// (which installs the telemetry capture layer feeding the same `Arc`) and read
+/// by the control-plane wiring ([`log_ring`]). A `OnceLock` so the singleton is
+/// established at startup before any subcommand runs. Lives in the **library**
+/// (not the binary) so [`control`] can read it in both the binary and the lib's
+/// integration tests. Bounded drop-oldest, read-only — it can never
+/// back-pressure the engine (invariant #10).
+static LOG_RING: std::sync::OnceLock<std::sync::Arc<multiview_telemetry::LogRing>> =
+    std::sync::OnceLock::new();
+
+/// Publish the process log-tail ring (set-once). The binary calls this from
+/// `init_tracing` with the same `Arc` the telemetry capture layer feeds; a
+/// redundant set is ignored. Returns whether this call established the ring.
+pub fn set_log_ring(ring: std::sync::Arc<multiview_telemetry::LogRing>) -> bool {
+    LOG_RING.set(ring).is_ok()
+}
+
+/// The process log-tail ring the capture layer feeds, if logging was
+/// initialized. [`control::bind_and_serve`] wires this into the `AppState` so
+/// `GET /api/v1/logs` serves live captured records; `None` (no capture
+/// installed) leaves the `AppState`'s empty default ring.
+#[must_use]
+pub fn log_ring() -> Option<std::sync::Arc<multiview_telemetry::LogRing>> {
+    LOG_RING.get().map(std::sync::Arc::clone)
+}
+
 /// Build-time GPU-capability cross-check + health-warning emit (SA-0 / ADR-0035):
 /// detect when a real GPU is present but the wgpu compositor resolved a
 /// software/CPU adapter (the silent CPU fallback) and emit a latched, actionable
