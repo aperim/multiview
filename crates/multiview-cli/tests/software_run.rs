@@ -231,6 +231,7 @@ async fn software_run_serves_the_control_api_while_running() {
         multiview_control::no_preview(),
         None, // whep
         None, // whip
+        None, // whep_output
         None, // licence
         None, // mesh
         multiview_control::LiveApplyCaps::default(),

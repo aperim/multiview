@@ -499,6 +499,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
         Arc::clone(&provider),
         None, // whep
         None, // whip
+        None, // whep_output
         None, // licence
         None, // mesh
         multiview_control::LiveApplyCaps::default(),

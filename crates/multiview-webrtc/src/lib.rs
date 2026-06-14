@@ -35,6 +35,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod egress;
 pub mod error;
 pub mod sdp;
 pub mod session;

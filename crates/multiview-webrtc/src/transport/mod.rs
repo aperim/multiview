@@ -24,17 +24,29 @@
 //! the consumer lanes. A wedged peer loses only its own session's media.
 
 mod ingest;
+mod whep_serve;
 mod whip_endpoint;
+mod whip_push;
 
 pub use ingest::{RtpRing, RtpRingEngine, MAX_INGRESS_RTP};
+pub use whep_serve::{WhepNegotiated, WhepServeEndpoint, WhepServeHandle};
 pub use whip_endpoint::{WhipEndpoint, WhipHandle, WhipNegotiated};
+pub use whip_push::{
+    PushBackoff, WhipPushAnswer, WhipPushClient, WhipPushOffer, WhipSignaller, MAX_REDIRECTS,
+};
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::media::{Direction, Frequency, MediaKind as Str0mMediaKind, MediaTime, Mid};
+use str0m::media::{Frequency, MediaKind as Str0mMediaKind, MediaTime, Mid};
+
+/// The SDP media direction (`sendonly` / `recvonly` / `sendrecv`), re-exported
+/// from str0m so callers select an offer's direction without depending on str0m
+/// directly (a WHEP viewer offers [`Direction::RecvOnly`]; the `whip_push` client
+/// offers [`Direction::SendOnly`]).
+pub use str0m::media::Direction;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
@@ -44,8 +56,8 @@ use crate::error::{Result, WebRtcError};
 /// The 90 kHz RTP clock for video (ADR-0048 codec matrix; invariant #3 rationals).
 const VIDEO_CLOCK_HZ: Frequency = Frequency::NINETY_KHZ;
 
-/// The 48 kHz RTP clock for Opus audio (RFC 7587; ADR-P006). Opus always rides a
-/// 48 kHz RTP clock regardless of the internal sample rate.
+/// The 48 kHz RTP clock for Opus audio (RFC 7587; ADR-P006 §6, ADR-0049 §6). Opus
+/// always rides a 48 kHz RTP clock regardless of the internal sample rate.
 const AUDIO_CLOCK_HZ: Frequency = Frequency::FORTY_EIGHT_KHZ;
 
 /// The kind of media a session carries.
@@ -115,6 +127,37 @@ impl SessionConfig {
             enable_vp8: false,
             enable_opus: true,
             rtp_mode: true,
+        }
+    }
+
+    /// A WHEP **output serve** session (ADR-0049 §5.1): the program is the **real
+    /// encoded H.264 rendition** + the shared Opus rendition, so only those
+    /// codecs are answered (no VP8 — the program is never re-encoded to VP8). The
+    /// viewer's browser is the offerer; this end is the **answerer** and only
+    /// *sends*, sample-writing the already-encoded program AUs
+    /// ([`Session::write_video_sample`]). **Sample mode** (`rtp_mode = false`):
+    /// str0m packetizes our samples into SRTP for the viewer.
+    #[must_use]
+    pub fn serve() -> Self {
+        Self {
+            enable_h264: true,
+            enable_vp8: false,
+            enable_opus: true,
+            rtp_mode: false,
+        }
+    }
+
+    /// A `whip_push` **client** session (ADR-0049 §5.2): Multiview is the
+    /// **offerer**, publishing the program sendonly to a remote WHIP ingest —
+    /// H.264 + Opus only, no VP8 (the program rendition is H.264). **Sample
+    /// mode**: str0m packetizes our program AUs into SRTP for the remote.
+    #[must_use]
+    pub fn push() -> Self {
+        Self {
+            enable_h264: true,
+            enable_vp8: false,
+            enable_opus: true,
+            rtp_mode: false,
         }
     }
 }
@@ -296,17 +339,35 @@ impl Session {
         Ok(())
     }
 
-    /// Create an SDP offer adding the given sendonly media, returning the offer
-    /// SDP string. The matching pending offer is stashed for
+    /// Create an SDP offer adding the given **sendonly** media, returning the
+    /// offer SDP string — the `whip_push` client's offer (Multiview sends the
+    /// program; ADR-0049 §5.2). The matching pending offer is stashed for
     /// [`Session::accept_answer`].
     ///
     /// # Errors
     ///
     /// [`WebRtcError::Transport`] if the change set produced no offer.
     pub fn create_offer(&mut self, kinds: &[MediaKind]) -> Result<String> {
+        self.create_offer_with_direction(kinds, Direction::SendOnly)
+    }
+
+    /// Create an SDP offer adding the given media in `direction`, returning the
+    /// offer SDP string. A WHEP **viewer** offers [`Direction::RecvOnly`] (it
+    /// receives the program); the `whip_push` client offers
+    /// [`Direction::SendOnly`] (it sends). The matching pending offer is stashed
+    /// for [`Session::accept_answer`].
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if the change set produced no offer.
+    pub fn create_offer_with_direction(
+        &mut self,
+        kinds: &[MediaKind],
+        direction: Direction,
+    ) -> Result<String> {
         let mut change = self.rtc.sdp_api();
         for kind in kinds {
-            let mid = change.add_media(kind.to_str0m(), Direction::SendOnly, None, None, None);
+            let mid = change.add_media(kind.to_str0m(), direction, None, None, None);
             self.media.push((mid, *kind));
         }
         let (offer, pending) = change
@@ -496,7 +557,7 @@ impl Session {
     /// Write one encoded **Opus** audio frame into the first audio media; str0m
     /// packetizes it into SRTP. `rtp_timestamp` is in **48 kHz** RTP units (RFC
     /// 7587 fixes the Opus RTP clock at 48 kHz regardless of the internal sample
-    /// rate; ADR-P006).
+    /// rate; ADR-P006, ADR-0049 §6).
     ///
     /// # Errors
     ///

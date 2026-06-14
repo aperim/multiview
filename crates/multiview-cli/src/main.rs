@@ -230,6 +230,12 @@ struct ControlPlaneWiring {
     /// `webrtc-native`.
     #[cfg(feature = "webrtc-native")]
     webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry,
+    /// The shared WebRTC **output** egress rendezvous (ADR-0049): the pipeline's
+    /// per-output drop-oldest feeds, so the control plane builds the WHEP-serve
+    /// provider (browser viewers) and the run path spawns the `whip_push` clients,
+    /// both fed the encode-once program. Only under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    egress_registry: multiview_cli::webrtc_outputs::EgressRegistry,
     /// The shared **program-audio preview tap** (ADR-P006 audio): the SAME
     /// [`ProgramAudioSlot`](multiview_cli::preview::ProgramAudioSlot) the run also
     /// hands the pipeline, so the live WHEP egress provider hears the post-loudnorm
@@ -281,6 +287,8 @@ async fn serve_control_plane(
         #[cfg(feature = "webrtc-native")]
         webrtc_registry,
         #[cfg(feature = "webrtc-native")]
+        egress_registry,
+        #[cfg(feature = "webrtc-native")]
         program_audio,
     } = wiring;
     let (commands, command_rx) = command_bus(64);
@@ -325,6 +333,21 @@ async fn serve_control_plane(
         multiview_cli::webrtc_ingest::build_whip_provider(config, webrtc_registry);
     #[cfg(not(feature = "webrtc-native"))]
     let whip: Option<multiview_control::SharedWhip> = None;
+    // WHEP-serve + WHIP-push OUTPUTS (ADR-0049, `webrtc-native`): build the
+    // WHEP-serve provider (so `POST /api/v1/whep/{output}` serves the real encoded
+    // program to a browser viewer) and spawn the supervised `whip_push` client
+    // tasks (publishing the program to remote WHIP ingests). Both are fed the
+    // encode-once program over the pipeline's per-output drop-oldest egress feeds
+    // (invariant #7) and run on their own tokio tasks — they can never
+    // back-pressure the engine (inv #10). Without the feature the default
+    // `NoWhepOutput` answers every viewer `503` (routes stay present + enforced).
+    #[cfg(feature = "webrtc-native")]
+    let whep_output: Option<multiview_control::SharedWhepOutput> = {
+        multiview_cli::webrtc_outputs::spawn_whip_push_clients(config, &egress_registry);
+        multiview_cli::webrtc_outputs::build_whep_output_provider(config, &egress_registry)
+    };
+    #[cfg(not(feature = "webrtc-native"))]
+    let whep_output: Option<multiview_control::SharedWhepOutput> = None;
     let (addr, handle, state) = control::bind_and_serve(
         listen,
         config,
@@ -333,6 +356,7 @@ async fn serve_control_plane(
         provider,
         whep,
         whip,
+        whep_output,
         licence,
         mesh,
         live_apply,
@@ -454,6 +478,8 @@ async fn run_pipeline_until_ctrl_c(
                     mesh: Some(Arc::clone(&plane.mesh)),
                     #[cfg(feature = "webrtc-native")]
                     webrtc_registry: pipeline.webrtc_registry(),
+                    #[cfg(feature = "webrtc-native")]
+                    egress_registry: pipeline.egress_registry(),
                     #[cfg(feature = "webrtc-native")]
                     program_audio: program_audio.clone(),
                 },
@@ -764,6 +790,12 @@ async fn run_software_until_ctrl_c(
                     // total under the rare software+webrtc-native combination.
                     #[cfg(feature = "webrtc-native")]
                     webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry::new(),
+                    // No pipeline on this path ⇒ no encode-once fan-out to feed, so
+                    // an empty egress registry: the WHEP provider stays NoWhepOutput
+                    // and no whip_push clients spawn (honest — there is nothing to
+                    // publish without a running program).
+                    #[cfg(feature = "webrtc-native")]
+                    egress_registry: multiview_cli::webrtc_outputs::EgressRegistry::new(),
                     // The software run path has no bake stage, so no program-audio
                     // PCM is produced — a WHEP peer on this path is video-only.
                     #[cfg(feature = "webrtc-native")]

@@ -1778,6 +1778,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/whep/{output_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/whep/{output_id}` — view: an SDP offer in, `201` + answer SDP +
+         *     `Location` out (the program is then sent over SRTP).
+         */
+        post: operations["whep_view"];
+        delete?: never;
+        /**
+         * `OPTIONS /api/v1/whep/{output_id}` — CORS preflight; advertises
+         *     `Accept-Post: application/sdp`.
+         */
+        options: operations["whep_options"];
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/whep/{output_id}/sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/whep/{output_id}/sessions/{session_id}` — tear the viewer
+         *     session down. `200` (idempotent within the tombstone window), `404` for an
+         *     unknown id.
+         */
+        delete: operations["whep_delete"];
+        options?: never;
+        head?: never;
+        /**
+         * `PATCH /api/v1/whep/{output_id}/sessions/{session_id}` — **`405`** (vanilla
+         *     ICE; trickle / ICE restart unimplemented, ADR-0049 §5.1). `Allow: DELETE,
+         *     OPTIONS`.
+         */
+        patch: operations["whep_patch"];
+        trace?: never;
+    };
     "/api/v1/whip/{source_id}": {
         parameters: {
             query?: never;
@@ -10275,6 +10325,191 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Problem"];
                 };
+            };
+        };
+    };
+    whep_view: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc output id to view. */
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        /** @description SDP offer */
+        requestBody: {
+            content: {
+                "application/sdp": string;
+            };
+        };
+        responses: {
+            /** @description Session created; SDP answer in the body, Location at the session resource. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/sdp": unknown;
+                };
+            };
+            /** @description Malformed SDP offer. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Missing credentials (the output token or a View API key). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A credential lacking view rights. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No configured webrtc output by that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The offer shares no supported codec (H.264 + Opus). */
+            406: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not application/sdp. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Over max_viewers / the viewer pool, or no serve transport. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    whep_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc output id. */
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Preflight; Accept-Post: application/sdp. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    whep_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc output id. */
+                output_id: string;
+                /** @description The WHEP session id from the view Location. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session released (idempotent within the tombstone window). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A credential lacking rights. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such live/known session. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    whep_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The webrtc output id. */
+                output_id: string;
+                /** @description The WHEP session id. */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trickle ICE / ICE restart are not supported (vanilla ICE). */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

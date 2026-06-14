@@ -874,6 +874,22 @@ enum RunnableOutput {
         /// The destination URL (for the run report + logs).
         url: String,
     },
+    /// A WebRTC program output (`webrtc` WHEP-serve / `whip_push`): a **mux-free**
+    /// sink that re-stamps each coded [`EncodedPacket`] into an
+    /// [`EgressSample`](multiview_webrtc::egress::EgressSample) and pushes it onto
+    /// a bounded drop-oldest [`EgressSink`](multiview_webrtc::egress::EgressSink)
+    /// — the encode-once program AUs the WHEP-serve driver / `whip_push` client
+    /// packetize into SRTP per session (invariant #7: no re-encode; per-viewer
+    /// cost is packetization only). A stalled viewer / dead WHIP target drops on
+    /// the feed, never stalling the fan-out (invariants #1/#10). Only under
+    /// `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    WebRtc {
+        /// The bounded drop-oldest egress sink the program AUs are pushed onto.
+        sink: multiview_webrtc::egress::EgressSink,
+        /// A short label (`webrtc`/`whip_push`) + the output id for the report.
+        label: String,
+    },
 }
 
 /// A built, ready-to-run pipeline.
@@ -983,6 +999,14 @@ pub struct Pipeline {
     /// under `webrtc-native`.
     #[cfg(feature = "webrtc-native")]
     webrtc_registry: crate::webrtc_ingest::WhipRegistry,
+    /// The shared WebRTC **output** egress rendezvous (ADR-0049): one
+    /// [`EgressFeed`](multiview_webrtc::egress::EgressFeed) per `webrtc`/`whip_push`
+    /// output, fed the encode-once program AUs by that output's
+    /// `RunnableOutput::WebRtc` sink runner; the run wiring hands it to the
+    /// WHEP-serve provider (viewers) + the `whip_push` clients. Only under
+    /// `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    egress_registry: crate::webrtc_outputs::EgressRegistry,
     /// Per-source last-good **audio** stores (AUD-2), keyed by source id. Shared
     /// (`Arc`) between each source's audio decode thread (writer) and the
     /// [`ProgramBus`](multiview_audio::program::ProgramBus) the bake consumer
@@ -1340,7 +1364,18 @@ impl Pipeline {
         // per pipeline, written by the timing-status task and read by every
         // HLS rolling playlist (PDT) — one anchor, every surface agrees.
         let epoch = multiview_output::SharedEpoch::new();
-        let built = build_outputs(&config.outputs, &epoch)?;
+        // The WebRTC output egress rendezvous (ADR-0049): one drop-oldest feed per
+        // `webrtc`/`whip_push` output, with the paired `EgressSink` keyed by output
+        // id for the sink runners. The run wiring reads the registry to bind the
+        // WHEP-serve endpoint + spawn the whip_push clients. Under `webrtc-native`.
+        #[cfg(feature = "webrtc-native")]
+        let (egress_registry, egress_sinks) = crate::webrtc_outputs::build_egress_registry(config);
+        let built = build_outputs(
+            &config.outputs,
+            &epoch,
+            #[cfg(feature = "webrtc-native")]
+            &egress_sinks,
+        )?;
         #[cfg(feature = "display-kms")]
         let has_display = !built.display.is_empty();
         #[cfg(not(feature = "display-kms"))]
@@ -1409,6 +1444,8 @@ impl Pipeline {
             ingest_plans,
             #[cfg(feature = "webrtc-native")]
             webrtc_registry,
+            #[cfg(feature = "webrtc-native")]
+            egress_registry,
             audio_stores,
             audio_ingest_plans,
             tone_ingest_plans,
@@ -1552,6 +1589,16 @@ impl Pipeline {
     #[must_use]
     pub fn webrtc_registry(&self) -> crate::webrtc_ingest::WhipRegistry {
         self.webrtc_registry.clone()
+    }
+
+    /// The shared WebRTC **output** egress rendezvous (ADR-0049). The run wiring
+    /// reads it to build the WHEP-serve provider (browser viewers) and spawn the
+    /// `whip_push` clients, both fed the encode-once program over the per-output
+    /// drop-oldest feed. Only under `webrtc-native`.
+    #[cfg(feature = "webrtc-native")]
+    #[must_use]
+    pub fn egress_registry(&self) -> crate::webrtc_outputs::EgressRegistry {
+        self.egress_registry.clone()
     }
 
     /// The resolved concrete encoder name.
@@ -3648,6 +3695,92 @@ fn run_one_output(
         RunnableOutput::Push { sink, label, url } => Ok(run_push_output(
             &sink, label, &url, rx, params, time_base, audio,
         )),
+        #[cfg(feature = "webrtc-native")]
+        RunnableOutput::WebRtc { sink, label } => {
+            Ok(run_webrtc_output(&sink, &label, rx, time_base))
+        }
+    }
+}
+
+/// Drive a WebRTC program output (`webrtc` / `whip_push`) over its fan-out channel
+/// of coded packets: re-stamp each [`EncodedPacket`] into an
+/// [`EgressSample`](multiview_webrtc::egress::EgressSample) (the AU bytes + its
+/// 90 kHz video / 48 kHz audio RTP timestamp derived from the packet's
+/// tick-stamped PTS, invariant #3) and push it onto the bounded drop-oldest
+/// [`EgressSink`](multiview_webrtc::egress::EgressSink) the WHEP-serve driver /
+/// `whip_push` client drains. No re-encode (invariant #7): the SAME coded bytes
+/// the file/HLS/push sinks mux are packetized into SRTP per session.
+///
+/// **Infallible** by design (returns a [`SinkRunOutcome`], never an error): a
+/// WebRTC output with no viewers / a dead WHIP target must not fail the program.
+/// On end-of-program (the channel closes) the egress feed is closed so the
+/// sessions tear down. A slow consumer drops on the feed — never stalls this
+/// off-hot-path drain, the fan-out, or the output clock (invariants #1/#10).
+#[cfg(feature = "webrtc-native")]
+fn run_webrtc_output(
+    sink: &multiview_webrtc::egress::EgressSink,
+    label: &str,
+    rx: Receiver<EncodedPacket>,
+    time_base: Rational,
+) -> SinkRunOutcome {
+    use multiview_ffmpeg::StreamKind;
+    use multiview_webrtc::egress::{EgressMedia, EgressSample};
+
+    // The video RTP clock is 90 kHz; the encoder time-base is `1/cadence`, so a
+    // packet PTS in encoder ticks rescales to 90 kHz video RTP units. Audio
+    // packets are stamped in `1/sample_rate` already; the AAC→Opus distinction
+    // does not change the 48 kHz Opus RTP clock the driver writes them at.
+    let video_rtp = Rational::new(1, 90_000);
+    let audio_rtp = Rational::new(1, 48_000);
+    let mut delivered = 0usize;
+    let mut dropped = 0u64;
+    // Block on each fanned packet; the iterator ends when the channel closes
+    // (end-of-program), consuming `rx` so it is dropped here.
+    for packet in rx {
+        delivered += 1;
+        let Some(bytes) = packet.payload() else {
+            continue;
+        };
+        let (media, rtp_timestamp) = match packet.kind() {
+            StreamKind::Video => {
+                let ts =
+                    multiview_core::time::rescale(packet.pts().unwrap_or(0), time_base, video_rtp);
+                (EgressMedia::Video, u32::try_from(ts.max(0)).unwrap_or(0))
+            }
+            StreamKind::Audio => {
+                // Audio packets carry their PTS in the audio encoder time-base
+                // (1/sample_rate); it is already the 48 kHz Opus RTP clock unit, so
+                // the rescale is identity — kept explicit for the timeline contract.
+                let ts =
+                    multiview_core::time::rescale(packet.pts().unwrap_or(0), audio_rtp, audio_rtp);
+                (EgressMedia::Audio, u32::try_from(ts.max(0)).unwrap_or(0))
+            }
+            // A future elementary-stream kind is not carried over WebRTC.
+            _ => continue,
+        };
+        let sample = EgressSample {
+            media,
+            rtp_timestamp,
+            keyframe: matches!(packet.kind(), StreamKind::Video) && packet.is_keyframe(),
+            data: bytes.to_vec(),
+        };
+        if sink.push(sample) {
+            dropped = dropped.saturating_add(1);
+        }
+    }
+    // End-of-program: close the feed so the sessions tear down cleanly.
+    sink.close();
+    if dropped > 0 {
+        tracing::debug!(
+            output = label,
+            dropped,
+            "webrtc egress dropped (slow/absent consumers)"
+        );
+    }
+    SinkRunOutcome {
+        line: format!("{label}: {delivered} packet(s) fanned to WebRTC egress"),
+        playlist: None,
+        frames: delivered,
     }
 }
 
@@ -5078,6 +5211,10 @@ fn start_display_audio(
 fn build_outputs(
     outputs: &[Output],
     epoch: &multiview_output::SharedEpoch,
+    #[cfg(feature = "webrtc-native")] egress_sinks: &std::collections::HashMap<
+        String,
+        multiview_webrtc::egress::EgressSink,
+    >,
 ) -> Result<BuiltOutputs, PipelineError> {
     // A display output in a non-display-kms build is a configuration the
     // binary cannot honour: fail the build clearly, never skip (DEV-B1).
@@ -5140,6 +5277,31 @@ fn build_outputs(
                     url: url.clone(),
                 });
             }
+            // WebRTC program outputs (ADR-0049): a mux-free fan-out sink that
+            // re-stamps the encode-once program packets into the output's bounded
+            // drop-oldest egress feed (invariant #7). The WHEP-serve driver /
+            // whip_push client (wired in the run path) drains the paired feed and
+            // packetizes per session. Under `webrtc-native` only; without the
+            // feature these are honestly skipped (no native transport linked).
+            #[cfg(feature = "webrtc-native")]
+            Output::Webrtc { .. } | Output::WhipPush { .. } => {
+                let id = output.id();
+                if let Some(sink) = egress_sinks.get(&id) {
+                    let label = match output {
+                        Output::WhipPush { .. } => format!("whip_push {id}"),
+                        _ => format!("webrtc {id}"),
+                    };
+                    runnable.push(RunnableOutput::WebRtc {
+                        sink: sink.clone(),
+                        label,
+                    });
+                } else {
+                    tracing::warn!(
+                        output = %id,
+                        "webrtc/whip_push output has no registered egress feed; skipping"
+                    );
+                }
+            }
             Output::RtspServer { .. } => {
                 tracing::warn!(
                     "rtsp_server output is not implemented (an RTSP server is its own \
@@ -5187,9 +5349,11 @@ fn maybe_prepend_program_ts(mut runnable: Vec<RunnableOutput>, live: bool) -> Ve
         RunnableOutput::Hls { playlist_path, .. } => {
             Some(playlist_path.with_file_name("program.ts"))
         }
-        // A push has no on-disk directory to derive a program file from; only an
-        // HLS output anchors the self-contained `program.ts`.
+        // A push / WebRTC output has no on-disk directory to derive a program
+        // file from; only an HLS output anchors the self-contained `program.ts`.
         RunnableOutput::File { .. } | RunnableOutput::Push { .. } => None,
+        #[cfg(feature = "webrtc-native")]
+        RunnableOutput::WebRtc { .. } => None,
     });
     if let Some(path) = file_path {
         runnable.insert(

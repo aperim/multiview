@@ -68,6 +68,16 @@ multiview-preview = { workspace = true }
 # link it and stay GPU/native-free; `cargo deny` scans the default build only
 # (`all-features = false`), so the str0m closure never enters the deny graph.
 multiview-webrtc = { workspace = true, optional = true }
+# The `whip_push` output's HTTP signalling (ADR-0049 §5.2): the WHIP `POST`
+# offer->answer against the remote origin (Bearer, https-only 307/308 redirects).
+# OPTIONAL, pulled in ONLY by `webrtc-native`; pinned to the `rustls-tls` backend
+# (NEVER OpenSSL/native-tls) so the dependency graph stays native-lib-free,
+# mirroring the control crate's reqwest posture. `cargo deny` runs with
+# all-features=false so this off-by-default dep is not in the scanned default graph.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "blocking",
+], optional = true }
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 thiserror = { workspace = true }
@@ -213,6 +223,7 @@ webrtc-native = [
     "webrtc",
     "dep:multiview-webrtc",
     "multiview-webrtc/native",
+    "dep:reqwest",
     "ffmpeg",
 ]
 

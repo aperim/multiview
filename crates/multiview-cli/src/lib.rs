@@ -155,8 +155,18 @@ pub mod webrtc_ingest;
 /// Shared `[webrtc]` config → `multiview_webrtc::config::EndpointConfig` mapping
 /// (ADR-0048 §1/§9): the dual-stack UDP port, advertised host candidates, session
 /// caps, CORS, and the STUN/TURN ICE servers (incl. the in-driver TURN client's
-/// credentials, ADR-0048 §5.1). Used by BOTH the WHIP ingest wiring
-/// ([`webrtc_ingest`]) and the WHEP egress preview wiring ([`whep`]) so the
-/// ICE/TURN mapping is defined once, never duplicated. Behind `webrtc-native`.
+/// credentials, ADR-0048 §5.1). Used by the WHIP ingest wiring
+/// ([`webrtc_ingest`]), the WHEP egress preview wiring ([`whep`]), and the
+/// WHEP-serve / `whip_push` output wiring ([`webrtc_outputs`]) so the ICE/TURN
+/// mapping is defined once, never duplicated. Behind `webrtc-native`.
 #[cfg(feature = "webrtc-native")]
 pub mod webrtc_endpoint;
+
+/// WHEP-serve + WHIP-push **output** wiring (ADR-0049): the program is encoded
+/// once (invariant #7) and a `webrtc` output WHEP-serves it to N browser viewers
+/// while a `whip_push` output publishes it to a remote WHIP ingest, both fed the
+/// same coded packets over a bounded drop-oldest egress feed (invariants #1/#10).
+/// Behind the off-by-default `webrtc-native` feature (the str0m endpoint + the
+/// reqwest WHIP signaller).
+#[cfg(feature = "webrtc-native")]
+pub mod webrtc_outputs;

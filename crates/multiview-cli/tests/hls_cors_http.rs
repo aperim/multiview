@@ -149,6 +149,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         multiview_control::no_preview(),
         None, // whep
         None, // whip
+        None, // whep_output
         None, // licence
         None, // mesh
         multiview_control::LiveApplyCaps::default(),

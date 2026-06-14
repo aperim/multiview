@@ -89,6 +89,14 @@ use tokio::task::JoinHandle;
 // transports, not a typo-similar pair; renaming either to satisfy the lint would
 // obscure the spec mapping.
 #[allow(clippy::similar_names)]
+// reason: this is a flat, linear control-plane wiring sequence — one documented
+// `if let Some(provider)` / `match` block per optional surface (WHEP preview, WHIP
+// ingest, WHEP-serve output, discovery, device pollers, licence, mesh). It crossed
+// the 100-line ceiling by 2 when the WebRTC ingest/preview/output providers were
+// each wired (#141/#143/#147). Extracting the blocks would only scatter the wiring
+// behind one-use helpers around the `#[cfg(feature = "discovery")]` rebind without
+// improving clarity; the length is inherent to the surface count, not complexity.
+#[allow(clippy::too_many_lines)]
 pub async fn bind_and_serve<F>(
     listen: &str,
     config: &MultiviewConfig,
@@ -101,6 +109,7 @@ pub async fn bind_and_serve<F>(
     // The WHIP ingest provider (ADR-T014). `None` keeps the default `NoWhip`
     // (every publish answers `503`; routes stay present + authz-enforced).
     whip: Option<multiview_control::SharedWhip>,
+    whep_output: Option<multiview_control::SharedWhepOutput>,
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
     live_apply: multiview_control::LiveApplyCaps,
@@ -202,6 +211,13 @@ where
     // default `NoWhip` answers `503` (routes stay present + authz-enforced).
     if let Some(whip) = whip {
         state = state.with_whip(whip);
+    }
+    // The WHEP-serve output provider (ADR-0049): when the binary wired the native
+    // endpoint, install it so a `POST /api/v1/whep/{output}` serves the real
+    // encoded program to a browser viewer; otherwise the default `NoWhepOutput`
+    // answers `503` (routes stay present + authz-enforced).
+    if let Some(whep_output) = whep_output {
+        state = state.with_whep_output(whep_output);
     }
 
     // Install the real mDNS browser when the `discovery` feature is built, so
@@ -2605,6 +2621,7 @@ input_id = "in_b"
             commands,
             multiview_control::no_preview(),
             // whep: the default (no native transport) — a pure build path.
+            None,
             None,
             None,
             None,
