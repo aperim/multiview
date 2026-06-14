@@ -178,6 +178,259 @@ pub struct RtspOptions {
     pub transport: String,
 }
 
+/// RIST (Reliable Internet Stream Transport, VSF `TR-06`) profile selector.
+///
+/// Maps to the `FFmpeg` `librist` protocol's `rist_profile` `AVOption`
+/// (`simple`/`main`/`advanced`). `main` is `librist`/`FFmpeg`'s own default and
+/// is the schema default. `advanced` (`TR-06-3` `EAP-SRP` auth) is accepted in
+/// the schema but is a Tier-1/2 direct-FFI feature — the Tier-0 `FFmpeg` path
+/// exposes only `PSK-AES`, so an `advanced`-with-auth deployment is a later
+/// slice (ADR-0095 §2/§6); the token round-trips losslessly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RistProfile {
+    /// Simple Profile (`TR-06-1`): `RTP`/`UDP` + `RTCP` `NACK` `ARQ`. Bonding
+    /// lives here in the protocol but is unreachable via `FFmpeg`'s single-peer
+    /// path (Tier-2).
+    Simple,
+    /// Main Profile (`TR-06-2`): `GRE` tunnel + `PSK`/`DTLS` encryption +
+    /// multiplexing. The default (matches `librist`/`FFmpeg`).
+    #[default]
+    Main,
+    /// Advanced Profile (`TR-06-3`): `EAP-SHA256-SRP6a` auth. Tier-1/2 only.
+    Advanced,
+}
+
+impl RistProfile {
+    /// The `FFmpeg` `librist` `rist_profile=` numeric token (`0`/`1`/`2`).
+    #[must_use]
+    pub const fn as_ffmpeg_token(self) -> &'static str {
+        match self {
+            Self::Simple => "0",
+            Self::Main => "1",
+            Self::Advanced => "2",
+        }
+    }
+}
+
+/// `AES` key length for RIST pre-shared-key (`PSK`) encryption.
+///
+/// Maps to the `FFmpeg` `librist` `encryption=128|256` `AVOption` — the one
+/// encryption mode the `FFmpeg` protocol exposes (ADR-0095 §2). `DTLS` /
+/// `EAP-SRP` are Tier-1/2 direct-FFI features, not offered here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RistAesBits {
+    /// `AES-128`.
+    Aes128,
+    /// `AES-256`.
+    Aes256,
+}
+
+impl RistAesBits {
+    /// The `AES` key length in bits (`128` / `256`) — the `FFmpeg` `encryption=`
+    /// value.
+    #[must_use]
+    pub const fn bits(self) -> u16 {
+        match self {
+            Self::Aes128 => 128,
+            Self::Aes256 => 256,
+        }
+    }
+}
+
+/// RIST pre-shared-key encryption: the `AES` key length plus a **secret-manager
+/// reference** (never a plaintext key).
+///
+/// The passphrase is held as a [`secret_ref`](RistEncryption::secret_ref)
+/// resolved at run time (the [`SourceAuth`] pattern); it never lives in the
+/// config file or in logs. The plaintext only ever materializes in the
+/// in-memory `rist://…?secret=…` `AVIO` URL passed to libav.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RistEncryption {
+    /// `AES` key length (`aes128` / `aes256`). Maps to `FFmpeg` `encryption`.
+    pub aes_bits: RistAesBits,
+    /// Reference to the pre-shared passphrase (e.g. `op://Servers/feed/rist-psk`
+    /// or `env:RIST_PSK`). Resolved at run time; NEVER stored or logged in
+    /// plaintext. Maps (resolved) to `FFmpeg` `secret`.
+    pub secret_ref: String,
+}
+
+/// A bonding/load-sharing peer endpoint (Tier-2, multi-ISP).
+///
+/// **Tier-0 does not implement bonding** — `FFmpeg`'s `librist` protocol calls
+/// `rist_peer_create()` exactly once, so a non-empty bonding list is rejected at
+/// validate time with a clear error on a Tier-0 build (ADR-0095 §4), never
+/// silently single-linked. The field carries the seam so a future Tier-2
+/// direct-FFI build is a clean addition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RistPeer {
+    /// The peer's `rist://host:port` URL (IPv6-first, bracketed literals).
+    pub url: String,
+}
+
+/// RIST-specific connection options (input or output), typed rather than a raw
+/// opaque `rist://?…` query (ADR-0095 §2, mirroring the multicast/SRT
+/// typed-config precedent).
+///
+/// All fields are optional with serde `skip_serializing_if`. Lowered to the
+/// `rist://…?rist_profile=…&buffer_size=…&encryption=…&secret=…&pkt_size=…`
+/// `AVIO` URL for the Tier-0 `FFmpeg` path (the lowering lives in
+/// `multiview-input`, where the resolved secret is injected).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RistOptions {
+    /// RIST profile. Absent ⇒ `FFmpeg`'s default (`main`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<RistProfile>,
+    /// Receiver recovery/jitter buffer depth in milliseconds (the `ARQ` window).
+    /// Absent / `0` ⇒ `librist` auto (`RTT`-Echo derived). Maps to `buffer_size`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_ms: Option<u32>,
+    /// `MPEG-TS`-aligned packet size (default 1316 = 7×188). Maps to `pkt_size`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkt_size: Option<u16>,
+    /// Pre-shared-key `AES` encryption (Main Profile). Cipher + a secret
+    /// **reference** only — never a plaintext key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<RistEncryption>,
+    /// Tier-2 only: bonding/load-sharing peer endpoints (multi-ISP). Empty ⇒
+    /// single link. A non-empty list is **rejected** on a Tier-0 build (the
+    /// `FFmpeg` protocol is single-peer) — honest capability reporting, never a
+    /// silent single-link (ADR-0095 §4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bonding: Vec<RistPeer>,
+}
+
+/// Errors raised while lowering [`RistOptions`] to a `rist://…?…` `AVIO` URL.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RistUrlError {
+    /// A non-empty `bonding` list was configured against the Tier-0 `FFmpeg`
+    /// path, which is single-peer (ADR-0095 §4). Bonding needs the Tier-2
+    /// direct-FFI build.
+    #[error(
+        "rist bonding/load-sharing requires the `rist` direct-FFI build (Tier-2); the Tier-0 \
+         FFmpeg `rist://` path is single-link only"
+    )]
+    BondingUnsupported,
+    /// Encryption was configured but the caller supplied no resolved secret
+    /// (the `secret_ref` could not be resolved from the secret manager).
+    #[error("rist encryption is configured but the pre-shared key (secret_ref) was not resolved")]
+    UnresolvedSecret,
+}
+
+/// Lower a base `rist://host:port` URL + typed [`RistOptions`] + a
+/// **resolved** pre-shared key into the `rist://…?…` `AVIO` URL the libav
+/// `librist` protocol opens (ADR-0095 Tier-0).
+///
+/// The lowered query carries the `FFmpeg` `librist` option names: `rist_profile`
+/// (`0`/`1`/`2`), `buffer_size` (ms), `pkt_size`, `encryption` (`128`/`256`),
+/// and `secret`. Options absent from [`RistOptions`] are omitted so `FFmpeg`'s
+/// own defaults apply. When the base URL already carries a query the lowered
+/// options are appended with `&`.
+///
+/// `resolved_secret` is the plaintext passphrase the **caller** resolved from
+/// [`RistEncryption::secret_ref`] (the config never holds it). When `redact` is
+/// `true` the `secret=` value is replaced by `***` for logging — the plaintext
+/// PSK never reaches a redacted (loggable) URL.
+///
+/// # Errors
+///
+/// - [`RistUrlError::BondingUnsupported`] when `opts.bonding` is non-empty
+///   (Tier-0 is single-link).
+/// - [`RistUrlError::UnresolvedSecret`] when `opts.encryption` is set but
+///   `resolved_secret` is `None`.
+pub fn lower_rist_url(
+    base_url: &str,
+    opts: &RistOptions,
+    resolved_secret: Option<&str>,
+    redact: bool,
+) -> Result<String, RistUrlError> {
+    if !opts.bonding.is_empty() {
+        return Err(RistUrlError::BondingUnsupported);
+    }
+    let mut params: Vec<(&str, String)> = Vec::new();
+    if let Some(profile) = opts.profile {
+        params.push(("rist_profile", profile.as_ffmpeg_token().to_owned()));
+    }
+    if let Some(buffer_ms) = opts.buffer_ms {
+        params.push(("buffer_size", buffer_ms.to_string()));
+    }
+    if let Some(pkt_size) = opts.pkt_size {
+        params.push(("pkt_size", pkt_size.to_string()));
+    }
+    if let Some(enc) = &opts.encryption {
+        params.push(("encryption", enc.aes_bits.bits().to_string()));
+        let Some(secret) = resolved_secret else {
+            return Err(RistUrlError::UnresolvedSecret);
+        };
+        let value = if redact {
+            "***".to_owned()
+        } else {
+            rist_percent_encode(secret)
+        };
+        params.push(("secret", value));
+    }
+    if params.is_empty() {
+        return Ok(base_url.to_owned());
+    }
+    let query = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    // Append to an existing query with `&`, otherwise open one with `?`.
+    let sep = if base_url.contains('?') { '&' } else { '?' };
+    Ok(format!("{base_url}{sep}{query}"))
+}
+
+/// Percent-encode the characters that would break a `rist://` URL query value
+/// (`&`, `=`, `?`, `#`, space, and `%` itself) — the SRT precedent's encoder.
+fn rist_percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'&' | b'=' | b'?' | b'#' | b'%' | b' ' => {
+                out.push('%');
+                out.push(rist_hex_digit(byte >> 4));
+                out.push(rist_hex_digit(byte & 0x0F));
+            }
+            other => match char::from_u32(u32::from(other)) {
+                Some(c) => out.push(c),
+                None => out.push('?'),
+            },
+        }
+    }
+    out
+}
+
+/// Map a nibble (`0..=15`) to its uppercase hex digit.
+const fn rist_hex_digit(nibble: u8) -> char {
+    match nibble {
+        0 => '0',
+        1 => '1',
+        2 => '2',
+        3 => '3',
+        4 => '4',
+        5 => '5',
+        6 => '6',
+        7 => '7',
+        8 => '8',
+        9 => '9',
+        10 => 'A',
+        11 => 'B',
+        12 => 'C',
+        13 => 'D',
+        14 => 'E',
+        _ => 'F',
+    }
+}
+
 /// Reference-only credential pointer for a source (never plaintext).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -326,6 +579,19 @@ pub enum SourceKind {
     Srt {
         /// Source URL.
         url: String,
+    },
+    /// RIST (Reliable Internet Stream Transport, VSF `TR-06`) input — the
+    /// open-standard sibling of SRT (ADR-0095). Single-link Simple/Main Profile
+    /// with `PSK-AES` rides `FFmpeg`'s `librist` protocol (Tier-0); the typed
+    /// [`RistOptions`] lower to the `rist://…?…` `AVIO` URL.
+    Rist {
+        /// Source URL (`rist://[::]:port` listen, or a peer `rist://host:port`).
+        /// IPv6-first: bracket IPv6 literals.
+        url: String,
+        /// Optional typed RIST options (profile, buffer, pkt size, PSK
+        /// encryption, bonding peers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rist: Option<RistOptions>,
     },
     /// RTMP input.
     Rtmp {
@@ -855,6 +1121,30 @@ pub enum Output {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<OutputAudio>,
     },
+    /// RIST push — the open-standard sibling of the SRT push (ADR-0095). A
+    /// `PushProtocol::Rist` (`mpegts` muxer) consuming the **same** encoded
+    /// packets as every other push sink (invariant #7); the typed [`RistOptions`]
+    /// lower to the `rist://…?…` `AVIO` URL the libav muxer opens.
+    Rist {
+        /// Stable operator id (ADR-0034 / RT-12). Absent ⇒ derived from
+        /// [`Output::label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Destination URL (`rist://host:port`, IPv6-first bracketed).
+        url: String,
+        /// Video codec.
+        codec: String,
+        /// Operator pin for this output's **encode** stage to a stable GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu_pin: Option<DevicePin>,
+        /// Per-output audio selection. Absent ⇒ the mixed program bus only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<OutputAudio>,
+        /// Optional typed RIST options (profile, buffer, pkt size, PSK
+        /// encryption, bonding peers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rist: Option<RistOptions>,
+    },
     /// WebRTC program output: serves the program to N browser viewers over
     /// WHEP (ADR-0049).
     ///
@@ -1103,6 +1393,7 @@ impl Output {
             | Output::Ndi { id, .. }
             | Output::Rtmp { id, .. }
             | Output::Srt { id, .. }
+            | Output::Rist { id, .. }
             | Output::Webrtc { id, .. }
             | Output::WhipPush { id, .. }
             | Output::Aes67 { id, .. }
@@ -1136,6 +1427,7 @@ impl Output {
             | Output::Ndi { gpu_pin, .. }
             | Output::Rtmp { gpu_pin, .. }
             | Output::Srt { gpu_pin, .. }
+            | Output::Rist { gpu_pin, .. }
             // The WebRTC kinds never encode (invariant #7): their pin targets
             // the encode stage of the rendition they consume (ADR-0049).
             | Output::Webrtc { gpu_pin, .. }
@@ -1160,6 +1452,7 @@ impl Output {
             | Output::Ndi { audio, .. }
             | Output::Rtmp { audio, .. }
             | Output::Srt { audio, .. }
+            | Output::Rist { audio, .. }
             | Output::Webrtc { audio, .. }
             | Output::WhipPush { audio, .. }
             | Output::Aes67 { audio, .. }
@@ -1185,10 +1478,11 @@ impl Output {
     #[must_use]
     pub const fn audio_capability(&self) -> OutputAudioCapability {
         match self {
-            // RTSP: N simultaneous `m=audio` subsessions. SRT carries MPEG-TS ⇒
-            // N PIDs, also simultaneous (the receiver-dependent first-PID-only
-            // behaviour is a delivery caveat, not a config-time capacity cap).
-            Output::RtspServer { .. } | Output::Srt { .. } => {
+            // RTSP: N simultaneous `m=audio` subsessions. SRT and RIST both carry
+            // an MPEG-TS payload ⇒ N PIDs, also simultaneous (the
+            // receiver-dependent first-PID-only behaviour is a delivery caveat,
+            // not a config-time capacity cap).
+            Output::RtspServer { .. } | Output::Srt { .. } | Output::Rist { .. } => {
                 OutputAudioCapability::new(TrackDelivery::Simultaneous, TrackCapacity::Unlimited)
             }
             // HLS/LL-HLS: N renditions, but the player plays one at a time.
@@ -1238,6 +1532,7 @@ impl Output {
             Output::Ndi { name, .. } => format!("ndi {name}"),
             Output::Rtmp { url, .. } => format!("rtmp {url}"),
             Output::Srt { url, .. } => format!("srt {url}"),
+            Output::Rist { url, .. } => format!("rist {url}"),
             Output::WhipPush { url, .. } => format!("whip_push {url}"),
             // WebRTC (WHEP serve) and AES67 carry an explicit operator label
             // (they have no mount/path/url to derive one from); use it verbatim.

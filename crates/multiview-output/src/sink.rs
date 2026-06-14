@@ -1037,6 +1037,10 @@ pub enum PushProtocol {
     Rtmp,
     /// SRT push (`srt://…`) — an MPEG-TS payload over the SRT transport.
     Srt,
+    /// RIST push (`rist://…`) — an MPEG-TS payload over the RIST transport
+    /// (VSF TR-06; the open-standard sibling of SRT, ADR-0095). Fanned the
+    /// **same** encoded packets as every other push sink (invariant #7).
+    Rist,
     /// RTSP announce/record (`rtsp://…`).
     Rtsp,
     /// Raw MPEG-TS over UDP (`udp://…`).
@@ -1049,9 +1053,9 @@ impl PushProtocol {
     pub const fn muxer_name(self) -> &'static str {
         match self {
             Self::Rtmp => "flv",
-            // SRT and plain UDP both carry an MPEG-TS payload; the URL scheme
-            // selects the transport, the muxer is the container.
-            Self::Srt | Self::UdpTs => "mpegts",
+            // SRT, RIST, and plain UDP all carry an MPEG-TS payload; the URL
+            // scheme selects the transport, the muxer is the container.
+            Self::Srt | Self::Rist | Self::UdpTs => "mpegts",
             Self::Rtsp => "rtsp",
         }
     }

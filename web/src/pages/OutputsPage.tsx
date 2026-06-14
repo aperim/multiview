@@ -254,6 +254,20 @@ function OutputKindFields({
           }}
         />
       );
+    case 'rist':
+      return (
+        <FormField
+          id="output-url"
+          label={t`Destination URL`}
+          value={form.url}
+          required
+          placeholder="rist://[2001:db8::1]:5000"
+          error={errors.url}
+          onChange={(next): void => {
+            setForm({ ...form, url: next });
+          }}
+        />
+      );
     case 'display':
       return <DisplayKindFields form={form} setForm={setForm} errors={errors} />;
   }
