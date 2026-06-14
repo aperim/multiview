@@ -56,7 +56,7 @@ use multiview_hal::load::{DeviceId, DeviceLoad, Vendor};
 use multiview_hal::select::{GpuCandidate, Pins, PipelineDemand, StageCaps};
 use multiview_hal::{Capability, Resolution, Stage};
 use multiview_output::fanout::{
-    EncodedPacket, PacketKind, PacketRouter, PacketSink, RenditionEncoder, RenditionId,
+    EncodedPacket, PacketKind, PacketSink, RenditionEncoder, RenditionId,
 };
 use multiview_core::traits::BackendKind;
 use multiview_core::pixel::PixelFormat;
@@ -404,12 +404,7 @@ fn validate_admission_deny_rolls_back_before_touching_anything() {
     // (which already reflects OLD's footprint), so VALIDATE rejects the
     // migration BEFORE any resource is touched.
     let candidates = vec![candidate("GPU-a", 0), candidate("GPU-b", 1)];
-    let plan = MigrationPlan {
-        from: nv("GPU-a", 0),
-        to: nv("GPU-b", 1),
-        gain: 0.2,
-        idr_aligned: true,
-    };
+    let plan = MigrationPlan::new(nv("GPU-a", 0), nv("GPU-b", 1), 0.2);
     // GPU-b (the target) is itself hot (over ceiling) — not admissible.
     let loads = vec![vram_pct("GPU-a", 0, 95), vram_pct("GPU-b", 1, 96)];
     let outcome = multiview_engine::migration::validate_migration(
@@ -428,12 +423,7 @@ fn validate_admission_deny_rolls_back_before_touching_anything() {
 #[test]
 fn validate_admits_a_target_with_headroom() {
     let candidates = vec![candidate("GPU-a", 0), candidate("GPU-b", 1)];
-    let plan = MigrationPlan {
-        from: nv("GPU-a", 0),
-        to: nv("GPU-b", 1),
-        gain: 0.5,
-        idr_aligned: true,
-    };
+    let plan = MigrationPlan::new(nv("GPU-a", 0), nv("GPU-b", 1), 0.5);
     let loads = vec![vram_pct("GPU-a", 0, 95), vram_pct("GPU-b", 1, 10)];
     let outcome = multiview_engine::migration::validate_migration(
         &candidates,
@@ -470,8 +460,9 @@ async fn placement_loop_anti_storm_caps_migrations() {
 
     let snapshot = Arc::new(LoadSnapshot::new());
     let crosspoint = OutputCrosspoint::new();
-    let mut coord: PlacementCoordinator =
-        PlacementCoordinator::new(controller, Arc::clone(&snapshot), crosspoint);
+    let registry = multiview_telemetry::metrics::MetricsRegistry::new();
+    let mut coord =
+        PlacementCoordinator::new(controller, Arc::clone(&snapshot), crosspoint, &registry);
 
     // A run of "GPU-a hot, GPU-b idle" ticks. Budget=1 allows exactly one
     // migration touching each GPU; the rest are AntiStorm sheds.
@@ -479,10 +470,9 @@ async fn placement_loop_anti_storm_caps_migrations() {
     let mut migrations = 0_u64;
     for _ in 0..40 {
         snapshot.publish(hot.clone());
-        match coord.observe_only() {
-            PlacementProposal::Migrate(_) => migrations += 1,
-            PlacementProposal::Split(_) | PlacementProposal::Shed { .. } | PlacementProposal::Hold => {}
-            _ => {}
+        // Hold / Shed / Split / any future variant is not a migration.
+        if let PlacementProposal::Migrate(_) = coord.observe_only() {
+            migrations += 1;
         }
     }
     assert!(
