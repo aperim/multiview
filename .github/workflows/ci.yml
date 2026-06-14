@@ -225,6 +225,18 @@ jobs:
           # multiview-hal off-by-default features
           - crate: multiview-hal
             feature: i915-pmu
+          # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
+          # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
+          # broke `webrtc-native` silently on main; these legs gate it going
+          # forward. multiview-webrtc owns the Session/egress API; multiview-cli's
+          # `webrtc-native` wires it into the binary; multiview-preview's `webrtc`
+          # is the preview-tap path.
+          - crate: multiview-webrtc
+            feature: native
+          - crate: multiview-cli
+            feature: webrtc-native
+          - crate: multiview-preview
+            feature: webrtc
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
