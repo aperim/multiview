@@ -102,9 +102,7 @@ fn whep_serve_sample_write_reaches_the_viewer() {
     // (invariant #3 — derived from the program tick, never input PTS).
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0xABu8, 1200));
-    server
-        .write_video_sample(&au, true, 90_000, now)
-        .unwrap();
+    server.write_video_sample(&au, true, 90_000, now).unwrap();
 
     assert!(
         pump_until(
@@ -182,9 +180,7 @@ fn whip_push_offer_answer_and_send_reaches_the_remote() {
 
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0xCDu8, 1200));
-    client
-        .write_video_sample(&au, true, 90_000, now)
-        .unwrap();
+    client.write_video_sample(&au, true, 90_000, now).unwrap();
 
     assert!(
         pump_until(
@@ -235,12 +231,8 @@ fn one_access_unit_serves_two_viewers() {
     // The SAME access unit bytes are written into each viewer's session.
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0x77u8, 1000));
-    server1
-        .write_video_sample(&au, true, 90_000, now)
-        .unwrap();
-    server2
-        .write_video_sample(&au, true, 90_000, now)
-        .unwrap();
+    server1.write_video_sample(&au, true, 90_000, now).unwrap();
+    server2.write_video_sample(&au, true, 90_000, now).unwrap();
 
     assert!(pump_until(
         &mut server1,

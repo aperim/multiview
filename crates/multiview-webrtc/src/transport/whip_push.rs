@@ -329,8 +329,7 @@ impl WhipPushClient {
                         );
                     }
                     EgressMedia::Audio => {
-                        let _ =
-                            session.write_audio_sample(&sample.data, sample.rtp_timestamp, now);
+                        let _ = session.write_audio_sample(&sample.data, sample.rtp_timestamp, now);
                     }
                 }
             }
