@@ -10350,6 +10350,71 @@
           },
           {
             "type": "object",
+            "description": "RIST push — the open-standard sibling of the SRT push (ADR-0095).",
+            "required": [
+              "url",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rist"
+                ]
+              },
+              "rist": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RistOptionsDoc",
+                    "description": "Optional typed RIST options (profile, buffer, PSK encryption, …)."
+                  }
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Destination URL (`rist://host:port`)."
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "AES67 / ST 2110-30 audio-over-IP send (raw PCM multicast, no encode).",
             "required": [
               "label",
@@ -11099,6 +11164,107 @@
         "format": "int64",
         "description": "A monotonic, per-target revision number (starts at 1).",
         "minimum": 0
+      },
+      "RistAesBitsDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::RistAesBits` (RIST PSK key length).",
+        "enum": [
+          "aes128",
+          "aes256"
+        ]
+      },
+      "RistEncryptionDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RistEncryption` (PSK; secret by\nreference only — never a plaintext key).",
+        "required": [
+          "aes_bits",
+          "secret_ref"
+        ],
+        "properties": {
+          "aes_bits": {
+            "$ref": "#/components/schemas/RistAesBitsDoc",
+            "description": "`AES` key length (`aes128` / `aes256`)."
+          },
+          "secret_ref": {
+            "type": "string",
+            "description": "Reference to the pre-shared passphrase (`op://…` / `env:VAR`); resolved\nat run time, never stored or logged in plaintext."
+          }
+        }
+      },
+      "RistOptionsDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RistOptions` (typed RIST connection\noptions; lowered to the `rist://…?…` `AVIO` URL on the Tier-0 `FFmpeg` path).",
+        "properties": {
+          "bonding": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RistPeerDoc"
+            },
+            "description": "Tier-2 only: bonding/load-sharing peers (rejected on the Tier-0 build)."
+          },
+          "buffer_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Recovery/jitter buffer depth in milliseconds (the `ARQ` window;\n`0`/absent ⇒ `librist` auto).",
+            "minimum": 0
+          },
+          "encryption": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RistEncryptionDoc",
+                "description": "Pre-shared-key `AES` encryption (Main Profile)."
+              }
+            ]
+          },
+          "pkt_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`MPEG-TS`-aligned packet size (default 1316).",
+            "minimum": 0
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RistProfileDoc",
+                "description": "RIST profile (absent ⇒ `main`)."
+              }
+            ]
+          }
+        }
+      },
+      "RistPeerDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RistPeer` (Tier-2 bonding endpoint).",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The peer's `rist://host:port` URL."
+          }
+        }
+      },
+      "RistProfileDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::RistProfile` (VSF `TR-06`).",
+        "enum": [
+          "simple",
+          "main",
+          "advanced"
+        ]
       },
       "Role": {
         "type": "string",
@@ -11925,6 +12091,37 @@
               "url": {
                 "type": "string",
                 "description": "Source URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "RIST (VSF `TR-06`) input — the open-standard sibling of SRT (ADR-0095).",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rist"
+                ]
+              },
+              "rist": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RistOptionsDoc",
+                    "description": "Optional typed RIST options (profile, buffer, PSK encryption, …)."
+                  }
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Source URL (`rist://[::]:port` or peer host)."
               }
             }
           },

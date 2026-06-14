@@ -700,6 +700,74 @@ pub struct RtspOptionsDoc {
     pub transport: String,
 }
 
+/// `OpenAPI` mirror of `multiview_config::RistProfile` (VSF `TR-06`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RistProfileDoc {
+    /// Simple Profile (`TR-06-1`).
+    Simple,
+    /// Main Profile (`TR-06-2`) — the default.
+    #[default]
+    Main,
+    /// Advanced Profile (`TR-06-3`) — Tier-1/2 only.
+    Advanced,
+}
+
+/// `OpenAPI` mirror of `multiview_config::RistAesBits` (RIST PSK key length).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RistAesBitsDoc {
+    /// `AES-128`.
+    Aes128,
+    /// `AES-256`.
+    Aes256,
+}
+
+/// `OpenAPI` mirror of `multiview_config::RistEncryption` (PSK; secret by
+/// reference only — never a plaintext key).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct RistEncryptionDoc {
+    /// `AES` key length (`aes128` / `aes256`).
+    pub aes_bits: RistAesBitsDoc,
+    /// Reference to the pre-shared passphrase (`op://…` / `env:VAR`); resolved
+    /// at run time, never stored or logged in plaintext.
+    pub secret_ref: String,
+}
+
+/// `OpenAPI` mirror of `multiview_config::RistPeer` (Tier-2 bonding endpoint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct RistPeerDoc {
+    /// The peer's `rist://host:port` URL.
+    pub url: String,
+}
+
+/// `OpenAPI` mirror of `multiview_config::RistOptions` (typed RIST connection
+/// options; lowered to the `rist://…?…` `AVIO` URL on the Tier-0 `FFmpeg` path).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[non_exhaustive]
+pub struct RistOptionsDoc {
+    /// RIST profile (absent ⇒ `main`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<RistProfileDoc>,
+    /// Recovery/jitter buffer depth in milliseconds (the `ARQ` window;
+    /// `0`/absent ⇒ `librist` auto).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_ms: Option<u32>,
+    /// `MPEG-TS`-aligned packet size (default 1316).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkt_size: Option<u16>,
+    /// Pre-shared-key `AES` encryption (Main Profile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<RistEncryptionDoc>,
+    /// Tier-2 only: bonding/load-sharing peers (rejected on the Tier-0 build).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bonding: Vec<RistPeerDoc>,
+}
+
 /// `OpenAPI` mirror of `multiview_config::ClockFaceConfig`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -893,6 +961,14 @@ pub enum SourceKindDoc {
     Srt {
         /// Source URL.
         url: String,
+    },
+    /// RIST (VSF `TR-06`) input — the open-standard sibling of SRT (ADR-0095).
+    Rist {
+        /// Source URL (`rist://[::]:port` or peer host).
+        url: String,
+        /// Optional typed RIST options (profile, buffer, PSK encryption, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rist: Option<RistOptionsDoc>,
     },
     /// RTMP input.
     Rtmp {
@@ -1193,6 +1269,25 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+    },
+    /// RIST push — the open-standard sibling of the SRT push (ADR-0095).
+    Rist {
+        /// Stable operator id; may be omitted.
+        #[serde(default)]
+        id: Option<String>,
+        /// Destination URL (`rist://host:port`).
+        url: String,
+        /// Video codec.
+        codec: String,
+        /// Encode-stage GPU pin.
+        #[serde(default)]
+        gpu_pin: Option<DevicePinDoc>,
+        /// Per-output audio selection.
+        #[serde(default)]
+        audio: Option<OutputAudioDoc>,
+        /// Optional typed RIST options (profile, buffer, PSK encryption, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rist: Option<RistOptionsDoc>,
     },
     /// AES67 / ST 2110-30 audio-over-IP send (raw PCM multicast, no encode).
     Aes67 {

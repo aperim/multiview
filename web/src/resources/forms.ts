@@ -46,6 +46,7 @@ export type FormErrorCode =
   | 'url-invalid'
   | 'scheme-rtsp'
   | 'scheme-srt'
+  | 'scheme-rist'
   | 'scheme-rtmp'
   | 'scheme-http'
   | 'hex-color'
@@ -557,6 +558,7 @@ export function sourceKindHasUrl(kind: SourceFormKind): boolean {
     kind === 'youtube' ||
     kind === 'ts' ||
     kind === 'srt' ||
+    kind === 'rist' ||
     kind === 'rtmp'
   );
 }
@@ -671,10 +673,14 @@ export function sourceFormToBody(form: SourceFormState): Record<string, unknown>
         body.rtsp = { transport: form.rtspTransport };
       }
       break;
+    // The plain URL kinds. RIST is a URL kind like SRT; its optional typed
+    // `rist` options block (when present in the stored body) round-trips through
+    // `form.extra` until a dedicated options sub-form lands (ADR-0095).
     case 'hls':
     case 'youtube':
     case 'ts':
     case 'srt':
+    case 'rist':
     case 'rtmp':
       body.url = form.url.trim();
       break;
@@ -749,6 +755,7 @@ export function parseSourceFormKind(tag: string | undefined): SourceFormKind | u
       'youtube',
       'ts',
       'srt',
+      'rist',
       'rtmp',
       'ndi',
       'file',
@@ -860,6 +867,13 @@ export function validateSourceForm(
     }
     case 'srt': {
       const code = urlErrorCode(form.url, ['srt'], 'scheme-srt');
+      if (code !== undefined) {
+        errors.url = code;
+      }
+      break;
+    }
+    case 'rist': {
+      const code = urlErrorCode(form.url, ['rist'], 'scheme-rist');
       if (code !== undefined) {
         errors.url = code;
       }
@@ -1079,6 +1093,9 @@ export const OUTPUT_RUNNABLE: Readonly<Record<OutputKind, OutputRunnability>> = 
   ndi: 'unbuilt',
   rtmp: 'runnable',
   srt: 'runnable',
+  // RIST runs only in a binary built with the off-by-default `rist` feature
+  // (a default build fails the run with a clear error, never a silent skip).
+  rist: 'requires-feature',
   display: 'requires-feature',
 };
 
@@ -1214,8 +1231,12 @@ export function outputFormToBody(form: OutputFormState): Record<string, unknown>
       }
       break;
     }
+    // The push URL kinds. RIST push is a URL kind like SRT; its optional typed
+    // `rist` options block round-trips through `form.extra` until a dedicated
+    // options sub-form lands (ADR-0095).
     case 'rtmp':
     case 'srt':
+    case 'rist':
       body.url = form.url.trim();
       body.codec = form.codec.trim();
       break;
@@ -1277,7 +1298,7 @@ export function parseOutputFormKind(tag: string | undefined): OutputKind | undef
   if (tag === 'll_hls') {
     return 'll-hls';
   }
-  return (['hls', 'ndi', 'rtmp', 'srt', 'display'] as const).find((k) => k === tag);
+  return (['hls', 'ndi', 'rtmp', 'srt', 'rist', 'display'] as const).find((k) => k === tag);
 }
 
 /**
@@ -1407,6 +1428,13 @@ export function validateOutputForm(
     }
     case 'srt': {
       const code = urlErrorCode(form.url, ['srt'], 'scheme-srt');
+      if (code !== undefined) {
+        errors.url = code;
+      }
+      break;
+    }
+    case 'rist': {
+      const code = urlErrorCode(form.url, ['rist'], 'scheme-rist');
       if (code !== undefined) {
         errors.url = code;
       }
