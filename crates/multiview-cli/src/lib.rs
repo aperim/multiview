@@ -175,3 +175,11 @@ pub mod webrtc_endpoint;
 /// reqwest WHIP signaller).
 #[cfg(feature = "webrtc-native")]
 pub mod webrtc_outputs;
+
+/// The **single-socket** WebRTC orchestration (ADR-0048 §4): binds ONE shared
+/// dual-stack UDP socket and adopts every WebRTC role onto it — preview WHEP, WHIP
+/// ingest, WHEP-serve outputs, and `whip_push` outputs — fixing the box-validation
+/// defect B where each role bound `webrtc.udp_port` independently and the 2nd/3rd
+/// bind hit `EADDRINUSE` and silently degraded. Behind `webrtc-native`.
+#[cfg(feature = "webrtc-native")]
+pub mod webrtc_unified;

@@ -31,19 +31,15 @@
 //! driver tasks never `.await` a peer and the engine never awaits them.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use multiview_config::{MultiviewConfig, Output};
 use multiview_control::{
     SharedWhepOutput, WhepOutputAnswer, WhepOutputAuth, WhepOutputProvider, WhepOutputReject,
 };
-use multiview_webrtc::config::EndpointConfig;
 use multiview_webrtc::egress::{egress_feed, EgressFeed, EgressSink};
 use multiview_webrtc::error::WebRtcError;
-use multiview_webrtc::transport::{
-    WhepServeEndpoint, WhepServeHandle, WhipPushAnswer, WhipPushClient, WhipSignaller,
-};
+use multiview_webrtc::transport::{WhepServeHandle, WhipPushAnswer, WhipSignaller};
 
 /// One configured WebRTC output's egress + policy, registered by the pipeline so
 /// the control/run wiring can drive it.
@@ -220,61 +216,91 @@ impl WhepOutputProvider for CliWhepProvider {
     }
 }
 
-/// Map the config `[webrtc]` section onto the crate's plain [`EndpointConfig`]
-/// (ADR-0048 §9) — the shared mapping the WHIP **ingest** wiring also uses
-/// ([`crate::webrtc_endpoint::endpoint_config_from`]).
-fn endpoint_config_from(config: &MultiviewConfig) -> EndpointConfig {
-    crate::webrtc_endpoint::endpoint_config_from(config)
+/// Whether the config (via the egress `registry`) has any WHEP-serve output (so
+/// the unified endpoint should register the WHEP-serve lane).
+#[must_use]
+pub fn has_whep_outputs(registry: &EgressRegistry) -> bool {
+    registry
+        .entries()
+        .iter()
+        .any(|(_, e)| matches!(e.policy, OutputPolicy::Whep { .. }))
 }
 
-/// Build the WHEP-serve [`WhepOutputProvider`] for the configured `webrtc`
-/// outputs over the shared egress `registry`, binding the WHEP-serve endpoint and
-/// spawning its driver task. Returns `None` (so the control plane keeps the
-/// default `NoWhepOutput` `503`) when no `webrtc` output is configured, or the
-/// endpoint bind fails (the run continues; WHEP viewing is unavailable).
-///
-/// The driver task owns the socket on its own tokio task for the run's lifetime;
-/// it can never back-pressure the engine (invariant #10).
+/// Build the WHEP-serve [`WhepOutputProvider`] over an **already-built**
+/// [`WhepServeHandle`] (the single-socket
+/// [`UnifiedEndpoint`](multiview_webrtc::transport::UnifiedEndpoint) owns the
+/// socket — this binds nothing). Registers each WHEP output's feed + cap on the
+/// handle. Returns `None` when no WHEP output is configured.
 #[must_use]
-pub fn build_whep_output_provider(
-    config: &MultiviewConfig,
+pub fn provider_for_handle(
     registry: &EgressRegistry,
+    handle: WhepServeHandle,
 ) -> Option<SharedWhepOutput> {
-    // Collect the WHEP-serve outputs (id -> (max_viewers, token, feed, audio)).
-    let mut whep: Vec<(String, u32, Option<String>, EgressFeed)> = Vec::new();
     let mut tokens: HashMap<String, Option<String>> = HashMap::new();
     for (id, entry) in registry.entries() {
         if let OutputPolicy::Whep { max_viewers, token } = &entry.policy {
             tokens.insert(id.clone(), token.clone());
-            whep.push((id.clone(), *max_viewers, token.clone(), entry.feed.clone()));
+            handle.register_output(&id, *max_viewers, entry.feed.clone());
         }
     }
-    if whep.is_empty() {
+    if tokens.is_empty() {
         return None;
     }
-    let endpoint_config = endpoint_config_from(config);
-    let (endpoint, handle) = match WhepServeEndpoint::bind(endpoint_config) {
-        Ok(pair) => pair,
-        Err(err) => {
-            tracing::warn!(error = %err, "WHEP-serve endpoint bind failed; WHEP output viewing unavailable this run");
-            return None;
-        }
-    };
-    // Register each output's feed + cap with the endpoint driver.
-    for (id, max_viewers, _token, feed) in whep {
-        handle.register_output(&id, max_viewers, feed);
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    tokio::spawn(async move {
-        if let Err(err) = endpoint.run(stop).await {
-            tracing::warn!(error = %err, "WHEP-serve endpoint driver exited");
-        }
-    });
     tracing::info!(
         outputs = tokens.len(),
-        "WHEP-serve endpoint bound; viewers may POST /api/v1/whep/{{output}}"
+        "WHEP-serve lane on the shared socket; viewers may POST /api/v1/whep/{{output}}"
     );
     Some(Arc::new(CliWhepProvider { handle, tokens }))
+}
+
+/// One `whip_push` output to register on the shared socket: its id, remote URL,
+/// optional bearer token, program egress feed, and whether it carries audio.
+pub struct WhipPushOutputSpec {
+    /// The output id (for logging).
+    pub id: String,
+    /// The remote WHIP origin URL.
+    pub url: String,
+    /// The optional bearer token.
+    pub token: Option<String>,
+    /// The program egress feed the client publishes.
+    pub feed: EgressFeed,
+    /// Whether the output carries the program Opus rendition.
+    pub audio: bool,
+}
+
+/// Collect the configured `whip_push` outputs from the egress `registry` so the
+/// unified endpoint can register one push lane per output on the shared socket.
+#[must_use]
+pub fn whip_push_specs(registry: &EgressRegistry) -> Vec<WhipPushOutputSpec> {
+    let mut specs = Vec::new();
+    for (id, entry) in registry.entries() {
+        if let OutputPolicy::WhipPush { url, token } = &entry.policy {
+            specs.push(WhipPushOutputSpec {
+                id: id.clone(),
+                url: url.clone(),
+                token: token.clone(),
+                feed: entry.feed.clone(),
+                audio: entry.audio,
+            });
+        }
+    }
+    specs
+}
+
+/// Build a boxed reqwest-backed [`WhipSignaller`] for a `whip_push` output, or
+/// `None` if the HTTP client cannot be built (the output is then skipped).
+#[must_use]
+pub fn build_push_signaller(
+    url: String,
+    token: Option<String>,
+) -> Option<Box<dyn WhipSignaller>> {
+    match ReqwestWhipSignaller::new(url, token) {
+        Ok(s) => Some(Box::new(s)),
+        Err(err) => {
+            tracing::warn!(error = %err, "whip_push signaller build failed; output skipped");
+            None
+        }
+    }
 }
 
 /// A reqwest-backed [`WhipSignaller`]: `POST`s the offer to the remote WHIP origin
@@ -356,43 +382,6 @@ impl WhipSignaller for ReqwestWhipSignaller {
         if let Err(e) = req.send() {
             tracing::debug!(error = %e, "whip_push DELETE failed (best-effort teardown)");
         }
-    }
-}
-
-/// Spawn one supervised [`WhipPushClient`] task per configured `whip_push` output
-/// over the shared egress `registry`. Each binds its own outbound socket, builds
-/// a sendonly offer, `POST`s it to the remote origin, and publishes the program;
-/// it reconnects with backoff on drop (supervised, like RTMP/SRT push). A
-/// run-lifetime task — never joined here (process exit tears it down), and it can
-/// never back-pressure the engine (invariant #10).
-pub fn spawn_whip_push_clients(config: &MultiviewConfig, registry: &EgressRegistry) {
-    for (id, entry) in registry.entries() {
-        let OutputPolicy::WhipPush { url, token } = &entry.policy else {
-            continue;
-        };
-        let endpoint_config = endpoint_config_from(config);
-        let client = match WhipPushClient::bind(endpoint_config, entry.feed.clone(), entry.audio) {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::warn!(output = %id, error = %err, "whip_push client bind failed; this output is unavailable this run");
-                continue;
-            }
-        };
-        let signaller = match ReqwestWhipSignaller::new(url.clone(), token.clone()) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(output = %id, error = %err, "whip_push signaller build failed; this output is unavailable this run");
-                continue;
-            }
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let output_id = id.clone();
-        tokio::spawn(async move {
-            if let Err(err) = client.run(signaller, stop).await {
-                tracing::warn!(output = %output_id, error = %err, "whip_push client task exited");
-            }
-        });
-        tracing::info!(output = %id, url = %url, "whip_push client started (publishing the program to the remote WHIP ingest)");
     }
 }
 
@@ -549,7 +538,9 @@ password = "p"
 realm = "example.org"
 "##;
         let config = MultiviewConfig::load_from_toml(toml).expect("config parses");
-        let ep = endpoint_config_from(&config);
+        // The single-socket unified endpoint binds from the SAME `[webrtc]` config
+        // section as WHIP ingest via the canonical public mapping (ADR-0048 §1/§9).
+        let ep = crate::webrtc_endpoint::endpoint_config_from(&config);
         assert_eq!(ep.udp_port, 8189);
         assert_eq!(
             ep.ice_servers.len(),

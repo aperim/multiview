@@ -297,57 +297,39 @@ async fn serve_control_plane(
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
     let hub =
         multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
-    // Live WHEP preview egress (ADR-P006), gated behind `webrtc-native`: the
-    // native str0m `WhepEgress` from `multiview-webrtc`, cap-decorated, sampling
-    // the SAME wait-free program slot + per-input stores as the JPEG path
-    // (read-only — invariant #10). `None` on a pure build (the SPA sheds to JPEG).
+    // ALL native WebRTC roles ride ONE shared dual-stack UDP socket (ADR-0048 §4,
+    // box-validation defect B): preview WHEP egress (ADR-P006), WHIP ingest
+    // (ADR-T014), WHEP-serve + `whip_push` outputs (ADR-0049). One bind, one driver
+    // task that demultiplexes every role by str0m's ufrag/peer demux; TURN media is
+    // framed through the relay (defect C). Previously each role bound
+    // `webrtc.udp_port` independently and the 2nd/3rd bind hit EADDRINUSE and
+    // silently degraded — so with preview+WHIP+WHEP-serve in one config, ingest and
+    // output-serve were dead. The preview encode runs on its own pump thread that
+    // touches only bounded `SampleFeed`s (never the socket — inv #10). `None` on a
+    // pure build (the SPA sheds to JPEG; the WHIP/WHEP routes answer 503).
     #[cfg(feature = "webrtc-native")]
-    let whep: Option<multiview_control::SharedWhep> = {
-        let endpoint_config = webrtc_endpoint_config(config);
-        let live = multiview_cli::whep::CliWhepProvider::spawn(
-            endpoint_config,
+    let (whep, whip, whep_output) = {
+        let unified = multiview_cli::webrtc_unified::spawn_unified_webrtc(
+            config,
             Arc::clone(&program_slot),
             Arc::clone(&shared_stores),
             program_audio,
+            webrtc_registry,
+            &egress_registry,
         );
-        let gated = multiview_control::GatedWhep::with_defaults(Arc::new(live));
-        let shared: multiview_control::SharedWhep = Arc::new(gated);
-        Some(shared)
+        (unified.whep, unified.whip, unified.whep_output)
     };
     #[cfg(not(feature = "webrtc-native"))]
     let whep: Option<multiview_control::SharedWhep> = None;
+    #[cfg(not(feature = "webrtc-native"))]
+    let whip: Option<multiview_control::SharedWhip> = None;
+    #[cfg(not(feature = "webrtc-native"))]
+    let whep_output: Option<multiview_control::SharedWhepOutput> = None;
     // The live-preview provider reads the program slot the run loop fills + the
     // shared per-input store map — read-only for control (invariant #10).
     let provider: multiview_control::SharedPreview = Arc::new(
         multiview_cli::preview::CliPreviewProvider::new(program_slot, shared_stores),
     );
-    // WHIP ingest (ADR-T014, `webrtc-native`): bind the single native str0m
-    // endpoint, spawn its driver task, and build the `WhipProvider` over the
-    // shared publisher registry — so a `POST /api/v1/whip/{source}` rendezvous a
-    // publisher to that source's `drive_webrtc` loop. The endpoint runs on its
-    // own tokio task and can never back-pressure the engine (inv #10). Without
-    // the feature the default `NoWhip` answers every publish `503` (the routes
-    // stay present + authz-enforced).
-    #[cfg(feature = "webrtc-native")]
-    let whip: Option<multiview_control::SharedWhip> =
-        multiview_cli::webrtc_ingest::build_whip_provider(config, webrtc_registry);
-    #[cfg(not(feature = "webrtc-native"))]
-    let whip: Option<multiview_control::SharedWhip> = None;
-    // WHEP-serve + WHIP-push OUTPUTS (ADR-0049, `webrtc-native`): build the
-    // WHEP-serve provider (so `POST /api/v1/whep/{output}` serves the real encoded
-    // program to a browser viewer) and spawn the supervised `whip_push` client
-    // tasks (publishing the program to remote WHIP ingests). Both are fed the
-    // encode-once program over the pipeline's per-output drop-oldest egress feeds
-    // (invariant #7) and run on their own tokio tasks — they can never
-    // back-pressure the engine (inv #10). Without the feature the default
-    // `NoWhepOutput` answers every viewer `503` (routes stay present + enforced).
-    #[cfg(feature = "webrtc-native")]
-    let whep_output: Option<multiview_control::SharedWhepOutput> = {
-        multiview_cli::webrtc_outputs::spawn_whip_push_clients(config, &egress_registry);
-        multiview_cli::webrtc_outputs::build_whep_output_provider(config, &egress_registry)
-    };
-    #[cfg(not(feature = "webrtc-native"))]
-    let whep_output: Option<multiview_control::SharedWhepOutput> = None;
     let (addr, handle, state) = control::bind_and_serve(
         listen,
         config,
@@ -378,18 +360,6 @@ async fn serve_control_plane(
         multiview_cli::config_watch::WatchOptions::default(),
     );
     Ok((handle, command_rx, hub, watch))
-}
-
-/// Map the validated `[webrtc]` config section into the `multiview-webrtc`
-/// [`EndpointConfig`](multiview_webrtc::config::EndpointConfig) the live WHEP
-/// egress endpoint binds (ADR-0048 §1: the cli reads the config doc; the webrtc
-/// crate never depends on `multiview-config`). Delegates to the shared mapping so
-/// the WHEP egress endpoint carries the same `[webrtc]` knobs as WHIP ingest —
-/// including the STUN/TURN ICE servers (ADR-0048 §5.1) the in-driver TURN client
-/// allocates relays from, so a browser behind NAT can WHEP-play via TURN.
-#[cfg(feature = "webrtc-native")]
-fn webrtc_endpoint_config(config: &MultiviewConfig) -> multiview_webrtc::config::EndpointConfig {
-    multiview_cli::webrtc_endpoint::endpoint_config_from(config)
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**

@@ -40,7 +40,6 @@ use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSessi
 use multiview_webrtc::error::WebRtcError;
 use multiview_webrtc::transport::{RtpRing, WhipHandle};
 
-use crate::webrtc_endpoint::endpoint_config_from;
 
 /// Per-source publish authorization: the configured token + whether audio is
 /// accepted (from `SourceKind::Webrtc`). A source absent from the map is not a
@@ -271,52 +270,30 @@ fn webrtc_source_policies(
     policies
 }
 
-/// Bind the native WHIP endpoint, spawn its driver task, and build the
-/// [`CliWhipProvider`] over the shared publisher `registry` — the run wiring's
-/// single entry point (ADR-T014 / ADR-0048).
-///
-/// Returns `None` (so the control plane keeps the default `NoWhip` `503`) when
-/// the config declares **no** `webrtc` source — there is nothing to publish to,
-/// so the endpoint is not bound. Also returns `None` if the endpoint bind fails
-/// (a port clash / bad config): the run continues with WHIP unavailable rather
-/// than failing the whole pipeline (a WHIP source then rides `NO_SIGNAL`).
-///
-/// The driver task is `tokio::spawn`ed and owns the socket; it can never
-/// back-pressure the engine (invariant #10). A run-lifetime task — it is not
-/// joined here (the process exit tears it down), matching the always-on
-/// announce/browse + device-poller tenants.
+/// Whether the config declares any `webrtc` ingest source (so the unified endpoint
+/// should register the WHIP ingest lane).
 #[must_use]
-pub fn build_whip_provider(
+pub fn has_webrtc_sources(config: &multiview_config::MultiviewConfig) -> bool {
+    !webrtc_source_policies(config).is_empty()
+}
+
+/// Build the WHIP [`WhipProvider`] over an **already-built** [`WhipHandle`] (the
+/// single-socket [`UnifiedEndpoint`](multiview_webrtc::transport::UnifiedEndpoint)
+/// owns the socket — this binds nothing). Returns `None` when no `webrtc` source is
+/// configured (the default `NoWhip` answers `503`).
+#[must_use]
+pub fn provider_for_handle(
     config: &multiview_config::MultiviewConfig,
+    handle: WhipHandle,
     registry: WhipRegistry,
 ) -> Option<multiview_control::SharedWhip> {
     let policies = webrtc_source_policies(config);
     if policies.is_empty() {
-        // No WHIP sources configured — keep the default NoWhip (the routes stay
-        // present and answer 503); never bind a socket for nothing.
         return None;
     }
-    let endpoint_config = endpoint_config_from(config);
-    let (endpoint, handle) = match multiview_webrtc::transport::WhipEndpoint::bind(endpoint_config)
-    {
-        Ok(pair) => pair,
-        Err(err) => {
-            tracing::warn!(error = %err, "WHIP endpoint bind failed; WHIP ingest unavailable this run (sources ride NO_SIGNAL)");
-            return None;
-        }
-    };
-    // The driver owns the socket on its own task for the run's lifetime; a
-    // never-raised stop flag keeps it running until process exit (the same
-    // posture as the mesh/device-poller control-plane tenants).
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    tokio::spawn(async move {
-        if let Err(err) = endpoint.run(stop).await {
-            tracing::warn!(error = %err, "WHIP endpoint driver exited");
-        }
-    });
     tracing::info!(
         sources = policies.len(),
-        "WHIP ingest endpoint bound; publishers may POST /api/v1/whip/{{source}}"
+        "WHIP ingest lane on the shared socket; publishers may POST /api/v1/whip/{{source}}"
     );
     Some(std::sync::Arc::new(CliWhipProvider::new(
         handle, registry, policies,
