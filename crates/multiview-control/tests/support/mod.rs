@@ -66,6 +66,9 @@ pub struct Harness {
     /// The shared NMOS registry the router serves, so a test can seed
     /// node/device/sender/receiver resources and exercise the NMOS Node API.
     pub nmos: Arc<NmosRegistry>,
+    /// The shared bounded log-tail ring the router reads (ADR-0060): a test can
+    /// push structured records and read them back over `GET /api/v1/logs`.
+    pub logs: Arc<multiview_telemetry::LogRing>,
 }
 
 /// Build an API-key store seeded with the four known test keys.
@@ -154,6 +157,7 @@ pub fn harness_customized(
     let salvos: Arc<dyn SalvoRepository> = Arc::new(InMemorySalvoStore::new());
     let tally = Arc::new(TallyMirror::new());
     let nmos = Arc::new(NmosRegistry::new());
+    let logs = Arc::new(multiview_telemetry::LogRing::new(2000));
     let state = AppState::new(
         Arc::clone(&engine),
         tx,
@@ -165,6 +169,7 @@ pub fn harness_customized(
     .with_salvo_store(Arc::clone(&salvos))
     .with_tally_mirror(Arc::clone(&tally))
     .with_nmos(Arc::clone(&nmos))
+    .with_log_ring(Arc::clone(&logs))
     .with_ack_clock(Arc::new(|| MediaTime::from_nanos(ACK_NANOS)));
     let state = customize(state);
     Harness {
@@ -176,6 +181,7 @@ pub fn harness_customized(
         salvos,
         tally,
         nmos,
+        logs,
     }
 }
 

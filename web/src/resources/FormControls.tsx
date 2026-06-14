@@ -45,6 +45,8 @@ export function FieldErrorMessage({ code }: { readonly code: FormErrorCode }): J
       return <Trans>An RTSP source URL must start with rtsp:// (or rtsps://).</Trans>;
     case 'scheme-srt':
       return <Trans>An SRT URL must start with srt://.</Trans>;
+    case 'scheme-rist':
+      return <Trans>A RIST URL must start with rist://.</Trans>;
     case 'scheme-rtmp':
       return <Trans>An RTMP URL must start with rtmp:// (or rtmps://).</Trans>;
     case 'scheme-http':

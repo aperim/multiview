@@ -23,6 +23,11 @@
 //!   uptime / alarm-second / error-second / severely-errored-second accounting
 //!   with a derived availability ratio.
 //! * [`health`] — [`health::HealthState`] with readiness gates for the probes.
+//! * [`log_capture`] — the resource-scoped structured log producer (ADR-0060):
+//!   the bounded drop-oldest [`log_capture::LogRing`] and the
+//!   [`log_capture::LogCaptureLayer`] `tracing` layer that mirrors every event
+//!   (ours and the libav bridge's) into it with its `resource_id` attribution,
+//!   feeding the control-plane `GET /api/v1/logs` tail and `Topic::Logs`.
 //! * [`metrics`] — [`metrics::MetricsRegistry`] with counters, gauges,
 //!   histograms, and bounded-cardinality [`metrics::Labels`].
 //! * [`gpu`] — per-GPU load gauges ([`gpu::GpuGauges`]) keyed by a bounded
@@ -54,6 +59,7 @@ pub mod availability;
 pub mod error;
 pub mod gpu;
 pub mod health;
+pub mod log_capture;
 pub mod metrics;
 pub mod placement;
 pub mod retention;
@@ -66,6 +72,7 @@ pub use availability::{AvailabilityCounters, AvailabilitySnapshot};
 pub use error::{Result, TelemetryError};
 pub use gpu::{CpuGauge, CpuSampler, GpuGauges, GpuLabels, VendorExposes};
 pub use health::{GateId, HealthState, Liveness, Readiness};
+pub use log_capture::{LogCaptureLayer, LogFilter, LogLevel, LogRecord, LogResourceKind, LogRing};
 pub use metrics::{
     Counter, Gauge, Histogram, HistogramSnapshot, Labels, MetricKind, MetricsRegistry,
     SeriesDescriptor,

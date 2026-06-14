@@ -2804,6 +2804,125 @@
         }
       }
     },
+    "/api/v1/logs": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "`GET /api/v1/logs` — recent buffered structured log records (role: read).",
+        "operationId": "list_logs",
+        "parameters": [
+          {
+            "name": "resource_id",
+            "in": "query",
+            "description": "Keep only records attributed to this stable config resource id.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Keep only records of this resource kind (`source`/`output`/`layout`/\n`program`/`device`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Keep only records at or above this severity (`trace`/`debug`/`info`/\n`warn`/`error`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Keep only records with a `seq` strictly greater than this cursor.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Return at most this many of the most-recent matching records.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching log records, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LogRecordDoc"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unrecognised level or kind filter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/mesh/peers": {
       "get": {
         "tags": [
@@ -9700,6 +9819,113 @@
         },
         "additionalProperties": false
       },
+      "LogLevelDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_telemetry::LogLevel`] (ADR-0060): the five\n`tracing` severities. Serde-equivalent: a unit enum rendered lowercase.",
+        "enum": [
+          "trace",
+          "debug",
+          "info",
+          "warn",
+          "error"
+        ]
+      },
+      "LogRecordDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of [`multiview_telemetry::LogRecord`] — one structured\nrecord in the `GET /api/v1/logs` tail (ADR-0060 §2.3).\n\nSerde-equivalent field-for-field to the real record: the optional resource\nattribution (`run_id` / `resource_kind` / `resource_id` / `label`), the libav\n`component` / `repeated`, and the always-present `seq` / `timestamp_ms` /\n`level` / `target` / `message`. Optionals are omitted when absent — an\nunattributed line carries no `resource_id` (honesty over a wrong id, §3.3).",
+        "required": [
+          "seq",
+          "timestamp_ms",
+          "level",
+          "target",
+          "message"
+        ],
+        "properties": {
+          "component": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The libav component class (`hevc`, `hls`), for bridge records."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resource's human label, if the span carried one."
+          },
+          "level": {
+            "$ref": "#/components/schemas/LogLevelDoc",
+            "description": "The record's severity."
+          },
+          "message": {
+            "type": "string",
+            "description": "The rendered event message."
+          },
+          "repeated": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The coalesced suppressed-repeat count, when a bridge record flushes a\nsummary.",
+            "minimum": 0
+          },
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stable config resource id this record is attributed to, if any."
+          },
+          "resource_kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LogResourceKindDoc",
+                "description": "The resource kind this record is attributed to, if any."
+              }
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The process run id, when configured."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic capture sequence number (the cursor for the `since` filter).",
+            "minimum": 0
+          },
+          "target": {
+            "type": "string",
+            "description": "The `tracing` target (e.g. `libav`, `multiview_engine`)."
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock capture time, milliseconds since the Unix epoch.",
+            "minimum": 0
+          }
+        }
+      },
+      "LogResourceKindDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of [`multiview_telemetry::LogResourceKind`] (ADR-0060 §2.2):\nthe resource a log record is attributed to. Serde-equivalent: a unit enum\nrendered `snake_case`.",
+        "enum": [
+          "source",
+          "output",
+          "layout",
+          "program",
+          "device"
+        ]
+      },
       "LoudnessTargetDoc": {
         "oneOf": [
           {
@@ -10345,6 +10571,71 @@
               "url": {
                 "type": "string",
                 "description": "Destination URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "RIST push — the open-standard sibling of the SRT push (ADR-0095).",
+            "required": [
+              "url",
+              "codec",
+              "kind"
+            ],
+            "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputAudioDoc",
+                    "description": "Per-output audio selection."
+                  }
+                ]
+              },
+              "codec": {
+                "type": "string",
+                "description": "Video codec."
+              },
+              "gpu_pin": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DevicePinDoc",
+                    "description": "Encode-stage GPU pin."
+                  }
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable operator id; may be omitted."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rist"
+                ]
+              },
+              "rist": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RistOptionsDoc",
+                    "description": "Optional typed RIST options (profile, buffer, PSK encryption, …)."
+                  }
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Destination URL (`rist://host:port`)."
               }
             }
           },
@@ -11099,6 +11390,107 @@
         "format": "int64",
         "description": "A monotonic, per-target revision number (starts at 1).",
         "minimum": 0
+      },
+      "RistAesBitsDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::RistAesBits` (RIST PSK key length).",
+        "enum": [
+          "aes128",
+          "aes256"
+        ]
+      },
+      "RistEncryptionDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RistEncryption` (PSK; secret by\nreference only — never a plaintext key).",
+        "required": [
+          "aes_bits",
+          "secret_ref"
+        ],
+        "properties": {
+          "aes_bits": {
+            "$ref": "#/components/schemas/RistAesBitsDoc",
+            "description": "`AES` key length (`aes128` / `aes256`)."
+          },
+          "secret_ref": {
+            "type": "string",
+            "description": "Reference to the pre-shared passphrase (`op://…` / `env:VAR`); resolved\nat run time, never stored or logged in plaintext."
+          }
+        }
+      },
+      "RistOptionsDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RistOptions` (typed RIST connection\noptions; lowered to the `rist://…?…` `AVIO` URL on the Tier-0 `FFmpeg` path).",
+        "properties": {
+          "bonding": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RistPeerDoc"
+            },
+            "description": "Tier-2 only: bonding/load-sharing peers (rejected on the Tier-0 build)."
+          },
+          "buffer_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Recovery/jitter buffer depth in milliseconds (the `ARQ` window;\n`0`/absent ⇒ `librist` auto).",
+            "minimum": 0
+          },
+          "encryption": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RistEncryptionDoc",
+                "description": "Pre-shared-key `AES` encryption (Main Profile)."
+              }
+            ]
+          },
+          "pkt_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`MPEG-TS`-aligned packet size (default 1316).",
+            "minimum": 0
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RistProfileDoc",
+                "description": "RIST profile (absent ⇒ `main`)."
+              }
+            ]
+          }
+        }
+      },
+      "RistPeerDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::RistPeer` (Tier-2 bonding endpoint).",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The peer's `rist://host:port` URL."
+          }
+        }
+      },
+      "RistProfileDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::RistProfile` (VSF `TR-06`).",
+        "enum": [
+          "simple",
+          "main",
+          "advanced"
+        ]
       },
       "Role": {
         "type": "string",
@@ -11925,6 +12317,37 @@
               "url": {
                 "type": "string",
                 "description": "Source URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "RIST (VSF `TR-06`) input — the open-standard sibling of SRT (ADR-0095).",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rist"
+                ]
+              },
+              "rist": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RistOptionsDoc",
+                    "description": "Optional typed RIST options (profile, buffer, PSK encryption, …)."
+                  }
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Source URL (`rist://[::]:port` or peer host)."
               }
             }
           },
@@ -13405,6 +13828,10 @@
     {
       "name": "alarms",
       "description": "Monitoring alarms: list + acknowledge"
+    },
+    {
+      "name": "logs",
+      "description": "Structured log tail (ADR-0060): recent buffered, resource-attributed records from a bounded drop-oldest ring, filterable by resource_id/kind/level/since/limit (read-only). Control-plane only; never back-pressures the engine."
     },
     {
       "name": "health",

@@ -54,6 +54,7 @@ export type SourceKind =
   | 'youtube'
   | 'ts'
   | 'srt'
+  | 'rist'
   | 'rtmp'
   | 'ndi'
   | 'file'
@@ -80,6 +81,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'youtube',
   'ts',
   'srt',
+  'rist',
   'rtmp',
   'ndi',
   'file',
@@ -119,7 +121,7 @@ export interface SourceView {
  * The output transport display kinds (config `Output`, folded for display).
  * `webrtc` serves the program to browsers over WHEP (`POST /api/v1/whep/{id}`);
  * `whip-push` (display kind ↔ wire tag `whip_push`) publishes the program to a
- * remote WHIP origin (ADR-0049).
+ * remote WHIP origin (ADR-0049). `rist` is the RIST egress transport (#158).
  */
 export type OutputKind =
   | 'rtsp'
@@ -128,6 +130,7 @@ export type OutputKind =
   | 'ndi'
   | 'rtmp'
   | 'srt'
+  | 'rist'
   | 'display'
   | 'webrtc'
   | 'whip-push';
@@ -140,6 +143,7 @@ export const OUTPUT_KINDS: readonly OutputKind[] = [
   'ndi',
   'rtmp',
   'srt',
+  'rist',
   'display',
   'webrtc',
   'whip-push',
