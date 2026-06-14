@@ -191,7 +191,7 @@ fn pump_until(
         // that by re-driving the egress after feeding it the peer's datagrams).
         for _ in 0..3 {
             let outbound = egress.drive_egress(id, clock).unwrap();
-            for (dst, payload) in outbound {
+            for (_source, dst, payload) in outbound {
                 assert_eq!(dst, peer_addr, "egress transmits to the peer");
                 peer.handle_datagram(egress_addr, peer_addr, &payload, clock)
                     .unwrap();
@@ -199,7 +199,7 @@ fn pump_until(
             peer.handle_timeout(clock).unwrap();
             for _ in 0..256 {
                 match peer.poll_transmit(clock) {
-                    Some((dst, payload)) => {
+                    Some((_source, dst, payload)) => {
                         assert_eq!(dst, egress_addr, "peer transmits to the egress");
                         egress
                             .handle_datagram(id, peer_addr, egress_addr, &payload, clock)

@@ -100,6 +100,72 @@ impl AnswerParams {
     }
 }
 
+/// Rewrite an answer SDP's connection (`c=`) and origin (`o=`) address family to
+/// match the family of the gathered ICE candidates — IPv6-first (ADR-0042).
+///
+/// str0m's own answer hardcodes the dummy `c=IN IP4 0.0.0.0` and
+/// `o=… IN IP4 0.0.0.0` (RFC 8839 §4.3.2 makes the `c=` line a placeholder when
+/// ICE is in use — the real addresses ride `a=candidate`). That is valid SDP, but
+/// box-validation found IPv6-only peers reject the family mismatch, and our
+/// IPv6-first posture wants the served answer honest. This transform inspects the
+/// `a=candidate` lines: if **any** is IPv6 (the IPv6-first case), every `c=`/`o=`
+/// connection address becomes `IN IP6 ::`; if the candidates are IPv4-only
+/// (legacy), the IPv4 dummy is kept (never claim an IPv6 connection we cannot
+/// offer). Only the network-type/address-type/address triple of `c=`/`o=` lines
+/// is touched; candidate, mid, fingerprint, and every other line is preserved
+/// verbatim. The dummy address stays unspecified (`::` / `0.0.0.0`) per RFC 8839.
+#[must_use]
+pub fn align_connection_family(sdp: &str) -> String {
+    let any_ipv6_candidate = sdp.lines().any(is_ipv6_candidate_line);
+    if !any_ipv6_candidate {
+        // IPv4-only (or no) candidates: leave str0m's IPv4 dummy untouched.
+        return sdp.to_owned();
+    }
+    // Preserve the original line terminators (str0m uses CRLF; tests may too).
+    let mut out = String::with_capacity(sdp.len());
+    for segment in sdp.split_inclusive('\n') {
+        // Split the trailing CR/LF so we rewrite only the line body.
+        let trimmed_len = segment.trim_end_matches(['\r', '\n']).len();
+        let (body, terminator) = segment.split_at(trimmed_len);
+        out.push_str(&rewrite_connection_line(body));
+        out.push_str(terminator);
+    }
+    out
+}
+
+/// Rewrite one `c=`/`o=` line's address family to IPv6 (`IN IP6 ::`), leaving any
+/// other line unchanged. `o=` keeps its first three tokens
+/// (`o=<user> <sess-id> <sess-version>`) and rewrites the `<nettype> <addrtype>
+/// <unicast-address>` triple; `c=` rewrites the whole `IN <addrtype> <addr>`.
+fn rewrite_connection_line(line: &str) -> String {
+    if line.starts_with("c=") {
+        return "c=IN IP6 ::".to_owned();
+    }
+    if let Some(rest) = line.strip_prefix("o=") {
+        // o=<username> <sess-id> <sess-version> <nettype> <addrtype> <addr>
+        let tokens: Vec<&str> = rest.split(' ').collect();
+        if let [user, sess_id, sess_version, _nettype, _addrtype, _addr, ..] = tokens.as_slice() {
+            return format!("o={user} {sess_id} {sess_version} IN IP6 ::");
+        }
+    }
+    line.to_owned()
+}
+
+/// Whether an SDP line is an `a=candidate` line whose connection address is IPv6.
+/// The candidate connection-address is the 5th whitespace token after the
+/// `candidate:` prefix: `candidate:<foundation> <component> <transport>
+/// <priority> <addr> <port> typ …`.
+fn is_ipv6_candidate_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix("a=candidate:") else {
+        return false;
+    };
+    rest.split_whitespace()
+        .nth(4)
+        .and_then(|addr| addr.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|ip| ip.is_ipv6())
+}
+
 /// A class of ICE candidate, used for IPv6-first priority ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]

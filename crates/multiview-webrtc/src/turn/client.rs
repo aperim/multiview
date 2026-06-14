@@ -118,6 +118,10 @@ pub struct TurnClient {
     permissions: HashSet<SocketAddr>,
     /// Whether the initial unauthenticated Allocate has been emitted.
     started: bool,
+    /// The relay address family the next Allocate requests (IPv6-first per
+    /// ADR-0042). A server `440 Address Family not Supported` flips this to IPv4
+    /// and re-queues the Allocate, so an IPv4-only relay still works.
+    request_family: super::message::AddressFamily,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,6 +147,9 @@ impl TurnClient {
             queue: vec![QueuedRequest::Allocate],
             permissions: HashSet::new(),
             started: false,
+            // IPv6-first: ask for an IPv6 relay; fall back to IPv4 only on a
+            // server 440 (Address Family not Supported).
+            request_family: super::message::AddressFamily::Ipv6,
         }
     }
 
@@ -237,6 +244,9 @@ impl TurnClient {
                 self.state = TurnState::Allocating;
                 let mut m = StunMessage::request(Method::Allocate);
                 m.push(Attribute::RequestedTransportUdp);
+                // IPv6-first relay (ADR-0042): ask the server for the current
+                // family (IPv6 until a 440 forces IPv4).
+                m.push(Attribute::RequestedAddressFamily(self.request_family));
                 m.push(Attribute::Lifetime(600));
                 (self.authenticate(m), Method::Allocate, None)
             }
@@ -339,6 +349,20 @@ impl TurnClient {
                     self.pending = None;
                     // Re-queue the same request, now that we can authenticate.
                     self.requeue(method, peer);
+                    return Ok(None);
+                }
+                // 440 Address Family not Supported (RFC 8656 §7.1): the server
+                // cannot give us the requested family (IPv6). Fall back to IPv4 and
+                // re-Allocate — IPv6-first, IPv4 as the legacy fallback, never a
+                // hard failure on an IPv4-only relay.
+                if code == 440
+                    && method == Method::Allocate
+                    && self.request_family == super::message::AddressFamily::Ipv6
+                {
+                    self.request_family = super::message::AddressFamily::Ipv4;
+                    self.pending = None;
+                    self.state = TurnState::Idle;
+                    self.requeue(Method::Allocate, None);
                     return Ok(None);
                 }
                 self.pending = None;

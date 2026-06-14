@@ -512,6 +512,40 @@ impl CliWhepProvider {
         }
     }
 
+    /// Build the preview provider for the **single-socket** unified path (defect B,
+    /// ADR-0048 §4): the caller (the cli's unified-webrtc wiring) supplies the
+    /// `egress` transport that the shared [`UnifiedEndpoint`] drives on the ONE
+    /// socket, and a `host` for the egress's host candidate. This spawns ONLY the
+    /// encode-pump thread (it fills the `SampleFeed`s); it binds NO socket and runs
+    /// NO socket I/O — that is the unified endpoint's job. `available` is `true`
+    /// because the shared socket is already bound by the unified endpoint.
+    #[must_use]
+    pub fn for_unified(
+        egress: Arc<WhepEgress>,
+        program: ProgramSlot,
+        stores: SharedStores,
+        program_audio: Option<crate::preview::ProgramAudioSlot>,
+    ) -> Self {
+        let state = Arc::new(Mutex::new(DriverState::default()));
+        spawn_encode_pump(Arc::clone(&state), program_audio.clone());
+        Self {
+            egress,
+            state,
+            program,
+            stores,
+            program_audio,
+            available: true,
+        }
+    }
+
+    /// The native egress transport this provider negotiates against — handed to the
+    /// shared [`UnifiedEndpoint`] so the ONE socket drives its inbound demux +
+    /// egress drain (the single-socket model, ADR-0048 §4).
+    #[must_use]
+    pub fn egress(&self) -> Arc<WhepEgress> {
+        Arc::clone(&self.egress)
+    }
+
     /// Build a [`SlotMediaSource`] for `scope`, choosing the wait-free reader, and
     /// (when `opus` AND this run has program audio) a per-session program-PCM ring
     /// the driver fans the shared tap into. Returns the media plus that per-session
@@ -611,10 +645,47 @@ impl WhepProvider for CliWhepProvider {
     }
 }
 
+/// Spawn ONLY the preview **encode-pump** thread (no socket I/O): drain the shared
+/// program-audio tap, fan it to each audio session's ring, and pump each session's
+/// sample→encode→`SampleFeed` at preview cadence. The socket I/O (inbound demux,
+/// TURN, egress drain→send) is owned by the single shared
+/// [`UnifiedEndpoint`](multiview_webrtc::transport::UnifiedEndpoint) (defect B,
+/// ADR-0048 §4), which drains the `SampleFeed`s this thread fills. The two are
+/// cleanly isolated: this thread touches only bounded drop-oldest feeds, never the
+/// socket (invariant #10).
+fn spawn_encode_pump(
+    state: Arc<Mutex<DriverState>>,
+    program_audio: Option<crate::preview::ProgramAudioSlot>,
+) {
+    std::thread::Builder::new()
+        .name("whep-encode-pump".to_owned())
+        .spawn(move || loop {
+            if let Ok(state) = state.lock() {
+                fan_program_audio(program_audio.as_ref(), state.sessions.values());
+                for session in state.sessions.values() {
+                    session.media.pump_once();
+                    let _ = &session.scope_label;
+                }
+            }
+            // Preview cadence; never busy-spin (best-effort, inv #10).
+            std::thread::sleep(DRIVER_TICK);
+        })
+        .ok();
+}
+
 /// Spawn the egress driver: own the shared UDP socket, run the configured TURN
 /// clients over it, pump every session's encode + egress at preview cadence, and
 /// fan inbound datagrams to the sessions. Never `.await`s a client; a stalled
 /// session loses only its own media (invariant #10).
+///
+/// This is the **standalone** preview driver (preview alone on its own socket),
+/// retained for direct use/tests; the cli runs every WebRTC role on ONE socket via
+/// [`UnifiedEndpoint`](multiview_webrtc::transport::UnifiedEndpoint) using
+/// [`CliWhepProvider::for_unified`] + [`spawn_encode_pump`] instead (ADR-0048 §4).
+#[allow(
+    dead_code,
+    reason = "standalone preview-only driver retained alongside the unified path"
+)]
 fn spawn_driver(
     egress: Arc<WhepEgress>,
     state: Arc<Mutex<DriverState>>,
@@ -636,6 +707,18 @@ fn spawn_driver(
                     match endpoint.recv_from(&mut buf) {
                         Ok((len, source)) => {
                             let payload = buf.get(..len).unwrap_or(&[]);
+                            // A relayed Data indication decapsulates to media on the
+                            // relay addr (defect C); a TURN control reply feeds the
+                            // driver; anything else is media on the local addr.
+                            if let Some(relayed) = turn.try_unwrap_relayed(source, payload, now) {
+                                let _ = egress.handle_datagram_broadcast(
+                                    relayed.peer,
+                                    relayed.relay,
+                                    &relayed.payload,
+                                    now,
+                                );
+                                continue;
+                            }
                             if turn.feed(source, payload, now) {
                                 continue;
                             }
@@ -664,10 +747,21 @@ fn spawn_driver(
                         let _ = &session.scope_label;
                     }
                 }
-                // 4. Drive every session's egress and send the outbound datagrams.
+                // 4. Drive every session's egress and send the outbound datagrams,
+                //    routing through the TURN relay when str0m chose the relay
+                //    candidate (source == an allocated relay addr → TURN Send
+                //    indication to the relay's server; defect C).
                 if let Ok(out) = egress.drive_all(now) {
-                    for (dst, payload) in out {
-                        let _ = endpoint.send_to(&payload, dst);
+                    for (source, dst, payload) in out {
+                        if turn.is_relay(source) {
+                            if let Some((server, wire)) =
+                                turn.frame_for_relay(source, dst, &payload, now)
+                            {
+                                let _ = endpoint.send_to(&wire, server);
+                            }
+                        } else {
+                            let _ = endpoint.send_to(&payload, dst);
+                        }
                     }
                 }
                 // 5. Park until the next session timer or the driver tick, whichever

@@ -39,8 +39,10 @@ fn pump_until(
         a.handle_timeout(clock).unwrap();
         b.handle_timeout(clock).unwrap();
         for _ in 0..256 {
+            // poll_transmit now surfaces str0m's (source, destination, payload); for
+            // host candidates the source is the local addr — assert the destination.
             match a.poll_transmit(clock) {
-                Some((dst, payload)) => {
+                Some((_source, dst, payload)) => {
                     assert_eq!(dst, b_addr);
                     b.handle_datagram(a_addr, b_addr, &payload, clock).unwrap();
                 }
@@ -49,7 +51,7 @@ fn pump_until(
         }
         for _ in 0..256 {
             match b.poll_transmit(clock) {
-                Some((dst, payload)) => {
+                Some((_source, dst, payload)) => {
                     assert_eq!(dst, a_addr);
                     a.handle_datagram(b_addr, a_addr, &payload, clock).unwrap();
                 }

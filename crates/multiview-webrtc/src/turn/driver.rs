@@ -22,6 +22,20 @@ use std::time::Instant;
 use crate::config::{EndpointConfig, IceServerKind};
 use crate::turn::{TurnClient, TurnEvent, TurnOutput};
 
+/// One inbound TURN Data indication unwrapped back into the application datagram
+/// the relay forwarded (defect C). The driver reports the `relay` it arrived on so
+/// the caller feeds str0m a `Receive` whose destination is the relay candidate's
+/// address (str0m matches the local relay candidate by `addr == destination`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayedDatagram {
+    /// The far peer the data originated from (XOR-PEER-ADDRESS).
+    pub peer: SocketAddr,
+    /// The decapsulated application payload (the inner SRTP/STUN bytes).
+    pub payload: Vec<u8>,
+    /// The relay address the data arrived on — the local candidate str0m matches.
+    pub relay: SocketAddr,
+}
+
 /// A driven TURN client wrapping the shared sans-IO [`TurnClient`].
 struct DrivenClient {
     client: TurnClient,
@@ -162,6 +176,84 @@ impl TurnRelayDriver {
     #[must_use]
     pub fn take_new_relays(&mut self) -> Vec<SocketAddr> {
         std::mem::take(&mut self.pending_relays)
+    }
+
+    /// Every relay currently allocated across the driven clients (one per client
+    /// that has reached `Allocated`). The driver routes a session transmit whose
+    /// str0m `source` matches one of these through that relay's TURN server.
+    #[must_use]
+    pub fn relays(&self) -> Vec<SocketAddr> {
+        self.clients
+            .iter()
+            .filter_map(|c| c.client.relay())
+            .collect()
+    }
+
+    /// Whether `addr` is an allocated relay address (the str0m `Transmit::source`
+    /// for a relay-routed datagram, i.e. a relay candidate's base).
+    #[must_use]
+    pub fn is_relay(&self, addr: SocketAddr) -> bool {
+        self.clients.iter().any(|c| c.client.relay() == Some(addr))
+    }
+
+    /// Frame an outbound application datagram for the relay `relay` toward `peer`
+    /// (defect C / ADR-0048 §5.1): the str0m `Transmit::source` was `relay` and its
+    /// `destination` was `peer`, so the bytes must ride a TURN Send indication to
+    /// the relay's server. Returns `(turn_server, wire_bytes)` to send on the
+    /// shared socket, or `None` if `relay` is not an allocated relay of any client.
+    ///
+    /// A permission for `peer` is ensured first (queued if absent) so the relay
+    /// accepts the peer's return traffic (RFC 8656 §9 access control). `now` is the
+    /// driver tick used to schedule any queued `CreatePermission`.
+    #[must_use]
+    pub fn frame_for_relay(
+        &mut self,
+        relay: SocketAddr,
+        peer: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+    ) -> Option<(SocketAddr, Vec<u8>)> {
+        for driven in &mut self.clients {
+            if driven.client.relay() != Some(relay) {
+                continue;
+            }
+            // Ensure the relay will accept traffic to/from this peer.
+            if !driven.client.has_permission(&peer) {
+                driven.client.create_permission(peer, now);
+            }
+            let wire = driven.client.wrap_send(peer, payload);
+            return Some((driven.client.server_addr(), wire));
+        }
+        None
+    }
+
+    /// Try to unwrap an inbound datagram from the TURN server `src` as a relayed
+    /// **Data indication** (defect C). Returns the decapsulated
+    /// [`RelayedDatagram`] (peer + payload + the relay it arrived on) when `src` is
+    /// a configured TURN server whose client is allocated and the datagram is a
+    /// Data indication; `None` otherwise (the caller then routes `src`'s datagram
+    /// through the ordinary [`Self::feed`] / media path).
+    #[must_use]
+    pub fn try_unwrap_relayed(
+        &self,
+        src: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+    ) -> Option<RelayedDatagram> {
+        let _ = now;
+        for driven in &self.clients {
+            if driven.client.server_addr() != src {
+                continue;
+            }
+            let relay = driven.client.relay()?;
+            let (peer, data) = driven.client.unwrap_data(payload)?;
+            return Some(RelayedDatagram {
+                peer,
+                payload: data,
+                relay,
+            });
+        }
+        None
     }
 
     /// Harvest `relay` (if any) into the pending+known sets, de-duped.

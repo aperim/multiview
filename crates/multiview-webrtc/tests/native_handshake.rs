@@ -49,8 +49,11 @@ fn pump_until(
         b.handle_timeout(clock).unwrap();
         for _ in 0..128 {
             match a.poll_transmit(clock) {
-                Some((dst, payload)) => {
-                    // The destination should be the other peer's address.
+                // poll_transmit now surfaces str0m's (source, destination, payload);
+                // for host candidates the source is the local addr — assert the
+                // destination is the other peer (the relay routing is exercised by
+                // the dedicated relay-forced-media test, not this host shuttle).
+                Some((_source, dst, payload)) => {
                     assert_eq!(dst, b_addr, "a transmits to b");
                     b.handle_datagram(a_addr, b_addr, &payload, clock).unwrap();
                 }
@@ -59,7 +62,7 @@ fn pump_until(
         }
         for _ in 0..128 {
             match b.poll_transmit(clock) {
-                Some((dst, payload)) => {
+                Some((_source, dst, payload)) => {
                     assert_eq!(dst, a_addr, "b transmits to a");
                     a.handle_datagram(b_addr, a_addr, &payload, clock).unwrap();
                 }
@@ -580,6 +583,149 @@ fn whip_endpoint_audio_false_answers_without_opus() {
         "audio=false must not answer Opus:\n{}",
         negotiated.answer_sdp
     );
+}
+
+#[test]
+fn relay_forced_media_flows_both_ways_through_the_turn_relay() {
+    // Defect C — the operator's HARD NAT-traversal requirement, proven offline:
+    // when the ONLY usable path between two peers is a TURN relay, real SRTP media
+    // must traverse the relay in BOTH directions. The publisher (A) is reachable
+    // only via its allocated relay; str0m therefore emits Transmits whose SOURCE
+    // is the relay address, which the driver frames as TURN Send indications to
+    // the server. The server (acting as the relay) delivers the inner datagram to
+    // the far peer (B), and B's replies to the relay address are wrapped back to A
+    // as Data indications the driver unwraps. None of this was wired before — the
+    // relay was advertised but media never traversed it.
+    use multiview_webrtc::turn::message::{Class, Method, StunMessage};
+    use multiview_webrtc::turn::{TurnClient, TurnCredential, TurnOutput, TurnState};
+
+    let now = Instant::now();
+    let server_addr: SocketAddr = "[2001:db8::1]:3478".parse().unwrap();
+    // A's relay address (what the TURN server allocates for A). B reaches A here.
+    let a_relay: SocketAddr = "[2001:db8::1]:49152".parse().unwrap();
+    let b_addr: SocketAddr = "[2001:db8::b]:50000".parse().unwrap();
+
+    let mut turn_server = FakeTurn::new(server_addr, a_relay, "alice", "s3cret", "example.org");
+    let mut a_turn = TurnClient::new(
+        server_addr,
+        TurnCredential::static_credential("alice", "s3cret", None),
+    );
+
+    // 1. Drive A's TURN client to an allocation against the fake server.
+    let mut relay = None;
+    for _ in 0..32 {
+        if let TurnOutput::Transmit { payload, .. } = a_turn.poll_output(now) {
+            if let Some(reply) = turn_server.handle(&payload) {
+                a_turn.handle_input(&reply, now).unwrap();
+            }
+        }
+        if let TurnState::Allocated { relay: r, .. } = a_turn.state() {
+            relay = Some(r);
+            break;
+        }
+    }
+    assert_eq!(relay, Some(a_relay), "A allocated its relay");
+
+    // 2. A (publisher) gathers ONLY its relay candidate — no host; the relayed
+    //    traffic egresses A's local socket. B gathers a host candidate.
+    let a_local: SocketAddr = "[::1]:40001".parse().unwrap();
+    let mut a = Session::new(&SessionConfig::default(), now);
+    let mut b = Session::new(&SessionConfig::ingest(), now);
+    a.add_relay_candidate(a_relay, a_local).unwrap();
+    b.add_host_candidate(b_addr).unwrap();
+    let offer = a.create_offer(&[MediaKind::Video]).unwrap();
+    let answer = b.accept_offer(&offer).unwrap();
+    a.accept_answer(&answer).unwrap();
+
+    // 3. The relay shuttle. A's transmits have source == a_relay (str0m chose the
+    //    relay candidate): the driver frames them as Send indications to the TURN
+    //    server; the server (relay) delivers the inner payload to B as if from
+    //    a_relay. B's transmits to a_relay are wrapped back to A as Data
+    //    indications the TURN client unwraps and feeds to A as arriving on a_relay.
+    let mut clock = now;
+    let mut a_saw_pli_or_media = false;
+    let mut delivered = false;
+    for i in 0..4000 {
+        a.handle_timeout(clock).unwrap();
+        b.handle_timeout(clock).unwrap();
+
+        // After connect, A writes one IDR access unit that must reach B via relay.
+        if a.is_connected() && b.is_connected() && !a_saw_pli_or_media {
+            let mut payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
+            payload.extend(std::iter::repeat_n(0xABu8, 1200));
+            a.write_video_sample(&payload, true, 0, clock).unwrap();
+            a_saw_pli_or_media = true;
+        }
+
+        // A → (Send indication) → server → B.
+        for _ in 0..128 {
+            match a.poll_transmit(clock) {
+                Some((source, dst, payload)) => {
+                    // Relay-forced: A's source is the relay, dst is the peer (B).
+                    assert_eq!(source, a_relay, "A sends from its relay candidate");
+                    assert_eq!(dst, b_addr, "the peer is B");
+                    // Frame as a TURN Send indication to the server.
+                    let send_ind = a_turn.wrap_send(dst, &payload);
+                    // The server relays: deliver the inner payload to B as if it
+                    // arrived from a_relay (B's view of A is the relay).
+                    if let Some((peer, inner)) = unwrap_send_indication(&send_ind) {
+                        assert_eq!(peer, b_addr);
+                        b.handle_datagram(a_relay, b_addr, &inner, clock).unwrap();
+                    }
+                }
+                None => break,
+            }
+        }
+        // B → server (Data indication wrap) → A (unwrap to arriving on a_relay).
+        for _ in 0..128 {
+            match b.poll_transmit(clock) {
+                Some((source, dst, payload)) => {
+                    assert_eq!(source, b_addr, "B sends from its host candidate");
+                    // B addresses A at the relay; the server wraps it back to A as
+                    // a Data indication; A's TURN client unwraps it.
+                    assert_eq!(dst, a_relay, "B reaches A via the relay address");
+                    let data_ind = turn_server.make_data_indication(b_addr, &payload);
+                    if let Some((peer, inner)) = a_turn.unwrap_data(&data_ind) {
+                        // Fed to A as arriving from the peer on the relay's local
+                        // candidate addr (str0m matches addr == relay).
+                        a.handle_datagram(peer, a_relay, &inner, clock).unwrap();
+                    }
+                }
+                None => break,
+            }
+        }
+
+        if b.received_rtp_count() > 0 {
+            delivered = true;
+            break;
+        }
+        let _ = i;
+        let next = a.poll_timeout(clock).min(b.poll_timeout(clock));
+        clock = next.max(clock + Duration::from_millis(1));
+    }
+
+    assert!(
+        a.is_connected() && b.is_connected(),
+        "ICE+DTLS completed entirely over the relay path"
+    );
+    assert!(
+        delivered,
+        "relay-forced SRTP media did not reach B through the TURN relay"
+    );
+    // Keep the codec honest (the relay shuttle used real STUN framing).
+    let probe = StunMessage::request(Method::Binding).to_bytes(None);
+    assert_eq!(StunMessage::parse(&probe).unwrap().class(), Class::Request);
+}
+
+/// Test helper: unwrap a TURN Send indication into `(peer, payload)` (the relay
+/// server's view of what the client asked it to forward).
+fn unwrap_send_indication(datagram: &[u8]) -> Option<(SocketAddr, Vec<u8>)> {
+    use multiview_webrtc::turn::message::{Class, Method, StunMessage};
+    let msg = StunMessage::parse(datagram).ok()?;
+    if msg.class() != Class::Indication || msg.method() != Method::Send {
+        return None;
+    }
+    Some((msg.peer_address()?, msg.data()?.to_vec()))
 }
 
 #[test]

@@ -35,12 +35,12 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::config::{EndpointConfig, IceServerKind};
+use crate::config::EndpointConfig;
 use crate::egress::{EgressFeed, EgressMedia};
 use crate::error::{Result, WebRtcError};
 use crate::session::{SessionId, SessionRole, SessionTable};
 use crate::transport::{Session, SessionConfig, WebRtcEndpoint};
-use crate::turn::TurnClient;
+use crate::turn::TurnRelayDriver;
 
 /// The maximum UDP datagram the recv loop reads.
 const RECV_BUFFER: usize = 2048;
@@ -49,34 +49,8 @@ const RECV_BUFFER: usize = 2048;
 /// run GC, and pump TURN when otherwise idle.
 const DRIVER_TICK: Duration = Duration::from_millis(10);
 
-/// One configured TURN server's allocation client, driven sans-IO over the shared
-/// socket by the endpoint loop (ADR-0048 §5.1) — the same shape WHIP ingest uses.
-struct TurnDriver {
-    client: TurnClient,
-}
-
-/// Build a [`TurnClient`] per configured TURN server (ADR-0048 §5.1). STUN
-/// servers need no client (str0m gathers srflx from the bound/advertised
-/// addresses). Empty when no TURN server is configured.
-fn build_turn_clients(config: &EndpointConfig) -> Vec<TurnDriver> {
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    config
-        .ice_servers
-        .iter()
-        .filter(|s| s.kind == IceServerKind::Turn)
-        .filter_map(|server| {
-            let credential = server.credentials.as_ref()?.resolve(now_unix);
-            Some(TurnDriver {
-                client: TurnClient::new(server.addr, credential),
-            })
-        })
-        .collect()
-}
-
 /// One admitted WHEP viewer session plus its per-session SPS/PPS cache.
-struct ViewerSession {
+pub(crate) struct ViewerSession {
     id: SessionId,
     output_id: String,
     session: Session,
@@ -89,7 +63,7 @@ struct ViewerSession {
 }
 
 /// A command to the running driver over the bounded channel.
-enum Command {
+pub(crate) enum Command {
     /// Register a freshly-negotiated WHEP viewer session.
     Register(Box<ViewerSession>),
     /// Tear down the session `session_id` (WHEP `DELETE`).
@@ -112,7 +86,7 @@ pub struct WhepServeHandle {
 }
 
 /// Shared state between the handle (negotiation) and the driver task.
-struct WhepShared {
+pub(crate) struct WhepShared {
     /// Bounded command channel to the driver (register / release).
     commands: mpsc::Sender<Command>,
     /// Host candidate addresses gathered at bind, IPv6-first (ADR-0042).
@@ -128,6 +102,21 @@ struct WhepShared {
     /// TURN relay transport addresses the driver's in-crate TURN client allocated
     /// (ADR-0048 §5.1), offered as relay candidates on each negotiated viewer.
     learned_relays: Mutex<Vec<SocketAddr>>,
+}
+
+impl WhepShared {
+    /// Publish freshly-learned TURN relays into the shared set so each future
+    /// negotiation offers them as relay candidates (de-duped; a poisoned lock is a
+    /// best-effort no-op). The unified driver calls this from the one TURN driver.
+    pub(crate) fn push_relays(&self, relays: &[SocketAddr]) {
+        if let Ok(mut learned) = self.learned_relays.lock() {
+            for relay in relays {
+                if !learned.contains(relay) {
+                    learned.push(*relay);
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for WhepServeHandle {
@@ -153,7 +142,44 @@ fn offer_has_audio(offer: &str) -> bool {
     offer.lines().any(|l| l.trim_start().starts_with("m=audio"))
 }
 
+/// The WHEP-serve viewer lane the [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint)
+/// owns: the registered viewers plus the command receiver + shared negotiation
+/// state. The unified driver steps it on the single shared socket (ADR-0048 §4).
+pub(crate) struct ServeLane {
+    pub(crate) commands: mpsc::Receiver<Command>,
+    pub(crate) shared: Arc<WhepShared>,
+    pub(crate) viewers: Vec<ViewerSession>,
+}
+
 impl WhepServeHandle {
+    /// Build the handle + command receiver + shared state from a config and the
+    /// gathered host candidates, **without binding a socket** — used by both
+    /// [`WhepServeEndpoint::bind`] (which binds first) and the single-socket
+    /// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) (which shares one
+    /// socket across roles, ADR-0048 §4).
+    pub(crate) fn build(
+        config: &EndpointConfig,
+        host_candidates: Vec<SocketAddr>,
+    ) -> (Self, mpsc::Receiver<Command>, Arc<WhepShared>) {
+        let (tx, rx) = mpsc::channel(64);
+        let shared = Arc::new(WhepShared {
+            commands: tx,
+            host_candidates,
+            table: Mutex::new(SessionTable::new(
+                config.max_sessions,
+                config.session_idle_timeout,
+                config.tombstone_ttl,
+            )),
+            outputs: Mutex::new(HashMap::new()),
+            viewers_by_output: Mutex::new(HashMap::new()),
+            learned_relays: Mutex::new(Vec::new()),
+        });
+        let handle = Self {
+            inner: Arc::clone(&shared),
+        };
+        (handle, rx, shared)
+    }
+
     /// Register a configured `webrtc` output: its per-output `max_viewers` cap and
     /// the shared [`EgressFeed`] carrying the program AUs. Called once per output
     /// at run start (the cli's sink runner owns the paired
@@ -361,36 +387,24 @@ impl WhepServeEndpoint {
     ///
     /// [`WebRtcError::Socket`] / [`WebRtcError::Config`] if the bind fails.
     pub fn bind(config: EndpointConfig) -> Result<(Self, WhepServeHandle)> {
-        let idle = config.session_idle_timeout;
-        let tombstone = config.tombstone_ttl;
-        let max_sessions = config.max_sessions;
         let endpoint = WebRtcEndpoint::bind(config)?;
         let host_candidates = endpoint.host_candidates()?;
-        let (tx, rx) = mpsc::channel(64);
-        let shared = Arc::new(WhepShared {
-            commands: tx,
-            host_candidates,
-            table: Mutex::new(SessionTable::new(max_sessions, idle, tombstone)),
-            outputs: Mutex::new(HashMap::new()),
-            viewers_by_output: Mutex::new(HashMap::new()),
-            learned_relays: Mutex::new(Vec::new()),
-        });
-        let handle = WhepServeHandle {
-            inner: Arc::clone(&shared),
-        };
+        let (handle, commands, shared) = WhepServeHandle::build(endpoint.config(), host_candidates);
         Ok((
             Self {
                 endpoint,
-                commands: rx,
+                commands,
                 shared,
             },
             handle,
         ))
     }
 
-    /// Run the driver loop until `stop` is raised. Owns the socket from
-    /// [`bind`](Self::bind). The live socket loop (hardware-gated); it never
-    /// blocks the engine.
+    /// Run the driver loop until `stop` is raised, owning the socket from
+    /// [`bind`](Self::bind). Retained as the **standalone** WHEP-serve driver for
+    /// direct use/tests; the cli runs every WebRTC role on ONE socket through
+    /// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) instead (ADR-0048
+    /// §4). The live socket loop is hardware-gated; it never blocks the engine.
     ///
     /// # Errors
     ///
@@ -398,7 +412,7 @@ impl WhepServeEndpoint {
     pub async fn run(self, stop: Arc<AtomicBool>) -> Result<()> {
         let bind_addr = self.endpoint.config().bind_addr();
         let local_addr = self.endpoint.local_addr()?;
-        let mut turn_clients = build_turn_clients(self.endpoint.config());
+        let mut turn = TurnRelayDriver::from_config(self.endpoint.config(), Instant::now());
         let std_socket = self.endpoint.into_socket();
         std_socket
             .set_nonblocking(true)
@@ -423,40 +437,83 @@ impl WhepServeEndpoint {
             }
             tokio::select! {
                 cmd = commands.recv() => {
-                    match cmd {
-                        Some(Command::Register(v)) => viewers.push(*v),
-                        Some(Command::Release { session_id }) => {
-                            for v in viewers.iter_mut().filter(|v| v.id == session_id) {
-                                v.session.disconnect();
-                            }
-                        }
-                        None => return Ok(()),
+                    if !Self::apply_command(&mut viewers, cmd) {
+                        return Ok(());
                     }
                 }
                 recv = socket.recv_from(&mut buf) => {
                     let now = Instant::now();
                     if let Ok((len, src)) = recv {
                         if let Some(payload) = buf.get(..len) {
-                            if !Self::feed_turn(&mut turn_clients, src, payload, now, &self.shared) {
-                                Self::route_datagram(&mut viewers, src, local_addr, payload, now);
-                            }
+                            Self::on_inbound(
+                                &mut viewers, &mut turn, src, local_addr, payload, now,
+                            );
                         }
                     }
-                    Self::pump_turn(&socket, &mut turn_clients, now, &self.shared).await;
-                    Self::pump_outbound(&socket, &mut viewers, now).await;
+                    Self::pump_turn(&socket, &mut turn, now, &self.shared).await;
+                    Self::pump_outbound(&socket, &mut viewers, &mut turn, now).await;
                 }
                 _ = tick.tick() => {
                     let now = Instant::now();
-                    Self::pump_egress(&mut viewers, now, &self.shared);
-                    for v in &mut viewers {
-                        let _ = v.session.handle_timeout(now);
-                        v.was_connected |= v.session.is_connected();
-                    }
-                    Self::pump_turn(&socket, &mut turn_clients, now, &self.shared).await;
-                    Self::pump_outbound(&socket, &mut viewers, now).await;
+                    Self::tick(&mut viewers, &self.shared, now);
+                    Self::pump_turn(&socket, &mut turn, now, &self.shared).await;
+                    Self::pump_outbound(&socket, &mut viewers, &mut turn, now).await;
                     Self::reap(&mut viewers, &self.shared);
                 }
             }
+        }
+    }
+
+    /// Apply a register/release command to the viewer set. Returns `false` when the
+    /// command channel has closed (all handles dropped) so the driver should exit.
+    pub(crate) fn apply_command(viewers: &mut Vec<ViewerSession>, cmd: Option<Command>) -> bool {
+        match cmd {
+            Some(Command::Register(v)) => {
+                viewers.push(*v);
+                true
+            }
+            Some(Command::Release { session_id }) => {
+                for v in viewers.iter_mut().filter(|v| v.id == session_id) {
+                    v.session.disconnect();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Classify and route one inbound datagram (relay-aware, defect C): a relayed
+    /// Data indication is decapsulated to the inner media; a TURN-server control
+    /// reply feeds the relay driver + publishes any learned relay; any other
+    /// datagram is media for the viewer demux.
+    pub(crate) fn on_inbound(
+        viewers: &mut [ViewerSession],
+        turn: &mut TurnRelayDriver,
+        src: SocketAddr,
+        local_addr: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+    ) {
+        match crate::transport::relay_io::classify_inbound(turn, src, payload, now) {
+            crate::transport::relay_io::Inbound::Relayed {
+                peer,
+                relay,
+                payload,
+            } => Self::route_datagram(viewers, peer, relay, &payload, now),
+            crate::transport::relay_io::Inbound::TurnControl => {}
+            crate::transport::relay_io::Inbound::Media => {
+                Self::route_datagram(viewers, src, local_addr, payload, now);
+            }
+        }
+    }
+
+    /// One idle-tick step: drain the egress feeds into the viewers and advance each
+    /// viewer's ICE/DTLS timers (the outbound + GC are pumped by the caller).
+    pub(crate) fn tick(viewers: &mut [ViewerSession], shared: &WhepShared, now: Instant) {
+        Self::pump_egress(viewers, now, shared);
+        for v in viewers.iter_mut() {
+            let _ = v.session.handle_timeout(now);
+            v.was_connected |= v.session.is_connected();
         }
     }
 
@@ -464,7 +521,7 @@ impl WhepServeEndpoint {
     /// into that output's viewers. The single program encode fans to N viewers
     /// (encode-once, invariant #7); a viewer that has not yet seen a keyframe
     /// skips delta AUs until the first IDR (late-join gate).
-    fn pump_egress(viewers: &mut [ViewerSession], now: Instant, shared: &WhepShared) {
+    pub(crate) fn pump_egress(viewers: &mut [ViewerSession], now: Instant, shared: &WhepShared) {
         // Snapshot the per-output feeds so the lock is not held during writes.
         let feeds: Vec<(String, EgressFeed)> = match shared.outputs.lock() {
             Ok(outputs) => outputs
@@ -513,7 +570,7 @@ impl WhepServeEndpoint {
     }
 
     /// Route one received datagram to the first viewer session that accepts it.
-    fn route_datagram(
+    pub(crate) fn route_datagram(
         viewers: &mut [ViewerSession],
         src: SocketAddr,
         local: SocketAddr,
@@ -528,68 +585,37 @@ impl WhepServeEndpoint {
 
     /// Drain every viewer's outbound datagrams onto the socket (non-blocking send;
     /// a send error drops the datagram — never blocks the loop).
-    async fn pump_outbound(
+    pub(crate) async fn pump_outbound(
         socket: &tokio::net::UdpSocket,
         viewers: &mut [ViewerSession],
+        turn: &mut TurnRelayDriver,
         now: Instant,
     ) {
         for v in viewers.iter_mut() {
-            while let Some((dst, payload)) = v.session.poll_transmit(now) {
-                let _ = socket.send_to(&payload, dst).await;
+            while let Some((source, dst, payload)) = v.session.poll_transmit(now) {
+                crate::transport::relay_io::send_routed(socket, turn, source, dst, &payload, now)
+                    .await;
             }
         }
     }
 
-    /// Feed a datagram from a configured TURN server into its client. Returns
-    /// `true` if a TURN client owned `src`. Mirrors the WHIP-ingest driver.
-    fn feed_turn(
-        clients: &mut [TurnDriver],
-        src: SocketAddr,
-        payload: &[u8],
-        now: Instant,
-        shared: &WhepShared,
-    ) -> bool {
-        for driver in clients.iter_mut() {
-            if driver.client.server_addr() != src {
-                continue;
-            }
-            if let Ok(Some(crate::turn::TurnEvent::Allocated(relay))) =
-                driver.client.handle_input(payload, now)
-            {
-                if let Ok(mut relays) = shared.learned_relays.lock() {
-                    if !relays.contains(&relay) {
-                        relays.push(relay);
-                    }
-                }
-            }
-            return true;
-        }
-        false
-    }
-
-    /// Drive every TURN client's sans-IO output, sending queued datagrams and
-    /// harvesting any learned relay (the operator's NAT-traversal path, live in
-    /// the driver). Non-blocking.
-    async fn pump_turn(
+    /// Drive the shared TURN relay driver: send each queued datagram to its TURN
+    /// server (allocate/refresh/retransmit) and publish any learned relay into
+    /// `shared.learned_relays` so future negotiations offer it as a relay
+    /// candidate (the operator's NAT-traversal path). Non-blocking.
+    pub(crate) async fn pump_turn(
         socket: &tokio::net::UdpSocket,
-        clients: &mut [TurnDriver],
+        turn: &mut TurnRelayDriver,
         now: Instant,
         shared: &WhepShared,
     ) {
-        for driver in clients.iter_mut() {
-            for _ in 0..8 {
-                match driver.client.poll_output(now) {
-                    crate::turn::TurnOutput::Transmit {
-                        destination,
-                        payload,
-                    } => {
-                        let _ = socket.send_to(&payload, destination).await;
-                    }
-                    crate::turn::TurnOutput::Timeout(_) | crate::turn::TurnOutput::Idle => break,
-                }
-            }
-            if let Some(relay) = driver.client.relay() {
-                if let Ok(mut relays) = shared.learned_relays.lock() {
+        while let Some((destination, payload)) = turn.poll_transmit(now) {
+            let _ = socket.send_to(&payload, destination).await;
+        }
+        let new_relays = turn.take_new_relays();
+        if !new_relays.is_empty() {
+            if let Ok(mut relays) = shared.learned_relays.lock() {
+                for relay in new_relays {
                     if !relays.contains(&relay) {
                         relays.push(relay);
                     }
@@ -600,7 +626,7 @@ impl WhepServeEndpoint {
 
     /// Remove viewer sessions whose `Rtc` has died, freeing their per-output slot
     /// and the global pool entry.
-    fn reap(viewers: &mut Vec<ViewerSession>, shared: &WhepShared) {
+    pub(crate) fn reap(viewers: &mut Vec<ViewerSession>, shared: &WhepShared) {
         viewers.retain_mut(|v| {
             if v.session.is_alive() {
                 return true;

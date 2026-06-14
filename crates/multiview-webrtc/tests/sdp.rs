@@ -9,7 +9,61 @@
     clippy::as_conversions
 )]
 
-use multiview_webrtc::sdp::{candidate_priority_order, AnswerParams, CandidateClass};
+use multiview_webrtc::sdp::{
+    align_connection_family, candidate_priority_order, AnswerParams, CandidateClass,
+};
+
+#[test]
+fn align_connection_family_rewrites_str0m_ipv4_placeholder_to_ipv6() {
+    // Defect D1 (IPv6-first SDP): str0m's own answer hardcodes the dummy
+    // `c=IN IP4 0.0.0.0` / `o=… IN IP4 0.0.0.0` even when every gathered candidate
+    // is IPv6. Per ADR-0042 (IPv6-first) the served answer's connection/origin
+    // family must match the candidate family. With only IPv6 candidates the c=/o=
+    // lines become `IN IP6 ::`.
+    let answer = "v=0\r\n\
+o=str0m-0.16.2 123 2 IN IP4 0.0.0.0\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtcp-mux\r\n\
+a=mid:0\r\n\
+a=candidate:1 1 udp 2122260223 2001:db8::15 8189 typ host\r\n";
+    let aligned = align_connection_family(answer);
+    assert!(
+        aligned.contains("c=IN IP6 ::"),
+        "the c= line follows the IPv6 candidate family:\n{aligned}"
+    );
+    assert!(
+        aligned.contains("o=str0m-0.16.2 123 2 IN IP6 ::"),
+        "the o= origin line follows the IPv6 candidate family:\n{aligned}"
+    );
+    assert!(
+        !aligned.contains("IP4 0.0.0.0"),
+        "no IPv4 placeholder remains:\n{aligned}"
+    );
+    // The non-connection lines are untouched (candidate, mid, etc).
+    assert!(aligned.contains("a=candidate:1 1 udp 2122260223 2001:db8::15 8189 typ host"));
+    assert!(aligned.contains("a=mid:0"));
+}
+
+#[test]
+fn align_connection_family_keeps_ipv4_when_candidates_are_ipv4_only() {
+    // If the only reachable candidate is IPv4 (legacy), the c=/o= family follows
+    // it — the dummy stays IPv4 rather than lying about an IPv6 connection.
+    let answer = "v=0\r\n\
+o=str0m-0.16.2 123 2 IN IP4 0.0.0.0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=candidate:1 1 udp 2122260223 192.0.2.15 8189 typ host\r\n";
+    let aligned = align_connection_family(answer);
+    assert!(
+        aligned.contains("c=IN IP4 0.0.0.0"),
+        "IPv4-only candidates keep the IPv4 dummy:\n{aligned}"
+    );
+    assert!(!aligned.contains("IP6"));
+}
 
 #[test]
 fn fake_answer_is_ipv6_first_and_has_mid_and_rtcp_mux() {

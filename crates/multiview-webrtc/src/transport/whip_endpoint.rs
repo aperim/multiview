@@ -43,7 +43,7 @@ const RECV_BUFFER: usize = 2048;
 const DRIVER_TICK: Duration = Duration::from_millis(50);
 
 /// A registered ingest session plus its per-session RTP egress ring.
-struct DrivenSession {
+pub(crate) struct DrivenSession {
     id: SessionId,
     source_id: String,
     session: Session,
@@ -55,7 +55,7 @@ struct DrivenSession {
 }
 
 /// A command sent to the running driver over the bounded channel.
-enum Command {
+pub(crate) enum Command {
     /// Register a freshly-negotiated ingest session.
     Register(Box<DrivenSession>),
     /// Tear down the session `session_id` (WHIP `DELETE`).
@@ -75,7 +75,7 @@ pub struct WhipHandle {
 }
 
 /// Shared state between the handle (negotiation) and the driver task.
-struct WhipShared {
+pub(crate) struct WhipShared {
     /// Bounded command channel to the driver (register / release).
     commands: mpsc::Sender<Command>,
     /// Host candidate addresses gathered at bind, IPv6-first (ADR-0042).
@@ -92,6 +92,21 @@ struct WhipShared {
     /// last resort, IPv6-first-ordered by str0m). Empty until/unless a TURN
     /// server is configured and an allocation completes.
     learned_relays: std::sync::Mutex<Vec<SocketAddr>>,
+}
+
+impl WhipShared {
+    /// Publish freshly-learned TURN relays into the shared set so each future
+    /// negotiation offers them as relay candidates (de-duped; a poisoned lock is a
+    /// best-effort no-op). The unified driver calls this from the one TURN driver.
+    pub(crate) fn push_relays(&self, relays: &[SocketAddr]) {
+        if let Ok(mut learned) = self.learned_relays.lock() {
+            for relay in relays {
+                if !learned.contains(relay) {
+                    learned.push(*relay);
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for WhipHandle {
@@ -140,7 +155,42 @@ fn answer_payload_type(sdp: &str, media: &str) -> Option<u8> {
     None
 }
 
+/// The WHIP ingest lane the [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint)
+/// owns: the registered ingest sessions plus the command receiver + shared
+/// negotiation state. The unified driver steps it on the single shared socket.
+pub(crate) struct IngestLane {
+    pub(crate) commands: mpsc::Receiver<Command>,
+    pub(crate) shared: Arc<WhipShared>,
+    pub(crate) sessions: Vec<DrivenSession>,
+}
+
 impl WhipHandle {
+    /// Build the handle + command receiver + shared state from a config and the
+    /// gathered host candidates, **without binding a socket** — used by both
+    /// [`WhipEndpoint::bind`] and the single-socket
+    /// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) (ADR-0048 §4).
+    pub(crate) fn build(
+        config: &EndpointConfig,
+        host_candidates: Vec<SocketAddr>,
+    ) -> (Self, mpsc::Receiver<Command>, Arc<WhipShared>) {
+        let (tx, rx) = mpsc::channel(64);
+        let shared = Arc::new(WhipShared {
+            commands: tx,
+            host_candidates,
+            table: std::sync::Mutex::new(SessionTable::new(
+                config.max_sessions,
+                config.session_idle_timeout,
+                config.tombstone_ttl,
+            )),
+            live_by_source: std::sync::Mutex::new(HashMap::new()),
+            learned_relays: std::sync::Mutex::new(Vec::new()),
+        });
+        let handle = Self {
+            inner: Arc::clone(&shared),
+        };
+        (handle, rx, shared)
+    }
+
     /// Negotiate a WHIP ingest session for `source_id` from the publisher's SDP
     /// `offer`, with `audio` controlling whether the Opus m-line is accepted.
     ///
@@ -337,35 +387,24 @@ impl WhipEndpoint {
     ///
     /// [`WebRtcError::Socket`] / [`WebRtcError::Config`] if the bind fails.
     pub fn bind(config: EndpointConfig) -> Result<(Self, WhipHandle)> {
-        let idle = config.session_idle_timeout;
-        let tombstone = config.tombstone_ttl;
-        let max_sessions = config.max_sessions;
         let endpoint = WebRtcEndpoint::bind(config)?;
         let host_candidates = endpoint.host_candidates()?;
-        let (tx, rx) = mpsc::channel(64);
-        let shared = Arc::new(WhipShared {
-            commands: tx,
-            host_candidates,
-            table: std::sync::Mutex::new(SessionTable::new(max_sessions, idle, tombstone)),
-            live_by_source: std::sync::Mutex::new(HashMap::new()),
-            learned_relays: std::sync::Mutex::new(Vec::new()),
-        });
-        let handle = WhipHandle {
-            inner: Arc::clone(&shared),
-        };
+        let (handle, commands, shared) = WhipHandle::build(endpoint.config(), host_candidates);
         Ok((
             Self {
                 endpoint,
-                commands: rx,
+                commands,
                 shared,
             },
             handle,
         ))
     }
 
-    /// Run the driver loop until `stop` is raised. Binds nothing new — it owns
-    /// the socket from [`bind`](WhipEndpoint::bind). This is the live socket
-    /// loop (hardware-gated); it never blocks the engine.
+    /// Run the standalone driver loop until `stop` is raised, owning the socket
+    /// from [`bind`](WhipEndpoint::bind). Retained for direct use/tests; the cli
+    /// runs every WebRTC role on ONE socket through
+    /// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) (ADR-0048 §4). The
+    /// live socket loop is hardware-gated; it never blocks the engine.
     ///
     /// # Errors
     ///
@@ -405,15 +444,8 @@ impl WhipEndpoint {
             tokio::select! {
                 // A new register/release command.
                 cmd = commands.recv() => {
-                    match cmd {
-                        Some(Command::Register(driven)) => sessions.push(*driven),
-                        Some(Command::Release { session_id }) => {
-                            for s in sessions.iter_mut().filter(|s| s.id == session_id) {
-                                s.session.disconnect();
-                                s.ring.close();
-                            }
-                        }
-                        None => return Ok(()), // all handles dropped.
+                    if !Self::apply_command(&mut sessions, cmd) {
+                        return Ok(()); // all handles dropped.
                     }
                 }
                 // An incoming datagram: a TURN-server reply, or media for a session.
@@ -421,37 +453,84 @@ impl WhipEndpoint {
                     let now = Instant::now();
                     if let Ok((len, src)) = recv {
                         if let Some(payload) = buf.get(..len) {
-                            // A datagram from a TURN server feeds its client; any
-                            // other datagram is media routed to the session that
-                            // accepts it.
-                            if !turn.feed(src, payload, now) {
-                                Self::route_datagram(&mut sessions, src, local_addr, payload, now);
-                            }
+                            Self::on_inbound(
+                                &mut sessions, &mut turn, src, local_addr, payload, now,
+                            );
                         }
                     }
                     Self::pump_turn(&socket, &mut turn, now, &self.shared).await;
-                    Self::pump_outbound(&socket, &mut sessions, now).await;
+                    Self::pump_outbound(&socket, &mut sessions, &mut turn, now).await;
                 }
                 // The idle tick: advance timers, drain RTP, drive TURN, GC.
                 _ = tick.tick() => {
                     let now = Instant::now();
-                    for s in &mut sessions {
-                        let _ = s.session.handle_timeout(now);
-                        s.was_connected |= s.session.is_connected();
-                        s.ring.drain_from(&mut s.session);
-                        Self::maybe_pli(s, now);
-                    }
+                    Self::tick(&mut sessions, now);
                     Self::pump_turn(&socket, &mut turn, now, &self.shared).await;
-                    Self::pump_outbound(&socket, &mut sessions, now).await;
+                    Self::pump_outbound(&socket, &mut sessions, &mut turn, now).await;
                     Self::reap(&mut sessions, &self.shared);
                 }
             }
         }
     }
 
+    /// Apply a register/release command to the ingest session set. Returns `false`
+    /// when the command channel closed (all handles dropped) so the driver exits.
+    pub(crate) fn apply_command(sessions: &mut Vec<DrivenSession>, cmd: Option<Command>) -> bool {
+        match cmd {
+            Some(Command::Register(driven)) => {
+                sessions.push(*driven);
+                true
+            }
+            Some(Command::Release { session_id }) => {
+                for s in sessions.iter_mut().filter(|s| s.id == session_id) {
+                    s.session.disconnect();
+                    s.ring.close();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Classify and route one inbound datagram (relay-aware, defect C): a relayed
+    /// Data indication is decapsulated to the inner media (fed as arriving on the
+    /// relay addr); a TURN-server control reply feeds the relay driver; any other
+    /// datagram is media for the session demux.
+    pub(crate) fn on_inbound(
+        sessions: &mut [DrivenSession],
+        turn: &mut TurnRelayDriver,
+        src: SocketAddr,
+        local_addr: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+    ) {
+        match crate::transport::relay_io::classify_inbound(turn, src, payload, now) {
+            crate::transport::relay_io::Inbound::Relayed {
+                peer,
+                relay,
+                payload,
+            } => Self::route_datagram(sessions, peer, relay, &payload, now),
+            crate::transport::relay_io::Inbound::TurnControl => {}
+            crate::transport::relay_io::Inbound::Media => {
+                Self::route_datagram(sessions, src, local_addr, payload, now);
+            }
+        }
+    }
+
+    /// One idle-tick step: advance each session's ICE/DTLS timers, drain its RTP
+    /// ring, and send a rate-limited PLI (the outbound + GC are pumped by caller).
+    pub(crate) fn tick(sessions: &mut [DrivenSession], now: Instant) {
+        for s in sessions.iter_mut() {
+            let _ = s.session.handle_timeout(now);
+            s.was_connected |= s.session.is_connected();
+            s.ring.drain_from(&mut s.session);
+            Self::maybe_pli(s, now);
+        }
+    }
+
     /// Route one received datagram to the first session that accepts it (the
     /// str0m ufrag/peer demux), drain its RTP, and note connection.
-    fn route_datagram(
+    pub(crate) fn route_datagram(
         sessions: &mut [DrivenSession],
         src: SocketAddr,
         local: SocketAddr,
@@ -473,18 +552,22 @@ impl WhipEndpoint {
         }
     }
 
-    /// Drain every session's outbound datagrams onto the socket (non-blocking
-    /// send; a send error drops the datagram — never blocks the loop).
-    async fn pump_outbound(
+    /// Drain every session's outbound datagrams onto the socket, routing each
+    /// through the TURN relay when str0m chose the relay candidate (source == relay
+    /// addr → TURN Send indication; defect C). Non-blocking; a send error drops the
+    /// datagram — never blocks the loop.
+    pub(crate) async fn pump_outbound(
         socket: &tokio::net::UdpSocket,
         sessions: &mut [DrivenSession],
+        turn: &mut TurnRelayDriver,
         now: Instant,
     ) {
         for s in sessions.iter_mut() {
-            while let Some((dst, payload)) = s.session.poll_transmit(now) {
+            while let Some((source, dst, payload)) = s.session.poll_transmit(now) {
                 // A send error (e.g. unreachable) is dropped: the publisher's
                 // own retransmit/ICE recovers it; the loop never blocks.
-                let _ = socket.send_to(&payload, dst).await;
+                crate::transport::relay_io::send_routed(socket, turn, source, dst, &payload, now)
+                    .await;
             }
         }
     }
@@ -493,7 +576,7 @@ impl WhipEndpoint {
     /// datagram to its TURN server (allocate/refresh/retransmit) and publish any
     /// relay it harvested into `shared.learned_relays` for future negotiations.
     /// Non-blocking; a send error is dropped (the client retransmits).
-    async fn pump_turn(
+    pub(crate) async fn pump_turn(
         socket: &tokio::net::UdpSocket,
         turn: &mut TurnRelayDriver,
         now: Instant,
@@ -520,7 +603,7 @@ impl WhipEndpoint {
     /// keyframe gate is presumably closed (best-effort recovery, ADR-T014 §7).
     /// We PLI on connect and then at most once per [`PLI_FLOOR`]; the keyframe
     /// gate downstream holds delta frames until the IDR regardless.
-    fn maybe_pli(s: &mut DrivenSession, now: Instant) {
+    pub(crate) fn maybe_pli(s: &mut DrivenSession, now: Instant) {
         if !s.session.is_connected() {
             return;
         }
@@ -535,7 +618,7 @@ impl WhipEndpoint {
 
     /// Remove sessions whose `Rtc` has died (ICE/DTLS failed or disconnected),
     /// closing their ring and freeing the per-source slot.
-    fn reap(sessions: &mut Vec<DrivenSession>, shared: &WhipShared) {
+    pub(crate) fn reap(sessions: &mut Vec<DrivenSession>, shared: &WhipShared) {
         sessions.retain_mut(|s| {
             if s.session.is_alive() {
                 return true;

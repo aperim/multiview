@@ -24,15 +24,19 @@
 //! the consumer lanes. A wedged peer loses only its own session's media.
 
 mod ingest;
-mod whep_serve;
-mod whip_endpoint;
-mod whip_push;
+pub(crate) mod relay_io;
+mod unified;
+pub(crate) mod whep_serve;
+pub(crate) mod whip_endpoint;
+pub(crate) mod whip_push;
 
 pub use ingest::{RtpRing, RtpRingEngine, MAX_INGRESS_RTP};
+pub use unified::{UnifiedBuilder, UnifiedEndpoint};
 pub use whep_serve::{WhepNegotiated, WhepServeEndpoint, WhepServeHandle};
 pub use whip_endpoint::{WhipEndpoint, WhipHandle, WhipNegotiated};
 pub use whip_push::{
-    PushBackoff, WhipPushAnswer, WhipPushClient, WhipPushOffer, WhipSignaller, MAX_REDIRECTS,
+    PushBackoff, PushLane, WhipPushAnswer, WhipPushClient, WhipPushOffer, WhipPushSpec,
+    WhipSignaller, MAX_REDIRECTS,
 };
 
 use std::collections::VecDeque;
@@ -180,7 +184,11 @@ pub struct Session {
     connected: bool,
     /// Datagrams the engine wants sent, drained from a single `poll_output` pass
     /// (the proven sans-IO drive shape — never poll the engine twice per tick).
-    outbound: VecDeque<(SocketAddr, Vec<u8>)>,
+    /// Each entry is `(source, destination, payload)`: the str0m `Transmit::source`
+    /// is the local candidate's base — for a **relay** candidate that base IS the
+    /// allocated relay address, the signal the driver uses to frame the datagram as
+    /// a TURN Send indication instead of a direct send (defect C, ADR-0048 §5.1).
+    outbound: VecDeque<(SocketAddr, SocketAddr, Vec<u8>)>,
     /// The next wake instant from the last drive pass.
     next_timeout: Option<Instant>,
     /// Decrypted media frames surfaced by the engine, oldest first (bounded) —
@@ -293,7 +301,11 @@ impl Session {
             match self.rtc.poll_output() {
                 Ok(Output::Transmit(transmit)) => {
                     let bytes: Vec<u8> = transmit.contents.into();
-                    self.outbound.push_back((transmit.destination, bytes));
+                    // Carry the str0m source (local candidate base) so the driver
+                    // can detect a relay-routed datagram (source == relay addr) and
+                    // frame it as a TURN Send indication (defect C).
+                    self.outbound
+                        .push_back((transmit.source, transmit.destination, bytes));
                 }
                 Ok(Output::Timeout(t)) => {
                     self.next_timeout = Some(t.max(now));
@@ -416,7 +428,12 @@ impl Session {
             .sdp_api()
             .accept_offer(offer)
             .map_err(|e| WebRtcError::Transport(format!("accept_offer: {e}")))?;
-        let answer_sdp = answer.to_sdp_string();
+        // str0m hardcodes the dummy `c=IN IP4 0.0.0.0` / `o=… IN IP4 0.0.0.0`
+        // even when every gathered candidate is IPv6 (RFC 8839 §4.3.2 makes the
+        // c= line a placeholder under ICE). Box-validation found IPv6-only peers
+        // reject the family mismatch, so align the served answer's connection /
+        // origin family to the candidate family — IPv6-first (ADR-0042, defect D1).
+        let answer_sdp = crate::sdp::align_connection_family(&answer.to_sdp_string());
         // Record the negotiated `(mid, kind)` pairs from the answer so the
         // answerer can address each stream by mid: the ingest side requests a
         // video keyframe (PLI via `request_video_keyframe`), and the WHEP egress
@@ -460,15 +477,17 @@ impl Session {
     }
 
     /// Pull the next datagram the session wants to send. Returns
-    /// `(destination, payload)` or `None` when the outbound queue is empty.
+    /// `(source, destination, payload)` or `None` when the outbound queue is empty.
     ///
-    /// This is the sans-IO send side: the driver sends `payload` to
-    /// `destination` over the shared UDP socket and loops until `None`. Datagrams
-    /// are produced by the single [`Session::drive`] pass that
-    /// [`Session::handle_datagram`] / [`Session::handle_timeout`] run, so the
-    /// engine is never polled twice per tick.
+    /// This is the sans-IO send side: the driver inspects `source` — if it is one
+    /// of the bound local sockets, it sends `payload` directly to `destination`;
+    /// if it is an allocated TURN **relay** address, it frames the datagram as a
+    /// TURN Send indication to the relay's server (defect C / ADR-0048 §5.1). It
+    /// loops until `None`. Datagrams are produced by the single [`Session::drive`]
+    /// pass that [`Session::handle_datagram`] / [`Session::handle_timeout`] run, so
+    /// the engine is never polled twice per tick.
     #[must_use = "the returned datagram must actually be sent"]
-    pub fn poll_transmit(&mut self, now: Instant) -> Option<(SocketAddr, Vec<u8>)> {
+    pub fn poll_transmit(&mut self, now: Instant) -> Option<(SocketAddr, SocketAddr, Vec<u8>)> {
         let _ = now;
         self.outbound.pop_front()
     }

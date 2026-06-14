@@ -51,13 +51,49 @@ const ATTR_DATA: u16 = 0x0013;
 const ATTR_REALM: u16 = 0x0014;
 const ATTR_NONCE: u16 = 0x0015;
 const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
+const ATTR_REQUESTED_ADDRESS_FAMILY: u16 = 0x0017;
 const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const ATTR_FINGERPRINT: u16 = 0x8028;
 
-// Address family bytes inside a (XOR-)MAPPED-ADDRESS value (RFC 5389 §15.1).
+// Address family bytes inside a (XOR-)MAPPED-ADDRESS value (RFC 5389 §15.1) — the
+// same byte values REQUESTED-ADDRESS-FAMILY uses (RFC 8656 §14.7).
 const FAMILY_IPV4: u8 = 0x01;
 const FAMILY_IPV6: u8 = 0x02;
+
+/// The address family a TURN client requests for its relayed transport address
+/// via REQUESTED-ADDRESS-FAMILY (RFC 8656 §14.7). IPv6-first per ADR-0042: the
+/// client asks for an IPv6 relay so an IPv6 peer's `CreatePermission` does not
+/// fail `440` (Address Family not Supported) / `443` against an IPv4-only default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AddressFamily {
+    /// IPv4 relay (`0x01`).
+    Ipv4,
+    /// IPv6 relay (`0x02`).
+    Ipv6,
+}
+
+impl AddressFamily {
+    /// The single family byte (RFC 8656 §14.7: top byte of the 4-byte value).
+    #[must_use]
+    pub const fn byte(self) -> u8 {
+        match self {
+            Self::Ipv4 => FAMILY_IPV4,
+            Self::Ipv6 => FAMILY_IPV6,
+        }
+    }
+
+    /// Decode a family byte, if recognised.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            FAMILY_IPV4 => Some(Self::Ipv4),
+            FAMILY_IPV6 => Some(Self::Ipv6),
+            _ => None,
+        }
+    }
+}
 
 /// The IANA protocol number TURN's REQUESTED-TRANSPORT carries for UDP (17),
 /// in the top byte of the 4-byte value (RFC 5766 §14.7).
@@ -194,6 +230,9 @@ pub enum Attribute {
     Lifetime(u32),
     /// `REQUESTED-TRANSPORT` = UDP (the only transport the client requests).
     RequestedTransportUdp,
+    /// `REQUESTED-ADDRESS-FAMILY` — the relay family the client asks for on
+    /// Allocate (RFC 8656 §14.7; IPv6-first per ADR-0042).
+    RequestedAddressFamily(AddressFamily),
     /// DATA — an application payload in a Send/Data indication.
     Data(Vec<u8>),
     /// CHANNEL-NUMBER for a `ChannelBind`.
@@ -322,6 +361,15 @@ impl StunMessage {
     pub fn peer_address(&self) -> Option<SocketAddr> {
         self.attributes.iter().find_map(|a| match a {
             Attribute::XorPeerAddress(addr) => Some(*addr),
+            _ => None,
+        })
+    }
+
+    /// The REQUESTED-ADDRESS-FAMILY, if present.
+    #[must_use]
+    pub fn requested_address_family(&self) -> Option<AddressFamily> {
+        self.attributes.iter().find_map(|a| match a {
+            Attribute::RequestedAddressFamily(family) => Some(*family),
             _ => None,
         })
     }
@@ -657,6 +705,14 @@ fn encode_attribute(out: &mut Vec<u8>, attr: &Attribute, tid: &TransactionId) {
                 &[REQUESTED_TRANSPORT_UDP, 0, 0, 0],
             );
         }
+        Attribute::RequestedAddressFamily(family) => {
+            // RFC 8656 §14.7: a 4-byte value — the family byte then 3 reserved.
+            push_bytes(
+                out,
+                ATTR_REQUESTED_ADDRESS_FAMILY,
+                &[family.byte(), 0, 0, 0],
+            );
+        }
         Attribute::Data(d) => push_bytes(out, ATTR_DATA, d),
         Attribute::ChannelNumber(n) => {
             let [hi, lo] = n.to_be_bytes();
@@ -764,6 +820,12 @@ fn decode_attribute(
         ATTR_NONCE => Some(Attribute::Nonce(decode_str(value))),
         ATTR_LIFETIME => Some(Attribute::Lifetime(be32(value, 0)?)),
         ATTR_REQUESTED_TRANSPORT => Some(Attribute::RequestedTransportUdp),
+        ATTR_REQUESTED_ADDRESS_FAMILY => {
+            let byte = *value
+                .first()
+                .ok_or(TurnError::Malformed("address-family"))?;
+            AddressFamily::from_byte(byte).map(Attribute::RequestedAddressFamily)
+        }
         ATTR_DATA => Some(Attribute::Data(value.to_vec())),
         ATTR_CHANNEL_NUMBER => Some(Attribute::ChannelNumber(be16(value, 0)?)),
         ATTR_ERROR_CODE => {
