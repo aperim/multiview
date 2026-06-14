@@ -411,7 +411,12 @@ fn webrtc_endpoint_config(config: &MultiviewConfig) -> multiview_webrtc::config:
 // line-count lint is allowed here with justification (matching `bind_and_serve`).
 #[allow(clippy::too_many_lines)]
 async fn run_pipeline_until_ctrl_c(
-    mut pipeline: multiview_cli::pipeline::Pipeline,
+    // `mut` is needed only under `webrtc-native` (the program-audio preview tap
+    // below calls `pipeline.set_program_audio_preview`). Without that feature the
+    // binding is never mutated, so the `mut` is conditional to stay
+    // `unused_mut`-clean on the `ffmpeg`/`rist`-only feature legs.
+    #[cfg(feature = "webrtc-native")] mut pipeline: multiview_cli::pipeline::Pipeline,
+    #[cfg(not(feature = "webrtc-native"))] pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
     config_path: &Path,

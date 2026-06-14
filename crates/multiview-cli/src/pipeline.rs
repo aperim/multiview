@@ -74,6 +74,8 @@ use ffmpeg_next::util::frame::Video;
 
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+#[cfg(feature = "rist")]
+use multiview_config::{lower_rist_url, RistOptions};
 use multiview_config::{MultiviewConfig, Output, Source, SourceKind};
 use multiview_control::EngineStateSnapshot;
 use multiview_core::frame::FrameMeta;
@@ -5220,6 +5222,76 @@ fn start_display_audio(
     started.audio_publishers.push(audio_publisher);
 }
 
+/// Resolve a RIST pre-shared-key `secret_ref` to its plaintext passphrase
+/// (RIST-3, ADR-0095 §3). The PSK is **never** stored in the config or logs; it
+/// is read at run time from the secret store the deployment configures.
+///
+/// This build resolves an `env:VAR` reference from the environment (no extra
+/// dependency, works in every deployment), exactly like the managed-device
+/// credential resolver. An `op://…` reference (or any other scheme) returns
+/// `None` here — the run then cannot inject the key and the `rist://` open
+/// surfaces a libav error the ingest loop rides as `NO_SIGNAL`/reconnect (never
+/// a crash), rather than silently sending an unencrypted feed.
+#[cfg(feature = "rist")]
+fn resolve_rist_secret(secret_ref: &str) -> Option<String> {
+    // `env:VAR` — read the passphrase from a single environment variable.
+    let var = secret_ref.strip_prefix("env:")?;
+    std::env::var(var).ok()
+}
+
+/// Lower a `rist://` base URL + typed [`RistOptions`] into the `AVIO` URL libav
+/// opens, resolving any PSK `secret_ref` (RIST-3, ADR-0095 §3). When `redact` is
+/// `true` the PSK is `***`-masked for logging — the plaintext never reaches a
+/// log line.
+///
+/// # Errors
+///
+/// [`multiview_config::RistUrlError`] when the typed options cannot be lowered
+/// (a non-empty bonding list on the Tier-0 build, or encryption configured with
+/// a `secret_ref` that did not resolve). Each call site maps it to the
+/// appropriate [`PipelineError`] (ingest vs output).
+#[cfg(feature = "rist")]
+fn rist_resolved_url(
+    base_url: &str,
+    rist: Option<&RistOptions>,
+    redact: bool,
+) -> Result<String, multiview_config::RistUrlError> {
+    let Some(opts) = rist else {
+        return Ok(base_url.to_owned());
+    };
+    // Resolve the PSK (if any) once; the lowering injects it into the URL.
+    let resolved = opts
+        .encryption
+        .as_ref()
+        .and_then(|enc| resolve_rist_secret(&enc.secret_ref));
+    lower_rist_url(base_url, opts, resolved.as_deref(), redact)
+}
+
+/// Build the `RunnableOutput::Push` for an `Output::Rist` (RIST-3): lower the
+/// typed options (resolving the PSK) to the `AVIO` URL the libav `mpegts` muxer
+/// opens over `rist://`, fed the SAME encoded packets as every other push
+/// (invariant #7). Only the redacted URL is ever logged / reported.
+///
+/// # Errors
+///
+/// [`PipelineError::Output`] when the options cannot be lowered (bonding on the
+/// Tier-0 build, or an unresolved encryption `secret_ref`).
+#[cfg(feature = "rist")]
+fn build_rist_push(url: &str, rist: Option<&RistOptions>) -> Result<RunnableOutput, PipelineError> {
+    let to_err = |e: multiview_config::RistUrlError| PipelineError::Output {
+        kind: "rist",
+        reason: e.to_string(),
+    };
+    let lowered = rist_resolved_url(url, rist, false).map_err(to_err)?;
+    let redacted = rist_resolved_url(url, rist, true).map_err(to_err)?;
+    tracing::info!(transport = "rist", url = %redacted, "wiring rist push output");
+    Ok(RunnableOutput::Push {
+        sink: PacketMuxSink::push(PushProtocol::Rist, lowered),
+        label: "rist",
+        url: redacted,
+    })
+}
+
 /// Build the runnable sinks from the config outputs.
 ///
 /// HLS/LL-HLS segment to disk; **RTMP and SRT push outputs are run** via the
@@ -5300,6 +5372,24 @@ fn build_outputs(
                     label: "srt",
                     url: url.clone(),
                 });
+            }
+            // RIST push (ADR-0095): the open-standard sibling of the SRT push.
+            // The typed options lower to the `rist://…?…` AVIO URL (the PSK
+            // resolved from its secret_ref); `PushProtocol::Rist` fans the SAME
+            // encoded packets through the `mpegts` muxer (invariant #7). The
+            // unredacted URL goes to the sink; only the redacted form is logged.
+            #[cfg(feature = "rist")]
+            Output::Rist { url, rist, .. } => {
+                runnable.push(build_rist_push(url, rist.as_ref())?);
+            }
+            // Without the `rist` feature the librist obligation is not built in,
+            // so a rist output is an honest skip (never a silent pretend-run),
+            // exactly like the RTSP-server / NDI outputs below.
+            #[cfg(not(feature = "rist"))]
+            Output::Rist { .. } => {
+                tracing::warn!(
+                    "rist output requires the `rist` feature (off by default); skipping"
+                );
             }
             // WebRTC program outputs (ADR-0049): a mux-free fan-out sink that
             // re-stamps the encode-once program packets into the output's bounded
@@ -5642,6 +5732,33 @@ fn ingest_plan_for(
         | SourceKind::Ts { url }
         | SourceKind::Srt { url }
         | SourceKind::Rtmp { url } => (SourceLocation::Url(url.clone()), true),
+        // RIST ingest (ADR-0095): the open-standard sibling of SRT. The typed
+        // options lower to the `rist://…?…` AVIO URL (PSK resolved from its
+        // secret_ref); it then rides the SAME libav demuxer + supervised
+        // reconnect + last-good store as every other network source — its ARQ
+        // recovery is an input jitter buffer, never the output clock
+        // (invariants #1/#2/#3; bad-inputs-are-the-purpose). `live` so the
+        // ingest loop reconnects forever.
+        #[cfg(feature = "rist")]
+        SourceKind::Rist { url, rist } => {
+            let lowered = rist_resolved_url(url, rist.as_ref(), false).map_err(|e| {
+                PipelineError::Ingest {
+                    id: source.id.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
+            (SourceLocation::Url(lowered), true)
+        }
+        // Without the `rist` feature the librist obligation is not built in, so a
+        // rist source is an honest typed refusal (never a silent skip), exactly
+        // like an NDI/webrtc source without its feature.
+        #[cfg(not(feature = "rist"))]
+        SourceKind::Rist { .. } => {
+            return Err(PipelineError::Ingest {
+                id: source.id.clone(),
+                reason: "RIST ingest requires the `rist` feature (off by default)".to_owned(),
+            })
+        }
         // A YouTube live source is a thin wrapper over HLS (ADR-0015): bound by its
         // watch URL, resolved to a fresh `*.googlevideo.com` HLS master on every
         // (re)connect by `yt-dlp`. It is `live` so the ingest loop reconnects (and
@@ -5751,6 +5868,15 @@ fn audio_ingest_plan_for(source: &Source) -> Option<crate::audio::AudioIngestPla
         | SourceKind::Ts { url }
         | SourceKind::Srt { url }
         | SourceKind::Rtmp { url } => (url.clone(), true),
+        // RIST audio is decoded from the SAME lowered `rist://` URL as its video
+        // (the audio peer opens its own libav context). A lowering error (bonding
+        // / unresolved PSK) means no audio path — the source rides silence on the
+        // bus rather than failing the build (the video plan surfaces the error).
+        #[cfg(feature = "rist")]
+        SourceKind::Rist { url, rist } => match rist_resolved_url(url, rist.as_ref(), false) {
+            Ok(lowered) => (lowered, true),
+            Err(_) => return None,
+        },
         // YouTube/NDI audio is not wired through the libav file decoder here:
         // YouTube needs the watch-URL resolve step (deferred to its own slice) and
         // NDI audio is a host-memory receive. Both ride silence on the bus for now.
@@ -8481,6 +8607,152 @@ mod ndi_tests {
         };
         assert_eq!(name, "STUDIO (CAM 1)");
         assert!(plan.live, "an ndi source must be live (reconnects)");
+    }
+}
+
+/// Tests for the RIST ingest+egress wiring (RIST-3, ADR-0095 Tier-0): under the
+/// `rist` feature a `rist` source plans as a live network ingest location whose
+/// URL carries the lowered `librist` options, and a `rist` push output builds a
+/// `PushProtocol::Rist` runnable fed the same encoded packets (invariant #7).
+/// The PSK is resolved from a `secret_ref` (`env:VAR`) and never logged. No
+/// network/peer is touched here (offline like the SRT tests).
+#[cfg(test)]
+#[cfg(feature = "rist")]
+mod rist_tests {
+    #![allow(
+        // reason: a unit test module; the strict workspace lints are relaxed for
+        // test code per CLAUDE.md (these mirror the surrounding `tests` modules).
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_config::{MultiviewConfig, RistOptions, Source};
+    use multiview_core::time::Rational;
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    use super::{
+        build_outputs, ingest_plan_for, rist_resolved_url, RunnableOutput, SourceLocation,
+    };
+
+    fn rist_source(json: serde_json::Value) -> Source {
+        serde_json::from_value(json).expect("rist source deserializes")
+    }
+
+    #[test]
+    fn rist_source_plans_as_a_live_network_url_with_lowered_options() {
+        let source = rist_source(serde_json::json!({
+            "id": "rist-in",
+            "kind": "rist",
+            "url": "rist://[::1]:5000",
+            "rist": { "profile": "main", "buffer_ms": 1000 },
+        }));
+        let store = Arc::new(TileStore::new(
+            source.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = ingest_plan_for(
+            &source,
+            320,
+            180,
+            Arc::clone(&store),
+            CanvasColor::default(),
+            Rational::new(30, 1),
+        )
+        .expect("rist source plans without failing the build");
+
+        let SourceLocation::Url(url) = &plan.location else {
+            panic!("expected a Url location for a rist source");
+        };
+        assert!(
+            url.starts_with("rist://[::1]:5000?"),
+            "base preserved: {url}"
+        );
+        assert!(url.contains("rist_profile=1"), "main ⇒ 1: {url}");
+        assert!(url.contains("buffer_size=1000"), "{url}");
+        assert!(plan.live, "a rist source must be live (reconnects)");
+    }
+
+    #[test]
+    fn rist_psk_is_resolved_from_env_and_redacted_in_logs() {
+        // Set a unique env var so the resolution is deterministic in CI.
+        let var = "RIST_TEST_PSK_RESOLVE";
+        std::env::set_var(var, "the-pre-shared-key");
+        let opts: RistOptions = serde_json::from_value(serde_json::json!({
+            "profile": "main",
+            "encryption": { "aes_bits": "aes256", "secret_ref": format!("env:{var}") },
+        }))
+        .expect("opts");
+
+        let live = rist_resolved_url("rist://[::1]:5000", Some(&opts), false)
+            .expect("the resolved secret lowers into the url");
+        assert!(live.contains("secret=the-pre-shared-key"), "{live}");
+
+        // The redacted (loggable) form hides the plaintext PSK.
+        let logged =
+            rist_resolved_url("rist://[::1]:5000", Some(&opts), true).expect("redacted url");
+        assert!(logged.contains("secret=***"), "{logged}");
+        assert!(!logged.contains("the-pre-shared-key"), "{logged}");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn a_rist_push_output_builds_as_a_runnable_push() {
+        // A push-only RIST config must BUILD (the keystone — `build_outputs`
+        // produces a Push runnable, not a skip). A live handshake is the
+        // `#[ignore]`d hardware test; here we only prove the wiring exists.
+        let toml = r##"
+schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "rist"
+url = "rist://[::1]:6000"
+codec = "mpeg2video"
+[outputs.rist]
+profile = "main"
+buffer_ms = 700
+"##;
+        let config = MultiviewConfig::load_from_toml(toml).expect("parse");
+        config.validate().expect("validates");
+        let epoch = multiview_output::SharedEpoch::default();
+        #[cfg(feature = "webrtc-native")]
+        let egress_sinks = std::collections::HashMap::new();
+        let built = build_outputs(
+            &config.outputs,
+            &epoch,
+            #[cfg(feature = "webrtc-native")]
+            &egress_sinks,
+        )
+        .expect("rist push output builds");
+        let push_count = built
+            .packet
+            .iter()
+            .filter(|r| matches!(r, RunnableOutput::Push { label, .. } if *label == "rist"))
+            .count();
+        assert_eq!(push_count, 1, "exactly one rist push runnable is built");
     }
 }
 

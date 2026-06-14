@@ -54,6 +54,7 @@ export type SourceKind =
   | 'youtube'
   | 'ts'
   | 'srt'
+  | 'rist'
   | 'rtmp'
   | 'ndi'
   | 'file'
@@ -76,6 +77,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'youtube',
   'ts',
   'srt',
+  'rist',
   'rtmp',
   'ndi',
   'file',
@@ -111,7 +113,7 @@ export interface SourceView {
 }
 
 /** The output transport display kinds (config `Output`, folded for display). */
-export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt' | 'display';
+export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt' | 'rist' | 'display';
 
 /** All output kinds, for building selectors. */
 export const OUTPUT_KINDS: readonly OutputKind[] = [
@@ -121,6 +123,7 @@ export const OUTPUT_KINDS: readonly OutputKind[] = [
   'ndi',
   'rtmp',
   'srt',
+  'rist',
   'display',
 ];
 

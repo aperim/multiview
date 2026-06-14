@@ -3442,6 +3442,18 @@ export interface components {
             url: string;
         } | {
             audio?: null | components["schemas"]["OutputAudioDoc"];
+            /** @description Video codec. */
+            codec: string;
+            gpu_pin?: null | components["schemas"]["DevicePinDoc"];
+            /** @description Stable operator id; may be omitted. */
+            id?: string | null;
+            /** @enum {string} */
+            kind: "rist";
+            rist?: null | components["schemas"]["RistOptionsDoc"];
+            /** @description Destination URL (`rist://host:port`). */
+            url: string;
+        } | {
+            audio?: null | components["schemas"]["OutputAudioDoc"];
             /** @description PCM depth: `L24` (Class A interop default) or `L16`. */
             depth?: string | null;
             gpu_pin?: null | components["schemas"]["DevicePinDoc"];
@@ -3833,6 +3845,55 @@ export interface components {
          */
         RevisionId: number;
         /**
+         * @description `OpenAPI` mirror of `multiview_config::RistAesBits` (RIST PSK key length).
+         * @enum {string}
+         */
+        RistAesBitsDoc: "aes128" | "aes256";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::RistEncryption` (PSK; secret by
+         *     reference only — never a plaintext key).
+         */
+        RistEncryptionDoc: {
+            /** @description `AES` key length (`aes128` / `aes256`). */
+            aes_bits: components["schemas"]["RistAesBitsDoc"];
+            /**
+             * @description Reference to the pre-shared passphrase (`op://…` / `env:VAR`); resolved
+             *     at run time, never stored or logged in plaintext.
+             */
+            secret_ref: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::RistOptions` (typed RIST connection
+         *     options; lowered to the `rist://…?…` `AVIO` URL on the Tier-0 `FFmpeg` path).
+         */
+        RistOptionsDoc: {
+            /** @description Tier-2 only: bonding/load-sharing peers (rejected on the Tier-0 build). */
+            bonding?: components["schemas"]["RistPeerDoc"][];
+            /**
+             * Format: int32
+             * @description Recovery/jitter buffer depth in milliseconds (the `ARQ` window;
+             *     `0`/absent ⇒ `librist` auto).
+             */
+            buffer_ms?: number | null;
+            encryption?: null | components["schemas"]["RistEncryptionDoc"];
+            /**
+             * Format: int32
+             * @description `MPEG-TS`-aligned packet size (default 1316).
+             */
+            pkt_size?: number | null;
+            profile?: null | components["schemas"]["RistProfileDoc"];
+        };
+        /** @description `OpenAPI` mirror of `multiview_config::RistPeer` (Tier-2 bonding endpoint). */
+        RistPeerDoc: {
+            /** @description The peer's `rist://host:port` URL. */
+            url: string;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::RistProfile` (VSF `TR-06`).
+         * @enum {string}
+         */
+        RistProfileDoc: "simple" | "main" | "advanced";
+        /**
          * @description A coarse role governing which actions a principal may perform.
          *
          *     Ordered by privilege: `ReadOnly < Viewer < Operator < Admin`. [`Role::can`]
@@ -4184,6 +4245,12 @@ export interface components {
             /** @enum {string} */
             kind: "srt";
             /** @description Source URL. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "rist";
+            rist?: null | components["schemas"]["RistOptionsDoc"];
+            /** @description Source URL (`rist://[::]:port` or peer host). */
             url: string;
         } | {
             /** @enum {string} */

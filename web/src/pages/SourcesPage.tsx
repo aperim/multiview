@@ -125,6 +125,8 @@ function SourceKindFields({
           return 'https://www.youtube.com/watch?v=…';
         case 'srt':
           return 'srt://[2001:db8::2]:7001';
+        case 'rist':
+          return 'rist://[2001:db8::2]:5000';
         case 'rtmp':
           return 'rtmp://ingest.example/app/key';
         default:

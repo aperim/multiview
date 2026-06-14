@@ -77,9 +77,10 @@ pub use routing::{
 };
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
-    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride,
-    DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth,
-    SourceKind,
+    lower_rist_url, Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig,
+    ColorOverride, DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RistAesBits,
+    RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, RtspOptions, Source,
+    SourceAuth, SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
@@ -1153,6 +1154,16 @@ impl Source {
                     }
                 }
             }
+            // RIST (ADR-0095): the typed options validate structurally here — a
+            // non-empty bonding list is rejected on the Tier-0 build (FFmpeg's
+            // protocol is single-peer; honest capability reporting, never a
+            // silent single-link), and an encryption block must carry a
+            // non-empty secret_ref. The URL's reachability is a runtime concern.
+            SourceKind::Rist { rist, .. } => {
+                if let Some(opts) = rist {
+                    validate_rist_options(&self.id, opts)?;
+                }
+            }
             // Network/synthetic kinds carry no kind-specific field that can be
             // validated structurally here (a URL's reachability is a runtime
             // concern, not a config one). The `youtube` URL is resolved at
@@ -1224,6 +1235,7 @@ impl Output {
             | Output::Hls { codec, .. }
             | Output::Rtmp { codec, .. }
             | Output::Srt { codec, .. }
+            | Output::Rist { codec, .. }
             | Output::Webrtc { codec, .. }
             | Output::WhipPush { codec, .. } => Some(codec),
             // NDI carries a channel-map, AES67 sends raw PCM, and a display
@@ -1257,6 +1269,14 @@ impl Output {
         } = self
         {
             validate_display_output(connector, mode.as_ref(), forced_mode.as_ref())?;
+        }
+        // RIST push options (bonding rejection + PSK secret_ref) are validated
+        // by the same shared helper the `rist` source uses (ADR-0095 §4).
+        if let Output::Rist {
+            rist: Some(opts), ..
+        } = self
+        {
+            validate_rist_options(&self.label(), opts)?;
         }
         self.validate_webrtc_rules()
     }
@@ -1297,6 +1317,7 @@ impl Output {
             | Output::Ndi { .. }
             | Output::Rtmp { .. }
             | Output::Srt { .. }
+            | Output::Rist { .. }
             | Output::Aes67 { .. }
             | Output::Display { .. } => Ok(()),
         }
@@ -1360,6 +1381,38 @@ impl Output {
 /// non-empty connector, `mode`/`forced_mode` mutual exclusion (an explicit
 /// EDID override and an EDID-less forced timing are contradictory requests),
 /// and a structurally sound [`DisplayModeSpec`] wherever one is given.
+/// Validate a [`crate::schema::RistOptions`] block (shared by the `rist` source
+/// and the `rist` push output).
+///
+/// Tier-0 (`FFmpeg` `rist://`) honest capability reporting (ADR-0095 §4):
+/// - a **non-empty `bonding`** list is rejected with a clear error — bonding is
+///   genuinely unreachable through `FFmpeg`'s single-peer protocol (it is the
+///   Tier-2 direct-FFI feature), so it is never silently single-linked;
+/// - an **encryption block** must carry a non-empty `secret_ref` (`PSK`
+///   requested with no key reference is a misconfiguration).
+fn validate_rist_options(
+    owner: &str,
+    opts: &crate::schema::RistOptions,
+) -> Result<(), ConfigError> {
+    if !opts.bonding.is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "rist {owner:?}: bonding/load-sharing ({} peer(s)) requires the `rist` direct-FFI \
+             build (Tier-2); the Tier-0 FFmpeg `rist://` path is single-link only — remove the \
+             `bonding` list or build the direct-FFI leaf (ADR-0095)",
+            opts.bonding.len()
+        )));
+    }
+    if let Some(enc) = &opts.encryption {
+        if enc.secret_ref.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "rist {owner:?}: encryption is configured but secret_ref is empty (the PSK is a \
+                 secret-manager reference, e.g. `op://…` or `env:VAR`; it is never a plaintext key)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_display_output(
     connector: &str,
     mode: Option<&DisplayModeSpec>,
