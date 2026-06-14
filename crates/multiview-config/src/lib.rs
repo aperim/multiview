@@ -126,6 +126,53 @@ pub struct ControlConfig {
     pub cast_media_base: Option<String>,
 }
 
+/// Process-wide system settings.
+///
+/// Currently the NDI® runtime license-acceptance gate (ADR-0008 §7.5); future
+/// process-wide settings join here as additional sub-tables. Absent ⇒ no system
+/// settings are configured (NDI I/O stays inert — unaccepted).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemConfig {
+    /// The NDI® SDK runtime license-acceptance gate. Absent ⇒ NDI I/O is refused
+    /// (`ndi_unlicensed`) and never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ndi: Option<NdiSystemConfig>,
+}
+
+/// The operator's NDI® SDK runtime license acceptance (ADR-0008 §7.5).
+///
+/// NDI I/O (source **and** output) is gated twice: the off-by-default `ndi` build
+/// feature, and this explicit, audited runtime acceptance. Until
+/// `accept_license = true` — with the audit fields [`accepted_by`](Self::accepted_by)
+/// and [`accepted_at`](Self::accepted_at) (who/when) — every configured NDI
+/// source/output is refused with the `ndi_unlicensed` status and never started
+/// (the output-clock invariant is untouched; the tile degrades).
+///
+/// The acceptance is **exported with config as a flag, never a secret**: it is
+/// ordinary, version-controllable config (no `secret_ref`, nothing redacted) so
+/// the legal acceptance travels with the configuration. It is a plain
+/// constructable data struct (mirroring the runtime `LicenseAcceptance` the gate
+/// consumes) so the control-plane settings handler and tests build it directly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NdiSystemConfig {
+    /// Operator confirmation that the NDI SDK license has been read and accepted.
+    /// `false`/absent ⇒ all NDI I/O is refused (`ndi_unlicensed`).
+    #[serde(default)]
+    pub accept_license: bool,
+    /// Audit — **who** accepted (operator id/principal). Required (non-empty) when
+    /// `accept_license = true`; enforced at config load by
+    /// [`MultiviewConfig::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_by: Option<String>,
+    /// Audit — **when** acceptance was recorded (free-form, e.g. RFC 3339).
+    /// Required (non-empty) when `accept_license = true`; enforced at config load
+    /// by [`MultiviewConfig::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<String>,
+}
+
 /// A complete Multiview configuration document (config-as-code).
 ///
 /// This is the whole-engine declarative state: canvas, layout strategy,
@@ -220,6 +267,11 @@ pub struct MultiviewConfig {
     /// system-clock wall source).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingConfig>,
+    /// Process-wide system settings (ADR-0008 §7.5): currently the NDI® runtime
+    /// license-acceptance gate (`[system.ndi] accept_license`). Absent ⇒ no
+    /// system settings (NDI I/O stays inert — unaccepted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemConfig>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -350,6 +402,7 @@ impl MultiviewConfig {
         self.validate_discovery()?;
         self.validate_control()?;
         self.validate_webrtc()?;
+        self.validate_system()?;
         self.validate_placement()?;
         self.validate_routing()?;
         if let Some(timing) = &self.timing {
@@ -532,6 +585,31 @@ impl MultiviewConfig {
     /// (absent) section always validates.
     fn validate_webrtc(&self) -> Result<(), ConfigError> {
         self.webrtc.validate()
+    }
+
+    /// Validate the optional `[system.ndi]` license-acceptance gate (ADR-0008
+    /// §7.5): when `accept_license = true`, the audit fields `accepted_by` +
+    /// `accepted_at` (who/when) must be present and non-empty — the same who/when
+    /// invariant the runtime `NdiLicense::accept` enforces, surfaced at
+    /// config-load so a malformed acceptance fails fast rather than at first NDI
+    /// start. Declining (`accept_license = false`) needs no audit.
+    fn validate_system(&self) -> Result<(), ConfigError> {
+        let Some(ndi) = self.system.as_ref().and_then(|s| s.ndi.as_ref()) else {
+            return Ok(());
+        };
+        if !ndi.accept_license {
+            return Ok(());
+        }
+        let nonblank = |f: &Option<String>| f.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if !nonblank(&ndi.accepted_by) || !nonblank(&ndi.accepted_at) {
+            return Err(ConfigError::Validation(
+                "system.ndi.accept_license = true requires the audit fields \
+                 accepted_by and accepted_at (who/when); add them, or set \
+                 accept_license = false to decline"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Flatten this document into a validated-shape [`multiview_core::layout::Layout`].

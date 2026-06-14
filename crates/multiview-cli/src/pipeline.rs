@@ -1185,6 +1185,17 @@ struct IngestPlan {
     /// off / not a webrtc source. Only under `webrtc-native`.
     #[cfg(feature = "webrtc-native")]
     webrtc_audio_store: Option<Arc<multiview_audio::store::AudioStore>>,
+    /// The `[system.ndi] accept_license` flag for this run (ADR-0008 §7.5),
+    /// stamped from `config.system` in [`Pipeline::build`]. Defaults to `false`
+    /// (declined): an NDI source is refused (`ndi_unlicensed`) and never starts
+    /// receiving until the operator accepts.
+    #[cfg(feature = "ndi")]
+    ndi_accept_license: bool,
+    /// The audited acceptance record (who/when) the NDI license gate consumes via
+    /// `NdiLicense::from_setting` at the receive construction point
+    /// ([`connect_ndi_receiver`]). Empty fields when unaccepted.
+    #[cfg(feature = "ndi")]
+    ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance,
 }
 
 /// The in-container subtitle decode route stashed on an [`IngestPlan`]: which
@@ -1295,6 +1306,20 @@ impl Pipeline {
                 canvas_color,
                 cadence,
             )?;
+
+            // Stamp this source's NDI license acceptance from `[system.ndi]`
+            // (ADR-0008 §7.5), like `cuda_ordinal` below — the per-source drive
+            // loop's gate (`connect_ndi_receiver`) reads it before any receive
+            // starts. Absent/false ⇒ declined (the plan's `false` default stands)
+            // and the source is refused (`ndi_unlicensed`).
+            #[cfg(feature = "ndi")]
+            if let Some(ndi) = config.system.as_ref().and_then(|s| s.ndi.as_ref()) {
+                plan.ndi_accept_license = ndi.accept_license;
+                plan.ndi_acceptance = multiview_input::ndi::license::LicenseAcceptance {
+                    accepted_by: ndi.accepted_by.clone().unwrap_or_default(),
+                    accepted_at: ndi.accepted_at.clone().unwrap_or_default(),
+                };
+            }
 
             // Wire this source's native captions (HLS WebVTT rendition thread +/or
             // in-container DVB-sub route), registering any cue store + reader plan
@@ -5828,9 +5853,10 @@ fn ingest_plan_for(
         // An NDI source (ADR-0008 / IN-3) is bound by its NDI source NAME and
         // received from host memory via `multiview-input`'s runtime-loaded NDI seam
         // — it bypasses libav. It is `live` so the ingest loop reconnects forever; a
-        // receive fault or an absent/unlicensed runtime degrades the tile on the
-        // ingest thread, never failing the build (invariants #1/#10). Only wired
-        // under the off-by-default `ndi` feature.
+        // receive fault, an absent runtime, or an unaccepted NDI license (the
+        // runtime gate, stamped onto the plan from `[system.ndi]` after build)
+        // degrades the tile on the ingest thread, never failing the build
+        // (invariants #1/#10). Only wired under the off-by-default `ndi` feature.
         #[cfg(feature = "ndi")]
         SourceKind::Ndi { name } => (SourceLocation::Ndi { name: name.clone() }, true),
         // With the `ndi` feature OFF the NDI runtime-load obligation is not built
@@ -5892,6 +5918,16 @@ fn ingest_plan_for(
         webrtc_registry: None,
         #[cfg(feature = "webrtc-native")]
         webrtc_audio_store: None,
+        // Declined by default; the NDI license acceptance (ADR-0008 §7.5) is
+        // stamped from `config.system` after build (like `cuda_ordinal`), so an
+        // NDI source is refused (`ndi_unlicensed`) until the operator accepts.
+        #[cfg(feature = "ndi")]
+        ndi_accept_license: false,
+        #[cfg(feature = "ndi")]
+        ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+            accepted_by: String::new(),
+            accepted_at: String::new(),
+        },
     })
 }
 
@@ -6596,19 +6632,26 @@ fn drive_ndi(plan: &IngestPlan, name: &str, stop: &AtomicBool) {
             return;
         }
         let started = Instant::now();
-        match connect_ndi_receiver(name) {
-            Ok(receiver) => {
-                let mut producer = multiview_input::ndi::NdiProducer::new(receiver);
+        match connect_ndi_receiver(name, plan.ndi_accept_license, plan.ndi_acceptance.clone()) {
+            Ok((license, receiver)) => {
+                let mut producer = multiview_input::ndi::NdiProducer::new(license, receiver);
                 drive_ndi_producer(plan, &mut producer, stop);
             }
             Err(status) => {
-                // Runtime absent / unusable / no live receiver yet: log once and let
-                // the tile degrade. We do NOT spin — the reconnect backoff below
-                // bounds retry frequency, and `stop`/prime-wait are never blocked.
+                // Runtime absent / unusable / unlicensed / no live receiver yet: log
+                // the honest status token and let the tile degrade. We do NOT spin —
+                // the reconnect backoff below bounds retry frequency (so this warn
+                // repeats at most once per backoff cycle, settling to ~1/30s), and
+                // `stop`/prime-wait are never blocked. An unaccepted license is
+                // terminal for this run: the acceptance is stamped onto the plan at
+                // build time, so re-evaluating it each retry yields the same refusal
+                // until a config reload restarts the process (`system` is a
+                // restart-class diff section; live acceptance/revocation propagation
+                // is a deferred follow-up).
                 tracing::warn!(
                     source = %plan.id,
                     ndi_source = name,
-                    ?status,
+                    status = status.status_label(),
                     "ndi receive unavailable; tile will degrade (LIVE->...->NO_SIGNAL)"
                 );
             }
@@ -6698,28 +6741,96 @@ fn ndi_host_to_image(
     Nv12Image::new(w, h, y_plane.to_vec(), uv_plane.to_vec(), frame.meta.color).ok()
 }
 
-/// Attempt to connect a live NDI receiver for source `name`.
+/// Attempt to connect a live NDI receiver for source `name`, gated by the NDI
+/// license acceptance.
+///
+/// The license gate is checked FIRST (ADR-0008 §7.5): an unaccepted or incomplete
+/// `[system.ndi] accept_license` is refused with the
+/// [`NdiLoadStatus::Unlicensed`](multiview_input::ndi::NdiLoadStatus) status
+/// (`ndi_unlicensed`) BEFORE the runtime is probed, so an unaccepted source never
+/// touches the SDK.
 ///
 /// HONEST SCOPE (live-only deferred half): binding a real
 /// [`NdiReceiver`](multiview_input::ndi::NdiReceiver) onto the resolved
 /// `multiview-ndi-sys` function table needs the proprietary SDK ABI + a running NDI
-/// network — neither exists in CI — so this currently probes the runtime and
-/// returns the typed status without a live receiver. With the runtime absent (the
-/// default case) it reports the unavailable status so the tile degrades; even with
-/// the runtime present, the live receiver binding is not yet wired (the converter +
-/// `NdiProducer` drive shape that *consume* a receiver are complete and tested in
-/// `multiview-input`). It never panics or blocks.
+/// network — neither exists in CI — so once the gate passes this probes the runtime
+/// and returns the typed status without a live receiver yet. With the runtime
+/// absent (the default case) it reports the unavailable status so the tile degrades;
+/// the converter + `NdiProducer` drive shape that *consume* a receiver are complete
+/// and tested in `multiview-input`. It never panics or blocks.
 #[cfg(feature = "ndi")]
 fn connect_ndi_receiver(
     _name: &str,
-) -> Result<Box<dyn multiview_input::ndi::NdiReceiver + Send>, multiview_input::ndi::NdiLoadStatus>
-{
+    accept_license: bool,
+    acceptance: multiview_input::ndi::license::LicenseAcceptance,
+) -> Result<
+    (
+        multiview_input::ndi::NdiLicense,
+        Box<dyn multiview_input::ndi::NdiReceiver + Send>,
+    ),
+    multiview_input::ndi::NdiLoadStatus,
+> {
+    // License gate FIRST (ADR-0008 §7.5): an unaccepted/incomplete acceptance is
+    // refused with the `ndi_unlicensed` status BEFORE the runtime is probed, so an
+    // unaccepted source never touches the SDK. When the live receiver binding (the
+    // deferred half) lands, re-evaluate the gate and return Ok((license, receiver))
+    // so the accepted guard gates `NdiProducer::new` by construction.
+    multiview_input::ndi::NdiLicense::from_setting(accept_license, acceptance)
+        .map_err(|_| multiview_input::ndi::NdiLoadStatus::Unlicensed)?;
+    // Runtime probe; the live SDK-backed receiver binding is the deferred half, so
+    // there is no receiver to pair with the (accepted) license yet — surface the
+    // probe status (RuntimeNotFound when absent, Available when present) so the drive
+    // loop logs the honest reason and the tile degrades.
     let status = multiview_input::ndi::NdiCapability::probe();
-    // Whether available or not, the live SDK-backed receiver binding is the
-    // deferred half. Surface the probe status (RuntimeNotFound when absent, or
-    // Available when present) so the drive loop logs the honest reason and the tile
-    // degrades rather than streaming a non-existent receiver.
     Err(status)
+}
+
+#[cfg(all(test, feature = "ndi"))]
+mod ndi_license_gate_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use multiview_input::ndi::license::LicenseAcceptance;
+    use multiview_input::ndi::NdiLoadStatus;
+
+    fn complete_audit() -> LicenseAcceptance {
+        LicenseAcceptance {
+            accepted_by: "ops".to_owned(),
+            accepted_at: "2026-06-06T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn connect_refuses_unlicensed_before_probing_the_runtime() {
+        // accept_license = false: the gate refuses with the distinct `ndi_unlicensed`
+        // status BEFORE the runtime is probed — never RuntimeNotFound, never a panic.
+        // (ADR-0008 §7.5: the license axis is checked first and is its own status.)
+        // `match` (not `expect_err`): the Ok arm carries a `Box<dyn NdiReceiver>`,
+        // which is not `Debug`.
+        match connect_ndi_receiver("STUDIO (CAM 1)", false, complete_audit()) {
+            Ok(_) => panic!("an unaccepted NDI source must be refused"),
+            Err(status) => assert_eq!(
+                status,
+                NdiLoadStatus::Unlicensed,
+                "unaccepted must surface ndi_unlicensed, distinct from the runtime axis"
+            ),
+        }
+    }
+
+    #[test]
+    fn connect_passes_the_license_gate_when_accepted() {
+        // accept_license = true + complete audit: the license gate passes, so the
+        // result is NEVER the Unlicensed refusal. The live receiver binding is the
+        // deferred half, so this still reports the runtime probe status on a host
+        // with no runtime — but never the license refusal.
+        match connect_ndi_receiver("STUDIO (CAM 1)", true, complete_audit()) {
+            Ok(_) => { /* a live receiver bound (SDK box): the gate passed */ }
+            Err(status) => assert_ne!(
+                status,
+                NdiLoadStatus::Unlicensed,
+                "an accepted + audited source must pass the license gate"
+            ),
+        }
+    }
 }
 
 /// Drive a WHIP ingest source (ADR-T014): wait for a publisher, decode its

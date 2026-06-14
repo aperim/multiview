@@ -103,6 +103,7 @@ impl ConfigDiff {
             discovery: running_discovery,
             timing: running_timing,
             webrtc: running_webrtc,
+            system: running_system,
         } = running;
         let MultiviewConfig {
             schema_version: next_schema_version,
@@ -125,6 +126,7 @@ impl ConfigDiff {
             discovery: next_discovery,
             timing: next_timing,
             webrtc: next_webrtc,
+            system: next_system,
         } = next;
 
         // Canvas: the pinned signal is geometry + cadence BY VALUE (the
@@ -141,7 +143,7 @@ impl ConfigDiff {
         let canvas_cosmetic_changed = !canvas_signal_changed && running_canvas != next_canvas;
 
         let mut changed_sections = BTreeSet::new();
-        let sectioned: [(&'static str, bool); 16] = [
+        let sectioned: [(&'static str, bool); 17] = [
             (
                 "schema_version",
                 running_schema_version != next_schema_version,
@@ -164,6 +166,11 @@ impl ConfigDiff {
             ("discovery", running_discovery != next_discovery),
             ("timing", running_timing != next_timing),
             ("webrtc", running_webrtc != next_webrtc),
+            // A change to `[system.ndi]` license acceptance is restart-class: full
+            // live revocation/acceptance propagation to running NDI I/O at the next
+            // safe boundary (ADR-0008 §7.5) is a separate follow-up, so surface it
+            // as a changed section (controlled reset) rather than claiming hot-apply.
+            ("system", running_system != next_system),
         ];
         for (name, changed) in sectioned {
             if changed {
