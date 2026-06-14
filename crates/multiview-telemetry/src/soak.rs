@@ -32,7 +32,8 @@ pub fn p99_abs_offset_ns(samples: &[i64]) -> Option<i64> {
     // rank = ceil(0.99 · n) in integer maths; index = rank − 1 (1-based → 0-based).
     let rank = (99usize.saturating_mul(n).saturating_add(99)) / 100;
     let index = rank.saturating_sub(1).min(n.saturating_sub(1));
-    abs.get(index).map(|v| i64::try_from(*v).unwrap_or(i64::MAX))
+    abs.get(index)
+        .map(|v| i64::try_from(*v).unwrap_or(i64::MAX))
 }
 
 /// The per-leg offset verdict: the measured p99 of `|offset|`, the source's
@@ -74,12 +75,10 @@ pub fn evaluate_offset(source: ClockSourceLabel, samples: &[i64]) -> Option<Offs
 /// than two samples is vacuously continuous.
 #[must_use]
 pub fn cadence_uninterrupted(tick_samples: &[u64], expected_min_delta: u64) -> bool {
-    tick_samples
-        .windows(2)
-        .all(|w| match w {
-            [prev, next] => next.saturating_sub(*prev) >= expected_min_delta,
-            _ => true,
-        })
+    tick_samples.windows(2).all(|w| match w {
+        [prev, next] => next.saturating_sub(*prev) >= expected_min_delta,
+        _ => true,
+    })
 }
 
 /// The aggregate soak verdict: every offset leg plus the cadence-continuity

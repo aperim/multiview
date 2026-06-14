@@ -34,6 +34,8 @@ net = ["dep:ureq"]
 multiview-control = { workspace = true, features = ["openapi"] }
 # gen-asyncapi calls multiview-events::asyncapi::generate_asyncapi_document().
 multiview-events = { workspace = true }
+# soak-report runs the multiview-telemetry::soak analyzer over a captured series.
+multiview-telemetry = { workspace = true }
 utoipa = { version = "5.5.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }

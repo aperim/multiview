@@ -53,7 +53,6 @@
 
 pub mod availability;
 pub mod clock;
-pub mod soak;
 pub mod error;
 pub mod gpu;
 pub mod health;
@@ -61,6 +60,7 @@ pub mod metrics;
 pub mod placement;
 #[cfg(feature = "snmp")]
 pub mod snmp;
+pub mod soak;
 pub mod syslog;
 pub mod tracing_init;
 

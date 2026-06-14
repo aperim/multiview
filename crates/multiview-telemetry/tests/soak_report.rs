@@ -59,12 +59,20 @@ fn the_99th_percentile_tolerates_the_worst_one_percent() {
     // 100th/top-1% sample, above the 99th-rank); but if >1% exceed, it fails.
     let mut tolerated: Vec<i64> = vec![PTP_OFFSET_P99_MAX_NS; 99];
     tolerated.push(50_000_000); // a single 50 ms spike — within the top 1%
-    assert!(evaluate_offset(ClockSourceLabel::Ptp, &tolerated).unwrap().pass);
+    assert!(
+        evaluate_offset(ClockSourceLabel::Ptp, &tolerated)
+            .unwrap()
+            .pass
+    );
 
     let mut breached: Vec<i64> = vec![0; 98];
     breached.push(PTP_OFFSET_P99_MAX_NS + 1);
     breached.push(PTP_OFFSET_P99_MAX_NS + 1); // 2% exceed → 99th-rank exceeds
-    assert!(!evaluate_offset(ClockSourceLabel::Ptp, &breached).unwrap().pass);
+    assert!(
+        !evaluate_offset(ClockSourceLabel::Ptp, &breached)
+            .unwrap()
+            .pass
+    );
 }
 
 #[test]
