@@ -53,6 +53,7 @@
 
 pub mod availability;
 pub mod clock;
+pub mod soak;
 pub mod error;
 pub mod gpu;
 pub mod health;

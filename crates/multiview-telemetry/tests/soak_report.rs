@@ -38,25 +38,40 @@ fn p99_of_an_empty_series_is_none() {
 
 #[test]
 fn ptp_offset_exactly_at_the_threshold_passes_but_one_ns_over_fails() {
-    // A series whose p99 lands exactly on the PTP bound (100_000 ns) passes;
-    // bumping the worst sample one ns over fails. Boundary is inclusive-pass.
-    let mut at: Vec<i64> = vec![0; 99];
-    at.push(PTP_OFFSET_P99_MAX_NS);
+    // A series whose 99th-pct lands exactly on the PTP bound (100_000 ns) passes;
+    // one ns over the bound at the 99th-pct fails. Boundary is inclusive-pass.
+    // (Every sample sits at the bound so the 99th-rank value IS the bound — the
+    // single-outlier-in-99-zeros shape would instead be tolerated, see below.)
+    let at: Vec<i64> = vec![PTP_OFFSET_P99_MAX_NS; 100];
     let v = evaluate_offset(ClockSourceLabel::Ptp, &at).unwrap();
     assert_eq!(v.p99_abs_ns, PTP_OFFSET_P99_MAX_NS);
     assert_eq!(v.threshold_ns, PTP_OFFSET_P99_MAX_NS);
     assert!(v.pass, "p99 == threshold must pass");
 
-    let mut over = at.clone();
-    *over.last_mut().unwrap() = PTP_OFFSET_P99_MAX_NS + 1;
+    let over: Vec<i64> = vec![PTP_OFFSET_P99_MAX_NS + 1; 100];
     assert!(!evaluate_offset(ClockSourceLabel::Ptp, &over).unwrap().pass);
 }
 
 #[test]
+fn the_99th_percentile_tolerates_the_worst_one_percent() {
+    // The SLO is "99th-pct |offset| ≤ bound", so the worst 1% may exceed it. 99
+    // samples at the bound + 1 huge outlier still passes (the outlier is the
+    // 100th/top-1% sample, above the 99th-rank); but if >1% exceed, it fails.
+    let mut tolerated: Vec<i64> = vec![PTP_OFFSET_P99_MAX_NS; 99];
+    tolerated.push(50_000_000); // a single 50 ms spike — within the top 1%
+    assert!(evaluate_offset(ClockSourceLabel::Ptp, &tolerated).unwrap().pass);
+
+    let mut breached: Vec<i64> = vec![0; 98];
+    breached.push(PTP_OFFSET_P99_MAX_NS + 1);
+    breached.push(PTP_OFFSET_P99_MAX_NS + 1); // 2% exceed → 99th-rank exceeds
+    assert!(!evaluate_offset(ClockSourceLabel::Ptp, &breached).unwrap().pass);
+}
+
+#[test]
 fn chrony_uses_the_looser_millisecond_bound() {
-    // 800 µs p99: fails the 100 µs PTP bound, passes the 1 ms chrony bound.
-    let mut s: Vec<i64> = vec![0; 99];
-    s.push(800_000);
+    // 800 µs at the 99th-pct: fails the 100 µs PTP bound, passes the 1 ms chrony
+    // bound. Same series, different per-source threshold.
+    let s: Vec<i64> = vec![800_000; 100];
     assert!(!evaluate_offset(ClockSourceLabel::Ptp, &s).unwrap().pass);
     let v = evaluate_offset(ClockSourceLabel::System, &s).unwrap();
     assert_eq!(v.threshold_ns, CHRONY_OFFSET_P99_MAX_NS);
@@ -88,12 +103,8 @@ fn a_soak_report_passes_only_when_every_leg_and_the_cadence_pass() {
     report.set_cadence(cadence_uninterrupted(&ticks, 30));
     assert!(report.passed());
 
-    // One failing leg sinks the whole report.
-    let bad: Vec<i64> = {
-        let mut v = vec![0; 99];
-        v.push(PTP_OFFSET_P99_MAX_NS + 1);
-        v
-    };
+    // One failing leg sinks the whole report (99th-pct over the bound).
+    let bad: Vec<i64> = vec![PTP_OFFSET_P99_MAX_NS + 1; 100];
     let mut report2 = SoakReport::default();
     report2.add_offset(evaluate_offset(ClockSourceLabel::Ptp, &bad).unwrap());
     report2.set_cadence(true);
