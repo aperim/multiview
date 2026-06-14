@@ -1066,5 +1066,184 @@ mod ffi {
                 "dropping the live registration finally clears it"
             );
         }
+
+        // ---- mechanism B parent walk (parent_log_context_offset) ------------
+        //
+        // libav's frame-threaded decoders / HLS sub-demuxers log against a CHILD
+        // object (e.g. an `AVCodecContext`) whose `AVClass` carries a
+        // `parent_log_context_offset`: at `(child_ptr + offset)` libav stores a
+        // pointer to the parent (the `AVFormatContext` we registered). The bridge
+        // must follow that link so the operator's "Error constructing the frame
+        // RPS" HEVC line — emitted on a libav decoder thread against the codec
+        // context, never our format context — still names its source.
+        //
+        // These tests fabricate the libav object/class layout the walk reads:
+        // an object whose FIRST field is `*const AVClass`, and (for the parent
+        // link) a `*mut c_void` planted at the class's declared offset.
+
+        /// A fake libav-loggable object: a leading `*const AVClass` followed by a
+        /// parent-context pointer slot the class's `parent_log_context_offset`
+        /// points at. Mirrors how a real `AVCodecContext` exposes its parent.
+        #[repr(C)]
+        struct FakeObj {
+            class: *const ffi::AVClass,
+            parent: *mut c_void,
+        }
+
+        /// Build an `AVClass` whose `parent_log_context_offset` is the byte offset
+        /// of [`FakeObj::parent`] (so the walk reads that slot), with a stable
+        /// `class_name`. `parent_offset == 0` means "no parent" (libav's sentinel).
+        fn fake_class(name: &'static CStr, parent_offset: c_int) -> Box<ffi::AVClass> {
+            // SAFETY (test): a zeroed AVClass is a valid all-fields-null/0 value;
+            // we then set only the two fields the walk reads (`class_name`,
+            // `parent_log_context_offset`). Pointers stay null/Option None.
+            let mut class: Box<ffi::AVClass> = Box::new(unsafe { std::mem::zeroed() });
+            class.class_name = name.as_ptr();
+            class.parent_log_context_offset = parent_offset;
+            class
+        }
+
+        #[test]
+        fn parent_walk_resolves_a_child_whose_parent_is_registered() {
+            // Distinct synthetic key space; the parent is a REAL stack object so
+            // its address is genuine and registrable.
+            let parent_name = c"hls";
+            let child_name = c"hevc";
+            let parent_class = fake_class(parent_name, 0);
+            let child_class = fake_class(
+                child_name,
+                // parent slot is the second field of FakeObj.
+                c_int::try_from(std::mem::offset_of!(FakeObj, parent)).unwrap_or(0),
+            );
+
+            // The parent (format context) object we own and register.
+            let parent_obj = FakeObj {
+                class: parent_class.as_ref() as *const ffi::AVClass,
+                parent: std::ptr::null_mut(),
+            };
+            let parent_ptr = std::ptr::from_ref(&parent_obj).cast::<c_void>().cast_mut();
+            let _reg = register_av_context(parent_ptr as usize, ResourceContext::source("cnn"));
+
+            // The child (codec context) object libav logs against; its parent slot
+            // points at the registered format context.
+            let child_obj = FakeObj {
+                class: child_class.as_ref() as *const ffi::AVClass,
+                parent: parent_ptr,
+            };
+            let child_ptr = std::ptr::from_ref(&child_obj).cast::<c_void>().cast_mut();
+
+            // Direct lookup of the child misses (only the parent is registered)…
+            assert_eq!(
+                resolve_registered(child_ptr as usize),
+                None,
+                "the child context itself is not registered"
+            );
+            // …but the parent walk reaches the registered format context.
+            let got =
+                resolve_with_parent_walk(child_ptr).expect("the parent walk resolves the child");
+            assert_eq!(got.id(), "cnn", "resolved via parent_log_context_offset");
+            assert_eq!(got.kind(), "source");
+        }
+
+        #[test]
+        fn parent_walk_returns_none_when_no_parent_is_registered() {
+            // A child whose parent is NOT registered (an unrelated decoder thread):
+            // mechanism C honesty — resolve to None, never a guessed id.
+            let child_class = fake_class(
+                c"hevc",
+                c_int::try_from(std::mem::offset_of!(FakeObj, parent)).unwrap_or(0),
+            );
+            // An unregistered parent object (a real address, never registered).
+            let parent_obj = FakeObj {
+                class: std::ptr::null(),
+                parent: std::ptr::null_mut(),
+            };
+            let parent_ptr = std::ptr::from_ref(&parent_obj).cast::<c_void>().cast_mut();
+            let child_obj = FakeObj {
+                class: child_class.as_ref() as *const ffi::AVClass,
+                parent: parent_ptr,
+            };
+            let child_ptr = std::ptr::from_ref(&child_obj).cast::<c_void>().cast_mut();
+
+            assert_eq!(
+                resolve_with_parent_walk(child_ptr),
+                None,
+                "an unregistered child + unregistered parent resolves to None (mechanism C)"
+            );
+        }
+
+        #[test]
+        fn parent_walk_resolves_transitively_through_two_hops() {
+            // grandparent (registered) ← parent ← child. The bounded walk must
+            // climb both hops to reach the registered grandparent.
+            let gp_class = fake_class(c"hls", 0);
+            let parent_offset =
+                c_int::try_from(std::mem::offset_of!(FakeObj, parent)).unwrap_or(0);
+            let parent_class = fake_class(c"hls", parent_offset);
+            let child_class = fake_class(c"hevc", parent_offset);
+
+            let gp = FakeObj {
+                class: gp_class.as_ref() as *const ffi::AVClass,
+                parent: std::ptr::null_mut(),
+            };
+            let gp_ptr = std::ptr::from_ref(&gp).cast::<c_void>().cast_mut();
+            let _reg = register_av_context(gp_ptr as usize, ResourceContext::source("abc"));
+
+            let parent = FakeObj {
+                class: parent_class.as_ref() as *const ffi::AVClass,
+                parent: gp_ptr,
+            };
+            let parent_ptr = std::ptr::from_ref(&parent).cast::<c_void>().cast_mut();
+            let child = FakeObj {
+                class: child_class.as_ref() as *const ffi::AVClass,
+                parent: parent_ptr,
+            };
+            let child_ptr = std::ptr::from_ref(&child).cast::<c_void>().cast_mut();
+
+            let got = resolve_with_parent_walk(child_ptr)
+                .expect("the two-hop walk reaches the grandparent");
+            assert_eq!(got.id(), "abc");
+        }
+
+        #[test]
+        fn parent_walk_direct_hit_short_circuits() {
+            // When the logged object itself is registered, the walk returns it
+            // without needing a parent link.
+            let cls = fake_class(c"hls", 0);
+            let obj = FakeObj {
+                class: cls.as_ref() as *const ffi::AVClass,
+                parent: std::ptr::null_mut(),
+            };
+            let ptr = std::ptr::from_ref(&obj).cast::<c_void>().cast_mut();
+            let _reg = register_av_context(ptr as usize, ResourceContext::output("rtsp-main"));
+            let got = resolve_with_parent_walk(ptr).expect("a directly-registered object resolves");
+            assert_eq!(got.id(), "rtsp-main");
+            assert_eq!(got.kind(), "output");
+        }
+
+        #[test]
+        fn parent_walk_tolerates_null_and_self_referential_links() {
+            // A null `avcl` resolves to None; a self-referential parent link must
+            // not loop forever (the bounded hop cap stops it) and resolves to None
+            // when nothing in the chain is registered.
+            assert_eq!(resolve_with_parent_walk(std::ptr::null_mut()), None);
+
+            let cls = fake_class(
+                c"hevc",
+                c_int::try_from(std::mem::offset_of!(FakeObj, parent)).unwrap_or(0),
+            );
+            // self-referential: the object's parent slot points back at itself.
+            let mut obj = FakeObj {
+                class: cls.as_ref() as *const ffi::AVClass,
+                parent: std::ptr::null_mut(),
+            };
+            let ptr = std::ptr::from_ref(&obj).cast::<c_void>().cast_mut();
+            obj.parent = ptr; // cycle
+            assert_eq!(
+                resolve_with_parent_walk(ptr),
+                None,
+                "a self-referential, unregistered chain terminates and resolves to None"
+            );
+        }
     }
 }
