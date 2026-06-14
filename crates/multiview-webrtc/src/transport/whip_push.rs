@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use crate::egress::{EgressFeed, EgressMedia};
 use crate::error::{Result, WebRtcError};
 use crate::transport::{MediaKind, Session, SessionConfig, WebRtcEndpoint};
+use crate::turn::TurnRelayDriver;
 
 /// The maximum UDP datagram the recv loop reads.
 const RECV_BUFFER: usize = 2048;
@@ -182,6 +183,216 @@ pub trait WhipSignaller: Send + Sync {
     fn delete_resource(&self, resource_url: &str);
 }
 
+/// What one `whip_push` output needs to publish on the **shared** socket via the
+/// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) (ADR-0048 §4): the program
+/// egress feed, whether it carries audio, and the host candidates (the one shared
+/// socket's reachable addresses, IPv6-first) the sendonly offer advertises.
+#[derive(Debug, Clone)]
+pub struct WhipPushSpec {
+    /// The bounded drop-oldest program egress feed the client publishes.
+    pub feed: EgressFeed,
+    /// Whether the output carries the shared program Opus rendition.
+    pub audio: bool,
+    /// The host candidates the sendonly offer advertises (IPv6-first).
+    pub host_candidates: Vec<SocketAddr>,
+}
+
+/// One `whip_push` output's lifecycle on the shared socket: a supervised state
+/// machine the [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) steps each
+/// driver tick. It mirrors the standalone [`WhipPushClient::run`] loop — build a
+/// sendonly offer, `POST` it (off-thread so the one driver never blocks), apply the
+/// answer, then drive ICE/DTLS/SRTP + sample-write the program AUs — but it shares
+/// the one socket instead of binding its own (the defect-B fix).
+pub struct PushLane {
+    spec: WhipPushSpec,
+    signaller: Arc<dyn WhipSignaller>,
+    backoff: PushBackoff,
+    state: PushState,
+}
+
+/// The supervised `whip_push` lifecycle state.
+enum PushState {
+    /// Not connected; the next connect attempt is due at `retry_at`.
+    Idle { retry_at: Instant },
+    /// A WHIP `POST` is in flight off-thread; `join` resolves to the answer.
+    Connecting {
+        session: Box<Session>,
+        join: tokio::task::JoinHandle<Result<WhipPushAnswer>>,
+    },
+    /// Connected: driving ICE/DTLS/SRTP + publishing. `resource_url` is the
+    /// session resource the client `DELETE`s on teardown.
+    Connected {
+        session: Box<Session>,
+        resource_url: Option<String>,
+        saw_keyframe: bool,
+    },
+}
+
+impl std::fmt::Debug for PushLane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let phase = match &self.state {
+            PushState::Idle { .. } => "idle",
+            PushState::Connecting { .. } => "connecting",
+            PushState::Connected { .. } => "connected",
+        };
+        f.debug_struct("PushLane")
+            .field("audio", &self.spec.audio)
+            .field("phase", &phase)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PushLane {
+    /// Build a lane from its spec + the HTTP signaller (boxed so the crate keeps no
+    /// HTTP dependency). The first connect attempt is due immediately.
+    #[must_use]
+    pub fn new(spec: WhipPushSpec, signaller: Box<dyn WhipSignaller>) -> Self {
+        Self {
+            spec,
+            signaller: Arc::from(signaller),
+            backoff: PushBackoff::new(),
+            state: PushState::Idle {
+                retry_at: Instant::now(),
+            },
+        }
+    }
+
+    /// Advance the lane one driver tick on the shared `socket` (relay-aware via
+    /// `turn`). Non-blocking: a due connect dispatches the WHIP `POST` off-thread;
+    /// a live session drains the feed and flushes outbound; a dead/failed session
+    /// schedules a backoff reconnect. Never `.await`s the remote peer (inv #10).
+    pub async fn step(
+        &mut self,
+        socket: &tokio::net::UdpSocket,
+        turn: &mut TurnRelayDriver,
+        local_addr: SocketAddr,
+        now: Instant,
+    ) {
+        // Take the state out to transition it (placed back before returning).
+        let state = std::mem::replace(
+            &mut self.state,
+            PushState::Idle {
+                retry_at: now + PushBackoff::MAX_DELAY,
+            },
+        );
+        self.state = match state {
+            PushState::Idle { retry_at } => {
+                if now < retry_at {
+                    PushState::Idle { retry_at }
+                } else {
+                    self.begin_connect(now)
+                }
+            }
+            PushState::Connecting { session, join } => {
+                self.poll_connect(session, join, now).await
+            }
+            PushState::Connected {
+                mut session,
+                resource_url,
+                mut saw_keyframe,
+            } => {
+                let _ = local_addr;
+                WhipPushClient::drain_and_send(
+                    socket,
+                    turn,
+                    &mut session,
+                    &self.spec.feed,
+                    &mut saw_keyframe,
+                    now,
+                )
+                .await;
+                if session.is_alive() {
+                    PushState::Connected {
+                        session,
+                        resource_url,
+                        saw_keyframe,
+                    }
+                } else {
+                    if let Some(url) = &resource_url {
+                        self.signaller.delete_resource(url);
+                    }
+                    PushState::Idle {
+                        retry_at: now + self.backoff.next_delay(),
+                    }
+                }
+            }
+        };
+    }
+
+    /// Feed one inbound datagram (already relay-decapsulated by the unified driver)
+    /// to a connecting/connected push session — str0m ignores a datagram not for it.
+    pub fn handle_inbound(&mut self, src: SocketAddr, dst: SocketAddr, payload: &[u8], now: Instant) {
+        match &mut self.state {
+            PushState::Connected { session, .. } | PushState::Connecting { session, .. } => {
+                let _ = session.handle_datagram(src, dst, payload, now);
+            }
+            PushState::Idle { .. } => {}
+        }
+    }
+
+    /// Build a sendonly offer and dispatch the (blocking) WHIP `POST` off-thread.
+    fn begin_connect(&mut self, now: Instant) -> PushState {
+        let Ok(offer) = WhipPushOffer::create(&self.spec.host_candidates, self.spec.audio) else {
+            return PushState::Idle {
+                retry_at: now + self.backoff.next_delay(),
+            };
+        };
+        let signaller = Arc::clone(&self.signaller);
+        let offer_sdp = offer.sdp;
+        let join =
+            tokio::task::spawn_blocking(move || signaller.post_offer(&offer_sdp));
+        PushState::Connecting {
+            session: Box::new(offer.session),
+            join,
+        }
+    }
+
+    /// Resolve the off-thread `POST` if it has finished; on success apply the
+    /// answer and go Connected, on failure back off and reconnect. A still-running
+    /// `POST` keeps the Connecting state (the unified driver re-steps next tick).
+    /// `JoinHandle::is_finished` lets us check without awaiting (no blocking on the
+    /// one driver), then a finished handle is awaited (it resolves immediately).
+    async fn poll_connect(
+        &mut self,
+        mut session: Box<Session>,
+        join: tokio::task::JoinHandle<Result<WhipPushAnswer>>,
+        now: Instant,
+    ) -> PushState {
+        if !join.is_finished() {
+            return PushState::Connecting { session, join };
+        }
+        // Finished: awaiting resolves immediately (no blocking the driver).
+        match join.await {
+            Ok(Ok(answer)) => {
+                if session.accept_answer(&answer.answer_sdp).is_err() {
+                    PushState::Idle {
+                        retry_at: now + self.backoff.next_delay(),
+                    }
+                } else {
+                    self.backoff.reset();
+                    PushState::Connected {
+                        session,
+                        resource_url: answer.resource_url,
+                        saw_keyframe: false,
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "whip_push POST failed; backing off");
+                PushState::Idle {
+                    retry_at: now + self.backoff.next_delay(),
+                }
+            }
+            Err(join_err) => {
+                tracing::warn!(error = %join_err, "whip_push POST task failed");
+                PushState::Idle {
+                    retry_at: now + self.backoff.next_delay(),
+                }
+            }
+        }
+    }
+}
+
 impl WhipPushClient {
     /// Bind the dual-stack socket and create the client over the program egress
     /// `feed`. `audio` is whether the output carries the program Opus rendition.
@@ -224,6 +435,7 @@ impl WhipPushClient {
         let bind_addr = self.endpoint.config().bind_addr();
         let local_addr = self.endpoint.local_addr()?;
         let host_candidates = self.endpoint.host_candidates()?;
+        let mut turn = TurnRelayDriver::from_config(self.endpoint.config(), Instant::now());
         let std_socket = self.endpoint.into_socket();
         std_socket
             .set_nonblocking(true)
@@ -279,12 +491,12 @@ impl WhipPushClient {
                                 let _ = session.handle_datagram(src, local_addr, payload, now);
                             }
                         }
-                        Self::drain_and_send(&socket, &mut session, &self.feed, &mut saw_keyframe, now).await;
+                        Self::drain_and_send(&socket, &mut turn, &mut session, &self.feed, &mut saw_keyframe, now).await;
                     }
                     _ = tick.tick() => {
                         let now = Instant::now();
                         let _ = session.handle_timeout(now);
-                        Self::drain_and_send(&socket, &mut session, &self.feed, &mut saw_keyframe, now).await;
+                        Self::drain_and_send(&socket, &mut turn, &mut session, &self.feed, &mut saw_keyframe, now).await;
                     }
                 }
                 if !session.is_alive() {
@@ -302,9 +514,11 @@ impl WhipPushClient {
     }
 
     /// Drain the egress feed and sample-write each program AU into the session,
-    /// then flush its outbound datagrams onto the socket (non-blocking).
+    /// then flush its outbound datagrams onto the socket, routing through the TURN
+    /// relay when str0m chose the relay candidate (defect C). Non-blocking.
     async fn drain_and_send(
         socket: &tokio::net::UdpSocket,
+        turn: &mut TurnRelayDriver,
         session: &mut Session,
         feed: &EgressFeed,
         saw_keyframe: &mut bool,
@@ -334,8 +548,8 @@ impl WhipPushClient {
                 }
             }
         }
-        while let Some((dst, payload)) = session.poll_transmit(now) {
-            let _ = socket.send_to(&payload, dst).await;
+        while let Some((source, dst, payload)) = session.poll_transmit(now) {
+            crate::transport::relay_io::send_routed(socket, turn, source, dst, &payload, now).await;
         }
     }
 }

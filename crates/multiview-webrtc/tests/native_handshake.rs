@@ -49,8 +49,11 @@ fn pump_until(
         b.handle_timeout(clock).unwrap();
         for _ in 0..128 {
             match a.poll_transmit(clock) {
-                Some((dst, payload)) => {
-                    // The destination should be the other peer's address.
+                // poll_transmit now surfaces str0m's (source, destination, payload);
+                // for host candidates the source is the local addr — assert the
+                // destination is the other peer (the relay routing is exercised by
+                // the dedicated relay-forced-media test, not this host shuttle).
+                Some((_source, dst, payload)) => {
                     assert_eq!(dst, b_addr, "a transmits to b");
                     b.handle_datagram(a_addr, b_addr, &payload, clock).unwrap();
                 }
@@ -59,7 +62,7 @@ fn pump_until(
         }
         for _ in 0..128 {
             match b.poll_transmit(clock) {
-                Some((dst, payload)) => {
+                Some((_source, dst, payload)) => {
                     assert_eq!(dst, a_addr, "b transmits to a");
                     a.handle_datagram(b_addr, a_addr, &payload, clock).unwrap();
                 }

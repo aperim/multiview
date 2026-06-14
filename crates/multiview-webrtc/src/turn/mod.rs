@@ -26,4 +26,4 @@ pub mod message;
 
 pub use auth::TurnCredential;
 pub use client::{TurnClient, TurnEvent, TurnOutput, TurnState};
-pub use driver::TurnRelayDriver;
+pub use driver::{RelayedDatagram, TurnRelayDriver};
