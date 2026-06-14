@@ -218,6 +218,54 @@ async fn export_retains_base_config_sections_the_stores_do_not_carry() {
 }
 
 #[tokio::test]
+async fn export_round_trips_the_system_ndi_acceptance_as_a_flag() {
+    // ADR-0008 §7.5: the NDI license acceptance is an authored [system] section no
+    // store carries; the export must pass it through verbatim and "as a flag, never
+    // a secret" (visible in the rendered TOML, not redacted) so the legal acceptance
+    // travels with the config. Guards the verbatim base_document passthrough against
+    // future export refactors that reconstruct sections explicitly.
+    let base = json!({
+        "system": {
+            "ndi": {
+                "accept_license": true,
+                "accepted_by": "operator@example",
+                "accepted_at": "2026-06-06T00:00:00Z"
+            }
+        }
+    });
+    let h = support::harness_with(|state| state.with_base_document(base.clone()));
+    seed(&h).await;
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    // Round-trips through the canonical type with the acceptance intact.
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("export is a valid MultiviewConfig document");
+    let ndi = parsed
+        .system
+        .as_ref()
+        .and_then(|s| s.ndi.as_ref())
+        .expect("the [system.ndi] acceptance survives the export round-trip");
+    assert!(ndi.accept_license);
+    assert_eq!(ndi.accepted_by.as_deref(), Some("operator@example"));
+
+    // Exported as a plain flag, never a secret (not redacted / behind a secret_ref).
+    assert!(
+        text.contains("accept_license = true"),
+        "the acceptance flag must export plainly:\n{text}"
+    );
+    assert!(
+        text.contains("operator@example"),
+        "the audit principal must export plainly (not redacted):\n{text}"
+    );
+}
+
+#[tokio::test]
 async fn export_prefers_the_seeded_working_layout_over_alphabetical_order() {
     // Review M1: with several layouts carrying a canvas, the export must use
     // the designated working layout, not the id-sorted first.

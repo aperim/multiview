@@ -6639,11 +6639,15 @@ fn drive_ndi(plan: &IngestPlan, name: &str, stop: &AtomicBool) {
             }
             Err(status) => {
                 // Runtime absent / unusable / unlicensed / no live receiver yet: log
-                // the honest status token once and let the tile degrade. We do NOT
-                // spin — the reconnect backoff below bounds retry frequency, and
+                // the honest status token and let the tile degrade. We do NOT spin —
+                // the reconnect backoff below bounds retry frequency (so this warn
+                // repeats at most once per backoff cycle, settling to ~1/30s), and
                 // `stop`/prime-wait are never blocked. An unaccepted license is
-                // terminal-until-accepted; the gate is re-evaluated on the next
-                // (backed-off) attempt, so a later acceptance is picked up.
+                // terminal for this run: the acceptance is stamped onto the plan at
+                // build time, so re-evaluating it each retry yields the same refusal
+                // until a config reload restarts the process (`system` is a
+                // restart-class diff section; live acceptance/revocation propagation
+                // is a deferred follow-up).
                 tracing::warn!(
                     source = %plan.id,
                     ndi_source = name,
