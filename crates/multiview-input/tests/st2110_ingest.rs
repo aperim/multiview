@@ -17,7 +17,7 @@
     clippy::indexing_slicing
 )]
 
-use multiview_core::time::MediaTime;
+use multiview_core::time::{rescale, MediaTime, Rational};
 use multiview_framestore::TileStore;
 use multiview_input::source::{FrameProducer, IngestConfig, IngestPump, StoredFrame};
 use multiview_input::st2022_7::Path;
@@ -242,6 +242,148 @@ fn channel_bridge_is_bounded_and_drives_the_producer() {
     assert!(
         tx2.try_send(line_packet(false, 1, 3, 2, 0)).is_err(),
         "a full bounded channel rejects the overflow instead of growing"
+    );
+}
+
+/// A virtual injected [`PaceClock`]: jumps to each release deadline (sleep-free),
+/// records the wall-clock instant at which each frame becomes due. The end-to-end
+/// proof that the paced raw-RTP / ST-2110 path releases frames at
+/// `anchor + (normalized_pts - pts0)` without ever touching a real clock.
+struct VirtualPaceClock {
+    now_ns: i64,
+}
+
+impl VirtualPaceClock {
+    fn new(start_ns: i64) -> Self {
+        Self { now_ns: start_ns }
+    }
+}
+
+impl multiview_input::source::PaceClock for VirtualPaceClock {
+    fn now_ns(&mut self) -> i64 {
+        self.now_ns
+    }
+    fn sleep_until(&mut self, deadline_ns: i64) {
+        // Jump the virtual clock forward to the deadline (never backward).
+        self.now_ns = self.now_ns.max(deadline_ns);
+    }
+    fn idle(&mut self) {
+        self.now_ns = self.now_ns.saturating_add(1_000_000);
+    }
+}
+
+#[test]
+fn paced_st2110_releases_frames_wall_clock_smoothed() {
+    use multiview_input::source::{IngestConfig, PacePolicy};
+
+    // Three consecutive 30 fps frames arrive as a back-to-back BURST (the producer
+    // yields them as fast as the assembler closes them). Under the wall-clock
+    // policy the pump must release them spaced by their normalized-PTS deltas
+    // (one 90 kHz frame period = 3000 ticks = 33_333_333 ns), not flood the store.
+    let mut packets = complete_frame(90_000, 0);
+    packets.extend(complete_frame(93_000, 4));
+    packets.extend(complete_frame(96_000, 8));
+    let source = ScriptedSource::new(packets);
+    let mut producer = St2110Producer::new(Box::new(source), geometry());
+
+    let store: TileStore<StoredFrame> = TileStore::with_defaults("st2110-paced");
+    let config = IngestConfig {
+        pace: PacePolicy::WallClock,
+        ..IngestConfig::default()
+    };
+    let mut pump = IngestPump::new(&producer, config);
+    let start = 5_000_000_000_i64;
+    let mut clock = VirtualPaceClock::new(start);
+
+    let published = pump
+        .run_paced_to_end(&mut producer, &store, &mut clock)
+        .expect("paced pump runs to clean EOS");
+    assert_eq!(published, 3, "all three frames reach the store");
+
+    // The virtual clock advanced to release the LAST frame at start + the exact
+    // (float-free) ns offset of 2 frame periods (6000 ticks @ 90 kHz) — proof the
+    // burst was smoothed across wall time, not published instantly.
+    let two_periods_ns = rescale(
+        6_000,
+        Rational::new(1, 90_000),
+        Rational::new(1, 1_000_000_000),
+    );
+    assert_eq!(
+        clock.now_ns,
+        start + two_periods_ns,
+        "the last frame released exactly 2 frame periods after the first (paced, not flooded)"
+    );
+    // And the offset must be ~2 * 33.33 ms (sanity: neither instant nor far-future).
+    assert!(
+        (66_000_000..=67_000_000).contains(&two_periods_ns),
+        "two-period offset is ~66.6 ms: {two_periods_ns}"
+    );
+}
+
+#[test]
+fn paced_st2110_32bit_wrap_crossing_soak() {
+    use multiview_input::source::{IngestConfig, PacePolicy};
+
+    // SOAK across the 32-bit RTP wrap boundary: feed a run of 30 fps frames whose
+    // 90 kHz timestamps cross 2^32 -> 0. The unwrap must make the wrap a normal
+    // forward delta, the normalizer stay strictly monotonic, and the pacer release
+    // each frame one frame period after the last — never a ~13.25 h backward jump
+    // or a far-future deadline (no explosion).
+    let modulus = 1_i64 << 32;
+    let period = 3_000_u32; // 30 fps @ 90 kHz
+    let n = 12_u32;
+    // Start far enough before the wrap that the run crosses it mid-stream.
+    let first = u32::try_from(modulus - i64::from(period) * 6).expect("fits u32");
+    let mut packets: Vec<St2110Packet> = Vec::new();
+    let mut seq: u16 = 0;
+    for k in 0..n {
+        let ts = first.wrapping_add(period.wrapping_mul(k));
+        packets.extend(complete_frame(ts, seq));
+        seq = seq.wrapping_add(4);
+    }
+    let source = ScriptedSource::new(packets);
+    let mut producer = St2110Producer::new(Box::new(source), geometry());
+
+    let store: TileStore<StoredFrame> = TileStore::with_defaults("st2110-wrap");
+    let config = IngestConfig {
+        pace: PacePolicy::WallClock,
+        // Large threshold: the unwrapped delta is a normal frame step, never a
+        // discontinuity.
+        discontinuity_ns: 60_000_000_000,
+        ..IngestConfig::default()
+    };
+    let mut pump = IngestPump::new(&producer, config);
+    let start = 0_i64;
+    let mut clock = VirtualPaceClock::new(start);
+
+    let published = pump
+        .run_paced_to_end(&mut producer, &store, &mut clock)
+        .expect("paced wrap soak runs to clean EOS");
+    assert_eq!(
+        published,
+        u64::from(n),
+        "every frame across the wrap reaches the store"
+    );
+
+    // The release clock advanced by the exact (float-free) ns offset of (n-1)
+    // frame periods — uniform across the wrap, no regression / explosion. A wrap
+    // mishandled as a backward jump would re-anchor (clock near `start`); one
+    // mishandled as a forward explosion would push the clock ~13 h out.
+    let total_ticks = i64::from(period) * (i64::from(n) - 1);
+    let expected_offset = rescale(
+        total_ticks,
+        Rational::new(1, 90_000),
+        Rational::new(1, 1_000_000_000),
+    );
+    assert_eq!(
+        clock.now_ns,
+        start + expected_offset,
+        "release spacing stayed uniform across the 32-bit RTP wrap (no jump/explosion)"
+    );
+    // Sanity bound: (n-1)=11 frame periods ~= 366.6 ms, nowhere near a 13 h wrap.
+    assert!(
+        (360_000_000..=370_000_000).contains(&expected_offset),
+        "offset is ~366 ms, not a wrap-sized jump: {expected_offset}"
     );
 }
 
