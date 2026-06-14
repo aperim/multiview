@@ -307,6 +307,11 @@ pub(crate) async fn delete_device(
     state.device_pollers.stop(&id).await;
     state.device_status.forget(&id);
     state.device_drivers.forget(&id);
+    // Forget any enrolled display-node identity bound to this device (DEV-B6):
+    // the keypair no longer authenticates a heartbeat, and a fresh enroll from
+    // that key is back to the pairing flow — the binding is genuinely dropped,
+    // not cached. A no-op for a non-`displaynode` device.
+    state.node_enroll.forget(&id);
     state.audit(
         &principal.key_id,
         AuditAction::Delete,

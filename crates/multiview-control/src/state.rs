@@ -23,7 +23,9 @@ use crate::devices::cast::media::CastDelivery;
 use crate::devices::cast::store::CastSessionStore;
 use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
 use crate::devices::sync_runtime::SyncGroupRuntime;
-use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
+use crate::devices::{
+    DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry, NodeEnrollState,
+};
 use crate::error::{ControlError, ControlResult};
 use crate::nmos::NmosRegistry;
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
@@ -386,6 +388,14 @@ pub struct AppState {
     /// behind the `zowietek` feature. Control-plane-only, `Mutex`-guarded handle
     /// map — it can never back-pressure the engine (invariant #10).
     pub device_pollers: Arc<DevicePollerRegistry>,
+    /// The display-node enrollment & pairing state (DEV-B6, ADR-0045): minted
+    /// TTL'd one-time tokens (hashed at rest), pending screen pairings (bounded),
+    /// and bound node keypair identities + their display-head projections. The
+    /// `/devices/enroll`, `/devices/pair`, `/devices/enrollment-tokens`,
+    /// `/devices/{id}/heartbeat`, and `/devices/{id}/display-heads` routes drive
+    /// it. Control-plane-only, `Mutex`-guarded, bounded — it can never
+    /// back-pressure the engine (invariant #10).
+    pub node_enroll: Arc<NodeEnrollState>,
     /// The Cast **delivery map** (DEV-D2, ADR-M011): output id → the
     /// device-reachable HLS rendition URL + segment format, built by the
     /// binary from the validated `control.cast_media_base` × the DEV-D1
@@ -629,6 +639,7 @@ impl AppState {
             discovery_config: Arc::new(multiview_config::DiscoveryConfig::default()),
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
+            node_enroll: Arc::new(NodeEnrollState::new()),
             cast_delivery: None,
             cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
@@ -955,6 +966,15 @@ impl AppState {
     #[must_use]
     pub fn with_device_pollers(mut self, device_pollers: Arc<DevicePollerRegistry>) -> Self {
         self.device_pollers = device_pollers;
+        self
+    }
+
+    /// Replace the display-node enrollment & pairing state (DEV-B6): tests
+    /// inject one carrying a fake clock to cross token TTLs deterministically;
+    /// the binary uses the default (system-clock) instance.
+    #[must_use]
+    pub fn with_node_enroll(mut self, node_enroll: Arc<NodeEnrollState>) -> Self {
+        self.node_enroll = node_enroll;
         self
     }
 

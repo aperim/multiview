@@ -45,6 +45,7 @@ pub mod broadcaster;
 pub mod cast;
 pub mod discovery;
 pub mod driver_registry;
+pub mod enroll;
 pub mod projection;
 pub mod registry;
 pub mod state_machine;
@@ -58,6 +59,11 @@ pub use discovery::{
     DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,
 };
 pub use driver_registry::DeviceDriverRegistry;
+pub use enroll::{
+    canonical_message, DisplayHead, EnrollError, EnrollOutcome, EnrollRequest, MintedToken,
+    NodeEnrollState, PairCompletion, PairRequest, PairingRequestSummary, TokenState, TokenSummary,
+    VerifiedHeartbeat,
+};
 pub use projection::{OutputTarget, SourceCandidate};
 pub use registry::DeviceStatusRegistry;
 pub use state_machine::{DeviceLifecycle, LifecycleEvent};
