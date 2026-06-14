@@ -164,6 +164,22 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
         keywords: ["sync_groups", "members", "offset_ms", "target_skew_ms"],
       },
       {
+        id: "webrtc-ice",
+        title: msg`WebRTC and TURN (ICE servers)`,
+        keywords: [
+          "webrtc",
+          "turn",
+          "stun",
+          "ice_servers",
+          "ice",
+          "nat",
+          "relay",
+          "credentials",
+          "whep",
+          "whip",
+        ],
+      },
+      {
         id: "validation",
         title: msg`Validation and import / export`,
         keywords: ["validate", "import", "export", "unique ids"],
@@ -406,6 +422,21 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
         keywords: ["mpeg-ts", "transport stream", "udp", "multicast", "broadcast", "rtp"],
       },
       {
+        id: "webrtc",
+        title: msg`WebRTC (WHIP and WHEP)`,
+        keywords: [
+          "webrtc",
+          "whip",
+          "whep",
+          "browser",
+          "sub-second",
+          "turn",
+          "ice",
+          "sdp",
+          "low latency",
+        ],
+      },
+      {
         id: "file-and-synthetic",
         title: msg`Files and synthetic sources`,
         keywords: ["file", "test pattern", "bars", "clock", "loop"],
@@ -623,6 +654,11 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
         keywords: ["hdr", "pq", "hlg", "brightness"],
       },
       {
+        id: "ice",
+        title: msg`ICE (Interactive Connectivity Establishment)`,
+        keywords: ["ice", "stun", "turn", "nat", "webrtc", "candidate", "relay"],
+      },
+      {
         id: "jitter-buffer",
         title: msg`Jitter buffer`,
         keywords: ["jitter", "buffer", "network", "smoothing"],
@@ -693,6 +729,11 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
         keywords: ["salvo", "recall", "preset", "router"],
       },
       {
+        id: "sdp",
+        title: msg`SDP (Session Description Protocol)`,
+        keywords: ["sdp", "offer", "answer", "webrtc", "whip", "whep", "negotiation"],
+      },
+      {
         id: "srt",
         title: msg`SRT`,
         keywords: ["srt", "secure reliable transport", "contribution"],
@@ -716,6 +757,16 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
         id: "umd",
         title: msg`UMD (Under-Monitor Display)`,
         keywords: ["umd", "under monitor display", "label", "source name"],
+      },
+      {
+        id: "whep",
+        title: msg`WHEP (WebRTC-HTTP Egress Protocol)`,
+        keywords: ["whep", "webrtc", "egress", "play", "browser", "preview", "sdp"],
+      },
+      {
+        id: "whip",
+        title: msg`WHIP (WebRTC-HTTP Ingestion Protocol)`,
+        keywords: ["whip", "webrtc", "ingest", "publish", "browser", "encoder", "sdp"],
       },
     ],
     related: ["/help/concepts/transports", "/help/concepts/timing-sync"],

@@ -107,6 +107,20 @@ export function GlossaryPage(): JSX.Element {
           </Prose>
         </DocSection>
 
+        <DocSection id="ice" title={<Trans>ICE (Interactive Connectivity Establishment)</Trans>}>
+          <Prose>
+            <Trans>
+              The procedure WebRTC peers use to find a working network path
+              between them. Each side gathers candidate addresses — its own
+              local address, its public address as seen through NAT (via a STUN
+              server), and, when a direct path is impossible, a relayed address
+              from a TURN server — and the pair probes them to pick one. A TURN
+              relay is what lets WebRTC work across strict firewalls; it is
+              configured on the server, never in the browser.
+            </Trans>
+          </Prose>
+        </DocSection>
+
         <DocSection id="jitter-buffer" title={<Trans>Jitter buffer</Trans>}>
           <Prose>
             <Trans>
@@ -273,6 +287,18 @@ export function GlossaryPage(): JSX.Element {
           </Prose>
         </DocSection>
 
+        <DocSection id="sdp" title={<Trans>SDP (Session Description Protocol)</Trans>}>
+          <Prose>
+            <Trans>
+              The small text document two WebRTC peers exchange to agree how to
+              talk: which codecs, resolutions, and audio formats each supports,
+              and the candidate network addresses to try. One side sends an
+              "offer" and the other replies with an "answer"; in WHIP and WHEP
+              that exchange is a single HTTPS request and response.
+            </Trans>
+          </Prose>
+        </DocSection>
+
         <DocSection id="srt" title={<Trans>SRT</Trans>}>
           <Prose>
             <Trans>
@@ -326,6 +352,29 @@ export function GlossaryPage(): JSX.Element {
               name — named for the physical display modules mounted under
               monitors in traditional galleries. UMD text can be static or
               driven dynamically by a router or automation system.
+            </Trans>
+          </Prose>
+        </DocSection>
+
+        <DocSection id="whep" title={<Trans>WHEP (WebRTC-HTTP Egress Protocol)</Trans>}>
+          <Prose>
+            <Trans>
+              The open standard for playing a WebRTC stream from a browser: the
+              player POSTs an SDP offer to a single URL and receives the answer,
+              then media flows over the peer connection. Multiview serves WHEP
+              for <Code>webrtc</Code> outputs and for the sub-second in-app live
+              preview.
+            </Trans>
+          </Prose>
+        </DocSection>
+
+        <DocSection id="whip" title={<Trans>WHIP (WebRTC-HTTP Ingestion Protocol)</Trans>}>
+          <Prose>
+            <Trans>
+              The open standard for publishing a WebRTC stream into a server: a
+              browser or encoder POSTs an SDP offer to a single URL and receives
+              the answer, then sends media over the peer connection. A Multiview{" "}
+              <Code>webrtc</Code> source is published to over WHIP.
             </Trans>
           </Prose>
         </DocSection>

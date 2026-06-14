@@ -58,6 +58,10 @@ export type SourceKind =
   | 'rtmp'
   | 'ndi'
   | 'file'
+  // WHIP ingest (RFC 9725): a WebRTC contribution source Multiview is the
+  // server FOR — a publisher (OBS, GStreamer whipclientsink, a browser) pushes
+  // media to the derived `POST /api/v1/whip/{id}` endpoint (ADR-T014).
+  | 'webrtc'
   // `test` is a legacy alias for `bars` (ADR-0027); kept in the union for
   // back-compat parsing of older bodies, but not offered in the picker.
   | 'test';
@@ -81,6 +85,7 @@ export const SOURCE_KINDS: readonly SourceKind[] = [
   'rtmp',
   'ndi',
   'file',
+  'webrtc',
 ];
 
 /** A managed ingest source. */
@@ -112,8 +117,23 @@ export interface SourceView {
   readonly locator: string | undefined;
 }
 
-/** The output transport display kinds (config `Output`, folded for display). */
-export type OutputKind = 'rtsp' | 'hls' | 'll-hls' | 'ndi' | 'rtmp' | 'srt' | 'rist' | 'display';
+/**
+ * The output transport display kinds (config `Output`, folded for display).
+ * `webrtc` serves the program to browsers over WHEP (`POST /api/v1/whep/{id}`);
+ * `whip-push` (display kind ↔ wire tag `whip_push`) publishes the program to a
+ * remote WHIP origin (ADR-0049). `rist` is the RIST egress transport (#158).
+ */
+export type OutputKind =
+  | 'rtsp'
+  | 'hls'
+  | 'll-hls'
+  | 'ndi'
+  | 'rtmp'
+  | 'srt'
+  | 'rist'
+  | 'display'
+  | 'webrtc'
+  | 'whip-push';
 
 /** All output kinds, for building selectors. */
 export const OUTPUT_KINDS: readonly OutputKind[] = [
@@ -125,6 +145,8 @@ export const OUTPUT_KINDS: readonly OutputKind[] = [
   'srt',
   'rist',
   'display',
+  'webrtc',
+  'whip-push',
 ];
 
 /** A configured output sink/server. */
@@ -141,12 +163,14 @@ export interface OutputView {
   readonly editable: boolean;
   /**
    * The kind's key field for display: the RTSP `mount`, the HLS/LL-HLS `path`,
-   * the RTMP/SRT `url`, the NDI source `name`, or the display `connector`.
+   * the RTMP/SRT/`whip-push` `url`, the NDI source `name`, the display
+   * `connector`, or — for a served `webrtc` output — the derived WHEP play URL.
    */
   readonly target: string | undefined;
   /**
    * The video codec (absent for NDI and display, which carry raw frames, not
-   * an encoded rendition).
+   * an encoded rendition). `webrtc`/`whip-push` consume an existing H.264
+   * rendition rather than spawning an encode, but still surface the codec.
    */
   readonly codec: string | undefined;
 }

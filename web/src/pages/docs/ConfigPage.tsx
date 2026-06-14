@@ -371,6 +371,43 @@ members = [
 ]`}</CodeBlock>
         </DocSection>
 
+        <DocSection id="webrtc-ice" title={<Trans>WebRTC and TURN (ICE servers)</Trans>}>
+          <Prose>
+            <Trans>
+              The optional <Code>[webrtc]</Code> section tunes the built-in
+              WebRTC endpoint that serves WHEP playback and the live preview and
+              accepts WHIP publishing. Most deployments need none of it: browsers
+              on the same network reach the server directly. When viewers or
+              publishers sit behind strict NATs or firewalls, add one or more{" "}
+              <Code>[[webrtc.ice_servers]]</Code> entries pointing at a STUN
+              and/or TURN server so the connection can be relayed.
+            </Trans>
+          </Prose>
+          <Prose>
+            <Trans>
+              TURN credentials are server-side configuration: they live in the
+              config file (or a <Code>secret_ref</Code> indirection) and are used
+              by the server when it gathers connection candidates. They are{" "}
+              <strong>never sent to the browser</strong> — the client offers a
+              plain connection and the server returns the negotiated path — so no
+              relay password is exposed to a viewer. URLs are IPv6-first and
+              bracket literal IPv6 addresses.
+            </Trans>
+          </Prose>
+          <CodeBlock label={t`Example ICE / TURN configuration`}>{`[webrtc]
+# Optional NAT-traversal helpers; omit entirely on a flat network.
+[[webrtc.ice_servers]]
+kind = "stun"
+url = "stun:[2001:db8::53]:3478"
+
+[[webrtc.ice_servers]]
+kind = "turn"
+url = "turn:[2001:db8::55]:3478"
+username = "multiview"
+# Secret — redacted in support bundles, never echoed to the browser.
+password = "op://Site/turn/credential"`}</CodeBlock>
+        </DocSection>
+
         <DocSection id="validation" title={<Trans>Validation and import / export</Trans>}>
           <Prose>
             <Trans>
