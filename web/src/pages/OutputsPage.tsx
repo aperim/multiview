@@ -41,10 +41,13 @@ import {
   AdvancedSection,
   ApplySemanticsCallout,
   CheckboxField,
+  DerivedUrlField,
   ExportConfigButton,
   FormField,
+  SecretField,
   SelectField,
 } from '../resources/FormControls';
+import { whepPlayUrl } from '../resources/api';
 import { HelpLink } from '../components/HelpLink';
 
 const AUDIO_CHOICES: readonly OutputAudioChoice[] = ['default', 'program', 'tracks'];
@@ -256,7 +259,138 @@ function OutputKindFields({
       );
     case 'display':
       return <DisplayKindFields form={form} setForm={setForm} errors={errors} />;
+    case 'webrtc':
+      return <WebrtcOutputFields form={form} setForm={setForm} errors={errors} />;
+    case 'whip-push':
+      return <WhipPushOutputFields form={form} setForm={setForm} errors={errors} />;
   }
+}
+
+/**
+ * The WHEP-serve (`webrtc`) output fields (ADR-0049 / ADR-W023). It never
+ * encodes — it fans the H.264 program rendition to browser viewers — so the
+ * form shows the DERIVED WHEP play URL (read-only, copyable), the viewer cap,
+ * and the optional viewer token (masked). The B-frames-off H.264 requirement is
+ * stated, since this schema has no rendition-settings surface to enforce it.
+ */
+function WebrtcOutputFields({
+  form,
+  setForm,
+  errors,
+}: {
+  readonly form: OutputFormState;
+  readonly setForm: (next: OutputFormState) => void;
+  readonly errors: FieldErrors<OutputField>;
+}): JSX.Element {
+  const { t } = useLingui();
+  const id = form.id.trim();
+  return (
+    <>
+      {id === '' ? (
+        <p className="text-xs text-muted-foreground">
+          <Trans>
+            Set an identifier above; the WHEP play endpoint is derived from it
+            and shown here once it is filled in.
+          </Trans>
+        </p>
+      ) : (
+        <DerivedUrlField
+          id="output-whep-url"
+          label={t`WHEP play endpoint`}
+          value={whepPlayUrl(id)}
+          hint={
+            <Trans>
+              Browser viewers POST an SDP offer here. With no token, viewing
+              needs a control-plane API key with View scope — never anonymous.
+              Relative to the control plane origin.
+            </Trans>
+          }
+          trailing={<HelpLink to="/help/glossary#whep" label={t`What is WHEP?`} compact />}
+        />
+      )}
+      <FormField
+        id="output-webrtc-max-viewers"
+        label={t`Maximum concurrent viewers (optional)`}
+        type="number"
+        value={form.webrtcMaxViewers}
+        placeholder="8"
+        error={errors.webrtcMaxViewers}
+        hint={<Trans>Viewers beyond this cap (or the endpoint pool) receive a 503. Default 8.</Trans>}
+        onChange={(next): void => {
+          setForm({ ...form, webrtcMaxViewers: next });
+        }}
+      />
+      <SecretField
+        id="output-webrtc-token"
+        label={t`Viewer token (optional)`}
+        value={form.webrtcToken}
+        placeholder={t`leave blank to require a View API key`}
+        hint={
+          <Trans>
+            A bearer token a viewer presents on the WHEP POST. Leave blank to
+            require a control-plane API key with View scope instead.
+          </Trans>
+        }
+        onChange={(next): void => {
+          setForm({ ...form, webrtcToken: next });
+        }}
+      />
+      <p className="text-xs text-muted-foreground">
+        <Trans>
+          A WebRTC output consumes the H.264 program rendition with B-frames
+          off — it does not spawn a separate encode.
+        </Trans>
+      </p>
+    </>
+  );
+}
+
+/**
+ * The WHIP-push (`whip-push`) output fields (ADR-0049 / ADR-W023): publishes
+ * the program to a remote WHIP origin (the WebRTC sibling of rtmp/srt push).
+ * https is recommended; the client aborts on a plaintext downgrade.
+ */
+function WhipPushOutputFields({
+  form,
+  setForm,
+  errors,
+}: {
+  readonly form: OutputFormState;
+  readonly setForm: (next: OutputFormState) => void;
+  readonly errors: FieldErrors<OutputField>;
+}): JSX.Element {
+  const { t } = useLingui();
+  return (
+    <>
+      <FormField
+        id="output-url"
+        label={t`Remote WHIP endpoint URL`}
+        value={form.url}
+        required
+        placeholder="https://[2001:db8::15]:8443/whip/pgm1"
+        error={errors.url}
+        hint={
+          <Trans>
+            The remote origin's WHIP ingest URL. Use https — the client follows
+            only https redirects and aborts on a plaintext downgrade.
+          </Trans>
+        }
+        onChange={(next): void => {
+          setForm({ ...form, url: next });
+        }}
+      />
+      <SecretField
+        id="output-whip-push-token"
+        label={t`Origin token (optional)`}
+        value={form.whipPushToken}
+        placeholder={t`bearer token for the remote origin`}
+        hint={<Trans>A bearer token sent on the WHIP POST to the remote origin.</Trans>}
+        onChange={(next): void => {
+          setForm({ ...form, whipPushToken: next });
+        }}
+      />
+    </>
+  );
 }
 
 /** The display-head fields: connector + the mutually-exclusive mode choice. */
