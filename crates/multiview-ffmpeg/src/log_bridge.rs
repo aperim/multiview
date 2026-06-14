@@ -485,7 +485,7 @@ impl Drop for ResourceGuard {
 #[cfg(feature = "ffmpeg")]
 pub use ffi::install;
 #[cfg(feature = "ffmpeg")]
-pub use ffi::{register_av_context, AvContextRegistration};
+pub use ffi::{register_av_context, resolve_av_context, AvContextRegistration};
 
 #[cfg(feature = "ffmpeg")]
 mod ffi {
@@ -698,10 +698,11 @@ mod ffi {
         AvContextRegistration { ptr, epoch }
     }
 
-    /// Resolve a registered resource from a raw libav object pointer, if any.
+    /// Resolve a registered resource from a raw libav object **address**, if any.
     ///
-    /// Looks up `ptr` directly; a miss returns [`None`] (the caller then falls
-    /// through to component-only attribution). The lookup takes only the read lock.
+    /// Looks up `ptr` directly; a miss returns [`None`] (the caller then walks
+    /// parents via [`resolve_with_parent_walk`] or falls through to
+    /// component-only attribution). The lookup takes only the read lock.
     fn resolve_registered(ptr: usize) -> Option<ResourceContext> {
         if ptr == 0 {
             return None;
@@ -712,6 +713,117 @@ mod ffi {
             Err(poisoned) => poisoned.into_inner(),
         };
         guard.get(&ptr).map(|e| e.context.clone())
+    }
+
+    /// Resolve a registered resource for a public caller (integration tests, the
+    /// demux registration seam) by direct **address** lookup (ADR-0060 §3.2).
+    ///
+    /// This is the public face of [`resolve_registered`]: it answers "is this
+    /// `AVFormatContext*` (as a `usize`) currently registered, and to which
+    /// resource?" without exposing the internal map. A miss (or `0`) returns
+    /// [`None`].
+    #[must_use]
+    pub fn resolve_av_context(ptr: usize) -> Option<ResourceContext> {
+        resolve_registered(ptr)
+    }
+
+    /// Maximum number of `parent_log_context_offset` hops the resolver follows.
+    ///
+    /// libav's log-context parent chains are shallow (a decoder → its codec
+    /// context → its format context is at most a couple of hops). A small fixed
+    /// cap bounds the work per line and defends against a malformed or cyclic
+    /// chain (a self-referential parent pointer never loops forever).
+    const MAX_PARENT_HOPS: usize = 4;
+
+    /// Resolve a registered resource for a logged libav object, following libav's
+    /// `parent_log_context_offset` on a direct-lookup miss (ADR-0060 §3.2,
+    /// mechanism B step 1→2).
+    ///
+    /// libav's frame-threaded decoders and the HLS sub-demuxer pool log against a
+    /// **child** object (an `AVCodecContext`, a sub-demuxer's `AVFormatContext`)
+    /// whose `AVClass` declares a `parent_log_context_offset`: at
+    /// `(object + offset)` libav stores a pointer to the parent log context (e.g.
+    /// the owning `AVFormatContext` we registered). So a HEVC "Error constructing
+    /// the frame RPS" line — emitted on a decoder thread against the codec
+    /// context, never our format context — is attributed by walking up to the
+    /// registered parent.
+    ///
+    /// Resolution order, honest and bounded:
+    /// 1. direct lookup of the logged object's address;
+    /// 2. else follow `parent_log_context_offset` up to [`MAX_PARENT_HOPS`] hops,
+    ///    looking each parent up in the map;
+    /// 3. else [`None`] (the caller keeps `component` only — never a guessed id).
+    ///
+    /// Every pointer read is null-checked and bounded to the documented `AVClass`
+    /// offset; any null/miss terminates the walk at [`None`].
+    fn resolve_with_parent_walk(avcl: *mut c_void) -> Option<ResourceContext> {
+        if avcl.is_null() {
+            return None;
+        }
+        // Step 1: the logged object itself.
+        // reason(allow): pointer→address cast for a map-key lookup only (never
+        // dereferenced); `<*mut T>::addr()` is MSRV-1.84 and this crate is 1.82.
+        #[allow(clippy::as_conversions)]
+        if let Some(found) = resolve_registered(avcl as usize) {
+            return Some(found);
+        }
+
+        // Step 2: climb `parent_log_context_offset` a bounded number of hops.
+        let mut current = avcl;
+        for _ in 0..MAX_PARENT_HOPS {
+            let parent = parent_log_context(current)?;
+            if parent.is_null() {
+                return None;
+            }
+            // reason(allow): same map-key-only pointer→address cast as above.
+            #[allow(clippy::as_conversions)]
+            if let Some(found) = resolve_registered(parent as usize) {
+                return Some(found);
+            }
+            current = parent;
+        }
+        None
+    }
+
+    /// Read the parent log-context pointer of a libav object via its
+    /// `AVClass::parent_log_context_offset`, if it declares one.
+    ///
+    /// libav's logging ABI: a loggable object's first member is `*const AVClass`,
+    /// and `AVClass::parent_log_context_offset` is a byte offset **into the
+    /// object** at which libav stores a `*mut c_void` pointing to the parent log
+    /// context (or `0` for "no parent"). Returns the parent object pointer (which
+    /// itself begins with a `*const AVClass`), or [`None`] when there is no
+    /// declared parent or any pointer in the chain is null.
+    fn parent_log_context(obj: *mut c_void) -> Option<*mut c_void> {
+        if obj.is_null() {
+            return None;
+        }
+        // SAFETY: per libav's logging ABI the object at `obj` begins with a
+        // `*const AVClass`. We read exactly that one leading pointer-sized field
+        // (unaligned-safe), assuming nothing about the rest of the struct. `obj`
+        // is non-null (checked above).
+        let class_ptr = unsafe { obj.cast::<*const ffi::AVClass>().read_unaligned() };
+        if class_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: `class_ptr` is a non-null `*const AVClass` libav keeps alive for
+        // the logged object; `parent_log_context_offset` is a plain `c_int` field
+        // of that valid C struct. A single field read.
+        let offset = unsafe { (*class_ptr).parent_log_context_offset };
+        // `0` (and any non-positive value) means "no parent log context".
+        let offset = usize::try_from(offset).ok().filter(|&o| o > 0)?;
+        // SAFETY: libav stores a `*mut c_void` to the parent at `(obj + offset)`
+        // bytes. We read exactly one pointer-sized value at that documented
+        // offset (unaligned-safe), never assuming any further layout. `obj` is a
+        // valid object whose class declared this offset; the read stays within the
+        // object libav owns.
+        let parent = unsafe {
+            obj.cast::<u8>()
+                .add(offset)
+                .cast::<*mut c_void>()
+                .read_unaligned()
+        };
+        Some(parent)
     }
 
     /// Install the libav → `tracing` log bridge for the process, exactly once.
@@ -808,18 +920,21 @@ mod ffi {
     /// resource, run the suppressor (keyed by `(level, resource_id, message)`),
     /// and emit via `tracing`. Split out so the unsafe trampoline body stays tiny.
     ///
-    /// `ctx_ptr` is the libav object address (`avcl as usize`); attribution is
-    /// resolved in priority order — (A) the thread-local [`current_resource`] for
-    /// lines on a thread we own, then (B) the [`av_class_map`] for libav-owned
-    /// worker threads, then (C) none (component-only, never a guessed id).
-    fn route(level: c_int, component: &str, ctx_ptr: usize, line: &str) {
+    /// `avcl` is the libav object pointer; attribution is resolved in priority
+    /// order — (A) the thread-local [`current_resource`] for lines on a thread we
+    /// own, then (B) the [`av_class_map`] for libav-owned worker threads (direct
+    /// lookup, then a bounded `parent_log_context_offset` walk to the owning
+    /// format context), then (C) none (component-only, never a guessed id).
+    fn route(level: c_int, component: &str, avcl: *mut c_void, line: &str) {
         let bridge_level = map_av_level(level);
         let clean = sanitize_line(line);
         if clean.is_empty() {
             return;
         }
-        // Mechanism A → B → C (ADR-0060 §3): never guess on a miss.
-        let resource = current_resource().or_else(|| resolve_registered(ctx_ptr));
+        // Mechanism A → B → C (ADR-0060 §3): never guess on a miss. (B) is the
+        // direct-lookup-then-parent-walk resolver, so a line logged against a
+        // child decoder/sub-demuxer context still reaches its registered parent.
+        let resource = current_resource().or_else(|| resolve_with_parent_walk(avcl));
         let resource_id = resource.as_ref().map(super::ResourceContext::id);
         let now = origin().elapsed();
         let outcome = match suppressor().lock() {
@@ -955,15 +1070,12 @@ mod ffi {
                 None => std::borrow::Cow::Borrowed(""),
             };
 
-            // The libav object address is the lookup key for the AVClass map
-            // (mechanism B); it is only ever compared, never dereferenced here.
-            // reason(allow): a pointer→address cast for use purely as a map key
-            // (never cast back / dereferenced), so no provenance is needed; the
-            // stable `<*mut T>::addr()` is MSRV-1.84 and this crate's MSRV is 1.82,
-            // so `as usize` is the only option until the MSRV moves.
-            #[allow(clippy::as_conversions)]
-            let ctx_ptr = avcl as usize;
-            route(level, component.as_ref(), ctx_ptr, line.as_ref());
+            // The libav object pointer is handed to the router for mechanism-B
+            // attribution: a direct map lookup of its address, then a bounded
+            // `parent_log_context_offset` walk (each hop null-checked) to reach a
+            // registered owning format context. The router only ever reads the
+            // documented leading `AVClass*` and the parent-offset slot.
+            route(level, component.as_ref(), avcl, line.as_ref());
         });
         // On any caught panic, drop the line silently. Never re-raise across FFI.
         drop(result);
@@ -1093,14 +1205,38 @@ mod ffi {
         /// Build an `AVClass` whose `parent_log_context_offset` is the byte offset
         /// of [`FakeObj::parent`] (so the walk reads that slot), with a stable
         /// `class_name`. `parent_offset == 0` means "no parent" (libav's sentinel).
-        fn fake_class(name: &'static CStr, parent_offset: c_int) -> Box<ffi::AVClass> {
+        fn fake_class(name: &'static CStr, parent_offset: c_int) -> ffi::AVClass {
             // SAFETY (test): a zeroed AVClass is a valid all-fields-null/0 value;
             // we then set only the two fields the walk reads (`class_name`,
-            // `parent_log_context_offset`). Pointers stay null/Option None.
-            let mut class: Box<ffi::AVClass> = Box::new(unsafe { std::mem::zeroed() });
+            // `parent_log_context_offset`). Pointers stay null/Option None. The
+            // caller binds the returned value to a local whose address is stable
+            // for the test scope (referenced by `class_ptr`).
+            let mut class: ffi::AVClass = unsafe { std::mem::zeroed() };
             class.class_name = name.as_ptr();
             class.parent_log_context_offset = parent_offset;
             class
+        }
+
+        /// The leading `*const AVClass` slot value for a fabricated object.
+        fn class_ptr(class: &ffi::AVClass) -> *const ffi::AVClass {
+            std::ptr::from_ref::<ffi::AVClass>(class)
+        }
+
+        /// The opaque `*mut c_void` address of a fabricated object (what libav
+        /// hands the log callback as `avcl`).
+        fn obj_ptr(obj: &FakeObj) -> *mut c_void {
+            std::ptr::from_ref::<FakeObj>(obj)
+                .cast::<c_void>()
+                .cast_mut()
+        }
+
+        /// The map-key address of a fabricated object pointer.
+        ///
+        /// reason(allow): pointer→address cast for a map key only (never
+        /// dereferenced); `<*mut T>::addr()` is MSRV-1.84 and this crate is 1.82.
+        #[allow(clippy::as_conversions)]
+        fn addr(ptr: *mut c_void) -> usize {
+            ptr as usize
         }
 
         #[test]
@@ -1118,23 +1254,23 @@ mod ffi {
 
             // The parent (format context) object we own and register.
             let parent_obj = FakeObj {
-                class: parent_class.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&parent_class),
                 parent: std::ptr::null_mut(),
             };
-            let parent_ptr = std::ptr::from_ref(&parent_obj).cast::<c_void>().cast_mut();
-            let _reg = register_av_context(parent_ptr as usize, ResourceContext::source("cnn"));
+            let parent_ptr = obj_ptr(&parent_obj);
+            let _reg = register_av_context(addr(parent_ptr), ResourceContext::source("cnn"));
 
             // The child (codec context) object libav logs against; its parent slot
             // points at the registered format context.
             let child_obj = FakeObj {
-                class: child_class.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&child_class),
                 parent: parent_ptr,
             };
-            let child_ptr = std::ptr::from_ref(&child_obj).cast::<c_void>().cast_mut();
+            let child_ptr = obj_ptr(&child_obj);
 
             // Direct lookup of the child misses (only the parent is registered)…
             assert_eq!(
-                resolve_registered(child_ptr as usize),
+                resolve_registered(addr(child_ptr)),
                 None,
                 "the child context itself is not registered"
             );
@@ -1158,12 +1294,12 @@ mod ffi {
                 class: std::ptr::null(),
                 parent: std::ptr::null_mut(),
             };
-            let parent_ptr = std::ptr::from_ref(&parent_obj).cast::<c_void>().cast_mut();
+            let parent_ptr = obj_ptr(&parent_obj);
             let child_obj = FakeObj {
-                class: child_class.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&child_class),
                 parent: parent_ptr,
             };
-            let child_ptr = std::ptr::from_ref(&child_obj).cast::<c_void>().cast_mut();
+            let child_ptr = obj_ptr(&child_obj);
 
             assert_eq!(
                 resolve_with_parent_walk(child_ptr),
@@ -1177,28 +1313,27 @@ mod ffi {
             // grandparent (registered) ← parent ← child. The bounded walk must
             // climb both hops to reach the registered grandparent.
             let gp_class = fake_class(c"hls", 0);
-            let parent_offset =
-                c_int::try_from(std::mem::offset_of!(FakeObj, parent)).unwrap_or(0);
+            let parent_offset = c_int::try_from(std::mem::offset_of!(FakeObj, parent)).unwrap_or(0);
             let parent_class = fake_class(c"hls", parent_offset);
             let child_class = fake_class(c"hevc", parent_offset);
 
             let gp = FakeObj {
-                class: gp_class.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&gp_class),
                 parent: std::ptr::null_mut(),
             };
-            let gp_ptr = std::ptr::from_ref(&gp).cast::<c_void>().cast_mut();
-            let _reg = register_av_context(gp_ptr as usize, ResourceContext::source("abc"));
+            let gp_ptr = obj_ptr(&gp);
+            let _reg = register_av_context(addr(gp_ptr), ResourceContext::source("abc"));
 
             let parent = FakeObj {
-                class: parent_class.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&parent_class),
                 parent: gp_ptr,
             };
-            let parent_ptr = std::ptr::from_ref(&parent).cast::<c_void>().cast_mut();
+            let parent_ptr = obj_ptr(&parent);
             let child = FakeObj {
-                class: child_class.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&child_class),
                 parent: parent_ptr,
             };
-            let child_ptr = std::ptr::from_ref(&child).cast::<c_void>().cast_mut();
+            let child_ptr = obj_ptr(&child);
 
             let got = resolve_with_parent_walk(child_ptr)
                 .expect("the two-hop walk reaches the grandparent");
@@ -1211,16 +1346,20 @@ mod ffi {
             // without needing a parent link.
             let cls = fake_class(c"hls", 0);
             let obj = FakeObj {
-                class: cls.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&cls),
                 parent: std::ptr::null_mut(),
             };
-            let ptr = std::ptr::from_ref(&obj).cast::<c_void>().cast_mut();
-            let _reg = register_av_context(ptr as usize, ResourceContext::output("rtsp-main"));
+            let ptr = obj_ptr(&obj);
+            let _reg = register_av_context(addr(ptr), ResourceContext::output("rtsp-main"));
             let got = resolve_with_parent_walk(ptr).expect("a directly-registered object resolves");
             assert_eq!(got.id(), "rtsp-main");
             assert_eq!(got.kind(), "output");
         }
 
+        // reason(allow): `obj.parent = ptr` writes the cycle link that the
+        // resolver then reads *through the raw pointer* — the compiler can't see
+        // that aliasing read, so it false-flags the store as never read.
+        #[allow(unused_assignments)]
         #[test]
         fn parent_walk_tolerates_null_and_self_referential_links() {
             // A null `avcl` resolves to None; a self-referential parent link must
@@ -1234,10 +1373,10 @@ mod ffi {
             );
             // self-referential: the object's parent slot points back at itself.
             let mut obj = FakeObj {
-                class: cls.as_ref() as *const ffi::AVClass,
+                class: class_ptr(&cls),
                 parent: std::ptr::null_mut(),
             };
-            let ptr = std::ptr::from_ref(&obj).cast::<c_void>().cast_mut();
+            let ptr = obj_ptr(&obj);
             obj.parent = ptr; // cycle
             assert_eq!(
                 resolve_with_parent_walk(ptr),
