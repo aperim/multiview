@@ -272,10 +272,13 @@ pub enum IceServerKindConfig {
 /// One configured ICE server (`stun:` / `turn:` / `turns:`), with optional TURN
 /// credentials (ADR-0048 §5.1).
 ///
-/// The `password` and `static_auth_secret` field names are caught by the
-/// control-plane config redactor (`multiview-control::redact_config` drops any
-/// key containing `password`/`secret`/…), so the secret never leaks on export.
-/// The `username` is not a secret (matching coturn's posture).
+/// The `password` and `static_auth_secret` fields are inline cleartext secrets.
+/// They are redacted on every outward-facing control-plane surface that renders
+/// this config: the support bundle (`multiview-control::redact_config` drops any
+/// secret-named key entirely) and the config-as-code export
+/// (`multiview-control::redact_config_for_export` replaces the value with a
+/// `<redacted>` placeholder, keeping the document re-importable). The `username`
+/// is not a secret (matching coturn's posture).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct IceServerConfig {
