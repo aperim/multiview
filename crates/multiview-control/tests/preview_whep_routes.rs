@@ -236,7 +236,7 @@ async fn malformed_offer_is_bad_request() {
 #[tokio::test]
 async fn capacity_exceeded_is_service_unavailable_with_fallback() {
     let whep = Arc::new(FakeWhep::refuse_with(WhepReject::CapacityExceeded {
-        fallback: "ws-jpeg".to_owned(),
+        fallback: "jpeg".to_owned(),
     }));
     let router = router_with_whep(whep);
     let resp = send(
@@ -247,7 +247,7 @@ async fn capacity_exceeded_is_service_unavailable_with_fallback() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let problem = body_json(resp).await;
     // The fallback transport hint is surfaced so the UI degrades honestly.
-    assert_eq!(problem["fallback"], "ws-jpeg");
+    assert_eq!(problem["fallback"], "jpeg");
 }
 
 #[tokio::test]

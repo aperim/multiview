@@ -75,6 +75,13 @@ pub mod outputs;
 pub mod preview;
 pub mod run;
 pub mod system_metrics;
+/// Live WHEP preview egress provider (ADR-P006), gated behind `webrtc-native`:
+/// wires the native `multiview-webrtc` `WhepEgress` into the control plane so a
+/// browser can WHEP-play a preview tap over real DTLS/SRTP, with audio, on all
+/// scopes. Strictly isolated (invariant #10): it samples wait-free taps and
+/// pushes into bounded drop-oldest feeds; the driver never awaits a client.
+#[cfg(feature = "webrtc-native")]
+pub mod whep;
 
 /// Build-capability gating for `[timing].ptp_phc` (DEV-C1 / ADR-M010): a
 /// configured PHC device must FAIL a non-`ptp` build at startup with a clear
@@ -144,6 +151,16 @@ pub mod captions;
 /// (invariants #1/#2/#10).
 #[cfg(feature = "webrtc-native")]
 pub mod webrtc_ingest;
+
+/// Shared `[webrtc]` config → `multiview_webrtc::config::EndpointConfig` mapping
+/// (ADR-0048 §1/§9): the dual-stack UDP port, advertised host candidates, session
+/// caps, CORS, and the STUN/TURN ICE servers (incl. the in-driver TURN client's
+/// credentials, ADR-0048 §5.1). Used by the WHIP ingest wiring
+/// ([`webrtc_ingest`]), the WHEP egress preview wiring ([`whep`]), and the
+/// WHEP-serve / `whip_push` output wiring ([`webrtc_outputs`]) so the ICE/TURN
+/// mapping is defined once, never duplicated. Behind `webrtc-native`.
+#[cfg(feature = "webrtc-native")]
+pub mod webrtc_endpoint;
 
 /// WHEP-serve + WHIP-push **output** wiring (ADR-0049): the program is encoded
 /// once (invariant #7) and a `webrtc` output WHEP-serves it to N browser viewers

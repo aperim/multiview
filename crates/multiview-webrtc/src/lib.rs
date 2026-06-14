@@ -45,5 +45,8 @@ pub mod turn;
 #[cfg(feature = "native")]
 pub mod transport;
 
+#[cfg(feature = "native")]
+pub mod whep_egress;
+
 pub use config::{EndpointConfig, IceServer, IceServerKind, TurnCredentials};
 pub use error::{Result, TurnError, WebRtcError};

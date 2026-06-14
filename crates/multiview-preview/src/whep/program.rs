@@ -28,7 +28,8 @@
 //! * [`PreviewEncoder`] / [`IdentityPreviewEncoder`] — the NV12 → encoded-sample
 //!   seam. The production path is a low-latency H.264 baseline encode; this seam
 //!   keeps the wiring testable with no native codec, and the live H.264 + str0m
-//!   egress lands behind the further `webrtc-native` gate (PRV-1b).
+//!   egress lives in the `multiview-webrtc` crate's `native` WHEP egress
+//!   transport (`WhepEgress`, ADR-0048 / ADR-P006).
 //! * [`ProgramFocusSource`] — a [`PreviewMediaSource`] that **samples** the tap
 //!   (drop-oldest, never pacing — inv #1/#10), runs each sampled frame through
 //!   the encoder, and pushes the encoded sample into a bounded **drop-oldest**
@@ -42,7 +43,8 @@
 //!
 //! The GPU downscale blit needs a real GPU/compositor and the H.264 encode + str0m
 //! ICE/DTLS/SRTP egress need a native stack + UDP/STUN reachability — none of which
-//! is reliable in CI. Those land behind the further `webrtc-native` gate; this
+//! is reliable in CI. The live str0m egress lives in `multiview-webrtc` (the
+//! single str0m owner, ADR-0048 / ADR-P006); this
 //! module is socket-free and codec-free: the tap, the encode *seam*, the bounded
 //! feed, and the session lifecycle are all unit-testable with injected frames and
 //! the in-memory fake transport in `tests/program_output_whep.rs`.
@@ -195,7 +197,7 @@ impl ProgramTap {
 /// canvas; modeling it as a trait keeps the program-focus wiring testable with no
 /// native codec ([`IdentityPreviewEncoder`]) and lets a hardware/software H.264
 /// encoder plug in behind the same seam (the live path, gated behind
-/// `webrtc-native`).
+/// the `multiview-webrtc` `native` WHEP egress transport).
 pub trait PreviewEncoder: Send + Sync {
     /// The codec the samples this encoder emits are encoded with.
     fn codec(&self) -> PreviewCodec;
@@ -213,7 +215,8 @@ pub trait PreviewEncoder: Send + Sync {
 /// timestamp through and marking the first emitted sample a keyframe. It exists
 /// only so the tap → encode → feed wiring and the session lifecycle are testable
 /// with no native codec; the real low-latency H.264 baseline encoder plugs into
-/// the same [`PreviewEncoder`] seam behind the further `webrtc-native` gate.
+/// the same [`PreviewEncoder`] seam, with live egress via the `multiview-webrtc`
+/// `native` transport (ADR-0048 / ADR-P006).
 #[derive(Debug)]
 pub struct IdentityPreviewEncoder {
     codec: PreviewCodec,

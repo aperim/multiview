@@ -56,7 +56,8 @@ use crate::error::{Result, WebRtcError};
 /// The 90 kHz RTP clock for video (ADR-0048 codec matrix; invariant #3 rationals).
 const VIDEO_CLOCK_HZ: Frequency = Frequency::NINETY_KHZ;
 
-/// The 48 kHz RTP clock for Opus audio (RFC 7587; ADR-0049 §6).
+/// The 48 kHz RTP clock for Opus audio (RFC 7587; ADR-P006 §6, ADR-0049 §6). Opus
+/// always rides a 48 kHz RTP clock regardless of the internal sample rate.
 const AUDIO_CLOCK_HZ: Frequency = Frequency::FORTY_EIGHT_KHZ;
 
 /// The kind of media a session carries.
@@ -134,7 +135,7 @@ impl SessionConfig {
     /// codecs are answered (no VP8 — the program is never re-encoded to VP8). The
     /// viewer's browser is the offerer; this end is the **answerer** and only
     /// *sends*, sample-writing the already-encoded program AUs
-    /// ([`Session::write_video_sample_at`]). **Sample mode** (`rtp_mode = false`):
+    /// ([`Session::write_video_sample`]). **Sample mode** (`rtp_mode = false`):
     /// str0m packetizes our samples into SRTP for the viewer.
     #[must_use]
     pub fn serve() -> Self {
@@ -376,6 +377,30 @@ impl Session {
         Ok(offer.to_sdp_string())
     }
 
+    /// Create an SDP offer adding the given **receive-only** media (the WHEP
+    /// browser/viewer shape), returning the offer SDP string. The matching pending
+    /// offer is stashed for [`Session::accept_answer`].
+    ///
+    /// A WHEP egress server answers a recvonly offer with sendonly media, so this
+    /// is the offer a preview *viewer* produces; the engine-side egress only ever
+    /// [`Session::accept_offer`]s (it never offers).
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Transport`] if the change set produced no offer.
+    pub fn create_recv_offer(&mut self, kinds: &[MediaKind]) -> Result<String> {
+        let mut change = self.rtc.sdp_api();
+        for kind in kinds {
+            let mid = change.add_media(kind.to_str0m(), Direction::RecvOnly, None, None, None);
+            self.media.push((mid, *kind));
+        }
+        let (offer, pending) = change
+            .apply()
+            .ok_or_else(|| WebRtcError::Transport("recv offer produced no changes".to_owned()))?;
+        self.pending = Some(pending);
+        Ok(offer.to_sdp_string())
+    }
+
     /// Accept a remote SDP offer and return **str0m's own complete answer SDP**
     /// (BUNDLE / mid / rtcp-mux / fmtp; ADR-0048 §10).
     ///
@@ -392,9 +417,13 @@ impl Session {
             .accept_offer(offer)
             .map_err(|e| WebRtcError::Transport(format!("accept_offer: {e}")))?;
         let answer_sdp = answer.to_sdp_string();
-        // Record the negotiated media (mid + kind) from the answer so the ingest
-        // side can address the video stream for PLI (`request_video_keyframe`).
-        // The answerer does not `add_media`, so `self.media` is otherwise empty.
+        // Record the negotiated `(mid, kind)` pairs from the answer so the
+        // answerer can address each stream by mid: the ingest side requests a
+        // video keyframe (PLI via `request_video_keyframe`), and the WHEP egress
+        // server (which answers a recvonly offer with sendonly media) looks up
+        // the `Writer` for each mid it must drive. The answerer does not
+        // `add_media`, so str0m exposes `media(mid)` but no public iterator — the
+        // mids + kinds are recovered from the answer SDP's m-sections.
         self.record_answer_media(&answer_sdp);
         Ok(answer_sdp)
     }
@@ -500,68 +529,57 @@ impl Session {
     }
 
     /// Write one encoded video sample (an access unit) into the first video
-    /// media at RTP timestamp **0**; str0m packetizes it into SRTP. `keyframe`
-    /// marks an IDR. Retained for the single-sample handshake tests; the program
-    /// egress uses [`Session::write_video_sample_at`] to carry the real
-    /// tick-derived 90 kHz timestamp (invariant #3).
+    /// media; str0m packetizes it into SRTP.
+    ///
+    /// `rtp_timestamp` is the sample's presentation time in **90 kHz** RTP units
+    /// (invariant #3: exact rationals, never float fps) — every distinct sample
+    /// carries its own advancing timestamp, never a pinned 0. `keyframe` records
+    /// that the access unit begins an IDR; str0m's H.264/VP8 packetizers derive
+    /// the actual keyframe marking from the NAL/VP8 payload itself, so the flag is
+    /// informational at this seam (the egress loop uses it to gate first-packet
+    /// delivery on a sync point).
     ///
     /// # Errors
     ///
     /// [`WebRtcError::Transport`] if there is no video media, no negotiated
     /// payload type, or the write fails.
-    pub fn write_video_sample(&mut self, data: &[u8], keyframe: bool, now: Instant) -> Result<()> {
-        self.write_video_sample_at(data, keyframe, 0, now)
-    }
-
-    /// Write one encoded video sample at the given **90 kHz RTP timestamp**
-    /// (`rtp_ts`), derived from the program output tick counter (invariant #3 —
-    /// raw input PTS never reaches a viewer). str0m packetizes the access unit
-    /// into SRTP for every negotiated viewer. `keyframe` marks an IDR (str0m
-    /// tags the RTP for a decodable seam).
-    ///
-    /// # Errors
-    ///
-    /// [`WebRtcError::Transport`] if there is no video media, no negotiated
-    /// payload type, or the write fails.
-    pub fn write_video_sample_at(
+    pub fn write_video_sample(
         &mut self,
         data: &[u8],
         keyframe: bool,
-        rtp_ts: u32,
+        rtp_timestamp: u32,
         now: Instant,
     ) -> Result<()> {
-        self.write_sample_at(
-            MediaKind::Video,
-            data,
-            keyframe,
-            rtp_ts,
-            VIDEO_CLOCK_HZ,
-            now,
-        )
+        let _ = keyframe;
+        self.write_sample(MediaKind::Video, data, u64::from(rtp_timestamp), now)
     }
 
-    /// Write one encoded Opus audio frame at the given **48 kHz RTP timestamp**
-    /// (`rtp_ts`), derived from the program audio sample counter (invariant #3).
-    /// str0m packetizes it into SRTP for every negotiated viewer.
+    /// Write one encoded **Opus** audio frame into the first audio media; str0m
+    /// packetizes it into SRTP. `rtp_timestamp` is in **48 kHz** RTP units (RFC
+    /// 7587 fixes the Opus RTP clock at 48 kHz regardless of the internal sample
+    /// rate; ADR-P006, ADR-0049 §6).
     ///
     /// # Errors
     ///
     /// [`WebRtcError::Transport`] if there is no audio media, no negotiated
     /// payload type, or the write fails.
-    pub fn write_audio_sample_at(&mut self, data: &[u8], rtp_ts: u32, now: Instant) -> Result<()> {
-        self.write_sample_at(MediaKind::Audio, data, false, rtp_ts, AUDIO_CLOCK_HZ, now)
+    pub fn write_audio_sample(
+        &mut self,
+        data: &[u8],
+        rtp_timestamp: u32,
+        now: Instant,
+    ) -> Result<()> {
+        self.write_sample(MediaKind::Audio, data, u64::from(rtp_timestamp), now)
     }
 
-    /// Shared sample-write: address the first media of `kind`, look up its
-    /// negotiated payload type, and write `data` at `rtp_ts` in `clock`, then
-    /// drive so str0m packetizes it into outbound SRTP now.
-    fn write_sample_at(
+    /// Common write path for both media kinds: resolve the mid + negotiated PT,
+    /// re-stamp the RTP time on the kind's clock, hand the access unit to str0m's
+    /// sample-mode writer, and drive one packetization pass.
+    fn write_sample(
         &mut self,
         kind: MediaKind,
         data: &[u8],
-        keyframe: bool,
-        rtp_ts: u32,
-        clock: Frequency,
+        rtp_timestamp: u64,
         now: Instant,
     ) -> Result<()> {
         let mid = self
@@ -569,8 +587,12 @@ impl Session {
             .iter()
             .find(|(_, k)| *k == kind)
             .map(|(mid, _)| *mid)
-            .ok_or_else(|| WebRtcError::Transport("no media to write".to_owned()))?;
-        let rtp_time = MediaTime::new(u64::from(rtp_ts), clock);
+            .ok_or_else(|| WebRtcError::Transport(format!("no {kind:?} media to write")))?;
+        let clock = match kind {
+            MediaKind::Video => VIDEO_CLOCK_HZ,
+            MediaKind::Audio => AUDIO_CLOCK_HZ,
+        };
+        let rtp_time = MediaTime::new(rtp_timestamp, clock);
         let pt = self
             .rtc
             .media(mid)
@@ -580,7 +602,6 @@ impl Session {
             .rtc
             .writer(mid)
             .ok_or_else(|| WebRtcError::Transport("no writer for mid".to_owned()))?;
-        let _ = keyframe;
         writer
             .write(pt, now, rtp_time, data.to_vec())
             .map_err(|e| WebRtcError::Transport(format!("write: {e}")))?;
@@ -684,7 +705,12 @@ impl Session {
                 // `Mid` is a bounded 16-byte string id; an over-long token is not
                 // a valid mid (skip it rather than truncate).
                 if !trimmed.is_empty() && trimmed.len() <= 16 {
-                    self.media.push((Mid::from(trimmed), kind));
+                    let mid = Mid::from(trimmed);
+                    // Don't double-record a mid already tracked (e.g. a
+                    // re-negotiation, or a WHEP egress that pre-registered mids).
+                    if !self.media.iter().any(|(existing, _)| *existing == mid) {
+                        self.media.push((mid, kind));
+                    }
                 }
                 pending_kind = None;
             }
@@ -781,6 +807,27 @@ impl WebRtcEndpoint {
     #[must_use]
     pub fn config(&self) -> &EndpointConfig {
         &self.config
+    }
+
+    /// Receive one datagram from the shared media socket into `buf`, returning
+    /// `(len, source)`. Non-blocking (the socket is bound non-blocking): a
+    /// `WouldBlock` surfaces as [`std::io::ErrorKind::WouldBlock`] so the driver
+    /// can park on a timer instead of busy-spinning.
+    ///
+    /// # Errors
+    ///
+    /// The underlying [`std::net::UdpSocket::recv_from`] error (incl. `WouldBlock`).
+    pub fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf)
+    }
+
+    /// Send `payload` to `dst` over the shared media socket.
+    ///
+    /// # Errors
+    ///
+    /// The underlying [`std::net::UdpSocket::send_to`] error.
+    pub fn send_to(&self, payload: &[u8], dst: SocketAddr) -> std::io::Result<usize> {
+        self.socket.send_to(payload, dst)
     }
 
     /// The gathered host candidate addresses, IPv6-first (ADR-0042): the bound

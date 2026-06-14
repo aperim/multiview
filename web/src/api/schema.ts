@@ -1004,6 +1004,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/preview/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/preview/capabilities` — what preview transports this build can
+         *     serve, so the SPA picks WHEP vs the JPEG ladder before issuing an offer
+         *     (ADR-P006 move 6, ADR-W020). Role: read.
+         */
+        get: operations["capabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/preview/inputs/{id}/whep": {
         parameters: {
             query?: never;
@@ -3553,6 +3574,25 @@ export interface components {
          */
         PinVendorDoc: "nvidia" | "intel" | "amd" | "apple";
         /**
+         * @description The `GET /api/v1/preview/capabilities` response (ADR-P006 move 6): what preview
+         *     transports this build can serve, so the SPA picks WHEP vs the JPEG ladder
+         *     (ADR-W020) **before** issuing an offer.
+         */
+        PreviewCapabilities: {
+            /**
+             * @description The always-available fallback transport literal: `"jpeg"` (the one
+             *     fallback literal everywhere — ADR-P006 move 6).
+             */
+            fallback: string;
+            /** @description Per-scope WHEP availability + the program fidelity label. */
+            scopes: components["schemas"]["ScopeCapabilities"];
+            /**
+             * @description Whether this build can serve WHEP/WebRTC at all (a native transport is
+             *     wired). `false` on a pure / negotiation-only build.
+             */
+            webrtc: boolean;
+        };
+        /**
          * @description `OpenAPI` mirror of `multiview_config::Probe` — the body accepted by
          *     `POST`/`PUT /api/v1/probes/{id}`.
          */
@@ -3639,6 +3679,13 @@ export interface components {
             /** @description A URI reference identifying the problem type (here a `/problems/<slug>`). */
             type: string;
         };
+        /**
+         * @description The fidelity a **program** WHEP focus would carry (ADR-P005/P006). Serialized
+         *     in the capabilities response so the SPA can label the program preview before
+         *     it opens one.
+         * @enum {string}
+         */
+        ProgramFidelity: "real-encoded-output" | "pre-encode-canvas-approx";
         /** @description The `POST /api/v1/support/tickets` request body. */
         RaiseTicketRequest: {
             /**
@@ -3950,6 +3997,21 @@ export interface components {
              *     zowietek-control type).
              */
             service_types: string[];
+        };
+        /** @description The per-scope capability map. */
+        ScopeCapabilities: {
+            /** @description The per-input scope. */
+            inputs: components["schemas"]["ScopeCapability"];
+            /** @description The per-output rendition scope. */
+            outputs: components["schemas"]["ScopeCapability"];
+            /** @description The composited program canvas scope. */
+            program: components["schemas"]["ScopeCapability"];
+        };
+        /** @description Per-scope WHEP availability (plus the program scope's fidelity label). */
+        ScopeCapability: {
+            fidelity?: null | components["schemas"]["ProgramFidelity"];
+            /** @description Whether a WHEP focus can be opened on this scope. */
+            whep: boolean;
         };
         /** @description An IS-04 **Sender**: an egress flow (a Multiview program/preview output). */
         Sender: components["schemas"]["ResourceCore"] & {
@@ -7673,6 +7735,35 @@ export interface operations {
             };
             /** @description If-Match precondition failed. */
             412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    capabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Preview transport capabilities. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewCapabilities"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

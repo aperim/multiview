@@ -37,9 +37,10 @@ use std::sync::{Arc, Mutex};
 
 use multiview_control::{WhipAnswer, WhipAuth, WhipProvider, WhipReject};
 use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection};
-use multiview_webrtc::config::{EndpointConfig, IceServer, TurnCredentials};
 use multiview_webrtc::error::WebRtcError;
 use multiview_webrtc::transport::{RtpRing, WhipHandle};
+
+use crate::webrtc_endpoint::endpoint_config_from;
 
 /// Per-source publish authorization: the configured token + whether audio is
 /// accepted (from `SourceKind::Webrtc`). A source absent from the map is not a
@@ -248,90 +249,6 @@ impl WhipProvider for CliWhipProvider {
     fn active_sessions(&self) -> usize {
         self.handle.live_publisher_count()
     }
-}
-
-/// Map the config `[webrtc]` section onto the crate's plain [`EndpointConfig`]
-/// (ADR-0048 §9): the single dual-stack UDP port, the advertised host
-/// candidates, the session caps/GC horizons, the CORS allow-list, and the
-/// STUN/TURN ICE servers. `multiview-webrtc` never depends on
-/// `multiview-config`, so this lives in the cli. Shared by the WHIP **ingest**
-/// wiring here and the WHEP-serve / `whip_push` **output** wiring
-/// ([`crate::webrtc_outputs`]) so the `[webrtc]`→`EndpointConfig` mapping (and the
-/// live-TURN-in-driver config it carries) is factored, not duplicated.
-pub fn endpoint_config_from(config: &multiview_config::MultiviewConfig) -> EndpointConfig {
-    let w = &config.webrtc;
-    let advertised_addresses = w
-        .advertised_addresses
-        .iter()
-        // A bare IP literal becomes a candidate; a hostname (no literal IP) is
-        // dropped here — str0m candidates are IPs (DNS resolution is a deploy
-        // concern, not a candidate). Config validation already vetted the shape.
-        .filter_map(|a| a.parse::<std::net::IpAddr>().ok())
-        .collect();
-    let ice_servers = w.ice_servers.iter().filter_map(ice_server_from).collect();
-    EndpointConfig {
-        udp_port: w.udp_port,
-        advertised_addresses,
-        max_sessions: w.max_sessions,
-        session_idle_timeout: std::time::Duration::from_millis(w.session_idle_timeout.millis()),
-        tombstone_ttl: multiview_webrtc::config::DEFAULT_TOMBSTONE_TTL,
-        cors_allow_origins: w.cors_allow_origins.clone(),
-        ice_servers,
-    }
-}
-
-/// Map one config ICE-server entry onto the crate's [`IceServer`]. The URL's
-/// `stun:`/`turn:` scheme + bracketed authority is parsed to a `SocketAddr`; an
-/// unparseable entry is dropped (config validation vetted the shape, but a
-/// hostname-only TURN URL is not a candidate transport address here). `None`
-/// skips the entry rather than failing the whole run.
-fn ice_server_from(server: &multiview_config::IceServerConfig) -> Option<IceServer> {
-    let addr = parse_ice_url_addr(&server.url)?;
-    match server.kind {
-        multiview_config::IceServerKindConfig::Stun => Some(IceServer::stun(addr)),
-        multiview_config::IceServerKindConfig::Turn => {
-            let creds = match (&server.password, &server.static_auth_secret) {
-                (Some(password), _) => {
-                    let mut c = TurnCredentials::long_term(
-                        server.username.clone().unwrap_or_default(),
-                        password.clone(),
-                    );
-                    c.realm.clone_from(&server.realm);
-                    c
-                }
-                (None, Some(secret)) => {
-                    let mut c = TurnCredentials::ephemeral_rest(
-                        server.username.clone().unwrap_or_default(),
-                        secret.clone(),
-                    );
-                    c.realm.clone_from(&server.realm);
-                    c
-                }
-                // Config validation rejects a credential-less TURN server, so this
-                // is unreachable for a validated config; skip rather than panic.
-                (None, None) => return None,
-            };
-            Some(IceServer::turn(addr, creds))
-        }
-        // `IceServerKindConfig` is `#[non_exhaustive]`: a future kind we cannot
-        // map is dropped (the run continues; it is not a candidate transport).
-        _ => None,
-    }
-}
-
-/// Parse a `stun:`/`turn:`/`turns:` URL's transport address into a `SocketAddr`.
-/// Strips the scheme and an optional `?transport=` query; brackets an IPv6
-/// authority. `None` when the host part is not an IP literal (a DNS name is not
-/// a candidate transport address here).
-fn parse_ice_url_addr(url: &str) -> Option<std::net::SocketAddr> {
-    let rest = url
-        .strip_prefix("stun:")
-        .or_else(|| url.strip_prefix("turns:"))
-        .or_else(|| url.strip_prefix("turn:"))
-        .unwrap_or(url);
-    // Drop a `?transport=udp` suffix.
-    let authority = rest.split('?').next().unwrap_or(rest);
-    authority.parse::<std::net::SocketAddr>().ok()
 }
 
 /// Build the per-source WHIP publish policies from the config's `webrtc` sources
