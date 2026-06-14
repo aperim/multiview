@@ -222,9 +222,9 @@ impl WhepOutputProvider for CliWhepProvider {
 
 /// Map the config `[webrtc]` section onto the crate's plain [`EndpointConfig`]
 /// (ADR-0048 §9) — the shared mapping the WHIP **ingest** wiring also uses
-/// ([`crate::webrtc_ingest::endpoint_config_from`]).
+/// ([`crate::webrtc_endpoint::endpoint_config_from`]).
 fn endpoint_config_from(config: &MultiviewConfig) -> EndpointConfig {
-    crate::webrtc_ingest::endpoint_config_from(config)
+    crate::webrtc_endpoint::endpoint_config_from(config)
 }
 
 /// Build the WHEP-serve [`WhepOutputProvider`] for the configured `webrtc`
@@ -510,6 +510,57 @@ mod tests {
             }
         )
         .is_ok());
+    }
+
+    #[test]
+    fn endpoint_config_from_threads_the_webrtc_section() {
+        // The WHEP-serve + whip_push output wiring binds the shared endpoint from
+        // the SAME `[webrtc]` config section as WHIP ingest (ADR-0048 §1/§9). This
+        // exercises the module's `endpoint_config_from` mapping helper — the call
+        // path that must resolve to the canonical public mapping
+        // (`crate::webrtc_endpoint::endpoint_config_from`), not a private import.
+        let toml = r##"
+schema_version = 1
+
+[canvas]
+width = 1920
+height = 1080
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+
+[canvas.color]
+profile = "sdr-bt709-limited"
+
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+
+[webrtc]
+udp_port = 8189
+
+[[webrtc.ice_servers]]
+kind = "turn"
+url = "turn:[2001:db8::55]:3478"
+username = "u"
+password = "p"
+realm = "example.org"
+"##;
+        let config = MultiviewConfig::load_from_toml(toml).expect("config parses");
+        let ep = endpoint_config_from(&config);
+        assert_eq!(ep.udp_port, 8189);
+        assert_eq!(
+            ep.ice_servers.len(),
+            1,
+            "the configured TURN server threads through to the output endpoint"
+        );
+        assert_eq!(
+            ep.ice_servers[0].kind,
+            multiview_webrtc::config::IceServerKind::Turn,
+            "the TURN relay (the operator's NAT-traversal path) is carried, not dropped"
+        );
     }
 
     #[test]

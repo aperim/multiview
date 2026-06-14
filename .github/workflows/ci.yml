@@ -225,6 +225,22 @@ jobs:
           # multiview-hal off-by-default features
           - crate: multiview-hal
             feature: i915-pmu
+          # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
+          # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
+          # broke `webrtc-native` silently on main; this leg gates it going
+          # forward. multiview-webrtc owns the Session/egress API (the
+          # method-name break that silently hit main lived here) and is pure
+          # str0m — it links NO ffmpeg, so it runs on the bare runner.
+          #
+          # NOTE: the `multiview-cli` (`webrtc-native`) and `multiview-preview`
+          # (`webrtc`) builds also link ffmpeg transitively (WHEP egress uses the
+          # encoder pool), so they CANNOT compile on this ffmpeg-free runner —
+          # `ffmpeg-sys-next` panics on missing `libavutil`. Guarding those needs
+          # the pinned FFmpeg base image (ghcr.io/aperim/multiview-ffmpeg:8.1.1-lgpl);
+          # a base-image-backed webrtc-link leg is a tracked follow-up. The crate
+          # leg below already guards the Session/egress API surface that broke.
+          - crate: multiview-webrtc
+            feature: native
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
