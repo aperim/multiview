@@ -302,6 +302,16 @@ export interface paths {
          *     [`multiview_config::MultiviewConfig`], validates the whole document, and
          *     returns it as TOML. This closes the management loop honestly today: edit in
          *     the UI → export → persist as the config file → the next start applies it.
+         *
+         *     **Secrets are redacted.** The export is outward-facing, so every inline
+         *     cleartext secret (WebRTC ICE `password`/`static_auth_secret`, WHIP/WHEP/
+         *     `whip_push` bearer `token`s, and any other secret-class field — see
+         *     [`crate::support_bundle::redact_config_for_export`]) is replaced with the
+         *     `<redacted>` placeholder. A `secret_ref` pointer (`op://…`) is preserved (it is
+         *     not a secret). The placeholder keeps the document re-importable, but it is a
+         *     **clearly-marked placeholder**: the operator restores the real credential (or
+         *     confirms the `secret_ref`) before the exported file is used to run — the
+         *     placeholder never authenticates.
          */
         get: operations["export_config"];
         put?: never;
