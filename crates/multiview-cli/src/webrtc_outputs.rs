@@ -222,9 +222,9 @@ impl WhepOutputProvider for CliWhepProvider {
 
 /// Map the config `[webrtc]` section onto the crate's plain [`EndpointConfig`]
 /// (ADR-0048 §9) — the shared mapping the WHIP **ingest** wiring also uses
-/// ([`crate::webrtc_ingest::endpoint_config_from`]).
+/// ([`crate::webrtc_endpoint::endpoint_config_from`]).
 fn endpoint_config_from(config: &MultiviewConfig) -> EndpointConfig {
-    crate::webrtc_ingest::endpoint_config_from(config)
+    crate::webrtc_endpoint::endpoint_config_from(config)
 }
 
 /// Build the WHEP-serve [`WhepOutputProvider`] for the configured `webrtc`
