@@ -52,6 +52,37 @@ fn requested_transport_and_lifetime_attributes_roundtrip() {
 }
 
 #[test]
+fn requested_address_family_ipv6_attribute_roundtrips() {
+    // Defect D2 (IPv6-first TURN): the Allocate request must carry
+    // REQUESTED-ADDRESS-FAMILY (RFC 8656 §14.7, attribute 0x0017) so the server
+    // allocates an IPv6 relay. Encode + decode it.
+    use multiview_webrtc::turn::message::AddressFamily;
+    let mut msg = StunMessage::request(Method::Allocate);
+    msg.push(Attribute::RequestedAddressFamily(AddressFamily::Ipv6));
+    let bytes = msg.to_bytes(None);
+    let parsed = StunMessage::parse(&bytes).expect("parses");
+    assert!(
+        parsed
+            .attributes()
+            .iter()
+            .any(|a| matches!(a, Attribute::RequestedAddressFamily(AddressFamily::Ipv6))),
+        "REQUESTED-ADDRESS-FAMILY=IPv6 survives the round-trip: {:?}",
+        parsed.attributes()
+    );
+    assert_eq!(parsed.requested_address_family(), Some(AddressFamily::Ipv6));
+}
+
+#[test]
+fn requested_address_family_ipv4_attribute_roundtrips() {
+    use multiview_webrtc::turn::message::AddressFamily;
+    let mut msg = StunMessage::request(Method::Allocate);
+    msg.push(Attribute::RequestedAddressFamily(AddressFamily::Ipv4));
+    let bytes = msg.to_bytes(None);
+    let parsed = StunMessage::parse(&bytes).expect("parses");
+    assert_eq!(parsed.requested_address_family(), Some(AddressFamily::Ipv4));
+}
+
+#[test]
 fn xor_mapped_address_roundtrips_ipv4() {
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 15), 50000));
     let mut msg = StunMessage::success(Method::Binding);

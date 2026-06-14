@@ -133,6 +133,31 @@ fn refresh_extends_the_allocation_lifetime() {
 }
 
 #[test]
+fn allocate_requests_an_ipv6_relay_family() {
+    // Defect D2 (IPv6-first): the very first Allocate the client emits must carry
+    // REQUESTED-ADDRESS-FAMILY=IPv6 so an IPv6 peer's CreatePermission does not
+    // fail 443/440 against an IPv4-only relay default. We inspect the first
+    // datagram off the wire rather than the fake server.
+    use multiview_webrtc::turn::message::{AddressFamily, Attribute, StunMessage};
+    let now = Instant::now();
+    let server_addr: SocketAddr = SERVER.parse().unwrap();
+    let cred = TurnCredential::static_credential("alice", "s3cret", None);
+    let mut client = TurnClient::new(server_addr, cred);
+    let TurnOutput::Transmit { payload, .. } = client.poll_output(now) else {
+        panic!("the client emits an Allocate first");
+    };
+    let msg = StunMessage::parse(&payload).expect("the Allocate parses");
+    assert_eq!(msg.method(), Method::Allocate);
+    assert!(
+        msg.attributes()
+            .iter()
+            .any(|a| matches!(a, Attribute::RequestedAddressFamily(AddressFamily::Ipv6))),
+        "Allocate requests an IPv6 relay (IPv6-first): {:?}",
+        msg.attributes()
+    );
+}
+
+#[test]
 fn relayed_send_wraps_application_data_toward_a_peer() {
     let now = Instant::now();
     let server_addr: SocketAddr = SERVER.parse().unwrap();
