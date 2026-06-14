@@ -165,8 +165,9 @@ pub use state::{
     seed_resources, AckClock, AppState, EngineStateSnapshot, LicenceState, SeededResources,
 };
 pub use support_bundle::{
-    compose_bundle, redact_config, Bundle, BundleInclude, BundleRepository, BundleRequest,
-    BundleStore, BundleWindow, ConfigSources, InMemoryBundles, Redaction, RedactionReason,
+    compose_bundle, redact_config, redact_config_for_export, Bundle, BundleInclude,
+    BundleRepository, BundleRequest, BundleStore, BundleWindow, ConfigSources, InMemoryBundles,
+    Redaction, RedactionReason, EXPORT_REDACTED_SENTINEL,
 };
 pub use support_store::{
     support_entitlement, support_route, CloseOutcome, DataRequest, DataRequestOutcome,

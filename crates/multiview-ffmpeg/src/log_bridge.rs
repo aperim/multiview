@@ -544,6 +544,18 @@ mod ffi {
         SuppressOutcome, Suppressor, MAX_LINE_LEN,
     };
 
+    // reason(allow): `vl: ffi::va_list` resolves to `[__va_list_tag; 1]` on the
+    // x86-64 / FFmpeg-8.1.x bindgen rendering, and rustc's `improper_ctypes`
+    // (under `-D warnings`) flags an array passed by value as not-FFI-safe. That
+    // type IS the libav callback ABI, though: this shim has the exact
+    // `void (*)(void*, int, const char*, va_list)` signature and is implemented in
+    // C (`csrc/log_shim.c`), which receives the genuine `va_list` with the correct
+    // platform ABI — Rust never constructs, reads, or passes one. The signature is
+    // declared only so its fn pointer can be handed to `av_log_set_callback`; it is
+    // never called from Rust. Spelling it with the binding's own `ffi::va_list`
+    // alias is the faithful declaration of the C ABI, so the lint is suppressed
+    // rather than "fixed" by lying about the parameter type.
+    #[allow(improper_ctypes)]
     extern "C" {
         /// The C log-callback shim (`csrc/log_shim.c`), compiled and linked by
         /// `build.rs` under the `ffmpeg` feature. It has the exact libav callback
@@ -851,6 +863,16 @@ mod ffi {
             // transmute reconciles the two ABI-identical fn-pointer types there.
             // The lint cannot see the other rendering, so the allow is required.
             #[allow(clippy::useless_transmute)]
+            // reason(allow): the transmute target is `_` ON PURPOSE — it resolves
+            // to `av_log_set_callback`'s callback parameter type, which bindgen
+            // renders DIFFERENTLY per toolchain (the `ffi::va_list` array alias on
+            // arm64/aarch64; the decayed `*mut __va_list_tag` on x86-64 trixie),
+            // so no single explicit annotation is correct on both. The
+            // `missing_transmute_annotations` lint fires only on the array
+            // rendering (FFmpeg 8.1.x, libavcodec .so.62) — exactly the rendering
+            // the inferred `_` exists to stay portable across — so it is suppressed
+            // here rather than spelling a per-arch type that would break the other.
+            #[allow(clippy::missing_transmute_annotations)]
             // SAFETY: this transmutes ONE fn pointer to another. The two types
             // differ only in how bindgen *spells* the `va_list` parameter
             // (`ffi::va_list` array alias vs the decayed `*mut __va_list_tag`);
